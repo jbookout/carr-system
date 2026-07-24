@@ -15,13 +15,15 @@ Knowledge lives as markdown in the Google Drive vault (`My Drive/CARR AI/`) fore
 - `baselines/` — committed snapshots of each generator's current output. Any code change must show its output diff against these before being accepted (the checkability guardrail: nobody reads this code line-by-line, so the outputs are what get reviewed).
 - `tools/check.sh` — the drift + diff check (see below).
 
-## Phase-1 execution model (important)
+## Execution model (phase 2 live, 2026-07-24)
 
-The VAULT copies of these scripts are still the live executing copies — scheduled runs and SOPs point at the vault, not this repo. This repo is version control and review, not yet the runtime. Change flow until runs are repointed:
+**On Joe's Mac this repo IS the runtime.** SOPs call `./run.sh deal-room|lead-board|renewal-feed|all`, which runs the repo generators against the vault (override the vault path with `CARR_VAULT`). Repointed 2026-07-24 after each repo run was verified output-identical to its vault-copy run (deal-room byte-identical; renewal-feed and lead-board identical back-to-back).
 
-1. Edit the script here (branch if you're Dell's side — see access model).
+**The vault copies remain as the fallback + Dell's runtime** (cloud-only sessions, and Dell's side until his brain joins the repo). They must stay in sync with this repo. Change flow:
+
+1. Edit the script here (fork + PR if you're Dell's side — see access model).
 2. Run `tools/check.sh` — it reports code drift (repo vs vault) and output drift (vault output vs baseline).
-3. When a change is accepted: copy the script to its vault path, re-run the pipeline, verify the output diff is exactly the intended change, update the baseline here, commit both together.
+3. When a change is accepted: run the pipeline via `run.sh`, verify the output diff is exactly the intended change, update the baseline, copy the script to its vault path (keeping the fallback in sync), commit baseline + code together.
 
 ## Access model (Joe's decision, 2026-07-24)
 

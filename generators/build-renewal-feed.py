@@ -24,11 +24,12 @@ SUPPRESSOR (Joe, 2026-07-14): cross-check every row against lead-registry.xlsx.
   - no match                                          -> normal lease-event lead
 Every suppression/flag is printed, so a bad match is visible (stale beats silent).
 """
-import os, glob, json, re
+import os, glob, json, re, sys
 import openpyxl
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, ".."))
+ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(HERE, ".."))
 LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
+AUTO = os.path.join(ROOT, "Automation")
 
 SEG_LEASE = "\U0001F511 LEASE EVENT — decision window"
 SEG_OWNER = "\U0001F3E2 OWNER-OCCUPIER — 2nd location"
@@ -149,7 +150,7 @@ def main():
     # --- GCCMLS lease-event feed (source-agnostic append; Gulf Coast MLS, added 2026-07-14) ---
     # Second MLS source per the reframe note above. Property-level decision-window signals
     # (address + term-inferred expiration, tenant not yet identified). Guarded: no-op if absent.
-    gc = os.path.join(HERE, "gccmls-lease-events.json")
+    gc = os.path.join(AUTO, "gccmls-lease-events.json")
     if os.path.exists(gc):
         try:
             extra = json.load(open(gc))
@@ -158,7 +159,7 @@ def main():
             print(f"GCCMLS feed: +{len(extra)} lease-event rows appended")
         except Exception as ex:
             print("GCCMLS feed skipped:", ex)
-    json.dump(out, open(os.path.join(HERE,"renewal-radar.json"),"w"), indent=1)
+    json.dump(out, open(os.path.join(AUTO,"renewal-radar.json"),"w"), indent=1)
     print(f"source: {os.path.basename(path)} -> {len(out)} rows on the board")
     for s,n in dist.items(): print(f"   {n:>4}  {s}")
     print(f"\nSUPPRESSOR: {len(dropped)} dropped (do-not-contact/paused), {len(flagged)} flagged (already a known lead)")
