@@ -6,6 +6,7 @@ generators/build-deal-room.py	DNA/Team/live-boards/build-deal-room.py
 generators/build-lead-board.py	Automation/build-lead-board.py
 generators/build-renewal-feed.py	Automation/build-renewal-feed.py
 pipelines/build-space-search.py	Automation/build-space-search.py
+pipelines/space-search-template.html	Automation/space-search-template.html
 pipelines/build-search-map.py	Automation/build-search-map.py
 pipelines/build-front-door.py	Automation/build-front-door.py
 pipelines/dso-match.py	Automation/dso-match.py

@@ -16,13 +16,17 @@ deal_room()    { python3 "$REPO/generators/build-deal-room.py" \
                    "$VAULT/DNA/Team/live-boards/deal-room-panhandle.html"; }
 lead_board()   { python3 "$REPO/generators/build-lead-board.py" "$VAULT"; }
 renewal_feed() { python3 "$REPO/generators/build-renewal-feed.py" "$VAULT"; }
+corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
+space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
 
 case "${1:-}" in
   deal-room)    deal_room ;;
   lead-board)   lead_board ;;
   renewal-feed) renewal_feed ;;
   all)          renewal_feed; lead_board; deal_room ;;
+  corroborate)  corroborate ;;
+  space-search) space_search "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|health|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|health|check"; exit 2 ;;
 esac

@@ -1,0 +1,882 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ | Prepared for __CLIENT__</title>
+
+<style>
+  @font-face{ font-family:"CARR Display"; src:url(data:font/ttf;base64,__OSWALD__) format("truetype-variations");
+              font-weight:200 700; font-style:normal; font-display:swap; }
+  @font-face{ font-family:"CARR Text"; src:url(data:font/ttf;base64,__MONTSERRAT__) format("truetype-variations");
+              font-weight:100 900; font-style:normal; font-display:swap; }
+
+  /* ============ TOKENS ============
+     Two independent axes:
+       data-ink="save"  → minimum-ink mode, always white ground, no fills
+       theme            → light / dark, presentation mode only
+     CARR system: navy #002F6C · deep navy #00224D · orange #F57F29 · white dominant */
+  :root{
+    --navy:#002F6C; --navy-deep:#00224D; --orange:#F57F29;
+    --paper:#FFFFFF; --raise:#FFFFFF; --tint:#F4F6F9;
+    --ink:#00224D; --body:#33414F; --muted:#6B7A8C;
+    --rule:#D5DDE6; --rule-soft:#E8EDF2;
+    --accent:#F57F29; --accent-ink:#B4550F; --accent-wash:#FDF1E7;
+    --brand:#002F6C; --brand-wash:#EBF0F6;
+    --off:#7A8797; --off-wash:#F2F4F7;
+    --shadow:0 1px 2px rgba(0,34,77,.06), 0 10px 30px -20px rgba(0,34,77,.45);
+    --logo-op:1;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-ink="save"]){
+      --paper:#071726; --raise:#0C2136; --tint:#0F2942;
+      --ink:#EAF1F8; --body:#B9C8D8; --muted:#7F93A8;
+      --rule:#1C3A56; --rule-soft:#142E46;
+      --accent:#FF9A4D; --accent-ink:#FFB374; --accent-wash:#2A1B0E;
+      --brand:#7FA9DC; --brand-wash:#0E2740;
+      --off:#7F8FA0; --off-wash:#0E2136;
+      --shadow:0 1px 2px rgba(0,0,0,.35), 0 10px 30px -20px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"]:not([data-ink="save"]){
+    --paper:#071726; --raise:#0C2136; --tint:#0F2942;
+    --ink:#EAF1F8; --body:#B9C8D8; --muted:#7F93A8;
+    --rule:#1C3A56; --rule-soft:#142E46;
+    --accent:#FF9A4D; --accent-ink:#FFB374; --accent-wash:#2A1B0E;
+    --brand:#7FA9DC; --brand-wash:#0E2740;
+    --off:#7F8FA0; --off-wash:#0E2136;
+    --shadow:0 1px 2px rgba(0,0,0,.35), 0 10px 30px -20px rgba(0,0,0,.9);
+  }
+  :root[data-theme="light"]:not([data-ink="save"]){
+    --paper:#FFFFFF; --raise:#FFFFFF; --tint:#F4F6F9;
+    --ink:#00224D; --body:#33414F; --muted:#6B7A8C;
+    --rule:#D5DDE6; --rule-soft:#E8EDF2;
+    --accent:#F57F29; --accent-ink:#B4550F; --accent-wash:#FDF1E7;
+    --brand:#002F6C; --brand-wash:#EBF0F6;
+    --off:#7A8797; --off-wash:#F2F4F7;
+    --shadow:0 1px 2px rgba(0,34,77,.06), 0 10px 30px -20px rgba(0,34,77,.45);
+  }
+  /* ---- ink saver: white ground, no fills, hairline rules, one grey ---- */
+  :root[data-ink="save"]{
+    --paper:#FFFFFF; --raise:#FFFFFF; --tint:#FFFFFF;
+    --ink:#000000; --body:#1A1A1A; --muted:#555555;
+    --rule:#9A9A9A; --rule-soft:#C8C8C8;
+    --accent:#000000; --accent-ink:#000000; --accent-wash:#FFFFFF;
+    --brand:#000000; --brand-wash:#FFFFFF;
+    --off:#666666; --off-wash:#FFFFFF;
+    --shadow:none; --logo-op:1;
+  }
+
+  /* Ink saver, part two (Joe, 2026-07-22): the big display type prints as a
+     hollow outline instead of a solid slab. Those few characters are where most
+     of the toner goes on a page that is otherwise mostly white. Only the largest
+     type gets this treatment, because outlined body text is unreadable. */
+  :root[data-ink="save"] h1,
+  :root[data-ink="save"] h1 em,
+  :root[data-ink="save"] .tally .n,
+  :root[data-ink="save"] .tally .n.hi{
+    color:transparent;
+    -webkit-text-stroke:1px #000;
+    paint-order:stroke fill;
+  }
+  :root[data-ink="save"] h1,
+  :root[data-ink="save"] h1 em{ -webkit-text-stroke-width:1.5px; }
+  /* Safari and Chrome honour -webkit-text-stroke. Anything that does not gets
+     solid black text, which is the current behaviour and still correct. */
+  @supports not (-webkit-text-stroke: 1px black){
+    :root[data-ink="save"] h1, :root[data-ink="save"] h1 em,
+    :root[data-ink="save"] .tally .n{ color:#000; }
+  }
+
+  /* Photos shrink hard in ink saver. On a printed tour packet the picture is
+     there to identify the building, not to fill the sheet. */
+  :root[data-ink="save"] .shot{ max-width:2.6in; margin-left:0; }
+  :root[data-ink="save"] .shot img{ max-height:1.7in; object-fit:cover; }
+
+  html{ -webkit-text-size-adjust:100%; }
+  body{
+    background:var(--paper); color:var(--body);
+    font-family:"CARR Text",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    font-size:16px; line-height:1.62; margin:0; padding:0 20px 88px;
+  }
+  .disp{ font-family:"CARR Display","Oswald",Impact,-apple-system,sans-serif; }
+  .mono{ font-family:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; }
+  .wrap{ max-width:1020px; margin:0 auto; }
+
+  /* ---------- mode bar ---------- */
+  .modebar{
+    position:sticky; top:0; z-index:20; display:flex; justify-content:flex-end; gap:8px;
+    padding:12px 0 10px; background:var(--paper);
+  }
+  .modebar button{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:11px; font-weight:500;
+    letter-spacing:.13em; text-transform:uppercase; cursor:pointer;
+    min-height:44px; padding:7px 16px; background:transparent; color:var(--muted);
+    border:1px solid var(--rule); border-radius:0; transition:none;
+  }
+  .modebar button[aria-pressed="true"]{ background:var(--ink); color:var(--paper); border-color:var(--ink); }
+  .modebar button:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+  :root[data-ink="save"] .modebar button[aria-pressed="true"]{ background:#000; color:#fff; }
+
+  /* ---------- masthead ---------- */
+  .mast{ padding:8px 0 26px; border-bottom:3px solid var(--brand); }
+  .toprow{ display:flex; align-items:center; gap:16px; margin-bottom:26px; flex-wrap:wrap; }
+  .logo{ height:26px; width:auto; opacity:var(--logo-op); }
+  .logo.wht{ display:none; }
+  :root[data-theme="dark"]:not([data-ink="save"]) .logo.blu,
+  :root[data-ink="save"] .logo.wht{ display:none; }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]):not([data-ink="save"]) .logo.blu{ display:none; }
+    :root:not([data-theme="light"]):not([data-ink="save"]) .logo.wht{ display:block; }
+  }
+  :root[data-theme="dark"]:not([data-ink="save"]) .logo.wht{ display:block; }
+  .toprow .kicker{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:11px; font-weight:400;
+    letter-spacing:.2em; text-transform:uppercase; color:var(--muted);
+    margin:0; padding-left:16px; border-left:1px solid var(--rule);
+  }
+  .toprow .when{ margin-left:auto; font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); font-weight:600; }
+
+  h1{
+    font-family:"CARR Display","Oswald",sans-serif;
+    font-size:clamp(38px,6.6vw,68px); line-height:1; font-weight:600; letter-spacing:.005em;
+    text-transform:uppercase; color:var(--ink); margin:0 0 20px; text-wrap:balance; max-width:15ch;
+  }
+  h1 em{ font-style:normal; color:var(--accent); }
+  .standfirst{ font-size:clamp(16px,2vw,19px); color:var(--body); margin:0; max-width:58ch; font-weight:400; }
+  .standfirst b{ color:var(--ink); font-weight:600; }
+
+  .brief{
+    margin-top:32px; display:grid; gap:1px; background:var(--rule);
+    border:1px solid var(--rule); grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  }
+  .brief div{ background:var(--raise); padding:13px 15px; }
+  .brief dt{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:10px; font-weight:500;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--muted); margin:0 0 5px;
+  }
+  .brief dd{ margin:0; font-size:14px; color:var(--ink); line-height:1.38; font-weight:500; }
+
+  .tally{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); margin:0; padding:26px 0 0; }
+  .tally div{ padding:4px 18px 4px 0; }
+  .tally .n{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:44px; font-weight:600;
+    letter-spacing:.01em; color:var(--ink); line-height:.95; font-variant-numeric:tabular-nums; display:block;
+  }
+  .tally .n.hi{ color:var(--accent); }
+  .tally .l{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:10.5px; font-weight:400;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--muted); margin-top:9px; display:block; line-height:1.4;
+  }
+
+  section{ padding-top:52px; }
+  /* ---- map. A stitched OpenStreetMap raster with pins placed by percentage, so
+     it scales with the page and prints exactly as it appears on screen. No map
+     library and no network at view time. ---- */
+  .mapwrap{ position:relative; margin-top:18px; border:1px solid var(--line);
+            border-radius:6px; overflow:hidden; background:var(--tint); }
+  .mapwrap img{ display:block; width:100%; height:auto; }
+  .pin{ position:absolute; transform:translate(-50%,-50%); display:block; padding:0;
+        border:0; background:transparent; cursor:pointer; line-height:1;
+        min-width:44px; min-height:44px; }        /* 44px touch target, doctrine law */
+  .pin i{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+          display:grid; place-items:center; font-style:normal; font-weight:700;
+          font-family:var(--display); border-radius:50%;
+          box-shadow:0 1px 4px rgba(0,0,0,.35); transition:transform .12s ease; }
+  .pin.t-tour i{ width:26px; height:26px; font-size:12px; background:var(--accent);
+                 color:#231000; border:2px solid #fff; }
+  .pin.t-look i{ width:22px; height:22px; font-size:10.5px; background:var(--brand);
+                 color:#fff; border:2px solid #fff; }
+  .pin.t-out  i{ width:15px; height:15px; font-size:0; background:var(--muted);
+                 color:transparent; border:1.5px solid #fff; opacity:.75; }
+  .pin.approx i{ border-style:dashed; }
+  .pin:hover i, .pin:focus-visible i{ transform:translate(-50%,-50%) scale(1.25); }
+  .pin:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+  /* ---- per-property locator. Cropped around the coordinate, so the pin is
+     always dead centre and needs no positioning. ---- */
+  .mini{ margin:14px 0 0; max-width:460px; }
+  .miniwrap{ position:relative; border:1px solid var(--rule); overflow:hidden; background:var(--tint); }
+  .miniwrap img{ display:block; width:100%; height:auto; }
+  :root[data-ink="save"] .miniwrap img{ filter:grayscale(1) contrast(.9) brightness(1.08); }
+  .minipin{
+    position:absolute; left:50%; top:50%; width:17px; height:17px; margin:-8.5px 0 0 -8.5px;
+    border-radius:50% 50% 50% 0; transform:rotate(-45deg);
+    background:var(--accent); border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.4);
+  }
+  :root[data-ink="save"] .minipin{ background:#000; border-color:#fff; box-shadow:none; }
+  .mini figcaption{ font-size:11.5px; color:var(--muted); margin-top:5px; line-height:1.35; }
+
+  /* Ink saver: the tile raster goes grey, and the three tiers stop relying on
+     colour, which all collapses to black in this mode. Solid, hollow, small grey. */
+  :root[data-ink="save"] .mapwrap img{ filter:grayscale(1) contrast(.85) brightness(1.12); }
+  :root[data-ink="save"] .pin.t-tour i{ background:#000; color:#fff; border-color:#fff; }
+  :root[data-ink="save"] .pin.t-look i{ background:#fff; color:#000; border:2px solid #000; }
+  :root[data-ink="save"] .pin.t-out i{ background:#8A8A8A; border-color:#fff; }
+  :root[data-ink="save"] .maplegend .k-tour{ background:#000; border:2px solid #fff; box-shadow:0 0 0 1px #000; }
+  :root[data-ink="save"] .maplegend .k-look{ background:#fff; border:2px solid #000; }
+  :root[data-ink="save"] .maplegend .k-out{ background:#8A8A8A; border:1.5px solid #fff; box-shadow:0 0 0 1px #8A8A8A; }
+
+  .maplegend{ display:flex; flex-wrap:wrap; gap:16px; align-items:center;
+              margin-top:10px; font-size:12px; color:var(--muted); }
+  .maplegend b{ display:inline-grid; place-items:center; width:16px; height:16px;
+                border-radius:50%; margin-right:5px; vertical-align:-3px; }
+  .maplegend .k-tour{ background:var(--accent); border:2px solid #fff; }
+  .maplegend .k-look{ background:var(--brand); border:2px solid #fff; }
+  .maplegend .k-out{ background:var(--muted); border:1.5px solid #fff; }
+  .mapnote{ font-size:12px; color:var(--muted); margin-top:8px; max-width:70ch; }
+  @media (max-width:640px){
+    .pin.t-tour i{ width:22px; height:22px; font-size:10px; }
+    .pin.t-look i{ width:18px; height:18px; font-size:9px; }
+    .pin.t-out i{ width:11px; height:11px; }
+  }
+  @media (prefers-reduced-motion:reduce){ .pin i{ transition:none; } }
+
+  .sechead{ display:flex; align-items:baseline; gap:14px; border-bottom:2px solid var(--brand); padding-bottom:8px; }
+  .sechead h2{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:23px; font-weight:600;
+    letter-spacing:.03em; text-transform:uppercase; color:var(--ink); margin:0;
+  }
+  .sechead .ct{ font-size:12px; color:var(--muted); margin-left:auto; white-space:nowrap; font-weight:600; letter-spacing:.05em; }
+  .sechead + p{ color:var(--muted); font-size:15px; margin:14px 0 0; max-width:64ch; }
+
+  /* ---------- properties ---------- */
+  .list{ display:flex; flex-direction:column; margin-top:24px; }
+  .prop{ display:grid; grid-template-columns:46px 1fr; border-top:1px solid var(--rule-soft); padding:22px 0; }
+  .prop:first-child{ border-top:1px solid var(--rule); }
+  .idx{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:14px; font-weight:500;
+    color:var(--muted); padding-top:4px; letter-spacing:.06em;
+  }
+  .phead{ display:flex; align-items:flex-start; gap:14px; flex-wrap:wrap; }
+  .paddr{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:23px; font-weight:500;
+    letter-spacing:.015em; color:var(--ink); margin:0; line-height:1.18;
+  }
+  .pcity{ font-size:13px; color:var(--muted); margin:3px 0 0; letter-spacing:.05em; text-transform:uppercase; font-weight:600; }
+  .chip{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:10px; font-weight:500;
+    letter-spacing:.14em; text-transform:uppercase; padding:6px 10px; white-space:nowrap; margin-left:auto;
+    background:var(--accent); color:#fff; border:1px solid var(--accent);
+  }
+  :root[data-ink="save"] .chip{ background:#fff; color:#000; }
+  .chip.b{ background:var(--brand-wash); color:var(--brand); border-color:var(--brand); }
+  .chip.c{ background:var(--off-wash); color:var(--off); border-color:var(--off); }
+
+  .why{ margin:13px 0 0; font-size:15.5px; max-width:68ch; }
+  .why b{ color:var(--ink); font-weight:600; }
+
+  .specs{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(115px,1fr)); gap:15px 22px;
+    margin-top:18px; padding-top:15px; border-top:1px solid var(--rule-soft);
+  }
+  .specs dt{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:9.5px; font-weight:400;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--muted); margin:0 0 4px;
+  }
+  .specs dd{ font-family:ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums;
+             font-size:13.5px; color:var(--ink); margin:0; line-height:1.3; }
+  .specs dd.em{ color:var(--accent-ink); font-weight:700; }
+  .specs dd small{ display:block; font-size:10.5px; color:var(--muted); margin-top:3px; font-weight:400; }
+
+  .tier1 .prop{
+    background:var(--raise); border:1px solid var(--rule); border-left:4px solid var(--accent);
+    padding:24px 26px; margin-bottom:14px; box-shadow:var(--shadow);
+  }
+  .tier1 .prop:first-child{ border-top:1px solid var(--rule); }
+  .tier1 .idx{ color:var(--accent-ink); font-weight:600; }
+
+  .out{ display:grid; grid-template-columns:46px 1fr; border-top:1px solid var(--rule-soft); padding:14px 0; }
+  .out:first-child{ border-top:1px solid var(--rule); }
+  .out .oaddr{ font-family:"CARR Display","Oswald",sans-serif; font-size:17px; font-weight:500; color:var(--ink); letter-spacing:.015em; }
+  .out .ocity{ font-size:11px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; font-weight:600; margin-left:6px; }
+  .out .oreason{ font-size:14.5px; color:var(--muted); margin-top:5px; max-width:66ch; }
+  .out .oreason b{ color:var(--body); font-weight:600; }
+
+  .callout{ border:1px solid var(--rule); border-top:4px solid var(--brand); background:var(--raise); padding:24px 26px; margin-top:24px; }
+  .callout h3{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:17px; font-weight:600;
+    letter-spacing:.04em; text-transform:uppercase; color:var(--ink); margin:0 0 13px;
+  }
+  .callout ul{ margin:0; padding-left:19px; }
+  .callout li{ margin-bottom:11px; max-width:66ch; font-size:15px; }
+  .callout li:last-child{ margin-bottom:0; }
+  .callout li b{ color:var(--ink); font-weight:600; }
+
+  .foot{ margin-top:60px; padding-top:24px; border-top:3px solid var(--brand);
+         display:flex; gap:30px; flex-wrap:wrap; justify-content:space-between; align-items:flex-start; }
+  .foot p{ margin:0 0 7px; font-size:14px; color:var(--muted); max-width:48ch; }
+  .foot .who{ font-family:"CARR Display","Oswald",sans-serif; font-size:20px; font-weight:600;
+              letter-spacing:.03em; text-transform:uppercase; color:var(--ink); margin-bottom:5px; }
+  .foot a{ color:var(--accent-ink); }
+  .stamp{ font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:10.5px; color:var(--muted); line-height:1.75; }
+
+  @media (max-width:600px){
+    body{ padding:0 15px 60px; font-size:15px; }
+    .prop,.out{ grid-template-columns:30px 1fr; }
+    .tier1 .prop{ padding:20px 17px; }
+    .chip{ margin-left:0; }
+    .toprow .when{ margin-left:0; width:100%; }
+  }
+
+
+  /* ---------- photo ---------- */
+  .shot{ margin:16px 0 0; border:1px solid var(--rule); overflow:hidden; background:var(--tint); }
+  .shot img{ display:block; width:100%; height:auto; }
+  :root[data-ink="save"] .shot img{ filter:grayscale(1) contrast(.92) brightness(1.06); }
+
+  .bname{ display:block; font-family:"CARR Text",sans-serif; font-size:13px; font-weight:500;
+          letter-spacing:.02em; text-transform:none; color:var(--muted); margin-top:3px; }
+
+  /* ---------- expandable detail ---------- */
+  .more{ margin-top:16px; border-top:1px solid var(--rule-soft); }
+  .more summary{
+    list-style:none; cursor:pointer; padding:14px 0; min-height:44px;
+    font-family:"CARR Display","Oswald",sans-serif; font-size:11px; font-weight:500;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--accent-ink);
+    display:flex; align-items:center; gap:8px;
+  }
+  .more summary::-webkit-details-marker{ display:none; }
+  .more summary::after{ content:"+"; font-size:15px; line-height:1; }
+  .more[open] summary::after{ content:"\2212"; }
+  .more summary:focus-visible{ outline:2px solid var(--accent); outline-offset:3px; }
+  .more .sclose{ display:none; }
+  .more[open] .sopen{ display:none; }
+  .more[open] .sclose{ display:inline; }
+  .mbody{ padding-top:4px; }
+  .dspecs{ border-top:none; padding-top:12px; }
+
+  .sub{ margin-top:18px; }
+  .sub h4{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:11px; font-weight:500;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--muted); margin:0 0 8px;
+  }
+  .sub ul{ margin:0; padding-left:18px; }
+  .sub li{ font-size:14.5px; margin-bottom:5px; }
+  .vnote{ font-size:13.5px; color:var(--muted); margin:9px 0 0; font-style:italic; }
+  .src{ font-size:12px; color:var(--muted); margin:16px 0 0; letter-spacing:.03em; }
+  .np{ color:var(--muted); font-style:italic; font-family:"CARR Text",sans-serif; font-size:13px; }
+  .pending{ font-size:14px; color:var(--muted); margin:18px 0 0; max-width:64ch; }
+
+  @media print{
+    /* On paper the TOUR candidates print in full — those are the ones being walked.
+       Lower tiers stay collapsed: printing every panel pushed the packet to 12 pages
+       with spec grids orphaned at the top of pages. Screen keeps all of them openable. */
+    .more summary{ display:none; }
+    .more{ border-top:1px solid var(--rule-soft); margin-top:10pt; }
+    .tier1 .mbody{ display:block !important; padding-top:9pt; }
+    .list:not(.tier1) .more{ display:none; }
+    .shot{ margin-top:9pt; max-height:2.5in; }
+    .shot img{ max-height:2.5in; object-fit:cover; }
+    /* Tour-packet printing: the photo identifies the building and nothing more,
+       so it gives its space back to the specs. Every tour property still starts
+       its own sheet. */
+    :root[data-ink="save"] .shot{ max-width:2.4in; max-height:1.6in; }
+    :root[data-ink="save"] .shot img{ max-height:1.6in; }
+    .sub{ margin-top:10pt; }
+    .sub h4{ font-size:8pt; margin-bottom:4pt; }
+    .sub li{ font-size:9pt; margin-bottom:2.5pt; }
+    .vnote{ font-size:8.5pt; margin-top:5pt; }
+    .src{ font-size:7.5pt; margin-top:9pt; }
+    .np{ font-size:8.5pt; }
+    .bname{ font-size:9pt; }
+    .dspecs{ padding-top:7pt; }
+    .pending{ font-size:9pt; }
+  }
+
+
+  /* ---------- UX doctrine law 8: one action per card ---------- */
+  .act{ margin-top:18px; padding-top:15px; border-top:1px solid var(--rule-soft); }
+  .act a{
+    display:inline-flex; align-items:center; justify-content:center;
+    min-height:44px; padding:12px 20px;              /* law 11c: 44px touch target */
+    font-family:"CARR Display","Oswald",sans-serif; font-size:12px; font-weight:500;
+    letter-spacing:.13em; text-transform:uppercase; text-decoration:none;
+    background:var(--accent); color:#fff; border:1px solid var(--accent);
+  }
+  :root[data-ink="save"] .act a{ background:#fff; color:#000; border-color:#000; }
+  .act a:hover{ background:var(--accent-ink); border-color:var(--accent-ink); }
+  .act a:active{ transform:translateY(1px); }
+  .act a:focus-visible{ outline:3px solid var(--brand); outline-offset:3px; }
+  .act .hint{ display:block; margin-top:9px; font-size:13px; color:var(--muted); }
+
+  /* ---- tour list. A selection that collects, rather than a mailto per card that
+     fired an email on every click (Joe, 2026-07-22). ---- */
+  .pick{
+    display:inline-flex; align-items:center; gap:11px; min-height:44px; padding:11px 19px;
+    font-family:"CARR Display","Oswald",sans-serif; font-size:12px; font-weight:500;
+    letter-spacing:.13em; text-transform:uppercase; cursor:pointer;
+    background:transparent; color:var(--accent-ink); border:1.5px solid var(--accent);
+  }
+  .pick .box{ width:15px; height:15px; border:1.5px solid currentColor; flex:none; position:relative; }
+  .pick[aria-pressed="true"]{ background:var(--accent); color:#fff; border-color:var(--accent); }
+  .pick[aria-pressed="true"] .box::after{
+    content:""; position:absolute; left:3.5px; top:0; width:5px; height:10px;
+    border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg);
+  }
+  .pick .lbl-on, .pick[aria-pressed="true"] .lbl-off{ display:none; }
+  .pick[aria-pressed="true"] .lbl-on{ display:inline; }
+  .pick:focus-visible{ outline:3px solid var(--brand); outline-offset:3px; }
+  :root[data-ink="save"] .pick{ color:#000; border-color:#000; background:#fff; }
+  :root[data-ink="save"] .pick[aria-pressed="true"]{ background:#fff; color:#000; }
+  :root[data-ink="save"] .pick[aria-pressed="true"] .box::after{ border-color:#000; }
+
+  .ghost{
+    display:inline-flex; align-items:center; min-height:44px; padding:11px 17px; margin-left:9px;
+    font-family:"CARR Display","Oswald",sans-serif; font-size:12px; letter-spacing:.13em;
+    text-transform:uppercase; cursor:pointer; background:transparent; color:var(--body);
+    border:1px solid var(--rule);
+  }
+  .ghost:hover{ border-color:var(--ink); color:var(--ink); }
+  .ghost:focus-visible{ outline:3px solid var(--brand); outline-offset:3px; }
+
+  ol.tl{ margin:16px 0 0; padding-left:0; list-style:none; counter-reset:tl; }
+  ol.tl li{
+    counter-increment:tl; display:flex; align-items:baseline; gap:14px;
+    padding:12px 0; border-bottom:1px solid var(--rule-soft);
+  }
+  ol.tl li::before{
+    content:counter(tl,decimal-leading-zero); font-family:"CARR Display","Oswald",sans-serif;
+    font-size:15px; color:var(--accent-ink); flex:none; min-width:24px;
+  }
+  ol.tl .a{ font-weight:600; color:var(--ink); }
+  ol.tl .c{ color:var(--muted); font-size:13px; }
+  ol.tl button{
+    margin-left:auto; background:transparent; border:0; cursor:pointer; color:var(--muted);
+    font-size:12px; text-decoration:underline; min-height:44px; padding:0 4px;
+  }
+  ol.tl button:hover{ color:var(--ink); }
+
+  .cartbar{
+    position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:40;
+    display:flex; align-items:center; gap:16px; padding:11px 12px 11px 20px;
+    background:var(--ink); color:var(--paper); border-radius:999px;
+    box-shadow:0 6px 24px rgba(0,0,0,.28); font-size:14px; max-width:calc(100% - 32px);
+  }
+  .cartbar a{
+    color:var(--paper); background:var(--accent); border-radius:999px; text-decoration:none;
+    padding:9px 17px; font-family:"CARR Display","Oswald",sans-serif; font-size:11.5px;
+    letter-spacing:.11em; text-transform:uppercase; min-height:44px;
+    display:inline-flex; align-items:center; white-space:nowrap;
+  }
+  .cartbar a:focus-visible{ outline:3px solid var(--paper); outline-offset:2px; }
+  @media (max-width:520px){ .cartbar{ font-size:13px; padding-left:15px; } }
+
+  /* law 11b: authored empty state, never a blank section */
+  .empty{
+    border:1px dashed var(--rule); padding:28px 24px; margin-top:24px; text-align:left;
+  }
+  .empty h4{ font-family:"CARR Display","Oswald",sans-serif; font-size:15px; font-weight:500;
+             letter-spacing:.06em; text-transform:uppercase; color:var(--ink); margin:0 0 8px; }
+  .empty p{ margin:0; font-size:15px; color:var(--muted); max-width:60ch; }
+
+  /* law 11c: honour reduced motion with a clean static fallback */
+  @media (prefers-reduced-motion:reduce){
+    *, *::before, *::after{
+      animation-duration:.001ms !important; animation-iteration-count:1 !important;
+      transition-duration:.001ms !important; scroll-behavior:auto !important;
+    }
+    .act a:active{ transform:none; }
+  }
+
+  /* ================= PRINT ================= */
+  @page{ margin:.55in .6in; }
+  @media print{
+    /* presentation mode prints in brand colour; ink saver prints flat black on white */
+    :root, :root[data-theme="dark"], :root[data-theme="light"]{
+      --paper:#FFFFFF; --raise:#FFFFFF; --tint:#F4F6F9;
+      --ink:#00224D; --body:#2B3846; --muted:#5C6B7C;
+      --rule:#B9C4D0; --rule-soft:#D8DFE7;
+      --accent:#F57F29; --accent-ink:#A64C0C; --accent-wash:#FDF1E7;
+      --brand:#002F6C; --brand-wash:#EBF0F6; --off:#6E7B8A; --off-wash:#F2F4F7;
+      --shadow:none;
+    }
+    :root[data-ink="save"], :root[data-ink="save"][data-theme="dark"], :root[data-ink="save"][data-theme="light"]{
+      --paper:#FFFFFF; --raise:#FFFFFF; --tint:#FFFFFF;
+      --ink:#000000; --body:#111111; --muted:#4A4A4A;
+      --rule:#8A8A8A; --rule-soft:#BFBFBF;
+      --accent:#000000; --accent-ink:#000000; --accent-wash:#FFFFFF;
+      --brand:#000000; --brand-wash:#FFFFFF; --off:#5A5A5A; --off-wash:#FFFFFF;
+      --shadow:none;
+    }
+    *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    :root[data-ink="save"] .chip{ background:#fff !important; color:#000 !important; border-color:#000 !important; }
+    :root[data-ink="save"] .logo{ filter:grayscale(1) contrast(2); }
+
+    .modebar{ display:none; }
+    .act{ margin-top:10pt; padding-top:8pt; }
+    .act a{ background:transparent !important; color:var(--ink) !important; border:none;
+            padding:0; min-height:0; font-size:9pt; letter-spacing:.06em; }
+    .act .hint{ font-size:8.5pt; margin-top:3pt; }
+    /* On paper the picker becomes a tick box the client marks by hand on the tour,
+       which is what a printed packet is for. The floating counter has no meaning
+       on paper and goes away. */
+    .pick{ background:transparent !important; color:#000 !important; border:none !important;
+           padding:0; min-height:0; font-size:9pt; letter-spacing:.06em; gap:7pt; }
+    .pick .box{ width:11pt; height:11pt; border:1pt solid #000 !important; }
+    .pick[aria-pressed="true"] .box::after{ border-color:#000 !important; }
+    .pick .lbl-on{ display:none !important; }
+    .pick .lbl-off{ display:inline !important; }
+    .cartbar, .ghost, #tl-empty{ display:none !important; }
+    .mini{ break-inside:avoid; page-break-inside:avoid; max-width:3.1in; }
+    .mini figcaption{ font-size:7.5pt; }
+    .minipin{ print-color-adjust:exact; -webkit-print-color-adjust:exact; }
+    ol.tl li{ padding:7pt 0; }
+    ol.tl button{ display:none; }
+    .empty{ padding:14pt 12pt; margin-top:12pt; }
+    .empty h4{ font-size:11pt; }
+    .empty p{ font-size:9.5pt; }
+    html,body{ background:#fff; }
+    body{ font-size:10pt; line-height:1.46; padding:0; margin:0; }
+    .wrap{ max-width:none; }
+
+    .mast{ padding:0 0 13pt; border-bottom-width:2.5pt; }
+    .toprow{ margin-bottom:14pt; }
+    .logo{ height:17pt; }
+    .logo.wht{ display:none !important; }
+    .logo.blu{ display:block !important; }
+    h1{ font-size:30pt; margin-bottom:9pt; max-width:none; }
+    .standfirst{ font-size:11pt; max-width:none; }
+    .brief{ margin-top:14pt; grid-template-columns:repeat(5,1fr); }
+    .brief div{ padding:6pt 7pt; }
+    .brief dt{ font-size:6.5pt; margin-bottom:2pt; }
+    .brief dd{ font-size:8.5pt; }
+
+    .tally{ padding-top:13pt; grid-template-columns:repeat(5,1fr); }
+    .tally .n{ font-size:24pt; }
+    .tally .l{ font-size:6.5pt; margin-top:4pt; }
+
+    section{ padding-top:19pt; }
+    .sechead{ padding-bottom:4pt; border-bottom-width:1.5pt; }
+    .sechead h2{ font-size:15pt; }
+    .sechead .ct{ font-size:8pt; }
+    .sechead + p{ font-size:9.5pt; margin-top:7pt; max-width:none; }
+
+    /* a tall expanded card MAY break, but never mid-thought: the header block
+       (address + photo + reasoning) and each spec grid stay whole */
+    .out, .callout{ break-inside:avoid; page-break-inside:avoid; }
+    .prop{ break-inside:auto; }
+    /* one tour candidate per page: they print in full, so packing two onto a sheet
+       split the header away from its own body and left empty railed boxes */
+    .tier1 .prop{ break-before:page; page-break-before:always; margin-bottom:0; }
+    /* The first one follows its own heading instead of forcing a page, which
+       otherwise strands "Worth touring" alone on an almost empty sheet. */
+    .tier1 .prop:first-child{ break-before:auto; page-break-before:auto; }
+    .list:not(.tier1) .prop{ break-inside:avoid; page-break-inside:avoid; }
+    .phead, .shot, .specs, .sub, .why{ break-inside:avoid; page-break-inside:avoid; }
+    .phead{ break-after:avoid; page-break-after:avoid; }
+    .shot{ break-before:avoid; page-break-before:avoid; }
+    .sechead, h1, h2, h3{ break-after:avoid; page-break-after:avoid; }
+    /* The map prints as the flat raster it already is. Pins keep their fills so
+       the tiers stay legible in ink. */
+    .mapwrap{ break-inside:avoid; page-break-inside:avoid; border-color:#999; }
+    .pin i{ box-shadow:none; print-color-adjust:exact; -webkit-print-color-adjust:exact; }
+    .maplegend, .mapnote{ font-size:8.5pt; }
+    .why, .oreason, .callout li{ orphans:3; widows:3; }
+
+    .list{ margin-top:13pt; }
+    .prop{ padding:11pt 0; grid-template-columns:32pt 1fr; }
+    .tier1 .prop{ padding:11pt 13pt; margin-bottom:8pt; border-width:.75pt; border-left-width:3pt; }
+    .idx{ font-size:10pt; }
+    .paddr{ font-size:14pt; }
+    .pcity{ font-size:7.5pt; }
+    .why{ font-size:10pt; margin-top:6pt; max-width:none; }
+    .chip{ font-size:7pt; padding:2.5pt 5pt; border-width:.75pt; }
+
+    .specs{ margin-top:9pt; padding-top:7pt; gap:7pt 13pt; grid-template-columns:repeat(4,1fr); }
+    .specs dt{ font-size:6.5pt; margin-bottom:1.5pt; }
+    .specs dd{ font-size:9pt; }
+    .specs dd small{ font-size:7pt; }
+
+    .out{ padding:7pt 0; grid-template-columns:32pt 1fr; }
+    .out .oaddr{ font-size:11pt; }
+    .out .ocity{ font-size:7.5pt; }
+    .out .oreason{ font-size:9pt; margin-top:2.5pt; max-width:none; }
+
+    .callout{ padding:10pt 12pt; margin-top:9pt; border-width:.75pt; border-top-width:2.5pt; }
+    .callout h3{ font-size:11pt; margin-bottom:6pt; }
+    .callout ul{ padding-left:14pt; }
+    .callout li{ margin-bottom:4.5pt; max-width:none; font-size:9.5pt; }
+
+    section:last-of-type, .tourlist{ break-before:page; page-break-before:always; padding-top:0; }
+
+    .foot{ display:block; margin-top:14pt; padding-top:9pt; border-top-width:2pt; break-inside:avoid; }
+    .foot p{ font-size:9pt; max-width:none; }
+    .foot .who{ font-size:13pt; }
+    .foot a{ text-decoration:none; }
+    .stamp{ font-size:7.5pt; margin-top:9pt; }
+  }
+</style>
+
+<div class="wrap">
+
+  <div class="modebar" role="group" aria-label="Display mode">
+    <button type="button" id="mPres" aria-pressed="true">Presentation</button>
+    <button type="button" id="mSave" aria-pressed="false">Ink saver</button>
+  </div>
+
+  <header class="mast">
+    <div class="toprow">
+      <img class="logo blu" src="data:image/png;base64,__LOGO_BLUE__" alt="CARR">
+      <img class="logo wht" src="data:image/png;base64,__LOGO_WHITE__" alt="CARR">
+      <p class="kicker">Healthcare Real Estate</p>
+      <p class="when">__PREPARED__</p>
+    </div>
+
+    <h1>__H1_A__ <em>Space Search</em></h1>
+    <p class="standfirst">Prepared for <b>__CLIENT__</b>. __N_TOTAL__ spaces are available for lease across your search area right now. __N_TOUR__ of them are worth your time, and the reasons the others are not tell you a great deal about this market.</p>
+
+    <dl class="brief">
+      <div><dt>Practice</dt><dd>__PRACTICE__</dd></div>
+      <div><dt>Target size</dt><dd class="mono">__TARGET__</dd></div>
+      <div><dt>Searched at</dt><dd class="mono">__SEARCHED__</dd></div>
+      <div><dt>Area</dt><dd>__AREA__</dd></div>
+      <div><dt>Structure</dt><dd>__STRUCTURE__</dd></div>
+    </dl>
+
+    <div class="tally">
+      <div><span class="n">__N_TOTAL__</span><span class="l">Spaces reviewed</span></div>
+      <div><span class="n hi">__N_TOUR__</span><span class="l">Worth touring</span></div>
+      <div><span class="n">__N_LOOK__</span><span class="l">Worth a look</span></div>
+      <div><span class="n">__N_OUT__</span><span class="l">Ruled out</span></div>
+      <div><span class="n mono">__RATE_SPAN__</span><span class="l">Asking range, the ones worth touring</span></div>
+    </div>
+  </header>
+
+  __MAP__
+
+  <section>
+    <div class="sechead"><h2>Worth touring</h2><span class="ct">__N_TOUR__ of __N_TOTAL__</span></div>
+    <p>These fit the size, the use, and the timing. Each carries a different trade-off, and seeing them in one afternoon will teach you more about your options than any amount of reading. Open the full detail on any of them for the complete picture.</p>
+    <div class="list tier1">__TOUR_CARDS__</div>
+  </section>
+
+  <section>
+    <div class="sechead"><h2>Worth a look</h2><span class="ct">__N_LOOK__ of __N_TOTAL__</span></div>
+    <p>Each of these could work if one condition changes: a landlord agrees to divide the space, a rate gets disclosed, or you decide to take more square footage than planned.</p>
+    <div class="list">__LOOK_CARDS__</div>
+  </section>
+
+  <section>
+    <div class="sechead"><h2>Reviewed and ruled out</h2><span class="ct">__N_OUT__ of __N_TOTAL__</span></div>
+    <p>Listed so you can see the whole field rather than a curated few. Every one of these was checked against your requirements before it was set aside.</p>
+    <div style="margin-top:20px">__OUT_ROWS__</div>
+  </section>
+
+  <section>
+    <div class="sechead summary"><h2>What this search tells you</h2></div>
+
+    <!-- Findings and confirmations are per-search and live in properties.json, never
+         here. They were hardcoded once, went stale the moment a second source was
+         merged, and told the client something false. Headings carry no counts for
+         the same reason. -->
+    <div class="callout">
+      <h3>What this search found</h3>
+      <ul>__FINDINGS__</ul>
+    </div>
+
+    <div class="callout">
+      <h3>What we need to confirm on your side</h3>
+      <ul>__CONFIRMATIONS__</ul>
+    </div>
+    __PENDING__
+  </section>
+
+  <section class="tourlist" id="tourlist">
+    <div class="sechead"><h2>Your tour list</h2><span class="ct" id="tl-count">Nothing picked yet</span></div>
+    <p>Everything you marked while reading, in one place. Send it and I will book the lot back
+       to back so you only give up one afternoon.</p>
+
+    <div id="tl-empty" class="empty">
+      <h4>You have not picked anything yet</h4>
+      <p>Use the button on any space above and it will appear here. If you would rather talk it
+         through than pick from a page, reply to the email this came in on and say so.</p>
+    </div>
+
+    <ol id="tl-list" class="tl" hidden></ol>
+
+    <div class="act" id="tl-actions" hidden>
+      <a id="tl-send" href="#">Send this list to Joe</a>
+      <button type="button" class="ghost" id="tl-copy">Copy the list instead</button>
+      <button type="button" class="ghost" id="tl-clear">Start over</button>
+      <span class="hint" id="tl-hint">Opens your email with the list already written out. Nothing is
+        sent until you press send yourself.</span>
+    </div>
+  </section>
+
+  <div class="cartbar" id="cartbar" hidden>
+    <span id="cartbar-n">0 spaces picked</span>
+    <a href="#tourlist">Review and send</a>
+  </div>
+
+  <footer class="foot">
+    <div>
+      <p class="who">Joe Bookout</p>
+      <p>Healthcare Real Estate Advisor, CARR</p>
+      <p><a href="mailto:joe.bookout@carr.us">joe.bookout@carr.us</a></p>
+      <p style="margin-top:13px">CARR represents healthcare tenants and buyers only. We never represent landlords or sellers, so there is no question about whose interests are being protected in your negotiation.</p>
+    </div>
+    <div class="stamp">
+      Prepared __PREPARED__<br>
+      Source: __SOURCES__<br>
+      Search: __SEARCHED__<br>
+      __AREA__<br>
+      __N_TOTAL__ properties reviewed
+    </div>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var root=document.documentElement,
+        pres=document.getElementById('mPres'),
+        save=document.getElementById('mSave');
+    function set(m){
+      if(m==='save'){ root.setAttribute('data-ink','save'); }
+      else { root.removeAttribute('data-ink'); }
+      pres.setAttribute('aria-pressed', String(m!=='save'));
+      save.setAttribute('aria-pressed', String(m==='save'));
+      try{ localStorage.setItem('carr-ink-mode', m); }catch(e){}
+    }
+    pres.addEventListener('click', function(){ set('pres'); });
+    save.addEventListener('click', function(){ set('save'); });
+    var s=null; try{ s=localStorage.getItem('carr-ink-mode'); }catch(e){}
+    if(s==='save'){ set('save'); }
+
+    /* printing must show every detail panel, then restore what the reader had open */
+    var wasOpen=[];
+    function expand(){
+      wasOpen=[];
+      document.querySelectorAll('details.more').forEach(function(d){
+        wasOpen.push(d.open); d.open=true;
+      });
+    }
+    function restore(){
+      document.querySelectorAll('details.more').forEach(function(d,i){ d.open=wasOpen[i]; });
+    }
+    window.addEventListener('beforeprint', expand);
+    window.addEventListener('afterprint', restore);
+
+    /* ---- tour list ----------------------------------------------------------
+       Selecting spaces builds one message at the end instead of firing a separate
+       email per card. State lives in sessionStorage so it survives a reload, and
+       nothing leaves the page until the reader presses send in their own mail
+       client. No network, so this still works offline and from an attachment. */
+    var picks = [];
+    try { picks = JSON.parse(sessionStorage.getItem('carr-tourlist') || '[]'); } catch(e){ picks = []; }
+
+    var elCount  = document.getElementById('tl-count');
+    var elEmpty  = document.getElementById('tl-empty');
+    var elList   = document.getElementById('tl-list');
+    var elActs   = document.getElementById('tl-actions');
+    var elSend   = document.getElementById('tl-send');
+    var elCopy   = document.getElementById('tl-copy');
+    var elClear  = document.getElementById('tl-clear');
+    var elHint   = document.getElementById('tl-hint');
+    var bar      = document.getElementById('cartbar');
+    var barN     = document.getElementById('cartbar-n');
+
+    /* NOT named save(): the mode toggle above already binds `save` to the Ink Saver
+       button element, and a function declaration of the same name gets clobbered. */
+    function persist(){
+      try { sessionStorage.setItem('carr-tourlist', JSON.stringify(picks)); } catch(e){}
+    }
+    function plural(n){ return n + (n === 1 ? ' space' : ' spaces'); }
+
+    function messageBody(){
+      var lines = picks.map(function(p, i){ return (i+1) + '. ' + p.addr + ', ' + p.city; });
+      return 'Hi Joe,\n\nI would like to see these:\n\n' + lines.join('\n') +
+             '\n\nCan we line them up back to back?\n\nThanks';
+    }
+
+    function render(){
+      var n = picks.length;
+      elCount.textContent = n ? plural(n) + ' picked' : 'Nothing picked yet';
+      elEmpty.hidden = n > 0;
+      elList.hidden  = n === 0;
+      elActs.hidden  = n === 0;
+      bar.hidden     = n === 0;
+      barN.textContent = plural(n) + ' picked';
+
+      elList.innerHTML = '';
+      picks.forEach(function(p){
+        var li = document.createElement('li');
+        var a  = document.createElement('span'); a.className = 'a'; a.textContent = p.addr;
+        var c  = document.createElement('span'); c.className = 'c'; c.textContent = p.city;
+        var rm = document.createElement('button');
+        rm.type = 'button'; rm.textContent = 'Remove';
+        rm.setAttribute('aria-label', 'Remove ' + p.addr + ' from your tour list');
+        rm.addEventListener('click', function(){ toggle(p.rank); });
+        li.appendChild(a); li.appendChild(c); li.appendChild(rm);
+        elList.appendChild(li);
+      });
+
+      elSend.href = 'mailto:joe.bookout@carr.us' +
+        '?subject=' + encodeURIComponent('__TITLE__: the ones I want to see') +
+        '&body=' + encodeURIComponent(messageBody());
+
+      document.querySelectorAll('.pick').forEach(function(b){
+        var on = picks.some(function(p){ return p.rank === +b.dataset.rank; });
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    }
+
+    function toggle(rank){
+      var i = picks.findIndex(function(p){ return p.rank === rank; });
+      if(i > -1){ picks.splice(i, 1); }
+      else {
+        var b = document.querySelector('.pick[data-rank="' + rank + '"]');
+        if(!b){ return; }
+        picks.push({ rank: rank, addr: b.dataset.addr, city: b.dataset.city });
+        picks.sort(function(a, z){ return a.rank - z.rank; });   // keep report order
+      }
+      persist(); render();
+    }
+
+    document.querySelectorAll('.pick').forEach(function(b){
+      b.addEventListener('click', function(){ toggle(+b.dataset.rank); });
+    });
+
+    if(elClear){
+      elClear.addEventListener('click', function(){ picks = []; persist(); render(); });
+    }
+    if(elCopy){
+      elCopy.addEventListener('click', function(){
+        var txt = messageBody();
+        var done = function(){ elHint.textContent = 'Copied. Paste it wherever you like.'; };
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(txt).then(done, function(){ fallback(txt, done); });
+        } else { fallback(txt, done); }
+      });
+    }
+    function fallback(txt, done){
+      var ta = document.createElement('textarea');
+      ta.value = txt; ta.setAttribute('readonly','');
+      ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); }
+      catch(e){ elHint.textContent = 'Copying is blocked here. Select the list above and copy it.'; }
+      document.body.removeChild(ta);
+    }
+
+    render();
+
+    /* map pins scroll to the property and open its detail, so a click answers
+       "what is this one" without the reader hunting for the card */
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    document.querySelectorAll('.pin').forEach(function(pin){
+      pin.addEventListener('click', function(){
+        var el = document.getElementById(pin.getAttribute('data-go'));
+        if(!el){ return; }
+        var d = el.querySelector('details.more');
+        if(d){ d.open = true; }
+        el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
+        el.style.transition = 'background-color .5s ease';
+        el.style.backgroundColor = 'var(--accent-wash)';
+        setTimeout(function(){ el.style.backgroundColor = ''; }, 1400);
+      });
+    });
+    if(window.matchMedia){
+      var mq=window.matchMedia('print');
+      (mq.addEventListener? mq.addEventListener.bind(mq,'change') : mq.addListener.bind(mq))(
+        function(e){ e.matches? expand() : restore(); });
+    }
+  })();
+</script>
