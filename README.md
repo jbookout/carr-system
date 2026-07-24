@@ -8,12 +8,17 @@ Knowledge lives as markdown in the Google Drive vault (`My Drive/CARR AI/`) fore
 
 ## Layout
 
-- `generators/` — the pipeline scripts (phase 1: the three already-code generators)
+- `manifest.tsv` — the repo↔vault map, one row per synced code file; `tools/check.sh` reads it. Adding a file to the repo means adding its row here.
+- `generators/` — the three board/feed generators (phase 1; repo is their runtime on Joe's Mac since phase 2)
   - `build-deal-room.py` — JSON→HTML Deal Room renderer. Reads `DNA/Team/live-boards/panhandle-team-deals.json`, writes `deal-room-panhandle.html`. NOT the Salesforce-export importer (that is a separate, still-open build — vault open-loops #84).
   - `build-lead-board.py` — the Lead Board builder. Writes `Automation/lead-board.html`.
   - `build-renewal-feed.py` — the renewal-radar feed builder. Writes `Automation/renewal-radar.json`.
+- `pipelines/` (+ `pipelines/radar/`) — the rest of the durable pipeline code, imported phase 3 (2026-07-24) for version control; their VAULT copies remain the SOP-invoked runtime until each is repointed after a verified identical run. Deliberately left out: the demoted Firefly receiver, deal-specific research one-offs, launchd plists.
+- `shared/` — code on the shared DNA tier (Dell's lead-board template, the vendor intro-path tool, the fill-engine pair). Vault copies canonical for Dell's use; repo is version history + review.
+- `bin/` — shell utilities (automation-Chrome launcher, calendar fetcher).
 - `baselines/` — committed snapshots of each generator's current output. Any code change must show its output diff against these before being accepted (the checkability guardrail: nobody reads this code line-by-line, so the outputs are what get reviewed).
-- `tools/check.sh` — the drift + diff check (see below).
+- `tools/check.sh` — code drift (every manifest row) + output drift vs baselines. `run.sh check`.
+- `tools/health-check.py` — the rule-28 façade check as code (phase 3 pilot): every watched pipeline output tested for STALE-past-cadence and BEHIND-its-inputs. `run.sh health`; the daily heartbeat's JOB 4a calls it.
 
 ## Execution model (phase 2 live, 2026-07-24)
 

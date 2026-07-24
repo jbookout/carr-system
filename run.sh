@@ -22,5 +22,7 @@ case "${1:-}" in
   lead-board)   lead_board ;;
   renewal-feed) renewal_feed ;;
   all)          renewal_feed; lead_board; deal_room ;;
-  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all"; exit 2 ;;
+  health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
+  check)        "$REPO/tools/check.sh" ;;
+  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|health|check"; exit 2 ;;
 esac

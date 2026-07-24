@@ -1,0 +1,24 @@
+# repo-path <TAB> vault-path (relative to CARR AI). One row per synced code file.
+# check.sh reads this for the code-drift pass. Vault copies are the fallback +
+# Dell's/cloud runtime for generators; for pipelines/ the vault copy is still the
+# SOP-invoked runtime (repoint happens per-script after a verified identical run).
+generators/build-deal-room.py	DNA/Team/live-boards/build-deal-room.py
+generators/build-lead-board.py	Automation/build-lead-board.py
+generators/build-renewal-feed.py	Automation/build-renewal-feed.py
+pipelines/build-space-search.py	Automation/build-space-search.py
+pipelines/build-search-map.py	Automation/build-search-map.py
+pipelines/build-front-door.py	Automation/build-front-door.py
+pipelines/dso-match.py	Automation/dso-match.py
+pipelines/radar/corroborate.py	Automation/radar/corroborate.py
+pipelines/radar/enrich-pecos-nppes.py	Automation/radar/enrich-pecos-nppes.py
+pipelines/radar/build-pecos-pool.py	Automation/radar/build-pecos-pool.py
+pipelines/radar/build-license-pool.py	Automation/radar/build-license-pool.py
+pipelines/radar/build-license-pool-from-raw.py	Automation/radar/build-license-pool-from-raw.py
+pipelines/radar/parse-tax-rolls.py	Automation/radar/parse-tax-rolls.py
+pipelines/radar/date-founders.py	Automation/radar/date-founders.py
+shared/build-lead-board-template.py	DNA/Team/build-lead-board.py
+shared/vendor_intro_for_stage.py	DNA/Network/vendor_intro_for_stage.py
+shared/fill-engine/extract_pvl_onepager.py	DNA/Deal Management/fill-engine/extract_pvl_onepager.py
+shared/fill-engine/fill_deal_template.py	DNA/Deal Management/fill-engine/fill_deal_template.py
+bin/launch-automation-chrome.sh	Automation/launch-automation-chrome.sh
+bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
