@@ -18,6 +18,7 @@ lead_board()   { python3 "$REPO/generators/build-lead-board.py" "$VAULT"; }
 renewal_feed() { python3 "$REPO/generators/build-renewal-feed.py" "$VAULT"; }
 corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
 space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
+graph()        { python3 "$REPO/pipelines/build-graph-notes.py" "$VAULT"; }
 
 case "${1:-}" in
   deal-room)    deal_room ;;
@@ -26,7 +27,8 @@ case "${1:-}" in
   all)          renewal_feed; lead_board; deal_room ;;
   corroborate)  corroborate ;;
   space-search) space_search "$@" ;;
+  graph)        graph ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|health|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|graph|health|check"; exit 2 ;;
 esac
