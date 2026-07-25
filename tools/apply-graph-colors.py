@@ -57,6 +57,18 @@ d["colorGroups"] = [g for g in d.get("colorGroups", []) if g["query"] not in STA
 pruned = before - len(d["colorGroups"])
 if pruned: print(f"pruned {pruned} stale colour groups from the old graph model")
 groups = d["colorGroups"]
+
+# Legacy path: groups predate the tier model and coloured real vault files orange
+# — which now means "Dell". A file under DNA/ would render orange while its own
+# folder node rendered blue. Realign them to the tier scheme so the system graph
+# is coherent whether you are looking at a folder node or the file itself:
+# blue = shared DNA tier, cyan = Joe-personal.
+TIER_BLUE, TIER_CYAN = int("3b82f6", 16), int("00e5ff", 16)
+for g in groups:
+    q = g.get("query", "")
+    if q.startswith("path:"):
+        target = q[5:].strip('"')
+        g["color"] = {"a": 1, "rgb": TIER_BLUE if target.startswith("DNA") else TIER_CYAN}
 have = {g["query"] for g in groups}
 added = 0
 for q, h in reversed(OWNER_FIRST):          # reversed so the listed order survives insert(0)
