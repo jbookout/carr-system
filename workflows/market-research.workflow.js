@@ -10,6 +10,8 @@ export const meta = {
   ],
 }
 
+const ARGS = (() => { try { return typeof args === 'string' ? JSON.parse(args) : (args || {}) } catch { return {} } })()
+
 // Graph-engineering build 2026-07-25. Rules honored:
 //  - verifiers get fresh context and try to REFUTE (fan-out hygiene rule 1)
 //  - scoped: angles capped at 6, claims verified with single skeptics; widen only on Joe's ask
@@ -20,10 +22,10 @@ export const meta = {
 //  - writing surfaces obey DNA/writing-rules.md; the synthesize prompt says so explicitly.
 // args: { question: string (required), today: 'YYYY-MM-DD', maxAngles?: number }
 
-const TODAY = (args && args.today) || 'UNDATED-pass-args.today'
-const QUESTION = args && args.question
+const TODAY = (ARGS && ARGS.today) || 'UNDATED-pass-args.today'
+const QUESTION = ARGS && ARGS.question
 if (!QUESTION) throw new Error('pass args.question — e.g. {question: "medical office vacancy and rent trend, Pensacola metro", today: "2026-07-25"}')
-const MAX_ANGLES = Math.min((args && args.maxAngles) || 5, 6)
+const MAX_ANGLES = Math.min((ARGS && ARGS.maxAngles) || 5, 6)
 
 const ANGLES = { type: 'object', required: ['angles'], properties: { angles: { type: 'array', maxItems: 6, items: {
   type: 'object', required: ['name', 'searchBrief'], properties: {

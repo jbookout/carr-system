@@ -10,6 +10,8 @@ export const meta = {
   ],
 }
 
+const ARGS = (() => { try { return typeof args === 'string' ? JSON.parse(args) : (args || {}) } catch { return {} } })()
+
 // Graph-engineering build 2026-07-25. Standing rules honored:
 //  - NEVER pre-qualify (Joe, Jul 16): every candidate that survives dedupe is PRESENTED with a
 //    score/confidence tier. Verification here checks the lead EXISTS at its source, it does not
@@ -21,10 +23,10 @@ export const meta = {
 //    CARR Leads Inbox / registry intake per DNA/Leads/lead-system.md, stamps, and logs the run.
 // args: { today: 'YYYY-MM-DD', lanes?: string[], regions?: string[], cap?: number }
 
-const TODAY = (args && args.today) || 'UNDATED-pass-args.today'
-const CAP = Math.min((args && args.cap) || 6, 20)
+const TODAY = (ARGS && ARGS.today) || 'UNDATED-pass-args.today'
+const CAP = Math.min((ARGS && ARGS.cap) || 6, 20)
 
-const LANES = (args && args.lanes) || [
+const LANES = (ARGS && ARGS.lanes) || [
   'local news + business journals: practice openings, expansions, relocations, new physician/dentist/vet arrivals announced in the last 60 days',
   'building permits + planning-commission agendas: healthcare build-outs, medical office construction filings',
   'hiring signals: job postings for office managers / associates / front desk at NEW or EXPANDING private practices (Indeed, practice sites, association job boards)',
@@ -32,7 +34,7 @@ const LANES = (args && args.lanes) || [
   'association + society announcements: new members, board changes, CE event hosts among private-practice owners',
   'university + residency pipelines: graduating residents/associates announcing moves into private practice in the territory',
 ]
-const REGIONS = (args && args.regions) || [
+const REGIONS = (ARGS && ARGS.regions) || [
   'Mobile and Baldwin County AL; Dothan AL',
   'Pensacola / Escambia + Santa Rosa County FL; Fort Walton / Destin / Okaloosa + Walton County FL',
   'Panama City / Bay County FL; Tallahassee / Leon County FL',

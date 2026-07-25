@@ -10,6 +10,8 @@ export const meta = {
   ],
 }
 
+const ARGS = (() => { try { return typeof args === 'string' ? JSON.parse(args) : (args || {}) } catch { return {} } })()
+
 // Graph-engineering build 2026-07-25. Design rules honored here:
 //  - graders never see each other or prior scores (the no-anchoring rule, now structural)
 //  - verifiers get FRESH context and judge evidence, not the grader's claim (fan-out hygiene rule 1)
@@ -18,9 +20,9 @@ export const meta = {
 //    top-seat writes the invoking session performs after reading this result (model-tiering hard floor).
 // args: { vault: string (CARR AI absolute path), today: 'YYYY-MM-DD' } — timestamps come in via args.
 
-const VAULT = (args && args.vault) ||
+const VAULT = (ARGS && ARGS.vault) ||
   '/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI'
-const TODAY = (args && args.today) || 'UNDATED-pass-args.today'
+const TODAY = (ARGS && ARGS.today) || 'UNDATED-pass-args.today'
 const CARD = `${VAULT}/00_Context/system-report-card-2026-07-07.md`
 
 const CATEGORIES = [
