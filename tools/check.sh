@@ -32,6 +32,23 @@ grep -v '^#' "$REPO/manifest.tsv" | while IFS=$'\t' read -r rp vp; do
   fi
 done
 
+echo "== Video pipeline drift (repo vs ~/Movies runtime, per manifest-video.tsv) =="
+VIDEO="${CARR_VIDEO_PIPE:-$HOME/Movies/CARR Video Pipeline}"
+if [ -d "$VIDEO" ]; then
+  grep -v '^#' "$REPO/manifest-video.tsv" | while IFS=$'\t' read -r rp vp; do
+    [ -z "$rp" ] && continue
+    if [ ! -f "$VIDEO/$vp" ]; then
+      echo "  MISSING $rp   (runtime copy not found: $vp)"; rc=1
+    elif diff -q "$REPO/$rp" "$VIDEO/$vp" >/dev/null 2>&1; then
+      echo "  OK      $rp"
+    else
+      echo "  DRIFT   $rp   (diff: diff -u \"$VIDEO/$vp\" \"$REPO/$rp\")"; rc=1
+    fi
+  done
+else
+  echo "  SKIP    video pipeline not present at $VIDEO"
+fi
+
 echo "== Output drift (vault output vs committed baseline) =="
 for f in ${(k)OUT}; do
   if diff -q "$REPO/baselines/$f" "${OUT[$f]}" >/dev/null 2>&1; then
