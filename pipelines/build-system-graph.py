@@ -220,6 +220,15 @@ for rel, d in sorted(docs.items()):
         f"Area: [[{area_title[d['area']]}]]",
         "",
     ]
+    # Link to the REAL file so the actual vault note joins the graph instead of
+    # floating as an orphan. The vault cites files by path ("DNA/templates.md"),
+    # which Obsidian does not resolve as a link, so 297 real documents rendered
+    # as disconnected dots while their proxy node sat in the cluster. A path-form
+    # wikilink resolves in Obsidian and is unambiguous across the 4 colliding
+    # basenames (INDEX/README/SKILL/session-operating-style). Markdown only —
+    # Obsidian does not graph .xlsx/.json/.html.
+    if rel.endswith(".md"):
+        body += [f"Source file: [[{rel[:-3]}]]", ""]
     if d["refs"]:
         body += ["## References", ""]
         for t in sorted(d["refs"], key=lambda r: title[r]):
