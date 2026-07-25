@@ -40,6 +40,8 @@ WATCH = [
      "Monday radar run (radar-digest-sop.md)"),
     ("PECOS pool",        "Automation/radar/upstream/pecos.json", 100, [],
      "quarterly (Jan/Apr/Jul/Oct; next diff vs the Q1 baseline in Oct)"),
+    ("Section index",     "Automation/section-index.tsv", 9, [],
+     "retrieval-as-code layer; rebuild = run.sh section-index (rides the Monday run; no BEHIND check — doc inputs churn daily by design)"),
     ("Joe calendar feed", "DNA/Team/calendar-latest.ics", 4, [],
      "fetch-calendar.sh; business days only"),
     ("Dell calendar feed","DNA/Team/calendar-latest-dell.ics", 4, [],
