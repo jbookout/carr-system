@@ -203,16 +203,37 @@ for l in leads:
     open(os.path.join(OUT, "leads", node + ".md"), "w").write("\n".join(body))
     counts["leads"] += 1
 
+# Territory footprint (AL gulf coast + FL panhandle). Used ONLY to separate deals CARR
+# represents directly (deep green) from out-of-market deals referred to another CARR agent
+# for a referral fee (light green). A deal with no city recorded is neither — it is tagged
+# #deal-unclassified and stays visibly unknown rather than being guessed into a lane.
+TERRITORY = ["pensacola","navarre","freeport","gulf shores","destin","miramar","santa rosa","panama",
+             "crestview","fort walton","mobile","dothan","tallahassee","foley","daphne","inlet beach",
+             "loxley","30a","niceville","gulf breeze","pace","milton","spanish fort","fairhope",
+             "enterprise","ozark","chipley","marianna","defuniak"]
+
+def deal_lane(city):
+    c = s(city).lower()
+    if not c: return None                                   # unknown — never guessed
+    return "territory" if any(t in c for t in TERRITORY) else "national"
+
 deal_taken = set()
 for d in deals:
     node = slug(s(d.get("name")) or s(d.get("company")), deal_taken, s(d.get("txn")))
     phase = s(d.get("phase")).lower()
     tags = ["deal", "won" if "closed" in phase or "won" in phase else ("cold" if "pending" in phase else "active")]
+    lane = deal_lane(d.get("city"))
+    tags.append({"territory":"deal-territory", "national":"deal-national"}.get(lane, "deal-unclassified"))
     vt = vert_tag(s(d.get("seg"))+" "+s(d.get("ptype")))
     if vt: tags.append(vt)
+    lane_txt = {"territory":"CARR represents (full commission)",
+                "national":"referred out to a local CARR agent (referral fee back to Dell; Joe's share rides on it)",
+                None:"LANE UNKNOWN — no city recorded, needs a verdict"}[lane]
     body = [fm([f"type: deal", f"phase: {esc(d.get('phase'))}", f"owner: {esc(d.get('owner') or 'unassigned')}",
-                f"segment: {esc(d.get('seg'))}", "tags: [" + ", ".join(tags) + "]"])]
+                f"segment: {esc(d.get('seg'))}", f"lane: {lane or 'unclassified'}",
+                "tags: [" + ", ".join(tags) + "]"])]
     body.append(f"**{s(d.get('name'))}** — {s(d.get('company'))} · {s(d.get('seg'))} · {s(d.get('city'))} · phase: {s(d.get('phase'))}\n")
+    body.append(f"*Lane: {lane_txt}*\n")
     links = []
     c_node, _ = find_client(d.get("company"))
     if not c_node: c_node, _ = find_client(d.get("contact"))
