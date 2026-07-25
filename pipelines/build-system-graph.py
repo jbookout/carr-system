@@ -110,8 +110,10 @@ if os.path.isdir(OUT):
     shutil.rmtree(OUT)
 os.makedirs(OUT)
 
-def w(title, lines):
-    open(os.path.join(OUT, f"{safe(title)}.md"), "w", encoding="utf-8").write("\n".join(lines))
+def w(title, lines, ext=".md"):
+    # README goes out as .txt: Obsidian graphs every .md, and a linkless
+    # README renders as a floating dot with nothing attached to it.
+    open(os.path.join(OUT, f"{safe(title)}{ext}"), "w", encoding="utf-8").write("\n".join(lines))
 
 # ---------- folder nodes: each with its own orbit of real files ----------
 edges = 0
@@ -170,7 +172,7 @@ w(POLE_DELL, ["---", "type: pole", "tier: DELL", "tags: [sys-pole, sys-tier-dell
               f"- [[{safe(POLE_DNA)}]]", ""])
 edges += 1
 
-w("README", [f"# Graph-System — how the CARR AI system connects (DERIVED, DO NOT HAND-EDIT)", "",
+w("README", ext=".txt", lines=[f"# Graph-System — how the CARR AI system connects (DERIVED, DO NOT HAND-EDIT)", "",
              f"- **{len(folders)} folder nodes**, each linking its own files",
              f"- **{len(docs)} real documents** — linked directly, no proxy duplicates",
              f"- **{len(folder_edges)} folder-to-folder flows** rolled up from file references",

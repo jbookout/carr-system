@@ -189,7 +189,8 @@ for title, mem in sorted(members.items()):
     open(os.path.join(OUT, f"{safe(title)}.md"), "w", encoding="utf-8").write("\n".join(body))
     written += 1; edges += len(mem) + len(flows.get(title, ()))
 
-open(os.path.join(OUT, "README.md"), "w", encoding="utf-8").write(
+# .txt not .md — a linkless README.md renders as a floating graph node.
+open(os.path.join(OUT, "README.txt"), "w", encoding="utf-8").write(
     "# Graph/hubs — the SKELETON of the people graph (DERIVED, DO NOT HAND-EDIT)\n\n"
     "Structure nodes, not attribute tags:\n\n"
     "    ① LEADS → ② CLIENTS & PROSPECTS → ③ DEALS   the pipeline, in sequence\n"
