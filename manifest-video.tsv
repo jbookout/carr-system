@@ -11,6 +11,7 @@
 # the vault copies. Imported 2026-07-25.
 #
 # NOT imported, deliberately: generated artifacts (*-job.json, *-log.txt,
+# animstatic-plan.env, choreography-log.tsv,
 # example-layers/*.png, example-static-flat.png, fontcheck.txt, writetest.txt),
 # media folders (01_Drop_*, 03_Output, 04_Archive, AE_Templates), and
 # ~/Library/LaunchAgents/com.carr.videopipeline.plist (launchd plists are an
@@ -23,6 +24,7 @@
 # recorded decision rather than an oversight.
 video/carr_animated_static.jsx	Scripts/carr_animated_static.jsx
 video/make-animated-static.sh	Scripts/make-animated-static.sh
+video/plan-animated-static.py	Scripts/plan-animated-static.py
 video/make-example-layers.py	Scripts/make-example-layers.py
 video/carr_lower_third.jsx	Scripts/carr_lower_third.jsx
 video/make-lower-third.sh	Scripts/make-lower-third.sh
