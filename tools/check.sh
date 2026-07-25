@@ -50,4 +50,29 @@ if diff -q "$REPO/generators/build-lead-board.py" "$REPO/shared/build-lead-board
 else
   echo "  SPLIT   build-lead-board — the two copies have diverged; port the change to both or say why in manifest.tsv"; rc=1
 fi
+
+# writing-lint fixtures (2026-07-25). The linter encodes DNA/writing-rules.md, so a
+# rule edit that quietly starts flagging good CRE prose (or stops catching a tell)
+# is the failure mode that would get it ignored. The two fixtures are the contract.
+echo "== writing-lint fixtures (false-positive + detection guard) =="
+if [ -f "$REPO/baselines/writing-lint.txt" ]; then
+  tmp="$(mktemp)"
+  { echo "# writing-lint baseline. Regenerate: tools/writing-lint-baseline.sh"
+    echo "## clean-email.txt --surface email  (must stay 0 HARD)"
+    python3 "$REPO/tools/writing-lint.py" "$REPO/tools/fixtures/clean-email.txt" --surface email | tail -n +2
+    echo
+    echo "## dirty-social.txt --surface social"
+    python3 "$REPO/tools/writing-lint.py" "$REPO/tools/fixtures/dirty-social.txt" --surface social | tail -n +2
+  } > "$tmp" 2>/dev/null
+  if diff -q "$REPO/baselines/writing-lint.txt" "$tmp" >/dev/null 2>&1; then
+    echo "  OK      writing-lint (fixtures match baseline)"
+  else
+    echo "  CHANGED writing-lint — findings moved. Review, then tools/writing-lint-baseline.sh"
+    echo "          (diff: diff -u baselines/writing-lint.txt <(tools/writing-lint-baseline.sh >/dev/null; cat baselines/writing-lint.txt))"
+    rc=1
+  fi
+  rm -f "$tmp"
+else
+  echo "  MISSING writing-lint baseline — run tools/writing-lint-baseline.sh"; rc=1
+fi
 exit $rc

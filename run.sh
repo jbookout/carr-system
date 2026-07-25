@@ -34,6 +34,7 @@ case "${1:-}" in
   section-index) section_index ;;
   retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
+  lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|graph|salesforce-diff [--apply]|section-index|retrieve <question>|health|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|graph|salesforce-diff [--apply]|section-index|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|check"; exit 2 ;;
 esac

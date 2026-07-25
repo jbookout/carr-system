@@ -1,0 +1,160 @@
+# writing-lint baseline. Regenerate: tools/writing-lint-baseline.sh
+## clean-email.txt --surface email  (must stay 0 HARD)
+rules: DNA/writing-rules.md · judgment pass still belongs to the writing-audit skill
+
+  [REVIEW] contrast-compressed  (line 21)
+      ...renewal letter is a starting position, not a price. Call me and I will pul...
+      Possible compressed contrast-reframe ('X, not Y' dropped into a sentence). Joe caught this live on 2026-07-14; same tell, shorter setup.
+      fix: If it is the false-dichotomy shape, rewrite as a plain assertion. A genuine correction of fact is fine.
+
+PASS on hard bans.  REVIEW items still need a human.
+
+## dirty-social.txt --surface social
+rules: DNA/writing-rules.md · judgment pass still belongs to the writing-audit skill
+
+  [HARD] generic-opener  (line 1)
+      ...In today's fast-paced world, healthcare practice owners m...
+      Generic AI opener.
+      fix: Open on the specific fact, name, number or observation.
+
+  [HARD] em-dash  (line 2)
+      ...landscape of lease decisions — and most of them get it wrong...
+      Em dash. Hard ban on every surface a prospect could see.
+      fix: Recast as two sentences, or use a comma, colon or parentheses.
+
+  [HARD] generic-opener  (line 4)
+      ...d most of them get it wrong.  Here's the truth: it's not about the rent, it'...
+      Generic AI opener.
+      fix: Open on the specific fact, name, number or observation.
+
+  [HARD] contrast-reframe  (line 4)
+      ...it wrong.  Here's the truth: it's not about the rent, it's about the terms. Dell brings 15 yea...
+      Contrast-reframe construction (the false-dichotomy shape).
+      fix: Drop the setup and assert the second half on its own.
+
+  [HARD] dell-attribution  (line 4)
+      ...e rent, it's about the terms. Dell brings 15 years of healthcare experi...
+      Banned Dell attribution. Third correction on this theme; hard ban since 2026-07-16.
+      fix: Call it 'our network' or 'my network' in the first person.
+
+  [HARD] vocab  (line 5)
+      ...vendor network that helps us unlock value for every client. We le...
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] corporate-cliche  (line 5)
+      ...vendor network that helps us unlock value for every client. We leverage...
+      Corporate cliché (banned in templates.md and restated in writing-rules.md).
+      fix: Say the concrete thing that actually happens.
+
+  [HARD] vocab  (line 6)
+      ...erage that network to deliver seamless, cutting-edge representation....
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] vocab  (line 6)
+      ...network to deliver seamless, cutting-edge representation.  Carr is the...
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] carr-caps  (line 9)
+      ...cutting-edge representation.  Carr is the only firm that works e...
+      CARR is always all caps. It is the brand.
+      fix: Write CARR.
+
+  [HARD] weasel-attribution  (line 9)
+      ...orks exclusively for tenants. Studies show that unrepresented tenants ov...
+      Weasel attribution with no named source.
+      fix: Name the source and date, or cut the claim (cite-or-cut).
+
+  [HARD] vocab  (line 10)
+      ...esented tenants overpay. This actually marks a pivotal moment for th...
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] puffery  (line 10)
+      ...enants overpay. This actually marks a pivotal moment for the industry, underscorin...
+      Importance puffery.
+      fix: State the fact and let the reader decide whether it matters.
+
+  [HARD] trailing-ing  (line 11)
+      ...ivotal moment for the industry, underscoring the significance of true advo...
+      Trailing -ing clause asserting meaning the facts have not established.
+      fix: State the actual consequence as its own sentence, or cut the clause.
+
+  [HARD] empty-phrase  (line 13)
+      ...gnificance of true advocacy.  It's worth noting that our approach is holistic...
+      Empty phrase.
+      fix: Delete it. The sentence after it is the sentence.
+
+  [HARD] vocab  (line 13)
+      ...h noting that our approach is holistic. We craft a strategy that is...
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] vocab  (line 14)
+      .... We craft a strategy that is transformative, meticulous, and robust. It c...
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] vocab  (line 14)
+      ...ategy that is transformative, meticulous, and robust. It can save you...
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] vocab  (line 14)
+      ...ansformative, meticulous, and robust. It can save you money. It ca...
+      Flagged AI-tell vocabulary (writing-rules.md hard-ban list).
+      fix: Use the plain word. If no plain word fits, the sentence is doing too little.
+
+  [HARD] no-x-no-y  (line 17)
+      ...e best part: you pay nothing. No pressure. No obligation. Just results.  The future of...
+      'No X. No Y. Just Z.' construction.
+      fix: Say what the thing is, not the list of things it isn't.
+
+  [REVIEW] navigate  (line 1)
+      ...althcare practice owners must navigate a complex landscape of lease...
+      'Navigate' is banned as a metaphor for handling a topic.
+      fix: Literal navigation is fine. Metaphorical use: name the actual task.
+
+  [REVIEW] landscape  (line 2)
+      ...wners must navigate a complex landscape of lease decisions — and most...
+      'Landscape' is banned as a metaphor.
+      fix: Literal landscaping is fine. Metaphorical use: say market, or the specific thing.
+
+  [REVIEW] colon-reveal  (line 4)
+      ...d most of them get it wrong.  Here's the truth: it's not about the rent, it's a...
+      Possible colon reveal (noun phrase, colon, dramatic payoff).
+      fix: Colons are for lists, labels and quotes. Write the sentence plainly.
+
+  [REVIEW] dell-mention  (line 4)
+      ...e rent, it's about the terms. Dell brings 15 years of healthcare...
+      Joe's marketing defaults to solo-Joe. Partner framing is opt-in per piece.
+      fix: Remove the mention unless Joe directed partner framing for this specific piece.
+
+  [REVIEW] craft-verb  (line 13)
+      ...our approach is holistic. We craft a strategy that is transformati...
+      'Craft' as a verb for writing or building something.
+      fix: Write, build, put together.
+
+  [REVIEW] mirrored-skeletons  (line 14)
+      ...It can save you money....
+      Three consecutive sentences built on the same frame ('it can...').
+      fix: One deliberate contrast pair is fine. Stacked mirroring is the tell.
+
+  [REVIEW] colon-reveal  (line 17)
+      ...ime. It can save you stress.  The best part: you pay nothing. No pressure. N...
+      Possible colon reveal (noun phrase, colon, dramatic payoff).
+      fix: Colons are for lists, labels and quotes. Write the sentence plainly.
+
+  [REVIEW] fragmentation  (line 17)
+      ...Just results....
+      Three or more stacked short fragments used as rhythm.
+      fix: Rejoin into full sentences unless one fragment is genuinely the point.
+
+  [REVIEW] kicker-ending  (line 19)
+      ...The future of healthcare real estate isn't coming....
+      Closing line has the manufactured-aphorism shape.
+      fix: End on the last concrete point or the next action.
+
+FAIL · 20 hard-ban hit(s). Do not ship until these are zero.

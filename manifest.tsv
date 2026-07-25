@@ -26,6 +26,12 @@ shared/fill-engine/fill_deal_template.py	DNA/Deal Management/fill-engine/fill_de
 bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
 # build-section-index.py is repo-only (no vault copy; the vault holds its OUTPUT in Automation/section-index.tsv)
 # tools/retrieve.py is repo-only (reads the derived index; sessions call it via run.sh retrieve)
+# tools/writing-lint.py is repo-only FOR NOW (2026-07-25). It enforces a SHARED-tier doctrine
+#   file (DNA/writing-rules.md), so Dell's side would benefit from a vault copy — but adding a
+#   file to the shared tier is a two-writer decision for Joe, not a unilateral write. Placement
+#   test: repo, because it is a checker like health-check.py/retrieve.py that local sessions
+#   invoke via run.sh, and its fixtures + baseline need version history to mean anything.
+#   Promote to shared/ -> DNA/ when Joe says so. Fixtures + baseline live with it.
 # workflows/*.workflow.js are repo-only (agent-graph orchestration, invoked by local Claude Code sessions via the Workflow tool; SOP pointers live in the vault files that own each job)
 # diff-salesforce-deals.py is repo-only (its INPUT capture + the SOP live in the vault)
 # capture-salesforce-report.js is repo-only (browser-pasted; the SOP that drives it lives in the vault)
