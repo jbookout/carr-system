@@ -140,6 +140,13 @@ RULES = [
      "Contrast-reframe construction (the false-dichotomy shape).",
      "Drop the setup and assert the second half on its own."),
 
+    ("contrast-reframe-split", "HARD",
+     r"\b(?:isn'?t|is not|aren'?t|wasn'?t|weren'?t|don'?t|doesn'?t)\s+[^.!?\n]{1,55}[.!?]\s+"
+     r"(?:It'?s|That'?s|They'?re|This is|It is|Those are)\b",
+     "Contrast-reframe split across two sentences ('X isn't A. It's B.'). Same "
+     "false-dichotomy shape as the comma form, just with a period in it.",
+     "Cut the negation and assert the second half on its own."),
+
     ("contrast-compressed", "REVIEW",
      r"\b\w+,\s+not\s+\w+\b",
      "Possible compressed contrast-reframe ('X, not Y' dropped into a sentence). "

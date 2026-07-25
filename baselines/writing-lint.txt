@@ -112,6 +112,11 @@ rules: DNA/writing-rules.md · judgment pass still belongs to the writing-audit 
       'No X. No Y. Just Z.' construction.
       fix: Say what the thing is, not the list of things it isn't.
 
+  [HARD] contrast-reframe-split  (line 19)
+      ...ure of healthcare real estate isn't coming. It's already here....
+      Contrast-reframe split across two sentences ('X isn't A. It's B.'). Same false-dichotomy shape as the comma form, just with a period in it.
+      fix: Cut the negation and assert the second half on its own.
+
   [REVIEW] navigate  (line 1)
       ...althcare practice owners must navigate a complex landscape of lease...
       'Navigate' is banned as a metaphor for handling a topic.
@@ -157,4 +162,4 @@ rules: DNA/writing-rules.md · judgment pass still belongs to the writing-audit 
       Closing line has the manufactured-aphorism shape.
       fix: End on the last concrete point or the next action.
 
-FAIL · 20 hard-ban hit(s). Do not ship until these are zero.
+FAIL · 21 hard-ban hit(s). Do not ship until these are zero.
