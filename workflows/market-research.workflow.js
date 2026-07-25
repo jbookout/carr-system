@@ -1,0 +1,80 @@
+export const meta = {
+  name: 'market-research',
+  description: 'Cited market-research graph: decompose question, parallel source sweep, adversarial verify, synthesize a DNA/Research-format report',
+  whenToUse: 'Market pulls for the territory (vacancy, rents, construction, healthcare-sector moves) or any research question feeding prospecting/content. Local Claude Code sessions.',
+  phases: [
+    { title: 'Scope', detail: 'decompose the question into distinct search angles' },
+    { title: 'Sweep', detail: 'one researcher per angle, blind to the others (T2 Sonnet)', model: 'sonnet' },
+    { title: 'Verify', detail: 'adversarial fresh-context check on every load-bearing claim (top seat)' },
+    { title: 'Synthesize', detail: 'DNA/Research house format: findings + So-what + re-engagement ammunition' },
+  ],
+}
+
+// Graph-engineering build 2026-07-25. Rules honored:
+//  - verifiers get fresh context and try to REFUTE (fan-out hygiene rule 1)
+//  - scoped: angles capped at 6, claims verified with single skeptics; widen only on Joe's ask
+//  - output follows the house format of DNA/Research/2026-07-06-panhandle-healthcare-cre-snapshot.md:
+//    national context -> per-area cited findings -> "So what" per section -> re-engagement ammunition
+//    -> next-pull candidates. The workflow returns markdown; the INVOKING session (top seat) writes
+//    the dated file into DNA/Research/ (shared tier), cross-refs prospect files, and stamps.
+//  - writing surfaces obey DNA/writing-rules.md; the synthesize prompt says so explicitly.
+// args: { question: string (required), today: 'YYYY-MM-DD', maxAngles?: number }
+
+const TODAY = (args && args.today) || 'UNDATED-pass-args.today'
+const QUESTION = args && args.question
+if (!QUESTION) throw new Error('pass args.question — e.g. {question: "medical office vacancy and rent trend, Pensacola metro", today: "2026-07-25"}')
+const MAX_ANGLES = Math.min((args && args.maxAngles) || 5, 6)
+
+const ANGLES = { type: 'object', required: ['angles'], properties: { angles: { type: 'array', maxItems: 6, items: {
+  type: 'object', required: ['name', 'searchBrief'], properties: {
+    name: { type: 'string' }, searchBrief: { type: 'string', description: 'self-contained research brief for one agent: what to find, where to look, what counts as a source' } } } } } }
+
+const FINDINGS = { type: 'object', required: ['findings'], properties: { findings: { type: 'array', items: {
+  type: 'object', required: ['claim', 'sourceUrl', 'sourceName'], properties: {
+    claim: { type: 'string' }, detail: { type: 'string' },
+    sourceUrl: { type: 'string' }, sourceName: { type: 'string' }, sourceDate: { type: 'string' },
+    loadBearing: { type: 'boolean', description: 'true if the report leans on this claim (numbers, trends, named moves)' } } } } } }
+
+const VERDICT = { type: 'object', required: ['survives', 'reason'], properties: {
+  survives: { type: 'boolean' }, reason: { type: 'string' },
+  correction: { type: 'string', description: 'the accurate version, if the claim is off' } } }
+
+phase('Scope')
+const scoped = await agent(
+  `Decompose this market-research question into at most ${MAX_ANGLES} DISTINCT search angles that together cover it without overlap: "${QUESTION}". Context: healthcare commercial real estate, tenant/buyer side, territory = South Alabama (Mobile, Dothan) through the Florida Panhandle (Pensacola to Tallahassee). Typical angle families: hard market data (vacancy/rents/absorption), construction + permits, healthcare-sector moves (openings, M&A, DSO activity), macro (rates, healthcare economics), local news. Each angle gets a self-contained brief.`,
+  { label: 'scope:angles', schema: ANGLES })
+
+phase('Sweep')
+const swept = await parallel(scoped.angles.slice(0, MAX_ANGLES).map(a => () => agent(
+  `Research ONE angle of: "${QUESTION}". Your angle: ${a.name}. Brief: ${a.searchBrief}. Search the live web; prefer primary/named sources (government data, CoStar-adjacent public reporting, business journals, permit portals) over aggregators. Every finding needs a real URL. Mark loadBearing=true on anything with a number, a trend direction, or a named market move. Report honestly if an angle is thin — an empty angle is a finding.`,
+  { label: `sweep:${a.name.slice(0, 28)}`, phase: 'Sweep', model: 'sonnet', schema: FINDINGS })))
+
+const all = swept.filter(Boolean).flatMap((s, i) => (s.findings || []).map(f => ({ ...f, angle: scoped.angles[i]?.name || `angle ${i + 1}` })))
+const loadBearing = all.filter(f => f.loadBearing)
+log(`sweep: ${all.length} findings, ${loadBearing.length} load-bearing -> adversarial verify`)
+
+phase('Verify')
+const verdicts = await parallel(loadBearing.map(f => () => agent(
+  `Adversarial verification, fresh context — you have not seen the researcher's work and your job is to REFUTE this claim if you can: "${f.claim}" (detail: ${f.detail || 'none'}), cited to ${f.sourceName} at ${f.sourceUrl}. Open the source; cross-check against one independent source if the number matters. Default to survives=false when the source does not clearly support the claim.`,
+  { label: `verify:${f.claim.slice(0, 28)}`, phase: 'Verify', schema: VERDICT }
+).then(v => ({ ...f, verdict: v }))))
+
+const kept = []
+for (const f of all) {
+  const v = verdicts.filter(Boolean).find(x => x.claim === f.claim)
+  if (!f.loadBearing) kept.push({ ...f, verified: 'not-load-bearing' })
+  else if (v && v.verdict.survives) kept.push({ ...f, verified: 'CONFIRMED' })
+  else if (v && v.verdict.correction) kept.push({ ...f, claim: v.verdict.correction, verified: 'CORRECTED', note: v.verdict.reason })
+  // refuted with no correction: dropped, and the drop is logged, not silent
+}
+const dropped = loadBearing.length - kept.filter(k => k.verified !== 'not-load-bearing').length
+if (dropped > 0) log(`verify: ${dropped} claim(s) refuted and dropped`)
+
+phase('Synthesize')
+const report = await agent(
+  `Write the ${TODAY} research pull answering: "${QUESTION}", from ONLY these verified findings (never add facts of your own):\n${JSON.stringify(kept, null, 1)}\nHouse format (mirror DNA/Research/2026-07-06-panhandle-healthcare-cre-snapshot.md): brief national/context frame -> per-area or per-theme findings as cited bullets (inline source name + URL) -> a "So what" takeaway per section tying it to prospecting or content for a healthcare-CRE tenant/buyer advisor -> a "Re-engagement ammunition" section (which KINDS of prospects this data supports approaching; no invented names) -> "Next-pull candidates". Style: DNA/writing-rules.md applies — no em-dashes, no AI-tell vocabulary, no stacked parallel sentence skeletons. Return pure markdown ready to save as a dated file.`,
+  { label: 'synthesize:report' })
+
+return { date: TODAY, question: QUESTION, angles: scoped.angles, findingCount: all.length,
+  confirmed: kept.filter(k => k.verified === 'CONFIRMED').length, dropped, report,
+  writeBackReminder: `Top seat: save as DNA/Research/${TODAY}-<slug>.md, cross-ref any relevant prospect files + clients-active.md, feed content-worthy items to the substance bank, stamp.` }

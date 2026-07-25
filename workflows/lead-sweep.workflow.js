@@ -1,0 +1,96 @@
+export const meta = {
+  name: 'lead-sweep',
+  description: 'Multi-modal lead-sourcing sweep: parallel finders per signal lane, dedupe barrier, fresh-context verify, ALL leads presented',
+  whenToUse: 'On-demand widening of lead sourcing beyond the coded feeds (Sunbiz/NPI/renewal radar stay T0 in the weekly run). Web-research lanes only. Local Claude Code sessions.',
+  phases: [
+    { title: 'Sweep', detail: 'one finder per lane x region, each blind to the others (T2 Sonnet)', model: 'sonnet' },
+    { title: 'Dedupe', detail: 'cross-lane merge in plain code — an edge, not an agent' },
+    { title: 'Verify', detail: 'fresh-context source check on each candidate (top seat)' },
+    { title: 'Present', detail: 'score + tier every lead; nothing withheld' },
+  ],
+}
+
+// Graph-engineering build 2026-07-25. Standing rules honored:
+//  - NEVER pre-qualify (Joe, Jul 16): every candidate that survives dedupe is PRESENTED with a
+//    score/confidence tier. Verification here checks the lead EXISTS at its source, it does not
+//    judge whether the lead is worth Joe's time. Weak-but-plausible => low score, still on the list.
+//  - Fan-out hygiene: verifiers are fresh-context, judging the cited source; run starts SCOPED
+//    (default 6 finder agents), widen only after a clean run.
+//  - A lone surname never merges records: dedupe key = normalized name + one corroborating field.
+//  - The workflow writes nothing. The invoking session (top seat) routes results to the
+//    CARR Leads Inbox / registry intake per DNA/Leads/lead-system.md, stamps, and logs the run.
+// args: { today: 'YYYY-MM-DD', lanes?: string[], regions?: string[], cap?: number }
+
+const TODAY = (args && args.today) || 'UNDATED-pass-args.today'
+const CAP = Math.min((args && args.cap) || 6, 20)
+
+const LANES = (args && args.lanes) || [
+  'local news + business journals: practice openings, expansions, relocations, new physician/dentist/vet arrivals announced in the last 60 days',
+  'building permits + planning-commission agendas: healthcare build-outs, medical office construction filings',
+  'hiring signals: job postings for office managers / associates / front desk at NEW or EXPANDING private practices (Indeed, practice sites, association job boards)',
+  'practice-for-sale and transition listings: brokers, DSO acquisition news, retirement announcements (sellers create buyer-side and lease-event opportunities nearby)',
+  'association + society announcements: new members, board changes, CE event hosts among private-practice owners',
+  'university + residency pipelines: graduating residents/associates announcing moves into private practice in the territory',
+]
+const REGIONS = (args && args.regions) || [
+  'Mobile and Baldwin County AL; Dothan AL',
+  'Pensacola / Escambia + Santa Rosa County FL; Fort Walton / Destin / Okaloosa + Walton County FL',
+  'Panama City / Bay County FL; Tallahassee / Leon County FL',
+]
+
+const FINDINGS = { type: 'object', required: ['leads'], properties: { leads: { type: 'array', items: {
+  type: 'object', required: ['name', 'signal', 'sourceUrl', 'vertical', 'confidence'], properties: {
+    name: { type: 'string', description: 'person or practice name, exactly as the source states it' },
+    practice: { type: 'string' }, location: { type: 'string' },
+    vertical: { type: 'string', description: 'dental/medical/vet/chiro/vision/therapy/fitness-wellness/other' },
+    signal: { type: 'string', description: 'what was observed and why it implies a coming real-estate decision' },
+    sourceUrl: { type: 'string' }, sourceDate: { type: 'string' },
+    confidence: { type: 'string', enum: ['HIGH', 'MEDIUM', 'LOW'] } } } } } }
+
+const CHECK = { type: 'object', required: ['exists', 'note'], properties: {
+  exists: { type: 'boolean', description: 'the cited source really says what the finder claims' },
+  note: { type: 'string' }, corroboration: { type: 'string', description: 'any second independent field found (address, license, entity filing)' } } }
+
+// scoped: pair lanes with regions round-robin up to CAP finder agents this run
+const jobs = []
+for (let i = 0; i < LANES.length && jobs.length < CAP; i++)
+  for (let r = 0; r < REGIONS.length && jobs.length < CAP; r++)
+    if ((i + r) % Math.max(1, Math.ceil((LANES.length * REGIONS.length) / CAP)) === 0 || LANES.length * REGIONS.length <= CAP)
+      jobs.push({ lane: LANES[i], region: REGIONS[r] })
+
+phase('Sweep')
+log(`lead-sweep ${TODAY}: ${jobs.length} finder agents (scoped cap ${CAP}) — widen only after a clean run`)
+const swept = await parallel(jobs.map((j, idx) => () => agent(
+  `You are ONE lane of a healthcare-practice lead sweep for a commercial real estate advisor (tenant/buyer representation only) covering: ${j.region}. Your lane, and ONLY your lane: ${j.lane}. Search the live web. Target PRIVATE practices (dental, medical, vet, chiro, vision, therapy, fitness/wellness) — never hospitals or corporate/institutional systems. Return every candidate you find with a real source URL; do NOT filter for quality — grade confidence instead (HIGH/MEDIUM/LOW) and include weak-but-plausible finds at LOW. Empty lanes return an empty list honestly.`,
+  { label: `sweep:${idx + 1}`, phase: 'Sweep', model: 'sonnet', schema: FINDINGS })))
+
+// Dedupe is an edge, not an agent: normalized name + one corroborating field.
+const seen = new Map()
+for (const batch of swept.filter(Boolean))
+  for (const l of (batch.leads || [])) {
+    const key = `${(l.name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()}|${(l.location || l.practice || '').toLowerCase().slice(0, 24)}`
+    if (!seen.has(key)) seen.set(key, l)
+    else {
+      const cur = seen.get(key)
+      cur.signal += ` | ALSO: ${l.signal} (${l.sourceUrl})`
+      if (l.confidence === 'HIGH') cur.confidence = 'HIGH'
+    }
+  }
+const candidates = [...seen.values()]
+log(`dedupe: ${candidates.length} unique candidates from ${swept.filter(Boolean).length} lanes`)
+
+phase('Verify')
+const verified = await parallel(candidates.map(l => () => agent(
+  `Fresh-context source check — you have not seen the finder's reasoning. Claim: "${l.name}"${l.practice ? ` (${l.practice})` : ''} — ${l.signal}. Cited source: ${l.sourceUrl}. Open the source (and one corroborating search if cheap). Does it actually support the claim? You are checking EXISTENCE and accuracy only — never whether the lead is "good enough"; qualification belongs to Joe on the board.`,
+  { label: `verify:${(l.name || 'lead').slice(0, 24)}`, phase: 'Verify', schema: CHECK }
+).then(v => ({ ...l, check: v }))))
+
+phase('Present')
+const out = verified.filter(Boolean).map(l => ({
+  ...l,
+  tier: !l.check?.exists ? 'UNVERIFIED (present anyway, flag)' :
+    l.check.corroboration ? 'CORROBORATED' : 'SINGLE-SOURCE',
+}))
+log(`lead-sweep ${TODAY}: presenting ALL ${out.length} leads (never pre-qualify)`)
+return { date: TODAY, lanesRun: jobs, leads: out,
+  writeBackReminder: 'Top seat: route rows to the registry intake per DNA/Leads/lead-system.md (Intake Log entry, stamps), then rebuild the board (run.sh lead-board). No lead dropped.' }

@@ -24,3 +24,6 @@ shared/fill-engine/extract_pvl_onepager.py	DNA/Deal Management/fill-engine/extra
 shared/fill-engine/fill_deal_template.py	DNA/Deal Management/fill-engine/fill_deal_template.py
 bin/launch-automation-chrome.sh	Automation/launch-automation-chrome.sh
 bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
+# build-section-index.py is repo-only (no vault copy; the vault holds its OUTPUT in Automation/section-index.tsv)
+# tools/retrieve.py is repo-only (reads the derived index; sessions call it via run.sh retrieve)
+# workflows/*.workflow.js are repo-only (agent-graph orchestration, invoked by local Claude Code sessions via the Workflow tool; SOP pointers live in the vault files that own each job)
