@@ -19,7 +19,7 @@ renewal_feed() { python3 "$REPO/generators/build-renewal-feed.py" "$VAULT"; }
 corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
 space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
 graph()        { python3 "$REPO/pipelines/build-graph-notes.py" "$VAULT" \
-                 && python3 "$REPO/pipelines/build-graph-hubs.py" "$VAULT"; }
+                 && python3 "$REPO/pipelines/build-graph-structure.py" "$VAULT"; }
 # NOTE: build-graph-notes.py wipes and rebuilds Graph/, which deletes Graph/hubs.
 # The hub pass MUST run after it, so `graph` always runs both.
 graph_system() { python3 "$REPO/pipelines/build-system-graph.py" "$VAULT"; }

@@ -29,16 +29,32 @@ OWNER_FIRST = [
     ("tag:#owner-shared", "ffffff"),   # white — jointly owned
 ]
 GROUPS = [
-    ("tag:#sys-area",       "ffffff"), ("tag:#sys-context",    "e8542f"),
-    ("tag:#sys-doctrine",   "d4a017"), ("tag:#sys-leads",      "2ecc71"),
-    ("tag:#sys-network",    "3b82f6"), ("tag:#sys-deals",      "8b5cf6"),
-    ("tag:#sys-clients",    "ec4899"), ("tag:#sys-marketing",  "f59e0b"),
-    ("tag:#sys-team",       "14b8a6"), ("tag:#sys-automation", "94a3b8"),
-    ("tag:#sys-research",   "a3e635"), ("tag:#sys-reference",  "64748b"),
-    ("tag:#sys-root",       "f43f5e"),
+    # --- people graph skeleton (path:Graph/) ---
+    ("tag:#struct-stage",   "ffffff"),   # ① LEADS → ② CLIENTS → ③ DEALS, the backbone
+    ("tag:#struct-source",  "22c55e"),   # ⚑ Lead Board, CARR Website, SBDC, referrers
+    ("tag:#struct-firm",    "64748b"),   # 🏢 colleagues at the same company
+    # --- system graph (path:Graph-System) ---
+    ("tag:#sys-router",     "fbbf24"),   # 📇 INDEX
+    ("tag:#sys-tier-dna",   "3b82f6"),   # shared tier — the single share to Dell
+    ("tag:#sys-tier-dell",  "ff9100"),   # Dell's twin
+    ("tag:#sys-tier-joe",   "00e5ff"),   # Joe-personal tier
+    ("tag:#sys-pole",       "ffffff"),
 ]
+# Tags retired when the graph model changed from flat areas/hubs to a structural
+# skeleton. Their colour groups match nothing now and just clutter the panel.
+STALE = {"tag:#sys-area", "tag:#sys-context", "tag:#sys-doctrine", "tag:#sys-leads",
+         "tag:#sys-network", "tag:#sys-deals", "tag:#sys-clients", "tag:#sys-marketing",
+         "tag:#sys-team", "tag:#sys-automation", "tag:#sys-research", "tag:#sys-reference",
+         "tag:#sys-root", "tag:#hub-firm", "tag:#hub-market", "tag:#hub-owner",
+         "tag:#hub-category", "tag:#hub-specialty", "tag:#hub-channel",
+         "tag:#hub-referrer", "tag:#hub-lane"}
+
 d = json.load(open(p))
-groups = d.setdefault("colorGroups", [])
+before = len(d.get("colorGroups", []))
+d["colorGroups"] = [g for g in d.get("colorGroups", []) if g["query"] not in STALE]
+pruned = before - len(d["colorGroups"])
+if pruned: print(f"pruned {pruned} stale colour groups from the old graph model")
+groups = d["colorGroups"]
 have = {g["query"] for g in groups}
 added = 0
 for q, h in reversed(OWNER_FIRST):          # reversed so the listed order survives insert(0)

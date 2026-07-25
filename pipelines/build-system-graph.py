@@ -1,271 +1,188 @@
 #!/usr/bin/env python3
 """
-build-system-graph.py — the SYSTEM-FLOW graph (companion to build-graph-notes.py).
+build-system-graph.py — the CARR AI system as its own shape.
 
-WHY THIS EXISTS
-  build-graph-notes.py renders PEOPLE (vendors, leads, clients, deals) from four
-  spreadsheets. It answers "who referred whom". It cannot answer "how does my
-  system flow through different areas", because the vault's own documents —
-  playbooks, SOPs, doctrine, workflows — are not in it at all.
+THE MODEL (Joe, 2026-07-25 — this is the spec, quoted):
+  "You'd have DNA and all its internal folders and files, then JOE's Brain
+   connected on one side and DELL's Brain connected on the other side. Then
+   you'd have CONTEXT with all its files orbiting, then INDEX would connect out
+   of that folder to all the other folders like it does in the actual system.
+   Then each folder would have its own orbit of files. And they would all
+   connect to other areas where they do in real life."
 
-  This generator renders the DOCUMENTS and the AREAS they belong to, and draws an
-  edge wherever one document references another. Those references already exist:
-  the vault convention is to cite files by path ("DNA/writing-rules.md") or by
-  bare filename ("templates.md"). That is real, human-authored structure, so the
-  edges are real rather than inferred.
+        ★ JOE'S BRAIN ──▶ ★ DNA (shared tier) ◀── ★ DELL'S BRAIN
+         (everything            the single             (reads DNA,
+          outside DNA/)         share to Dell)          writes back)
 
-PLACEMENT (per the standing repo-vs-vault rule)
-  Code lives in the repo (~/carr-system/pipelines) because it is durable and
-  version-controlled. Output lives in the vault (CARR AI/Graph-System) because
-  that is where Obsidian reads it. Output is DERIVED — never hand-edit it.
+        📇 INDEX ──▶ every top-level folder      (the router, as in real life)
+        📁 folder ──▶ its own files              (each folder's orbit)
+        📁 folder ──▶ 📁 folder                   where their files cite each other
 
-SEPARATION
-  Writes to Graph-System/, NOT Graph/. Keeping people and system structure in
-  separate folders is deliberate: merging them is how you get a hairball. In
-  Obsidian, filter the graph with  path:Graph-System  to see this one alone.
+WHY THERE ARE NO PROXY NODES (v1 had them; they were duplication)
+  v1 emitted one proxy node per document to carry file-to-file edges without
+  editing real files. Obsidian graphs every .md in the vault, so each document
+  then existed TWICE — once connected, once orphaned — and Joe called it, fairly,
+  duplication. This version links FOLDERS directly to the REAL files and rolls
+  file-to-file references up into FOLDER-to-FOLDER edges. Nothing is duplicated,
+  every real document is connected to its folder, and cross-area flow is still
+  visible — at the altitude you can actually read it.
 
-IDENTITY RULE
-  A reference resolves to a node by (1) exact relative path, else (2) unique
-  basename. Ambiguous basenames (INDEX.md, README.md, SKILL.md, ...) resolve ONLY
-  by full path — never guessed. Unresolved references are listed in the note as
-  plain text so the gap stays visible instead of silently vanishing.
+  Path-form wikilinks ([[DNA/templates]]) because four basenames collide
+  (INDEX, README, SKILL, session-operating-style).
+
+PLACEMENT: code in the repo (durable, versioned); output in the vault (where
+Obsidian reads it). Output is DERIVED — never hand-edit Graph-System/.
 """
-import sys, os, re, json, shutil, unicodedata
+import sys, os, re, shutil, unicodedata
 from collections import defaultdict
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, "Graph-System")
 
-SKIP_DIRS = {"Graph", "Graph-System", ".obsidian", "_to_delete", "_asset_staging",
-             ".git", "node_modules", ".trash"}
+SKIP = {"Graph", "Graph-System", ".obsidian", "_to_delete", "_asset_staging",
+        ".git", "node_modules", ".trash", "Output"}
 DOC_EXT = (".md", ".xlsx", ".json", ".html")
 
-# ---------- areas: directory prefix -> (area name, tag slug) ----------
-AREA_RULES = [
-    ("DNA/Leads",            "Pipeline & Leads",     "leads"),
-    ("DNA/Network",          "Vendor Network",       "network"),
-    ("DNA/Deal Management",  "Deal Management",      "deals"),
-    ("DNA/Clients",          "Clients & Prospects",  "clients"),
-    ("DNA/Marketing",        "Marketing & Content",  "marketing"),
-    ("DNA/Team",             "Team & Protocol",      "team"),
-    ("DNA/Research",         "Research",             "research"),
-    ("DNA/Reference",        "Reference",            "reference"),
-    ("DNA",                  "DNA Doctrine",         "doctrine"),
-    ("00_Context",           "Context & Governance", "context"),
-    ("Automation",           "Automation",           "automation"),
-    ("Marketing",            "Marketing & Content",  "marketing"),
-    ("Prospects",            "Clients & Prospects",  "clients"),
-    ("Outreach",             "Pipeline & Leads",     "leads"),
-    ("Output",               "Marketing & Content",  "marketing"),
-]
-
-def area_of(relpath):
-    for prefix, name, tag in AREA_RULES:
-        if relpath == prefix or relpath.startswith(prefix + "/"):
-            return name, tag
-    return "Root & Entry Points", "root"
-
-def slug(name, taken):
-    s = unicodedata.normalize("NFKD", str(name or "unnamed"))
-    s = re.sub(r'[\\/:*?"<>|#^\[\]{}]', "", s).strip()
-    s = re.sub(r"\s+", " ", s) or "unnamed"
-    base, n = s, 2
-    while s.lower() in taken:
-        s = f"{base} ({n})"; n += 1
-    taken.add(s.lower())
-    return s
-
-# ---------- collect documents ----------
-docs = {}   # relpath -> meta
-for dirpath, dirnames, filenames in os.walk(ROOT):
-    dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
-    for fn in filenames:
-        if not fn.endswith(DOC_EXT) or fn.startswith("."):
+# ---------- collect real documents ----------
+docs = {}
+for dp, dn, fn in os.walk(ROOT):
+    dn[:] = [d for d in dn if d not in SKIP and not d.startswith(".")]
+    for f in fn:
+        if not f.endswith(DOC_EXT) or f.startswith("."):
             continue
-        full = os.path.join(dirpath, fn)
-        rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
-        if rel.split("/")[0] in SKIP_DIRS:
+        rel = os.path.relpath(os.path.join(dp, f), ROOT).replace(os.sep, "/")
+        if rel.split("/")[0] in SKIP:
             continue
-        area, tag = area_of(rel)
-        docs[rel] = {"rel": rel, "base": fn, "area": area, "tag": tag,
-                     "size": os.path.getsize(full), "refs": set(), "unresolved": set()}
+        docs[rel] = os.path.dirname(rel) or "."
 
-# ---------- resolution index ----------
-by_path = {r: r for r in docs}
+folders = sorted({d for d in docs.values()})
+
+# ---------- resolve file-to-file references ----------
+by_path = set(docs)
 base_map = defaultdict(list)
 for r in docs:
-    base_map[docs[r]["base"].lower()].append(r)
-# a basename resolves only when unambiguous
+    base_map[os.path.basename(r).lower()].append(r)
 by_base = {b: v[0] for b, v in base_map.items() if len(v) == 1}
-
-REF_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_/&. -]*\.(?:md|xlsx|json|html)", re.I)
+REF = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_/&. -]*\.(?:md|xlsx|json|html)", re.I)
 
 def resolve(ref):
     ref = ref.strip().lstrip("./")
     if ref in by_path:
-        return by_path[ref]
-    # try trailing-path match (e.g. "Social Media/x.md" for a deeper real path)
-    for r in docs:
+        return ref
+    for r in by_path:
         if r.lower().endswith("/" + ref.lower()):
             return r
     return by_base.get(os.path.basename(ref).lower())
 
-# ---------- scan markdown bodies for references ----------
-for rel, meta in docs.items():
+folder_edges = defaultdict(int)      # (folder A, folder B) -> reference count
+for rel, fold in docs.items():
     if not rel.endswith(".md"):
         continue
     try:
         text = open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore").read()
     except OSError:
         continue
-    for m in REF_RE.findall(text):
+    for m in REF.findall(text):
         tgt = resolve(m)
-        if tgt and tgt != rel:
-            meta["refs"].add(tgt)
-        elif not tgt:
-            meta["unresolved"].add(m.strip())
+        if tgt and docs[tgt] != fold:
+            folder_edges[(fold, docs[tgt])] += 1
 
-# ---------- build node titles ----------
-taken = set()
-title = {}
-for rel in sorted(docs):
-    stem = os.path.splitext(docs[rel]["base"])[0]
-    # disambiguate the known colliding basenames with their parent folder
-    if len(base_map[docs[rel]["base"].lower()]) > 1:
-        parent = os.path.dirname(rel).split("/")[-1] or "root"
-        stem = f"{stem} ({parent})"
-    title[rel] = slug(stem, taken)
+# ---------- tiers ----------
+def tier_of(folder):
+    """CLAUDE.md: the entire SHARED tier lives under DNA/ — the single share to
+    Dell. Everything outside DNA/ is Joe-personal and never shared."""
+    return "DNA" if folder == "DNA" or folder.startswith("DNA/") else "JOE"
 
-areas = sorted({d["area"] for d in docs.values()})
-area_title = {a: slug(a, taken) for a in areas}
-area_tag = {}
-for d in docs.values():
-    area_tag[d["area"]] = d["tag"]
+def title_for(folder):
+    return "📁 " + (folder if folder != "." else "root")
 
-# ---------- write ----------
+def safe(n):
+    x = unicodedata.normalize("NFKD", n)
+    return re.sub(r"\s+", " ", re.sub(r'[\\/:*?"<>|#^\[\]{}]', "", x)).strip() or "unnamed"
+
+POLE_JOE  = "★ JOE'S BRAIN (personal tier)"
+POLE_DNA  = "★ DNA (shared tier)"
+POLE_DELL = "★ DELL'S BRAIN (his twin)"
+INDEX     = "📇 INDEX — the router"
+
 if os.path.isdir(OUT):
     shutil.rmtree(OUT)
-os.makedirs(os.path.join(OUT, "areas"), exist_ok=True)
-os.makedirs(os.path.join(OUT, "docs"), exist_ok=True)
+os.makedirs(OUT)
 
-def first_line(rel):
-    """A one-line human descriptor: first heading, else first italic note line."""
-    if not rel.endswith(".md"):
-        return ""
-    try:
-        for ln in open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore"):
-            ln = ln.strip()
-            if ln.startswith("#"):
-                return ln.lstrip("# ").strip()[:160]
-    except OSError:
-        pass
-    return ""
+def w(title, lines):
+    open(os.path.join(OUT, f"{safe(title)}.md"), "w", encoding="utf-8").write("\n".join(lines))
 
-# area hubs
-area_members = defaultdict(list)
-for rel, d in docs.items():
-    area_members[d["area"]].append(rel)
-
-# cross-area traffic, for the hub notes
-area_edges = defaultdict(int)
-for rel, d in docs.items():
-    for t in d["refs"]:
-        a, b = d["area"], docs[t]["area"]
-        if a != b:
-            area_edges[(a, b)] += 1
-
-for a in areas:
-    tag = area_tag[a]
-    members = sorted(area_members[a], key=lambda r: -docs[r]["size"])
-    out_links = sorted({b for (x, b), n in area_edges.items() if x == a})
-    in_links = sorted({x for (x, b), n in area_edges.items() if b == a})
-    body = [
-        "---",
-        "type: area",
-        f'area: "{a}"',
-        f"tags: [sys-area, sys-{tag}]",
-        "---",
-        "",
-        f"# {a}",
-        "",
-        f"**{len(members)} documents.** Area hub — every document below belongs to this area.",
-        "",
-    ]
-    if out_links:
-        body += ["## Feeds into", ""] + [f"- [[{area_title[b]}]] ({area_edges[(a,b)]} references)"
-                                          for b in out_links] + [""]
-    if in_links:
-        body += ["## Fed by", ""] + [f"- [[{area_title[x]}]] ({area_edges[(x,a)]} references)"
-                                      for x in in_links] + [""]
-    body += ["## Documents", ""] + [f"- [[{title[r]}]]" for r in members] + [""]
-    open(os.path.join(OUT, "areas", f"{area_title[a]}.md"), "w", encoding="utf-8").write("\n".join(body))
-
-# doc notes
-for rel, d in sorted(docs.items()):
-    desc = first_line(rel)
-    body = [
-        "---",
-        "type: doc",
-        f'area: "{d["area"]}"',
-        f'path: "{rel}"',
-        f"size_kb: {round(d['size']/1024, 1)}",
-        f"tags: [sys-doc, sys-{d['tag']}]",
-        "---",
-        "",
-        f"# {title[rel]}",
-        "",
-        f"`{rel}`" + (f" — {desc}" if desc else ""),
-        "",
-        f"Area: [[{area_title[d['area']]}]]",
-        "",
-    ]
-    # Link to the REAL file so the actual vault note joins the graph instead of
-    # floating as an orphan. The vault cites files by path ("DNA/templates.md"),
-    # which Obsidian does not resolve as a link, so 297 real documents rendered
-    # as disconnected dots while their proxy node sat in the cluster. A path-form
-    # wikilink resolves in Obsidian and is unambiguous across the 4 colliding
-    # basenames (INDEX/README/SKILL/session-operating-style). Markdown only —
-    # Obsidian does not graph .xlsx/.json/.html.
-    if rel.endswith(".md"):
-        body += [f"Source file: [[{rel[:-3]}]]", ""]
-    if d["refs"]:
-        body += ["## References", ""]
-        for t in sorted(d["refs"], key=lambda r: title[r]):
-            cross = " ⟶ *" + docs[t]["area"] + "*" if docs[t]["area"] != d["area"] else ""
-            body.append(f"- [[{title[t]}]]{cross}")
+# ---------- folder nodes: each with its own orbit of real files ----------
+edges = 0
+for fold in folders:
+    files = sorted(r for r, f in docs.items() if f == fold)
+    tier = tier_of(fold)
+    parent = os.path.dirname(fold)
+    out_f = sorted({b for (a, b), n in folder_edges.items() if a == fold})
+    body = ["---", "type: folder", f'folder: "{fold}"', f"tier: {tier}",
+            f"files: {len(files)}", f"tags: [sys-folder, sys-tier-{tier.lower()}]",
+            "---", "", f"# {fold if fold != '.' else 'root'}", "",
+            f"Tier: [[{safe(POLE_DNA if tier == 'DNA' else POLE_JOE)}]]", ""]
+    edges += 1
+    if parent and parent in folders:
+        body += [f"Parent: [[{safe(title_for(parent))}]]", ""]; edges += 1
+    if out_f:
+        body += ["## Feeds into", ""]
+        for b in out_f:
+            body.append(f"- [[{safe(title_for(b))}]] — {folder_edges[(fold, b)]} references")
+            edges += 1
         body.append("")
-    if d["unresolved"]:
-        body += ["## Referenced but not found in the vault", ""]
-        body += [f"- `{u}`" for u in sorted(d["unresolved"])[:25]]
-        body.append("")
-    open(os.path.join(OUT, "docs", f"{title[rel]}.md"), "w", encoding="utf-8").write("\n".join(body))
+    body += ["## Files", ""]
+    for r in files:
+        body.append(f"- [[{r[:-3]}]]" if r.endswith(".md") else f"- `{r}`")
+        if r.endswith(".md"):
+            edges += 1
+    w(title_for(fold), body + [""])
 
-# ---------- README + stats ----------
-edge_count = sum(len(d["refs"]) for d in docs.values()) + sum(len(v) for v in area_members.values())
-orphans = [r for r, d in docs.items() if not d["refs"]]
-lines = [
-    "# Graph-System — how the CARR AI system flows",
-    "",
-    "**DERIVED. Never hand-edit.** Regenerate with `run.sh graph-system`.",
-    "",
-    f"- **{len(docs)} document nodes** across **{len(areas)} areas**",
-    f"- **{edge_count} edges** ({sum(len(d['refs']) for d in docs.values())} document-to-document "
-    f"references + {sum(len(v) for v in area_members.values())} document-to-area)",
-    f"- documents that reference nothing: **{len(orphans)}** "
-    f"({round(100*len(orphans)/max(len(docs),1))}%) — still connected via their area hub",
-    "",
-    "In Obsidian, filter the graph with `path:Graph-System` to view this alone,",
-    "or `path:Graph` for the people graph. They are deliberately separate.",
-    "",
-    "## Cross-area traffic",
-    "",
-    "| From | To | References |",
-    "|---|---|---|",
-]
-for (a, b), n in sorted(area_edges.items(), key=lambda kv: -kv[1]):
-    lines.append(f"| {a} | {b} | {n} |")
-open(os.path.join(OUT, "README.md"), "w", encoding="utf-8").write("\n".join(lines) + "\n")
+# ---------- the router ----------
+tops = sorted({f.split("/")[0] for f in folders if f != "."})
+w(INDEX, ["---", "type: router", "tags: [sys-router]", "---", "",
+          "# INDEX — the router", "",
+          "*`INDEX.md` is read first every session and routes to every area, "
+          "so it links out to all of them here exactly as it does in the system.*", ""]
+         + [f"- [[{safe(title_for(t))}]]" for t in tops] + [""])
+edges += len(tops)
 
-print(f"Graph-System: {len(docs)} docs, {len(areas)} areas, {edge_count} edges, "
-      f"{len(orphans)} docs with no outbound reference")
+# ---------- tier poles ----------
+for pole, tier, blurb in (
+    (POLE_JOE, "JOE", "Everything outside `DNA/`. Joe-personal, never shared."),
+    (POLE_DNA, "DNA", "The single share to Dell. Both brains read and write this tier, "
+                      "so the two-writer protocol applies to every file below."),
+):
+    mine = sorted(f for f in folders if tier_of(f) == tier)
+    w(pole, ["---", "type: pole", f"tier: {tier}", f"tags: [sys-pole, sys-tier-{tier.lower()}]",
+             "---", "", f"# {pole}", "", f"*{blurb}*", "",
+             f"**{len(mine)} folders.**", ""]
+            + [f"- [[{safe(title_for(f))}]]" for f in mine] + [""])
+    edges += len(mine)
+
+w(POLE_DELL, ["---", "type: pole", "tier: DELL", "tags: [sys-pole, sys-tier-dell]", "---", "",
+              f"# {POLE_DELL}", "",
+              "*Dell's twin runs on the shared tier. He has no files in this vault — "
+              "he reads and writes `DNA/`, which is exactly why the two-writer "
+              "protocol exists. This node marks the share boundary.*", "",
+              f"- [[{safe(POLE_DNA)}]]", ""])
+edges += 1
+
+w("README", [f"# Graph-System — how the CARR AI system connects (DERIVED, DO NOT HAND-EDIT)", "",
+             f"- **{len(folders)} folder nodes**, each linking its own files",
+             f"- **{len(docs)} real documents** — linked directly, no proxy duplicates",
+             f"- **{len(folder_edges)} folder-to-folder flows** rolled up from file references",
+             f"- **~{edges} edges**", "",
+             "    ★ JOE'S BRAIN ──▶ ★ DNA (shared) ◀── ★ DELL'S BRAIN",
+             "    📇 INDEX ──▶ every top-level folder",
+             "    📁 folder ──▶ its files, its parent, and the folders it cites", "",
+             "Filter the Obsidian graph with `path:Graph-System` to view this alone.",
+             "Regenerate with `~/carr-system/run.sh graph-system`.", "",
+             "## Busiest flows", "", "| From | To | Refs |", "|---|---|---|"]
+            + [f"| {a} | {b} | {n} |" for (a, b), n in
+               sorted(folder_edges.items(), key=lambda kv: -kv[1])[:20]])
+
+print(f"Graph-System: {len(folders)} folders, {len(docs)} real docs linked directly "
+      f"(no proxies), {len(folder_edges)} folder flows, ~{edges} edges")
