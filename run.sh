@@ -15,6 +15,7 @@ deal_room()    { python3 "$REPO/generators/build-deal-room.py" \
                    "$VAULT/DNA/Deal Management/panhandle-team-deals.json" \
                    "$VAULT/DNA/Team/live-boards/deal-room-panhandle.html"; }
 lead_board()   { python3 "$REPO/generators/build-lead-board.py" "$VAULT"; }
+lead_promote() { shift; python3 "$REPO/pipelines/lead-promote.py" "$VAULT" "$@"; }
 renewal_feed() { python3 "$REPO/generators/build-renewal-feed.py" "$VAULT"; }
 corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
 space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
@@ -30,6 +31,7 @@ section_index(){ python3 "$REPO/pipelines/build-section-index.py" "$VAULT"; }
 case "${1:-}" in
   deal-room)    deal_room ;;
   lead-board)   lead_board ;;
+  lead-promote) lead_promote "$@" ;;
   renewal-feed) renewal_feed ;;
   all)          renewal_feed; lead_board; deal_room ;;
   corroborate)  corroborate ;;
@@ -43,5 +45,5 @@ case "${1:-}" in
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|check"; exit 2 ;;
 esac
