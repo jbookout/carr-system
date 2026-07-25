@@ -76,18 +76,27 @@ def distinct(s):
 
 def load_registry():
     """Return list of {id, owner, stage, last, first, ptoks, dnc}."""
+    # Schema-validated (orchestrator-lane corrective #1, 2026-07-25): headers by name,
+    # loud halt on a moved column. Bootstrap finds lib/sheets.py (repo) or a flat copy.
+    _d = os.path.dirname(os.path.abspath(__file__))
+    for _c in (os.path.join(_d, "..", "lib"), _d):
+        if os.path.isfile(os.path.join(_c, "sheets.py")):
+            sys.path.insert(0, _c); break
+    from sheets import header_map, data_rows
     reg = os.path.join(LEADS_DIR, "lead-registry.xlsx")
     wb = openpyxl.load_workbook(reg, read_only=True, data_only=True)
     ws = wb["Registry"]; out=[]
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if not r or not r[0]: continue
-        contact = val(r[5]); practice = val(r[6]); stage = val(r[3])
-        nexta = val(r[17]) if len(r)>17 else ""; notes = val(r[22]) if len(r)>22 else ""
+    c = header_map(ws, ["Lead ID", "Owner", "Stage", "Contact Name", "Practice",
+                        "Next Action", "Notes"], "lead-registry.xlsx[Registry]")
+    for r in data_rows(ws):
+        if not r or not r[c["Lead ID"]]: continue
+        contact = val(r[c["Contact Name"]]); practice = val(r[c["Practice"]]); stage = val(r[c["Stage"]])
+        nexta = val(r[c["Next Action"]]) if len(r)>c["Next Action"] else ""; notes = val(r[c["Notes"]]) if len(r)>c["Notes"] else ""
         cn = [t for t in re.sub(r'[^a-z ]',' ',contact.lower()).split() if t not in ("dr","mr","mrs","ms")]
         first = cn[0] if cn else ""; last = cn[-1] if len(cn)>1 else ""
         blob = (nexta+" "+notes).lower()
         dnc = bool(re.search(r"do not contact|do not nudge|no further outreach|inbound only|no nudges|sequence closed|no follow", blob)) or stage.strip().lower() in ("paused","closed","lost","dead","do not contact")
-        out.append({"id":r[0],"owner":val(r[2]),"stage":stage,"last":last,"first":first,
+        out.append({"id":r[c["Lead ID"]],"owner":val(r[c["Owner"]]),"stage":stage,"last":last,"first":first,
                     "ptoks":distinct(practice),"dnc":dnc})
     wb.close(); return out
 
@@ -158,7 +167,9 @@ def main():
             for e in extra: dist[e.get("s","?")] = dist.get(e.get("s","?"),0)+1
             print(f"GCCMLS feed: +{len(extra)} lease-event rows appended")
         except Exception as ex:
-            print("GCCMLS feed skipped:", ex)
+            # Corrective #2 (2026-07-25): the file EXISTS but is unreadable — that is
+            # corruption, not absence; absence is the guarded no-op above. Fail loudly.
+            raise SystemExit(f"GCCMLS feed exists but is unreadable ({ex}) — fix or remove {gc}")
     json.dump(out, open(os.path.join(AUTO,"renewal-radar.json"),"w"), indent=1)
     print(f"source: {os.path.basename(path)} -> {len(out)} rows on the board")
     for s,n in dist.items(): print(f"   {n:>4}  {s}")

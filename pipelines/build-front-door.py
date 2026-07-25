@@ -2,9 +2,12 @@
 # Regenerate: python3 build-front-door.py  (writes front-door.html beside it). Edit the GROUPS list to change tiles.
 # Mirrors the lead board's build-lead-board.py pattern so the Front Door is regenerable, not hand-edited.
 
-import urllib.parse, html, json, re
+import urllib.parse, html, json, re, os, sys
 
-FOLDER = "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+# CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant,
+# which structurally blocked any non-Joe machine (Dell's clone) from running this.
+FOLDER = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CARR_VAULT",
+    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 REMINDER = "Reminder before we start: this session needs the CARR AI folder connected to read and write (this launcher link should connect it automatically; if it is not connected, connect it before sending)."
 DOCTRINE = "Run this as a guided flow per DNA/Team/guided-entry-doctrine.md: tell me up front how many questions it will be, ask one at a time with multiple choice wherever possible and fill-in-the-blank otherwise, and if this creates a record, capture the core first, save it, then offer to fill in the rest later so a couple of minutes is enough (the daily heartbeat or Monday brief will chase the missing pieces)."
 

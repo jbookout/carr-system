@@ -111,14 +111,22 @@ def _merger_date(line):
 # ---------- Stage 0: the founders + the visible gap ----------
 def load_founders():
     import openpyxl
+    # Schema-validated (orchestrator-lane corrective #1, 2026-07-25): headers by name.
+    _d = os.path.dirname(os.path.abspath(__file__))
+    for _c in (os.path.join(_d, "..", "..", "lib"), _d):
+        if os.path.isfile(os.path.join(_c, "sheets.py")):
+            sys.path.insert(0, _c); break
+    from sheets import header_map, data_rows
     path = latest(os.path.join(LEADS_DIR, "lead-router-*.xlsx"))
     if not path: raise SystemExit("No lead-router-*.xlsx found.")
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb["Lead Router"]
+    c = header_map(ws, ["SEGMENT", "Name", "Profession", "City", "County"],
+                   f"{os.path.basename(path)}[Lead Router]")
     f = []
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if r[0] and "POST-SALE FOUNDER" in str(r[0]):
-            f.append({"name": r[4], "prof": r[5], "city": r[11], "county": r[12]})
+    for r in data_rows(ws):
+        if r[c["SEGMENT"]] and "POST-SALE FOUNDER" in str(r[c["SEGMENT"]]):
+            f.append({"name": r[c["Name"]], "prof": r[c["Profession"]], "city": r[c["City"]], "county": r[c["County"]]})
     wb.close()
     return f
 

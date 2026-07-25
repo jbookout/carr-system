@@ -120,6 +120,11 @@ def find_client(text):
     return cli_by_name.get(t.lower()), t
 
 # ---------- write ----------
+# Temp-and-swap (orchestrator-lane corrective, 2026-07-25): build the whole tree in
+# Graph.tmp first, swap in only on success — a mid-run crash (malformed source xlsx)
+# used to leave Graph/ empty or half-built with no rollback.
+FINAL_OUT = OUT
+OUT = FINAL_OUT.rstrip("/\\") + ".tmp"
 if os.path.isdir(OUT): shutil.rmtree(OUT)
 for sub in ("vendors", "leads", "clients", "deals"): os.makedirs(os.path.join(OUT, sub))
 
@@ -253,4 +258,7 @@ for d in deals:
     open(os.path.join(OUT, "deals", node + ".md"), "w").write("\n".join(body))
     counts["deals"] += 1
 
-print("Graph notes written:", counts, "→", OUT)
+# success — swap the finished tree into place
+if os.path.isdir(FINAL_OUT): shutil.rmtree(FINAL_OUT)
+os.rename(OUT, FINAL_OUT)
+print("Graph notes written:", counts, "→", FINAL_OUT)

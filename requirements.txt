@@ -1,0 +1,11 @@
+# carr-system Python dependencies (orchestrator-lane corrective, 2026-07-25).
+# Install: python3 -m pip install -r requirements.txt
+# Everything else in the repo is stdlib by design (repo convention).
+openpyxl>=3.1
+Pillow>=10.0   # used by the write-content card crop step + image handling in space-search
+
+# SYSTEM (non-pip) dependencies, documented here because nowhere else was:
+#   libreoffice  — shared/fill-engine/fill_deal_template.py renders via `libreoffice --headless`
+#   node         — workflows/*.workflow.js syntax checks (tools/smoke.sh); the Workflow
+#                  runtime itself is provided by Claude Code, not this repo
+#   git          — manifest/baseline discipline assumes a git checkout

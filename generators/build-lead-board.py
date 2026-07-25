@@ -29,6 +29,15 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.pat
 LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
 AUTO = os.path.join(ROOT, "Automation")
 
+# Schema-validated reads (orchestrator-lane corrective #1, 2026-07-25): columns are
+# resolved by HEADER NAME via sheets.py — a moved/renamed column halts loudly instead
+# of silently shifting fields. Bootstrap finds lib/sheets.py (repo) or sheets.py (vault copy).
+_d = os.path.dirname(os.path.abspath(__file__))
+for _c in (os.path.join(_d, "..", "lib"), _d):
+    if os.path.isfile(os.path.join(_c, "sheets.py")):
+        sys.path.insert(0, _c); break
+from sheets import header_map, data_rows
+
 def latest_router():
     cands = sorted(glob.glob(os.path.join(LEADS_DIR, "lead-router-*.xlsx")))
     if not cands: raise SystemExit("No lead-router-*.xlsx found in " + LEADS_DIR)
@@ -60,28 +69,39 @@ SEG_ORDER = [
 def load_router(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb["Lead Router"]
+    c = header_map(ws, ["SEGMENT", "THE PLAY", "Owns?", "Name", "Profession", "Lic Yrs",
+                        "Age Band", "# at Address", "Practice Address", "City", "County",
+                        "Email", "Phone"], f"{os.path.basename(path)}[Lead Router]")
     leads=[]; segPlay={}
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if not r[4]: continue
-        if r[0] and r[0] not in segPlay: segPlay[r[0]] = r[1] or ""
-        leads.append({"s":r[0],"n":str(r[4]).title() if r[4] else "","pr":r[5] or "",
-            "ly":(round(float(r[6]),0) if isinstance(r[6],(int,float)) else ""),
-            "ab":r[8] or "","na":r[9] or "","ad":r[10] or "",
-            "ci":(str(r[11]).title() if r[11] else ""),"co":(str(r[12]).title() if r[12] else ""),
-            "e":r[14] or "","ph":r[15] or "","own":r[2] or ""})
+    for r in data_rows(ws):
+        if not r[c["Name"]]: continue
+        if r[c["SEGMENT"]] and r[c["SEGMENT"]] not in segPlay: segPlay[r[c["SEGMENT"]]] = r[c["THE PLAY"]] or ""
+        leads.append({"s":r[c["SEGMENT"]],"n":str(r[c["Name"]]).title() if r[c["Name"]] else "","pr":r[c["Profession"]] or "",
+            "ly":(round(float(r[c["Lic Yrs"]]),0) if isinstance(r[c["Lic Yrs"]],(int,float)) else ""),
+            "ab":r[c["Age Band"]] or "","na":r[c["# at Address"]] or "","ad":r[c["Practice Address"]] or "",
+            "ci":(str(r[c["City"]]).title() if r[c["City"]] else ""),"co":(str(r[c["County"]]).title() if r[c["County"]] else ""),
+            "e":r[c["Email"]] or "","ph":r[c["Phone"]] or "","own":r[c["Owns?"]] or ""})
     wb.close()
     return leads, segPlay
 
 def load_registry(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb["Registry"]
+    c = header_map(ws, ["Lead ID", "Owner", "Stage", "Segment", "Contact Name", "Practice",
+                        "Specialty", "City/Market", "County", "Email", "Phone", "Next Action",
+                        "Next Action Date", "Last Touch", "Detail File"],
+                   "lead-registry.xlsx[Registry]")
     out=[]
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if not r[0] or r[2] != "Joe": continue
-        out.append({"id":r[0],"stage":r[3],"seg":r[4],"name":r[5],"practice":r[6],"spec":r[7],
-            "city":r[8],"county":r[9],"email":r[10] or "","phone":r[11] or "",
-            "next":str(r[17] or ""),"nextdate":norm(r[18]),"lasttouch":norm(r[19]),
-            "detail":r[21] or "","lease":norm(r[23]) if len(r)>23 else "","leaseconf":(r[25] if len(r)>25 else "") or ""})
+    for r in data_rows(ws):
+        if not r[c["Lead ID"]] or r[c["Owner"]] != "Joe": continue
+        out.append({"id":r[c["Lead ID"]],"stage":r[c["Stage"]],"seg":r[c["Segment"]],"name":r[c["Contact Name"]],
+            "practice":r[c["Practice"]],"spec":r[c["Specialty"]],
+            "city":r[c["City/Market"]],"county":r[c["County"]],"email":r[c["Email"]] or "","phone":r[c["Phone"]] or "",
+            "next":str(r[c["Next Action"]] or ""),"nextdate":norm(r[c["Next Action Date"]]),"lasttouch":norm(r[c["Last Touch"]]),
+            "detail":r[c["Detail File"]] or "",
+            # columns 23/25 sit BEYOND the header row (no names exist) — kept positional
+            # + length-guarded on purpose; if headers are ever added, name them here.
+            "lease":norm(r[23]) if len(r)>23 else "","leaseconf":(r[25] if len(r)>25 else "") or ""})
     wb.close()
     return out
 
@@ -200,10 +220,16 @@ print(f"Wrote {out_path}  ({os.path.getsize(out_path):,} bytes)")
 # Automation/, so every rebuild also drops the built board into the shared
 # DNA/Team/live-boards/ for his side to re-persist. Derived view; overwrite is correct.
 shared_path = os.path.join(ROOT, "DNA", "Team", "live-boards", "lead-board-latest.html")
+publish_failed = None
 try:
     os.makedirs(os.path.dirname(shared_path), exist_ok=True)
     open(shared_path,"w",encoding="utf-8").write(html)
     print(f"Published shared copy: {shared_path}")
 except Exception as e:
+    publish_failed = e
     print(f"WARNING: shared-tier publish failed ({e}) — Dell's copy will go stale; fix before session end.")
 print(f"Router: {os.path.basename(router_path)} | {len(L):,} leads | queue {queue_n} | decisions {len(DECISIONS)}")
+if publish_failed:
+    # Corrective #2 (2026-07-25): a failed shared publish must FAIL the run, not
+    # whisper — exit 0 here let the heartbeat report success while Dell's copy went stale.
+    sys.exit(f"EXIT 1: board written, but the shared-tier publish failed ({publish_failed}).")

@@ -40,4 +40,14 @@ for f in ${(k)OUT}; do
     echo "  CHANGED $f   (diff: tools/check.sh --out $f)"; rc=1
   fi
 done
+
+# Twin-copy identity (orchestrator-lane corrective #3, 2026-07-25): Joe's generator and
+# Dell's shared template are the SAME logic and were reconciled to identical on 2026-07-25.
+# A fix applied to one side only used to ship silently — now it flags here.
+echo "== Twin-copy identity (generator vs shared template) =="
+if diff -q "$REPO/generators/build-lead-board.py" "$REPO/shared/build-lead-board-template.py" >/dev/null 2>&1; then
+  echo "  OK      build-lead-board (both copies identical)"
+else
+  echo "  SPLIT   build-lead-board — the two copies have diverged; port the change to both or say why in manifest.tsv"; rc=1
+fi
 exit $rc

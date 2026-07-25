@@ -22,10 +22,13 @@ shared/build-lead-board-template.py	DNA/Team/build-lead-board.py
 shared/vendor_intro_for_stage.py	DNA/Network/vendor_intro_for_stage.py
 shared/fill-engine/extract_pvl_onepager.py	DNA/Deal Management/fill-engine/extract_pvl_onepager.py
 shared/fill-engine/fill_deal_template.py	DNA/Deal Management/fill-engine/fill_deal_template.py
-bin/launch-automation-chrome.sh	Automation/launch-automation-chrome.sh
+# bin/launch-automation-chrome.sh DELETED 2026-07-25 (orphaned Firefly launcher; the lane was demoted Jul 18 and its companion firefly_receiver.py never lived here). Vault copy retired to _to_delete/.
 bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
 # build-section-index.py is repo-only (no vault copy; the vault holds its OUTPUT in Automation/section-index.tsv)
 # tools/retrieve.py is repo-only (reads the derived index; sessions call it via run.sh retrieve)
 # workflows/*.workflow.js are repo-only (agent-graph orchestration, invoked by local Claude Code sessions via the Workflow tool; SOP pointers live in the vault files that own each job)
 # diff-salesforce-deals.py is repo-only (its INPUT capture + the SOP live in the vault)
 # capture-salesforce-report.js is repo-only (browser-pasted; the SOP that drives it lives in the vault)
+lib/sheets.py	Automation/sheets.py
+lib/sheets.py	Automation/radar/sheets.py
+lib/sheets.py	DNA/Team/sheets.py

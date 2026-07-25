@@ -28,8 +28,10 @@ Writes:
 
 import base64, json, os, re, sys
 
-BRAND = ("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
-         "My Drive/CARR AI/Marketing/Brand Assets")
+# CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant.
+BRAND = os.path.join(os.environ.get("CARR_VAULT",
+    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"),
+    "Marketing", "Brand Assets")
 
 ASSETS = {
     "OSWALD":     f"{BRAND}/fonts/Oswald.ttf",

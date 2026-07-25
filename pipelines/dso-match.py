@@ -24,11 +24,17 @@ for vert,brands in ref.items():
             for L in locs: targets[norm(L["street"])]=(brand,vert)
 src=sys.argv[1] if len(sys.argv)>1 else sorted(glob.glob(os.path.join(ROOT,"DNA","Leads","lead-router-*.xlsx")))[-1]
 ws=openpyxl.load_workbook(src,read_only=True,data_only=True)["Lead Router"]
+# Schema-validated (orchestrator-lane corrective #1, 2026-07-25): headers by name.
+_d=os.path.dirname(os.path.abspath(__file__))
+for _c in (os.path.join(_d,"..","lib"), _d):
+    if os.path.isfile(os.path.join(_c,"sheets.py")): sys.path.insert(0,_c); break
+from sheets import header_map, data_rows
+c=header_map(ws,["SEGMENT","Name","Profession","Practice Address","City","Email","Phone"],f"{os.path.basename(src)}[Lead Router]")
 out=[]
-for r in ws.iter_rows(min_row=2,values_only=True):
-    if not r[4] or not r[10]: continue
-    t=targets.get(norm(r[10]))
-    if t: out.append({"name":str(r[4]),"prof":str(r[5] or ""),"brand":t[0],"vertical":t[1],"seg":str(r[0] or ""),"addr":str(r[10]),"city":str(r[11] or ""),"email":str(r[14] or ""),"phone":str(r[15] or "")})
+for r in data_rows(ws):
+    if not r[c["Name"]] or not r[c["Practice Address"]]: continue
+    t=targets.get(norm(r[c["Practice Address"]]))
+    if t: out.append({"name":str(r[c["Name"]]),"prof":str(r[c["Profession"]] or ""),"brand":t[0],"vertical":t[1],"seg":str(r[c["SEGMENT"]] or ""),"addr":str(r[c["Practice Address"]]),"city":str(r[c["City"]] or ""),"email":str(r[c["Email"]] or ""),"phone":str(r[c["Phone"]] or "")})
 json.dump(out,open(os.path.join(ROOT,"Automation","dso-matches.json"),"w"),indent=1)
 print(f"source: {os.path.basename(src)} | {len(targets)} corporate addresses loaded | matches: {len(out)}")
 for b,n in Counter(x["brand"] for x in out).most_common(): print(f"  {n:4}  {b}")
