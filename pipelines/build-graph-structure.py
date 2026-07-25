@@ -189,16 +189,24 @@ for title, mem in sorted(members.items()):
     open(os.path.join(OUT, f"{safe(title)}.md"), "w", encoding="utf-8").write("\n".join(body))
     written += 1; edges += len(mem) + len(flows.get(title, ()))
 
-# .txt not .md — a linkless README.md renders as a floating graph node.
-open(os.path.join(OUT, "README.txt"), "w", encoding="utf-8").write(
-    "# Graph/hubs — the SKELETON of the people graph (DERIVED, DO NOT HAND-EDIT)\n\n"
-    "Structure nodes, not attribute tags:\n\n"
-    "    ① LEADS → ② CLIENTS & PROSPECTS → ③ DEALS   the pipeline, in sequence\n"
-    "    ★ JOE / ★ DELL                              owner poles, each pulling their records\n"
-    "    ◆ VENDORS                                   reaching into all three stages\n"
-    "    ⚑ source                                    Lead Board, CARR Website, SBDC, referrers\n"
-    "    🏢 firm                                      colleagues at the same company\n\n"
-    "Regenerate with `~/carr-system/run.sh graph`.\n")
+# The legend is a REAL node, linked to the skeleton it explains. A README that
+# floats alone is a note nothing points at — the fix is to connect it, not to
+# hide it behind a .txt extension. Here it doubles as the key to the symbols.
+legend = ["---", "type: legend", "tags: [structure, struct-legend]", "---", "",
+          "# 📖 LEGEND — people graph", "",
+          "**DERIVED. Never hand-edit `Graph/`.** Regenerate: `~/carr-system/run.sh graph`.", "",
+          "| Symbol | Meaning |", "|---|---|",
+          "| ① ② ③ | the pipeline, in sequence — leads become clients become deals |",
+          "| ◆ | vendors, reaching into all three stages |",
+          "| ★ | owner poles — Joe's records and Dell's |",
+          "| ⚑ | where a lead came from: Lead Board, CARR Website, SBDC, a named referrer |",
+          "| 🏢 | colleagues at the same firm |", "",
+          "Colour: cyan = Joe's · orange = Dell's · white = the backbone · "
+          "green = a source. Unowned records keep their record-type colour.", "",
+          "## The skeleton", ""]
+legend += [f"- [[{safe(t)}]]" for t in sorted(members) if tag_for(t) in ("pole", "stage")]
+open(os.path.join(OUT, "📖 LEGEND — people graph.md"), "w", encoding="utf-8").write("\n".join(legend) + "\n")
+written += 1
 
 if skipped:
     print(f"\nskipped {len(skipped)} oversized non-structural clusters (>{MAX}):")

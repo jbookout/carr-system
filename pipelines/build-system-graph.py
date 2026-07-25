@@ -172,19 +172,25 @@ w(POLE_DELL, ["---", "type: pole", "tier: DELL", "tags: [sys-pole, sys-tier-dell
               f"- [[{safe(POLE_DNA)}]]", ""])
 edges += 1
 
-w("README", ext=".txt", lines=[f"# Graph-System — how the CARR AI system connects (DERIVED, DO NOT HAND-EDIT)", "",
-             f"- **{len(folders)} folder nodes**, each linking its own files",
-             f"- **{len(docs)} real documents** — linked directly, no proxy duplicates",
-             f"- **{len(folder_edges)} folder-to-folder flows** rolled up from file references",
-             f"- **~{edges} edges**", "",
-             "    ★ JOE'S BRAIN ──▶ ★ DNA (shared) ◀── ★ DELL'S BRAIN",
-             "    📇 INDEX ──▶ every top-level folder",
-             "    📁 folder ──▶ its files, its parent, and the folders it cites", "",
-             "Filter the Obsidian graph with `path:Graph-System` to view this alone.",
-             "Regenerate with `~/carr-system/run.sh graph-system`.", "",
-             "## Busiest flows", "", "| From | To | Refs |", "|---|---|---|"]
-            + [f"| {a} | {b} | {n} |" for (a, b), n in
-               sorted(folder_edges.items(), key=lambda kv: -kv[1])[:20]])
+LEGEND = "📖 LEGEND — system graph"
+w(LEGEND, ["---", "type: legend", "tags: [sys-legend]", "---", "",
+           f"# {LEGEND}", "",
+           "**DERIVED. Never hand-edit `Graph-System/`.** "
+           "Regenerate: `~/carr-system/run.sh graph-system`.", "",
+           "| Symbol | Meaning |", "|---|---|",
+           "| ★ | the three brains — Joe's personal tier, the shared DNA tier, Dell's twin |",
+           "| 📇 | INDEX, the router read first every session |",
+           "| 📁 | a real folder, with its own files orbiting it |", "",
+           "Folder-to-folder arrows are rolled up from the file references that "
+           "already exist in the documents. Colour: cyan = Joe-personal · "
+           "blue = shared DNA · orange = Dell · gold = INDEX.", "",
+           "## Start here", "",
+           f"- [[{safe(POLE_JOE)}]]", f"- [[{safe(POLE_DNA)}]]",
+           f"- [[{safe(POLE_DELL)}]]", f"- [[{safe(INDEX)}]]", "",
+           "## Busiest flows", "", "| From | To | Refs |", "|---|---|---|"]
+          + [f"| {a} | {b} | {n} |" for (a, b), n in
+             sorted(folder_edges.items(), key=lambda kv: -kv[1])[:20]])
+edges += 4
 
 print(f"Graph-System: {len(folders)} folders, {len(docs)} real docs linked directly "
       f"(no proxies), {len(folder_edges)} folder flows, ~{edges} edges")

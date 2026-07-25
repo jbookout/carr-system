@@ -32,7 +32,9 @@ GROUPS = [
     # --- people graph skeleton (path:Graph/) ---
     ("tag:#struct-stage",   "ffffff"),   # ① LEADS → ② CLIENTS → ③ DEALS, the backbone
     ("tag:#struct-source",  "22c55e"),   # ⚑ Lead Board, CARR Website, SBDC, referrers
-    ("tag:#struct-firm",    "64748b"),   # 🏢 colleagues at the same company
+    ("tag:#struct-firm",    "64748b"),
+    ("tag:#struct-legend",  "fbbf24"),   # 📖 the key to the symbols
+    ("tag:#sys-legend",     "fbbf24"),   # 🏢 colleagues at the same company
     # --- system graph (path:Graph-System) ---
     ("tag:#sys-router",     "fbbf24"),   # 📇 INDEX
     ("tag:#sys-tier-dna",   "3b82f6"),   # shared tier — the single share to Dell
