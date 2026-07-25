@@ -37,9 +37,11 @@ const FINDINGS = { type: 'object', required: ['findings'], properties: { finding
     sourceUrl: { type: 'string' }, sourceName: { type: 'string' }, sourceDate: { type: 'string' },
     loadBearing: { type: 'boolean', description: 'true if the report leans on this claim (numbers, trends, named moves)' } } } } } }
 
-const VERDICT = { type: 'object', required: ['survives', 'reason'], properties: {
-  survives: { type: 'boolean' }, reason: { type: 'string' },
-  correction: { type: 'string', description: 'the accurate version, if the claim is off' } } }
+const VERDICTS = { type: 'object', required: ['verdicts'], properties: { verdicts: { type: 'array', items: {
+  type: 'object', required: ['claim', 'survives', 'reason'], properties: {
+    claim: { type: 'string', description: 'the claim EXACTLY as given in the numbered list (verbatim echo — used to match results back)' },
+    survives: { type: 'boolean' }, reason: { type: 'string' },
+    correction: { type: 'string', description: 'the accurate version, if the claim is off' } } } } } }
 
 phase('Scope')
 const scoped = await agent(
@@ -56,17 +58,27 @@ const loadBearing = all.filter(f => f.loadBearing)
 log(`sweep: ${all.length} findings, ${loadBearing.length} load-bearing -> adversarial verify`)
 
 phase('Verify')
-const verdicts = await parallel(loadBearing.map(f => () => agent(
-  `Adversarial verification, fresh context — you have not seen the researcher's work and your job is to REFUTE this claim if you can: "${f.claim}" (detail: ${f.detail || 'none'}), cited to ${f.sourceName} at ${f.sourceUrl}. Open the source; cross-check against one independent source if the number matters. Default to survives=false when the source does not clearly support the claim.`,
-  { label: `verify:${f.claim.slice(0, 28)}`, phase: 'Verify', schema: VERDICT }
-).then(v => ({ ...f, verdict: v }))))
+// Jul 25 token-efficiency pass: source-support checks are mechanical existence
+// verification — batched 4 claims per agent on T2 Sonnet per the tiering amendment
+// (00_Context/model-tiering.md). Fresh context vs the researchers is what buys
+// independence; refute-by-default posture unchanged.
+const VB = 4
+const vbatches = []
+for (let i = 0; i < loadBearing.length; i += VB) vbatches.push(loadBearing.slice(i, i + VB))
+const vresults = await parallel(vbatches.map((b, bi) => () => agent(
+  `Adversarial verification, fresh context — you have not seen the researchers' work and your job is to REFUTE each claim below if you can. For EACH numbered claim: open its cited source; cross-check against one independent source when the number matters. Default to survives=false when the source does not clearly support the claim; give a correction when you find the accurate version. Echo each claim verbatim.\n${b.map((f, i) => `${i + 1}. "${f.claim}" (detail: ${(f.detail || 'none').slice(0, 200)}) — cited to ${f.sourceName} at ${f.sourceUrl}`).join('\n')}`,
+  { label: `verify:batch${bi + 1}`, phase: 'Verify', model: 'sonnet', schema: VERDICTS })))
+const vmap = new Map()
+for (const r of vresults.filter(Boolean))
+  for (const v of (r.verdicts || [])) vmap.set((v.claim || '').toLowerCase().trim().slice(0, 80), v)
 
 const kept = []
 for (const f of all) {
-  const v = verdicts.filter(Boolean).find(x => x.claim === f.claim)
+  const v = vmap.get((f.claim || '').toLowerCase().trim().slice(0, 80))
   if (!f.loadBearing) kept.push({ ...f, verified: 'not-load-bearing' })
-  else if (v && v.verdict.survives) kept.push({ ...f, verified: 'CONFIRMED' })
-  else if (v && v.verdict.correction) kept.push({ ...f, claim: v.verdict.correction, verified: 'CORRECTED', note: v.verdict.reason })
+  else if (v && v.survives) kept.push({ ...f, verified: 'CONFIRMED' })
+  else if (v && v.correction) kept.push({ ...f, claim: v.correction, verified: 'CORRECTED', note: v.reason })
+  else if (!v) kept.push({ ...f, verified: 'UNMATCHED-VERDICT (kept, flagged — echo mismatch)' })
   // refuted with no correction: dropped, and the drop is logged, not silent
 }
 const dropped = loadBearing.length - kept.filter(k => k.verified !== 'not-load-bearing').length

@@ -39,8 +39,11 @@ const GRADE = { type: 'object', required: ['category', 'score', 'evidence', 'gap
   gaps: { type: 'array', items: { type: 'string' } } } }
 
 const VERDICT = { type: 'object', required: ['upheld', 'adjustedScore', 'reason'], properties: {
-  upheld: { type: 'boolean' }, adjustedScore: { type: 'number', minimum: 0, maximum: 100 },
+  upheld: { type: 'boolean' },
+  adjustedScore: { type: 'number', minimum: 0, maximum: 100, description: 'YOUR final 0-100 score for the category as a number IN THIS FIELD — equal to the grader score if upheld. Never deliver your score only inside the reason text.' },
   reason: { type: 'string' } } }
+
+const RETRIEVE_HINT = 'To locate evidence cheaply, FIRST run in Bash: ~/carr-system/run.sh retrieve "<your search terms>" — it scores the vault section index and returns exact file + line-range reads. Open only what it returns; fall back to the rubric pointers on no hits.'
 
 phase('Measure')
 const metrics = await agent(
@@ -48,16 +51,24 @@ const metrics = await agent(
   { label: 'measure:baselines', model: 'haiku', effort: 'low' })
 
 phase('Grade')
-const graded = await pipeline(
-  CATEGORIES,
-  cat => agent(
-    `You are grading ONE category of the CARR AI system report card, independently — you have NO access to prior scores and must not guess them. Category: "${cat}". Read the rubric for this category in "${CARD}" (and ONLY what that rubric points you to under "${VAULT}"). Fresh measurements you may trust:\n${metrics}\nGrade 0-100 with concrete evidence.`,
-    { label: `grade:${cat}`, phase: 'Grade', model: 'sonnet', schema: GRADE }),
-  (g, cat) => g && agent(
-    `Fresh-context audit verification. A grader scored the CARR AI category "${cat}" at ${g.score}/100 citing: ${JSON.stringify(g.evidence)}. You have NOT seen its reasoning and owe it nothing. Independently spot-check the citations against the real files under "${VAULT}" (rubric: "${CARD}"). Refute the score if evidence is wrong, stale, or cherry-picked; uphold only what checks out. Return your own adjustedScore either way.`,
-    { label: `verify:${cat}`, phase: 'Verify', schema: VERDICT }
-  ).then(v => ({ ...g, verdict: v }))
-)
+const graded0 = await parallel(CATEGORIES.map(cat => () => agent(
+  `You are grading ONE category of the CARR AI system report card, independently — you have NO access to prior scores and must not guess them. Category: "${cat}". Read the rubric for this category in "${CARD}" (and ONLY what that rubric points you to under "${VAULT}"). ${RETRIEVE_HINT} Fresh measurements you may trust:\n${metrics}\nGrade 0-100 with concrete evidence.`,
+  { label: `grade:${cat}`, phase: 'Grade', model: 'sonnet', schema: GRADE })))
+
+// Selective verification (Jul 25 token-efficiency pass): fresh-context T3 verifiers
+// check the EXTREMES — the 3 highest and 3 lowest grades, the ones most likely to be
+// wrong and most able to move the verdict. Mid-range grades pass through labeled
+// unverified (judgment verification stays T3 per the tiering amendment; the barrier
+// here is justified — selection needs the whole grade set).
+const graded1 = graded0.filter(Boolean)
+const rankedCats = [...graded1].sort((a, b) => b.score - a.score).map(g => g.category)
+const toVerify = new Set([...rankedCats.slice(0, 3), ...rankedCats.slice(-3)])
+const graded = await parallel(graded1.map(g => () => !toVerify.has(g.category)
+  ? Promise.resolve({ ...g, verdict: null })
+  : agent(
+    `Fresh-context audit verification. A grader scored the CARR AI category "${g.category}" at ${g.score}/100 citing: ${JSON.stringify(g.evidence)}. You have NOT seen its reasoning and owe it nothing. Independently spot-check the citations against the real files under "${VAULT}" (rubric: "${CARD}"). ${RETRIEVE_HINT} Refute the score if evidence is wrong, stale, or cherry-picked; uphold only what checks out. Put your final number in adjustedScore either way.`,
+    { label: `verify:${g.category}`, phase: 'Verify', schema: VERDICT }
+  ).then(v => ({ ...g, verdict: v }))))
 
 phase('Synthesize')
 const clean = graded.filter(Boolean)
@@ -65,7 +76,7 @@ const rows = clean.map(g => ({
   category: g.category,
   score: g.verdict && !g.verdict.upheld ? g.verdict.adjustedScore : g.score,
   graderScore: g.score, upheld: g.verdict ? g.verdict.upheld : null,
-  verifierReason: g.verdict ? g.verdict.reason : 'verifier missing',
+  verifierReason: g.verdict ? g.verdict.reason : 'mid-range grade — not selected for verification (extremes-only policy, Jul 25)',
   evidence: g.evidence, gaps: g.gaps,
 }))
 const summary = await agent(

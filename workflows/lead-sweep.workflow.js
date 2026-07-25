@@ -49,9 +49,12 @@ const FINDINGS = { type: 'object', required: ['leads'], properties: { leads: { t
     sourceUrl: { type: 'string' }, sourceDate: { type: 'string' },
     confidence: { type: 'string', enum: ['HIGH', 'MEDIUM', 'LOW'] } } } } } }
 
-const CHECK = { type: 'object', required: ['exists', 'note'], properties: {
-  exists: { type: 'boolean', description: 'the cited source really says what the finder claims' },
-  note: { type: 'string' }, corroboration: { type: 'string', description: 'any second independent field found (address, license, entity filing)' } } }
+const CHECKS = { type: 'object', required: ['checks'], properties: { checks: { type: 'array', items: {
+  type: 'object', required: ['name', 'exists', 'note'], properties: {
+    name: { type: 'string', description: 'the lead name EXACTLY as given in the numbered list' },
+    exists: { type: 'boolean', description: 'the cited source really says what the finder claims' },
+    note: { type: 'string' },
+    corroboration: { type: 'string', description: 'any second independent field found (address, license, entity filing)' } } } } } }
 
 // scoped: pair lanes with regions round-robin up to CAP finder agents this run
 const jobs = []
@@ -82,10 +85,21 @@ const candidates = [...seen.values()]
 log(`dedupe: ${candidates.length} unique candidates from ${swept.filter(Boolean).length} lanes`)
 
 phase('Verify')
-const verified = await parallel(candidates.map(l => () => agent(
-  `Fresh-context source check — you have not seen the finder's reasoning. Claim: "${l.name}"${l.practice ? ` (${l.practice})` : ''} — ${l.signal}. Cited source: ${l.sourceUrl}. Open the source (and one corroborating search if cheap). Does it actually support the claim? You are checking EXISTENCE and accuracy only — never whether the lead is "good enough"; qualification belongs to Joe on the board.`,
-  { label: `verify:${(l.name || 'lead').slice(0, 24)}`, phase: 'Verify', schema: CHECK }
-).then(v => ({ ...l, check: v }))))
+// Jul 25 token-efficiency pass: mechanical existence checks run BATCHED (5 leads per
+// agent — one context setup instead of five) and on T2 Sonnet per the verification-
+// tiering amendment (00_Context/model-tiering.md): independence comes from fresh
+// context and a different instance than the finder, not from model tier. Ambiguity
+// is reported honestly in the note, never guessed; judgment stays with Joe.
+const BATCH = 5
+const batches = []
+for (let i = 0; i < candidates.length; i += BATCH) batches.push(candidates.slice(i, i + BATCH))
+const checked = await parallel(batches.map((b, bi) => () => agent(
+  `Fresh-context source checks — you have not seen any finder's reasoning. For EACH numbered claim below: open the cited source (plus one cheap corroborating search if warranted) and report whether it actually supports the claim. You are checking EXISTENCE and accuracy only — never whether a lead is "good enough"; qualification belongs to Joe on the board. Unreachable or ambiguous source = say so in the note, do not guess. Echo each name exactly.\n${b.map((l, i) => `${i + 1}. "${l.name}"${l.practice ? ` (${l.practice})` : ''} — ${l.signal.slice(0, 300)} — source: ${l.sourceUrl}`).join('\n')}`,
+  { label: `verify:batch${bi + 1}`, phase: 'Verify', model: 'sonnet', schema: CHECKS })))
+const byName = new Map()
+for (const c of checked.filter(Boolean))
+  for (const k of (c.checks || [])) byName.set((k.name || '').toLowerCase().trim(), k)
+const verified = candidates.map(l => ({ ...l, check: byName.get((l.name || '').toLowerCase().trim()) || null }))
 
 phase('Present')
 const out = verified.filter(Boolean).map(l => ({
