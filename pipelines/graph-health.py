@@ -114,13 +114,41 @@ for l in leads:   name_checks("lead",   s(l.get("Contact Name")), s(l.get("Lead 
 for c in clients: name_checks("client", s(c.get("Name")), s(c.get("Client ID")))
 
 # ---------- 4: same person as both lead and client ----------
-lead_names  = {s(l.get("Contact Name")).lower(): s(l.get("Lead ID")) for l in leads if s(l.get("Contact Name"))}
+lead_by_name = {s(l.get("Contact Name")).lower(): l for l in leads if s(l.get("Contact Name"))}
+
+# 4a. THE ONE THAT COSTS MONEY: a client on a live deal who is ALSO sitting in a
+# prospecting drip, so CARR is emailing "ever considered real estate?" to someone
+# mid-transaction. Session 1 caught this on one client by hand; the check found
+# six. Ranked above the generic duplicate because it is actively going out.
+LIVE = ("closing", "pending", "research", "negotiation", "legal", "due diligence",
+        "won", "active")
+for c in clients:
+    nm, st = s(c.get("Name")).lower(), s(c.get("Status"))
+    l = lead_by_name.get(nm)
+    if not l or not any(k in st.lower() for k in LIVE):
+        continue
+    drip = s(l.get("Drip Campaign"))
+    if drip or "drip" in s(l.get("Stage")).lower():
+        add("HIGH", "LIVE CLIENT ON A PROSPECTING DRIP",
+            f"{s(c.get('Name'))} — {s(c.get('Client ID'))} is “{st}” but lead "
+            f"{s(l.get('Lead ID'))} is “{s(l.get('Stage'))}” on “{drip}”. Remove from the drip.")
+
+# 4b. the generic case: same person as both a lead and a client
 for c in clients:
     nm = s(c.get("Name")).lower()
-    if nm and nm in lead_names:
-        add("HIGH", "Lead + client duplicate",
+    if nm and nm in lead_by_name:
+        add("MED", "Lead + client duplicate",
             f"“{s(c.get('Name'))}” is {s(c.get('Client ID'))} (client, {s(c.get('Status'))}) "
-            f"AND {lead_names[nm]} (lead) — check the lead is not on a drip")
+            f"AND {s(lead_by_name[nm].get('Lead ID'))} (lead)")
+
+# 4c. the same person holding TWO client IDs — pure migration damage
+_by = defaultdict(list)
+for c in clients:
+    if s(c.get("Name")): _by[s(c.get("Name")).lower()].append(s(c.get("Client ID")))
+for nm, ids in sorted(_by.items()):
+    if len(ids) > 1:
+        add("HIGH", "Duplicate client record",
+            f"“{nm.title()}” holds {len(ids)} client IDs: {', '.join(ids)} — merge to one")
 
 # ---------- 5: missing source ----------
 no_src = [s(l.get("Lead ID")) for l in leads
