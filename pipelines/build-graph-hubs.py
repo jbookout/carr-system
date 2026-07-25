@@ -65,11 +65,25 @@ for sub in ("vendors", "leads", "clients", "deals"):
         if fn.endswith(".md"):
             node_titles[os.path.splitext(fn)[0].lower()] = os.path.splitext(fn)[0]
 
-def node_for(*names):
-    """Resolve a person/entity to the exact note title, or None."""
+def node_for(*names, kind=None):
+    """Resolve a person/entity to the exact note title, or None.
+
+    build-graph-notes.py suffixes a lead/deal title with its record type when it
+    would otherwise collide with the client or vendor of the same name (e.g.
+    "Joseph Finelli" the client and "Joseph Finelli (deal)"). Try the suffixed
+    form FIRST for those record types, otherwise every deal for an existing
+    client would hub against the client node and the deal node would be left
+    with no edges at all.
+    """
     for n in names:
         n = s(n)
-        if n and n.lower() in node_titles:
+        if not n:
+            continue
+        if kind:
+            k = f"{n} ({kind})".lower()
+            if k in node_titles:
+                return node_titles[k]
+        if n.lower() in node_titles:
             return node_titles[n.lower()]
     return None
 
@@ -114,7 +128,7 @@ for v in rows(VENDORS, "Vendors"):
     add("Category", s(v.get("Category")), n)
 
 for l in rows(LEADS, "Registry"):
-    n = node_for(l.get("Contact Name"), l.get("Practice"))
+    n = node_for(l.get("Contact Name"), l.get("Practice"), kind="lead")
     if not n: continue
     add("Firm", norm_firm(l.get("Practice")), n)
     for c in split_multi(norm_city(l.get("City/Market"))): add("Market", c, n)
@@ -139,7 +153,7 @@ for c in rows(CLIENTS, "Clients"):
 if os.path.exists(DEALS):
     dj = json.load(open(DEALS))
     for d in dj.get("deals", []):
-        n = node_for(d.get("name"), d.get("contact"), d.get("company"))
+        n = node_for(d.get("name"), d.get("contact"), d.get("company"), kind="deal")
         if not n: continue
         for m in split_multi(norm_city(d.get("city"))): add("Market", m, n)
         add("Owner", s(d.get("owner")) or "Unassigned", n)
@@ -160,14 +174,46 @@ def safe(name):
     x = re.sub(r'[\\/:*?"<>|#^\[\]{}]', "", x).strip()
     return re.sub(r"\s+", " ", x) or "unnamed"
 
+# ---------- what NOT to hub ----------
+# Two rules, both learned by getting it wrong (Joe, 2026-07-25: "this thing is a
+# giant hairball").
+#
+# 1. AN ATTRIBUTE THAT IS ALREADY A COLOUR MUST NOT ALSO BE AN EDGE. Owner is
+#    rendered as colour (#owner-joe / #owner-dell) and Lane as the deal-* tags.
+#    Hubbing them too added 533 edges — a third of all hub edges — that separate
+#    nothing, because "Dell owns it" is true of 412 records. Two mega-stars
+#    dominated the layout and drowned the informative structure.
+# 2. A HUB LARGER THAN ~30 IS A TAXONOMY BUCKET, NOT A CLUSTER. "Banker/Lender"
+#    with 47 members tells you the category system exists, which you knew. The
+#    hubs that carry information are small: Firm averages 3 members, Referrer 5.
+#
+# Consequence, and it is the right one: records whose ONLY connection was their
+# owner go back to being isolated. That is honest — they were never meaningfully
+# connected, and their colour already says whose they are.
+# 2. A hub is only a problem when it DOMINATES the layout. Obsidian's force
+#    layout is fine with a 68-member market cluster in a 662-node graph (10%);
+#    it collapses around a 412-member star (62%). So the cap scales with the
+#    graph rather than being a flat number: anything pulling in more than ~12%
+#    of all nodes is a taxonomy bucket, not a cluster. A flat cap of 30 was
+#    tried first and cut too deep — connectivity fell to 65% and the orphan ring
+#    came back.
+SKIP_KINDS = {"Owner", "Lane"}
+MAX_MEMBERS = max(30, int(0.12 * len(node_titles)))
+
 written = 0
 edges = 0
 singletons = 0
+skipped_big = []
 taken = set()
 for kind, group in hubs.items():
+    if kind in SKIP_KINDS:
+        continue
     for name, members in sorted(group.items()):
         if len(members) < 2:
             singletons += 1          # a hub of one connects nothing — skip it
+            continue
+        if len(members) > MAX_MEMBERS:
+            skipped_big.append((len(members), kind, name))
             continue
         title = safe(f"{name} ({kind})")
         low = title.lower()
@@ -194,4 +240,10 @@ open(os.path.join(OUT, "README.md"), "w", encoding="utf-8").write(
     "Hubs with only one member are skipped: they connect nothing.\n\n"
     "Regenerate with `~/carr-system/run.sh graph-hubs` (runs graph, then hubs).\n")
 
-print(f"hubs: {written} written, {edges} new edges, {singletons} single-member hubs skipped")
+# No silent caps: say exactly what was dropped and why.
+if skipped_big:
+    print(f"\nskipped {len(skipped_big)} hubs over {MAX_MEMBERS} members (taxonomy buckets, not clusters):")
+    for n, kind, name in sorted(skipped_big, reverse=True):
+        print(f"   {n:4d}  {kind}: {name}")
+print(f"\nhubs: {written} written, {edges} edges, {singletons} single-member skipped, "
+      f"{len(skipped_big)} oversized skipped, kinds excluded: {', '.join(sorted(SKIP_KINDS))} (rendered as colour instead)")

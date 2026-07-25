@@ -40,15 +40,52 @@ def vert_tag(text):
         if k in t: return v
     return None
 
-def slug(name, taken, fallback_id=""):
+def sanitize(name, fallback_id=""):
     s = unicodedata.normalize("NFKD", str(name or fallback_id or "unnamed"))
     s = re.sub(r'[\\/:*?"<>|#^\[\]{}]', "", s).strip()
-    s = re.sub(r"\s+", " ", s) or (fallback_id or "unnamed")
-    base, n = s, 2
+    return re.sub(r"\s+", " ", s) or (fallback_id or "unnamed")
+
+def slug(name, taken, fallback_id=""):
+    s = base = sanitize(name, fallback_id)
+    n = 2
     while s.lower() in taken:
         s = f"{base} ({fallback_id or n})"; n += 1
     taken.add(s.lower())
     return s
+
+def unique_node(name, kind, taken, fallback_id=""):
+    """Node titles must be unique across ALL of Graph/, not per subfolder.
+
+    Obsidian resolves [[Name]] by basename across the whole vault, so two notes
+    sharing a basename in different folders make every link to that name
+    ambiguous — Obsidian silently picks one and the other node becomes
+    unreachable, rendering as an isolated dot no matter how many links point at
+    the name. Measured 2026-07-25: 41 duplicate titles affecting 88 notes,
+    because leads and deals each deduped against their own private set instead of
+    a shared one.
+
+    A client and their deal are legitimately separate records, so on collision we
+    suffix with the record TYPE rather than a meaningless (2). Clients and vendors
+    are registered first and keep the clean name as the canonical person record.
+    """
+    base = sanitize(name, fallback_id)
+    s = base
+    if s.lower() in taken:
+        s, n = f"{base} ({kind})", 2
+        while s.lower() in taken:
+            s = f"{base} ({kind} {n})"; n += 1
+    taken.add(s.lower())
+    return s
+
+def owner_tag(owner):
+    """Owner is the biggest-picture separator in the graph (Joe, 2026-07-25):
+    which half of the business a record belongs to. It lives in frontmatter but
+    not in tags, and Obsidian colour groups key on tags — so emit it as one."""
+    o = s(owner).strip().lower()
+    if o.startswith("joe"):    return "owner-joe"
+    if o.startswith("dell") or o.startswith("wayne"): return "owner-dell"
+    if o.startswith("shared") or o.startswith("both"): return "owner-shared"
+    return "owner-unassigned"
 
 def fm(lines):
     return "---\n" + "\n".join(lines) + "\n---\n"
@@ -101,6 +138,9 @@ for c in clients:
     base = os.path.splitext(os.path.basename(det))[0].lower() if det else ""
     c["_detail"] = detail_files.get(base)          # hand note wins as the node
     c["_node"] = c["_detail"] or slug(s(c.get("Name")) or s(c.get("Practice / Entity")), taken, cid)
+    # a hand-written dossier name bypasses slug(), so register it explicitly or
+    # a later lead/deal can mint the same title and both become unreachable
+    if c["_detail"]: taken.add(c["_detail"].lower())
     if cid: cli_by_id[cid.upper()] = c["_node"]
     for key in (s(c.get("Name")), s(c.get("Practice / Entity"))):
         if key: cli_by_name.setdefault(key.lower(), c["_node"])
@@ -139,7 +179,7 @@ counts = {"vendors":0, "leads":0, "clients":0, "deals":0}
 
 for v in vendors:
     vid, node = s(v.get("ID")), v["_node"]
-    tags = ["vendor", "network"]
+    tags = ["vendor", "network", owner_tag(v.get("Owner"))]
     vt = vert_tag(s(v.get("Vertical"))+" "+s(v.get("Category")))
     if vt: tags.append(vt)
     stage = s(v.get("Stage")).lower()
@@ -161,7 +201,7 @@ for c in clients:
     cid, node = s(c.get("Client ID")), c["_node"]
     status = s(c.get("Status")).lower()
     stat_tag = "won" if "won" in status else ("active" if any(k in status for k in ("active","negotiat","outreach","research")) else ("dormant" if "paus" in status else "cold"))
-    tags = ["client", stat_tag]
+    tags = ["client", stat_tag, owner_tag(c.get("Owner"))]
     vt = vert_tag(s(c.get("Specialty / Type"))+" "+s(c.get("Deal Type")))
     if vt: tags.append(vt)
     body = [fm([f"type: client", f"id: {esc(cid)}", f"status: {esc(c.get('Status'))}",
@@ -184,10 +224,10 @@ for l in leads:
     cname = s(l.get("Contact Name"))
     if not cname or cname.startswith("("):          # placeholder, not a name
         cname = s(l.get("Practice"))
-    node = slug(cname, lead_taken, lid)
+    node = unique_node(cname, "lead", taken, lid)
     stage = s(l.get("Stage")).lower()
     stat_tag = "active" if any(k in stage for k in ("active","engaged","outreach")) else ("won" if "won" in stage else ("dormant" if any(k in stage for k in ("paus","hold","do-not")) else "cold"))
-    tags = ["lead", stat_tag]
+    tags = ["lead", stat_tag, owner_tag(l.get("Owner"))]
     vt = vert_tag(s(l.get("Specialty")))
     if vt: tags.append(vt)
     body = [fm([f"type: lead", f"id: {esc(lid)}", f"stage: {esc(l.get('Stage'))}",
@@ -230,9 +270,10 @@ def deal_lane(deal):
 
 deal_taken = set()
 for d in deals:
-    node = slug(s(d.get("name")) or s(d.get("company")), deal_taken, s(d.get("txn")))
+    node = unique_node(s(d.get("name")) or s(d.get("company")), "deal", taken, s(d.get("txn")))
     phase = s(d.get("phase")).lower()
-    tags = ["deal", "won" if "closed" in phase or "won" in phase else ("cold" if "pending" in phase else "active")]
+    tags = ["deal", "won" if "closed" in phase or "won" in phase else ("cold" if "pending" in phase else "active"),
+            owner_tag(d.get("owner"))]
     lane = deal_lane(d)
     tags.append({"territory":"deal-territory", "national":"deal-national"}.get(lane, "deal-unclassified"))
     vt = vert_tag(s(d.get("seg"))+" "+s(d.get("ptype")))

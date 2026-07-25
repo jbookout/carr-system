@@ -18,6 +18,16 @@ p = os.path.join(vault, ".obsidian", "graph.json")
 if subprocess.run(["pgrep", "-x", "Obsidian"], capture_output=True).returncode == 0:
     sys.exit("REFUSING: Obsidian is running and will overwrite this. Quit Obsidian, then re-run.")
 
+# Obsidian applies the FIRST matching colour group, so order is precedence.
+# Owner goes at the front deliberately (Joe, 2026-07-25): which half of the
+# business a record belongs to is the biggest-picture separator, and it should
+# beat record type. `owner-unassigned` is intentionally NOT coloured — those 154
+# records fall through to their type colour instead of forming a third bloc.
+OWNER_FIRST = [
+    ("tag:#owner-joe",    "00e5ff"),   # bright cyan  — Joe's half
+    ("tag:#owner-dell",   "ff9100"),   # bright orange — Dell's half
+    ("tag:#owner-shared", "ffffff"),   # white — jointly owned
+]
 GROUPS = [
     ("tag:#sys-area",       "ffffff"), ("tag:#sys-context",    "e8542f"),
     ("tag:#sys-doctrine",   "d4a017"), ("tag:#sys-leads",      "2ecc71"),
@@ -28,11 +38,23 @@ GROUPS = [
     ("tag:#sys-root",       "f43f5e"),
 ]
 d = json.load(open(p))
-have = {g["query"] for g in d.get("colorGroups", [])}
+groups = d.setdefault("colorGroups", [])
+have = {g["query"] for g in groups}
 added = 0
+for q, h in reversed(OWNER_FIRST):          # reversed so the listed order survives insert(0)
+    if q not in have:
+        groups.insert(0, {"query": q, "color": {"a": 1, "rgb": int(h, 16)}}); added += 1
 for q, h in GROUPS:
     if q not in have:
-        d.setdefault("colorGroups", []).append({"query": q, "color": {"a": 1, "rgb": int(h, 16)}})
-        added += 1
+        groups.append({"query": q, "color": {"a": 1, "rgb": int(h, 16)}}); added += 1
+# Default the view to ONE graph. Unfiltered, Obsidian renders the people graph,
+# the system graph and every real vault note together — which reads as a hairball
+# and hides that they are separate models (Joe, 2026-07-25). Flip the filter to
+# `path:Graph-System` for system flow; clear it to see everything.
+if not d.get("search"):
+    d["search"] = "path:Graph/"
+    print('set default graph filter to  path:Graph/  (use path:Graph-System for system flow)')
+
 json.dump(d, open(p, "w"), indent=2)
-print(f"added {added} colour groups; {len(d['colorGroups'])} total")
+print(f"added {added} colour groups; {len(groups)} total "
+      f"(owner groups first — they take precedence over record type)")

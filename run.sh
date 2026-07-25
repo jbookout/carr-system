@@ -23,6 +23,7 @@ graph()        { python3 "$REPO/pipelines/build-graph-notes.py" "$VAULT" \
 # NOTE: build-graph-notes.py wipes and rebuilds Graph/, which deletes Graph/hubs.
 # The hub pass MUST run after it, so `graph` always runs both.
 graph_system() { python3 "$REPO/pipelines/build-system-graph.py" "$VAULT"; }
+graph_health() { shift; python3 "$REPO/pipelines/graph-health.py" "$VAULT" "$@"; }
 sf_diff()      { shift; python3 "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }
 section_index(){ python3 "$REPO/pipelines/build-section-index.py" "$VAULT"; }
 
@@ -35,11 +36,12 @@ case "${1:-}" in
   space-search) space_search "$@" ;;
   graph)        graph ;;
   graph-system) graph_system ;;
+  graph-health) graph_health "$@" ;;
   salesforce-diff) sf_diff "$@" ;;
   section-index) section_index ;;
   retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|salesforce-diff [--apply]|section-index|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|check"; exit 2 ;;
 esac
