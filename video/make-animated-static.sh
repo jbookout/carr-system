@@ -44,11 +44,12 @@ shift
 NAME="animated_static"
 case "${1:-}" in -*|"") ;; *) NAME="$1"; shift ;; esac
 
-PLANARGS=(); DRY=0
+PLANARGS=(); DRY=0; EMAIL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --concept|--sfx|--avoid) PLANARGS+=("$1" "$2"); shift 2 ;;
     --dry-run) DRY=1; shift ;;
+    --email) EMAIL=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -132,6 +133,35 @@ $FF -y -nostdin -i "$FINAL" -i "$PAL" \
   -lavfi "fps=15,scale=${GIF_WIDTH}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
   "$GIF" 2>/dev/null
 rm -f "$PAL"
+
+# --- email variant (--email) -------------------------------------------------
+# Legacy Outlook on Windows renders only the FIRST FRAME of a GIF as a static
+# image (modern Outlook 365, Outlook Mac, web and mobile all animate). The
+# standing email-design rule is that the key information must live on frame one
+# — which a build-on animation violates by construction, since frame one is an
+# empty canvas. So the email cut leads with the FINISHED card for a single
+# frame: legacy Outlook shows the complete, readable card, and everywhere else
+# that frame is one 15fps tick before the build starts.
+# It also does not loop. A build repeating forever in an inbox is irritating;
+# this plays once and rests on the finished card.
+if [ "$EMAIL" -eq 1 ]; then
+  echo "Building email GIF (Outlook-safe first frame, no loop)..."
+  EGIF="$PIPE/03_Output/${NAME}_email.gif"
+  EW="${EMAIL_WIDTH:-600}"
+  LAST="$PIPE/03_Output/.${NAME}_last.png"
+  $FF -y -nostdin -sseof -0.2 -i "$FINAL" -frames:v 1 "$LAST" 2>/dev/null
+  $FF -y -nostdin -loop 1 -t 0.07 -i "$LAST" -i "$FINAL" -filter_complex "\
+[0:v]fps=15,scale=${EW}:-1:flags=lanczos,setsar=1[a];\
+[1:v]fps=15,scale=${EW}:-1:flags=lanczos,setsar=1[b];\
+[a][b]concat=n=2:v=1[c];[c]split[s0][s1];\
+[s0]palettegen=stats_mode=diff[p];\
+[s1][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
+    -loop -1 "$EGIF" 2>/dev/null
+  rm -f "$LAST"
+  ESIZE=$(du -k "$EGIF" | cut -f1)
+  echo "OK: $EGIF  (${ESIZE}K)"
+  [ "$ESIZE" -gt 1024 ] && echo "  WARNING: over 1MB — drop EMAIL_WIDTH or shorten the build before sending."
+fi
 
 # Only now does the concept get burned — a failed render must not consume one.
 python3 "$PLANNER" "$LAYERDIR" "$LOG" --name "$NAME" --out-path "$RAW" \
