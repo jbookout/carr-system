@@ -212,9 +212,15 @@ TERRITORY = ["pensacola","navarre","freeport","gulf shores","destin","miramar","
              "loxley","30a","niceville","gulf breeze","pace","milton","spanish fort","fairhope",
              "enterprise","ozark","chipley","marianna","defuniak"]
 
-def deal_lane(city):
-    c = s(city).lower()
-    if not c: return None                                   # unknown — never guessed
+def deal_lane(deal):
+    """Prefer Salesforce's own Out-of-Market flag (written into the JSON as `lane`
+    by diff-salesforce-deals.py). Fall back to the city heuristic only for a deal
+    that has never been through a Salesforce read; a blank city stays unknown
+    rather than being guessed into a lane."""
+    lane = s(deal.get("lane")).lower()
+    if lane in ("territory", "national"): return lane
+    c = s(deal.get("city")).lower()
+    if not c: return None
     return "territory" if any(t in c for t in TERRITORY) else "national"
 
 deal_taken = set()
@@ -222,7 +228,7 @@ for d in deals:
     node = slug(s(d.get("name")) or s(d.get("company")), deal_taken, s(d.get("txn")))
     phase = s(d.get("phase")).lower()
     tags = ["deal", "won" if "closed" in phase or "won" in phase else ("cold" if "pending" in phase else "active")]
-    lane = deal_lane(d.get("city"))
+    lane = deal_lane(d)
     tags.append({"territory":"deal-territory", "national":"deal-national"}.get(lane, "deal-unclassified"))
     vt = vert_tag(s(d.get("seg"))+" "+s(d.get("ptype")))
     if vt: tags.append(vt)
