@@ -47,14 +47,40 @@ def money(s):
 if not os.path.exists(TSV):
     sys.exit(f"No capture found at {TSV}\nRun the browser capture first — see DNA/Deal Management/salesforce-read-sop.md")
 
+# The capture step (pipelines/capture-salesforce-report.js) emits Salesforce's own column
+# headers; a hand-built TSV uses the short names. Accept either, so the two halves of this
+# workflow actually plug together no matter which produced the file.
+ALIAS = {
+    "deal name": "deal_name", "company name": "company", "deal owner": "owner",
+    "total commission": "commission", "city of transaction": "city",
+    "state of transaction": "state", "out of market deal": "oom",
+    "out of market deal type": "oom_type", "phase": "phase", "close date": "close_date",
+    "primary contact": "contact", "transaction type": "txn",
+}
+def colname(h):
+    h = h.strip()
+    return ALIAS.get(h.lower(), h.lower().replace(" ", "_"))
+
 rows, hdr = [], None
 for line in open(TSV, encoding="utf-8"):
     line = line.rstrip("\n")
     if not line.strip() or line.lstrip().startswith("#"): continue
     parts = line.split("\t")
     if hdr is None:
-        hdr = [p.strip() for p in parts]; continue
+        hdr = [colname(p) for p in parts]; continue
     rows.append(dict(zip(hdr, [p.strip() for p in parts])))
+
+# Salesforce renders the Out-of-Market checkbox as prose; normalise to the N/T the rest
+# of this script (and the graph's lane tags) speak.
+for r in rows:
+    v = (r.get("oom") or "").strip().lower()
+    if "not included" in v: r["oom"] = "T"
+    elif "included" in v:   r["oom"] = "N"
+    r.setdefault("deal_name", ""); r.setdefault("company", "")
+    for k in ("city", "state", "phase", "commission", "owner", "oom_type", "close_date"):
+        r.setdefault(k, "")
+    if r.get("owner", "").startswith("Wayne"): r["owner"] = "Dell"
+rows = [r for r in rows if r.get("deal_name")]     # drops Salesforce's grand-total row
 
 # ---------- load the Deal Room JSON ----------
 data  = json.load(open(JSON, encoding="utf-8"))
