@@ -120,8 +120,13 @@ lead_by_name = {s(l.get("Contact Name")).lower(): l for l in leads if s(l.get("C
 # prospecting drip, so CARR is emailing "ever considered real estate?" to someone
 # mid-transaction. Session 1 caught this on one client by hand; the check found
 # six. Ranked above the generic duplicate because it is actively going out.
-LIVE = ("closing", "pending", "research", "negotiation", "legal", "due diligence",
-        "won", "active")
+# LATE stages only. The first version included "research" and "pending", which
+# flagged early-stage prospects as live clients and inflated a 2-case problem into
+# a 6-case one (Joe caught it: "none of those are even under contract"). A monthly
+# newsletter reaching someone at Research or Pending is not a defect — that is what
+# nurture is for. It is a defect once they are under contract.
+LIVE = ("closing", "legal", "due diligence", "negotiation", "negotiating",
+        "won", "active client")
 for c in clients:
     nm, st = s(c.get("Name")).lower(), s(c.get("Status"))
     l = lead_by_name.get(nm)
