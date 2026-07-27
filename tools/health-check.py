@@ -37,7 +37,11 @@ WATCH = [
     ("Pre-entity watch",  "Automation/pre-entity-watch.json", 9, [],
      "corroborate.py rides the Monday radar run"),
     ("DSO matches",       "Automation/dso-matches.json", 100, [],
-     "dso-match.py, event-driven vs quarterly source refresh; board ingests it (corrective 2026-07-25)"),
+     "dso-match.py, event-driven vs quarterly source refresh. CORRECTED 2026-07-27: the "
+     "note here used to claim 'board ingests it' — it does NOT. Nothing reads this file. "
+     "build-lead-board.py derives its DSO Associate count from the router's SEGMENT string, "
+     "not from these matches. Wiring it in is open work; until then this row only proves the "
+     "file is fresh, never that it reaches a surface."),
     ("Relocating owners", "Automation/relocating-owner-leads.json", 100, [],
      "FL DOR x out-of-state DOH join, quarterly-ish; board ingests it (corrective 2026-07-25)"),
     ("National accounts", "DNA/Team/national-accounts.json", None,  [],
