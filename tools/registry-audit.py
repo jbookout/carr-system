@@ -249,6 +249,31 @@ for src, lid, label in pointers:
         ok("%s -> %s resolves" % (src, lid))
 
 print()
+
+# ---------------------------------------------------------------- 6 detail files
+
+print("[6] detail file paths")
+# The July 11 refactor moved every dossier from top-level Prospects/ to
+# DNA/Clients/prospects/. Eight rows (L-001 … L-008, the oldest and most-worked
+# leads in the system) still carried the old path 16 days later, and nothing said
+# so. A pointer that names a file is worth exactly as much as the file existing.
+checked = broken = prose = 0
+for n in sorted(rows):
+    df = _s(rows[n].get("Detail File"))
+    if not df:
+        continue
+    # Some rows use this column for a narrative note rather than a path. That is
+    # pre-existing convention, not a defect; count it and move on.
+    if "/" not in df or len(df) > 160 or " " in df.split("/")[0]:
+        prose += 1
+        continue
+    checked += 1
+    if not os.path.exists(os.path.join(ROOT, df)):
+        broken += 1
+        err("%s Detail File does not exist: %s" % (fmt_id(n), df))
+if not broken:
+    ok("%d detail path(s) resolve (%d rows hold prose, not a path)" % (checked, prose))
+print()
 print("registry-audit: %d error(s), %d warning(s)" % (len(errors), len(warns)))
 wb.close()
 sys.exit(1 if errors else 0)

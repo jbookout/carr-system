@@ -25,7 +25,7 @@ WHAT IT CHECKS
 Usage:  run.sh graph-health   |   python3 pipelines/graph-health.py [VAULT] [--verbose]
 Exit 0 always — this is a report, not a gate.
 """
-import sys, os, re, json, glob
+import sys, os, re, json, glob, difflib
 from collections import defaultdict
 import openpyxl
 
@@ -139,11 +139,19 @@ for c in clients:
             f"{s(l.get('Lead ID'))} is “{s(l.get('Stage'))}” on “{drip}”. Remove from the drip.")
 
 # 4b. the generic case: same person as both a lead and a client
+# The 116 roster records Dell exported were migrated into the registry as leads on
+# 2026-07-06, so an unworked roster record having a lead row is the DESIGN, not
+# damage. Reporting all 46 at MED (35 of them that overlap) buried the handful that
+# are actually being worked as a client and a prospect at the same time — which is
+# the pair that puts a live client on a drip. Split by status. (2026-07-27)
 for c in clients:
     nm = s(c.get("Name")).lower()
     if nm and nm in lead_by_name:
-        add("MED", "Lead + client duplicate",
-            f"“{s(c.get('Name'))}” is {s(c.get('Client ID'))} (client, {s(c.get('Status'))}) "
+        st = s(c.get("Status"))
+        expected = "roster" in st.lower() and "unworked" in st.lower()
+        add("LOW" if expected else "MED",
+            "Roster/registry overlap (expected)" if expected else "Lead + client duplicate",
+            f"“{s(c.get('Name'))}” is {s(c.get('Client ID'))} (client, {st}) "
             f"AND {s(lead_by_name[nm].get('Lead ID'))} (lead)")
 
 # 4c. the same person holding TWO client IDs — pure migration damage
@@ -174,16 +182,49 @@ def name_parts(name):
     return [p for p in re.split(r"[^a-zA-Z]+", name.lower())
             if len(p) > 1 and p not in TITLES]
 
+# Words that make a local part a PRACTICE inbox rather than a person's address.
+# lillianfamilydentistry@gmail.com on a row named Arielle Spivey is the practice's
+# front desk, not a stranger. Free-provider domains hide this from the domain test.
+PRACTICE_WORD = re.compile(
+    r"dental|dentist|dds|dmd|ortho|perio|endo|smile|oral|vet|animal|paw|spay|dog|cat|"
+    r"medical|medicine|clinic|health|wellness|care|surgery|surgical|derm|cardio|ophth|"
+    r"optom|eye|vision|chiro|therapy|rehab|pediatr|family|sinus|foot|podiatr|doc\b|dr\b")
+
+
+def _fuzzy_hit(part, local):
+    """True when `part` appears in `local` with at most one character of slop.
+
+    Covers the whole spelling-variant family: bcombes/Combs, dtherdon/Herndon,
+    shaun@/Shuan, efaulkner/Falkner. These are one person with a typo on one side,
+    not mail going to a stranger, and calling them HIGH is what buried the real ones.
+    """
+    if len(part) < 4:
+        return False
+    for w in (len(part) - 1, len(part), len(part) + 1):
+        for i in range(0, max(1, len(local) - w + 1)):
+            win = local[i:i + w]
+            if not win:
+                continue
+            if difflib.SequenceMatcher(None, part, win).ratio() >= (1 - 1.0 / len(part)):
+                return True
+    return False
+
+
 def email_check(label, name, email, ident, company=""):
     """Flag only when the address plausibly belongs to SOMEONE ELSE.
 
     Real addresses take many shapes and none of them are a token match:
       nileshpatel@   (concatenated)   jholder@  (initial+surname)
       hicksc@        (surname+initial) c.busby@ (initial.surname)
-    Flagging those produced 207 false positives on the first run. Only report when
-    no part of the person's name appears in the local part in ANY of those forms —
-    which is what an address like rachel.noell@ on a row named Tatum Cannon looks
-    like, and that one is a real defect worth catching.
+    Flagging those produced 207 false positives on the first run, cut to 52. On
+    2026-07-27 those 52 were read one by one and roughly six were real. The other
+    four fifths were four shapes this now models, because a check that is 85% wrong
+    is worse than no check: it teaches you to skim past the ones that matter.
+
+      ljd@derosierdds.com       the DOMAIN is his own name (only the local part was read)
+      mcg@3mg.com, nak07d@me    initials, sometimes with a middle initial or credential
+      bcombes@ for "Brad Combs" a one-character spelling variant, not a stranger
+      spaymobile@gmail.com      the practice's inbox on a free provider
     """
     name, email = s(name), s(email)
     if not name or "@" not in email or PLACEHOLDER.search(name): return
@@ -191,8 +232,13 @@ def email_check(label, name, email, ident, company=""):
     if not parts: return
     local = re.sub(r"[^a-z]", "", email.split("@")[0].lower())
     if not local: return
+    domain = email.split("@")[1].lower()
+    dom = re.sub(r"[^a-z]", "", domain.split(".")[0])
+
     for p in parts:
         if p in local or local in p:                    # concatenated or truncated
+            return
+        if len(p) > 3 and p in dom:                     # his own practice domain
             return
     initials = {p[0] for p in parts}
     for p in parts:                                     # initial+surname / surname+initial
@@ -200,16 +246,47 @@ def email_check(label, name, email, ident, company=""):
                               local.startswith(i + p) or local.startswith(p + i)
                               for i in initials):
             return
-    # A shared inbox (southwoodconst@, terraequities@, monarchbc@) is not a defect —
-    # it is how small firms operate. If the local part echoes the company or the
-    # domain, treat it as a generic address and note it separately.
+    # Initials-only, in name order, optionally trailed by a credential or digits:
+    # mcg@3mg.com, gwgdmd@knology.net, msidpm@footdoctors.org, nak07d@me.com.
+    if len(parts) >= 2:
+        ini = "".join(p[0] for p in parts)
+        if local.startswith(ini) and len(ini) >= 2:
+            return
+
     org = re.sub(r"[^a-z]", "", (company or "").lower())
-    dom = re.sub(r"[^a-z]", "", email.split("@")[1].split(".")[0].lower())
     generic = (org and (local in org or org.startswith(local) or local.startswith(org[:6]))) \
               or (dom and (local in dom or dom.startswith(local)))
     if generic:
         add("LOW", "Shared/company inbox, not a personal address",
             f"{label} {ident}: “{name}” → {email}")
+        return
+    if PRACTICE_WORD.search(local):
+        add("LOW", "Practice inbox, not a personal address",
+            f"{label} {ident}: “{name}” → {email} — reaches the front desk, fine to use, "
+            f"but it is not a private line to the decision-maker")
+        return
+    # Initials WITH a middle initial (mcg@ for Mike Garver, nak07d@ for Nathan
+    # Kupperman, msidpm@ for Mark Isenberg). Short local part, opens on the first
+    # name's initial, carries the surname's initial. Kept visible but not HIGH:
+    # it is a plausible reading, not a proven one, so a human confirms before sending.
+    run = re.match(r"[a-z]+", local).group(0)
+    if len(parts) >= 2 and len(run) <= 6 and run[0] == parts[0][0] and parts[-1][0] in run[1:]:
+        add("MED", "Initials, verify before sending",
+            f"{label} {ident}: “{name}” → {email} — reads as their initials. Confirm once, "
+            f"then it is fine.")
+        return
+    # Truncated surname (simmoag@ for Andrew Simmons, jdkinanniston@ for John Kasper).
+    for p in parts:
+        if len(p) >= 5 and local.startswith(p[:5]):
+            add("MED", "Initials, verify before sending",
+                f"{label} {ident}: “{name}” → {email} — surname truncated in the address. "
+                f"Confirm once, then it is fine.")
+            return
+
+    if any(_fuzzy_hit(p, local) for p in parts):
+        add("MED", "Name/email spelling variant",
+            f"{label} {ident}: “{name}” vs {email} — same person, one of the two is "
+            f"misspelled. Fix the record; do not treat as a wrong recipient.")
         return
     add("HIGH", "Name vs email disagree",
         f"{label} {ident}: “{name}” but address is {email} — mail may reach a different person")

@@ -248,5 +248,47 @@ def append_rows(path, records, source, notes, tag="intake"):
     return ids, bpath, delta
 
 
+def edit_rows(path, edits, tag, log=None):
+    """Change fields on existing rows. `edits` is {lead_id: {column: value}}.
+
+    Refuses to touch Lead ID at all, and the usual invariants still run on save, so
+    an edit cannot quietly turn one person's row into another's. Returns the count.
+
+    `log` is an optional Intake Log note; pass one when the edit is a repair worth
+    a ledger line, omit it for routine field maintenance.
+    """
+    wb, ws, colmap = open_registry(path)
+    before = snapshot(ws, colmap)
+
+    if any("Lead ID" in ch for ch in edits.values()):
+        raise SystemExit("REFUSED: edit_rows may not change a Lead ID. Nothing was saved.")
+
+    want = {id_num(k) for k in edits}
+    missing = sorted(want - set(before))
+    if missing:
+        raise SystemExit("REFUSED: no such row(s): %s. Nothing was saved."
+                         % [fmt_id(n) for n in missing])
+
+    touched = 0
+    for row in ws.iter_rows(min_row=2):
+        n = id_num(row[colmap["Lead ID"] - 1].value)
+        if n is None or n not in want:
+            continue
+        ch = edits.get(fmt_id(n)) or edits.get("L-%d" % n) or {}
+        unknown = [k for k in ch if k not in colmap]
+        if unknown:
+            raise SystemExit("SCHEMA HALT [%s]: unknown column(s) %s. Nothing was saved."
+                             % (path, unknown))
+        for k, v in ch.items():
+            row[colmap[k] - 1].value = v
+        touched += 1
+
+    if log:
+        span = ", ".join(sorted(edits))
+        log_intake(wb, datetime.date.today().isoformat(), "Registry edit", touched, span, log)
+    bpath, _ = write_guarded(path, wb, ws, before, tag)
+    return touched, bpath
+
+
 if __name__ == "__main__":
     print(__doc__)
