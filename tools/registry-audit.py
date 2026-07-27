@@ -189,6 +189,17 @@ else:
                 continue
             now = (_s(rows[n].get("Contact Name")), _s(rows[n].get("Practice")))
             if was != now and not tokens(*was) & tokens(*now):
+                # A name can be legitimately corrected — a row whose Contact Name
+                # held a referrer note, a misspelling, a married name. The writer
+                # requires an explicit reason for that (registry.allow_occupant),
+                # and the convention is to stamp NAME-FIXED in the row's Notes.
+                # Honour that stamp: a change the record itself explains is not
+                # drift, and a check that nags about a documented fix forever is
+                # a check people learn to ignore.
+                if "NAME-FIXED" in _s(rows[n].get("Notes")).upper():
+                    ok("%s name corrected on purpose (NAME-FIXED stamp present): "
+                       "%s -> %s" % (fmt_id(n), was[0] or "(blank)", now[0] or "(blank)"))
+                    continue
                 err("%s changed occupant: was %s / %s, now %s / %s"
                     % (fmt_id(n), was[0] or "(blank)", was[1] or "(blank)",
                        now[0] or "(blank)", now[1] or "(blank)"))

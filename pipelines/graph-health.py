@@ -129,14 +129,23 @@ LIVE = ("closing", "legal", "due diligence", "negotiation", "negotiating",
         "won", "active client")
 for c in clients:
     nm, st = s(c.get("Name")).lower(), s(c.get("Status"))
+    if st.lower().startswith("merged into"):
+        continue
     l = lead_by_name.get(nm)
     if not l or not any(k in st.lower() for k in LIVE):
         continue
+    # A client under contract should still HEAR from CARR — going silent the moment
+    # someone hires you is its own mistake. Joe's call, 2026-07-27: they come off the
+    # prospecting lane and onto "Client Care (post-close)". So the defect is being on
+    # a PROSPECTING drip, not being on a drip. (Config tab holds the lane vocabulary.)
     drip = s(l.get("Drip Campaign"))
-    if drip or "drip" in s(l.get("Stage")).lower():
+    CLIENT_LANES = ("client care",)
+    prospecting = drip and not any(k in drip.lower() for k in CLIENT_LANES)
+    if prospecting or (not drip and "drip" in s(l.get("Stage")).lower()):
         add("HIGH", "LIVE CLIENT ON A PROSPECTING DRIP",
             f"{s(c.get('Name'))} — {s(c.get('Client ID'))} is “{st}” but lead "
-            f"{s(l.get('Lead ID'))} is “{s(l.get('Stage'))}” on “{drip}”. Remove from the drip.")
+            f"{s(l.get('Lead ID'))} is “{s(l.get('Stage'))}” on “{drip}”. "
+            f"Move to “Client Care (post-close)”, do not just remove them.")
 
 # 4b. the generic case: same person as both a lead and a client
 # The 116 roster records Dell exported were migrated into the registry as leads on
@@ -146,22 +155,49 @@ for c in clients:
 # the pair that puts a live client on a drip. Split by status. (2026-07-27)
 for c in clients:
     nm = s(c.get("Name")).lower()
+    st = s(c.get("Status"))
+    if st.lower().startswith("merged into"):
+        continue          # a tombstone is a resolved duplicate, not an open one
     if nm and nm in lead_by_name:
-        st = s(c.get("Status"))
         expected = "roster" in st.lower() and "unworked" in st.lower()
         add("LOW" if expected else "MED",
             "Roster/registry overlap (expected)" if expected else "Lead + client duplicate",
             f"“{s(c.get('Name'))}” is {s(c.get('Client ID'))} (client, {st}) "
             f"AND {s(lead_by_name[nm].get('Lead ID'))} (lead)")
 
-# 4c. the same person holding TWO client IDs — pure migration damage
+# 4c. the same person holding TWO client IDs — pure migration damage.
+# A merged duplicate keeps its row as a TOMBSTONE (Status "Merged into C-0xx") so
+# that references written before the merge still resolve — the L-162 lesson. A
+# tombstone is a resolved duplicate, so it must not keep reporting as an open one,
+# or the check never goes quiet and stops being read. (2026-07-27)
+def _tombstoned(c):
+    return s(c.get("Status")).lower().startswith("merged into")
+
 _by = defaultdict(list)
 for c in clients:
-    if s(c.get("Name")): _by[s(c.get("Name")).lower()].append(s(c.get("Client ID")))
+    if s(c.get("Name")) and not _tombstoned(c):
+        _by[s(c.get("Name")).lower()].append(s(c.get("Client ID")))
 for nm, ids in sorted(_by.items()):
     if len(ids) > 1:
         add("HIGH", "Duplicate client record",
             f"“{nm.title()}” holds {len(ids)} client IDs: {', '.join(ids)} — merge to one")
+
+# Near-duplicate names the exact match cannot see. "Dr Jordan Rigsby" and "Jordan
+# Rigsby" were two records for one man and 4c was blind to both of them, so the
+# merge pass found a third Rigsby row the check had never reported.
+_seen = [(s(c.get("Name")), s(c.get("Client ID"))) for c in clients
+         if s(c.get("Name")) and not _tombstoned(c)]
+_DROP = {"dr", "mr", "mrs", "ms", "dds", "dmd", "md", "do", "jr", "sr", "ii", "iii",
+         "cpa", "esq", "phd", "rn", "np", "pa", "fnp", "otr", "the", "and"}
+_norm = lambda n: " ".join(sorted(p for p in re.split(r"[^a-zA-Z]+", n.lower())
+                                  if len(p) > 1 and p not in _DROP))
+_near = defaultdict(list)
+for nm, cid in _seen:
+    if _norm(nm): _near[_norm(nm)].append(f"{nm} ({cid})")
+for key, who in sorted(_near.items()):
+    if len(who) > 1 and len({w.split(" (")[0].lower() for w in who}) > 1:
+        add("HIGH", "Near-duplicate client name",
+            f"{' and '.join(who)} normalise to the same person — confirm and merge")
 
 # ---------- 5: missing source ----------
 no_src = [s(l.get("Lead ID")) for l in leads
@@ -210,7 +246,7 @@ def _fuzzy_hit(part, local):
     return False
 
 
-def email_check(label, name, email, ident, company=""):
+def email_check(label, name, email, ident, company="", notes=""):
     """Flag only when the address plausibly belongs to SOMEONE ELSE.
 
     Real addresses take many shapes and none of them are a token match:
@@ -228,6 +264,24 @@ def email_check(label, name, email, ident, company=""):
     """
     name, email = s(name), s(email)
     if not name or "@" not in email or PLACEHOLDER.search(name): return
+
+    # Triage stamps written into the row by the 2026-07-27 name/email pass. A row a
+    # human has already ruled on is not an open finding. Suppressing the resolved
+    # ones and demoting the known-bad ones is what keeps HIGH meaning "nobody has
+    # looked at this yet", which is the only thing that makes HIGH worth reading.
+    up = s(notes).upper()
+    if "EMAIL-OK" in up:
+        return
+    if "EMAIL-DEAD" in up:
+        add("MED", "Email domain is dead, needs a new address",
+            f"{label} {ident}: “{name}” → {email} — domain has no MX and no A. "
+            f"Already triaged; it needs a replacement address, not a second look.")
+        return
+    if "EMAIL-UNVERIFIED" in up:
+        add("MED", "Email flagged DO NOT SEND, awaiting confirmation",
+            f"{label} {ident}: “{name}” → {email} — already triaged and blocked from "
+            f"sending. Clears when someone confirms the address by phone or first contact.")
+        return
     parts = name_parts(name)
     if not parts: return
     local = re.sub(r"[^a-z]", "", email.split("@")[0].lower())
@@ -291,9 +345,9 @@ def email_check(label, name, email, ident, company=""):
     add("HIGH", "Name vs email disagree",
         f"{label} {ident}: “{name}” but address is {email} — mail may reach a different person")
 
-for v in vendors: email_check("vendor", v.get("Name"), v.get("Email"), s(v.get("ID")), s(v.get("Company")))
-for l in leads:   email_check("lead",   l.get("Contact Name"), l.get("Email"), s(l.get("Lead ID")), s(l.get("Practice")))
-for c in clients: email_check("client", c.get("Name"), c.get("Email"), s(c.get("Client ID")), s(c.get("Practice / Entity")))
+for v in vendors: email_check("vendor", v.get("Name"), v.get("Email"), s(v.get("ID")), s(v.get("Company")), s(v.get("Notes")))
+for l in leads:   email_check("lead",   l.get("Contact Name"), l.get("Email"), s(l.get("Lead ID")), s(l.get("Practice")), s(l.get("Notes")))
+for c in clients: email_check("client", c.get("Name"), c.get("Email"), s(c.get("Client ID")), s(c.get("Practice / Entity")), s(c.get("Notes")))
 
 # ---------- report ----------
 ORDER = {"HIGH": 0, "MED": 1, "LOW": 2}

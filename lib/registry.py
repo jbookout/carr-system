@@ -161,7 +161,7 @@ def backup(path, tag):
     return dest
 
 
-def write_guarded(path, wb, ws, before, tag):
+def write_guarded(path, wb, ws, before, tag, allow_occupant=None):
     """Run the invariants, back up, then save. The only sanctioned save.
 
     `before` is the snapshot() taken before the caller touched anything.
@@ -171,7 +171,13 @@ def write_guarded(path, wb, ws, before, tag):
       - a pre-existing ID whose occupant changed (#101)
       - a duplicate ID
       - a retired ID brought back to life
+
+    `allow_occupant` is {lead_id: reason} for the legitimate case: correcting a
+    name that was wrong in the first place. It is deliberately not a flag. Naming
+    the row AND writing the reason is the whole safeguard, and the reason is
+    echoed on stdout so the exception is visible in the run, not buried.
     """
+    allowed = {id_num(k): v for k, v in (allow_occupant or {}).items()}
     assert_columns(ws, path)
     after = snapshot(ws, colmap=assert_columns(ws, path))
 
@@ -183,7 +189,13 @@ def write_guarded(path, wb, ws, before, tag):
             % (len(vanished), [fmt_id(n) for n in vanished])
         )
 
-    stolen = [n for n in before if n in after and after[n] != before[n]]
+    stolen = [n for n in before if n in after and after[n] != before[n]
+              and n not in allowed]
+    for n in sorted(set(allowed) & set(before)):
+        if after.get(n) != before[n]:
+            print("  occupant change ALLOWED on %s: %s / %s -> %s / %s — %s"
+                  % (fmt_id(n), before[n][0] or "(blank)", before[n][1] or "(blank)",
+                     after[n][0] or "(blank)", after[n][1] or "(blank)", allowed[n]))
     if stolen:
         detail = "; ".join(
             "%s was %s / %s, would become %s / %s"
@@ -248,7 +260,7 @@ def append_rows(path, records, source, notes, tag="intake"):
     return ids, bpath, delta
 
 
-def edit_rows(path, edits, tag, log=None):
+def edit_rows(path, edits, tag, log=None, allow_occupant=None):
     """Change fields on existing rows. `edits` is {lead_id: {column: value}}.
 
     Refuses to touch Lead ID at all, and the usual invariants still run on save, so
@@ -286,7 +298,7 @@ def edit_rows(path, edits, tag, log=None):
     if log:
         span = ", ".join(sorted(edits))
         log_intake(wb, datetime.date.today().isoformat(), "Registry edit", touched, span, log)
-    bpath, _ = write_guarded(path, wb, ws, before, tag)
+    bpath, _ = write_guarded(path, wb, ws, before, tag, allow_occupant=allow_occupant)
     return touched, bpath
 
 

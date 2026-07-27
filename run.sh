@@ -28,6 +28,7 @@ graph_health() { shift; python3 "$REPO/pipelines/graph-health.py" "$VAULT" "$@";
 sf_diff()      { shift; python3 "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }
 section_index(){ python3 "$REPO/pipelines/build-section-index.py" "$VAULT"; }
 registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" "$@"; }
+verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" "$@"; }
 
 case "${1:-}" in
   deal-room)    deal_room ;;
@@ -43,9 +44,10 @@ case "${1:-}" in
   salesforce-diff) sf_diff "$@" ;;
   section-index) section_index ;;
   registry-audit) registry_audit "$@" ;;
+  verify-emails) verify_emails "$@" ;;
   retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|check"; exit 2 ;;
 esac
