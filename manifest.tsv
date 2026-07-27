@@ -25,6 +25,11 @@ shared/fill-engine/fill_deal_template.py	DNA/Deal Management/fill-engine/fill_de
 # bin/launch-automation-chrome.sh DELETED 2026-07-25 (orphaned Firefly launcher; the lane was demoted Jul 18 and its companion firefly_receiver.py never lived here). Vault copy retired to _to_delete/.
 bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
 # build-section-index.py is repo-only (no vault copy; the vault holds its OUTPUT in Automation/section-index.tsv)
+# lib/registry.py and tools/registry-audit.py are repo-only (2026-07-27). PLACEMENT TEST:
+#   registry.py is the sanctioned WRITE api for lead-registry.xlsx and registry-audit.py is its
+#   checker. Both are invoked by local Claude Code sessions (run.sh registry-audit, check.sh);
+#   Dell's side and the cloud sessions never write the registry directly, so a vault copy would
+#   be a second unguarded path to the exact file this is meant to protect. Repo only, on purpose.
 # tools/retrieve.py is repo-only (reads the derived index; sessions call it via run.sh retrieve)
 # tools/writing-lint.py is repo-only FOR NOW (2026-07-25). It enforces a SHARED-tier doctrine
 #   file (DNA/writing-rules.md), so Dell's side would benefit from a vault copy — but adding a

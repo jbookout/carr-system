@@ -92,4 +92,14 @@ if [ -f "$REPO/baselines/writing-lint.txt" ]; then
 else
   echo "  MISSING writing-lint baseline — run tools/writing-lint-baseline.sh"; rc=1
 fi
+
+# Registry integrity (2026-07-27). Both of that day's defects — lane 3's columns dropped
+# (#100) and L-164/165/166 reassigned on top of live rows (#101) — ran for weeks behind a
+# clean-looking weekly digest because nothing resolved a pointer end to end. This does.
+echo "== Registry integrity (pointer rot, occupant drift, schema, ledger) =="
+if CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" >/dev/null 2>&1; then
+  echo "  OK      lead-registry (every pointer resolves)"
+else
+  echo "  BROKEN  lead-registry — run: ./run.sh registry-audit"; rc=1
+fi
 exit $rc
