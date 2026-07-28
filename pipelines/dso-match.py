@@ -76,8 +76,27 @@ CORP_DOMAIN = re.compile(r"@(aspendental|heartland|pacificdental|smilebrands|sag
                          r"mydermspecialists)", re.I)
 OWNER_SEG = "PRACTICE OWNER (Sunbiz-confirmed)"
 
+# Vertical guard (added 2026-07-27 after the first live run put a PODIATRIST inside
+# Heartland Dental). norm() strips suite numbers, so two separate tenants of one
+# building collapse onto a single street address — the dentist really is Heartland's,
+# the podiatrist down the hall is not. 12 of the first 103 matches were this. A
+# provider whose profession cannot plausibly work for the brand's vertical is not a
+# match; it is evidence the address is shared.
+VERT_OK = {
+    "dental":      ("dent",),
+    "veterinary":  ("vet",),
+    "optometry":   ("optom", "ophthal", "optic"),
+    # derm groups genuinely employ MDs, DOs, APRNs and PAs, so this one is broad
+    "dermatology": ("medical doctor", "osteopathic", "physician", "aprn", "nurse",
+                    "derm", "assistant"),
+}
+def vertical_ok(prof, vert):
+    p = str(prof or "").lower()
+    keys = VERT_OK.get(vert)
+    return True if not keys else any(k in p for k in keys)
+
 rows = list(data_rows(ws))
-out, density = [], defaultdict(list)
+out, density, shared = [], defaultdict(list), []
 for r in rows:
     if not r[c["Name"]] or not r[c["Practice Address"]]: continue
     key = norm(r[c["Practice Address"]])
@@ -86,6 +105,14 @@ for r in rows:
     if not t: continue
     brand, vert = t
     seg = str(r[c["SEGMENT"]] or "")
+    if not vertical_ok(r[c["Profession"]], vert):
+        # kept, but OFF the board: it is a shared-address signal, not an employee
+        shared.append({"name": str(r[c["Name"]]), "prof": str(r[c["Profession"]] or ""),
+                       "brand": brand, "vertical": vert, "addr": str(r[c["Practice Address"]]),
+                       "city": str(r[c["City"]] or ""),
+                       "why": "profession incompatible with the brand's vertical — the address is "
+                              "almost certainly shared between separate tenants"})
+        continue
     email = str(r[c["Email"]] or "")
     own = OWNERSHIP.get(brand, "unclassified")
 
@@ -117,11 +144,14 @@ unmatched = [{"addr": k[0], "city": k[1], "providers": len(v),
 
 json.dump(out, open(os.path.join(ROOT, "Automation", "dso-matches.json"), "w"), indent=1)
 json.dump(unmatched, open(os.path.join(ROOT, "Automation", "dso-density-candidates.json"), "w"), indent=1)
+json.dump(shared, open(os.path.join(ROOT, "Automation", "dso-shared-address-flags.json"), "w"), indent=1)
 
 assoc = [x for x in out if x["class"] == "dso-associate"]
 print(f"source: {os.path.basename(src)} | {len(targets)} corporate addresses | {len(rows)} providers")
 print(f"matched: {len(out)}  ->  {len(assoc)} associates, {len(out)-len(assoc)} owners-at-corporate (review)")
 for b, n in Counter(x["brand"] for x in out).most_common(): print(f"  {n:4}  {b}")
 print("confidence: " + ", ".join(f"{k}={v}" for k, v in Counter(x['confidence'] for x in assoc).most_common()))
+print(f"vertical guard dropped {len(shared)} shared-address false positives "
+      f"(-> dso-shared-address-flags.json)")
 print(f"wrote Automation/dso-matches.json + dso-density-candidates.json "
       f"({len(unmatched)} dense unmatched addresses for brand research)")

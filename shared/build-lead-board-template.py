@@ -20,7 +20,7 @@ Writes:
 Then: update the `the-lead-board` artifact from that file if the desktop app is
 connected (update_artifact); otherwise note it and move on. The file is the record.
 """
-import sys, os, glob, json
+import sys, os, glob, json, re
 from collections import Counter
 from datetime import datetime, date
 import openpyxl
@@ -56,7 +56,7 @@ SEG_ORDER = [
  ("\U0001F3AF PRACTICE RIPE FOR SALE","Ripe for Sale","refer to practice brokers","hot"),
  ("⭐⭐ POST-SALE FOUNDER (owns nothing)","Post-Sale Founder","the hottest class","hot"),
  ("⭐ ASSOCIATE — going-independent window","Associate in Window","2-5 yr nurture","warm"),
- ("⭐ DSO ASSOCIATE (email domain proves it)","DSO Associate","nurture now","warm"),
+ ("⭐ DSO ASSOCIATE — corporate clinic address","DSO Associate","nurture now","warm"),
  ("PRACTICE OWNER (Sunbiz-confirmed)","Practice Owner","expansion / buy-vs-lease","warm"),
  ("🏢 OWNER-OCCUPIER — 2nd location","Owner-Occupier","owns the building · 2nd location","warm"),
  ("SOLO — owner not yet confirmed","Solo, Unconfirmed","confirm on Sunbiz","early"),
@@ -107,6 +107,51 @@ def load_registry(path):
 
 router_path = latest_router()
 L, segPlay = load_router(router_path)
+
+# DSO / corporate-associate re-segmentation (2026-07-27, Joe: "seems highly unlikely
+# that there is only one"). The board used to derive its DSO count from the router's
+# SEGMENT string alone, which labelled a provider a DSO associate ONLY when their email
+# carried a corporate domain — true of 3 rows in 9,320, so the board showed exactly ONE.
+# dso-match.py now identifies them by PRACTICE ADDRESS against the corporate-locations
+# file, and this is the wiring that was never built: nothing read dso-matches.json.
+# These are router rows being RE-SEGMENTED, not appended, so the total lead count is
+# unchanged and nobody is double-counted. Only class == "dso-associate" moves; the
+# owner-at-corporate-address REVIEW rows deliberately keep their existing segment,
+# because calling a Sunbiz-confirmed owner an associate inverts the lead.
+dso_path = os.path.join(AUTO, "dso-matches.json")
+dso_n = 0
+if os.path.exists(dso_path):
+    DSO_SEG = "⭐ DSO ASSOCIATE — corporate clinic address"
+    # The old label said "(email domain proves it)". That is no longer how these are
+    # found, and it was the sentence that hid the bug — it read as a proof when it was
+    # a filter that caught 3 rows in 9,320. Any router row still carrying the old
+    # string is remapped so the rename does not orphan it out of SEG_ORDER.
+    OLD_DSO_SEG = "⭐ DSO ASSOCIATE (email domain proves it)"
+    for lead in L:
+        if lead["s"] == OLD_DSO_SEG: lead["s"] = DSO_SEG
+    if OLD_DSO_SEG in segPlay: segPlay[DSO_SEG] = segPlay.pop(OLD_DSO_SEG)
+    def _k(n, a):
+        return (re.sub(r"[^A-Z0-9]", "", str(n or "").upper()),
+                re.sub(r"[^A-Z0-9]", "", str(a or "").upper()))
+    dso_by = {}
+    for x in json.load(open(dso_path)):
+        if x.get("class") != "dso-associate": continue
+        dso_by[_k(x.get("name"), x.get("addr"))] = x
+    for lead in L:
+        m = dso_by.get(_k(lead["n"], lead["ad"]))
+        if not m: continue
+        lead["s"] = DSO_SEG
+        lead["conf"] = m.get("confidence", "")
+        lead["brand"] = m.get("brand", "")
+        dso_n += 1
+    if dso_n:
+        segPlay[DSO_SEG] = ("Providers whose PRACTICE ADDRESS matches a known corporate/DSO clinic, so "
+                            "they are working for the group rather than owning their own shop. Nurture "
+                            "now: the going-independent conversation is the opening. CONFIDENCE: HIGH = "
+                            "corporate email domain corroborates the address; MEDIUM = address match at a "
+                            "corporate or PE-backed brand; LOW = the brand is a physician-owned MSO or "
+                            "partner-equity group, where employment is likelier than ownership but not "
+                            "proven — verify before working a LOW. Source: dso-matches.json.")
 # Entity-formation feed (the corp-filings lane output: new territory business filings,
 # FL Sunbiz + AL SOS — the leads the licensure-based router structurally misses).
 ef_path = os.path.join(AUTO, "entity-formation-leads.json")
