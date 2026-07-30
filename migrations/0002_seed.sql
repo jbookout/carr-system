@@ -77,4 +77,8 @@ insert into system_config (key, value, note) values
   ('export.deadman_hours', '26',
    'Digest alarms on any export target with no ok run in this many hours (A8).'),
   ('ingest.max_payload_bytes', '1048576',
-   'INITIAL 1 MiB. Ingest socket rejects larger payloads (A11); attachments go to R2, not the socket.');
+   'INITIAL 1 MiB. Ingest socket rejects larger payloads (A11); attachments go to R2, not the socket.'),
+  ('api.monthly_spend_cap_usd', 'null',
+   'REQUIRED FROM JOE before the first cron job runs. Cron jobs REFUSE to start while this is null: a missing cap fails loud, never silently unlimited. (Adopted 7/30, idea-inbox one-person-ai-business filing.)'),
+  ('api.quote_before_execute_usd', '5',
+   'INITIAL. A job whose estimated model cost exceeds this asks before running; per-job usage lands in the nightly digest.');
