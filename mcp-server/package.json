@@ -1,0 +1,19 @@
+{
+  "name": "mcp-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "neonctl": "^2.38.5",
+    "wrangler": "^4.115.0"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0"
+  }
+}
