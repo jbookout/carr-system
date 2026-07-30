@@ -64,7 +64,7 @@ def build_registry(tmp_path, cur):
 ROSTER_REL = "DNA/Clients/client-roster.xlsx"
 ROSTER_COLS = ["Client ID", "Name", "Practice / Entity", "Owner", "Status", "Specialty / Type",
                "Market / Location", "Deal Type", "Referral Source", "Contact", "Phone", "Email",
-               "Possible Duplicate Of", "Detail File"]
+               "Possible Duplicate Of", "Detail File", "Notes"]
 
 
 def build_roster(tmp_path, cur):
@@ -115,11 +115,17 @@ def build_deals(tmp_path, cur):
     for r in cur.fetchall():
         row = dict(zip(cols, r))
         legacy = row.get("source_row") or {}
-        # mapped fields win; unmapped legacy JSON fields pass through verbatim
+        # FIDELITY RULE (reconciliation round 2): legacy passthrough wins for
+        # vocabulary-rich fields (txn, carr) the DB normalizes internally;
+        # DB values win for fields it actively owns (name, phase, owner, seg)
+        # — those now render display-faithfully (phase label, initcap owner).
         legacy.update({
-            "name": row["name"], "phase": row["phase"], "owner": row["owner"],
-            "txn": row["deal_type"], "seg": row["segment"],
-            "carr": row["PLACEHOLDER_sf_commission_never_sum"],
+            "name": row["name"], "phase": row["phase"],
+            "owner": row["owner"] or legacy.get("owner"),
+            "txn": legacy["txn"] if "txn" in legacy else row["deal_type"],
+            "seg": legacy["seg"] if "seg" in legacy else row["segment"],
+            "carr": legacy.get("carr") if legacy.get("carr") is not None
+                    else row["PLACEHOLDER_sf_commission_never_sum"],
         })
         deals.append(legacy)
     doc = {
