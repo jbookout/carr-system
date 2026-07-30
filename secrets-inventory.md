@@ -36,7 +36,7 @@
 | Cloudflare: Worker OAuth (IdP) | n/a (auth layer) | allow-list of exactly TWO identities (joe, dell) | Worker config | token issuance rejects everyone else (A10); short access, long refresh |
 | Cloudflare: R2 keys | WRITE (objects) | attachments bucket | Worker secret | weekly R2 → second-store copy (attachments otherwise have zero backup) |
 | Cloudflare: 2FA recovery codes | n/a | account recovery | OFFLINE with Joe (paper/vault, not a file) | A14 |
-| age keypair (dump encryption) | n/a | decrypt pg_dumps | private key OFFLINE with Joe + one sealed copy; public key in repo | pg_dump encrypted from the FIRST dump, before any git commit (A9) |
+| age keypair (dump encryption) | n/a | decrypt pg_dumps | CREATED 7/30: private key ~/.config/carr/age-key.txt (600, local); public key in repo (backups-public-key.txt). ⏳ JOE OWES the offline copy: print/write the private key and store it sealed, then this row updates | first dump encrypted + restore-verified 7/30 (A9) |
 | Healthchecks.io ping URLs | READ-ish (pings out to the service) | dead-man checks per job | cron env | the service does the alert-sending, so the no-send rule holds (A13) |
 | ingest per-source tokens | WRITE (into inbox only) | one token per source (Notes sweep, share-sheet Shortcut, Make, MailerLite webhooks) | each sender + Worker secret | HMAC where the sender supports it; size cap; rate-limited (A11) |
 | Blotato API key (metrics scope) | READ | analytics pull for placement_metric | cron env | if Blotato has no scoped keys (TO VERIFY at signup), the metrics job holds the full key and is therefore SEND-capable: it then runs ONLY in the human-gated environment, never open cron — decide at build, do not fudge |
