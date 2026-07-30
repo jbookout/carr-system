@@ -24,6 +24,9 @@
 --   D5 building_ownership + registration.registered_with as party FK
 --      (leak guard becomes structural)
 --   D6 document factory: doc_template registry + document record
+--   I.2 record_flag: OSINT/enrichment findings as structured rows with
+--      provenance + stored "none found" (added after the 7/30-night OSINT
+--      sections landed in the addendum; trigger machinery itself is Wave 3+)
 -- Target: Postgres 16+ (Neon). Applied via versioned migrations in
 -- carr-system (migrations/0001_init.sql mirrors this file).
 --
@@ -893,6 +896,30 @@ create table ingest_inbox (
   unique (source, external_id)                      -- [A1] webhook retries dedup here;
                                                     -- the socket always returns 2xx on dup
 );
+
+-- [I.2] OSINT/enrichment findings as structured records with provenance.
+-- Creation-triggered enrichment (flood/wind zone, FDEP/EPA hits, permit
+-- history, zoning), vendor vetting (license/discipline, OSHA), client risk
+-- (board discipline, OIG exclusion), and deal-triggered dossier lines all
+-- land HERE, never as prose. "None found" is a STORED value ({"result":
+-- "none_found"}) — an absent row is never read as clean (no-fabrication).
+create table record_flag (
+  id           uuid primary key default gen_random_uuid(),
+  subject_type text not null,                       -- 'building','space','party','deal',
+                                                    -- 'vendor','client','lead'
+  subject_id   uuid not null,
+  kind         text not null,                       -- 'flood_zone','wind_zone','env_hit',
+                                                    -- 'permit_history','zoning','deed_chain',
+                                                    -- 'lien','license_status','discipline',
+                                                    -- 'oig_exclusion','osha','tax_delinquency',
+                                                    -- 'eviction_history','mortgage', ...
+  value        jsonb not null,                      -- the finding, structured
+  source       text not null,                       -- provenance on EVERY row (binding caveat)
+  observed_at  timestamptz not null default now(),
+  expires_on   date,                                -- volatile flags carry a re-verify date
+  created_by   uuid not null references actor(id)
+);
+create index record_flag_subject_idx on record_flag (subject_type, subject_id, kind);
 
 create table attachment (
   id          uuid primary key default gen_random_uuid(),
