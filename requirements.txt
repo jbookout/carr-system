@@ -3,6 +3,7 @@
 # Everything else in the repo is stdlib by design (repo convention).
 openpyxl>=3.1
 Pillow>=10.0   # used by the write-content card crop step + image handling in space-search
+psycopg[binary]>=3.2   # record layer: tools/migrate.py + (build day) the MCP server's DB path
 
 # SYSTEM (non-pip) dependencies, documented here because nowhere else was:
 #   libreoffice  — shared/fill-engine/fill_deal_template.py renders via `libreoffice --headless`
