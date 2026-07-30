@@ -32,7 +32,7 @@
 | Neon: carr_writer URL | WRITE | base tables, MCP write path only | Worker secret (wrangler) | NEVER handed to a build/chat session; sessions get branch creds |
 | Neon: carr_reader URL | READ | views only, zero base-table grants | Worker secret + cron env | the default connection for everything that reads |
 | Neon: branch creds | WRITE (branch) | rehearsal branches | issued per build session, short-lived | the ONLY creds a build session touches (A14) |
-| Neon API key | READ (control plane) | consumption polling (A13) | cron env | budget alerts at 50/80%; works while compute suspended |
+| Neon API key | READ (control plane) | consumption polling (A13) | cron env | budget alerts at 50/80%; works while compute suspended. AMENDED 7/30 (Joe): Free plan cannot pre-store a card, so card-at-upgrade IS the plan — the alert response is Joe upgrading (~2 min), documented in the vault runbook |
 | Cloudflare: Worker OAuth (IdP) | n/a (auth layer) | allow-list of exactly TWO identities (joe, dell) | Worker config | token issuance rejects everyone else (A10); short access, long refresh |
 | Cloudflare: R2 keys | WRITE (objects) | attachments bucket | Worker secret | weekly R2 → second-store copy (attachments otherwise have zero backup) |
 | Cloudflare: 2FA recovery codes | n/a | account recovery | OFFLINE with Joe (paper/vault, not a file) | A14 |
