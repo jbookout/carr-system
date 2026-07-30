@@ -27,6 +27,11 @@
 --   I.2 record_flag: OSINT/enrichment findings as structured rows with
 --      provenance + stored "none found" (added after the 7/30-night OSINT
 --      sections landed in the addendum; trigger machinery itself is Wave 3+)
+--   Joe 7/30 morning review: VENDORS PULLED INTO WAVE 1 — vendor table
+--      widened to mirror the live vendors.xlsx master (stage/owner/territory/
+--      offers/seeking/rivalry/originated/enrich/out_of_market), vendor_stage
+--      vocab table (seeded from the workbook Legend at import), party_link
+--      intro-graph edges. Brokers stay Wave 3.
 -- Target: Postgres 16+ (Neon). Applied via versioned migrations in
 -- carr-system (migrations/0001_init.sql mirrors this file).
 --
@@ -324,12 +329,37 @@ create table lead (
 create trigger lead_touch before update on lead
   for each row execute function trg_touch_row();
 
+-- [Joe 7/30 morning: VENDORS JOIN WAVE 1.] Columns below mirror the LIVE
+-- vendors.xlsx master (read 7/30: ID, Name, Company, Category, Vertical,
+-- Title, Owner, Stage, Last Touch, Next Step, Referral-active?, Territory,
+-- State, Offers, Seeking, Links, Rivalry Group, Originated/Referred, Phone,
+-- Email, Notes, Enrich?). Name/Company/Title/Phone/Email/State live on party;
+-- Next Step is a next_action; Links become party_link rows below.
+create table vendor_stage (                      -- [A6] seeded at import from the
+  slug text primary key,                         -- workbook's Legend & Schema sheet,
+  label text not null,                           -- human-reviewed — never guessed
+  sort int not null default 100
+);
+
 create table vendor (
   id          uuid primary key default gen_random_uuid(),
   vendor_ref  text unique,                       -- 'V-CPA-006' (number from ref_vendor_seq [A4])
   party_id    uuid not null references party(id),
   category    text not null,                     -- 'lender','gc','architect','equipment',...
   verticals   text[],
+  stage       text references vendor_stage(slug),-- tool-required; standing rule: a
+                                                 -- Claude-found vendor enters at the
+                                                 -- prospect-tier stage until a real call
+  owner_id    uuid references actor(id),         -- whose relationship
+  referral_active boolean,
+  territory   text,
+  offers      text,                              -- what they offer the network
+  seeking     text,                              -- what they're looking for right now
+  rivalry_group text,                            -- competitors kept apart at events
+  originated  text,                              -- who brought them in (free-form provenance)
+  enrich      boolean not null default false,    -- flagged for the enrichment interview
+  out_of_market boolean not null default false,  -- the Out of Market sheet, as a flag
+  last_touch  date,                              -- DERIVED from activity by job; kept for export
   intro_notes text,
   version     int not null default 1,            -- [A2]
   created_at  timestamptz not null default now(),
@@ -339,6 +369,24 @@ create table vendor (
 );
 create trigger vendor_touch before update on vendor
   for each row execute function trg_touch_row();
+
+-- The intro graph: the workbook's Links column as real edges. Also the home
+-- of the referral reciprocity ledger later (I.3.9) — intros SENT and RECEIVED
+-- are just kinds.
+create table party_link (
+  id          uuid primary key default gen_random_uuid(),
+  from_party  uuid not null references party(id),
+  to_party    uuid not null references party(id),
+  kind        text not null,                     -- 'can_introduce','intro_sent',
+                                                 -- 'intro_received','works_with','referred'
+  note        text,
+  source      text not null,
+  created_at  timestamptz not null default now(),
+  created_by  uuid not null references actor(id),
+  check (from_party <> to_party)
+);
+create index party_link_from_idx on party_link (from_party, kind);
+create index party_link_to_idx   on party_link (to_party, kind);
 
 -- ============================================================
 -- 3. DEALS and PARTICIPANTS (interchangeability lives here)
