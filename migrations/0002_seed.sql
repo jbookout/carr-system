@@ -78,7 +78,7 @@ insert into system_config (key, value, note) values
    'Digest alarms on any export target with no ok run in this many hours (A8).'),
   ('ingest.max_payload_bytes', '1048576',
    'INITIAL 1 MiB. Ingest socket rejects larger payloads (A11); attachments go to R2, not the socket.'),
-  ('api.monthly_spend_cap_usd', 'null',
-   'REQUIRED FROM JOE before the first cron job runs. Cron jobs REFUSE to start while this is null: a missing cap fails loud, never silently unlimited. (Adopted 7/30, idea-inbox one-person-ai-business filing.)'),
+  ('api.monthly_spend_cap_usd', '20',
+   'SET BY JOE 2026-07-30 ("$20 per month to start. i can adjust if needed"). Cron jobs refuse to start if this is ever null: a missing cap fails loud, never silently unlimited. Adjusting is one sentence, not a deploy.'),
   ('api.quote_before_execute_usd', '5',
    'INITIAL. A job whose estimated model cost exceeds this asks before running; per-job usage lands in the nightly digest.');
