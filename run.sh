@@ -48,7 +48,8 @@ case "${1:-}" in
   retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
-  migrate)      shift; python3 "$REPO/tools/migrate.py" "$@" ;;
+  migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
+  export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|migrate [--apply] [--yes]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
 esac
