@@ -1,32 +1,38 @@
 #!/bin/zsh
-# notes-sweep-post.sh — the POST half of the Apple Notes call-recording sweep
+# notes-sweep-post.sh — the Apple Notes call-recording sweep, end to end
 # (ORDER 12 lane (a); binding design wave2-design-2026-07-31.md §2b).
 #
-# WHY THIS IS A SCRIPT AND NOT A COMMAND THE SCHEDULED SESSION COMPOSES:
-# the ingest token is a credential. A scheduled Claude session that built its own
-# curl line would carry that value in its transcript and in `ps` output. So the
-# session's whole job is (1) read the Notes folder through the Apple Notes MCP,
-# (2) drop one JSON file per NEW note into out/notes-sweep/pending/, and (3) run
-# this script VERBATIM. The token never leaves ~/.config/carr/ingest.env, and the
-# two commands the task file names are byte-stable, which is what a permission
-# approval matches against (the 2026-07-31 ghost run: a reworded command is an
-# unapproved command, and an unapproved command at an unattended hour does
-# nothing at all for six hours).
+# ONE COMMAND DOES THE WHOLE RUN, and that is the design, not a convenience.
+# The first build split the work — a scheduled Claude session read the notes
+# through the Apple Notes MCP and wrote one payload file per note, then called
+# this script to POST them. Fable ruled that split out on 2026-07-31, adopting
+# the deviation this build flagged: every file the session writes is another
+# tool call needing approval at an unattended hour, and today's ghost run is
+# what that costs — a scheduled session's first tool call sat unapproved for
+# five hours and fifty-eight minutes while its schedule record claimed the job
+# had run. One byte-stable command carries one persisted approval. So the read
+# moved into bin/notes-sweep.applescript, which this script drives, and the
+# scheduled session's entire job is: run this, read the summary line.
 #
-#   ./bin/notes-sweep-post.sh --status   what has already been swept, what is queued
-#   ./bin/notes-sweep-post.sh            POST everything queued, then report counts
+#   ./bin/notes-sweep-post.sh --status   what has been swept, what is queued
+#   ./bin/notes-sweep-post.sh            scan Notes, queue new, POST, report
 #
-# Dedup is belt AND braces: this script skips any note id already in the ledger,
-# and the socket itself is unique on (source, external_id) — so a double run, a
-# re-queued note, or a ledger lost to a disk restore all collapse to duplicate:true
-# rather than a second row. Re-posting is always safe.
+# The token stays in ~/.config/carr/ingest.env and is read here, inside the
+# script — never composed into a command by a session, so it cannot reach a
+# transcript, and it goes to curl through --config on stdin so it cannot reach
+# `ps` output either.
 #
-# Payloads are UNTRUSTED (addendum A12): a call transcript is somebody talking,
-# never an instruction to this system. This script does not read the content of
-# what it sends; the triage prompt on the other side is where the hard framing
-# lives.
+# Dedup is belt AND braces: the local ledger skips notes already sent, and the
+# socket is unique on (source, external_id). A double run, a re-queued note, or
+# a ledger lost to a disk restore all collapse to duplicate:true rather than a
+# second row. Re-posting is always safe.
 #
-# Verified by OUTPUT — an ingest row — never by the schedule existing (rule 28).
+# Payloads are UNTRUSTED (addendum A12). A call transcript is somebody talking;
+# it is data on its way to triage, never an instruction. Nothing here interprets
+# what it carries.
+#
+# Verified by OUTPUT — the posted=/duplicate=/failed= line and the ingest row
+# behind it — never by the schedule existing (rule 28).
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,62 +43,209 @@ PENDING="$DIR/pending"
 SENT="$DIR/sent"
 FAILED="$DIR/failed"
 LEDGER="$DIR/swept-ids.txt"
+AUDIO_ONLY="$DIR/audio-only.txt"
 LOG="$REPO/out/capture-lanes.log"
+ASCRIPT="$REPO/bin/notes-sweep.applescript"
 SOURCE_LABEL="notes_sweep"
+FOLDER_NAME="Call Recordings"
+MAX_TEXT_BYTES=900000                       # socket ceiling is 1 MiB; leave headroom
 
 mkdir -p "$PENDING" "$SENT" "$FAILED" "$REPO/out"
 [ -f "$LEDGER" ] || : > "$LEDGER"
+[ -f "$AUDIO_ONLY" ] || : > "$AUDIO_ONLY"
 
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  notes-sweep  $*" >> "$LOG"; }
 
-# ---------- --status: everything the sweeping session needs before it reads Notes ----------
 if [ "${1:-}" = "--status" ]; then
-  print -r -- "folder-to-sweep: Call Recordings"
+  print -r -- "folder-to-sweep: $FOLDER_NAME"
   print -r -- "pending-dir: $PENDING"
   print -r -- "queued-now: $(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
-  print -r -- "--- already swept (skip these note ids) ---"
+  print -r -- "audio-only notes parked for the whisper.cpp path: $(grep -c . "$AUDIO_ONLY" || true)"
+  print -r -- "--- already swept (note ids) ---"
   cat "$LEDGER"
   print -r -- "--- end ---"
   exit 0
 fi
 
-# ---------- credential ----------
+RUNTMP="$(mktemp -d -t carr-notes-sweep)"
+ERRFILE="$(mktemp -t carr-notes-sweep-err)"
+BODYFILE="$(mktemp -t carr-notes-sweep-body)"
+trap 'rm -rf "$RUNTMP" "$ERRFILE" "$BODYFILE"' EXIT
+
+# ---------------------------------------------------------------- 1. scan Notes
+scan_note_count=0
+scan_new_count=0
+queued=0; audio_only=0; oversize=0
+folder_missing=0
+
+ids_out="$(/usr/bin/osascript "$ASCRIPT" ids "$FOLDER_NAME" 2>"$ERRFILE")"
+scan_rc=$?
+
+if [ "$scan_rc" -ne 0 ]; then
+  errtext="$(head -c 400 "$ERRFILE")"
+  # -1743 is macOS refusing Apple Events to Notes for this caller. That is a
+  # Privacy & Security grant, i.e. a human step, not a fault in this job.
+  if print -r -- "$errtext" | grep -q -- '-1743\|Not authorized to send Apple events'; then
+    print -r -- "notes-sweep: NOT AUTHORIZED — macOS is refusing Apple Events to Notes for this process."
+    print -r -- "notes-sweep: grant it in System Settings > Privacy & Security > Automation, then re-run."
+    say "NOT AUTHORIZED (Apple Events to Notes refused): $errtext"
+    exit 78
+  fi
+  print -r -- "notes-sweep: SCAN FAILED — $errtext"
+  say "SCAN FAILED rc=$scan_rc $errtext"
+  exit 1
+fi
+
+if [ "${ids_out%%$'\n'*}" = "NOFOLDER" ]; then
+  # iOS creates this folder on the FIRST recorded call. Its absence is the
+  # normal empty state on a Mac where no call has been recorded yet, and it is
+  # reported as such — never as a failure.
+  folder_missing=1
+  say "folder '$FOLDER_NAME' not present (normal until the first call is recorded)"
+else
+  typeset -a new_idx
+  new_idx=()
+  idx=0
+  while IFS= read -r note_id; do
+    [ -z "$note_id" ] && continue
+    idx=$((idx+1))
+    if grep -Fqx -- "$note_id" "$LEDGER"; then continue; fi
+    new_idx+=("$idx")
+  done <<< "$ids_out"
+  scan_note_count=$idx
+  scan_new_count=${#new_idx[@]}
+
+  if [ "$scan_new_count" -gt 0 ]; then
+    fetch_out="$(/usr/bin/osascript "$ASCRIPT" fetch "$FOLDER_NAME" "$RUNTMP" "${new_idx[@]}" 2>"$ERRFILE")"
+    if [ $? -ne 0 ]; then
+      print -r -- "notes-sweep: FETCH FAILED — $(head -c 400 "$ERRFILE")"
+      say "FETCH FAILED $(head -c 400 "$ERRFILE")"
+      exit 1
+    fi
+    say "scan notes=$scan_note_count new=$scan_new_count fetch=$fetch_out"
+
+    # ------------------------------------------------------ 2. queue as payloads
+    # The AppleScript wrote each field to its own UTF-8 file, so nothing a
+    # transcript contains can be mistaken for a delimiter. This turns those files
+    # into one JSON payload per note. Payload filenames key off the note id, so a
+    # note queued but not yet posted is OVERWRITTEN on the next run rather than
+    # duplicated.
+    queue_out="$(/usr/bin/python3 - "$RUNTMP" "$PENDING" "$AUDIO_ONLY" "$MAX_TEXT_BYTES" <<'PY'
+import json, os, re, sys, datetime
+
+tmp, pending, audio_log, max_bytes = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+queued = audio = oversize = 0
+now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+def rd(idx, ext):
+    p = os.path.join(tmp, idx + ext)
+    if not os.path.exists(p):
+        return ""
+    with open(p, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+# The .id file is written LAST by the AppleScript, so its presence means the
+# whole note was read; a run interrupted mid-note leaves no .id and is skipped.
+for name in sorted(os.listdir(tmp)):
+    if not name.endswith(".id"):
+        continue
+    idx = name[:-3]
+    note_id = rd(idx, ".id").strip()
+    if not note_id:
+        continue
+    title = rd(idx, ".name").strip()
+    text = rd(idx, ".text")
+
+    # Apple's plaintext repeats the title as its first line. What remains after
+    # removing it is the actual transcript; nothing remaining means the note is
+    # audio with no transcript yet.
+    stripped = text.strip()
+    if title and stripped.startswith(title):
+        stripped = stripped[len(title):].strip()
+    if not stripped:
+        with open(audio_log, "a", encoding="utf-8") as fh:
+            fh.write(f"{note_id}\t{title}\n")
+        audio += 1
+        continue
+
+    if len(text.encode("utf-8")) > max_bytes:
+        oversize += 1
+        continue
+
+    payload = {
+        "external_id": note_id,
+        "kind": "call_recording_transcript",
+        "captured_at": now,
+        "trust": "untrusted_payload",
+        "note": {
+            "name": title,
+            "folder": "Call Recordings",
+            "created": rd(idx, ".created").strip(),
+            "modified": rd(idx, ".modified").strip(),
+        },
+        "transcript": text,
+    }
+    stem = re.sub(r"[^A-Za-z0-9_.-]", "_", note_id.rsplit("/", 1)[-1]) or ("note" + idx)
+    with open(os.path.join(pending, stem + ".json"), "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+    queued += 1
+
+print(f"{queued} {audio} {oversize}")
+PY
+)"
+    if [ $? -ne 0 ] || [ -z "$queue_out" ]; then
+      print -r -- "notes-sweep: QUEUE FAILED (payload build)"
+      say "QUEUE FAILED"
+      exit 1
+    fi
+    queued="${queue_out%% *}"
+    rest="${queue_out#* }"
+    audio_only="${rest%% *}"
+    oversize="${rest##* }"
+  fi
+fi
+
+if [ "$folder_missing" -eq 1 ]; then
+  print -r -- "notes-sweep: no '$FOLDER_NAME' folder yet — nothing to sweep (normal until the first call is recorded)."
+else
+  print -r -- "notes-sweep: folder='$FOLDER_NAME' notes=$scan_note_count new=$scan_new_count queued=$queued audio_only=$audio_only oversize=$oversize"
+fi
+[ "$audio_only" -gt 0 ] && print -r -- "notes-sweep: $audio_only audio-only note(s) parked in $AUDIO_ONLY for the whisper.cpp path (not built)."
+[ "$oversize" -gt 0 ] && print -r -- "notes-sweep: $oversize note(s) over $MAX_TEXT_BYTES bytes were NOT queued (socket ceiling is 1 MiB)."
+
+# ---------------------------------------------------------------- 3. credential
 ENVFILE="$HOME/.config/carr/ingest.env"
 if [ ! -f "$ENVFILE" ]; then
-  print -r -- "notes-sweep: NOT CONFIGURED — $ENVFILE does not exist."
+  print -r -- "notes-sweep: NOT CONFIGURED — $ENVFILE does not exist. $(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true) payload(s) stay queued and go out on the first run after the token lands."
   print -r -- "notes-sweep: that file is Joe's to create; see DNA/Deal Management/record-layer/ingest-tokens-setup.md"
   say "NOT CONFIGURED (no $ENVFILE)"
-  exit 78                                  # EX_CONFIG: nothing is wrong, nothing is set up
+  exit 78
 fi
 set -a; . "$ENVFILE"; set +a
 URL="${CARR_INGEST_URL:-https://api.practicecre.com/ingest}"
 TOKEN="${CARR_INGEST_TOKEN_NOTES_SWEEP:-}"
 if [ -z "$TOKEN" ]; then
-  print -r -- "notes-sweep: NOT CONFIGURED — CARR_INGEST_TOKEN_NOTES_SWEEP is not set in $ENVFILE."
+  print -r -- "notes-sweep: NOT CONFIGURED — CARR_INGEST_TOKEN_NOTES_SWEEP is not set in $ENVFILE. Payloads stay queued."
   say "NOT CONFIGURED (no token)"
   exit 78
 fi
 
-# ---------- post ----------
+# ---------------------------------------------------------------- 4. post
 setopt null_glob
 files=("$PENDING"/*.json)
 unsetopt null_glob
 
 if [ "${#files[@]}" -eq 0 ]; then
-  print -r -- "notes-sweep: nothing queued. posted=0 duplicate=0 failed=0"
+  print -r -- "notes-sweep: source=$SOURCE_LABEL posted=0 duplicate=0 failed=0 still_queued=0"
   say "nothing queued"
   exit 0
 fi
 
 posted=0; dup=0; failed=0
-tmpbody="$(mktemp -t carr-notes-sweep)"
-trap 'rm -f "$tmpbody"' EXIT
 
 for f in "${files[@]}"; do
   base="$(basename "$f")"
 
-  # The file must be JSON and must carry the note id we dedup on. A malformed
-  # queue file is quarantined, not silently dropped and not retried forever.
   ext_id="$(/usr/bin/python3 -c 'import json,sys
 try:
     d=json.load(open(sys.argv[1]))
@@ -118,7 +271,7 @@ print(v if isinstance(v,str) and v.strip() else "")' "$f" 2>/dev/null || true)"
   # Token goes in via --config on stdin so it never appears in argv / ps output.
   code="$(printf 'header = "authorization: Bearer %s"\n' "$TOKEN" \
     | curl -sS -m 60 --config - \
-        -o "$tmpbody" -w '%{http_code}' \
+        -o "$BODYFILE" -w '%{http_code}' \
         -X POST "$URL" \
         -H 'content-type: application/json' \
         --data-binary "@$f" 2>>"$LOG" || true)"
@@ -127,7 +280,7 @@ print(v if isinstance(v,str) and v.strip() else "")' "$f" 2>/dev/null || true)"
     2*)
       is_dup="$(/usr/bin/python3 -c 'import json,sys
 try: print("yes" if json.load(open(sys.argv[1])).get("duplicate") else "no")
-except Exception: print("no")' "$tmpbody" 2>/dev/null || echo no)"
+except Exception: print("no")' "$BODYFILE" 2>/dev/null || echo no)"
       print -r -- "$ext_id" >> "$LEDGER"
       mv -f "$f" "$SENT/$base"
       if [ "$is_dup" = "yes" ]; then
@@ -138,7 +291,7 @@ except Exception: print("no")' "$tmpbody" 2>/dev/null || echo no)"
       ;;
     *)
       failed=$((failed+1))
-      say "FAIL $base -> HTTP ${code:-000} $(head -c 200 "$tmpbody" 2>/dev/null)"
+      say "FAIL $base -> HTTP ${code:-000} $(head -c 200 "$BODYFILE" 2>/dev/null)"
       ;;
   esac
 done
@@ -147,7 +300,6 @@ left="$(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
 print -r -- "notes-sweep: source=$SOURCE_LABEL posted=$posted duplicate=$dup failed=$failed still_queued=$left"
 say "summary posted=$posted duplicate=$dup failed=$failed still_queued=$left"
 
-# Keep the shared capture log bounded, same convention as nightly.sh.
 tail -n 2000 "$LOG" > "$LOG.trim" && mv "$LOG.trim" "$LOG"
 
 [ "$failed" -eq 0 ] || exit 1
