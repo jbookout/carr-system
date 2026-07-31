@@ -52,6 +52,19 @@ WATCH = [
      "quarterly (Jan/Apr/Jul/Oct; next diff vs the Q1 baseline in Oct)"),
     ("Section index",     "Automation/section-index.tsv", 9, [],
      "retrieval-as-code layer; rebuild = run.sh section-index (rides the Monday run; no BEHIND check — doc inputs churn daily by design)"),
+    # --- the record layer's generated files (added 2026-07-31 with ORDER 2) ------
+    # 26h, matching the export digest's dead-man: the chain runs nightly 7 days a
+    # week (unlike the weekday pipelines above), so anything past ~a day means the
+    # chain did not run or its export step failed. Rule 28 in its purest form —
+    # these files existing proves nothing; their FRESHNESS proves the chain ran.
+    # No BEHIND inputs: their input is the database, which has no mtime.
+    ("GEN lead-registry",   "DNA/Leads/lead-registry.xlsx",              26/24, [], "nightly chain (bin/nightly.sh)"),
+    ("GEN client-roster",   "DNA/Clients/client-roster.xlsx",            26/24, [], "nightly chain (bin/nightly.sh)"),
+    ("GEN vendors",         "DNA/Network/vendors.xlsx",                  26/24, [], "nightly chain (bin/nightly.sh)"),
+    ("GEN deals json",      "DNA/Deal Management/panhandle-team-deals.json", 26/24, [], "nightly chain (bin/nightly.sh)"),
+    ("GEN clients-active",  "DNA/Clients/clients-active.md",             26/24, [], "nightly chain (bin/nightly.sh)"),
+    ("GEN rules shared",    "DNA/compiled-rules-shared.md",              26/24, [], "nightly chain (bin/nightly.sh)"),
+    ("GEN rules joe",       "00_Context/compiled-rules-joe.md",          26/24, [], "nightly chain (bin/nightly.sh)"),
     ("Joe calendar feed", "DNA/Team/calendar-latest.ics", 4, [],
      "fetch-calendar.sh; business days only"),
     ("Dell calendar feed","DNA/Team/calendar-latest-dell.ics", 4, [],
