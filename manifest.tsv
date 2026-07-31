@@ -31,6 +31,10 @@ bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
 #   Dell's side and the cloud sessions never write the registry directly, so a vault copy would
 #   be a second unguarded path to the exact file this is meant to protect. Repo only, on purpose.
 # tools/retrieve.py is repo-only (reads the derived index; sessions call it via run.sh retrieve)
+# tools/ledger-repair.py is repo-only (2026-07-31). PLACEMENT TEST: it touches schema_migrations,
+#   which only the migration runner beside it may write, and it is a ONE-TIME repair for the
+#   0013-0016 ledger gap. A vault copy would put a database-mutating script on Dell's side for a
+#   job his sessions must never run. Repo only, and it goes inert once the four rows exist.
 # tools/writing-lint.py is repo-only FOR NOW (2026-07-25). It enforces a SHARED-tier doctrine
 #   file (DNA/writing-rules.md), so Dell's side would benefit from a vault copy — but adding a
 #   file to the shared tier is a two-writer decision for Joe, not a unilateral write. Placement
