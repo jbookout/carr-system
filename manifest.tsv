@@ -40,6 +40,14 @@ bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
 #   same class as pipelines/import_wave1.py and tools/ledger-repair.py. Ongoing links go through
 #   the link-parties verb, so a vault copy would put a database-mutating script on Dell's side
 #   for a job neither partner's sessions should ever run twice. Repo only, on purpose.
+# pipelines/cadence_engine.py, pipelines/availability_matcher.py and
+#   pipelines/cadence-rules-seed.sql are repo-only (2026-07-31, ORDER 14). PLACEMENT TEST:
+#   both scripts are steps of bin/nightly.sh, which is itself repo-only and runs on Joe's Mac
+#   under Joe's credentials; the engine WRITES next_action + event rows as the DB writer, and
+#   the seed file writes cadence_rule. A vault copy would put database-mutating jobs on Dell's
+#   side that his sessions must never run — and when Dell's nightly lands it authors its own,
+#   the same reference-pattern ruling ops/scheduled-tasks got after ORDER 8. What Dell DOES see
+#   is the OUTPUT: the actions the engine spawns land in the exported files he already reads.
 # tools/writing-lint.py is repo-only FOR NOW (2026-07-25). It enforces a SHARED-tier doctrine
 #   file (DNA/writing-rules.md), so Dell's side would benefit from a vault copy — but adding a
 #   file to the shared tier is a two-writer decision for Joe, not a unilateral write. Placement
