@@ -84,6 +84,18 @@ function normRate(amount, basis) {
   return null; // gross bases: tool computes from area when space known, else norm_owed
 }
 
+// The deal paper writes a phone as (850) 361-2208. The actor row stores what the
+// human typed (joe: 850.361.2208), so the plan formats it here — one convention
+// in one place, rather than every field map carrying a format. An unrecognized
+// shape passes through verbatim: a phone is never invented or truncated to fit.
+function fmtPhoneUS(v) {
+  if (v === null || v === undefined) return null;
+  const digits = String(v).replace(/\D/g, "");
+  const t = digits.length === 11 && digits[0] === "1" ? digits.slice(1) : digits;
+  if (t.length !== 10) return String(v).trim() || null;
+  return `(${t.slice(0, 3)}) ${t.slice(3, 6)}-${t.slice(6)}`;
+}
+
 async function resolveSubject(client, ref) {
   // Accepts 'L-204', 'C-127', 'V-CPA-006', a deal name, or a party/practice name.
   //
@@ -318,11 +330,19 @@ async function buildRecordBag(c, dealId, clientId) {
 
   // The signing agent is the deal's CURRENT lead participant, not the session's
   // actor: a document Dell prepares on Joe's deal still signs Joe.
+  //
+  // [ORDER 24] phone and email come off the actor row. They used to be hardcoded
+  // null here, so the signature slots owed on every draft with a "no phone column"
+  // reason that stopped being true the moment the column landed. Empty string is
+  // normalized to null deliberately: a blank is missing, and a slot that owes is
+  // worth more than a signature line rendered with nothing in it.
   const ag = (await c.query(
-    `select a.slug, a.display_name, a.email from deal_participant dp
+    `select a.slug, a.display_name, a.email, a.phone from deal_participant dp
        join actor a on a.id=dp.actor_id
       where dp.deal_id=$1 and dp.role='lead' and dp.to_at is null limit 1`, [dealId])).rows[0];
-  bag.agent = ag ? { slug: ag.slug, display_name: ag.display_name, email: ag.email, phone: null }
+  bag.agent = ag ? { slug: ag.slug, display_name: ag.display_name,
+                     email: (ag.email && String(ag.email).trim()) || null,
+                     phone: fmtPhoneUS(ag.phone) }
                  : { slug: null, display_name: null, email: null, phone: null };
 
   const ct = (await c.query(
