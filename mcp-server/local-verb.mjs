@@ -24,14 +24,19 @@ if (!verb || !url) {
   process.exit(2);
 }
 if (!/ep-|neon\.tech/.test(url)) { console.error("DATABASE_URL does not look like a Neon url"); process.exit(2); }
-if (!process.env.CARR_LOCAL_VERB_ALLOW_PRODUCTION) {
-  // Production's endpoint host is the default branch's; a branch url carries its
-  // own endpoint id, so a substring check on the known production endpoint is
-  // enough to keep this off the live database by accident.
-  if (url.includes("ep-lively-mountain") || url.includes("br-summer-breeze")) {
-    console.error("refusing: that looks like production. Branch rehearsal only.");
-    process.exit(2);
-  }
+// Production's endpoint, MEASURED today rather than guessed:
+//   neonctl connection-string production ... -> ep-restless-resonance-awbp35k3
+// The first version of this rail named an endpoint that does not exist, so it
+// would have refused nothing. A guard that cannot fire is worse than no guard,
+// because it is trusted. Hence the second half: the target host is always
+// printed, so a human reading the output can see what it actually connected to
+// even if this constant ever goes stale (a recreated endpoint changes it).
+const PRODUCTION_ENDPOINT = "ep-restless-resonance-awbp35k3";
+const host = (url.match(/@([^/?]+)/) || [])[1] || "(unparsed)";
+console.error(`local-verb -> ${host}`);
+if (!process.env.CARR_LOCAL_VERB_ALLOW_PRODUCTION && url.includes(PRODUCTION_ENDPOINT)) {
+  console.error("refusing: that is the production endpoint. This tool is for branch rehearsal.");
+  process.exit(2);
 }
 
 const tool = TOOLS[verb];
