@@ -86,46 +86,51 @@ function normRate(amount, basis) {
 
 async function resolveSubject(client, ref) {
   // Accepts 'L-204', 'C-127', 'V-CPA-006', a deal name, or a party/practice name.
+  //
+  // [amendment 11] Every lookup goes through v_ref_index. This used to query the
+  // base tables, which carr_reader cannot see — views-only is deliberate — so the
+  // read verbs returned permission-denied in production from build day until this
+  // was found by ORDER 6's done-test. The security model wins; the verb adapts.
   if (/^L-\d+/i.test(ref)) {
-    const r = await client.query("select id from lead where registry_ref ilike $1", [ref]);
-    if (r.rows.length) return { type: "lead", id: r.rows[0].id };
+    const r = await client.query(
+      "select subject_id from v_ref_index where subject_type='lead' and ref ilike $1", [ref]);
+    if (r.rows.length) return { type: "lead", id: r.rows[0].subject_id };
   }
   if (/^C-\d+/i.test(ref)) {
-    const r = await client.query("select id from client where roster_ref ilike $1", [ref]);
-    if (r.rows.length) return { type: "client", id: r.rows[0].id };
+    const r = await client.query(
+      "select subject_id from v_ref_index where subject_type='client' and ref ilike $1", [ref]);
+    if (r.rows.length) return { type: "client", id: r.rows[0].subject_id };
   }
   if (/^[VT]-/i.test(ref)) {
-    const r = await client.query("select id from vendor where vendor_ref ilike $1", [ref]);
-    if (r.rows.length) return { type: "vendor", id: r.rows[0].id };
+    const r = await client.query(
+      "select subject_id from v_ref_index where subject_type='vendor' and ref ilike $1", [ref]);
+    if (r.rows.length) return { type: "vendor", id: r.rows[0].subject_id };
   }
   // [amendment 7] Both name fallbacks used to take the single newest/closest match.
   // On an ambiguous name that silently wrote to the WRONG record, with no signal —
   // exactly the failure tool-contracts §5 says a verb must never produce. Fetch up
   // to 5 and refuse to guess when more than one matches.
+  // [amendment 7] Name paths fetch up to 5 and refuse to guess past one match.
   let r = await client.query(
-    `select d.id, d.name, d.phase, c.roster_ref as client_ref
-       from deal d left join client c on c.id = d.client_id
-      where d.name ilike $1 order by d.created_at desc limit 5`, [`%${ref}%`]);
-  if (r.rows.length === 1) return { type: "deal", id: r.rows[0].id };
+    `select subject_id, display_name, status, client_ref from v_ref_index
+      where subject_type='deal' and display_name ilike $1 limit 5`, [`%${ref}%`]);
+  if (r.rows.length === 1) return { type: "deal", id: r.rows[0].subject_id };
   if (r.rows.length > 1) {
     throw new ToolError({ error: "needs_disambiguation", ref,
-      candidates: r.rows.map(x => ({ name: x.name, phase: x.phase, client_ref: x.client_ref })),
+      candidates: r.rows.map(x => ({ name: x.display_name, phase: x.status, client_ref: x.client_ref })),
       hint: "pass the exact ref or full name" });
   }
+  // Merge tombstones are excluded: a merged record is not a resolution target, and
+  // leaving them in would make every merged pair permanently ambiguous. That is what
+  // the view's `merged` flag is for — no column added to satisfy this.
   r = await client.query(
-    `select coalesce(c.id, l.id, v.id) as id,
-            case when c.id is not null then 'client' when l.id is not null then 'lead' else 'vendor' end as type,
-            p.name, p.city, coalesce(c.roster_ref, l.registry_ref, v.vendor_ref) as ref
-     from party p
-     left join client c on c.party_id = p.id
-     left join lead l on l.party_id = p.id
-     left join vendor v on v.party_id = p.id
-     where p.name ilike $1 and coalesce(c.id, l.id, v.id) is not null
-     order by similarity(p.name, $2) desc limit 5`, [`%${ref}%`, ref]);
-  if (r.rows.length === 1) return { type: r.rows[0].type, id: r.rows[0].id };
+    `select subject_type, subject_id, display_name, ref, city from v_ref_index
+      where subject_type in ('lead','client','vendor') and not merged and display_name ilike $1
+      order by similarity(display_name, $2) desc limit 5`, [`%${ref}%`, ref]);
+  if (r.rows.length === 1) return { type: r.rows[0].subject_type, id: r.rows[0].subject_id };
   if (r.rows.length > 1) {
     throw new ToolError({ error: "needs_disambiguation", ref,
-      candidates: r.rows.map(x => ({ name: x.name, ref: x.ref, kind: x.type, city: x.city })),
+      candidates: r.rows.map(x => ({ name: x.display_name, ref: x.ref, kind: x.subject_type, city: x.city })),
       hint: "pass the exact ref or full name" });
   }
   throw new ToolError({ error: "subject_not_found", ref,
@@ -147,13 +152,22 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     handler: async (c, _a, args) => {
       const q = args.query;
+      // [amendment 11] Through v_ref_index, not the base tables. Merged records are
+      // KEPT here (unlike resolveSubject) and carry the flag: someone searching a
+      // merged name should learn the record exists and where it went, rather than
+      // be told nothing matched.
       const parties = await c.query(
-        `select p.name, p.city, p.specialty, l.registry_ref, cl.roster_ref, v.vendor_ref
-         from party p left join lead l on l.party_id=p.id
-         left join client cl on cl.party_id=p.id left join vendor v on v.party_id=p.id
-         where p.name % $1 or p.name ilike $2 order by similarity(p.name,$1) desc limit 10`, [q, `%${q}%`]);
+        `select display_name as name, city, specialty, org_name, ref, subject_type as kind, merged
+         from v_ref_index
+         where subject_type in ('lead','client','vendor')
+           and (display_name % $1 or display_name ilike $2)
+         order by similarity(display_name,$1) desc limit 10`, [q, `%${q}%`]);
       const deals = await c.query(
-        "select name, phase, owner from v_deal_board where name ilike $1 limit 5", [`%${q}%`]);
+        // The column is lead_owner; `owner` never existed on this view, so this
+        // query has always thrown. It stayed invisible because the query above it
+        // threw first (amendment 11) — one bug hiding another.
+        "select name, phase, lead_owner as owner, client_ref from v_deal_board where name ilike $1 limit 5",
+        [`%${q}%`]);
       return { parties: parties.rows, deals: deals.rows };
     },
   },
