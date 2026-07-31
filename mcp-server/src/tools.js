@@ -98,18 +98,36 @@ async function resolveSubject(client, ref) {
     const r = await client.query("select id from vendor where vendor_ref ilike $1", [ref]);
     if (r.rows.length) return { type: "vendor", id: r.rows[0].id };
   }
-  let r = await client.query("select id from deal where name ilike $1 order by created_at desc limit 1", [`%${ref}%`]);
-  if (r.rows.length) return { type: "deal", id: r.rows[0].id };
+  // [amendment 7] Both name fallbacks used to take the single newest/closest match.
+  // On an ambiguous name that silently wrote to the WRONG record, with no signal —
+  // exactly the failure tool-contracts §5 says a verb must never produce. Fetch up
+  // to 5 and refuse to guess when more than one matches.
+  let r = await client.query(
+    `select d.id, d.name, d.phase, c.roster_ref as client_ref
+       from deal d left join client c on c.id = d.client_id
+      where d.name ilike $1 order by d.created_at desc limit 5`, [`%${ref}%`]);
+  if (r.rows.length === 1) return { type: "deal", id: r.rows[0].id };
+  if (r.rows.length > 1) {
+    throw new ToolError({ error: "needs_disambiguation", ref,
+      candidates: r.rows.map(x => ({ name: x.name, phase: x.phase, client_ref: x.client_ref })),
+      hint: "pass the exact ref or full name" });
+  }
   r = await client.query(
     `select coalesce(c.id, l.id, v.id) as id,
-            case when c.id is not null then 'client' when l.id is not null then 'lead' else 'vendor' end as type
+            case when c.id is not null then 'client' when l.id is not null then 'lead' else 'vendor' end as type,
+            p.name, p.city, coalesce(c.roster_ref, l.registry_ref, v.vendor_ref) as ref
      from party p
      left join client c on c.party_id = p.id
      left join lead l on l.party_id = p.id
      left join vendor v on v.party_id = p.id
      where p.name ilike $1 and coalesce(c.id, l.id, v.id) is not null
-     order by similarity(p.name, $2) desc limit 1`, [`%${ref}%`, ref]);
-  if (r.rows.length) return { type: r.rows[0].type, id: r.rows[0].id };
+     order by similarity(p.name, $2) desc limit 5`, [`%${ref}%`, ref]);
+  if (r.rows.length === 1) return { type: r.rows[0].type, id: r.rows[0].id };
+  if (r.rows.length > 1) {
+    throw new ToolError({ error: "needs_disambiguation", ref,
+      candidates: r.rows.map(x => ({ name: x.name, ref: x.ref, kind: x.type, city: x.city })),
+      hint: "pass the exact ref or full name" });
+  }
   throw new ToolError({ error: "subject_not_found", ref,
     hint: "use find first; refs look like L-204 / C-127 / V-CPA-006 or a deal name" });
 }
@@ -235,8 +253,11 @@ export const TOOLS = {
       required: ["idempotency_key","ref","description"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-next-action", args, async () => {
       const s = await resolveSubject(c, args.ref);
+      // [amendment 8] Replacing an unfinished ball used to record the old one as
+      // 'done'. It wasn't done — it was superseded. No-fabrication applies to
+      // metadata too, and 'done' would inflate any completion measure built on this.
       await c.query(
-        `update next_action set status='done', updated_by=$1 where subject_type=$2 and subject_id=$3
+        `update next_action set status='dropped', updated_by=$1 where subject_type=$2 and subject_id=$3
          and owner_id=$1 and status='open'`, [actor.id, s.type, s.id]);
       const r = await c.query(
         `insert into next_action (subject_type, subject_id, owner_id, due_on, description, created_by)
