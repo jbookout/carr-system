@@ -33,3 +33,7 @@ id = "b033d3b5c454445080e9d0ab51ff8f3c"
 
 [observability]
 enabled = true
+
+[[r2_buckets]]
+binding = "carr_documents"
+bucket_name = "carr-documents"
