@@ -109,6 +109,11 @@ def active_book_review(curated_path, derived_path, db_url):
                           for r in cur.fetchall()}
         except Exception as e:                        # noqa: BLE001 — reported, not swallowed
             cause_err = f"{type(e).__name__}: {e}"
+    else:
+        # No URL is the same epistemic state as a failed connection: we cannot
+        # know causes. Without this, the loop below asserts "never imported"
+        # for every row — a fabricated fact (caught live 2026-07-31).
+        cause_err = "no reconcile DB URL set (CARR_RECONCILE_DB_URL / CARR_IMPORT_DB_URL)"
 
     for cid in sorted(set(curated) - set(derived)):
         f = causes.get(cid)
@@ -125,9 +130,13 @@ def active_book_review(curated_path, derived_path, db_url):
         only_curated.append((cid, (curated[cid].get("Name") or "").strip(), why))
 
     for cid in sorted(set(derived) - set(curated)):
-        f = causes.get(cid, {})
-        why = ("has an open deal" if f.get("open_deal")
-               else f"status '{f.get('status')}' is flagged pipeline-active")
+        f = causes.get(cid)
+        if f is None:
+            why = ("cause unavailable (no DB access this run)" if cause_err
+                   else "unexpected — rendered but absent from the cause lookup")
+        else:
+            why = ("has an open deal" if f.get("open_deal")
+                   else f"status '{f.get('status')}' is flagged pipeline-active")
         why += " — on the book by the rules, absent from the curated file"
         only_derived.append((cid, (derived[cid].get("Name") or "").strip(), why))
 
