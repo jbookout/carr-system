@@ -1,13 +1,13 @@
--- 0019: Wave 2 machinery tables (ORDER 11; binding design wave2-design-2026-07-31.md §2a).
+-- 0019: Wave 2 machinery (ORDER 11; binding design wave2-design-2026-07-31.md §2a,
+-- as amended by the Fable ruling of 2026-07-31 ~1:10pm CT).
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 -- READ THIS FIRST: SIX OF THE ORDER'S EIGHT ITEMS ALREADY EXIST, APPLIED BY
--- 0001 ON BUILD DAY. This migration creates ONLY the two that do not, and it
--- alters NOTHING that does. That is the order's own stop rule, not a choice:
+-- 0001 ON BUILD DAY. This migration creates ONE table and alters NOTHING that
+-- exists. That is the order's own stop rule, not a choice:
 --   "Any existing table alter beyond (h)'s registration column → stop."
 --
--- Measured on branch rehearse-0019 (a full-data copy of production taken
--- 2026-07-31 17:37Z, schema_migrations through 0018) before a line of DDL was
+-- Measured on a full-data branch copy of production before a line of DDL was
 -- written — the order's premise was checked against the database, not against
 -- the migration files:
 --
@@ -18,7 +18,7 @@
 --   (d) document           EXISTS  (0001, line ~911)     0
 --   (e) placement_metric   EXISTS  (0001, line ~853)     0
 --   (f) cadence_rule       MISSING                        —   <- created here
---   (g) job_config         MISSING                        —   <- created here
+--   (g) job_config         RULED OUT — see below
 --   (h) building_ownership EXISTS  (0001, line ~575)     0
 --       registration.registered_with
 --                          EXISTS as registered_with_party, NOT NULL party FK
@@ -26,31 +26,30 @@
 --
 -- All seven existing tables are EMPTY, so the order's "all initially empty" end
 -- state already holds for them. Their column shapes are NOT identical to the
--- order's field lists (e.g. negotiation_round.side checks tenant/landlord/
--- buyer/seller rather than ours/theirs; lease carries options_note text and
--- escalator text rather than options jsonb and escalation numeric; document
--- references the attachment table, which is where r2_key lives, instead of
--- carrying working_path/pdf_path/r2_key itself; placement_metric keys on a
--- placement FK rather than (platform, external_id)). Reconciling those shapes
--- means ALTERing existing tables, which this order forbids outright, so every
--- one of them is reported to Fable and left exactly as 0001 built it.
+-- order's field lists, and FABLE HAS RULED THAT THE 0001 SHAPES STAND (ruling
+-- of 2026-07-31 ~1:10pm CT; the design doc is being amended to record as-built):
+--   · negotiation_round.side checks tenant/landlord/buyer/seller, NOT the
+--     order's ours/theirs — which flips meaning between rep sides and is the
+--     reason the 0001 vocabulary wins.
+--   · lease carries options_note text and escalator text, not options jsonb and
+--     escalation numeric.
+--   · document references the attachment table (where r2_key, sha256 and bytes
+--     live) instead of carrying working_path/pdf_path/r2_key itself. The
+--     normalization stands.
+--   · placement_metric keys on a placement FK, not (platform, external_id).
+--     The FK stands — it cannot orphan.
+--   · registration's party FK stands as registered_with_party. A second,
+--     nullable `registered_with` beside it would put two columns on one table
+--     for one fact.
+-- Nothing above is touched here.
 --
--- The same applies to (h): registration already carries a party FK for the
--- registered-with party. Adding a second, nullable `registered_with` column
--- beside `registered_with_party` would put two columns on one table for one
--- fact — the shape the D5 design asks for is already there under a longer name.
--- Reported, not improvised.
+-- (g) job_config IS DELIBERATELY NOT CREATED. The Fable ruling: ONE CONFIG
+-- HOME. system_config (0001/0002) already exists, already holds thresholds as
+-- rows under dotted keys, and already carries the learning floor. A job_config
+-- table would have been a second home for the same class of fact — the drift
+-- generator this ruling exists to prevent. The four job entries ORDER 11(g)
+-- names are handled in system_config below, under its own convention.
 -- ─────────────────────────────────────────────────────────────────────────────
---
--- What this migration therefore is: cadence_rule (§2e's engine reads rules;
--- rules are rows, not code) and job_config (§C's threshold table; tuning is an
--- UPDATE, not a deploy), created exactly as ORDER 11 (f) and (g) specify, plus
--- the writer grants. Nothing is granted to carr_reader — no read verb touches
--- either table, and amendment 11's views-only posture decides per-view later.
---
--- Schema-only, no data outside the four job_config seed rows the order names,
--- no view touched: every export must be byte-for-byte unchanged either side of
--- this migration, and that is the done-test.
 
 -- ── 0. the premise, asserted rather than assumed ─────────────────────────────
 -- If this migration is ever replayed onto a database built from 0001 forward,
@@ -74,7 +73,7 @@ begin
                     and column_name = 'registered_with_party') then
     raise exception 'ORDER 11 (h): registration.registered_with_party is gone — stop and report';
   end if;
-  raise notice 'ORDER 11 premise: all seven pre-existing tables present; creating only cadence_rule + job_config';
+  raise notice 'ORDER 11 premise: all seven pre-existing tables present; creating cadence_rule only';
 end $$;
 
 -- ── 1. (f) cadence_rule ──────────────────────────────────────────────────────
@@ -100,7 +99,8 @@ comment on table cadence_rule is
   'ref table is a later row-add, never a redeploy. HARD DEFAULT from Joe''s '
   '2026-07-31 cold/paused ruling (rule store + decision-history): cold-class '
   'clients are EXCLUDED from automatic nurture cadences — never pester a ghost. '
-  'A cold or paused client re-enters cadence only by a human act.';
+  'A cold or paused client re-enters cadence only by a human act. Engine '
+  'thresholds and settings live in system_config, never in a second config table.';
 
 comment on column cadence_rule.trigger is
   'on_complete = fires when the subject''s next_action completes; on_date = '
@@ -108,52 +108,63 @@ comment on column cadence_rule.trigger is
 comment on column cadence_rule.interval_days is
   'Nullable on purpose: an on_date rule has no interval.';
 
--- ── 2. (g) job_config ────────────────────────────────────────────────────────
--- §C's threshold table. Learning-job evidence floors, notification budgets and
--- matcher settings live here, so tuning is an UPDATE and not a deploy, and a
--- job below its floor reports the shortfall instead of concluding.
-create table job_config (
-  job_slug   text primary key,
-  config     jsonb not null default '{}'::jsonb,
-  updated_at timestamptz not null default now()
-);
-
-comment on table job_config is
-  'Per-job thresholds and settings (ORDER 11g, wave2-design §2a/§C). Empty '
-  'config = no threshold ruled yet, which a job must report honestly rather '
-  'than treat as zero. NOTE FOR FABLE: system_config (0001/0002) already holds '
-  'thresholds as rows under dotted keys — learning.min_posts_per_feature_cell '
-  'is 30 there today, and this table''s weekly_learning seed states the same '
-  'number under min_posts_per_cell. Two homes for one fact is a drift '
-  'generator; which one is authoritative is a design ruling, not this '
-  'migration''s to take. Both are seeded consistently until it lands.';
-
--- The four seed rows ORDER 11(g) names. Only weekly_learning has a threshold
--- ruled; the other three are empty by design, not by omission.
-insert into job_config (job_slug, config) values
-  ('weekly_learning',     '{"min_posts_per_cell": 30}'::jsonb),
-  ('promotion_review',    '{}'::jsonb),
-  ('matcher',             '{}'::jsonb),
-  ('notification_budget', '{}'::jsonb);
+-- ── 2. (g) the four job entries, in the ONE config home ──────────────────────
+-- system_config's convention, read off the live table rather than assumed:
+-- key is '<namespace>.<setting>', value is jsonb (bare scalar or object), note
+-- is a plain-words sentence saying what the row gates, and INITIAL marks a
+-- number that is a starting guess rather than a ruling. Eleven rows today.
+--
+-- TWO OF THE FOUR JOBS ARE ALREADY HOME, AND ARE NOT RE-SEEDED. Re-seeding
+-- them under a second namespace is the exact duplication the ruling forbids,
+-- one level down:
+--   · weekly_learning   → learning.min_posts_per_feature_cell = 30  (0002)
+--                         and learning.exploration_share            (0002)
+--     The order's job_config seed for this job carried min_posts_per_cell 30 —
+--     the SAME fact under a different name. Skipped; the canonical key above
+--     is the one every learning job reads.
+--   · promotion_review  → promotion.min_repeat_violations = 3       (0002)
+--
+-- The other two have no home yet and get one. Their value is an empty object
+-- ON PURPOSE — ORDER 11(g)'s own words, "empty jsonb is fine where no
+-- threshold is ruled yet". A job reading {} must report the shortfall (§C:
+-- "14 posts tagged, threshold is 30, no conclusions yet"), never assume a
+-- default. When a real setting is ruled it lands as its own dotted key
+-- alongside these, exactly as the learning and promotion namespaces did.
+insert into system_config (key, value, note) values
+  ('matcher.settings', '{}'::jsonb,
+   'ORDER 11(g) / wave2-design §D4. Settings for the availability x space_search '
+   'matcher (nightly join; matches land in the digest, never auto-sent). EMPTY '
+   'BY DESIGN: no threshold has been ruled yet, and the job must say so rather '
+   'than invent one. First real setting lands as its own matcher.<setting> key.'),
+  ('notification_budget.settings', '{}'::jsonb,
+   'ORDER 11(g) / wave2-design §2g. Notification thresholds and budgets for the '
+   'operating-rhythm layer. EMPTY BY DESIGN: unruled, and quiet hours plus the '
+   'weekends-off rule already bind at the notification layer regardless. First '
+   'real budget lands as its own notification_budget.<setting> key.');
 
 -- ── 3. grants ────────────────────────────────────────────────────────────────
--- Writer full, matching what 0004 gave every base table (select, insert,
--- update — no delete anywhere in this schema by design). carr_reader gets
--- NOTHING: the order specifies none, no read verb touches these tables, and
--- amendment 11's views-only posture is what makes the leak guard structural.
+-- Writer full on the new table, matching what 0004 gave every base table
+-- (select, insert, update — no delete anywhere in this schema by design).
+-- carr_reader gets NOTHING: the order specifies none, no read verb touches it,
+-- and amendment 11's views-only posture is what makes the leak guard
+-- structural. system_config needs no grant work — it already has 0004's, and
+-- carr_exporter's read grant from 0006.
 grant select, insert, update on cadence_rule to carr_writer;
-grant select, insert, update on job_config  to carr_writer;
 
 -- ── 4. guards ────────────────────────────────────────────────────────────────
 do $$
-declare n int; leaked text;
+declare n int; leaked text; strays text;
 begin
-  -- (f)+(g) exist and only they were created
   if to_regclass('public.cadence_rule') is null then
     raise exception 'cadence_rule was not created';
   end if;
-  if to_regclass('public.job_config') is null then
-    raise exception 'job_config was not created';
+
+  -- The ruling, made mechanical: there is ONE config home. If a later hand
+  -- re-adds job_config, this migration is where the intent is written down.
+  if to_regclass('public.job_config') is not null then
+    raise exception
+      'job_config exists — the 2026-07-31 ruling is ONE config home (system_config). '
+      'Stop and report rather than maintaining two.';
   end if;
 
   -- cadence_rule ships empty (the engine is ORDER 14; this order is schema only)
@@ -162,32 +173,55 @@ begin
     raise exception 'cadence_rule must ship empty, found % row(s)', n;
   end if;
 
-  -- job_config carries exactly the four seeded jobs
-  select count(*) into n from job_config;
-  if n <> 4 then
-    raise exception 'job_config seed: expected 4 rows, found %', n;
+  -- the two new config rows exist and are honestly empty
+  select count(*) into n from system_config
+   where key in ('matcher.settings', 'notification_budget.settings')
+     and value = '{}'::jsonb;
+  if n <> 2 then
+    raise exception 'expected 2 empty job-config rows in system_config, found %', n;
   end if;
 
-  -- the stop rule, made mechanical: ANY carr_reader privilege on either new
-  -- table fails this migration rather than shipping a widened reader.
+  -- the two already-home jobs were NOT duplicated under a second namespace
+  select string_agg(key, ', ' order by key) into strays
+    from system_config
+   where key like 'weekly\_learning.%' or key like 'promotion\_review.%'
+      or key like 'job\_config%';
+  if strays is not null then
+    raise exception
+      'duplicate job namespace(s) in system_config: %. weekly_learning lives under '
+      'learning.*, promotion_review under promotion.* — one home per fact.', strays;
+  end if;
+
+  -- and their canonical values are untouched by this migration
+  if (select value from system_config where key = 'learning.min_posts_per_feature_cell')
+       is distinct from '30'::jsonb then
+    raise exception 'learning.min_posts_per_feature_cell moved — this migration must not touch it';
+  end if;
+  if (select value from system_config where key = 'promotion.min_repeat_violations')
+       is distinct from '3'::jsonb then
+    raise exception 'promotion.min_repeat_violations moved — this migration must not touch it';
+  end if;
+
+  -- the stop rule, made mechanical: ANY carr_reader privilege on the new table
+  -- fails this migration rather than shipping a widened reader.
   select string_agg(distinct table_name, ', ') into leaked
     from information_schema.role_table_grants
    where grantee = 'carr_reader'
      and table_schema = 'public'
-     and table_name in ('cadence_rule', 'job_config');
+     and table_name = 'cadence_rule';
   if leaked is not null then
     raise exception
       'ORDER 11 stop rule: carr_reader holds a privilege on % — none is specified', leaked;
   end if;
 
-  -- writer can actually use them (a table the verbs cannot write is furniture)
+  -- writer can actually use it (a table the verbs cannot write is furniture)
   select count(*) into n
     from information_schema.role_table_grants
    where grantee = 'carr_writer' and table_schema = 'public'
-     and table_name in ('cadence_rule', 'job_config')
+     and table_name = 'cadence_rule'
      and privilege_type in ('SELECT', 'INSERT', 'UPDATE');
-  if n <> 6 then
-    raise exception 'carr_writer grants incomplete on the new tables (% of 6)', n;
+  if n <> 3 then
+    raise exception 'carr_writer grants incomplete on cadence_rule (% of 3)', n;
   end if;
 
   -- the seven pre-existing tables are still empty and still untouched by this
@@ -208,5 +242,5 @@ begin
       'writes to none of them; stop and report', n;
   end if;
 
-  raise notice 'ORDER 11 guards: cadence_rule empty, job_config 4 seeds, reader 0 grants, writer 6, pre-existing 7 untouched';
+  raise notice 'ORDER 11 guards: cadence_rule empty, 2 config rows seeded, no duplicate namespaces, reader 0 grants, writer 3, pre-existing 7 untouched';
 end $$;
