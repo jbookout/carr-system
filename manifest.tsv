@@ -48,6 +48,15 @@ bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
 #   side that his sessions must never run — and when Dell's nightly lands it authors its own,
 #   the same reference-pattern ruling ops/scheduled-tasks got after ORDER 8. What Dell DOES see
 #   is the OUTPUT: the actions the engine spawns land in the exported files he already reads.
+# pipelines/review_queue.py, pipelines/brief_pack.py and
+#   pipelines/notification-budget-seed.sql are repo-only (2026-07-31, ORDER 16). PLACEMENT TEST:
+#   both scripts read the database through Joe's exporter credential and read HIS calendar,
+#   HIS open items, and HIS documents, so a vault copy would be a second runtime pointed at
+#   one partner's data, which is the opposite of what a shared file is for. They are invoked
+#   through run.sh by the heartbeat and the Monday brief, exactly like health-check.py. Dell's
+#   twin gets its own pair when his side lands, computing from HIS credential, the same
+#   reference-pattern ruling ORDER 14 took. The seed file writes system_config, so it carries
+#   the same never-on-Dell's-side reason as the cadence seed above.
 # tools/writing-lint.py is repo-only FOR NOW (2026-07-25). It enforces a SHARED-tier doctrine
 #   file (DNA/writing-rules.md), so Dell's side would benefit from a vault copy — but adding a
 #   file to the shared tier is a two-writer decision for Joe, not a unilateral write. Placement

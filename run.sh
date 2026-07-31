@@ -5,6 +5,8 @@
 #   ./run.sh lead-board    — rebuild the Lead Board HTML from the registry + feeds
 #   ./run.sh renewal-feed  — rebuild renewal-radar.json from the newest radar xlsx
 #   ./run.sh all           — all three, renewal-feed before lead-board (feed order matters)
+#   ./run.sh review-queue  — rebuild the ONE review queue (out/review-queue/), a surface only
+#   ./run.sh brief-pack    — the four brief sections as callable units (out/brief-pack/)
 # CARR_VAULT overrides the vault path (default: Joe's Drive mount).
 
 set -eu
@@ -28,6 +30,10 @@ graph_health() { shift; python3 "$REPO/pipelines/graph-health.py" "$VAULT" "$@";
 sf_diff()      { shift; python3 "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }
 section_index(){ python3 "$REPO/pipelines/build-section-index.py" "$VAULT"; }
 registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" "$@"; }
+# ORDER 16. Both are READ-ONLY surfaces: no database write, no send, no push.
+# They run on the repo venv because they speak to Neon through psycopg.
+review_queue() { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/review_queue.py" "$@"; }
+brief_pack()   { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/brief_pack.py" "$@"; }
 verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" "$@"; }
 
 case "${1:-}" in
@@ -44,6 +50,8 @@ case "${1:-}" in
   salesforce-diff) sf_diff "$@" ;;
   section-index) section_index ;;
   registry-audit) registry_audit "$@" ;;
+  review-queue) review_queue "$@" ;;
+  brief-pack)   brief_pack "$@" ;;
   verify-emails) verify_emails "$@" ;;
   retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
@@ -51,5 +59,5 @@ case "${1:-}" in
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph|graph-system|graph-health [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
 esac
