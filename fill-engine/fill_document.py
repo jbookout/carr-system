@@ -414,6 +414,134 @@ def scrub_docx(path: str, author: str = CARR_AUTHOR) -> dict:
     return found
 
 
+# --------------------------------------------------------- the finish rules
+# ORDER 22, and it exists because ORDER 20's fold-in 1 was only half a rule.
+# Filled values were forced black and OWED markers red, which left the CARRIED
+# text — CARR's own standing language, sitting in the template in the template's
+# replace-me blue and red — coloured on a document that goes to a listing agent.
+#
+# JOE'S CORRECTION (2026-07-31, now an active shared rule) settles which side
+# gives: every LOI term is negotiable and a template value is a placeholder
+# holding the most common case, so the colour in a template means "review this
+# per deal", not "this is CARR policy". The template authorship is therefore
+# CORRECT and must not be forked. The document is what changes: on the sendable
+# render every run is black except the markers that still owe Joe an answer.
+#
+# The verification surface moves with the rule. A reader can no longer tell a
+# carried run from a filled one by its ink, so `audit_template_colors.py` and the
+# `carried` list in the run's own report are what say what was carried, and the
+# colour left in the file means one thing only: a human still owes an answer.
+OWED_PREFIX = re.compile(r"^\s*\[OWED:")
+
+
+def _force_run_color(r_el, rgb: str) -> None:
+    """Force one w:r element's colour, clearing any theme colour beside it.
+
+    Works on the raw element rather than on a python-docx Run so it reaches runs
+    inside a content control, which `paragraph.runs` cannot see. The colour
+    element is placed through python-docx's own rPr accessor so it lands in the
+    schema's required child order instead of merely at the end.
+    """
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    c = r_el.get_or_add_rPr().get_or_add_color()
+    c.set(f"{W}val", rgb)
+    for attr in (f"{W}themeColor", f"{W}themeTint", f"{W}themeShade"):
+        if c.get(attr) is not None:
+            del c.attrib[attr]
+
+
+def _run_text(r_el) -> str:
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    return "".join(t.text or "" for t in r_el.findall(f".//{W}t"))
+
+
+def finish_colors(path: str) -> dict:
+    """Force every body run BLACK except the engine's own OWED markers, red.
+
+    Body only: header1.xml holds the letterhead and is never touched, so the
+    branding keeps its own colours and the .emf and the theme stay byte-identical
+    to the template. Empty runs are skipped because a run with no text has no ink
+    to correct, and touching it would change the package for no visible gain.
+    """
+    import docx
+
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    d = docx.Document(path)
+    out: dict = {"forced_black": 0, "owed_kept_red": 0, "recolored": []}
+    for r in d.element.body.findall(f".//{W}r"):
+        text = _run_text(r)
+        if not text.strip():
+            continue
+        rPr = r.find(f"{W}rPr")
+        c = None if rPr is None else rPr.find(f"{W}color")
+        prev = "" if c is None else (c.get(f"{W}val") or "").upper()
+        theme = None if c is None else c.get(f"{W}themeColor")
+        was_colored = bool(theme) or prev not in ("", "AUTO", "000000")
+        if OWED_PREFIX.match(text):
+            _force_run_color(r, RED)
+            out["owed_kept_red"] += 1
+            continue
+        _force_run_color(r, BLACK)
+        out["forced_black"] += 1
+        if was_colored:
+            out["recolored"].append({"was": prev or f"theme:{theme}", "text": text[:90]})
+    d.save(path)
+    return out
+
+
+def has_unresolved_option(text: str) -> bool:
+    """A pipe is the template author's way of writing 'pick one'."""
+    return " | " in text or text.rstrip().endswith("|")
+
+
+def resolve_unresolved_options(path: str, labels: dict | None = None) -> dict:
+    """Turn any surviving 'A | B' into a red OWED marker naming the alternatives.
+
+    ORDER 22(b). A pipe that reaches the finish is not text, it is a question
+    nobody answered, and a letter reaching the listing agent with both
+    alternatives still in it is a worse failure than a colour (measured on the
+    C-112 draft of 2026-07-31: the Broker Commission, HVAC and Electrical rows
+    all shipped their pipes). The alternatives are named as the template writes
+    them rather than paraphrased, so the answer Joe gives is a choice between the
+    template's own words.
+    """
+    import docx
+
+    labels = labels or {}
+    d = docx.Document(path)
+    found: list[dict] = []
+
+    def handle(where: str, text: str, setter) -> None:
+        if not has_unresolved_option(text):
+            return
+        segs = [s.strip() for s in re.split(r"\s*\|\s*", text) if s.strip()]
+        label = labels.get(where) or "unresolved template option"
+        marker = (f"[OWED: {label}. The template offers alternatives here and nobody has "
+                  "chosen: " + " OR ".join(f'"{s}"' for s in segs) + "]")
+        setter(marker)
+        found.append({"where": where, "was": text, "alternatives": segs, "marker": marker})
+
+    for pi, p in enumerate(d.paragraphs):
+        handle(f"para:{pi}", p.text, lambda t, p=p: _set_paragraph_text(p, t, RED))
+    for ti, t in enumerate(d.tables):
+        for ri, row in enumerate(t.rows):
+            for ci, cell in enumerate(row.cells):
+                handle(f"table:{ti}:{ri}:{ci}", cell.text,
+                       lambda t, cell=cell: _set_cell_text(cell, t, RED))
+    if found:
+        d.save(path)
+    return {"count": len(found), "resolved_to_owed": found}
+
+
+def document_pipes(path: str) -> list[str]:
+    """Every body run still carrying a pipe. The done-test reads this, not a report."""
+    import docx
+
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    d = docx.Document(path)
+    return [_run_text(r) for r in d.element.body.findall(f".//{W}r") if "|" in _run_text(r)]
+
+
 # ------------------------------------------------------- the colour audit
 # Joe's convention read back out of a file. Two uses, one function: the finish
 # check on a produced draft (anything still coloured is either an unfilled slot

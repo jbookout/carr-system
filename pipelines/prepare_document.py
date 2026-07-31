@@ -36,6 +36,17 @@ SPREADSHEET goes out as the PDF so the formulas stay ours, and the working
 workbook never leaves. Naming a sendable format is not permission to send:
 Joe sends, and no verb in this system can.
 
+THE FINISH RULES (ORDER 22, from Joe's correction that every LOI term is
+negotiable and a template value is a placeholder holding the most common case,
+never CARR policy). On the sendable render: every run is BLACK except the OWED
+markers, which are RED, so the only colour a reader sees is a question somebody
+still owes an answer to. What the template carried is read off the run's own
+`carried` list and off audit_template_colors.py, not off the document's ink. And
+any text still carrying a pipe is an UNRESOLVED CHOICE, never text: it becomes a
+red OWED marker naming the template's own alternatives. Both are checked on the
+produced file, and that check BLOCKS the OneDrive copy the way a HARD lint
+finding does.
+
 Every outbound .docx is SCRUBBED before it routes — comments, tracked changes,
 comment authors, custom properties, and the authorship metadata inherited from
 CARR's corporate template (the C-112 draft carried a named individual's Windows
@@ -64,7 +75,8 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "fill-engine"))
 sys.path.insert(0, os.path.join(REPO, "lib"))
-from fill_document import fill, to_pdf, FillError, colored_runs, scrub_docx  # noqa: E402
+from fill_document import (fill, to_pdf, FillError, colored_runs, scrub_docx,  # noqa: E402
+                           finish_colors, resolve_unresolved_options, document_pipes)
 import r2_archive as r2  # noqa: E402
 
 VAULT = os.environ.get(
@@ -123,39 +135,51 @@ def leak_guard(text: str, listing_side_names: list[str]) -> list[str]:
 OWED_MARKER = re.compile(r"^\s*\[OWED:")
 
 
-def color_check(path: str) -> list[dict]:
-    """The no-coloured-text finish check (Joe's convention, 2026-07-31).
+def color_check(path: str) -> dict:
+    """The no-coloured-text finish check, now a GATE (ORDER 22(a)).
 
-    Blue or red in a CARR template means "this gets replaced". A finished letter
-    is all black. So after the fill, anything still coloured that is NOT one of
-    our own red OWED markers is a finding: either a slot no field map covers, or
-    template text that nobody has patched. It rides alongside the leak guard and
-    the writing lint because it is the same class of check, a fact about the
-    produced file rather than a judgment about it.
+    Joe's convention: blue or red in a CARR template means "this gets replaced",
+    and a letter that goes out is all black. ORDER 20 forced filled values black
+    and OWED markers red but left the CARRIED runs in the template's own
+    replace-me colours, and reported them rather than blocking — because
+    blocking on carried text would have stopped every LOI this factory ever
+    produces.
 
-    It REPORTS rather than blocks, and that is deliberate. Several coloured runs
-    are `carry` slots holding CARR's own standing language that the map declines
-    to write (the base-year line, the commission language), so blocking would
-    stop every LOI this factory will ever produce. The lint HARD gate is the one
-    that blocks; this one tells Joe where to look.
+    That trade is gone: the finish now forces every run black except the OWED
+    markers, so nothing legitimate is left coloured and the check can hold a real
+    line. The invariant is arithmetic rather than judgment — every coloured run
+    in the sendable file is an OWED marker, and every OWED marker is red — so a
+    failure means the finish rule did not reach some run, which is a defect in
+    this engine and not a fact about the deal.
+
+    A pipe is checked separately and over the whole body, because a run inside a
+    content control is invisible to a paragraph scan and " | " reaching the
+    listing agent is worse than any colour.
     """
     if os.path.splitext(path)[1].lower() != ".docx":
-        return []
-    findings = []
-    for r in colored_runs(path):
-        if OWED_MARKER.match(r["text"]):
-            continue                       # our own marker, red on purpose
-        # SEEN IN THE C-112 RENDER, not reasoned about: the coloured text left
-        # standing by `carry` slots is not merely coloured, it is UNFINISHED.
-        # The Broker Commission cell reads "4% of the total base rent for the 10
-        # year term | $10.00 per RSF", HVAC reads "Owner to pay for and install
-        # | ensure". A pipe is the template author's way of writing "pick one",
-        # and a document going to the listing agent with both alternatives still
-        # in it is a worse failure than a colour. Flagged separately so it reads
-        # as what it is.
-        r = dict(r, unresolved_option=" | " in r["text"] or r["text"].strip().endswith("|"))
-        findings.append(r)
-    return findings
+        return {"applies": False, "passed": True}
+    runs = colored_runs(path)
+    markers = [r for r in runs if OWED_MARKER.match(r["text"])]
+    not_marker = [r for r in runs if not OWED_MARKER.match(r["text"])]
+    not_red = [r for r in markers if r["color"] != "FF0000"]
+    pipes = document_pipes(path)
+    return {"applies": True,
+            "colored_runs": len(runs), "owed_markers": len(markers),
+            "colored_but_not_owed": not_marker, "owed_but_not_red": not_red,
+            "pipes_remaining": pipes,
+            "passed": not not_marker and not not_red and not pipes}
+
+
+def slot_labels(plan: dict) -> dict:
+    """Address -> the label a human knows the slot by, for an OWED marker's text."""
+    out = {}
+    for group in ("owed", "carried", "partial"):
+        for s in plan.get(group, []) or []:
+            if s.get("where"):
+                out[s["where"]] = s.get("label") or s.get("slot") or ""
+    for e in plan.get("edits", []) or []:
+        out.setdefault(e["where"], e.get("slot", ""))
+    return {k: v for k, v in out.items() if v}
 
 
 def run_lint(text: str, label: str) -> dict:
@@ -241,8 +265,16 @@ def main() -> int:
     # the colour Joe reads the draft by (black = real, red = still needs him).
     edits = [{"where": e["where"], "text": e["text"], "owed": bool(e.get("owed"))}
              for e in plan["edits"]]
+    # ---- the finish rules (ORDER 22), between the fill and the render so the
+    # PDF is a render of the finished file rather than of an intermediate one.
+    # Order matters: pipes become OWED markers FIRST, so the colour pass sees
+    # them as markers and leaves them red instead of blackening a live question.
+    options, color_finish = None, None
     try:
         fill(tmpl, working, edits)
+        if ext == ".docx":
+            options = resolve_unresolved_options(working, slot_labels(plan))
+            color_finish = finish_colors(working)
         to_pdf(working, pdf)
     except FillError as e:
         print(f"STOP: {e}", file=sys.stderr)
@@ -268,15 +300,16 @@ def main() -> int:
     text = doc_text(working)
     leaks = leak_guard(text, plan.get("listing_side_names", []))
     lint = run_lint(text, plan["basename"][:40])
-    color_findings = color_check(working)
+    color = color_check(working)
 
-    blocked = bool(leaks) or lint["hard"]
+    blocked = bool(leaks) or lint["hard"] or not color["passed"]
     routed_to, route_note = STAGING, "staging only (--route staging)"
     if a.route == "onedrive":
         if blocked:
             route_note = ("BLOCKED from OneDrive: "
                           + ("leak guard findings; " if leaks else "")
-                          + ("writing-lint HARD findings" if lint["hard"] else "")
+                          + ("writing-lint HARD findings; " if lint["hard"] else "")
+                          + ("the colour/pipe finish gate failed" if not color["passed"] else "")
                           + ". Staging copy only, per the ORDER 13 gate.")
         else:
             folder = find_deal_folder(plan)
@@ -312,15 +345,16 @@ def main() -> int:
                      "workbook never leaves."),
             "human_gate": "Sendable names the format, not permission. Joe sends; no verb can."},
         "scrub": scrub,
-        "color_findings": color_findings,
+        "color_finish": color_finish,
+        "unresolved_options": options,
+        "color_gate": color,
         "color_note": ("Joe's convention: blue or red marks text that gets replaced, and a letter "
-                       "that goes out is all black. Filled values are forced black and OWED markers "
-                       "are forced red. Anything else still coloured is listed above: it is either a "
-                       "slot no map covers or template text nobody patched. Reported, not blocking "
-                       "— several are 'carry' slots holding CARR's standing language on purpose."
-                       + (" THIS FILE IS THE SENDABLE ONE, so every finding above is a colour the "
-                          "listing agent would see. Read them before handing it over."
-                          if sendable_role == "working" and color_findings else "")),
+                       "that goes out is all black. Every run in the sendable file is forced black "
+                       "except the OWED markers, which stay red, so the only colour left is a "
+                       "question a human still owes. What the template CARRIED is read off the "
+                       "'carried' list and audit_template_colors.py, not off the document's ink. "
+                       "This is a gate: coloured runs must equal OWED markers exactly, every marker "
+                       "red, and no pipe anywhere in the body."),
         "routed_to": routed_to, "route_note": route_note,
         "status": "draft",
         "human_gate": "DRAFT for Joe to review. Nothing was sent; no verb in this system can send.",
