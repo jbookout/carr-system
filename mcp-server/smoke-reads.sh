@@ -11,7 +11,11 @@
 #   ./mcp-server/smoke-reads.sh
 # Exit 0 = all read verbs healthy. Non-zero = at least one check failed.
 #
-# Read-only by construction: every verb below has write:false in the registry.
+# NOT read-only any more, and deliberately so (ORDER 18 addendum, 2026-07-31).
+# Every verb here is write:false EXCEPT the last check, a log-activity call with
+# a FIXED idempotency key: it inserted once, on the first run in history, and
+# replays for ever after. That one row is the price of covering the write path,
+# and a twelve-hour production outage is what not covering it cost.
 
 set -uo pipefail
 
@@ -43,18 +47,20 @@ call() {
 REPS="${SMOKE_REPS:-3}"
 REP_SLEEP="${SMOKE_REP_SLEEP:-3}"
 
-# check <label> <verb> <args> [grep-pattern]
+# check <label> <verb> <args> [grep-pattern] [second-grep-pattern]
 # Passes when every rep is non-error, not isError, and (if given) matches the
-# pattern. A verb returning an empty-but-valid result still passes: this is a
+# pattern(s). A verb returning an empty-but-valid result still passes: this is a
 # plumbing check, not a data assertion.
 check() {
-  local label="$1" verb="$2" args="$3" pattern="${4:-}" i why=""
+  local label="$1" verb="$2" args="$3" pattern="${4:-}" pattern2="${5:-}" i why=""
   for i in $(seq 1 "$REPS"); do
     call "$verb" "$args"
     if echo "$RESULT" | grep -q '"error"'; then why="transport/protocol error"
     elif echo "$RESULT" | grep -q '"isError":true'; then why="verb returned isError"
     elif [ -n "$pattern" ] && ! echo "$RESULT" | grep -q "$pattern"; then
       why="expected /$pattern/ in the result"
+    elif [ -n "$pattern2" ] && ! echo "$RESULT" | grep -q "$pattern2"; then
+      why="expected /$pattern2/ in the result"
     else why=""; fi
     if [ -n "$why" ]; then
       echo "  FAIL  $label — $why (rep $i of $REPS)"
@@ -89,6 +95,51 @@ if [ "$_amb_ok" -eq 1 ]; then
   echo "  ok    ambiguous name returns needs_disambiguation  (${REPS}/${REPS})"; pass=$((pass+1))
 else
   echo "  FAIL  ambiguous name did NOT return needs_disambiguation"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
+
+# --- ORDER 18: the intro graph is reachable under the READER role ---------------
+# 'Jon Shaw' is a real vendor (V-BNK-013) who introduced C-155 Dr. James Allen
+# Tyrer. The name 'Tyrer' cannot appear in the parties block (that block matches
+# the query name) nor in the deals block (no deal is named Jon Shaw), so a
+# response to query 'Jon Shaw' that contains Tyrer can only have come from the
+# connections block reading v_party_graph. The chain is the probe.
+echo
+# (the result arrives as a JSON string inside the MCP envelope, so the keys are
+#  backslash-escaped on the wire — match them that way, not as bare quotes)
+check "graph probe: find surfaces the Shaw -> Tyrer intro" \
+      find '{"query":"Jon Shaw"}' '\\"connections\\"' 'Tyrer'
+
+# --- ORDER 18 addendum: the WRITE path, using the A1 replay property -----------
+# WHY THIS EXISTS. On 2026-07-31 every ref-based WRITE verb returned 500
+# "permission denied for view v_ref_index" for roughly twelve hours. ORDER 7
+# moved resolveSubject onto that view and granted it to carr_reader only, but
+# resolveSubject also runs inside the write transaction under carr_writer. This
+# script was all-green throughout, because it only ever exercised reads.
+#
+# The probe is safe to run forever: the idempotency key below is FIXED and the
+# arguments never change, so the A1 envelope inserts on the first run in history
+# (2026-07-31) and REPLAYS on every run after — same response, no second row.
+# Anything that grows here would be an envelope bug, which is itself worth
+# catching. kind is 'note' on purpose: is_contact=false since 0017, so the probe
+# cannot move a Last Touch value in the exports.
+echo
+_w_ok=1; _w_why=""
+for i in $(seq 1 "$REPS"); do
+  call log-activity '{"idempotency_key":"smoke-write-probe-permanent","ref":"V-CPA-006","kind":"note","summary":"smoke write probe — replayed, never duplicated"}'
+  if echo "$RESULT" | grep -q '"error"'; then _w_ok=0; _w_why="transport/protocol error"; break; fi
+  if echo "$RESULT" | grep -q '"isError":true'; then _w_ok=0; _w_why="verb returned isError (resolveSubject under carr_writer?)"; break; fi
+  if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _w_ok=0; _w_why="no ok:true in the envelope response"; break; fi
+  # rep 1 may legitimately be the first-ever insert; every rep after it must replay
+  if [ "$i" -gt 1 ] && ! echo "$RESULT" | grep -q '\\"replayed\\":true'; then
+    _w_ok=0; _w_why="rep $i did NOT replay — the envelope wrote twice"; break
+  fi
+  [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+done
+if [ "$_w_ok" -eq 1 ]; then
+  echo "  ok    write path: log-activity resolves + replays  (${REPS}/${REPS})"; pass=$((pass+1))
+else
+  echo "  FAIL  write path — $_w_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
 fi
 

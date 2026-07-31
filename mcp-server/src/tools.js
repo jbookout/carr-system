@@ -139,6 +139,25 @@ async function resolveSubject(client, ref) {
 
 const FK = { deal: "deal_id", client: "client_id", lead: "lead_id", vendor: "vendor_id" };
 
+// [ORDER 18] How many intro-graph edges `find` returns per query. A cap, not a
+// page: find answers "who is this and who do we know through them", and the whole
+// subgraph belongs to a graph verb nobody has ordered yet.
+const CONNECTIONS_CAP = 12;
+
+// [ORDER 18] The kind vocabulary lives in party_link_kind (0020) — the verb has no
+// enum of its own any more, so widening it is a row a human adds, not a deploy.
+// Validated against the table so an unknown kind is refused with the legal list
+// rather than landing as a new de-facto vocabulary the way intro_sent did.
+async function validateLinkKind(client, kind) {
+  const r = await client.query(
+    "select slug from party_link_kind where slug=$1", [kind]);
+  if (r.rows.length) return kind;
+  const all = await client.query("select slug from party_link_kind order by sort");
+  throw new ToolError({ error: "unknown_kind", kind,
+    valid: all.rows.map(x => x.slug),
+    hint: "party_link_kind is the vocabulary; add a row there if a genuinely new kind is needed" });
+}
+
 // ---------- the registry ----------
 // Each: { description, inputSchema, write: bool, humanOnly?: bool, handler(client, actor, args) }
 
@@ -148,7 +167,7 @@ export const TOOLS = {
 
   "find": {
     write: false,
-    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Read-only.",
+    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. Read-only.",
     inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     handler: async (c, _a, args) => {
       const q = args.query;
@@ -168,7 +187,20 @@ export const TOOLS = {
         // threw first (amendment 11) — one bug hiding another.
         "select name, phase, lead_owner as owner, client_ref from v_deal_board where name ilike $1 limit 5",
         [`%${q}%`]);
-      return { parties: parties.rows, deals: deals.rows };
+      // [ORDER 18] The intro graph, through v_party_graph — SAFE COLUMNS ONLY, the
+      // same views-only posture as v_ref_index. Capped deliberately: a hub like
+      // V-CPA-006 carries 16 edges on its own and the whole graph is not an answer
+      // to a name search. Newest first, because a fresh intro is the useful one;
+      // names break the tie so the 28 backfilled edges (one timestamp between them)
+      // still come back in a stable order.
+      const connections = await c.query(
+        `select from_ref, from_name, kind, to_ref, to_name, note
+         from v_party_graph
+         where from_name ilike $1 or to_name ilike $1
+            or from_ref  ilike $2 or to_ref  ilike $2
+         order by linked_at desc, from_name, to_name limit $3`,
+        [`%${q}%`, q, CONNECTIONS_CAP]);
+      return { parties: parties.rows, deals: deals.rows, connections: connections.rows };
     },
   },
 
@@ -524,19 +556,39 @@ export const TOOLS = {
 
   "link-parties": {
     write: true,
-    description: "Record an intro-graph edge: who can introduce whom, who referred whom. Feeds who-do-we-know and the future reciprocity ledger.",
+    description: "Record an intro-graph edge: who can introduce whom, who referred whom. Feeds who-do-we-know (find returns these) and the reciprocity ledger. kind comes from the party_link_kind table — today knows, intro, intro_received, can_introduce, works_with, referral — and the same edge recorded twice returns the first one, never a duplicate.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, from_party: { type: "string" }, to_party: { type: "string" },
-      kind: { type: "string", enum: ["can_introduce","intro_sent","intro_received","works_with","referred"] },
+      kind: { type: "string", description: "a slug from party_link_kind: knows, intro, intro_received, can_introduce, works_with, referral" },
       note: { type: "string" } }, required: ["idempotency_key","from_party","to_party","kind"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "link-parties", args, async () => {
-      const r = await c.query(
+      // [ORDER 18] The old hard-coded enum (can_introduce/intro_sent/intro_received/
+      // works_with/referred) is retired. It was one of the two vocabularies ORDER 17
+      // found: this verb could not write a single kind the backfill used, and the
+      // backfill could not write one this verb offered. One table, one vocabulary.
+      const kind = await validateLinkKind(c, args.kind);
+      // Upsert against 0020's unique index. Before it, two taps wrote two identical
+      // edges and nothing complained. `do nothing` returns no row on conflict, so
+      // the existing edge is read back and returned — the caller gets the edge it
+      // asked for either way, and learns which case it was.
+      const ins = await c.query(
         `insert into party_link (from_party, to_party, kind, note, source, created_by)
-         values ($1,$2,$3,$4,'stated',$5) returning id`,
-        [args.from_party, args.to_party, args.kind, args.note || null, actor.id]);
+         values ($1,$2,$3,$4,'stated',$5)
+         on conflict (from_party, to_party, kind) do nothing
+         returning id`,
+        [args.from_party, args.to_party, kind, args.note || null, actor.id]);
+      if (!ins.rows.length) {
+        const cur = await c.query(
+          "select id from party_link where from_party=$1 and to_party=$2 and kind=$3",
+          [args.from_party, args.to_party, kind]);
+        // No event row: nothing changed in the record, and an event that says a
+        // link was made when none was is the kind of fiction the ledger exists to
+        // prevent. The tool_call row (envelope) still records that it was asked.
+        return { ok: true, link_id: cur.rows[0].id, existing: true };
+      }
       await writeEvent(c, actor, "link-parties", "party", args.from_party,
-        { new: { kind: args.kind, to: args.to_party }, idempotency_key: args.idempotency_key });
-      return { ok: true, link_id: r.rows[0].id };
+        { new: { kind, to: args.to_party }, idempotency_key: args.idempotency_key });
+      return { ok: true, link_id: ins.rows[0].id, existing: false };
     }),
   },
 
