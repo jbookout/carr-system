@@ -1,163 +1,164 @@
 {
-  "unreviewed": true,
-  "template_kind": "xlsx",
-  "proposed_by": "ORDER 13 execution, 2026-07-31",
-  "review_note": "PROPOSED map, not reviewed. The grid is a REPEATING shape: four property column-pairs, each carrying a frozen OFFERED column and a live CURRENT column over twenty deal points. That is one negotiation_round per property per side, keyed to a premises \u2014 so the map declares the addressing in full and resolves it as a unit, rather than pretending 160 independent slots exist.\n\nSENDABLE FORMAT (Joe's doctrine, 2026-07-31, superseding the old blanket 'clients get PDFs, never working files'): this is a SPREADSHEET template, so the PDF is the sendable artifact and the working workbook never leaves. Concealing the formulas is the whole point. Naming a sendable format is not permission to send: Joe sends, and no verb in this system can.",
-  "slots": {
-    "title": {
-      "where": "cell:LOI Grid!A1",
-      "label": "Title",
-      "kind": "record",
-      "template_default": "[CLIENT NAME] \u2014 LOI Grid \u2014 [m-d-yy]",
-      "segments": [
-        {
-          "from": "client.display_name"
-        },
-        {
-          "literal": " - LOI Grid - "
-        },
-        {
-          "from": "today",
-          "format": "date_short"
-        }
-      ],
-      "owed_note": "Client display name and the run date. HYPHENS, not the template placeholder's em-dashes: writing-rules hard-bans the em-dash on every surface a prospect could see, and the factory's own output must not be the thing that trips its own gate. The template's remaining em-dashes (A2, the four PROPERTY headers, A14, A27) are Joe's to rule on."
+ "unreviewed": false,
+ "template_kind": "xlsx",
+ "proposed_by": "ORDER 13 execution, 2026-07-31",
+ "review_note": "REVIEWED AND APPROVED by Joe 2026-07-31 (structure-only: producing a real grid waits on premises records, Wave 3).\n\nPROPOSED map, not reviewed. The grid is a REPEATING shape: four property column-pairs, each carrying a frozen OFFERED column and a live CURRENT column over twenty deal points. That is one negotiation_round per property per side, keyed to a premises \u2014 so the map declares the addressing in full and resolves it as a unit, rather than pretending 160 independent slots exist.\n\nSENDABLE FORMAT (Joe's doctrine, 2026-07-31, superseding the old blanket 'clients get PDFs, never working files'): this is a SPREADSHEET template, so the PDF is the sendable artifact and the working workbook never leaves. Concealing the formulas is the whole point. Naming a sendable format is not permission to send: Joe sends, and no verb in this system can.",
+ "slots": {
+  "title": {
+   "where": "cell:LOI Grid!A1",
+   "label": "Title",
+   "kind": "record",
+   "template_default": "[CLIENT NAME] \u2014 LOI Grid \u2014 [m-d-yy]",
+   "segments": [
+    {
+     "from": "client.display_name"
+    },
+    {
+     "literal": " - LOI Grid - "
+    },
+    {
+     "from": "today",
+     "format": "date_short"
     }
-  },
-  "repeat": {
-    "name": "properties",
-    "label": "The four property column-pairs (OFFERED frozen / CURRENT live)",
-    "over": "premises_list",
-    "limit": 4,
-    "header_row": 4,
-    "column_pairs": [
-      [
-        "B",
-        "C"
-      ],
-      [
-        "D",
-        "E"
-      ],
-      [
-        "F",
-        "G"
-      ],
-      [
-        "H",
-        "I"
-      ]
-    ],
-    "header": {
-      "segments": [
-        {
-          "literal": "PROPERTY "
-        },
-        {
-          "from": "item.index"
-        },
-        {
-          "literal": " \u2014 "
-        },
-        {
-          "from": "item.address"
-        }
-      ]
-    },
-    "rows": {
-      "6": {
-        "label": "Status",
-        "from": "item.round.status_note"
-      },
-      "7": {
-        "label": "Landlord / listing agent",
-        "from": "item.listing_side_name"
-      },
-      "8": {
-        "label": "SF",
-        "from": "item.area_sf",
-        "format": "sf"
-      },
-      "9": {
-        "label": "Rate ($/SF/yr)",
-        "from": "item.round.rate_norm_sf_yr",
-        "format": "usd2"
-      },
-      "10": {
-        "label": "Structure (NNN/MG/FS)",
-        "from": "item.round.opex_structure"
-      },
-      "11": {
-        "label": "Est. OpEx ($/SF)",
-        "from": "item.round.opex_note"
-      },
-      "12": {
-        "label": "Escalations",
-        "from": "item.round.escalator"
-      },
-      "13": {
-        "label": "Term (yrs)",
-        "from": "item.round.term_months",
-        "format": "term_years_num"
-      },
-      "14": {
-        "label": "Free rent (mo)",
-        "from": "item.round.free_rent_months"
-      },
-      "15": {
-        "label": "TI allowance ($/SF)",
-        "from": "item.round.ti_per_sf",
-        "format": "usd2"
-      },
-      "16": {
-        "label": "Est. build-out cost ($/SF)",
-        "from": null,
-        "owed_note": "No record field: build-out cost is the tenant's own estimate, not a negotiated term. Belongs to the comparison workbook."
-      },
-      "17": {
-        "label": "TI gap",
-        "from": null,
-        "owed_note": "Derived from row 15 minus row 16; the template computes it once both are present."
-      },
-      "18": {
-        "label": "Renewal options",
-        "from": "item.round.options_note"
-      },
-      "19": {
-        "label": "Purchase option",
-        "from": "item.round.options_note",
-        "owed_note": "Shares options_note with row 18 today \u2014 one text column carrying two different facts. Splitting it is a schema question, flagged not improvised."
-      },
-      "20": {
-        "label": "Exclusivity",
-        "from": null,
-        "owed_note": "No record field."
-      },
-      "21": {
-        "label": "Signage",
-        "from": null,
-        "owed_note": "No record field."
-      },
-      "22": {
-        "label": "Parking",
-        "from": null,
-        "owed_note": "No record field."
-      },
-      "23": {
-        "label": "Other terms",
-        "from": "item.round.note"
-      },
-      "24": {
-        "label": "Effective total cost",
-        "from": null,
-        "owed_note": "Comes from the lease-comparison workbook, not the record layer. Cross-document, deliberately left to the human."
-      },
-      "25": {
-        "label": "Last updated",
-        "from": "item.round.proposed_on",
-        "format": "date_short"
-      }
-    },
-    "owed_note": "Needs (1) premises rows for the candidate properties and (2) negotiation_round rows per premises for the OFFERED (round 1) and CURRENT (newest) columns. The record layer holds zero premises and zero spaces today, so this block resolves as one owed entry until a space search is recorded."
+   ],
+   "owed_note": "Client display name and the run date. HYPHENS, not the template placeholder's em-dashes: writing-rules hard-bans the em-dash on every surface a prospect could see, and the factory's own output must not be the thing that trips its own gate. The template's remaining em-dashes (A2, the four PROPERTY headers, A14, A27) are Joe's to rule on."
   }
+ },
+ "repeat": {
+  "name": "properties",
+  "label": "The four property column-pairs (OFFERED frozen / CURRENT live)",
+  "over": "premises_list",
+  "limit": 4,
+  "header_row": 4,
+  "column_pairs": [
+   [
+    "B",
+    "C"
+   ],
+   [
+    "D",
+    "E"
+   ],
+   [
+    "F",
+    "G"
+   ],
+   [
+    "H",
+    "I"
+   ]
+  ],
+  "header": {
+   "segments": [
+    {
+     "literal": "PROPERTY "
+    },
+    {
+     "from": "item.index"
+    },
+    {
+     "literal": " \u2014 "
+    },
+    {
+     "from": "item.address"
+    }
+   ]
+  },
+  "rows": {
+   "6": {
+    "label": "Status",
+    "from": "item.round.status_note"
+   },
+   "7": {
+    "label": "Landlord / listing agent",
+    "from": "item.listing_side_name"
+   },
+   "8": {
+    "label": "SF",
+    "from": "item.area_sf",
+    "format": "sf"
+   },
+   "9": {
+    "label": "Rate ($/SF/yr)",
+    "from": "item.round.rate_norm_sf_yr",
+    "format": "usd2"
+   },
+   "10": {
+    "label": "Structure (NNN/MG/FS)",
+    "from": "item.round.opex_structure"
+   },
+   "11": {
+    "label": "Est. OpEx ($/SF)",
+    "from": "item.round.opex_note"
+   },
+   "12": {
+    "label": "Escalations",
+    "from": "item.round.escalator"
+   },
+   "13": {
+    "label": "Term (yrs)",
+    "from": "item.round.term_months",
+    "format": "term_years_num"
+   },
+   "14": {
+    "label": "Free rent (mo)",
+    "from": "item.round.free_rent_months"
+   },
+   "15": {
+    "label": "TI allowance ($/SF)",
+    "from": "item.round.ti_per_sf",
+    "format": "usd2"
+   },
+   "16": {
+    "label": "Est. build-out cost ($/SF)",
+    "from": null,
+    "owed_note": "No record field: build-out cost is the tenant's own estimate, not a negotiated term. Belongs to the comparison workbook."
+   },
+   "17": {
+    "label": "TI gap",
+    "from": null,
+    "owed_note": "Derived from row 15 minus row 16; the template computes it once both are present."
+   },
+   "18": {
+    "label": "Renewal options",
+    "from": "item.round.options_note"
+   },
+   "19": {
+    "label": "Purchase option",
+    "from": "item.round.options_note",
+    "owed_note": "Shares options_note with row 18 today \u2014 one text column carrying two different facts. Splitting it is a schema question, flagged not improvised."
+   },
+   "20": {
+    "label": "Exclusivity",
+    "from": null,
+    "owed_note": "No record field."
+   },
+   "21": {
+    "label": "Signage",
+    "from": null,
+    "owed_note": "No record field."
+   },
+   "22": {
+    "label": "Parking",
+    "from": null,
+    "owed_note": "No record field."
+   },
+   "23": {
+    "label": "Other terms",
+    "from": "item.round.note"
+   },
+   "24": {
+    "label": "Effective total cost",
+    "from": null,
+    "owed_note": "Comes from the lease-comparison workbook, not the record layer. Cross-document, deliberately left to the human."
+   },
+   "25": {
+    "label": "Last updated",
+    "from": "item.round.proposed_on",
+    "format": "date_short"
+   }
+  },
+  "owed_note": "Needs (1) premises rows for the candidate properties and (2) negotiation_round rows per premises for the OFFERED (round 1) and CURRENT (newest) columns. The record layer holds zero premises and zero spaces today, so this block resolves as one owed entry until a space search is recorded."
+ },
+ "reviewed_by": "Joe Bookout, walk-through in chat, 2026-07-31 evening (Fable seat session 3)"
 }

@@ -1,216 +1,225 @@
 {
-  "unreviewed": true,
-  "template_kind": "docx",
-  "proposed_by": "ORDER 13 execution, 2026-07-31",
-  "review_note": "PROPOSED map, not reviewed. Same slot grammar as loi-lease.json. The purchase LOI's economics have NO home in the schema today \u2014 see purchase_price's owed_note and the report's schema-gap finding.\n\nCOLOUR CROSS-CHECK (2026-07-31, ORDER 20 fold-in). Joe's convention: blue or red marks text that gets replaced; a letter that goes out is all black. Checked this map against the template's own coloured runs, which are the author's independent list of slots. 20 coloured runs across 13 addresses. COLOURED BUT UNMAPPED (0): none. MAPPED AND MARKED BY A CONTENT CONTROL instead of a colour, correctly mapped (1): para:5. MAPPED BUT UNMARKED EITHER WAY (2): table:0:6:1, table:0:8:1. NOTHING WAS ADDED TO THIS MAP: the map is reviewed territory, and a slot found by colour is a candidate for the human reading it, not a change made on its behalf.\n\nSENDABLE FORMAT (Joe's doctrine, 2026-07-31, superseding the old blanket 'clients get PDFs, never working files'): this is a LETTER template, so the WORKING .docx is what goes to the listing agent. They edit and revise it, and that revision IS the negotiation; the PDF is the record and preview copy. Because the .docx is outbound it is SCRUBBED before it routes, of comments, tracked changes, comment authors, custom properties and the authorship metadata inherited from CARR's corporate letterhead. Naming a sendable format is not permission to send: Joe sends, and no verb can.",
-  "slots": {
-    "letter_date": {
-      "where": "para:5",
-      "label": "Letter date",
-      "kind": "record",
-      "template_default": "October 27, 2023",
-      "segments": [
-        {
-          "from": "today",
-          "format": "date_long"
-        }
-      ],
-      "owed_note": "Word content control bound to //StartDate, carrying a stale 2023 date. Same defect as the lease template, different paragraph index."
-    },
-    "salutation": {
-      "where": "para:9",
-      "label": "Salutation",
-      "kind": "option",
-      "template_default": "Owner | Broker,",
-      "choices": [
-        "Owner,",
-        "Broker,"
-      ],
-      "default": 1,
-      "owed_note": "Addressed to the listing broker in practice."
-    },
-    "contact_line": {
-      "where": "para:14",
-      "label": "Contact line",
-      "kind": "record",
-      "template_default": "Please contact me with any questions at first.last@carr.us or (000) 000-0000. Thank you.",
-      "segments": [
-        {
-          "literal": "Please contact me with any questions at "
-        },
-        {
-          "from": "agent.email"
-        },
-        {
-          "literal": " or "
-        },
-        {
-          "from": "agent.phone"
-        },
-        {
-          "literal": ". Thank you."
-        }
-      ],
-      "owed_note": "Note the purchase template puts email before phone, the reverse of the lease template. Addressed by the map, not by a shared assumption."
-    },
-    "agent_block": {
-      "where": "para:16",
-      "label": "Signature block",
-      "kind": "record",
-      "template_default": "Agent / CARR",
-      "segments": [
-        {
-          "from": "agent.display_name"
-        },
-        {
-          "literal": "\nCARR"
-        }
-      ],
-      "owed_note": "The deal's current lead participant."
-    },
-    "agent_phone": {
-      "where": "para:17",
-      "label": "Signature phone",
-      "kind": "record",
-      "template_default": "(000) 000-0000",
-      "segments": [
-        {
-          "from": "agent.phone"
-        }
-      ],
-      "owed_note": "No phone column on actor."
-    },
-    "agent_email": {
-      "where": "para:18",
-      "label": "Signature email",
-      "kind": "record",
-      "template_default": "first.last@carr.us",
-      "segments": [
-        {
-          "from": "agent.email"
-        }
-      ],
-      "owed_note": "actor.email is null for joe and dell."
-    },
-    "buyer": {
-      "where": "table:0:0:1",
-      "label": "Buyer",
-      "kind": "record",
-      "template_default": "Client, DDS | DMD | OD | MD | DO | DPT | DVM | DC",
-      "segments": [
-        {
-          "from": "client.display_name"
-        },
-        {
-          "literal": ", ",
-          "with_next": true
-        },
-        {
-          "from": "tenant.credential",
-          "optional": true
-        }
-      ],
-      "owed_note": "Credential optional so a missing one cannot cost the buyer name."
-    },
-    "premises": {
-      "where": "table:0:1:1",
-      "label": "Premises",
-      "kind": "record",
-      "template_default": "Address, Suite, City, State",
-      "segments": [
-        {
-          "from": "premises.address"
-        },
-        {
-          "literal": ", Suite ",
-          "with_next": true
-        },
-        {
-          "from": "premises.suite",
-          "optional": true
-        },
-        {
-          "literal": ", "
-        },
-        {
-          "from": "premises.city"
-        },
-        {
-          "literal": ", "
-        },
-        {
-          "from": "premises.state"
-        }
-      ],
-      "owed_note": "premises/space record for the subject property."
-    },
-    "size": {
-      "where": "table:0:2:1",
-      "label": "Size",
-      "kind": "record",
-      "template_default": "Approximately 3,000 RSF",
-      "segments": [
-        {
-          "literal": "Approximately "
-        },
-        {
-          "from": "premises.area_sf",
-          "format": "sf"
-        },
-        {
-          "literal": " RSF"
-        }
-      ],
-      "owed_note": "Rentable area from the premises/space record."
-    },
-    "purchase_price": {
-      "where": "table:0:3:1",
-      "label": "Purchase Price",
-      "kind": "record",
-      "template_default": "$800,000",
-      "segments": [
-        {
-          "from": "round.purchase_price",
-          "format": "usd"
-        }
-      ],
-      "owed_note": "SCHEMA GAP, reported not improvised: negotiation_round.rate_basis is a RENT vocabulary (usd_sf_yr / usd_sf_mo / usd_mo_gross / usd_yr_gross). A purchase price has no basis it can legally carry, so record-counter cannot store one and this slot is structurally owed on every purchase deal until the vocabulary gains a total-price basis. Fable's call, not this order's."
-    },
-    "earnest_money": {
-      "where": "table:0:4:1",
-      "label": "Earnest Money",
-      "kind": "carry",
-      "owed_note": "Standing language carrying $10,000 and a 60-day non-refundable trigger. Verify both against the deal before sending."
-    },
-    "inspection_period": {
-      "where": "table:0:5:1",
-      "label": "Inspection Period",
-      "kind": "carry",
-      "owed_note": "60 days plus the contingency list. Contingencies are CARR's standing ask."
-    },
-    "seller_to_provide": {
-      "where": "table:0:6:1",
-      "label": "Seller to Provide",
-      "kind": "carry",
-      "owed_note": "Phase One and Survey ask."
-    },
-    "closing": {
-      "where": "table:0:7:1",
-      "label": "Closing",
-      "kind": "carry",
-      "owed_note": "14 days after inspection; moves with the inspection period if that is changed."
-    },
-    "financing": {
-      "where": "table:0:8:1",
-      "label": "Financing",
-      "kind": "carry",
-      "owed_note": "'Buyer has received preliminary approval from his lender' asserts a fact about the client AND carries a pronoun. Verify it is true for this buyer before sending; there is no record field for lender approval."
-    },
-    "broker_commission": {
-      "where": "table:0:9:1",
-      "label": "Broker Commission",
-      "kind": "carry",
-      "owed_note": "CARR's own commission ask, never record-derived."
+ "unreviewed": false,
+ "template_kind": "docx",
+ "proposed_by": "ORDER 13 execution, 2026-07-31",
+ "review_note": "REVIEWED AND APPROVED by Joe 2026-07-31 (with the financing carry->option conversion and the ORDER 23 commission-audience extension). Purchase-price schema gap stands open \u2014 rate_basis needs a total-dollars vocabulary entry before price can fill.\n\nPROPOSED map, not reviewed. Same slot grammar as loi-lease.json. The purchase LOI's economics have NO home in the schema today \u2014 see purchase_price's owed_note and the report's schema-gap finding.\n\nCOLOUR CROSS-CHECK (2026-07-31, ORDER 20 fold-in). Joe's convention: blue or red marks text that gets replaced; a letter that goes out is all black. Checked this map against the template's own coloured runs, which are the author's independent list of slots. 20 coloured runs across 13 addresses. COLOURED BUT UNMAPPED (0): none. MAPPED AND MARKED BY A CONTENT CONTROL instead of a colour, correctly mapped (1): para:5. MAPPED BUT UNMARKED EITHER WAY (2): table:0:6:1, table:0:8:1. NOTHING WAS ADDED TO THIS MAP: the map is reviewed territory, and a slot found by colour is a candidate for the human reading it, not a change made on its behalf.\n\nSENDABLE FORMAT (Joe's doctrine, 2026-07-31, superseding the old blanket 'clients get PDFs, never working files'): this is a LETTER template, so the WORKING .docx is what goes to the listing agent. They edit and revise it, and that revision IS the negotiation; the PDF is the record and preview copy. Because the .docx is outbound it is SCRUBBED before it routes, of comments, tracked changes, comment authors, custom properties and the authorship metadata inherited from CARR's corporate letterhead. Naming a sendable format is not permission to send: Joe sends, and no verb can.",
+ "slots": {
+  "letter_date": {
+   "where": "para:5",
+   "label": "Letter date",
+   "kind": "record",
+   "template_default": "October 27, 2023",
+   "segments": [
+    {
+     "from": "today",
+     "format": "date_long"
     }
+   ],
+   "owed_note": "Word content control bound to //StartDate, carrying a stale 2023 date. Same defect as the lease template, different paragraph index."
+  },
+  "salutation": {
+   "where": "para:9",
+   "label": "Salutation",
+   "kind": "option",
+   "template_default": "Owner | Broker,",
+   "choices": [
+    "Owner,",
+    "Broker,"
+   ],
+   "default": 1,
+   "owed_note": "Addressed to the listing broker in practice."
+  },
+  "contact_line": {
+   "where": "para:14",
+   "label": "Contact line",
+   "kind": "record",
+   "template_default": "Please contact me with any questions at first.last@carr.us or (000) 000-0000. Thank you.",
+   "segments": [
+    {
+     "literal": "Please contact me with any questions at "
+    },
+    {
+     "from": "agent.email"
+    },
+    {
+     "literal": " or "
+    },
+    {
+     "from": "agent.phone"
+    },
+    {
+     "literal": ". Thank you."
+    }
+   ],
+   "owed_note": "Note the purchase template puts email before phone, the reverse of the lease template. Addressed by the map, not by a shared assumption."
+  },
+  "agent_block": {
+   "where": "para:16",
+   "label": "Signature block",
+   "kind": "record",
+   "template_default": "Agent / CARR",
+   "segments": [
+    {
+     "from": "agent.display_name"
+    },
+    {
+     "literal": "\nCARR"
+    }
+   ],
+   "owed_note": "The deal's current lead participant."
+  },
+  "agent_phone": {
+   "where": "para:17",
+   "label": "Signature phone",
+   "kind": "record",
+   "template_default": "(000) 000-0000",
+   "segments": [
+    {
+     "from": "agent.phone"
+    }
+   ],
+   "owed_note": "No phone column on actor."
+  },
+  "agent_email": {
+   "where": "para:18",
+   "label": "Signature email",
+   "kind": "record",
+   "template_default": "first.last@carr.us",
+   "segments": [
+    {
+     "from": "agent.email"
+    }
+   ],
+   "owed_note": "actor.email is null for joe and dell."
+  },
+  "buyer": {
+   "where": "table:0:0:1",
+   "label": "Buyer",
+   "kind": "record",
+   "template_default": "Client, DDS | DMD | OD | MD | DO | DPT | DVM | DC",
+   "segments": [
+    {
+     "from": "client.display_name"
+    },
+    {
+     "literal": ", ",
+     "with_next": true
+    },
+    {
+     "from": "tenant.credential",
+     "optional": true
+    }
+   ],
+   "owed_note": "Credential optional so a missing one cannot cost the buyer name."
+  },
+  "premises": {
+   "where": "table:0:1:1",
+   "label": "Premises",
+   "kind": "record",
+   "template_default": "Address, Suite, City, State",
+   "segments": [
+    {
+     "from": "premises.address"
+    },
+    {
+     "literal": ", Suite ",
+     "with_next": true
+    },
+    {
+     "from": "premises.suite",
+     "optional": true
+    },
+    {
+     "literal": ", "
+    },
+    {
+     "from": "premises.city"
+    },
+    {
+     "literal": ", "
+    },
+    {
+     "from": "premises.state"
+    }
+   ],
+   "owed_note": "premises/space record for the subject property."
+  },
+  "size": {
+   "where": "table:0:2:1",
+   "label": "Size",
+   "kind": "record",
+   "template_default": "Approximately 3,000 RSF",
+   "segments": [
+    {
+     "literal": "Approximately "
+    },
+    {
+     "from": "premises.area_sf",
+     "format": "sf"
+    },
+    {
+     "literal": " RSF"
+    }
+   ],
+   "owed_note": "Rentable area from the premises/space record."
+  },
+  "purchase_price": {
+   "where": "table:0:3:1",
+   "label": "Purchase Price",
+   "kind": "record",
+   "template_default": "$800,000",
+   "segments": [
+    {
+     "from": "round.purchase_price",
+     "format": "usd"
+    }
+   ],
+   "owed_note": "SCHEMA GAP, reported not improvised: negotiation_round.rate_basis is a RENT vocabulary (usd_sf_yr / usd_sf_mo / usd_mo_gross / usd_yr_gross). A purchase price has no basis it can legally carry, so record-counter cannot store one and this slot is structurally owed on every purchase deal until the vocabulary gains a total-price basis. Fable's call, not this order's."
+  },
+  "earnest_money": {
+   "where": "table:0:4:1",
+   "label": "Earnest Money",
+   "kind": "carry",
+   "owed_note": "Standing language carrying $10,000 and a 60-day non-refundable trigger. Verify both against the deal before sending."
+  },
+  "inspection_period": {
+   "where": "table:0:5:1",
+   "label": "Inspection Period",
+   "kind": "carry",
+   "owed_note": "60 days plus the contingency list. Contingencies are CARR's standing ask."
+  },
+  "seller_to_provide": {
+   "where": "table:0:6:1",
+   "label": "Seller to Provide",
+   "kind": "carry",
+   "owed_note": "Phase One and Survey ask."
+  },
+  "closing": {
+   "where": "table:0:7:1",
+   "label": "Closing",
+   "kind": "carry",
+   "owed_note": "14 days after inspection; moves with the inspection period if that is changed."
+  },
+  "financing": {
+   "where": "table:0:8:1",
+   "label": "Financing",
+   "owed_note": "'Buyer has received preliminary approval from his lender' asserts a fact about the client AND carries a pronoun. Verify it is true for this buyer before sending; there is no record field for lender approval.",
+   "kind": "option",
+   "choices": [
+    "Buyer has received preliminary approval from her lender",
+    "Buyer has received preliminary approval from his lender",
+    "Buyer has received preliminary approval from their lender",
+    ""
+   ],
+   "note": "CONVERTED carry->option on Joe's approval 2026-07-31: the template sentence asserts a fact about the client AND hardcodes a pronoun \u2014 both are caller choices. The empty-string choice deletes the sentence for deals with no preliminary approval yet. No default: unresolved -> OWED."
+  },
+  "broker_commission": {
+   "where": "table:0:9:1",
+   "label": "Broker Commission",
+   "kind": "carry",
+   "owed_note": "CARR's own commission ask, never record-derived.",
+   "note": " AUDIENCE RULE (Joe, 2026-07-31, extends ORDER 23): listing-agent copy only; drops from client-facing copies."
   }
+ },
+ "reviewed_by": "Joe Bookout, walk-through in chat, 2026-07-31 evening (Fable seat session 3)"
 }
