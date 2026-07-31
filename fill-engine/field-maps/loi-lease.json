@@ -1,474 +1,481 @@
 {
-  "unreviewed": true,
-  "template_kind": "docx",
-  "proposed_by": "ORDER 13 execution, 2026-07-31",
-  "review_note": "PROPOSED map, not reviewed. prepare-document refuses this template unless allow_unreviewed:true. Every slot below names the template address it writes and the record field it reads. A slot with kind 'carry' is deliberately NOT written: it is the template's own standing language, left byte-identical and listed in the report as verify-before-sending.\n\nCOLOUR CROSS-CHECK (2026-07-31, ORDER 20 fold-in). Joe's convention: blue or red marks text that gets replaced; a letter that goes out is all black. Checked this map against the template's own coloured runs, which are the author's independent list of slots. 100 coloured runs across 34 addresses. COLOURED BUT UNMAPPED (5): table:0:14:0 FF0000 'Exclusivity'; table:0:15:0 FF0000 'Signage'; table:0:16:0 FF0000 'HVAC'; table:0:17:0 FF0000 'Electrical'; table:0:9:0 FF0000 'Base Year'. MAPPED AND MARKED BY A CONTENT CONTROL instead of a colour, correctly mapped (2): para:21, para:3. MAPPED BUT UNMARKED EITHER WAY (2): table:0:10:1, table:0:11:1. NOTHING WAS ADDED TO THIS MAP: the map is reviewed territory, and a slot found by colour is a candidate for the human reading it, not a change made on its behalf.\n\nSENDABLE FORMAT (Joe's doctrine, 2026-07-31, superseding the old blanket 'clients get PDFs, never working files'): this is a LETTER template, so the WORKING .docx is what goes to the listing agent. They edit and revise it, and that revision IS the negotiation; the PDF is the record and preview copy. Because the .docx is outbound it is SCRUBBED before it routes, of comments, tracked changes, comment authors, custom properties and the authorship metadata inherited from CARR's corporate letterhead. Naming a sendable format is not permission to send: Joe sends, and no verb can.",
-  "slot_kinds": {
-    "record": "reads record fields; unresolved -> the slot is written as an explicit OWED marker, never the template's placeholder number",
-    "option": "the template ships pipe-separated alternatives; the caller picks via prepare-document's options argument. No default means the caller MUST choose or the slot is owed.",
-    "carry": "template language retained untouched; reported for human verification"
-  },
-  "slots": {
-    "letter_date": {
-      "where": "para:3",
-      "label": "Letter date",
-      "kind": "record",
-      "template_default": "October 27, 2023",
-      "segments": [
-        {
-          "from": "today",
-          "format": "date_long"
-        }
-      ],
-      "owed_note": "FOUND BY THE RENDER, not by reading the XML: this paragraph is a Word content control bound to //StartDate, so python-docx reports it as empty and the first C-112 draft went out dated October 27, 2023. Any map for a CARR letterhead template must cover its date."
-    },
-    "re_line": {
-      "where": "para:5",
-      "label": "RE line",
-      "kind": "option",
-      "template_default": "RE: Letter of Intent to Lease | Request for Proposal to Lease",
-      "choices": [
-        "RE: Letter of Intent to Lease",
-        "RE: Request for Proposal to Lease"
-      ],
-      "default": 0,
-      "owed_note": "LOI (terms our client would accept) vs RFP (asking the landlord to propose). Different documents."
-    },
-    "salutation": {
-      "where": "para:7",
-      "label": "Salutation",
-      "kind": "option",
-      "template_default": "Landlord | Broker,",
-      "choices": [
-        "Landlord,",
-        "Broker,"
-      ],
-      "default": 1,
-      "owed_note": "Addressed to the listing broker in practice; the landlord form exists for direct owners."
-    },
-    "intent_sentence": {
-      "where": "para:9",
-      "label": "Opening sentence",
-      "kind": "option",
-      "template_default": "Please prepare an offer... | Our client would consider pursuing a lease agreement...",
-      "choices": [
-        "Please prepare an offer for our consideration based upon the following terms:",
-        "Our client would consider pursuing a lease agreement based upon the following terms:"
-      ],
-      "default": 1,
-      "owed_note": "Must agree with the RE line: the ask form goes with RFP, the terms form with LOI."
-    },
-    "financing_sentence": {
-      "where": "para:14",
-      "label": "Financing sentence",
-      "kind": "record",
-      "template_default": "Dr. ___'s financing is already in place through ___.",
-      "segments": [
-        {
-          "literal": "Dr. "
-        },
-        {
-          "from": "contact.last_name"
-        },
-        {
-          "literal": "'s financing is already in place through "
-        },
-        {
-          "from": "financing.lender"
-        },
-        {
-          "literal": "."
-        }
-      ],
-      "owed_note": "Doctor surname comes from the deal's client_contact participant; the lender has NO record field anywhere today (see the report's schema-gap note)."
-    },
-    "practice_strength": {
-      "where": "para:15",
-      "label": "Practice-strength paragraph",
-      "kind": "option",
-      "template_default": "She is an established doctor... | He is... | They are...",
-      "choices": [
-        "She is an established doctor with a thriving practice. She is looking to increase her square footage while enhancing her visibility.",
-        "He is an established doctor with a thriving practice. He is looking to increase his square footage while enhancing his visibility.",
-        "They are established doctors with a thriving practice. They are looking to increase their square footage while enhancing their visibility."
-      ],
-      "default": null,
-      "owed_note": "No record field carries a person's pronoun and none should be guessed. The caller states it."
-    },
-    "buildout_cost_note": {
-      "where": "para:16",
-      "label": "TI cost sentence ($110 per RSF)",
-      "kind": "carry",
-      "owed_note": "Standing template language carrying a market number. No record field holds a per-deal build-out estimate; verify against the deal's own comparison workbook before sending."
-    },
-    "vendor_team_sentence": {
-      "where": "para:17",
-      "label": "Vendor-team paragraph",
-      "kind": "option",
-      "template_default": "She | He | They will hire a medical specific architect...",
-      "choices": [
-        "She will hire a medical specific architect, contractor, equipment supplier, technology provider, etc.  Each of these vendors is extremely familiar with this process and works on dozens of these projects per year.  The architect will manage the entire process.",
-        "He will hire a medical specific architect, contractor, equipment supplier, technology provider, etc.  Each of these vendors is extremely familiar with this process and works on dozens of these projects per year.  The architect will manage the entire process.",
-        "They will hire a medical specific architect, contractor, equipment supplier, technology provider, etc.  Each of these vendors is extremely familiar with this process and works on dozens of these projects per year.  The architect will manage the entire process."
-      ],
-      "default": null,
-      "owed_note": "Same pronoun choice as practice_strength; kept as its own slot so the two cannot silently disagree."
-    },
-    "financial_statement_sentence": {
-      "where": "para:18",
-      "label": "Financial statement sentence",
-      "kind": "record",
-      "template_default": "Dr.___'s financial statement and tax returns are prepared and will be provided...",
-      "segments": [
-        {
-          "literal": "Dr. "
-        },
-        {
-          "from": "contact.last_name"
-        },
-        {
-          "literal": "'s financial statement and tax returns are prepared and will be provided to the landlord of the prevailing property."
-        }
-      ],
-      "owed_note": "Doctor surname, same source as the financing sentence."
-    },
-    "decision_ready_sentence": {
-      "where": "para:19",
-      "label": "Decision-ready sentence",
-      "kind": "option",
-      "template_default": "She is | He is | They are prepared to make an immediate decision and move forward.",
-      "choices": [
-        "She is prepared to make an immediate decision and move forward.",
-        "He is prepared to make an immediate decision and move forward.",
-        "They are prepared to make an immediate decision and move forward."
-      ],
-      "default": null,
-      "owed_note": "Third pronoun slot."
-    },
-    "contact_line": {
-      "where": "para:21",
-      "label": "Contact line",
-      "kind": "record",
-      "template_default": "Please contact me with any questions at  or . Thank you.",
-      "segments": [
-        {
-          "literal": "Please contact me with any questions at "
-        },
-        {
-          "from": "agent.phone"
-        },
-        {
-          "literal": " or "
-        },
-        {
-          "from": "agent.email"
-        },
-        {
-          "literal": ". Thank you."
-        }
-      ],
-      "owed_note": "actor rows carry display_name only; there is no phone column and email is null for both partners."
-    },
-    "agent_block": {
-      "where": "para:23",
-      "label": "Signature block",
-      "kind": "record",
-      "template_default": "Name / CARR",
-      "segments": [
-        {
-          "from": "agent.display_name"
-        },
-        {
-          "literal": "\nCARR"
-        }
-      ],
-      "owed_note": "The deal's current lead participant, not the session's actor."
-    },
-    "agent_phone": {
-      "where": "para:24",
-      "label": "Signature phone",
-      "kind": "record",
-      "template_default": "(000) 000-0000",
-      "segments": [
-        {
-          "from": "agent.phone"
-        }
-      ],
-      "owed_note": "No phone column on actor."
-    },
-    "agent_email": {
-      "where": "para:25",
-      "label": "Signature email",
-      "kind": "record",
-      "template_default": "first.last@carr.us",
-      "segments": [
-        {
-          "from": "agent.email"
-        }
-      ],
-      "owed_note": "actor.email is null for joe and dell."
-    },
-    "tenant": {
-      "where": "table:0:0:1",
-      "label": "Tenant",
-      "kind": "record",
-      "template_default": "Client DDS | DMD | OD | MD | DO | DPT | DVM | DC",
-      "segments": [
-        {
-          "from": "client.display_name"
-        },
-        {
-          "literal": ", ",
-          "with_next": true
-        },
-        {
-          "from": "tenant.credential",
-          "optional": true
-        }
-      ],
-      "owed_note": "Credential is an option the caller states (DDS/DMD/OD/MD/DO/DPT/DVM/DC). It is OPTIONAL here on purpose: a missing credential must not cost the tenant name."
-    },
-    "premises": {
-      "where": "table:0:1:1",
-      "label": "Premises",
-      "kind": "record",
-      "template_default": "Address, Suite, City, State",
-      "segments": [
-        {
-          "from": "premises.address"
-        },
-        {
-          "literal": ", Suite ",
-          "with_next": true
-        },
-        {
-          "from": "premises.suite",
-          "optional": true
-        },
-        {
-          "literal": ", "
-        },
-        {
-          "from": "premises.city"
-        },
-        {
-          "literal": ", "
-        },
-        {
-          "from": "premises.state"
-        }
-      ],
-      "owed_note": "premises/space rows for the subject property. Zero premises rows exist in the system today."
-    },
-    "size": {
-      "where": "table:0:2:1",
-      "label": "Size",
-      "kind": "record",
-      "template_default": "Approximately 3,000 RSF",
-      "segments": [
-        {
-          "literal": "Approximately "
-        },
-        {
-          "from": "premises.area_sf",
-          "format": "sf"
-        },
-        {
-          "literal": " RSF"
-        }
-      ],
-      "owed_note": "Rentable area from the premises/space record."
-    },
-    "lease_term": {
-      "where": "table:0:3:1",
-      "label": "Lease Term",
-      "kind": "record",
-      "template_default": "10 years plus free rent",
-      "segments": [
-        {
-          "from": "round.term_months",
-          "format": "term_years"
-        },
-        {
-          "literal": " plus free rent"
-        }
-      ],
-      "owed_note": "Term from the newest tenant-side negotiation_round."
-    },
-    "commencement_date": {
-      "where": "table:0:4:1",
-      "label": "Commencement Date",
-      "kind": "record",
-      "template_default": "5 months from mutual execution of lease (Design, CD's, Permitting, Build Out, FF&E)",
-      "segments": [
-        {
-          "from": "lease.commencement_on",
-          "format": "date_long"
-        }
-      ],
-      "owed_note": "lease.commencement_on. Before a lease row exists this is the negotiated date and the template's standing 5-months language may be the right answer instead \u2014 a review question, not a fill."
-    },
-    "free_rent": {
-      "where": "table:0:5:1",
-      "label": "Free Rent",
-      "kind": "record",
-      "template_default": "3 months free rent and operating expenses upon lease commencement",
-      "segments": [
-        {
-          "from": "round.free_rent_months",
-          "format": "months"
-        },
-        {
-          "literal": " free rent upon lease commencement"
-        }
-      ],
-      "owed_note": "Whether operating expenses are abated during free rent is a separate fact; round.opex_note carries it and this slot deliberately does not assert it."
-    },
-    "base_rent": {
-      "where": "table:0:6:1",
-      "label": "Base Rent",
-      "kind": "record",
-      "template_default": "$20.00 per RSF I Most Competitive Terms",
-      "segments": [
-        {
-          "from": "round.rate",
-          "format": "rate"
-        }
-      ],
-      "owed_note": "THE number. Rate plus its basis from the newest tenant-side negotiation_round; a rate without its basis is refused upstream by record-counter, so it can never arrive bare."
-    },
-    "annual_increases": {
-      "where": "table:0:7:1",
-      "label": "Annual Increases",
-      "kind": "record",
-      "template_default": "$.50 | 3%",
-      "segments": [
-        {
-          "from": "round.escalator"
-        }
-      ],
-      "owed_note": "negotiation_round.escalator, free text ('3%' or '$0.50')."
-    },
-    "lease_type": {
-      "where": "table:0:8:1",
-      "label": "Lease Type",
-      "kind": "option",
-      "template_default": "Full Service | Triple Net (please estimate expenses)",
-      "choices": [
-        "Full Service",
-        "Triple Net (please estimate expenses)",
-        "Modified Gross"
-      ],
-      "default": null,
-      "owed_note": "The structure. lease.opex_structure carries it once a lease exists; before that the caller states it."
-    },
-    "base_year": {
-      "where": "table:0:9:1",
-      "label": "Base Year",
-      "kind": "carry",
-      "owed_note": "Conditional language ('if Full Service or Modified Gross'). Only relevant when lease_type is not NNN."
-    },
-    "renewal_options": {
-      "where": "table:0:10:1",
-      "label": "Renewal Options",
-      "kind": "record",
-      "template_default": "Two five-year options at then market rates",
-      "segments": [
-        {
-          "from": "round.options_note"
-        }
-      ],
-      "owed_note": "negotiation_round.options_note."
-    },
-    "security_deposit": {
-      "where": "table:0:11:1",
-      "label": "Security Deposit",
-      "kind": "carry",
-      "owed_note": "'Equal to one month's gross rent' is a formula, not a figure, and stays true at any rate. A stated dollar deposit belongs in the report, not in this cell."
-    },
-    "ti_allowance": {
-      "where": "table:0:12:1",
-      "label": "TI Allowance",
-      "kind": "record",
-      "template_default": "$50 per RSF",
-      "segments": [
-        {
-          "from": "round.ti",
-          "format": "ti"
-        }
-      ],
-      "owed_note": "negotiation_round.ti_amount + ti_basis. A self-funded build-out is a real answer here and must be stated, not left as the template's $50."
-    },
-    "use": {
-      "where": "table:0:13:1",
-      "label": "Use",
-      "kind": "option",
-      "template_default": "Medical | Dental | Veterinary | Optometry | Physical Therapy | Chiropractic | Therapy and Counseling Office",
-      "choices": [
-        "Medical Office",
-        "Dental Office",
-        "Veterinary Office",
-        "Optometry Office",
-        "Physical Therapy Office",
-        "Chiropractic Office",
-        "Therapy and Counseling Office"
-      ],
-      "from": "client.vertical",
-      "value_map": {
-        "Dental": "Dental Office",
-        "Dentist": "Dental Office",
-        "Medical": "Medical Office",
-        "Physician": "Medical Office",
-        "Veterinary": "Veterinary Office",
-        "Vet": "Veterinary Office",
-        "Optometry": "Optometry Office",
-        "Vision": "Optometry Office",
-        "Phys Therapy": "Physical Therapy Office",
-        "Physical Therapy": "Physical Therapy Office",
-        "Chiropractic": "Chiropractic Office",
-        "Chiro": "Chiropractic Office",
-        "Therapy": "Therapy and Counseling Office",
-        "Counseling": "Therapy and Counseling Office"
-      },
-      "default": null,
-      "owed_note": "THE ONE DERIVED-VOCABULARY SLOT. client.vertical is CARR's own book vocabulary; the value_map above translates it to the template's use list and lives in the map as reviewable DATA, not in code. An unmapped vertical is owed, never guessed."
-    },
-    "exclusivity": {
-      "where": "table:0:14:1",
-      "label": "Exclusivity",
-      "kind": "carry",
-      "owed_note": "'Exclusive for specialty in the property' is standing ask language."
-    },
-    "signage": {
-      "where": "table:0:15:1",
-      "label": "Signage",
-      "kind": "option",
-      "template_default": "Right to place signage on the monument sign | building",
-      "choices": [
-        "Right to place signage on the monument sign",
-        "Right to place signage on the building",
-        "Right to place signage on the monument sign and the building"
-      ],
-      "default": 2,
-      "owed_note": "Ask-wide by default; narrowed by the caller when a property limits it."
-    },
-    "hvac": {
-      "where": "table:0:16:1",
-      "label": "HVAC",
-      "kind": "carry",
-      "owed_note": "Standing CARR spec (1 ton per 350 SF)."
-    },
-    "electrical": {
-      "where": "table:0:17:1",
-      "label": "Electrical",
-      "kind": "carry",
-      "owed_note": "Standing CARR spec (3-phase, 200 amp)."
-    },
-    "broker_commission": {
-      "where": "table:0:18:1",
-      "label": "Broker Commission",
-      "kind": "carry",
-      "owed_note": "CARR's own commission ask. NEVER record-derived: the deal's commission columns are Salesforce placeholders that no view may treat as data."
+ "unreviewed": false,
+ "template_kind": "docx",
+ "proposed_by": "ORDER 13 execution, 2026-07-31",
+ "review_note": "REVIEWED AND APPROVED by Joe 2026-07-31 after a full 33-slot walk-through. Two rulings from the review are queued as ORDER 23, not yet built: (1) the base_year ROW DROPS entirely when lease_type = NNN ('base year row drops most of the time - NNN leases dont include this row'); (2) broker_commission is AUDIENCE-dependent \u2014 listing-agent copy only, dropped from any client-facing copy ('we dont like to draw attention to our commission. it only goes out to the listing agent'). Until 23 lands, Joe deletes the base-year row by hand on NNN letters.\n\nPROPOSED map, not reviewed. prepare-document refuses this template unless allow_unreviewed:true. Every slot below names the template address it writes and the record field it reads. A slot with kind 'carry' is deliberately NOT written: it is the template's own standing language, left byte-identical and listed in the report as verify-before-sending.\n\nCOLOUR CROSS-CHECK (2026-07-31, ORDER 20 fold-in). Joe's convention: blue or red marks text that gets replaced; a letter that goes out is all black. Checked this map against the template's own coloured runs, which are the author's independent list of slots. 100 coloured runs across 34 addresses. COLOURED BUT UNMAPPED (5): table:0:14:0 FF0000 'Exclusivity'; table:0:15:0 FF0000 'Signage'; table:0:16:0 FF0000 'HVAC'; table:0:17:0 FF0000 'Electrical'; table:0:9:0 FF0000 'Base Year'. MAPPED AND MARKED BY A CONTENT CONTROL instead of a colour, correctly mapped (2): para:21, para:3. MAPPED BUT UNMARKED EITHER WAY (2): table:0:10:1, table:0:11:1. NOTHING WAS ADDED TO THIS MAP: the map is reviewed territory, and a slot found by colour is a candidate for the human reading it, not a change made on its behalf.\n\nSENDABLE FORMAT (Joe's doctrine, 2026-07-31, superseding the old blanket 'clients get PDFs, never working files'): this is a LETTER template, so the WORKING .docx is what goes to the listing agent. They edit and revise it, and that revision IS the negotiation; the PDF is the record and preview copy. Because the .docx is outbound it is SCRUBBED before it routes, of comments, tracked changes, comment authors, custom properties and the authorship metadata inherited from CARR's corporate letterhead. Naming a sendable format is not permission to send: Joe sends, and no verb can.",
+ "slot_kinds": {
+  "record": "reads record fields; unresolved -> the slot is written as an explicit OWED marker, never the template's placeholder number",
+  "option": "the template ships pipe-separated alternatives; the caller picks via prepare-document's options argument. No default means the caller MUST choose or the slot is owed.",
+  "carry": "template language retained untouched; reported for human verification"
+ },
+ "slots": {
+  "letter_date": {
+   "where": "para:3",
+   "label": "Letter date",
+   "kind": "record",
+   "template_default": "October 27, 2023",
+   "segments": [
+    {
+     "from": "today",
+     "format": "date_long"
     }
+   ],
+   "owed_note": "FOUND BY THE RENDER, not by reading the XML: this paragraph is a Word content control bound to //StartDate, so python-docx reports it as empty and the first C-112 draft went out dated October 27, 2023. Any map for a CARR letterhead template must cover its date."
+  },
+  "re_line": {
+   "where": "para:5",
+   "label": "RE line",
+   "kind": "option",
+   "template_default": "RE: Letter of Intent to Lease | Request for Proposal to Lease",
+   "choices": [
+    "RE: Letter of Intent to Lease",
+    "RE: Request for Proposal to Lease"
+   ],
+   "default": 0,
+   "owed_note": "LOI (terms our client would accept) vs RFP (asking the landlord to propose). Different documents."
+  },
+  "salutation": {
+   "where": "para:7",
+   "label": "Salutation",
+   "kind": "option",
+   "template_default": "Landlord | Broker,",
+   "choices": [
+    "Landlord,",
+    "Broker,"
+   ],
+   "default": 1,
+   "owed_note": "Addressed to the listing broker in practice; the landlord form exists for direct owners."
+  },
+  "intent_sentence": {
+   "where": "para:9",
+   "label": "Opening sentence",
+   "kind": "option",
+   "template_default": "Please prepare an offer... | Our client would consider pursuing a lease agreement...",
+   "choices": [
+    "Please prepare an offer for our consideration based upon the following terms:",
+    "Our client would consider pursuing a lease agreement based upon the following terms:"
+   ],
+   "default": 1,
+   "owed_note": "Must agree with the RE line: the ask form goes with RFP, the terms form with LOI."
+  },
+  "financing_sentence": {
+   "where": "para:14",
+   "label": "Financing sentence",
+   "kind": "record",
+   "template_default": "Dr. ___'s financing is already in place through ___.",
+   "segments": [
+    {
+     "literal": "Dr. "
+    },
+    {
+     "from": "contact.last_name"
+    },
+    {
+     "literal": "'s financing is already in place through "
+    },
+    {
+     "from": "financing.lender"
+    },
+    {
+     "literal": "."
+    }
+   ],
+   "owed_note": "Doctor surname comes from the deal's client_contact participant; the lender has NO record field anywhere today (see the report's schema-gap note)."
+  },
+  "practice_strength": {
+   "where": "para:15",
+   "label": "Practice-strength paragraph",
+   "kind": "option",
+   "template_default": "She is an established doctor... | He is... | They are...",
+   "choices": [
+    "She is an established doctor with a thriving practice. She is looking to increase her square footage while enhancing her visibility.",
+    "He is an established doctor with a thriving practice. He is looking to increase his square footage while enhancing his visibility.",
+    "They are established doctors with a thriving practice. They are looking to increase their square footage while enhancing their visibility."
+   ],
+   "default": null,
+   "owed_note": "No record field carries a person's pronoun and none should be guessed. The caller states it."
+  },
+  "buildout_cost_note": {
+   "where": "para:16",
+   "label": "TI cost sentence ($110 per RSF)",
+   "kind": "carry",
+   "owed_note": "Standing template language carrying a market number. No record field holds a per-deal build-out estimate; verify against the deal's own comparison workbook before sending."
+  },
+  "vendor_team_sentence": {
+   "where": "para:17",
+   "label": "Vendor-team paragraph",
+   "kind": "option",
+   "template_default": "She | He | They will hire a medical specific architect...",
+   "choices": [
+    "She will hire a medical specific architect, contractor, equipment supplier, technology provider, etc.  Each of these vendors is extremely familiar with this process and works on dozens of these projects per year.  The architect will manage the entire process.",
+    "He will hire a medical specific architect, contractor, equipment supplier, technology provider, etc.  Each of these vendors is extremely familiar with this process and works on dozens of these projects per year.  The architect will manage the entire process.",
+    "They will hire a medical specific architect, contractor, equipment supplier, technology provider, etc.  Each of these vendors is extremely familiar with this process and works on dozens of these projects per year.  The architect will manage the entire process."
+   ],
+   "default": null,
+   "owed_note": "Same pronoun choice as practice_strength; kept as its own slot so the two cannot silently disagree."
+  },
+  "financial_statement_sentence": {
+   "where": "para:18",
+   "label": "Financial statement sentence",
+   "kind": "record",
+   "template_default": "Dr.___'s financial statement and tax returns are prepared and will be provided...",
+   "segments": [
+    {
+     "literal": "Dr. "
+    },
+    {
+     "from": "contact.last_name"
+    },
+    {
+     "literal": "'s financial statement and tax returns are prepared and will be provided to the landlord of the prevailing property."
+    }
+   ],
+   "owed_note": "Doctor surname, same source as the financing sentence."
+  },
+  "decision_ready_sentence": {
+   "where": "para:19",
+   "label": "Decision-ready sentence",
+   "kind": "option",
+   "template_default": "She is | He is | They are prepared to make an immediate decision and move forward.",
+   "choices": [
+    "She is prepared to make an immediate decision and move forward.",
+    "He is prepared to make an immediate decision and move forward.",
+    "They are prepared to make an immediate decision and move forward."
+   ],
+   "default": null,
+   "owed_note": "Third pronoun slot."
+  },
+  "contact_line": {
+   "where": "para:21",
+   "label": "Contact line",
+   "kind": "record",
+   "template_default": "Please contact me with any questions at  or . Thank you.",
+   "segments": [
+    {
+     "literal": "Please contact me with any questions at "
+    },
+    {
+     "from": "agent.phone"
+    },
+    {
+     "literal": " or "
+    },
+    {
+     "from": "agent.email"
+    },
+    {
+     "literal": ". Thank you."
+    }
+   ],
+   "owed_note": "actor rows carry display_name only; there is no phone column and email is null for both partners.",
+   "note": "actor.phone + actor.email (both populated 2026-07-31; same Worker fix owed as agent_phone)."
+  },
+  "agent_block": {
+   "where": "para:23",
+   "label": "Signature block",
+   "kind": "record",
+   "template_default": "Name / CARR",
+   "segments": [
+    {
+     "from": "agent.display_name"
+    },
+    {
+     "literal": "\nCARR"
+    }
+   ],
+   "owed_note": "The deal's current lead participant, not the session's actor."
+  },
+  "agent_phone": {
+   "where": "para:24",
+   "label": "Signature phone",
+   "kind": "record",
+   "template_default": "(000) 000-0000",
+   "segments": [
+    {
+     "from": "agent.phone"
+    }
+   ],
+   "owed_note": "No phone column on actor.",
+   "note": "actor.phone (column added + populated 2026-07-31; the deployed Worker's plan generator predates it \u2014 small Worker fix owed before this fills server-side)."
+  },
+  "agent_email": {
+   "where": "para:25",
+   "label": "Signature email",
+   "kind": "record",
+   "template_default": "first.last@carr.us",
+   "segments": [
+    {
+     "from": "agent.email"
+    }
+   ],
+   "owed_note": "actor.email is null for joe and dell.",
+   "note": "actor.email (populated for joe 2026-07-31; dell's at his onboarding)."
+  },
+  "tenant": {
+   "where": "table:0:0:1",
+   "label": "Tenant",
+   "kind": "record",
+   "template_default": "Client DDS | DMD | OD | MD | DO | DPT | DVM | DC",
+   "segments": [
+    {
+     "from": "client.display_name"
+    },
+    {
+     "literal": ", ",
+     "with_next": true
+    },
+    {
+     "from": "tenant.credential",
+     "optional": true
+    }
+   ],
+   "owed_note": "Credential is an option the caller states (DDS/DMD/OD/MD/DO/DPT/DVM/DC). It is OPTIONAL here on purpose: a missing credential must not cost the tenant name."
+  },
+  "premises": {
+   "where": "table:0:1:1",
+   "label": "Premises",
+   "kind": "record",
+   "template_default": "Address, Suite, City, State",
+   "segments": [
+    {
+     "from": "premises.address"
+    },
+    {
+     "literal": ", Suite ",
+     "with_next": true
+    },
+    {
+     "from": "premises.suite",
+     "optional": true
+    },
+    {
+     "literal": ", "
+    },
+    {
+     "from": "premises.city"
+    },
+    {
+     "literal": ", "
+    },
+    {
+     "from": "premises.state"
+    }
+   ],
+   "owed_note": "premises/space rows for the subject property. Zero premises rows exist in the system today."
+  },
+  "size": {
+   "where": "table:0:2:1",
+   "label": "Size",
+   "kind": "record",
+   "template_default": "Approximately 3,000 RSF",
+   "segments": [
+    {
+     "literal": "Approximately "
+    },
+    {
+     "from": "premises.area_sf",
+     "format": "sf"
+    },
+    {
+     "literal": " RSF"
+    }
+   ],
+   "owed_note": "Rentable area from the premises/space record."
+  },
+  "lease_term": {
+   "where": "table:0:3:1",
+   "label": "Lease Term",
+   "kind": "record",
+   "template_default": "10 years plus free rent",
+   "segments": [
+    {
+     "from": "round.term_months",
+     "format": "term_years"
+    },
+    {
+     "literal": " plus free rent"
+    }
+   ],
+   "owed_note": "Term from the newest tenant-side negotiation_round."
+  },
+  "commencement_date": {
+   "where": "table:0:4:1",
+   "label": "Commencement Date",
+   "kind": "record",
+   "template_default": "5 months from mutual execution of lease (Design, CD's, Permitting, Build Out, FF&E)",
+   "segments": [
+    {
+     "from": "lease.commencement_on",
+     "format": "date_long"
+    }
+   ],
+   "owed_note": "lease.commencement_on. Before a lease row exists this is the negotiated date and the template's standing 5-months language may be the right answer instead \u2014 a review question, not a fill."
+  },
+  "free_rent": {
+   "where": "table:0:5:1",
+   "label": "Free Rent",
+   "kind": "record",
+   "template_default": "3 months free rent and operating expenses upon lease commencement",
+   "segments": [
+    {
+     "from": "round.free_rent_months",
+     "format": "months"
+    },
+    {
+     "literal": " free rent upon lease commencement"
+    }
+   ],
+   "owed_note": "Whether operating expenses are abated during free rent is a separate fact; round.opex_note carries it and this slot deliberately does not assert it."
+  },
+  "base_rent": {
+   "where": "table:0:6:1",
+   "label": "Base Rent",
+   "kind": "record",
+   "template_default": "$20.00 per RSF I Most Competitive Terms",
+   "segments": [
+    {
+     "from": "round.rate",
+     "format": "rate"
+    }
+   ],
+   "owed_note": "THE number. Rate plus its basis from the newest tenant-side negotiation_round; a rate without its basis is refused upstream by record-counter, so it can never arrive bare."
+  },
+  "annual_increases": {
+   "where": "table:0:7:1",
+   "label": "Annual Increases",
+   "kind": "record",
+   "template_default": "$.50 | 3%",
+   "segments": [
+    {
+     "from": "round.escalator"
+    }
+   ],
+   "owed_note": "negotiation_round.escalator, free text ('3%' or '$0.50')."
+  },
+  "lease_type": {
+   "where": "table:0:8:1",
+   "label": "Lease Type",
+   "kind": "option",
+   "template_default": "Full Service | Triple Net (please estimate expenses)",
+   "choices": [
+    "Full Service",
+    "Triple Net (please estimate expenses)",
+    "Modified Gross"
+   ],
+   "default": null,
+   "owed_note": "The structure. lease.opex_structure carries it once a lease exists; before that the caller states it."
+  },
+  "base_year": {
+   "where": "table:0:9:1",
+   "label": "Base Year",
+   "kind": "carry",
+   "owed_note": "Conditional language ('if Full Service or Modified Gross'). Only relevant when lease_type is not NNN."
+  },
+  "renewal_options": {
+   "where": "table:0:10:1",
+   "label": "Renewal Options",
+   "kind": "record",
+   "template_default": "Two five-year options at then market rates",
+   "segments": [
+    {
+     "from": "round.options_note"
+    }
+   ],
+   "owed_note": "negotiation_round.options_note."
+  },
+  "security_deposit": {
+   "where": "table:0:11:1",
+   "label": "Security Deposit",
+   "kind": "carry",
+   "owed_note": "'Equal to one month's gross rent' is a formula, not a figure, and stays true at any rate. A stated dollar deposit belongs in the report, not in this cell."
+  },
+  "ti_allowance": {
+   "where": "table:0:12:1",
+   "label": "TI Allowance",
+   "kind": "record",
+   "template_default": "$50 per RSF",
+   "segments": [
+    {
+     "from": "round.ti",
+     "format": "ti"
+    }
+   ],
+   "owed_note": "negotiation_round.ti_amount + ti_basis. A self-funded build-out is a real answer here and must be stated, not left as the template's $50."
+  },
+  "use": {
+   "where": "table:0:13:1",
+   "label": "Use",
+   "kind": "option",
+   "template_default": "Medical | Dental | Veterinary | Optometry | Physical Therapy | Chiropractic | Therapy and Counseling Office",
+   "choices": [
+    "Medical Office",
+    "Dental Office",
+    "Veterinary Office",
+    "Optometry Office",
+    "Physical Therapy Office",
+    "Chiropractic Office",
+    "Therapy and Counseling Office"
+   ],
+   "from": "client.vertical",
+   "value_map": {
+    "Dental": "Dental Office",
+    "Dentist": "Dental Office",
+    "Medical": "Medical Office",
+    "Physician": "Medical Office",
+    "Veterinary": "Veterinary Office",
+    "Vet": "Veterinary Office",
+    "Optometry": "Optometry Office",
+    "Vision": "Optometry Office",
+    "Phys Therapy": "Physical Therapy Office",
+    "Physical Therapy": "Physical Therapy Office",
+    "Chiropractic": "Chiropractic Office",
+    "Chiro": "Chiropractic Office",
+    "Therapy": "Therapy and Counseling Office",
+    "Counseling": "Therapy and Counseling Office"
+   },
+   "default": null,
+   "owed_note": "THE ONE DERIVED-VOCABULARY SLOT. client.vertical is CARR's own book vocabulary; the value_map above translates it to the template's use list and lives in the map as reviewable DATA, not in code. An unmapped vertical is owed, never guessed."
+  },
+  "exclusivity": {
+   "where": "table:0:14:1",
+   "label": "Exclusivity",
+   "kind": "carry",
+   "owed_note": "'Exclusive for specialty in the property' is standing ask language."
+  },
+  "signage": {
+   "where": "table:0:15:1",
+   "label": "Signage",
+   "kind": "option",
+   "template_default": "Right to place signage on the monument sign | building",
+   "choices": [
+    "Right to place signage on the monument sign",
+    "Right to place signage on the building",
+    "Right to place signage on the monument sign and the building"
+   ],
+   "default": 2,
+   "owed_note": "Ask-wide by default; narrowed by the caller when a property limits it."
+  },
+  "hvac": {
+   "where": "table:0:16:1",
+   "label": "HVAC",
+   "kind": "carry",
+   "owed_note": "Standing CARR spec (1 ton per 350 SF).",
+   "note": "Most-common placeholder (1 ton per 350 SF), negotiable per deal like every LOI term (taught rule 2026-07-31); per-use guidance now lives in DNA/Reference vertical guides' MEP sections."
+  },
+  "electrical": {
+   "where": "table:0:17:1",
+   "label": "Electrical",
+   "kind": "carry",
+   "owed_note": "Standing CARR spec (3-phase, 200 amp).",
+   "note": "Most-common placeholder (3-phase, 200 amp), negotiable per deal (taught rule 2026-07-31); 3-phase is often an over-ask for light uses \u2014 see DNA/Reference MEP sections."
+  },
+  "broker_commission": {
+   "where": "table:0:18:1",
+   "label": "Broker Commission",
+   "kind": "carry",
+   "owed_note": "CARR's own commission ask. NEVER record-derived: the deal's commission columns are Salesforce placeholders that no view may treat as data.",
+   "note": "CARR's own commission ask \u2014 most-common placeholder, negotiable per deal. NEVER record-derived: the deal's commission columns are Salesforce placeholders that no view may treat as data. AUDIENCE RULE (Joe, 2026-07-31): listing-agent copy only; drops from client-facing copies (ORDER 23)."
   }
+ },
+ "reviewed_by": "Joe Bookout, slot-by-slot walk-through in chat, 2026-07-31 evening (Fable seat session 3)"
 }
