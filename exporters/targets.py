@@ -148,6 +148,44 @@ ACTIVE_COLS = ["Owner", "Name", "C-ID", "Status", "Deal Type", "Specialty", "Loc
                "Last Touch", "Next Step", "Detail"]
 
 
+FROZEN_ACTIVE = Path(__file__).resolve().parent.parent / "frozen-sources" / "2026-07-30" / "clients-active.md"
+
+
+def _lifted_header():
+    """The file's own prose, carried verbatim from the frozen copy.
+
+    The identity of this file -- what it is, what it replaced, where narrative
+    lives -- was written by Joe and is not the exporter's to paraphrase. Only two
+    things are dropped: the hand-maintained 'Last updated' / 'Last synced' stamps,
+    which would be stale the moment they were copied into a nightly-regenerated
+    file (no-fabrication applies to metadata too).
+    """
+    keep = []
+    for line in FROZEN_ACTIVE.read_text().splitlines():
+        if line.startswith("## "):
+            break
+        if line.startswith("# ") or line.startswith("Last updated:") or line.startswith("Last synced:"):
+            continue
+        keep.append(line)
+    while keep and not keep[-1].strip():
+        keep.pop()
+    return keep
+
+
+def _md_cell(v):
+    """Render one value as a markdown table cell.
+
+    A pipe inside a value silently splits the row into an extra column and every
+    cell after it shifts left -- C-131's location ("Marietta | Smyrna") did exactly
+    that, putting a city where the Next Step belonged. Newlines end the row
+    outright. Both are escaped rather than stripped: the data stays verbatim, the
+    table stays parseable.
+    """
+    if v is None:
+        return ""
+    return str(v).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", "<br>")
+
+
 def build_clients_active(tmp_path, cur):
     cur.execute('select * from v_export_clients_active order by "Owner", "Name"')
     cols = [d[0] for d in cur.description]
@@ -155,10 +193,13 @@ def build_clients_active(tmp_path, cur):
     lines = [
         "# Clients — Shared Active Index (both partners, one book)",
         "",
-        "*GENERATED from the CARR record layer — do not hand-edit; regenerated nightly.",
-        "Narrative per client lives in `DNA/Clients/prospects/<name>.md`. Records change",
-        "via the MCP verbs (log-activity, update-deal, set-next-action...); this file is",
-        "a rendered view. If it looks stale, check the export timestamp below.*",
+        "> **GENERATED from the CARR record layer — do not hand-edit; regenerated nightly.**",
+        "> Membership is DERIVED (an open deal, or a status flagged as pipeline-active), not",
+        "> stored. Records change via the MCP verbs (log-activity, update-deal,",
+        "> set-next-action...); this file is a rendered view. Where the prose below predates",
+        "> the record layer and says to update rows in place, the MCP verbs are how you do it now.",
+        "",
+        *_lifted_header(),
         "",
         "## Active pipeline",
         "",
@@ -166,7 +207,7 @@ def build_clients_active(tmp_path, cur):
         "|" + "---|" * len(ACTIVE_COLS),
     ]
     for r in rows:
-        lines.append("| " + " | ".join("" if v is None else str(v) for v in r) + " |")
+        lines.append("| " + " | ".join(_md_cell(v) for v in r) + " |")
     from datetime import datetime, timezone
     lines += ["", f"*Exported: {datetime.now(timezone.utc).isoformat()}*", ""]
     tmp_path.write_text("\n".join(lines))
