@@ -103,9 +103,12 @@ def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
         checksum = canonical_checksum(canonical)
         prev = last_ok_count(cur, target_key)
         tol = float(config(cur, "export.row_tolerance_pct", 5))
+        # Small files break percent gates: 2 rules -> 3 is 50% "drift" but normal
+        # growth. An absolute floor lets small deltas through regardless of percent.
+        abs_floor = float(config(cur, "export.row_tolerance_abs", 3))
         if prev is not None and prev > 0 and not bootstrap:
             drift = abs(row_count - prev) / prev * 100
-            if drift > tol:
+            if drift > tol and abs(row_count - prev) > abs_floor:
                 record_run(cur, target_key, row_count, checksum, "validation_failed")
                 conn.commit()
                 tmp_path.unlink()
