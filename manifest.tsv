@@ -35,6 +35,11 @@ bin/fetch-calendar.sh	Automation/local-tasks/fetch-calendar.sh
 #   which only the migration runner beside it may write, and it is a ONE-TIME repair for the
 #   0013-0016 ledger gap. A vault copy would put a database-mutating script on Dell's side for a
 #   job his sessions must never run. Repo only, and it goes inert once the four rows exist.
+# pipelines/parse_party_links.py is repo-only (2026-07-31, ORDER 17 / amendment 4). PLACEMENT
+#   TEST: it is a ONE-TIME backfill that writes party_link and event rows as the DB writer, the
+#   same class as pipelines/import_wave1.py and tools/ledger-repair.py. Ongoing links go through
+#   the link-parties verb, so a vault copy would put a database-mutating script on Dell's side
+#   for a job neither partner's sessions should ever run twice. Repo only, on purpose.
 # tools/writing-lint.py is repo-only FOR NOW (2026-07-25). It enforces a SHARED-tier doctrine
 #   file (DNA/writing-rules.md), so Dell's side would benefit from a vault copy — but adding a
 #   file to the shared tier is a two-writer decision for Joe, not a unilateral write. Placement
