@@ -119,13 +119,18 @@ def main():
                     help="consider every availability row, not just the newest per space")
     a = ap.parse_args()
 
-    url = (os.environ.get("CARR_DB_MATCHER_URL")
+    # [ORDER 19a] CARR_DB_JOBS_URL first: one nightly-jobs role for every
+    # unattended pipeline. The exporter credential is kept as a fallback because
+    # it still runs the honest-empty report, and the older per-script name stays
+    # accepted so nothing that already works stops working.
+    url = (os.environ.get("CARR_DB_JOBS_URL")
+           or os.environ.get("CARR_DB_MATCHER_URL")
            or os.environ.get("CARR_DB_EXPORTER_URL")
            or os.environ.get("DATABASE_URL"))
     if not url:
         print("availability_matcher: NOT CONFIGURED — no database URL "
-              "(CARR_DB_MATCHER_URL, CARR_DB_EXPORTER_URL or DATABASE_URL). "
-              "Nothing attempted.", file=sys.stderr)
+              "(CARR_DB_JOBS_URL, CARR_DB_MATCHER_URL, CARR_DB_EXPORTER_URL or "
+              "DATABASE_URL). Nothing attempted.", file=sys.stderr)
         return 78
 
     OUT.mkdir(exist_ok=True)
@@ -144,9 +149,10 @@ def main():
             # people to stop reading the log.
             print("availability_matcher: NOT CONFIGURED — this credential is "
                   "views-only and no view exposes `availability` / `space_search`. "
-                  "The matcher needs base-table SELECT on availability, space, "
-                  "building, space_search, client, party (a credential, or a "
-                  "reader-facing view + grant — a Fable call, not this script's). "
+                  "The answer exists as of ORDER 19a: the `carr_jobs` role holds "
+                  "exactly the reads this needs (availability, space_search, and "
+                  "column-scoped space / building / client / party). Set "
+                  "CARR_DB_JOBS_URL in ~/.config/carr/db.env. "
                   "Nothing attempted, nothing written.", file=sys.stderr)
             return 78
         n_se = conn.execute(

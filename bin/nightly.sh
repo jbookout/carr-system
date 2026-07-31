@@ -77,10 +77,14 @@ export CARR_EXPORT_LIVE=1
 
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
-# credential above cannot run it. It looks for CARR_DB_CADENCE_URL and exits 78
-# — SKIP, not FAIL — when there is none. Until that credential exists in
-# ~/.config/carr/db.env the engine is armed and silent, which is honest; the
-# matcher reads only and rides the exporter credential today.
+# credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first
+# (ORDER 19a settled the name: ONE nightly-jobs role, `carr_jobs`, not one
+# credential per pipeline; the older CARR_DB_CADENCE_URL / CARR_DB_MATCHER_URL
+# names stay accepted) and exit 78 — SKIP, not FAIL — when there is none. Until
+# that row exists in ~/.config/carr/db.env both are armed and silent, which is
+# honest. THE COMMAND LINES BELOW DO NOT CHANGE when the credential lands: the
+# scripts read the environment, so the night the row appears both steps simply
+# start doing work, with no new approval surface and no task-file edit.
 step "cadence engine (spawn owed next actions)"      ./.venv/bin/python pipelines/cadence_engine.py --apply
 step "availability matcher (digest, never sent)"     ./.venv/bin/python pipelines/availability_matcher.py
 

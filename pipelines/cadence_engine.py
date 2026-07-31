@@ -32,6 +32,15 @@ GUARD regardless of rules data")
   the status of the client they belong to; `vendor` subjects are never in scope
   (a vendor has no client status — the abundance rule is about clients).
 
+THE RULE'S OWN SCOPE (ORDER 19c, column added by 0021)
+  `cadence_rule.status_filter` is a nullable text[] of client_status slugs. NULL
+  keeps the pre-0021 behaviour (every subject the hard guard allows). A list
+  NARROWS the rule to subjects whose governing client status is in it — the
+  seeded nurture45 row carries {engaged}, so "engaged-client nurture" finally
+  means what its name says (ORDER 14 reported that gap; this closes it). It can
+  only ever narrow: the hard guard above runs first, so a row saying
+  status_filter={cold} still spawns nothing.
+
 IDEMPOTENCE (ORDER 14a: "key on (rule_id, completed_action_id)")
   Every spawn writes an `event` row, verb 'cadence-spawn', carrying
   idempotency_key 'cadence:<rule_id>:<completed_action_id>' (on_complete) or
@@ -170,13 +179,25 @@ def load_context(conn):
     return ctx
 
 
-def guard_reason(ctx, stype, sid):
-    """The hard guard + the two honest refusals. Returns a skip reason or None."""
+def guard_reason(ctx, stype, sid, status_filter=None):
+    """The hard guard + the two honest refusals + the rule's own scope.
+
+    ORDER OF EVALUATION IS THE WHOLE POINT. The hard cold/paused guard runs
+    FIRST and is not expressible in rules data; `status_filter` (0021, ORDER
+    19c) runs after it and can only NARROW. A rule row carrying
+    status_filter={cold} therefore still spawns nothing — data cannot re-admit
+    a subject the abundance rule excluded.
+    """
     s = ctx["subjects"].get((stype, sid))
     if s is None:
         return "subject not found (merged or deleted record)"
     if s["status"] in COLD_CLASS:
         return "abundance rule: client status '%s'" % s["status"]
+    if status_filter:
+        if s["status"] not in status_filter:
+            return ("rule is scoped to status %s; this subject is %s"
+                    % ("{" + ", ".join(status_filter) + "}",
+                       ("'%s'" % s["status"]) if s["status"] else "unstatused"))
     if s["owner"] is None:
         return "no owner on record — a ball with no holder is not a ball"
     return None
@@ -185,7 +206,7 @@ def guard_reason(ctx, stype, sid):
 # ── the two trigger types ────────────────────────────────────────────────────
 
 def plan_on_complete(conn, ctx, rule, today, plan, skips):
-    rid, lane, stype, _trig, interval, template, _active = rule
+    rid, lane, stype, _trig, interval, template, _active, sfilter = rule
     if interval is None:
         skips.append((lane, "rule has no interval_days — an on_complete rule without "
                             "one cannot date its successor", None))
@@ -204,7 +225,7 @@ def plan_on_complete(conn, ctx, rule, today, plan, skips):
             skips.append((lane, "completed %d days ago, past the %d-day lookback"
                           % ((today - done_on).days, ctx["lookback_days"]), key))
             continue
-        why = guard_reason(ctx, stype, sid)
+        why = guard_reason(ctx, stype, sid, sfilter)
         if why:
             skips.append((lane, why, key))
             continue
@@ -244,7 +265,7 @@ def plan_on_date(conn, ctx, rules_for_lane, lane, stype, today, plan, skips):
     rows = conn.execute(
         "select id, %s from %s where %s is not null" % (column, table, column)).fetchall()
     for i, rule in enumerate(rules):
-        rid, _lane, _st, _tg, interval, template, _a = rule
+        rid, _lane, _st, _tg, interval, template, _a, sfilter = rule
         if interval is None:
             skips.append((lane, "on_date rule has no interval_days — nothing to count "
                                 "back from the date", None))
@@ -259,7 +280,7 @@ def plan_on_date(conn, ctx, rules_for_lane, lane, stype, today, plan, skips):
                 continue                      # silent: this is the normal state
             if not (fire_on <= today <= window_end):
                 continue                      # window not open (or already past)
-            why = guard_reason(ctx, stype, sid)
+            why = guard_reason(ctx, stype, sid, sfilter)
             if why:
                 skips.append((lane, why, key))
                 continue
@@ -306,10 +327,12 @@ def write_report(path, rules, plan, skips, applied, wrote, lookback):
     A("## Rules read")
     A("")
     if rules:
-        A("| lane | subject | trigger | interval_days |")
-        A("|---|---|---|---|")
+        A("| lane | subject | trigger | interval_days | status filter |")
+        A("|---|---|---|---|---|")
         for r in rules:
-            A("| %s | %s | %s | %s |" % (r[1], r[2], r[3], r[4]))
+            A("| %s | %s | %s | %s | %s |"
+              % (r[1], r[2], r[3], r[4],
+                 ("{" + ", ".join(r[7]) + "}") if r[7] else "any (hard guard only)"))
     else:
         A("None.")
     A("")
@@ -361,9 +384,15 @@ def main():
     ap.add_argument("--today", help="YYYY-MM-DD, for rehearsal only")
     a = ap.parse_args()
 
-    url = os.environ.get("CARR_DB_CADENCE_URL") or os.environ.get("DATABASE_URL")
+    # [ORDER 19a] CARR_DB_JOBS_URL is THE name: one nightly-jobs role for every
+    # unattended pipeline, not one credential per script. The older names stay as
+    # fallbacks so nothing that already works stops working.
+    url = (os.environ.get("CARR_DB_JOBS_URL")
+           or os.environ.get("CARR_DB_CADENCE_URL")
+           or os.environ.get("DATABASE_URL"))
     if not url:
-        print("cadence_engine: NOT CONFIGURED — no CARR_DB_CADENCE_URL or DATABASE_URL. "
+        print("cadence_engine: NOT CONFIGURED — no CARR_DB_JOBS_URL, CARR_DB_CADENCE_URL "
+              "or DATABASE_URL. "
               "This engine WRITES (next_action + event), so the read-only exporter "
               "credential in ~/.config/carr/db.env cannot run it. Nothing attempted.",
               file=sys.stderr)
@@ -375,7 +404,8 @@ def main():
     with psycopg.connect(url) as conn:
         ctx = load_context(conn)
         rules = conn.execute("""
-            select id, lane, subject_type, trigger, interval_days, action_template, active
+            select id, lane, subject_type, trigger, interval_days, action_template,
+                   active, status_filter
               from cadence_rule where active order by lane, interval_days desc nulls last
         """).fetchall()
 

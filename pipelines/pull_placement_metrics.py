@@ -59,8 +59,9 @@ ACTOR
   than the importer's `system` actor.
 
 Usage:
-  DATABASE_URL=... .venv/bin/python pipelines/pull_placement_metrics.py           # dry run
-  DATABASE_URL=... .venv/bin/python pipelines/pull_placement_metrics.py --apply   # write
+  CARR_DB_JOBS_URL=... .venv/bin/python pipelines/pull_placement_metrics.py           # dry run
+  CARR_DB_JOBS_URL=... .venv/bin/python pipelines/pull_placement_metrics.py --apply   # write
+  (DATABASE_URL and CARR_IMPORT_DB_URL are still accepted, in that order, after it)
 Reads BLOTATO_API_KEY from the environment (~/.zprofile is the existing home,
 set for the social-media-manager skill's blotato.sh — no new secret).
 The dry run touches no database and is the default.
@@ -452,11 +453,17 @@ def main():
     counts = (0, 0, 0, 0)
     db_state = dict(pieces_new=len(pieces), placements_new=len(placements),
                     metrics_new=len(metrics),
-                    note="not read (no DATABASE_URL) — the 'would insert' counts above "
+                    note="not read (no database credential) — the 'would insert' counts above "
                          "are the FULL source counts, not a delta against what is "
                          "already recorded")
 
-    url = os.environ.get("DATABASE_URL") or os.environ.get("CARR_IMPORT_DB_URL")
+    # [ORDER 19a] The nightly-jobs role holds select/insert/update on exactly the
+    # three tables this pipeline writes, so CARR_DB_JOBS_URL is the credential
+    # this lane is meant to run under. DATABASE_URL (owner) still wins nothing —
+    # it is simply the next name accepted, unchanged for a human at a terminal.
+    url = (os.environ.get("CARR_DB_JOBS_URL")
+           or os.environ.get("DATABASE_URL")
+           or os.environ.get("CARR_IMPORT_DB_URL"))
     if url:
         import psycopg
         with psycopg.connect(url) as conn:
@@ -474,7 +481,8 @@ def main():
                     metrics_new=sum(1 for m in metrics if m["external_id"] not in have),
                     note=f"read OK — {len(have)} placement(s) already recorded")
     elif a.apply:
-        print("DATABASE_URL is not set — --apply has nothing to write to.", file=sys.stderr)
+        print("No database credential (CARR_DB_JOBS_URL / DATABASE_URL) — "
+              "--apply has nothing to write to.", file=sys.stderr)
         return 78
 
     write_report(report_path, pieces, placements, metrics, skipped, a.apply, counts,

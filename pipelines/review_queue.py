@@ -110,14 +110,26 @@ REF_TOKEN = re.compile(r"\b([LCV])-([A-Z]{3}-)?(\d{3})\b")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def db_url() -> str | None:
-    url = os.environ.get("CARR_DB_EXPORTER_URL") or os.environ.get("DATABASE_URL")
-    if url:
-        return url
+    # [ORDER 19a] CARR_DB_JOBS_URL first, and for this file it is the difference
+    # between a queue and a third of a queue: the ingest lane needs select on
+    # `ingest_inbox` and the paperwork lane wants `document`, and the exporter
+    # role holds neither (measured: permission denied for table ingest_inbox).
+    # The older names stay accepted so the two working lanes never regress.
+    for name in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL", "DATABASE_URL"):
+        url = os.environ.get(name)
+        if url:
+            return url
     env = Path.home() / ".config/carr/db.env"
     if env.exists():
+        found = {}
         for line in env.read_text().splitlines():
-            if line.startswith("CARR_DB_EXPORTER_URL="):
-                return line.split("=", 1)[1].strip()
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                found[k.strip()] = v.strip()
+        for name in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL"):
+            # preference, not file order: db.env is a list, not a ranking
+            if found.get(name):
+                return found[name]
     return None
 
 

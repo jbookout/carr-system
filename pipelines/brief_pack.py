@@ -74,6 +74,14 @@ PHASE_WORDS = {"legal": "in legal review", "closing": "closing", "due_diligence"
 
 
 def db_url():
+    # [ORDER 19a, and the ONE script that deliberately does NOT prefer
+    # CARR_DB_JOBS_URL — flagged in the execution log rather than done quietly.]
+    # This file reads v_deal_board, v_today_triage, v_last_touch and v_ref_index.
+    # The nightly-jobs role holds exactly one of those four (v_ref_index) and is
+    # not granted the others on purpose: reaching for it here would trade a
+    # working brief pack for a literal reading of the word "prefer". The reader
+    # tier is the right tier for a read-only brief; the jobs role is for the
+    # lanes that WRITE or that need ingest_inbox.
     url = os.environ.get("CARR_DB_EXPORTER_URL") or os.environ.get("DATABASE_URL")
     if url:
         return url

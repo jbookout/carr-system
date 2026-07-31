@@ -42,11 +42,11 @@ mkdir -p "$REPO/out" "$LEARN_DIR"
 [ -f "$HOME/.config/carr/db.env" ] && { set -a; . "$HOME/.config/carr/db.env"; set +a; }
 [ -f "$HOME/.zprofile" ] && . "$HOME/.zprofile" >/dev/null 2>&1
 
-# The metrics pull WRITES, so the exporter URL cannot run it. Accepted names, in
-# order of preference. ORDER 14's cadence engine established CARR_DB_CADENCE_URL
-# for the same need; it is accepted here so ONE row in db.env serves both rather
-# than Joe adding a second identical credential under a second name. Which single
-# name wins is Fable's to settle — see the ORDER 15 log entry.
+# The metrics pull WRITES, so the exporter URL cannot run it. SETTLED by ORDER
+# 19a: the single name is CARR_DB_JOBS_URL, the one nightly-jobs role, and the
+# python reads it directly and prefers it over everything below. These two lines
+# stay for the older names, so a Mac carrying only CARR_DB_WRITER_URL or
+# CARR_DB_CADENCE_URL keeps working exactly as it did.
 : "${DATABASE_URL:=${CARR_DB_WRITER_URL:-${CARR_DB_CADENCE_URL:-}}}"
 [ -n "$DATABASE_URL" ] && export DATABASE_URL || unset DATABASE_URL
 

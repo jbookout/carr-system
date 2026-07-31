@@ -83,8 +83,15 @@ class Source:
     """One connection, honest about what it can and cannot see."""
 
     def __init__(self):
-        self.url = os.environ.get("DATABASE_URL") or os.environ.get("CARR_IMPORT_DB_URL")
-        self.tier = "full"
+        # [ORDER 19a] CARR_DB_JOBS_URL first — the one nightly-jobs role. It holds
+        # the content tables and the rule view these jobs actually read, and
+        # nothing else, so it is the credential this lane is meant to run under.
+        # Every older name stays accepted, in the order that was true before.
+        self.url = os.environ.get("CARR_DB_JOBS_URL")
+        self.tier = "jobs"
+        if not self.url:
+            self.url = os.environ.get("DATABASE_URL") or os.environ.get("CARR_IMPORT_DB_URL")
+            self.tier = "full"
         if not self.url:
             self.url = os.environ.get("CARR_DB_EXPORTER_URL")
             self.tier = "views"
@@ -92,6 +99,11 @@ class Source:
             self.tier = "none"
         self.conn = None
         self.reason = {
+            "jobs": "CARR_DB_JOBS_URL present (carr_jobs, the nightly-jobs role). It reads "
+                    "`placement`, `placement_metric`, `content_piece`, `event` and "
+                    "`v_compiled_rules`, which is every source these four jobs need. "
+                    "Anything outside that set still reports "
+                    f"{UNAVAILABLE} rather than a number nobody measured.",
             "full": "DATABASE_URL present — base tables readable, every clause runs.",
             "views": "only CARR_DB_EXPORTER_URL present (least-privilege exporter role, "
                      "views-only by design). Clauses needing base tables report "

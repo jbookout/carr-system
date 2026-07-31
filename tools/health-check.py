@@ -65,6 +65,29 @@ WATCH = [
     ("GEN clients-active",  "DNA/Clients/clients-active.md",             26/24, [], "nightly chain (bin/nightly.sh)"),
     ("GEN rules shared",    "DNA/compiled-rules-shared.md",              26/24, [], "nightly chain (bin/nightly.sh)"),
     ("GEN rules joe",       "00_Context/compiled-rules-joe.md",          26/24, [], "nightly chain (bin/nightly.sh)"),
+    # --- the Wave 2 job reports (added 2026-07-31 with ORDER 19a) ---------------
+    # These five live in the REPO's out/, not the vault, so their patterns are
+    # absolute — os.path.join returns an absolute second argument unchanged.
+    # 26h each, per the ORDER 19 ruling: the two digests ride the nightly chain
+    # (7 days), and the brief pack plus the queue are rebuilt by the heartbeat.
+    # WHAT A FAILURE HERE MEANS, so nobody debugs the wrong end: cadence and
+    # matcher going stale means the nightly chain SKIPPED them, which until Joe's
+    # role tap lands is the DESIGNED state (exit 78, not a fault). Brief pack and
+    # review queue going stale on a Monday is the weekends-off rule showing
+    # through, since the heartbeat stands down Sat/Sun and JOB 4a runs before
+    # JOB 4b rebuilds them — flagged to Fable rather than padded on my own
+    # judgment, because the order set the cadence explicitly at 26h.
+    ("JOB brief-pack",    os.path.expanduser("~/carr-system/out/brief-pack/brief-pack-latest.md"), 26/24, [],
+     "run.sh brief-pack (heartbeat JOB 4b)"),
+    ("JOB monday-agenda", os.path.expanduser("~/carr-system/out/brief-pack/monday-agenda.md"), 26/24, [],
+     "run.sh brief-pack — the Monday brief's own input, watched separately because "
+     "it has its own consumer"),
+    ("JOB review-queue",  os.path.expanduser("~/carr-system/out/review-queue/review-queue.html"), 26/24, [],
+     "run.sh review-queue (heartbeat JOB 4b)"),
+    ("JOB matcher",       os.path.expanduser("~/carr-system/out/availability-matches.md"), 26/24, [],
+     "availability_matcher.py, step 2 of the nightly chain (SKIPs until CARR_DB_JOBS_URL exists)"),
+    ("JOB cadence",       os.path.expanduser("~/carr-system/out/cadence-latest.md"), 26/24, [],
+     "cadence_engine.py, step 1 of the nightly chain (SKIPs until CARR_DB_JOBS_URL exists)"),
     ("Joe calendar feed", "DNA/Team/calendar-latest.ics", 4, [],
      "fetch-calendar.sh; business days only"),
     ("Dell calendar feed","DNA/Team/calendar-latest-dell.ics", 4, [],

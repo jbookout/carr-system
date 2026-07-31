@@ -12,10 +12,11 @@
 # Exit 0 = all read verbs healthy. Non-zero = at least one check failed.
 #
 # NOT read-only any more, and deliberately so (ORDER 18 addendum, 2026-07-31).
-# Every verb here is write:false EXCEPT the last check, a log-activity call with
-# a FIXED idempotency key: it inserted once, on the first run in history, and
-# replays for ever after. That one row is the price of covering the write path,
-# and a twelve-hour production outage is what not covering it cost.
+# Every verb here is write:false EXCEPT the last two checks, which use FIXED
+# idempotency keys: they wrote once, on the first run in history, and replay for
+# ever after. Those few rows are the price of covering the write path, and a
+# twelve-hour production outage is what not covering it cost.
+# Eleven checks as of ORDER 19 (the eleventh is the completion path).
 
 set -uo pipefail
 
@@ -140,6 +141,47 @@ if [ "$_w_ok" -eq 1 ]; then
   echo "  ok    write path: log-activity resolves + replays  (${REPS}/${REPS})"; pass=$((pass+1))
 else
   echo "  FAIL  write path — $_w_why"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
+
+# --- ORDER 19: the completion path, the same fixed-key replay pattern ----------
+# WHY THIS EXISTS. Until 2026-07-31 NOTHING in this system could mark a ball
+# done: production held 212 open, 1 dropped and zero done, so the on_complete
+# half of the cadence engine had no input path at all. `complete-action` is that
+# path, and a verb the whole follow-up machinery depends on deserves a tripwire
+# rather than a memory.
+#
+# SAFE TO RUN FOR EVER, for the same reason the write probe is: both keys below
+# are FIXED and the arguments never change, so the pair inserted exactly once in
+# history and replays on every run after. The subject is deliberate too —
+# 'AMA Law Office' is a CLOSED/LOST deal that carried zero next_action rows, and
+# no seeded cadence rule fires on a deal subject, so completing this fixture
+# spawns nothing and displaces no real ball. If a deal-lane on_complete rule is
+# ever seeded, move the fixture rather than deleting this probe.
+#
+# THE TWO ARGUMENT STRINGS BELOW ARE FROZEN. The envelope hashes the arguments
+# with the key, so editing a single character of either JSON body makes every
+# future run return `key_reuse` instead of a replay, and the probe fails for
+# ever after on a typo. Change the key too, or leave them alone.
+echo
+_c_ok=1; _c_why=""
+for i in $(seq 1 "$REPS"); do
+  call set-next-action '{"idempotency_key":"smoke-ball-probe-permanent","ref":"AMA Law Office","description":"smoke probe fixture — permanent, replayed, never a real ball"}'
+  if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _c_ok=0; _c_why="the probe fixture ball could not be set"; break; fi
+  call complete-action '{"idempotency_key":"smoke-complete-probe-permanent","ref":"AMA Law Office","outcome":"smoke probe — completed once, replayed for ever after"}'
+  if echo "$RESULT" | grep -q '"error"'; then _c_ok=0; _c_why="transport/protocol error"; break; fi
+  if echo "$RESULT" | grep -q '"isError":true'; then _c_ok=0; _c_why="verb returned isError (deployed? resolveSubject under carr_writer?)"; break; fi
+  if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _c_ok=0; _c_why="no ok:true in the envelope response"; break; fi
+  # rep 1 may legitimately be the first-ever completion; every rep after replays
+  if [ "$i" -gt 1 ] && ! echo "$RESULT" | grep -q '\\"replayed\\":true'; then
+    _c_ok=0; _c_why="rep $i did NOT replay — the envelope completed twice"; break
+  fi
+  [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+done
+if [ "$_c_ok" -eq 1 ]; then
+  echo "  ok    completion path: complete-action marks done + replays  (${REPS}/${REPS})"; pass=$((pass+1))
+else
+  echo "  FAIL  completion path — $_c_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
 fi
 

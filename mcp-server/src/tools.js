@@ -540,6 +540,45 @@ export const TOOLS = {
     }),
   },
 
+  "complete-action": {
+    write: true,
+    description: "Mark YOUR open ball on a subject DONE — the thing actually happened. Say what came of it in `outcome` if there is anything to say. DONE MEANS DONE: if you are abandoning the ball or replacing it with something else, use set-next-action instead (that records the old one as 'dropped', which is what it was). Completing is what feeds the follow-up cadence, so a false 'done' schedules a real touch on a fiction.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, ref: { type: "string" },
+      outcome: { type: "string", description: "optional: what came of it, in your words" } },
+      required: ["idempotency_key","ref"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "complete-action", args, async () => {
+      const s = await resolveSubject(c, args.ref);
+      // Only the caller's own ball, exactly like set-next-action: Dell's stays
+      // untouched. The next_action_touch trigger stamps updated_at, and the
+      // cadence engine reads THAT as the completion date, so nothing here sets
+      // it by hand.
+      const r = await c.query(
+        `update next_action set status='done', updated_by=$1
+          where subject_type=$2 and subject_id=$3 and owner_id=$1 and status='open'
+          returning id, description, due_on`, [actor.id, s.type, s.id]);
+      if (!r.rows.length) {
+        const others = await c.query(
+          `select a.slug as owner, n.description, n.due_on from next_action n
+             join actor a on a.id = n.owner_id
+            where n.subject_type=$1 and n.subject_id=$2 and n.status='open'`, [s.type, s.id]);
+        throw new ToolError({ error: "no_open_action", subject: s,
+          open_for_others: others.rows,
+          hint: others.rows.length
+            ? "the open ball on this subject belongs to someone else — only its holder can complete it"
+            : "nobody holds an open action here; log-activity records what happened, set-next-action sets the next one" });
+      }
+      for (const row of r.rows)
+        await writeEvent(c, actor, "complete-action", s.type, s.id,
+          { field: "status", old: { status: "open" },
+            new: { next_action: row.description, next_action_id: row.id, status: "done",
+                   outcome: args.outcome || null },
+            human_quote: args.outcome || null, idempotency_key: args.idempotency_key });
+      return { ok: true, completed: r.rows.map(x => ({ next_action_id: x.id, description: x.description })),
+               count: r.rows.length, subject: s };
+    }),
+  },
+
   "add-critical-date": {
     write: true,
     description: "A date with consequences (LOI expiry, lease expiration, option window, earnout). source is REQUIRED — where did this date come from?",

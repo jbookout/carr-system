@@ -41,14 +41,14 @@
 begin;
 
 -- (1) engaged-client nurture, 45 days.
--- NOTE, and it is honest rather than hidden: cadence_rule has no status-filter
--- column, so "engaged-client" cannot be expressed as a row today. The engine
--- applies the hard cold/paused guard and nothing narrower. If the qualifier
--- must bite (nurture ONLY status='engaged'), that is one new column
--- (subject_filter jsonb) and a migration — a Fable call, not this file's.
-insert into cadence_rule (lane, subject_type, trigger, interval_days, action_template, active)
+-- The qualifier BITES as of 0021 (ORDER 19c): status_filter {engaged} narrows
+-- this rule to clients whose status actually is `engaged`, so the rule's name
+-- and its behaviour are the same statement. ORDER 14 reported the gap and this
+-- is its close. status_filter can only ever NARROW — the hard cold/paused guard
+-- runs first in the engine and is not expressible in rules data by design.
+insert into cadence_rule (lane, subject_type, trigger, interval_days, action_template, active, status_filter)
 select 'nurture45', 'client', 'on_complete', 45,
-       'Nurture touch — {subject} ({ref}). 45-day client cadence.', true
+       'Nurture touch — {subject} ({ref}). 45-day client cadence.', true, array['engaged']
  where not exists (select 1 from cadence_rule
                     where lane='nurture45' and subject_type='client'
                       and trigger='on_complete' and interval_days=45);
@@ -112,4 +112,5 @@ end $$;
 
 commit;
 
-select lane, subject_type, trigger, interval_days, active from cadence_rule order by lane, interval_days desc;
+select lane, subject_type, trigger, interval_days, status_filter, active
+  from cadence_rule order by lane, interval_days desc;
