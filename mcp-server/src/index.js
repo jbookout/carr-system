@@ -1,36 +1,39 @@
-// CARR MCP server — Worker (2026-07-30 build session, verb surface added).
-// Surfaces: /health (dead-man probe), /ingest (socket), /mcp (MCP 2026-06 spec,
-// stateless streamable HTTP: initialize / tools/list / tools/call).
-// AUTH (interim, documented in tool-contracts §1): per-partner bearer tokens
-// (PARTNER_TOKENS secret {"joe": "...", "dell": "..."}); the actor comes from
-// the MATCHED TOKEN, never the payload. The OAuth approval flow for the
-// phone connector layers on top next session; token issuance stays pinned to
-// exactly two identities either way (A10).
+// CARR MCP server — Worker entrypoint.
+//
+// The Worker's fetch IS an OAuthProvider (Cloudflare's workers-oauth-provider).
+// It is the OAuth 2.1 authorization server to the Claude apps, and it wraps the
+// MCP verb surface at /mcp as its protected API route. Everything else — the
+// dead-man probe, the ingest socket, and the Google sign-in leg — goes to the
+// default handler and is NOT behind an access token.
+//
+//   /mcp        API route. Token validated by the provider; the actor arrives as
+//               ctx.props. Also accepts a legacy PARTNER_TOKENS bearer for the
+//               duration of the migration (resolveExternalToken, below).
+//   /authorize  Google sign-in starts (our code — see google-oidc.js)
+//   /callback   Google returns; identity verified; allow-list applied; issue
+//   /token      implemented by the provider
+//   /register   implemented by the provider (RFC 7591 dynamic client registration)
+//   /.well-known/oauth-authorization-server        provider (RFC 8414)
+//   /.well-known/oauth-protected-resource[/path]   provider (RFC 9728)
+//   /health     unchanged, unauthenticated dead-man probe
+//   /ingest     unchanged, INGEST_TOKENS bearer — deliberately OUTSIDE the OAuth wrap
+//
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon } from "@neondatabase/serverless";
-import { Pool } from "@neondatabase/serverless";
-import { TOOLS, ToolError } from "./tools.js";
+import { mcpApiHandler } from "./mcp.js";
+import { handleAuthorize, handleCallback } from "./google-oidc.js";
+import { slugForLegacyToken, propsForSlug } from "./identity.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 
-// ---------- auth ----------
+const ACCESS_TOKEN_TTL = 3600; // 1 hour (design: access tokens short)
+const REFRESH_TOKEN_TTL = 7776000; // 90 days (design: refresh tokens long)
 
-function actorFromToken(request, env) {
-  const auth = request.headers.get("authorization") || "";
-  const token = auth.replace(/^Bearer\s+/i, "");
-  if (!token) return null;
-  let map;
-  try { map = JSON.parse(env.PARTNER_TOKENS || "{}"); } catch { map = {}; }
-  for (const [slug, t] of Object.entries(map))
-    if (t && t.length >= 32 && t === token)
-      return { slug, display: slug === "joe" ? "Joe" : "Dell", human: true };
-  return null;
-}
-
-// ---------- health + ingest (unchanged behavior) ----------
+// ---------- health + ingest (unchanged behavior, unchanged auth) ----------
 
 async function health(env) {
   try {
@@ -39,9 +42,15 @@ async function health(env) {
     return json({ ok: true, digest_lines: rows.length, ts: new Date().toISOString() });
   } catch (e) {
     const suspended = /suspend|quota|compute/i.test(String(e));
-    return json({ ok: false, reason: suspended
-      ? "Database compute is suspended (Neon budget). Not an emergency: boards render from last exports. Runbook: DNA/Deal Management/record-layer/runbook.md step 2."
-      : "Database unreachable: " + String(e).slice(0, 200) }, 503);
+    return json(
+      {
+        ok: false,
+        reason: suspended
+          ? "Database compute is suspended (Neon budget). Not an emergency: boards render from last exports. Runbook: DNA/Deal Management/record-layer/runbook.md step 2."
+          : "Database unreachable: " + String(e).slice(0, 200),
+      },
+      503,
+    );
   }
 }
 
@@ -49,13 +58,21 @@ async function ingest(request, env) {
   const auth = request.headers.get("authorization") || "";
   const token = auth.replace(/^Bearer\s+/i, "");
   let tokens;
-  try { tokens = JSON.parse(env.INGEST_TOKENS || "{}"); } catch { tokens = {}; }
+  try {
+    tokens = JSON.parse(env.INGEST_TOKENS || "{}");
+  } catch {
+    tokens = {};
+  }
   const source = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
   if (!source) return json({ error: "unauthorized" }, 401);
   const len = parseInt(request.headers.get("content-length") || "0", 10);
   if (len > 1048576) return json({ error: "payload_too_large" }, 413);
   let payload;
-  try { payload = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
   const externalId = payload.external_id || request.headers.get("x-external-id") || null;
   try {
     const sql = neon(env.DATABASE_URL_WRITER);
@@ -70,103 +87,54 @@ async function ingest(request, env) {
   }
 }
 
-// ---------- MCP transport (stateless streamable HTTP) ----------
+// ---------- default handler: everything that is not the protected API ----------
 
-const PROTOCOL = "2025-06-18";
-
-function toolList() {
-  return Object.entries(TOOLS).map(([name, t]) => ({
-    name, description: t.description, inputSchema: t.inputSchema,
-  }));
-}
-
-async function callTool(env, actor, name, args) {
-  const tool = TOOLS[name];
-  if (!tool) throw new ToolError({ error: "unknown_tool", name });
-  if (tool.humanOnly && !actor.human)
-    throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
-
-  if (!tool.write) {
-    const sql = neon(env.DATABASE_URL_READER);
-    const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
-    return tool.handler(client, actor, args || {});
-  }
-
-  // writes: real transaction on the writer pool; actor row resolved inside it
-  const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
-  const client = await pool.connect();
-  try {
-    await client.query("begin");
-    const a = await client.query("select id from actor where slug=$1", [actor.slug]);
-    const fullActor = { ...actor, id: a.rows[0].id };
-    const result = await tool.handler(client, fullActor, args || {});
-    await client.query("commit");
-    return result;
-  } catch (e) {
-    await client.query("rollback").catch(() => {});
-    throw e;
-  } finally {
-    client.release();
-    env.ctx?.waitUntil?.(pool.end());
-  }
-}
-
-async function mcp(request, env, ctx) {
-  if (request.method !== "POST")
-    return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
-  const actor = actorFromToken(request, env);
-  if (!actor) return json({ error: "unauthorized" }, 401);
-
-  let rpc;
-  try { rpc = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
-  const reply = (result) => json({ jsonrpc: "2.0", id: rpc.id, result });
-  const rpcError = (code, message, data) =>
-    json({ jsonrpc: "2.0", id: rpc.id, error: { code, message, data } });
-
-  try {
-    switch (rpc.method) {
-      case "initialize":
-        return reply({
-          protocolVersion: PROTOCOL,
-          capabilities: { tools: {} },
-          serverInfo: { name: "carr-record-layer", version: "0.1.0" },
-          instructions:
-            "CARR's record layer. Writes need a fresh idempotency_key (UUID) per intended action; " +
-            "mutations need base_version from a fresh read. version_conflict and needs_confirm are " +
-            "questions for the human, never auto-retried. There is no send tool: drafts are produced, " +
-            "Joe sends.",
-        });
-      case "notifications/initialized":
-        return new Response(null, { status: 202 });
-      case "ping":
-        return reply({});
-      case "tools/list":
-        return reply({ tools: toolList() });
-      case "tools/call": {
-        env.ctx = ctx;
-        try {
-          const result = await callTool(env, actor, rpc.params?.name, rpc.params?.arguments);
-          return reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
-        } catch (e) {
-          if (e instanceof ToolError)
-            return reply({ isError: true, content: [{ type: "text", text: JSON.stringify(e.payload) }] });
-          throw e;
-        }
-      }
-      default:
-        return rpcError(-32601, `method not found: ${rpc.method}`);
-    }
-  } catch (e) {
-    return rpcError(-32603, "internal error", String(e).slice(0, 300));
-  }
-}
-
-export default {
+const defaultHandler = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/health") return health(env);
     if (url.pathname === "/ingest" && request.method === "POST") return ingest(request, env);
-    if (url.pathname === "/mcp") return mcp(request, env, ctx);
-    return json({ service: "carr-mcp", surfaces: ["/health", "/ingest", "/mcp"] }, 404);
+    if (url.pathname === "/authorize") return handleAuthorize(request, env);
+    if (url.pathname === "/callback") return handleCallback(request, env);
+    return json({ service: "carr-mcp", surfaces: ["/health", "/ingest", "/mcp", "/authorize", "/callback"] }, 404);
   },
 };
+
+// ---------- the provider ----------
+
+export default new OAuthProvider({
+  apiRoute: "/mcp",
+  apiHandler: mcpApiHandler,
+  defaultHandler,
+
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+
+  accessTokenTTL: ACCESS_TOKEN_TTL,
+  refreshTokenTTL: REFRESH_TOKEN_TTL,
+
+  // The 2026-07-28 MCP spec revision prefers Client ID Metadata Documents over
+  // dynamic client registration; both are on, so clients on either side of that
+  // migration work. CIMD needs the global_fetch_strictly_public compatibility
+  // flag (set in wrangler.toml) for SSRF protection.
+  clientIdMetadataDocumentEnabled: true,
+
+  // ---- MIGRATION ONLY -------------------------------------------------------
+  // Consulted only when a bearer is NOT a valid provider-issued token. A valid
+  // legacy PARTNER_TOKENS string therefore authenticates exactly as it does
+  // today, through the same actor mapping and into the same ctx.props.
+  //
+  // RETIREMENT (its own commit, after BOTH partners' connectors are verified
+  // live on their phones): delete this option, delete slugForLegacyToken in
+  // identity.js, and remove the PARTNER_TOKENS secret. Nothing else changes.
+  async resolveExternalToken({ token, env }) {
+    const slug = slugForLegacyToken(token, env);
+    if (!slug) return null;
+    return { props: propsForSlug(slug, { via: "partner-token-legacy" }) };
+  },
+
+  onError({ code, description, status }) {
+    console.warn(`OAuth error response: ${status} ${code} - ${description}`);
+  },
+});

@@ -3,9 +3,19 @@
 #   DATABASE_URL_READER — Neon login role granted carr_reader (views only)
 #   DATABASE_URL_WRITER — Neon login role granted carr_writer (write path; set when verbs land)
 #   INGEST_TOKENS       — JSON map { "<source>": "<token>" } for the ingest socket
+#   PARTNER_TOKENS      — INTERIM. JSON map { "joe": "...", "dell": "..." }.
+#                         Retired in its own commit once both partners' OAuth
+#                         connectors are verified live on their phones.
+#   GOOGLE_CLIENT_ID    — Google Cloud OAuth 2.0 web client (upstream sign-in)
+#   GOOGLE_CLIENT_SECRET— ditto. Joe sets both himself; Claude never holds them.
 name = "carr-mcp"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
+
+# Required by workers-oauth-provider for Client ID Metadata Document support:
+# it disables the legacy same-zone fetch shortcut, which is the SSRF guard for
+# fetching a client's metadata document.
+compatibility_flags = ["global_fetch_strictly_public"]
 
 # Custom domain on the practicecre.com zone (registered 7/30, this account).
 # api.* is the machine surface; reports.* (client links) is a separate Pages
@@ -13,6 +23,13 @@ compatibility_date = "2026-07-01"
 routes = [
   { pattern = "api.practicecre.com", custom_domain = true }
 ]
+
+# OAuth grant/token storage for workers-oauth-provider. The binding name is
+# fixed by the library — it reads env.OAUTH_KV directly. Created 2026-07-31.
+# Secrets are stored only as hashes; grant props are encrypted at rest.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "b033d3b5c454445080e9d0ab51ff8f3c"
 
 [observability]
 enabled = true
