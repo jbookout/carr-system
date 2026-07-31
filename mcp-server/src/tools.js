@@ -249,10 +249,10 @@ export const TOOLS = {
 
   "stamp-touch": {
     write: true,
-    description: "Truck shorthand for log-activity: one-line call/text/note stamp. 'Called Hughes, going well' and done.",
+    description: "Truck shorthand for log-activity: one-line call/text stamp. 'Called Hughes, going well' and done. Contact kinds only — a note is annotation, not a touch (it would not move Last Touch since 0017); use log-activity kind:note or an event for annotation.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, ref: { type: "string" },
-      kind: { type: "string", enum: ["call","text","note"], default: "call" },
+      kind: { type: "string", enum: ["call","text"], default: "call" },
       summary: { type: "string" } }, required: ["idempotency_key","ref","summary"] },
     handler: async (c, actor, args) =>
       TOOLS["log-activity"].handler(c, actor, { ...args, kind: args.kind || "call" }),
