@@ -125,7 +125,48 @@ def _unwrap_content_controls(el) -> None:
         parent.remove(sdt)
 
 
-def _set_paragraph_text(para, text: str) -> None:
+# ------------------------------------------------- Joe's colour convention
+# JOE'S OWN RULE FOR THE CARR TEMPLATES (stated 2026-07-31): text in BLUE or RED
+# is text that gets replaced, coloured "for human eyes to know the text gets
+# replaced". A letter that actually goes out is ALL BLACK.
+#
+# The engine inherits the addressed run's formatting on purpose, which is what
+# keeps the letterhead intact — and it is also what made every filled value come
+# out in the placeholder's blue or red. Measured on the C-112 draft before this
+# change: the tenant name, the signature block, the $17.00 rate and the 3%
+# escalation all rendered RED, in a document whose whole point is that it is
+# ready for Joe to read. So a fill now STATES the colour rather than inheriting
+# it, and the two states say opposite things at a glance:
+#   BLACK — this value is real and final.
+#   RED   — this is an OWED marker. A human still has to answer it.
+# Red for owed is not a new convention. It is Joe's existing one, pointed at the
+# one thing left in a draft that still needs him.
+BLACK = "000000"
+RED = "FF0000"
+
+
+def _set_run_color(run, rgb: str | None) -> None:
+    """Force a run's colour, clearing any theme colour that would override it.
+
+    Setting `w:color/@w:val` alone is not enough: a run carrying `w:themeColor`
+    keeps taking its colour from the theme, so the attribute is removed rather
+    than left to fight with the value.
+    """
+    if rgb is None:
+        return
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    rPr = run._element.get_or_add_rPr()
+    c = rPr.find(f"{W}color")
+    if c is None:
+        c = rPr.makeelement(f"{W}color", {})
+        rPr.append(c)
+    c.set(f"{W}val", rgb)
+    for attr in (f"{W}themeColor", f"{W}themeTint", f"{W}themeShade"):
+        if c.get(attr) is not None:
+            del c.attrib[attr]
+
+
+def _set_paragraph_text(para, text: str, color: str | None = None) -> None:
     """Replace a paragraph's text, keeping the FIRST run's formatting.
 
     Word stores a paragraph as a sequence of runs; a template's placeholder is
@@ -134,18 +175,23 @@ def _set_paragraph_text(para, text: str) -> None:
     result reads as one clean value in the template's own typeface. A paragraph
     with no runs (an empty line) gets one created, inheriting the paragraph
     style rather than the document default.
+
+    `color` overrides the inherited font colour and nothing else: size, weight,
+    typeface and the paragraph's own styling all still come from the template.
     """
     _unwrap_content_controls(para._p)
     runs = para.runs
     if not runs:
-        para.add_run(text)
+        r = para.add_run(text)
+        _set_run_color(r, color)
         return
     runs[0].text = text
+    _set_run_color(runs[0], color)
     for extra in runs[1:]:
         extra._element.getparent().remove(extra._element)
 
 
-def _set_cell_text(cell, text: str) -> None:
+def _set_cell_text(cell, text: str, color: str | None = None) -> None:
     """Replace a table cell's text across the whole cell, first paragraph wins.
 
     Multi-line template cells (the LOI's Broker Commission cell is three
@@ -154,9 +200,21 @@ def _set_cell_text(cell, text: str) -> None:
     """
     _unwrap_content_controls(cell._tc)
     paras = cell.paragraphs
-    _set_paragraph_text(paras[0], text)
+    _set_paragraph_text(paras[0], text, color)
     for extra in paras[1:]:
         extra._element.getparent().remove(extra._element)
+
+
+def edit_color(e: dict) -> str | None:
+    """The colour one edit writes in. Owed markers red, real values black.
+
+    An explicit `color` on the edit wins, so a caller that needs something else
+    is not fighting the default; absent that, the edit's own `owed` flag decides.
+    """
+    if "color" in e:
+        v = e["color"]
+        return None if v in (None, "inherit") else {"black": BLACK, "red": RED}.get(v, v)
+    return RED if e.get("owed") else BLACK
 
 
 def fill_docx(template: str, out: str, edits: list[dict]) -> str:
@@ -168,11 +226,12 @@ def fill_docx(template: str, out: str, edits: list[dict]) -> str:
     for e in edits:
         addr = parse_address(e["where"])
         text = "" if e.get("text") is None else str(e["text"])
+        color = edit_color(e)
         if addr[0] == "para":
             i = addr[1]
             if i >= len(d.paragraphs):
                 raise FillError(f"{e['where']}: document has {len(d.paragraphs)} paragraphs")
-            _set_paragraph_text(d.paragraphs[i], text)
+            _set_paragraph_text(d.paragraphs[i], text, color)
         elif addr[0] == "table":
             _, t, r, c = addr
             if t >= len(d.tables):
@@ -180,11 +239,228 @@ def fill_docx(template: str, out: str, edits: list[dict]) -> str:
             tb = d.tables[t]
             if r >= len(tb.rows) or c >= len(tb.columns):
                 raise FillError(f"{e['where']}: table {t} is {len(tb.rows)}x{len(tb.columns)}")
-            _set_cell_text(tb.rows[r].cells[c], text)
+            _set_cell_text(tb.rows[r].cells[c], text, color)
         else:
             raise FillError(f"{e['where']}: cell addresses belong to xlsx templates")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     d.save(out)
+    return out
+
+
+# ------------------------------------------------ the outbound docx scrub
+# JOE'S DOCTRINE, stated 2026-07-31 and it corrects what the factory inherited:
+# an LOI letter goes to the LISTING AGENT AS A .docx, because the counterparty
+# edits and revises it and that IS the negotiation workflow. The PDF is the
+# record and preview copy. Spreadsheets are the other way round: the grid goes
+# out as a PDF precisely so nobody sees the formulas, and the working xlsx never
+# leaves. So a .docx from this factory is an OUTBOUND artifact, and an outbound
+# Word file must read as a clean CARR document.
+#
+# IT DOES NOT, OUT OF THE BOX, AND THAT IS A MEASURED FINDING RATHER THAN A
+# PRECAUTION. The C-112 draft filed in Joe's deal folder on 2026-07-31 carried,
+# inherited straight from CARR's corporate letterhead template:
+#     dc:creator          Andrew Mondy
+#     cp:lastModifiedBy   Mike Jorgenson
+#     cp:revision         23
+#     created / modified  2018-01-24 / 2023-10-27
+#     app.xml Template    C:\Users\andrew\AppData\Roaming\Microsoft\Templates\...
+# A named individual's Windows user directory, on a document about to be handed
+# to the other side of a negotiation. Nothing about it is secret and nothing
+# about it is intentional either, which is the definition of a fingerprint.
+#
+# WHAT IS SCRUBBED AND WHAT IS DELIBERATELY NOT. Removed: comments and their
+# parts, tracked changes (insertions accepted, deletions dropped, revision-only
+# formatting records removed), comment authors, custom document properties, and
+# the authorship and revision metadata above. KEPT: the letterhead, the theme,
+# the styles, the numbering, every byte of branding. The scrub is metadata
+# surgery, never content surgery, and the sha256 check on the TEMPLATE still
+# holds because the template is never what gets scrubbed.
+CARR_AUTHOR = "CARR"
+
+_DROP_PARTS = ("word/comments.xml", "word/commentsExtended.xml", "word/commentsIds.xml",
+               "word/commentsExtensible.xml", "word/people.xml", "docProps/custom.xml")
+
+
+def _strip_revisions(body, W: str) -> dict:
+    """Accept insertions, drop deletions, remove revision-only records."""
+    found = {"insertions_accepted": 0, "deletions_removed": 0, "format_revisions_removed": 0,
+             "comment_marks_removed": 0, "moves_resolved": 0}
+
+    for tag in (f"{W}ins", f"{W}moveTo"):
+        for el in body.findall(f".//{tag}"):
+            parent = el.getparent()
+            idx = list(parent).index(el)
+            for child in list(el):
+                parent.insert(idx, child)
+                idx += 1
+            parent.remove(el)
+            found["insertions_accepted" if tag.endswith("ins") else "moves_resolved"] += 1
+
+    for tag in (f"{W}del", f"{W}moveFrom"):
+        for el in body.findall(f".//{tag}"):
+            el.getparent().remove(el)
+            found["deletions_removed"] += 1
+
+    for tag in (f"{W}rPrChange", f"{W}pPrChange", f"{W}sectPrChange", f"{W}tblPrChange",
+                f"{W}trPrChange", f"{W}tcPrChange", f"{W}cellIns", f"{W}cellDel"):
+        for el in body.findall(f".//{tag}"):
+            el.getparent().remove(el)
+            found["format_revisions_removed"] += 1
+
+    for tag in (f"{W}commentRangeStart", f"{W}commentRangeEnd", f"{W}commentReference"):
+        for el in body.findall(f".//{tag}"):
+            el.getparent().remove(el)
+            found["comment_marks_removed"] += 1
+
+    return found
+
+
+def scrub_docx(path: str, author: str = CARR_AUTHOR) -> dict:
+    """Make one .docx safe to hand to a counterparty. Returns what it found.
+
+    Reports rather than whispers: every value it clears is named in the return,
+    because "what was in this file before we cleaned it" is the finding, and a
+    scrub nobody can read is indistinguishable from a scrub that did nothing.
+    """
+    import zipfile
+    import docx
+    from lxml import etree
+
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    found: dict = {"path": path}
+
+    d = docx.Document(path)
+    found.update(_strip_revisions(d.element.body, W))
+
+    cp = d.core_properties
+    found["metadata_cleared"] = {
+        "author": cp.author, "last_modified_by": cp.last_modified_by,
+        "revision": cp.revision, "comments": cp.comments, "category": cp.category,
+        "keywords": cp.keywords, "subject": cp.subject,
+        "created": str(cp.created) if cp.created else None,
+        "modified": str(cp.modified) if cp.modified else None}
+    cp.author = author
+    cp.last_modified_by = author
+    cp.revision = 1
+    cp.comments = ""
+    cp.category = ""
+    cp.keywords = ""
+    cp.subject = ""
+    found["metadata_cleared"]["last_printed"] = (str(cp.last_printed) if cp.last_printed else None)
+    # python-docx refuses None for lastPrinted, so the element goes rather than
+    # the value: "this document was printed on <date>" is exactly the kind of
+    # history an outbound file has no reason to carry.
+    for el in list(cp._element):
+        if etree.QName(el).localname == "lastPrinted":
+            cp._element.remove(el)
+    d.save(path)
+
+    # Part-level removal. python-docx leaves an unreferenced comments part in
+    # the package, and an orphan part is still a part: the text is recoverable
+    # by anyone who opens the zip. So the package is rewritten with those
+    # entries gone and the two manifests that name them repaired.
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        entries = {n: z.read(n) for n in names}
+    dropped = [n for n in names if n in _DROP_PARTS]
+    found["parts_removed"] = dropped
+    found["app_properties_cleared"] = {}
+
+    if "docProps/app.xml" in entries:
+        root = etree.fromstring(entries["docProps/app.xml"])
+        for local in ("Template", "Manager", "Company", "TotalTime", "LastAuthor", "HyperlinkBase"):
+            for el in root.iter():
+                if etree.QName(el).localname == local and (el.text or "").strip():
+                    found["app_properties_cleared"][local] = el.text
+                    el.text = "CARR" if local == "Company" else ""
+        entries["docProps/app.xml"] = etree.tostring(root, xml_declaration=True,
+                                                     encoding="UTF-8", standalone=True)
+
+    if dropped:
+        ct = etree.fromstring(entries["[Content_Types].xml"])
+        for el in list(ct):
+            part = (el.get("PartName") or "").lstrip("/")
+            if part in dropped:
+                ct.remove(el)
+        entries["[Content_Types].xml"] = etree.tostring(ct, xml_declaration=True,
+                                                        encoding="UTF-8", standalone=True)
+        for rels in ("word/_rels/document.xml.rels", "_rels/.rels"):
+            if rels not in entries:
+                continue
+            base = os.path.dirname(os.path.dirname(rels)) or ""
+            rr = etree.fromstring(entries[rels])
+            for el in list(rr):
+                tgt = (el.get("Target") or "").lstrip("/")
+                full = os.path.normpath(os.path.join(base, tgt)) if base else tgt
+                if full.replace(os.sep, "/") in dropped or tgt in dropped:
+                    rr.remove(el)
+            entries[rels] = etree.tostring(rr, xml_declaration=True,
+                                           encoding="UTF-8", standalone=True)
+
+    tmp = path + ".scrub"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for n in names:
+            if n in dropped:
+                continue
+            z.writestr(n, entries[n])
+    os.replace(tmp, path)
+
+    # Left alone on purpose, and named so nobody thinks it was missed:
+    # customXml/ parts are the content-control bindings the template ships with.
+    # The fill unwraps every control, so they bind nothing; they carry no
+    # authorship and removing them safely means rewriting three more manifests
+    # for no gain in what a counterparty can learn.
+    found["kept_deliberately"] = [n for n in names if n.startswith(("customXml/", "word/glossary/"))]
+    return found
+
+
+# ------------------------------------------------------- the colour audit
+# Joe's convention read back out of a file. Two uses, one function: the finish
+# check on a produced draft (anything still coloured is either an unfilled slot
+# or a template patch nobody made), and the template survey that tells a field
+# map which slots the template itself says exist.
+
+def colored_runs(path: str, ignore_black: bool = True) -> list[dict]:
+    """Every run in a docx carrying a non-black explicit colour.
+
+    Returns [{where, color, text}] with `where` in the engine's own address
+    grammar, so a finding names a slot address a map can be compared against.
+    """
+    import docx
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    d = docx.Document(path)
+    # THE SAME BLIND SPOT ORDER 13 FOUND, and it bites here too: python-docx
+    # cannot see runs inside a Word content control, so a scan that trusts
+    # `paragraph.runs` reports a coloured control as uncoloured. The first run of
+    # this audit called the lease template's letter date and contact line
+    # "mapped but uncoloured" for exactly that reason, which would have read as
+    # over-mapping when it was a scanner that could not see. Unwrapping happens
+    # on the IN-MEMORY document only; nothing is written back, and the file on
+    # disk is never touched by an audit.
+    _unwrap_content_controls(d.element.body)
+    out = []
+
+    def scan(where, para):
+        for r in para.runs:
+            rPr = r._element.find(f"{W}rPr")
+            c = None if rPr is None else rPr.find(f"{W}color")
+            if c is None:
+                continue
+            val = (c.get(f"{W}val") or "").upper()
+            theme = c.get(f"{W}themeColor")
+            if ignore_black and val in ("", "AUTO", "000000") and not theme:
+                continue
+            if not r.text.strip():
+                continue
+            out.append({"where": where, "color": val or f"theme:{theme}", "text": r.text})
+
+    for pi, p in enumerate(d.paragraphs):
+        scan(f"para:{pi}", p)
+    for ti, t in enumerate(d.tables):
+        for ri, row in enumerate(t.rows):
+            for ci, cell in enumerate(row.cells):
+                for p in cell.paragraphs:
+                    scan(f"table:{ti}:{ri}:{ci}", p)
     return out
 
 

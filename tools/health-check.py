@@ -122,4 +122,53 @@ for name, out_pat, max_age, inputs, note in WATCH:
         rc = 1
     else:
         print(f"  OK {name:<18} {a:.1f}d old")
+
+# --- the R2 archive quota (added 2026-07-31, ORDER 20c) ----------------------
+# NOT a freshness check, and it is here rather than in WATCH for that reason.
+# The ledger only moves when a document is archived, so an old ledger is normal
+# and proves nothing. What matters is the NUMBER creeping toward the cap: Joe's
+# requirement is a hard self-enforced quota, and a hard cap that nobody watches
+# turns into a refusal on the day it matters. This row is how the heartbeat sees
+# it coming years out. Read-only, file-only: no network call and no credential,
+# so the heartbeat never fails because Cloudflare was slow.
+GB = 1024 ** 3
+DEFAULT_QUOTA_GB = 8          # mirrors lib/r2_archive.py when system_config is unset
+WARN_AT = 0.80
+R2_LEDGER = os.path.expanduser("~/carr-system/out/r2-usage.json")
+try:
+    import json
+    with open(R2_LEDGER) as fh:
+        _led = json.load(fh)
+    used = sum(int(o.get("bytes", 0)) for o in _led.get("objects", {}).values())
+    cap = float(_led.get("quota_gb_last_seen") or DEFAULT_QUOTA_GB) * GB
+    pct = used / cap if cap else 0
+    n = len(_led.get("objects", {}))
+
+    def _h(b):                       # the unit that keeps the number legible
+        for unit, size in (("GB", GB), ("MB", 1024 ** 2), ("KB", 1024)):
+            if abs(b) >= size:
+                return f"{b / size:,.2f} {unit}"
+        return f"{int(b):,} bytes"
+
+    line = f"{_h(used)} of {_h(cap)} ({pct * 100:.1f}%), {n} objects"
+    if pct >= 1:
+        print(f"  ⚠︎ {'R2 archive':<18} OVER QUOTA: {line}  · uploads are being REFUSED; "
+              f"raise system_config r2.quota_gb or purge archived documents")
+        rc = 1
+    elif pct >= WARN_AT:
+        print(f"  ⚠︎ {'R2 archive':<18} {line}  · past {WARN_AT:.0%} of the self-enforced cap; "
+              f"decide before the pipeline has to refuse")
+        rc = 1
+    else:
+        print(f"  OK {'R2 archive':<18} {line}")
+except FileNotFoundError:
+    # Not a failure. Before the first document is archived there is nothing to
+    # count, and inventing an alarm for that would train everyone to ignore this
+    # line by the time it means something.
+    print(f"  -- {'R2 archive':<18} no ledger yet ({R2_LEDGER}); nothing archived so far")
+except (ValueError, OSError, KeyError) as e:
+    print(f"  ⚠︎ {'R2 archive':<18} ledger unreadable ({type(e).__name__}); the quota guard "
+          f"rebuilds it from the bucket on the next archive run")
+    rc = 1
+
 sys.exit(rc)
