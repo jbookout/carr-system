@@ -18,22 +18,23 @@
 -- migration PROVES that equality instead of asserting it in a comment.
 --
 -- ─────────────────────────────────────────────────────────────────────────────
--- !! NOT APPLIED ANYWHERE. THIS FILE STOPS ITSELF, BY DESIGN, AND CORRECTLY. !!
--- Rehearsed on Neon branch rehearse-0018 (full copy of production) 2026-07-31
--- ~11:50am CT. Every guard below passed EXCEPT the last one, which is ORDER 10's
--- own hard stop:
---     amendment 2 STOP: active-book membership changed.
---     14 dropped [C-110, C-111, C-113, C-114, C-115, C-116, C-117, C-118,
---                 C-119, C-120, C-121, C-122, C-123, C-124] / 0 added []
--- Cause: amendment 2 sets is_active_pipeline FALSE for `cold` and `paused`.
--- Migration 0014 — also Joe's ruling, seven hours earlier the same day — set
--- cold_not_started and paused TRUE, and wrote the reason into the vocabulary
--- itself: "ON THE WORKING BOOK, not yet started. Appears in clients-active.md."
--- Those 14 clients (11 cold + 3 paused, all Joe's) sit in the shared working
--- book on that flag alone; none has an open deal to carry it. So the two
--- rulings collide, and reconciling them is Joe's call, not a migration's.
--- DO NOT apply this file until that ruling exists. If the answer is "cold and
--- paused stay on the book", the fix is two `true`s in step 2 and nothing else.
+-- THE ACTIVE BOOK SHRINKS BY 14, ON PURPOSE. Read this before touching step 8.
+-- The first rehearsal (branch rehearse-0018, 2026-07-31 ~11:50am CT) stopped
+-- itself: every guard passed except the membership one, because amendment 2
+-- flags `cold` and `paused` as not-pipeline while migration 0014 — Joe's ruling
+-- seven hours earlier the same day — had flagged both as ON the book, with the
+-- reason written into the vocabulary row itself.
+--
+-- Joe settled it live at ~12:30pm CT, and cold/paused DROP: a cold client is
+-- usually ghosting, you never pester, a pause can run longer than a year, and
+-- the abundance mindset says work the live ones. So 0014's flags and 0014's
+-- written reasons on those two rows are BOTH superseded here — step 2 rewrites
+-- the notes so the old reason cannot outlive the ruling that replaced it.
+--
+-- The membership guard therefore does not expect an empty delta. It expects
+-- EXACTLY those fourteen clients to leave and nobody to arrive, named one by
+-- one. An expected change asserted by name is still a guard; "some rows moved"
+-- is not.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- ── 0. snapshots: what the exports said BEFORE anything moved ────────────────
@@ -54,13 +55,33 @@ alter table client alter column status drop not null;
 -- Inserted alongside the old vocabulary; the old rows are deleted in step 5,
 -- which is itself a guard: the FK refuses the delete if any client still
 -- points at an old slug, so an incomplete backfill cannot commit.
+-- The `note` column is the reason a status exists, read before assigning one
+-- (0014's own words). Two of these notes carry Joe's 12:30pm ruling, because
+-- 0014 wrote the OPPOSITE reason into cold_not_started and left paused blank,
+-- and a superseded reason left standing is how the next session gets it wrong.
 insert into client_status (slug, label, sort, is_active_pipeline, note) values
-  ('roster',      'Roster',      10, false, 'In the book, unworked.'),
-  ('cold',        'Cold',        20, false, 'Approached, no traction.'),
-  ('engaged',     'Engaged',     30, true,  'Live relationship, no open deal.'),
-  ('active_deal', 'Active deal', 40, true,  'Open deal in progress.'),
-  ('paused',      'Paused',      50, false, 'Deliberately on hold.'),
-  ('past_client', 'Past client', 60, false, 'Deals concluded, relationship kept.')
+  ('roster',      'Roster',      10, false,
+     'In the book, unworked. Bulk universe: on the roster, not on the daily '
+     'active book. Nobody has committed to working this record yet.'),
+  ('cold',        'Cold',        20, false,
+     'Approached, no traction. NOT on the active book, and that is deliberate '
+     '(Joe, 2026-07-31 ~12:30pm CT — this SUPERSEDES 0014''s note, which said '
+     '"ON THE WORKING BOOK ... Appears in clients-active.md"). His reasoning: a '
+     'cold client is usually ghosting, you never pester, and the abundance '
+     'mindset says work the live ones. Cold is a separate not-top-of-mind '
+     'category, not a queue to grind. It comes back the moment there is a deal.'),
+  ('engaged',     'Engaged',     30, true,
+     'Live relationship, no open deal. On the active book.'),
+  ('active_deal', 'Active deal', 40, true,
+     'Open deal in progress. On the active book.'),
+  ('paused',      'Paused',      50, false,
+     'Deliberately on hold. NOT on the active book (Joe, 2026-07-31 ~12:30pm CT '
+     '— SUPERSEDES 0014, which flagged paused pipeline-active). A pause can run '
+     'longer than a year; a paused client sitting in the daily book is noise. An '
+     'open deal still pulls the client back on regardless of this status.'),
+  ('past_client', 'Past client', 60, false,
+     'Deals concluded, relationship kept. Off the active book until a new deal '
+     'opens; a past client is a referral source, not a task.')
 on conflict (slug) do update
   set label = excluded.label, sort = excluded.sort,
       is_active_pipeline = excluded.is_active_pipeline, note = excluded.note;
@@ -299,23 +320,42 @@ begin
   end if;
 end $$;
 
--- ── 8. THE MEMBERSHIP GUARD — the order's hard stop ──────────────────────────
--- "the derived active book (clients-active) membership delta must be EMPTY;
---  ANY membership change → STOP and report the delta for Fable (do not ship a
---  membership change as a side effect)."
+-- ── 8. THE MEMBERSHIP GUARD — expect EXACTLY these fourteen, and nobody else ──
+-- Joe's 12:30pm ruling replaced ORDER 10(e)'s empty-delta clause with a named
+-- one: "delta must be EXACTLY 14 dropped [C-110 ... C-124] / 0 added — anything
+-- else → STOP." The set below is that list, hard-coded on purpose. A count check
+-- would pass if fourteen of the WRONG clients left; only the names catch that.
 do $$
-declare gone text; added text; n_gone int; n_added int;
+declare expected text[] := array[
+    'C-110','C-111','C-113','C-114','C-115','C-116','C-117',
+    'C-118','C-119','C-120','C-121','C-122','C-123','C-124'];
+  gone text[]; added text[]; unexpected text[]; missing text[];
 begin
-  select count(*), coalesce(string_agg(ref, ', ' order by ref), '')
-    into n_gone, gone
+  select coalesce(array_agg(ref order by ref), '{}') into gone
     from (select ref from amd2_pre_book
           except select "C-ID" from v_export_clients_active) x;
-  select count(*), coalesce(string_agg(ref, ', ' order by ref), '')
-    into n_added, added
+  select coalesce(array_agg(ref order by ref), '{}') into added
     from (select "C-ID" as ref from v_export_clients_active
           except select ref from amd2_pre_book) y;
-  if n_gone <> 0 or n_added <> 0 then
-    raise exception 'amendment 2 STOP: active-book membership changed. % dropped [%] / % added [%]',
-      n_gone, gone, n_added, added;
+
+  select coalesce(array_agg(r order by r), '{}') into unexpected
+    from unnest(gone) r where not r = any (expected);
+  select coalesce(array_agg(r order by r), '{}') into missing
+    from unnest(expected) r where not r = any (gone);
+
+  if array_length(added, 1) is not null then
+    raise exception 'amendment 2 STOP: % client(s) ADDED to the active book, none was expected: %',
+      array_length(added, 1), added;
   end if;
+  if array_length(unexpected, 1) is not null then
+    raise exception 'amendment 2 STOP: client(s) left the active book that the ruling did not name: %',
+      unexpected;
+  end if;
+  if array_length(missing, 1) is not null then
+    raise exception 'amendment 2 STOP: the ruling named client(s) that did NOT leave the active book: %',
+      missing;
+  end if;
+  raise notice 'amendment 2: active book % -> % rows; exactly the 14 named clients left, 0 added.',
+    (select count(*) from amd2_pre_book),
+    (select count(*) from v_export_clients_active);
 end $$;
