@@ -93,6 +93,9 @@ step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
 step "graph (derived from the exported files)"       ./run.sh graph
 step "encrypted backup -> git"                       ./bin/backup-dump.sh
 
+# ── ORDER 5: dead-man pings LAST — a ping means the whole chain above ran ────
+step "healthchecks dead-man pings"               ./bin/hc-ping.sh
+
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="
 else
