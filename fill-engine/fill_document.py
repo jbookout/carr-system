@@ -10,6 +10,7 @@ place: every fill copies first.
 
   fill(template_path, out_path, edits)        -> out_path      (docx or xlsx)
   to_pdf(src_path, out_pdf_path)              -> out_pdf_path
+  drop_rows(docx_path, [addresses])           -> what it removed  (ORDER 23(a))
 
 `edits` is a list of {"where": <address>, "text": <string>}:
 
@@ -531,6 +532,111 @@ def resolve_unresolved_options(path: str, labels: dict | None = None) -> dict:
     if found:
         d.save(path)
     return {"count": len(found), "resolved_to_owed": found}
+
+
+# ------------------------------------------------------------ row removal
+# ORDER 23(a), from Joe's field-map review: "base year row drops most of the
+# time - NNN leases dont include this row" and "Broker commission typically gets
+# dropped on a client facing draft LOI."
+#
+# TWO REASONS A ROW LEAVES A LETTER, one engine operation. A CONDITIONAL drop is
+# a term that does not exist on this deal (a base year on a triple-net lease is
+# not an unanswered question, it is a row about nothing). An AUDIENCE drop is a
+# term that exists and is simply not this reader's business. Both are the same
+# surgery — delete the whole `w:tr` — and neither is a fill: blanking the cell
+# would leave a labelled empty row, which reads as an omission rather than as a
+# term that does not apply.
+#
+# WHY THIS RUNS LAST, after the fills and after the colour pass. Every address in
+# a field map is a table/row/cell index, so deleting row 9 renumbers every row
+# below it. Fill first and drop after, and every address the map wrote was
+# resolved against the template's own numbering. Reverse the two and the map
+# would have to know which rows a deal drops before it could address anything —
+# which is the same shift bug, moved somewhere harder to see.
+#
+# Rows are removed in DESCENDING index order for the same reason: dropping row 18
+# first leaves row 9 exactly where the map said it was.
+
+_ROW = re.compile(r"^table:(\d+):(\d+)(?::\d+)?$")
+
+
+def parse_row_address(where: str) -> tuple[int, int]:
+    """`table:T:R` or a cell address `table:T:R:C` -> (table, row).
+
+    A cell address is accepted on purpose: a field map addresses a SLOT, and a
+    slot lives in a cell. Naming the row a slot sits in is the caller's business,
+    not a second address grammar for the map to keep in sync.
+    """
+    m = _ROW.match(where)
+    if not m:
+        raise FillError(f"{where!r}: a row drop needs a table address "
+                        "(table:T:R, or the cell address of a slot in that row)")
+    return int(m.group(1)), int(m.group(2))
+
+
+def drop_rows(path: str, wheres: list[str], reasons: dict | None = None) -> dict:
+    """Delete whole table rows from a docx in place. Returns what it removed.
+
+    Reports the removed row's own text, because "which row went" is the finding a
+    human checks, and a drop nobody can read is indistinguishable from a drop
+    that hit the wrong row. Structural integrity is the caller's stop rule: the
+    file is re-opened after the write, and a row carrying a vertical merge is
+    named in the return so a doubtful drop is visible rather than silent.
+    """
+    import docx
+
+    reasons = reasons or {}
+    if not wheres:
+        return {"count": 0, "dropped": [], "tables": {}}
+    d = docx.Document(path)
+    targets = sorted({parse_row_address(w) for w in wheres}, reverse=True)
+    before = {ti: len(t.rows) for ti, t in enumerate(d.tables)}
+    dropped: list[dict] = []
+    for t, r in targets:
+        if t >= len(d.tables):
+            raise FillError(f"table:{t}:{r}: document has {len(d.tables)} tables")
+        tb = d.tables[t]
+        if r >= len(tb.rows):
+            raise FillError(f"table:{t}:{r}: table {t} has {len(tb.rows)} rows")
+        row = tb.rows[r]
+        cells = []
+        seen = set()
+        for c in row.cells:                       # merged cells repeat; name each once
+            if id(c._tc) in seen:
+                continue
+            seen.add(id(c._tc))
+            cells.append(c.text.strip())
+        W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        merged = bool(row._tr.findall(f".//{W}vMerge"))
+        tr = row._tr
+        tr.getparent().remove(tr)
+        dropped.append({"where": f"table:{t}:{r}", "cells": cells,
+                        "vertical_merge_in_row": merged,
+                        "why": reasons.get(f"table:{t}:{r}")
+                               or reasons.get(next((w for w in wheres
+                                                    if parse_row_address(w) == (t, r)), ""), "")})
+    d.save(path)
+    after_doc = docx.Document(path)               # re-open: the stop rule, in code
+    after = {ti: len(t.rows) for ti, t in enumerate(after_doc.tables)}
+    return {"count": len(dropped), "dropped": dropped,
+            "tables": {"rows_before": before, "rows_after": after},
+            "reopened_ok": True}
+
+
+def table_row_texts(path: str, table: int = 0) -> list[list[str]]:
+    """Every row of one table as its cell texts. The done-test reads this."""
+    import docx
+    t = docx.Document(path).tables[table]
+    out = []
+    for row in t.rows:
+        seen, cells = set(), []
+        for c in row.cells:
+            if id(c._tc) in seen:
+                continue
+            seen.add(id(c._tc))
+            cells.append(c.text.strip())
+        out.append(cells)
+    return out
 
 
 def document_pipes(path: str) -> list[str]:

@@ -27,6 +27,9 @@ the whole contract between them.
                     results, attachment pointers)
   --r2-dry-run      exercise the quota gate and report, upload nothing, write
                     nothing
+  --no-client-copy  suppress the CLIENT COPY artifact (ORDER 23(c)), which is
+                    otherwise produced whenever the field map names a row the
+                    client must not see
 
 WHICH FILE IS THE SENDABLE ONE (Joe's doctrine, 2026-07-31, superseding the old
 blanket "clients get PDFs, never working files"): a LETTER goes to the listing
@@ -46,6 +49,17 @@ any text still carrying a pipe is an UNRESOLVED CHOICE, never text: it becomes a
 red OWED marker naming the template's own alternatives. Both are checked on the
 produced file, and that check BLOCKS the OneDrive copy the way a HARD lint
 finding does.
+
+ROWS THAT LEAVE THE LETTER (ORDER 23, from Joe's field-map review). Two of his
+rulings, both carried in the reviewed field map as data and evaluated here at
+finish: a `drop_when` row is deleted when the deal makes the term meaningless (an
+NNN lease has no base year), and an `audience` row is deleted from the CLIENT
+COPY only (the commission ask goes to the listing agent, never to the client).
+Drops run AFTER every fill because deleting a row renumbers the rows below it,
+and a row is never dropped on a guess: an unresolved condition keeps the row.
+The client copy carries CLIENT-COPY in its filename and passes the same gates as
+the working file, so nothing client-named can be mistaken for the counterparty's
+copy and no artifact leaves here ungated.
 
 Every outbound .docx is SCRUBBED before it routes — comments, tracked changes,
 comment authors, custom properties, and the authorship metadata inherited from
@@ -76,7 +90,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "fill-engine"))
 sys.path.insert(0, os.path.join(REPO, "lib"))
 from fill_document import (fill, to_pdf, FillError, colored_runs, scrub_docx,  # noqa: E402
-                           finish_colors, resolve_unresolved_options, document_pipes)
+                           finish_colors, resolve_unresolved_options, document_pipes,
+                           drop_rows, parse_row_address, table_row_texts)
 import r2_archive as r2  # noqa: E402
 
 VAULT = os.environ.get(
@@ -182,6 +197,117 @@ def slot_labels(plan: dict) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
+# ------------------------------------------------------------- row drops
+# ORDER 23, from Joe's field-map review. Two rules, one operation, and the field
+# map carries both as DATA rather than this file carrying them as code:
+#
+#   drop_when  a term that does not exist on this deal. base_year drops when the
+#              lease is triple-net, because an NNN lease has no base year — the
+#              row is about nothing, which is not the same as unanswered.
+#   audience   a term that exists and is not this reader's business. The broker
+#              commission goes to the listing agent and never to the client, so
+#              it drops from the CLIENT COPY and stays in the working .docx.
+#
+# The map is Joe's reviewed territory and the conditions are his words, so a
+# condition changes by editing the map, never by editing this file. Both are
+# evaluated at FINISH, after every fill: a drop renumbers the rows below it, so
+# dropping first would move addresses out from under the map that wrote them.
+
+FIELD_MAPS = os.path.join(REPO, "fill-engine", "field-maps")
+
+
+def load_field_map(plan: dict) -> dict:
+    """The reviewed map for this plan's template, or an empty map if none is here.
+
+    An absent map is not an error: the plan is the contract between the Worker
+    and this script, and the map is read only for the two finish rules the
+    record layer cannot evaluate. No map means no drops, said out loud in the
+    report rather than assumed.
+    """
+    slug = (plan.get("template") or {}).get("slug") or ""
+    path = os.path.join(FIELD_MAPS, f"{slug}.json")
+    if not slug or not os.path.exists(path):
+        return {"_missing": path, "slots": {}}
+    with open(path) as fh:
+        m = json.load(fh)
+    m["_path"] = path
+    return m
+
+
+def resolved_slot_values(plan: dict) -> dict:
+    """slot -> the text actually written for it. Owed markers are NOT values."""
+    out = {}
+    for e in plan.get("edits", []) or []:
+        if e.get("slot") and not e.get("owed"):
+            out[e["slot"]] = str(e.get("text") or "")
+    return out
+
+
+def conditional_drops(fmap: dict, plan: dict) -> dict:
+    """Evaluate every `drop_when` in the map against this deal's resolved slots.
+
+    A row is never dropped on a guess: if the governing slot is owed or missing,
+    the row stays and the report says why. Both outcomes are returned, because
+    "the base year row is still here" is a fact Joe should be able to read
+    without re-deriving the condition himself.
+    """
+    vals = resolved_slot_values(plan)
+    drop, kept = [], []
+    for name, s in (fmap.get("slots") or {}).items():
+        cond = s.get("drop_when")
+        if not cond:
+            continue
+        gov, want = cond.get("slot"), cond.get("resolves_to") or []
+        have = vals.get(gov)
+        row = {"slot": name, "label": s.get("label"), "where": s.get("where"),
+               "governed_by": gov, "resolves_to": want, "resolved_value": have,
+               "why": cond.get("why", "")}
+        if have is None:
+            if cond.get("when_unresolved") == "drop":
+                row["decision"] = f"DROPPED: {gov} is unresolved and the map says drop anyway"
+                drop.append(row)
+            else:
+                row["decision"] = (f"KEPT: {gov} is unresolved on this deal, and a row is never "
+                                   "dropped on a guess")
+                kept.append(row)
+        elif have in want:
+            row["decision"] = f"DROPPED: {gov} resolved to {have!r}"
+            drop.append(row)
+        else:
+            row["decision"] = f"KEPT: {gov} resolved to {have!r}, which is not a drop value"
+            kept.append(row)
+    return {"drop": drop, "kept": kept}
+
+
+def audience_drops(fmap: dict, audience: str = "client") -> list[dict]:
+    """Every slot the map says this audience must not see."""
+    out = []
+    for name, s in (fmap.get("slots") or {}).items():
+        aud = s.get("audience") or {}
+        if audience in (aud.get("drop_for") or []):
+            out.append({"slot": name, "label": s.get("label"), "where": s.get("where"),
+                        "why": aud.get("why", "")})
+    return out
+
+
+def shift_for_prior_drops(where: str, prior: list[str]) -> str:
+    """Re-address a row after earlier rows in the same table were removed.
+
+    THE BUG THIS EXISTS TO PREVENT, stated because it is invisible in a test that
+    only drops one row: the client copy is made from the FINISHED working file,
+    which on an NNN lease has already lost row 9. The commission row the map
+    addresses as table:0:18 is row 17 in that file. Address arithmetic is the
+    honest fix — the map keeps naming the template's own numbering, and every
+    consumer of a modified document adjusts for what it already removed. The
+    caller verifies the result by reading the row's own label before deleting it,
+    because arithmetic that is wrong should fail loudly on the label, not quietly
+    on a neighbouring row.
+    """
+    t, r = parse_row_address(where)
+    gone = sum(1 for p in prior if parse_row_address(p)[0] == t and parse_row_address(p)[1] < r)
+    return f"table:{t}:{r - gone}"
+
+
 def run_lint(text: str, label: str) -> dict:
     """tools/writing-lint.py as the gate it already is. Exit 1 = HARD finding."""
     tmp = os.path.join(STAGING, f".lint-{label}.txt")
@@ -236,6 +362,77 @@ def find_deal_folder(plan: dict) -> str | None:
     return best if best_score >= 2 else None
 
 
+def build_client_copy(working: str, plan: dict, fmap: dict, prior_drops: list[str]) -> dict:
+    """The third artifact (ORDER 23(c)): the finished letter minus what the client must not see.
+
+    Rendered FROM the finished sendable rather than from a second fill, so it is
+    the same document Joe already read with rows removed — there is no second
+    path for a value to differ down. It carries CLIENT-COPY in its own filename
+    for one reason: nothing named for the client can be handed to a counterparty
+    by accident, and a name is the only thing that survives being dragged into an
+    email. The listing-agent working copy keeps every row; the record PDF is the
+    full version. This changes no send semantics — Joe sends, nothing here can.
+
+    The label check is the safety rail. A row is only deleted after this function
+    has read that row's own label cell and found the slot's label in it, so an
+    address that has drifted stops the client copy instead of silently deleting
+    the wrong term.
+    """
+    drops = audience_drops(fmap, "client")
+    base, ext = os.path.splitext(working)
+    out = {"audience": "client", "produced": False,
+           "declared_drops": drops,
+           "docx": base + "-CLIENT-COPY" + ext, "pdf": base + "-CLIENT-COPY.pdf"}
+    if fmap.get("_missing"):
+        out["why_not"] = f"no field map on disk at {fmap['_missing']}, so no audience rule to apply"
+        return out
+    if not drops:
+        out["why_not"] = "the field map declares no audience drops for a client copy"
+        return out
+
+    rows = table_row_texts(working, 0)
+    wheres, reasons, mismatches = [], {}, []
+    for d in drops:
+        if not d.get("where"):
+            mismatches.append({"slot": d["slot"], "problem": "the map slot has no address"})
+            continue
+        adj = shift_for_prior_drops(d["where"], prior_drops)
+        t, r = parse_row_address(adj)
+        label = (d.get("label") or "").strip().lower()
+        actual = rows[r][0].strip() if t == 0 and r < len(rows) and rows[r] else ""
+        if label and label not in actual.lower():
+            mismatches.append({"slot": d["slot"], "map_address": d["where"],
+                               "address_in_finished_file": adj,
+                               "expected_label": d.get("label"), "row_label_found": actual})
+            continue
+        wheres.append(adj)
+        reasons[adj] = f"{d.get('label')} — {d.get('why', '')}"
+    if mismatches:
+        out["why_not"] = ("STOPPED: a row addressed for the client copy does not carry the label "
+                          "the map names, so no row was deleted. See address_mismatches.")
+        out["address_mismatches"] = mismatches
+        return out
+
+    shutil.copy2(working, out["docx"])
+    out["dropped"] = drop_rows(out["docx"], wheres, reasons)
+    out["scrub"] = scrub_docx(out["docx"])
+    to_pdf(out["docx"], out["pdf"])                # LibreOffice render = the structural check
+    text = doc_text(out["docx"])
+    out["leak_findings"] = leak_guard(text, plan.get("listing_side_names", []))
+    lint = run_lint(text, (plan["basename"][:32] + "-client"))
+    out["lint_hard"], out["lint_report"] = lint["hard"], lint["report"]
+    out["color_gate"] = color_check(out["docx"])
+    out["docx_sha256"], out["docx_bytes"] = sha256_of(out["docx"])
+    out["pdf_sha256"], out["pdf_bytes"] = sha256_of(out["pdf"])
+    out["produced"] = True
+    out["passed"] = (out["color_gate"]["passed"] and not out["lint_hard"]
+                     and not out["leak_findings"])
+    out["human_gate"] = ("The client copy is a DRAFT for Joe. It exists so the commission ask is "
+                         "not in front of the client; it is not a second sendable and nothing here "
+                         "sends anything.")
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("plan", help="the prepare-document plan JSON ('-' for stdin)")
@@ -246,6 +443,10 @@ def main() -> int:
     ap.add_argument("--r2-bucket", default="carr-documents")
     ap.add_argument("--r2-dry-run", action="store_true",
                     help="run the quota gate and report, upload nothing, write no rows")
+    ap.add_argument("--no-client-copy", action="store_true",
+                    help="skip the CLIENT-COPY artifact even when the field map declares "
+                         "audience drops (ORDER 23(c)); the client copy is produced by default "
+                         "for any docx whose map names a client-audience drop")
     a = ap.parse_args()
 
     plan = json.load(sys.stdin if a.plan == "-" else open(a.plan))
@@ -269,12 +470,24 @@ def main() -> int:
     # PDF is a render of the finished file rather than of an intermediate one.
     # Order matters: pipes become OWED markers FIRST, so the colour pass sees
     # them as markers and leaves them red instead of blackening a live question.
-    options, color_finish = None, None
+    fmap = load_field_map(plan)
+    options, color_finish, row_drops = None, None, None
+    prior_drops: list[str] = []
     try:
         fill(tmpl, working, edits)
         if ext == ".docx":
             options = resolve_unresolved_options(working, slot_labels(plan))
             color_finish = finish_colors(working)
+            # ORDER 23(a)+(b), LAST of the three finish rules on purpose: a drop
+            # renumbers every row below it, so it runs after every address the
+            # map wrote has already been resolved against the template's own
+            # numbering.
+            cond = conditional_drops(fmap, plan)
+            prior_drops = [d["where"] for d in cond["drop"] if d.get("where")]
+            row_drops = drop_rows(working, prior_drops,
+                                  {d["where"]: f"{d.get('label')} — {d['decision']}"
+                                   for d in cond["drop"] if d.get("where")})
+            row_drops["evaluated"] = cond
         to_pdf(working, pdf)
     except FillError as e:
         print(f"STOP: {e}", file=sys.stderr)
@@ -302,14 +515,27 @@ def main() -> int:
     lint = run_lint(text, plan["basename"][:40])
     color = color_check(working)
 
-    blocked = bool(leaks) or lint["hard"] or not color["passed"]
+    # ---- the client copy (ORDER 23(c)), built from the FINISHED sendable so it
+    # is the same letter Joe read with the audience rows removed. It runs the
+    # same gates: an artifact that skips the gates is an artifact nobody checked.
+    client = None
+    if ext == ".docx" and not a.no_client_copy:
+        try:
+            client = build_client_copy(working, plan, fmap, prior_drops)
+        except FillError as e:
+            print(f"STOP: client copy: {e}", file=sys.stderr)
+            return 2
+
+    client_failed = bool(client and client.get("produced") and not client.get("passed"))
+    blocked = bool(leaks) or lint["hard"] or not color["passed"] or client_failed
     routed_to, route_note = STAGING, "staging only (--route staging)"
     if a.route == "onedrive":
         if blocked:
             route_note = ("BLOCKED from OneDrive: "
                           + ("leak guard findings; " if leaks else "")
                           + ("writing-lint HARD findings; " if lint["hard"] else "")
-                          + ("the colour/pipe finish gate failed" if not color["passed"] else "")
+                          + ("the colour/pipe finish gate failed; " if not color["passed"] else "")
+                          + ("the CLIENT COPY failed its own gates" if client_failed else "")
                           + ". Staging copy only, per the ORDER 13 gate.")
         else:
             folder = find_deal_folder(plan)
@@ -317,7 +543,10 @@ def main() -> int:
                 route_note = ("no matching deal folder under Active Deals; staged instead of "
                               "creating a second folder beside the real one")
             else:
-                for src in (working, pdf):
+                filed = [working, pdf]
+                if client and client.get("produced"):
+                    filed += [client["docx"], client["pdf"]]
+                for src in filed:
                     shutil.copy2(src, os.path.join(folder, os.path.basename(src)))
                 routed_to, route_note = folder, "filed to the deal's existing OneDrive folder"
 
@@ -347,6 +576,13 @@ def main() -> int:
         "scrub": scrub,
         "color_finish": color_finish,
         "unresolved_options": options,
+        "row_drops": row_drops,
+        "row_drop_note": ("ORDER 23: the field map decides which rows leave a letter. `drop_when` "
+                          "removes a term that does not exist on this deal (an NNN lease has no "
+                          "base year); `audience` removes a term this reader has no business "
+                          "seeing, on the CLIENT COPY only. Drops run after every fill, so no "
+                          "address moves under a slot, and a row is never dropped on a guess."),
+        "client_copy": client,
         "color_gate": color,
         "color_note": ("Joe's convention: blue or red marks text that gets replaced, and a letter "
                        "that goes out is all black. Every run in the sendable file is forced black "

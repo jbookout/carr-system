@@ -218,7 +218,13 @@
    "label": "Broker Commission",
    "kind": "carry",
    "owed_note": "CARR's own commission ask, never record-derived.",
-   "note": " AUDIENCE RULE (Joe, 2026-07-31, extends ORDER 23): listing-agent copy only; drops from client-facing copies."
+   "note": " AUDIENCE RULE (Joe, 2026-07-31, extends ORDER 23): listing-agent copy only; drops from client-facing copies.",
+   "audience": {
+    "drop_for": [
+     "client"
+    ],
+    "why": "Same ruling as the lease letter, extended by Joe during the purchase-map review: the commission row goes to the listing agent, never to the client. ORDER 23 added only this machine-readable block to this reviewed map; nothing else in it was touched."
+   }
   }
  },
  "reviewed_by": "Joe Bookout, walk-through in chat, 2026-07-31 evening (Fable seat session 3)"
