@@ -1,0 +1,51 @@
+# corpus-set.tsv — WHAT COUNTS AS DOCTRINE (ORDER 30, Wave 4 phase 1, 2026-07-31)
+#
+# One row per mirrored file: vault-relative path <TAB> class <TAB> why it is doctrine.
+# tools/corpus-sync.py reads this file and nothing else to decide what to mirror.
+# Adding doctrine to the corpus = adding a row. Removing one = deleting the row
+# (then --sync --prune). The Drive copy stays canonical either way.
+#
+# THE TEST APPLIED (ORDER 30's criterion, stated so the next editor applies the same one):
+#   IN  — the file teaches how the work is done or what is true about the domain,
+#         and it changes only when a human decides to change it.
+#   OUT — records, rosters, registries, ledgers, queues, briefs, dated research
+#         snapshots, generated exports, indexes/pointers, and session state.
+#   OUT — anything whose content is instructions for running a pipeline that the
+#         record layer is actively rewriting (the SOP class). Those are the
+#         open QUESTIONS in ORDER 30's log, deliberately unmirrored in phase 1.
+#
+# path	class	why
+DNA/writing-rules.md	doctrine-root	the zero-tolerance writing ruleset; binds every prospect-facing surface
+DNA/brand-voice.md	doctrine-root	voice doctrine; changes only by Joe's decision
+DNA/templates.md	doctrine-root	outreach doctrine and the template layer
+DNA/carr-profile.md	doctrine-root	positioning and what CARR is; the client-facing frame
+DNA/ux-doctrine.md	doctrine-root	the design law every surface is built against
+DNA/objection-bank.md	doctrine-root	objection craft, self-described companion to templates.md; language, not events
+DNA/Deal Management/playbooks/renewals.md	playbook	domain playbook; the merge target the knowledge policy names
+DNA/Deal Management/playbooks/negotiation.md	playbook	domain playbook; the merge target the knowledge policy names
+DNA/Deal Management/playbooks/financing.md	playbook	domain playbook; the merge target the knowledge policy names
+DNA/Deal Management/playbooks/diligence-and-valuation.md	playbook	domain playbook; the merge target the knowledge policy names
+DNA/Deal Management/playbooks/practice-os-playbooks.md	playbook	per-vertical run-down checklists; categories and matching rules, no vendor names
+DNA/Deal Management/pipeline-coo-doctrine.md	craft	names itself doctrine; how the COO seat keeps the pipeline current
+DNA/Leads/pipeline-craft.md	craft	the craft layer of the lead system (lead-system.md is its SOP layer, held back)
+DNA/Leads/costar-playbook.md	craft	what is actually in CoStar and the workflows worth building on it
+DNA/Network/vendor-relationship-craft.md	craft	how referrals are earned per vendor type; unified vendor doctrine
+DNA/Network/introduction-rules.md	craft	the taught compatibility layer; every rule here arrived by a human decision
+DNA/Network/vendor-by-industry-reference.md	method	CARR's approach per vendor category; the generic layer under the craft file
+DNA/Network/vendor-intro-timeline.md	method	deal stage to vendor category; the concierge sequence
+DNA/Deal Management/legal-considerations-lease-review.md	method	distilled legal-risk framework for agents; paraphrase-only capture, no transcript
+DNA/Deal Management/purchase-vs-lease-fill-guide.md	method	CARR's fill-and-interpret methodology; the judgment layer over the worksheets
+DNA/Deal Management/deal-analysis-toolkit.md	method	how deal economics get framed for a client; documents the standard worksheets
+DNA/Research/costar-how-to.md	method	tool method, not a market pull; lives in Research/ by filing accident
+DNA/Research/maps-and-demographics.md	method	how CARR's mapping team is engaged; process, not data
+DNA/Reference/dental-vertical-guide.md	vertical-knowledge	CARR training knowledge: build-out, sizing, creditworthiness
+DNA/Reference/medical-vertical-guide.md	vertical-knowledge	CARR training knowledge: build-out, sizing, space-type fit
+DNA/Reference/vet-vertical-guide.md	vertical-knowledge	CARR training knowledge: build-out, sizing, landlord pitch
+DNA/Reference/vision-vertical-guide.md	vertical-knowledge	CARR training knowledge: build-out, sizing, the retail duality
+DNA/Reference/other-healthcare-vertical-guide.md	vertical-knowledge	CARR training knowledge: chiropractic and therapy
+DNA/Marketing/Social Media/marketing-playbook.md	playbook	transferable persuasion craft; grows by merge, which is doctrine growth, not a log
+DNA/Marketing/Social Media/linkedin-strategy-2026.md	playbook	per-platform format, strategy and distribution law
+DNA/Marketing/Social Media/facebook-strategy-2026.md	playbook	per-platform format, strategy and distribution law
+DNA/Marketing/Social Media/instagram-strategy-2026.md	playbook	per-platform format, strategy and distribution law
+DNA/Marketing/Social Media/facebook-ads-playbook-2026.md	playbook	the paid companion; ad mechanics transfer between both partners
+DNA/Marketing/Social Media/community-group-playbook-2026.md	playbook	purpose, membership and moderation law for the regional group
