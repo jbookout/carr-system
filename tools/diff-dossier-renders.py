@@ -70,7 +70,7 @@ def main():
         for name in names:
             rel = f"{DOSSIER_DIR}/{name}"
             rendered_path = OUT / name
-            rows, _canonical = build_dossier(rel)(rendered_path, cur)
+            rows, _canonical = build_dossier(rel, DOSSIER_FILES[name])(rendered_path, cur)
             new = rendered_path.read_text()
             old = frozen[name]
 

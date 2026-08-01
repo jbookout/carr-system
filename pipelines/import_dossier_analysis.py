@@ -52,7 +52,14 @@ US_DATE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 LAST_UPDATED = re.compile(r"^Last updated:\s*(.+?)\s*$", re.M)
 # Authors are only ever read off an explicit stamp the file itself carries.
 AUTHOR = re.compile(r"\((?:by\s+)?(Joe|Dell|Claude)\b", re.I)
-FM_OWNER = re.compile(r"^owner:\s*(\S+)", re.M)
+# The WHOLE owner line, not the first token. Joe's dictated stamp for
+# LifeDentalGroup is "Shared, Dell originated" — a \S+ capture would have taken
+# "Shared," and thrown away both the attribution and the fact that it is shared.
+FM_OWNER = re.compile(r"^owner:\s*(.+?)\s*$", re.M)
+# Which actor a stamp names. A compound stamp still has exactly one party who
+# ORIGINATED it, and that is who the row is attributed to; the full text rides
+# along so the render never flattens "Shared, Dell originated" to bare "dell".
+ACTOR_IN_STAMP = re.compile(r"\b(joe|dell)\b", re.I)
 
 HEADER_TITLE = "Dossier header (legacy import)"
 
@@ -146,17 +153,28 @@ def parse_file(path: Path):
 
         am = AUTHOR.search(title)
         if am:
-            author, author_prov = am.group(1).lower(), "section stamp"
+            author = am.group(1).lower()
+            author_stamp, author_prov = am.group(1), "section stamp"
         elif file_owner:
-            author, author_prov = file_owner.lower(), "file stamp (owner)"
+            hit = ACTOR_IN_STAMP.search(file_owner)
+            if hit:
+                author, author_stamp = hit.group(1).lower(), file_owner
+                author_prov = "file stamp (owner)"
+            else:
+                # An owner line naming nobody the actor table knows. Do not guess
+                # which human it means — that is the whole stop rule.
+                author, author_stamp, author_prov = None, file_owner, "none"
+                flags.append(f"the file's `owner:` stamp ({file_owner!r}) names no "
+                             f"actor this system knows")
         else:
-            author, author_prov = None, "none"
+            author, author_stamp, author_prov = None, None, "none"
             flags.append("no author stamped on this section and the file carries "
                          "no `owner:` frontmatter")
 
         rows.append({"title": title, "body": body_text, "occurred_at": dt,
-                     "author": author, "date_prov": date_prov,
-                     "author_prov": author_prov, "flags": flags})
+                     "author": author, "author_stamp": author_stamp,
+                     "date_prov": date_prov, "author_prov": author_prov,
+                     "flags": flags})
     return rows
 
 
@@ -293,9 +311,23 @@ def main():
         if "system" not in actors:
             sys.exit("no 'system' actor to attribute unattributed rows to")
 
-        SOURCE_BY_PROV = {"section stamp": "import",
-                          "file stamp (owner)": "import_file_stamp",
-                          "none": "import_unattributed"}
+        def source_for(r):
+            """The provenance label that rides `source` on the imported row.
+
+            A compound file stamp carries its FULL text after the colon, so the
+            render can print "dell (per file stamp 'Shared, Dell originated')"
+            instead of silently reducing a shared, Dell-originated client to one
+            name. No DDL: `source` is already this table's free-text provenance
+            column ('stated', 'import', 'mail_ingest', 'call_recording').
+            """
+            if r["author_prov"] == "section stamp":
+                return "import"
+            if r["author_prov"] == "none":
+                return "import_unattributed"
+            stamp = (r.get("author_stamp") or "").strip()
+            if stamp.lower() == (r["author"] or ""):
+                return "import_file_stamp"
+            return f"import_file_stamp:{stamp}"[:200]
         for name in files:
             rel = f"{DOSSIER_DIR}/{name}"
             cur.execute("select client_id from v_export_dossier_subject where rel_path=%s", (rel,))
@@ -326,7 +358,7 @@ def main():
                     "                      summary, detail, client_id, source) "
                     "values (%s, %s, %s, 'analysis', %s, %s, %s, %s)",
                     (r["occurred_at"], base + timedelta(microseconds=ordinal), actor_id,
-                     r["title"], r["body"], client_id, SOURCE_BY_PROV[r["author_prov"]]))
+                     r["title"], r["body"], client_id, source_for(r)))
                 written += 1
         conn.commit()
     print(f"\nREHEARSAL import: {written} analysis rows written to the branch, "
