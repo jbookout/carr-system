@@ -43,7 +43,7 @@ one.
 
 from datetime import datetime, timezone
 
-HUNT_REL = "DNA/Network/hunt-ledger.generated.md"
+HUNT_REL = "DNA/Network/hunt-ledger.md"  # swapped to the live path 2026-08-01 post-repoint+H2-apply (ORDER 39 flip)
 RECIP_REL = "DNA/Network/deals-reciprocity.generated.md"
 
 # Entry totals in each SOURCE ledger as frozen 2026-08-01, so the coverage line
@@ -53,22 +53,20 @@ SOURCE_ENTRY_TOTALS = {"hunt-ledger": 4, "deals-reciprocity": 5}
 
 PARKED_NOTE = {
     "hunt-ledger": (
-        "Not yet imported: **H2** (Hunt #1 — authored by the Monday brief, i.e. the "
-        "`automation` actor, which no verb can issue, so its author cannot be preserved), "
-        "**H3** (\"Honest note on hunt #1\" — no date stamp, no author stamp, no subject ref) "
-        "and **H4** (\"Hunt #2 upgrade\" — author unstamped, no subject ref). All three are on "
-        "Joe's consolidated review list. Their text is intact in the source file and in the "
-        "freeze zip; nothing is lost."
+        "H1 and H2 are imported (H2 with actor `system`, provenance \"Monday brief "
+        "automation\" preserved on the row — Joe's ruling, 2026-08-01). **H3 and H4 were "
+        "DROPPED to the freeze by the same ruling** (no subject, no timeline home); their "
+        "text survives only in `2026-08-01-hunt-ledger-freeze.zip`, and that is deliberate, "
+        "not loss."
     ),
     "deals-reciprocity": (
-        "Not yet imported: **R2/R3** (Nilesh Patel, Jon Shaw — no date, no author, and they are "
-        "hand-maintained counts that deals.md's own two-way-ledger section says to derive on "
-        "demand rather than store) and **R4/R5** (Nate @ EOS, Trey @ Lazzarri — each exists in "
-        "the vendor book twice, un-merged, so the lone-name rule bars picking a ref). All four "
-        "are on Joe's consolidated list. Note also that R1's referral RELATIONSHIP is not "
-        "repeated here: it is already carried by the intro graph as party_link edges "
-        "V-SUP-051 → C-155 and V-SUP-051 → L-208. This render carries the commercial "
-        "arrangement, which no edge holds."
+        "**R2–R5 retired to derivation by Joe's standing counts ruling (2026-08-01): counts "
+        "always derive from deal records, never import as notes.** Backfill checks #117–#120 "
+        "record the deals underneath each (Nilesh Patel 3, Jon Shaw 2, Nate Woulston 2, "
+        "Trey Crowley 2); once those carry participant rows the positions compute themselves. "
+        "Note also that R1's referral RELATIONSHIP is not repeated here: it is already carried "
+        "by the intro graph as party_link edges V-SUP-051 → C-155 and V-SUP-051 → L-208. This "
+        "render carries the commercial arrangement, which no edge holds."
     ),
 }
 

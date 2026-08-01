@@ -16,6 +16,8 @@ from pathlib import Path
 import openpyxl
 
 from .common import VAULT
+from .ledger_targets import (HUNT_REL as LEDGER_HUNT_REL, RECIP_REL as LEDGER_RECIP_REL,
+                             build_hunt_ledger, build_reciprocity)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
@@ -948,6 +950,11 @@ TARGETS = {
     # and the nightly chain with no edit to either. A rule taught at 9am reaches
     # the engine at the top of the next hour, same as every other taught rule.
     "compiled-rules-intro": (RULES_INTRO_REL, build_rules_intro),
+    # ORDER 39 (2026-08-01): the two md-ledger renders. hunt-ledger.md is the
+    # live flipped file; the reciprocity render lives beside deals.md because
+    # deals.md is section-scoped (27 hand-kept deal records stay hand-kept).
+    "md-ledger-hunt": (LEDGER_HUNT_REL, build_hunt_ledger),
+    "md-ledger-reciprocity": (LEDGER_RECIP_REL, build_reciprocity),
     # #8 (Wave 3, ORDER 25d). Carries a death sentence — see build_router.
     "lead-router-2026-07-13.xlsx": (ROUTER_REL, build_router),
     # #9-#12 (one-writer Phase A, ORDER 31d). `--only loop` refreshes all four,
