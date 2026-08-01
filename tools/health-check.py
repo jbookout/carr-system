@@ -171,4 +171,53 @@ except (ValueError, OSError, KeyError) as e:
           f"rebuilds it from the bucket on the next archive run")
     rc = 1
 
+# --- the doctrine corpus mirror (added 2026-07-31, ORDER 30c) ----------------
+# Also not a freshness check, and file-only by design: it hashes 34 small text
+# files on local disk plus their Drive originals. No network, no credential, no
+# database, so the heartbeat can never fail here for being offline.
+# TWO FINDINGS, and they mean opposite things:
+#   the Drive moved on  — normal. Doctrine changed and the mirror has not caught
+#     up. It warns (rc=1) rather than staying quiet because an un-synced mirror
+#     is a mirror with a hole in its history, and closing it is one command. If
+#     this proves noisy in practice, downgrading it to informational is a
+#     one-line change — flagged in ORDER 30's log rather than decided here.
+#   the mirror was edited — a defect. Nothing reads corpus/, so that edit reaches
+#     no session, and the next --sync would erase it. The Drive is canonical.
+CORPUS_SYNC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corpus-sync.py")
+try:
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("corpus_sync", CORPUS_SYNC)
+    _cs = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_cs)
+    _st = _cs.status()
+    if not _st["manifest"]:
+        print(f"  -- {'corpus mirror':<18} no manifest yet; run python3 tools/corpus-sync.py --sync")
+    else:
+        _c = _st["counts"]
+        _loud = sum(_c.get(k, 0) for k in ("MIRROR-EDITED", "BOTH-CHANGED"))
+        _behind = _c.get("DRIFT", 0) + _c.get("NEW", 0) + _c.get("MISSING-MIRROR", 0)
+        _gone = _c.get("SOURCE-GONE", 0) + _c.get("UNREADABLE", 0)
+        _n = _st["manifest_count"]
+        if _loud:
+            print(f"  ⚠︎ {'corpus mirror':<18} {_loud} file(s) EDITED IN THE MIRROR  · the Drive is "
+                  f"canonical and nothing reads corpus/; move the edit to the Drive "
+                  f"(tools/corpus-sync.py names them)")
+            rc = 1
+        elif _behind or _gone:
+            _bits = []
+            if _behind:
+                _bits.append(f"{_behind} newer on the Drive")
+            if _gone:
+                _bits.append(f"{_gone} missing/unreadable at the source")
+            print(f"  ⚠︎ {'corpus mirror':<18} {', '.join(_bits)} of {_n}  · "
+                  f"run python3 tools/corpus-sync.py --sync")
+            rc = 1
+        else:
+            print(f"  OK {'corpus mirror':<18} {_n} doctrine files, 0 drift")
+except FileNotFoundError:
+    print(f"  -- {'corpus mirror':<18} tools/corpus-sync.py not present; corpus check skipped")
+except Exception as e:
+    print(f"  ⚠︎ {'corpus mirror':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
