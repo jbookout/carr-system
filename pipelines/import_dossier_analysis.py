@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ORDER 36 step 7 — import the 20 hand-maintained dossiers' analysis prose as
+"""ORDER 36 step 7 — import the 23 hand-maintained dossiers' analysis prose as
 dated `kind=analysis` activity rows.
 
 DRY RUN BY DEFAULT. --apply writes, and refuses to run unless migration 0028 is
@@ -15,15 +15,18 @@ WHAT IT DOES NOT DO — the stop rules, in code:
   * It never guesses a date or an author. A section whose date or author cannot
     be read off the file's OWN stamps is imported WITH ITS TEXT INTACT (nothing
     is lost) and flagged on the review list, with the reason recorded per row.
-  * A flagged row's occurred_at falls back to the file's `Last updated:` stamp,
-    or failing that the file's mtime, and `source` is set to 'import' so the
-    render prints "date unrecorded"-grade provenance rather than a confident
-    date the file never claimed.
+  * A row's occurred_at falls back to the file's `Last updated:` stamp, or
+    failing that the file's mtime (which IS flagged — mtime is not a claim the
+    file makes). Author falls back to the file's `owner:` frontmatter per Joe's
+    2026-08-01 ruling, and `source` records WHICH level supplied it —
+    import / import_file_stamp / import_unattributed — so the render can say
+    "per file stamp, not this section" instead of printing an inherited name as
+    though the section had stamped it.
   * It writes one row per H2 section plus one for the pre-H2 header block. It
     does not merge, summarise, rewrite or reflow prose — the body is the
     section's bytes.
 
-CHUNKING, and why H2: every one of the 20 files organises itself by `## `
+CHUNKING, and why H2: every one of the 23 files organises itself by `## `
 headings — dated addenda in the deal files (GulfCoastPelvicFloor,
 FirstCallDPC-Petersen) and topical sections in the narrative ones
 (LifeDentalGroup, Tyrer). H3s stay INSIDE their parent section; splitting on
@@ -33,7 +36,7 @@ import argparse
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -300,14 +303,30 @@ def main():
             if not got:
                 print(f"  SKIP {name}: no subject row"); skipped += 1; continue
             client_id = got[0]
-            for r in parse_file(VAULT / DOSSIER_DIR / name):
+            # POSITIONAL recorded_at (Fable ruling, 2026-08-01). The render picks
+            # "current analysis" with `order by occurred_at desc, recorded_at
+            # desc, id`. Sections carrying no date of their own inherit the
+            # file's single date, and a whole file imports inside ONE
+            # transaction, so now() was identical for every row — which dropped
+            # the tie onto a random uuid and made "current" arbitrary in 19 of
+            # the 23 files (Tyrer's `Changelog` won rank 1 that way).
+            #
+            # Stamping recorded_at one microsecond apart in FILE ORDER makes the
+            # tie break by position in the source document: the LAST section in
+            # the file ranks first. In the dated-addendum dossiers that is
+            # genuinely the newest entry, because their addenda run down the
+            # page. It is also true on its face — the rows really were recorded
+            # in this order, so nothing here is a fabricated fact.
+            file_rows = parse_file(VAULT / DOSSIER_DIR / name)
+            base = datetime.now(timezone.utc)
+            for ordinal, r in enumerate(file_rows):
                 actor_id = actors.get(r["author"] or "", actors["system"])
                 cur.execute(
-                    "insert into activity (occurred_at, actor_id, kind, summary, detail, "
-                    "                      client_id, source) "
-                    "values (%s, %s, 'analysis', %s, %s, %s, %s)",
-                    (r["occurred_at"], actor_id, r["title"], r["body"], client_id,
-                     SOURCE_BY_PROV[r["author_prov"]]))
+                    "insert into activity (occurred_at, recorded_at, actor_id, kind, "
+                    "                      summary, detail, client_id, source) "
+                    "values (%s, %s, %s, 'analysis', %s, %s, %s, %s)",
+                    (r["occurred_at"], base + timedelta(microseconds=ordinal), actor_id,
+                     r["title"], r["body"], client_id, SOURCE_BY_PROV[r["author_prov"]]))
                 written += 1
         conn.commit()
     print(f"\nREHEARSAL import: {written} analysis rows written to the branch, "
