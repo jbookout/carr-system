@@ -2,7 +2,11 @@
 # check.sh reads this for the code-drift pass. Vault copies are the fallback +
 # Dell's/cloud runtime for generators; for pipelines/ the vault copy is still the
 # SOP-invoked runtime (repoint happens per-script after a verified identical run).
-generators/build-deal-room.py	DNA/Team/live-boards/build-deal-room.py
+# FORKED BY DESIGN 2026-07-31 (ORDER 29a ratification): repo copy reads record views
+# (records-mode default); the vault copy is Dell's/cloud FILE-mode runtime and stays so
+# per the ORDER 28 finding (no DB path off this Mac). The two can never match again, so
+# the drift pairing is retired rather than alarming every night. Vault copy governed by
+# dna-protocol as before. Former row: generators/build-deal-room.py <TAB> DNA/Team/live-boards/build-deal-room.py
 generators/build-lead-board.py	Automation/build-lead-board.py
 generators/build-renewal-feed.py	Automation/build-renewal-feed.py
 pipelines/build-space-search.py	Automation/build-space-search.py
