@@ -65,6 +65,10 @@ WATCH = [
     ("GEN clients-active",  "DNA/Clients/clients-active.md",             26/24, [], "nightly chain (bin/nightly.sh)"),
     ("GEN rules shared",    "DNA/compiled-rules-shared.md",              26/24, [], "nightly chain (bin/nightly.sh)"),
     ("GEN rules joe",       "00_Context/compiled-rules-joe.md",          26/24, [], "nightly chain (bin/nightly.sh)"),
+    # ORDER 37: the vendor-politics compile target. Its key prefix-matches
+    # `--only compiled-rules`, so the hourly refresh reaches it as well.
+    ("GEN rules intro",     "DNA/Network/introduction-rules.md",         26/24, [],
+     "nightly chain (bin/nightly.sh) + hourly bin/refresh-rules.sh"),
     # --- the Wave 2 job reports (added 2026-07-31 with ORDER 19a) ---------------
     # These five live in the REPO's out/, not the vault, so their patterns are
     # absolute — os.path.join returns an absolute second argument unchanged.
