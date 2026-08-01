@@ -4,9 +4,12 @@
 #
 # The compiled-rules files are the BINDING auto-loaded surface; a rule taught
 # from Cowork/phone mid-day sat in the DB until the 2am chain re-rendered them.
-# This job re-renders JUST those two files every 30 minutes (launchd), so the
-# lag drops from overnight to ~half an hour whenever this Mac is awake.
-# Pure code, no model (T0 per model-tiering). Full chain still owns 2am.
+# This job re-renders JUST those two files HOURLY, 7:00-20:00 local (launchd
+# StartCalendarInterval) — business hours only, on Joe's cost ruling 2026-07-31:
+# Neon free tier = 100 CU-h/month, every wake burns ~5 min of compute, and
+# capping out SUSPENDS the DB until the next cycle. Overnight wakes would spend
+# real budget re-rendering rules nobody teaches at 3am; the 2am chain stays the
+# night's only DB visitor. Pure code, no model (T0 per model-tiering).
 #
 # SKIP-not-FAIL: missing env = exit 0 with a SKIP line, per house convention.
 REPO="$HOME/carr-system"
