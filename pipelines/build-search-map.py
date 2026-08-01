@@ -127,7 +127,11 @@ def geocode(addr, city, cache):
     that survives all of that unresolved gets NO pin. We never fall back to a
     city centroid and call it a location."""
     key = f"{addr}|{city}"
-    if key in cache:
+    # Serve cached SUCCESSES only (fixed 2026-07-31): a cached failure replayed
+    # forever, so a fix upstream (like the widened VIEWBOX) could never rescue a
+    # pin without hand-purging the cache. Failures now retry each run — bounded
+    # cost, only the unresolved addresses re-query.
+    if key in cache and cache[key] is not None:
         return cache[key]
 
     head = strip_unit(addr)
