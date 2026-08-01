@@ -270,6 +270,7 @@ def build_clients_active(tmp_path, cur):
 RULES_SHARED_REL = "DNA/compiled-rules-shared.md"
 RULES_JOE_REL = "00_Context/compiled-rules-joe.md"
 RULES_INTRO_REL = "DNA/Network/introduction-rules.md"
+RULES_DELL_REL = "DNA/compiled-rules-dell.md"
 
 # ORDER 37. introduction-rules.md is DOMAIN-scoped: vendor↔vendor politics, read
 # by engine.md before it proposes an intro and before any joint guest list goes
@@ -341,7 +342,18 @@ def build_rules_joe(tmp_path, cur):
     return _build_rules(
         tmp_path, cur, "joe", "Compiled rules — Joe (personal)",
         "PERSONAL SCOPE: these apply to Joe's brain only. Dell's equivalent file "
-        "lives on his side and is generated the same way.")
+        "is DNA/compiled-rules-dell.md, generated the same way.")
+
+
+def build_rules_dell(tmp_path, cur):
+    # Added 2026-08-01 (Dell onboarding prep). Renders into the DNA share — the
+    # one surface Dell's Mac reaches — so his sessions auto-load it exactly as
+    # Joe's load compiled-rules-joe. Empty until Dell teaches his first rule;
+    # an empty file with the header is the correct day-one state, not a bug.
+    return _build_rules(
+        tmp_path, cur, "dell", "Compiled rules — Dell (personal)",
+        "PERSONAL SCOPE: these apply to Dell's brain only. Joe's equivalent is "
+        "00_Context/compiled-rules-joe.md on his side.")
 
 
 # -------- introduction-rules.md (the vendor-politics compile target, ORDER 37) --------
@@ -950,6 +962,9 @@ TARGETS = {
     # and the nightly chain with no edit to either. A rule taught at 9am reaches
     # the engine at the top of the next hour, same as every other taught rule.
     "compiled-rules-intro": (RULES_INTRO_REL, build_rules_intro),
+    # Dell onboarding prep (2026-08-01): Dell's personal compiled rules, in the
+    # DNA share. Prefix-matches --only compiled-rules → rides hourly + nightly.
+    "compiled-rules-dell": (RULES_DELL_REL, build_rules_dell),
     # ORDER 39 (2026-08-01): the two md-ledger renders. hunt-ledger.md is the
     # live flipped file; the reciprocity render lives beside deals.md because
     # deals.md is section-scoped (27 hand-kept deal records stay hand-kept).
