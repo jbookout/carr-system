@@ -24,7 +24,14 @@ PY="$REPO/.venv/bin/python"
 deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" \
                    "$VAULT/DNA/Deal Management/panhandle-team-deals.json" \
                    "$VAULT/DNA/Team/live-boards/deal-room-panhandle.html" "$@"; }
-lead_board()   { python3 "$REPO/generators/build-lead-board.py" "$VAULT"; }
+# ORDER 26(b): the board gained --files/--records. The DEFAULT IS STILL FILES and
+# the chain still calls this with no arguments, so `run.sh all` is byte-for-byte
+# what it was. Records mode is reachable by hand — and needs the repo venv (it
+# speaks to Neon through psycopg) plus a DSN that can read prospect_pool, which
+# `tools/db-tap.py run` supplies. Parity passed 2026-07-31; the default flip waits
+# on a pool read surface the exporter credential can reach (parked, see the
+# ORDER 26 execution log).
+lead_board()   { "$PY" "$REPO/generators/build-lead-board.py" "$VAULT" "$@"; }
 lead_promote() { shift; python3 "$REPO/pipelines/lead-promote.py" "$VAULT" "$@"; }
 renewal_feed() { python3 "$REPO/generators/build-renewal-feed.py" "$VAULT"; }
 corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
@@ -46,7 +53,7 @@ verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" 
 
 case "${1:-}" in
   deal-room)    shift; deal_room "$@" ;;
-  lead-board)   lead_board ;;
+  lead-board)   shift; lead_board "$@" ;;
   lead-promote) lead_promote "$@" ;;
   renewal-feed) renewal_feed ;;
   all)          renewal_feed; lead_board; deal_room ;;
@@ -67,5 +74,5 @@ case "${1:-}" in
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
 esac

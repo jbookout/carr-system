@@ -58,6 +58,33 @@ LEADS_REL = "DNA/Leads/lead-registry.xlsx"
 CLIENTS_REL = "DNA/Clients/client-roster.xlsx"
 DEALS_REL = "DNA/Deal Management/panhandle-team-deals.json"
 
+# ---------------- the prospect pool (ORDER 26) ----------------
+#
+# The pool is a different read from the four above, and the reason is a real
+# boundary rather than an inconvenience. ORDER 25 deliberately gave the pool two
+# narrow surfaces:
+#   v_pool         — safe columns, granted to carr_reader. No address, no email,
+#                    no phone, no source_row. 9,320 uncontacted third parties is
+#                    an order of magnitude more personal data than the 207 worked
+#                    leads, so the class-parity argument that opened v_export_leads
+#                    does not carry here.
+#   v_export_pool  — full columns INCLUDING source_row, granted to carr_exporter
+#                    only, and scoped `where source = 'lead-router'` because it
+#                    exists to regenerate the router sheet (export target #8).
+#
+# The board needs full columns for EVERY source, which is neither of those. The
+# read therefore prefers an elevated DSN (what `tools/db-tap.py run` sets) and
+# falls back to the exporter's router-only slice. When the board asks for lane
+# sources and only the router slice is reachable, records mode is UNAVAILABLE and
+# the caller falls back to files loudly — it never renders a board that is
+# quietly missing 540 radar rows. Closing that gap properly is one line in a
+# migration (an all-source export view, or a select grant), which ORDER 26 is not
+# allowed to write; it is parked in the execution log instead.
+
+ROUTER_SOURCE = "lead-router"
+LANE_SOURCES = ("corp-filings", "upstream", "renewal-radar",
+                "relocating-owner", "national-accounts")
+
 
 # ---------------- mode selection ----------------
 
@@ -239,3 +266,110 @@ def load_deals_doc(root, mode):
         "count": len(deals),
         "deals": deals,
     }
+
+
+# ---------------- the prospect pool ----------------
+
+def _elevated_url():
+    """A DSN that can read prospect_pool itself. `tools/db-tap.py run` sets DATABASE_URL."""
+    return os.environ.get("CARR_DB_POOL_URL") or os.environ.get("DATABASE_URL")
+
+
+def pool_reach(wanted):
+    """(ok, why-not, connect-fn, all_sources) for the pool sources `wanted` needs.
+
+    Reports rather than raises: the board turns a miss into a loud fallback to
+    files, which is the ORDER 29a contract for an unreachable record path.
+    """
+    try:
+        import psycopg  # noqa: F401
+    except ImportError:
+        return False, "psycopg not importable by this interpreter (use .venv/bin/python)", None, False
+    url = _elevated_url()
+    if url:
+        def _c():
+            import psycopg
+            return psycopg.connect(url)
+        try:
+            with _c() as conn, conn.cursor() as cur:
+                cur.execute("select 1 from prospect_pool limit 1")
+        except Exception as e:                                  # noqa: BLE001
+            return False, f"elevated DSN cannot read prospect_pool ({type(e).__name__})", None, False
+        return True, "", _c, True
+    if not _exporter_url():
+        return False, "no CARR_DB_POOL_URL and no CARR_DB_EXPORTER_URL", None, False
+    if set(wanted) - {ROUTER_SOURCE}:
+        return (False,
+                "the exporter credential reaches only v_export_pool, which is scoped to "
+                f"source='{ROUTER_SOURCE}'; {sorted(set(wanted) - {ROUTER_SOURCE})} are "
+                "unreachable without an all-source view (parked, ORDER 26)",
+                None, False)
+    return True, "", _connect, False
+
+
+def load_pool(wanted):
+    """{source: [source_row dict, ...]} in each source's own file order.
+
+    source_row is the finder's row VERBATIM, which is what makes a records-mode
+    consumer able to reproduce a file-mode one exactly: the transform is shared,
+    only where the raw row came from changes.
+    """
+    ok, why, conn_fn, all_sources = pool_reach(wanted)
+    if not ok:
+        raise RuntimeError(why)
+
+    # THE ROUTER ROWS GET THE EXPORT'S OWN PROJECTION, and this is not cosmetic.
+    # A router row exists twice inside the pool: nine sheet columns are DB-OWNED
+    # (they have their own typed column, normalised by the importer's val()), and
+    # source_row holds the sheet cell VERBATIM. exporters/targets.py:build_router
+    # renders the DB-owned nine from the columns and everything else from
+    # source_row, so the router xlsx a file-mode board reads carries the column
+    # values. Measured 2026-07-31: 923 rows differ between the two — the empty
+    # phone placeholder is '() ' verbatim and '()' after val() — and the board
+    # would have shown one in records mode and the other in file mode.
+    #
+    # So this applies build_router's projection, importing the mapping from
+    # targets.py rather than copying it. The lanes deliberately do NOT get the
+    # same treatment: their board rows carry lane-specific fields that have no
+    # column at all (le / tier / conf / ll / rep / newll / in_territory /
+    # sensitivity), the relocating-owner lane is appended to the board WHOLESALE,
+    # and overlaying columns onto those objects would inject changes where no
+    # divergence exists.
+    sys.path.insert(0, str(REPO))
+    from exporters.targets import ROUTER_DB_OWNED
+
+    sel = ", ".join(f'{v} as "{k}"' for k, v in _ROUTER_DB_COLS.items())
+    if all_sources:
+        q = (f"select source, source_seq, source_row, {sel} from prospect_pool "
+             "where source = any(%s) order by source, source_seq")
+        args = (list(wanted),)
+    else:
+        cols = ", ".join(f'"{k}"' for k in ROUTER_DB_OWNED)
+        q = (f"select %s::text as source, source_seq, source_row, {cols} "
+             "from v_export_pool order by source_seq")
+        args = (ROUTER_SOURCE,)
+
+    out = {s: [] for s in wanted}
+    with conn_fn() as conn, conn.cursor() as cur:
+        cur.execute(q, args)
+        names = [d[0] for d in cur.description]
+        for r in cur.fetchall():
+            rec = dict(zip(names, r))
+            src = rec["source"]
+            if src not in out:
+                continue
+            row = dict(rec["source_row"] or {})
+            if src == ROUTER_SOURCE:
+                for sheet_col in ROUTER_DB_OWNED:
+                    row[sheet_col] = rec[sheet_col]
+            out[src].append(row)
+    return out
+
+
+# view alias -> base column, for the all-source read. The aliases are
+# v_export_pool's, so both read paths hand the caller the same keys.
+_ROUTER_DB_COLS = {
+    "SEGMENT": "segment", "THE PLAY": "segment_play", "Name": "name",
+    "Profession": "vertical", "Practice Address": "address", "City": "city",
+    "County": "county", "Email": "email", "Phone": "phone",
+}

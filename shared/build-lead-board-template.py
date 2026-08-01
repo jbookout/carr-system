@@ -6,7 +6,25 @@ Run by the weekly lead-system run (see DNA/Leads/lead-system-weekly.md) and any
 session that moves a worked lead (refresh-on-change law, mirrors the Deal Room).
 
 Usage:
-  python3 build-lead-board.py [CARR_ROOT]
+  python3 build-lead-board.py [CARR_ROOT] [--files|--records]
+
+TWO SOURCE MODES (ORDER 26(b), the ORDER 29a pattern).
+  --files    the historical read: the router xlsx, the lane JSONs, the registry
+             xlsx. Still the default, still the fallback, still what the nightly
+             chain runs, and still the only mode Dell's runtime and any machine
+             without a database credential can use.
+  --records  the same board derived from the record layer: `prospect_pool` (the
+             router rows ORDER 25 imported plus the radar-lane rows ORDER 26(a)
+             maps) and the lead registry's export view.
+
+The two modes share every transform. What changes is only where the RAW row came
+from — an xlsx cell, a JSON object, or the `source_row` jsonb that stored that
+same object verbatim. That is what makes byte-identical output provable rather
+than hoped for: tools/parity-lead-board.py runs both and diffs the payload the
+template consumes. Records mode falls back to files, loudly, when the record path
+is unreachable; a board that quietly dropped its radar rows would be worse than
+one that admits it read the files.
+
 CARR_ROOT defaults to the folder two levels up from this script (…/CARR AI).
 Sources:
   <root>/DNA/Leads/lead-router-*.xlsx   (latest by name = the 9,320 reservoir)
@@ -25,9 +43,42 @@ from collections import Counter
 from datetime import datetime, date
 import openpyxl
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_ARGV = [a for a in sys.argv[1:] if not a.startswith("--")]
+ROOT = _ARGV[0] if _ARGV else os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
 AUTO = os.path.join(ROOT, "Automation")
+
+# ── source mode ──────────────────────────────────────────────────────────────
+# The import is guarded, not assumed: the vault copy of this script (Dell's and
+# the cloud runtime, per manifest.tsv) sits beside a bare sheets.py with no lib/
+# package next to it. There, records mode simply does not exist and the board
+# runs exactly as it always has.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from lib.record_sources import (LANE_SOURCES, MODE_FILES, MODE_RECORDS, ROUTER_SOURCE,
+                                    load_leads, load_pool, pool_reach, resolve_mode, source_note)
+    _HAVE_RECORDS = True
+except ImportError:
+    MODE_FILES, MODE_RECORDS, _HAVE_RECORDS = "files", "records", False
+
+if _HAVE_RECORDS:
+    # Default stays FILES until parity has been proven AND the chain can actually
+    # reach the pool unattended (ORDER 26(c)). Flipping the default before both
+    # are true would give a board that falls back every night while reporting a
+    # records-mode flag on its command line.
+    MODE, _ = resolve_mode(sys.argv[1:], default=MODE_FILES)
+    if MODE == MODE_RECORDS:
+        _want = (ROUTER_SOURCE,) + LANE_SOURCES
+        _ok, _why, _, _ = pool_reach(_want)
+        if not _ok:
+            print(f"[lead-board] records mode unavailable ({_why}) — falling back to the "
+                  f"generated files", file=sys.stderr)
+            MODE = MODE_FILES
+else:
+    MODE = MODE_FILES
+    if "--records" in sys.argv[1:]:
+        print("[lead-board] this copy has no lib/record_sources.py — running file mode",
+              file=sys.stderr)
 
 # Schema-validated reads (orchestrator-lane corrective #1, 2026-07-25): columns are
 # resolved by HEADER NAME via sheets.py — a moved/renamed column halts loudly instead
@@ -66,47 +117,120 @@ SEG_ORDER = [
  ("UNCLASSIFIED","Unclassified","needs a pass","hold"),
 ]
 
-def load_router(path):
+# The thirteen router columns the board renders. The sheet carries four more
+# (SUNBIZ entities, Lic Yrs' neighbours, License) which pass through source_row
+# and the export untouched; the board has never read them.
+ROUTER_COLS = ["SEGMENT", "THE PLAY", "Owns?", "Name", "Profession", "Lic Yrs",
+               "Age Band", "# at Address", "Practice Address", "City", "County",
+               "Email", "Phone"]
+
+
+def router_rows_from_file(path):
+    """The historical read: one dict per sheet row, keyed by header name."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb["Lead Router"]
-    c = header_map(ws, ["SEGMENT", "THE PLAY", "Owns?", "Name", "Profession", "Lic Yrs",
-                        "Age Band", "# at Address", "Practice Address", "City", "County",
-                        "Email", "Phone"], f"{os.path.basename(path)}[Lead Router]")
-    leads=[]; segPlay={}
-    for r in data_rows(ws):
-        if not r[c["Name"]]: continue
-        if r[c["SEGMENT"]] and r[c["SEGMENT"]] not in segPlay: segPlay[r[c["SEGMENT"]]] = r[c["THE PLAY"]] or ""
-        leads.append({"s":r[c["SEGMENT"]],"n":str(r[c["Name"]]).title() if r[c["Name"]] else "","pr":r[c["Profession"]] or "",
-            "ly":(round(float(r[c["Lic Yrs"]]),0) if isinstance(r[c["Lic Yrs"]],(int,float)) else ""),
-            "ab":r[c["Age Band"]] or "","na":r[c["# at Address"]] or "","ad":r[c["Practice Address"]] or "",
-            "ci":(str(r[c["City"]]).title() if r[c["City"]] else ""),"co":(str(r[c["County"]]).title() if r[c["County"]] else ""),
-            "e":r[c["Email"]] or "","ph":r[c["Phone"]] or "","own":r[c["Owns?"]] or ""})
-    wb.close()
-    return leads, segPlay
-
-def load_registry(path):
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb["Registry"]
-    c = header_map(ws, ["Lead ID", "Owner", "Stage", "Segment", "Contact Name", "Practice",
-                        "Specialty", "City/Market", "County", "Email", "Phone", "Next Action",
-                        "Next Action Date", "Last Touch", "Detail File"],
-                   "lead-registry.xlsx[Registry]")
-    out=[]
-    for r in data_rows(ws):
-        if not r[c["Lead ID"]] or r[c["Owner"]] != "Joe": continue
-        out.append({"id":r[c["Lead ID"]],"stage":r[c["Stage"]],"seg":r[c["Segment"]],"name":r[c["Contact Name"]],
-            "practice":r[c["Practice"]],"spec":r[c["Specialty"]],
-            "city":r[c["City/Market"]],"county":r[c["County"]],"email":r[c["Email"]] or "","phone":r[c["Phone"]] or "",
-            "next":str(r[c["Next Action"]] or ""),"nextdate":norm(r[c["Next Action Date"]]),"lasttouch":norm(r[c["Last Touch"]]),
-            "detail":r[c["Detail File"]] or "",
-            # columns 23/25 sit BEYOND the header row (no names exist) — kept positional
-            # + length-guarded on purpose; if headers are ever added, name them here.
-            "lease":norm(r[23]) if len(r)>23 else "","leaseconf":(r[25] if len(r)>25 else "") or ""})
+    c = header_map(ws, ROUTER_COLS, f"{os.path.basename(path)}[Lead Router]")
+    out = [{h: r[c[h]] for h in ROUTER_COLS} for r in data_rows(ws)]
     wb.close()
     return out
 
-router_path = latest_router()
-L, segPlay = load_router(router_path)
+
+def load_router(rows):
+    """rows -> (board leads, segment plays). Mode-agnostic ON PURPOSE.
+
+    A records-mode row is the same dict, restored from the `source_row` jsonb the
+    importer wrote verbatim. Sharing this function is what makes parity a property
+    of the code rather than a coincidence that has to be re-tested by eye.
+    """
+    leads=[]; segPlay={}
+    for r in rows:
+        if not r["Name"]: continue
+        if r["SEGMENT"] and r["SEGMENT"] not in segPlay: segPlay[r["SEGMENT"]] = r["THE PLAY"] or ""
+        leads.append({"s":r["SEGMENT"],"n":str(r["Name"]).title() if r["Name"] else "","pr":r["Profession"] or "",
+            "ly":(round(float(r["Lic Yrs"]),0) if isinstance(r["Lic Yrs"],(int,float)) else ""),
+            "ab":r["Age Band"] or "","na":r["# at Address"] or "","ad":r["Practice Address"] or "",
+            "ci":(str(r["City"]).title() if r["City"] else ""),"co":(str(r["County"]).title() if r["County"] else ""),
+            "e":r["Email"] or "","ph":r["Phone"] or "","own":r["Owns?"] or ""})
+    return leads, segPlay
+
+REGISTRY_NAMED = ["Lead ID", "Owner", "Stage", "Segment", "Contact Name", "Practice",
+                  "Specialty", "City/Market", "County", "Email", "Phone", "Next Action",
+                  "Next Action Date", "Last Touch", "Detail File"]
+# Columns 23 and 25 sit BEYOND the sheet's header row, so the file read has always
+# taken them positionally. They are NOT anonymous in the record: v_export_leads
+# names them, and exporters/targets.py:REGISTRY_COLS writes them at exactly those
+# two indices. Naming them here is what lets one transform serve both modes.
+REGISTRY_POS = {23: "Est-Lease-Event", 25: "Event-Confidence"}
+
+
+def registry_rows_from_file(path):
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb["Registry"]
+    c = header_map(ws, REGISTRY_NAMED, "lead-registry.xlsx[Registry]")
+    out = []
+    for r in data_rows(ws):
+        d = {h: r[c[h]] for h in REGISTRY_NAMED}
+        for i, nm in REGISTRY_POS.items():
+            d[nm] = r[i] if len(r) > i else ""
+        out.append(d)
+    wb.close()
+    return out
+
+
+def load_registry(rows):
+    # Returns EVERY row with its owner attached (2026-07-27). It used to filter to
+    # Owner=="Joe" right here, which meant 37 rows with a BLANK owner were dropped on
+    # the floor: they appear on nobody's board, Joe's or Dell's. Splitting happens at
+    # the call site now, so the unowned ones can be surfaced instead of vanishing.
+    out=[]
+    for r in rows:
+        if not r["Lead ID"]: continue
+        out.append({"owner":(r["Owner"] or "").strip(),
+            "id":r["Lead ID"],"stage":r["Stage"],"seg":r["Segment"],"name":r["Contact Name"],
+            "practice":r["Practice"],"spec":r["Specialty"],
+            "city":r["City/Market"],"county":r["County"],"email":r["Email"] or "","phone":r["Phone"] or "",
+            "next":str(r["Next Action"] or ""),"nextdate":norm(r["Next Action Date"]),"lasttouch":norm(r["Last Touch"]),
+            "detail":r["Detail File"] or "",
+            "lease":norm(r["Est-Lease-Event"]),"leaseconf":r["Event-Confidence"] or ""})
+    return out
+
+# ── where the raw rows come from ─────────────────────────────────────────────
+# Five lanes append board rows; each is a pool `source` slug in records mode and
+# a JSON file in file mode. Three other files are NOT lane row sources and are
+# read from disk in BOTH modes, deliberately:
+#   dso-matches.json      an OVERLAY that re-segments router rows already on the
+#                         board — it adds nobody, so it is not a pool source.
+#   lead-board-hot.json   ranked REGISTRY leads (L-### ids), not prospects.
+#   lead-board-decisions.json  Joe's curated decision queue, a human artefact.
+LANE_FILES = {
+    "corp-filings":      os.path.join(AUTO, "entity-formation-leads.json"),
+    "upstream":          os.path.join(AUTO, "pre-entity-watch.json"),
+    "renewal-radar":     os.path.join(AUTO, "renewal-radar.json"),
+    "relocating-owner":  os.path.join(AUTO, "relocating-owner-leads.json"),
+    "national-accounts": os.path.join(ROOT, "DNA", "Team", "national-accounts.json"),
+}
+
+router_path = latest_router()      # read in both modes: the FILENAME carries the
+                                   # router's own date, which is what the header's
+                                   # freshness grade is about. Records mode reads
+                                   # the name, never the contents.
+if MODE == MODE_RECORDS:
+    POOL = load_pool((ROUTER_SOURCE,) + LANE_SOURCES)
+    router_raw = POOL[ROUTER_SOURCE]
+else:
+    POOL = None
+    router_raw = router_rows_from_file(router_path)
+
+
+def lane(slug):
+    """The lane's raw objects, in the lane's own order, from records or from disk."""
+    if MODE == MODE_RECORDS:
+        return POOL.get(slug, [])
+    p = LANE_FILES[slug]
+    return json.load(open(p)) if os.path.exists(p) else []
+
+
+L, segPlay = load_router(router_raw)
 
 # DSO / corporate-associate re-segmentation (2026-07-27, Joe: "seems highly unlikely
 # that there is only one"). The board used to derive its DSO count from the router's
@@ -154,41 +278,34 @@ if os.path.exists(dso_path):
                             "proven — verify before working a LOW. Source: dso-matches.json.")
 # Entity-formation feed (the corp-filings lane output: new territory business filings,
 # FL Sunbiz + AL SOS — the leads the licensure-based router structurally misses).
-ef_path = os.path.join(AUTO, "entity-formation-leads.json")
 ef_n = 0
-if os.path.exists(ef_path):
-    ef = json.load(open(ef_path))
-    NEW_SEG = "\U0001F195 NEW ENTITY — corp-filings"
-    for x in ef:
-        if x.get("in_territory") is False:
-            continue  # out-of-territory rows are logged in the file but not shown on the board
-        L.append({"s":NEW_SEG,"n":x.get("n",""),"pr":x.get("pr",""),"ly":"","ab":"","na":"",
-                  "ad":x.get("ad",""),"ci":x.get("ci",""),"co":x.get("co",""),
-                  "e":x.get("e",""),"ph":x.get("ph",""),"own":x.get("own","YES")})
-        ef_n += 1
+NEW_SEG = "\U0001F195 NEW ENTITY — corp-filings"
+for x in lane("corp-filings"):
+    if x.get("in_territory") is False:
+        continue  # out-of-territory rows are logged in the file but not shown on the board
+    L.append({"s":NEW_SEG,"n":x.get("n",""),"pr":x.get("pr",""),"ly":"","ab":"","na":"",
+              "ad":x.get("ad",""),"ci":x.get("ci",""),"co":x.get("co",""),
+              "e":x.get("e",""),"ph":x.get("ph",""),"own":x.get("own","YES")})
+    ef_n += 1
 segPlay["\U0001F195 NEW ENTITY — corp-filings"] = "New business entities filed in territory (FL Sunbiz + Alabama SOS). This is the entity-formation lane, the detector that catches relocators and Alabama leads the licensure list misses. Owner-confirmed by the filing itself."
 # Pre-entity watch feed (Radar lane 4, the corroboration engine: corroborate.py output).
-pe_path = os.path.join(AUTO, "pre-entity-watch.json")
-if os.path.exists(pe_path):
-    PE_SEG = "\U0001F52D PRE-ENTITY — upstream watch"
-    for x in json.load(open(pe_path)):
-        if x.get("in_territory") is False: continue
-        sens = " ⚠" if x.get("sensitivity","").startswith("PERSONAL") else ""
-        L.append({"s":PE_SEG,"n":x.get("n","")+sens,"pr":x.get("pr",""),"ly":"","ab":"","na":"",
-                  "ad":x.get("ad",""),"ci":x.get("ci",""),"co":x.get("co",""),
-                  "e":x.get("e",""),"ph":x.get("ph",""),"own":""})
+PE_SEG = "\U0001F52D PRE-ENTITY — upstream watch"
+for x in lane("upstream"):
+    if x.get("in_territory") is False: continue
+    sens = " ⚠" if (x.get("sensitivity") or "").startswith("PERSONAL") else ""
+    L.append({"s":PE_SEG,"n":x.get("n","")+sens,"pr":x.get("pr",""),"ly":"","ab":"","na":"",
+              "ad":x.get("ad",""),"ci":x.get("ci",""),"co":x.get("co",""),
+              "e":x.get("e",""),"ph":x.get("ph",""),"own":""})
 segPlay["\U0001F52D PRE-ENTITY — upstream watch"] = "Corroborated upstream signals: two or more independent pre-entity signals (tip, deed, Medicare enrollment, license, address move) pointing at the same person BEFORE any entity files. The earliest the system can see. ⚠ rows are PERSONAL-adjacent: the detection is never the opener; every touch passes the how-did-you-know-to-call-me test."
 # Renewal Radar feed (CoStar tenant renewal leads; doctrine DNA/Leads/renewal-radar-sop.md,
 # built by build-renewal-feed.py from the latest DNA/Leads/renewal-radar-*.xlsx). Segment set
 # by the feed (LEASE RENEWAL / OWNER-OCCUPIER / INSTITUTIONAL). Carries lease-event + tier fields.
-rr_path = os.path.join(AUTO, "renewal-radar.json")
-if os.path.exists(rr_path):
-    for x in json.load(open(rr_path)):
-        L.append({"s":x.get("s",""),"n":x.get("n",""),"pr":x.get("pr",""),"ly":"","ab":"","na":"",
-                  "ad":x.get("ad",""),"ci":x.get("ci",""),"co":x.get("co",""),
-                  "e":x.get("e",""),"ph":x.get("ph",""),"own":"",
-                  "le":x.get("le",""),"tier":x.get("tier",""),"conf":x.get("conf",""),
-                  "ll":x.get("ll",""),"rep":x.get("rep",""),"flag":x.get("flag",""),"newll":x.get("newll","")})
+for x in lane("renewal-radar"):
+    L.append({"s":x.get("s",""),"n":x.get("n",""),"pr":x.get("pr",""),"ly":"","ab":"","na":"",
+              "ad":x.get("ad",""),"ci":x.get("ci",""),"co":x.get("co",""),
+              "e":x.get("e",""),"ph":x.get("ph",""),"own":"",
+              "le":x.get("le",""),"tier":x.get("tier",""),"conf":x.get("conf",""),
+              "ll":x.get("ll",""),"rep":x.get("rep",""),"flag":x.get("flag",""),"newll":x.get("newll","")})
 segPlay["🔑 LEASE EVENT — decision window"] = "A lease coming up is NOT a renewal — it means the doctor has reached a real-estate DECISION point: renew, relocate and lease, relocate and buy, buy the space they are in, build ground-up, sale-leaseback, or exit. The job is to be in the room BEFORE they decide and represent whichever way they go. Expiry data is blank in this market, so every date is DERIVED (commencement / move-in / permit) and the confidence tag says how firm. Leverage is built 12-24 months out, not at the deadline. A blank tenant rep = unrepresented = the CARR pitch, pre-qualified. CoStar shows only part of the market; other MLS feeds append into this segment as they come online."
 segPlay["🏢 OWNER-OCCUPIER — 2nd location"] = "The practice OWNS its building (CoStar Occupancy=Owned, tax-roll confirmed). Never a renewal lead, but a proven transactor with a balance sheet: a second location, expansion, sale-leaseback, eventual sale, and the best referral source alive. The biggest hole in the old model; never delete these."
 segPlay["🏛 INSTITUTIONAL — watch the physicians"] = "Hospital-system, Navy, or county tenants. Do not pitch the building, watch the physicians inside it (D5 team-diff). Institutions are the farm system: where independents come from (Brown filed Serenity while employed at HCA Florida West)."
@@ -198,11 +315,9 @@ segPlay["🏛 INSTITUTIONAL — watch the physicians"] = "Hospital-system, Navy,
 # An out-of-state doctor licensed in FL in the last ~12 months who ALSO owns a territory parcel is
 # very likely relocating here, knowable months before any entity files. Rows carry their own board
 # schema (incl. conf/newll); each is scored so Joe qualifies on the board, none pre-filtered out.
-ro_path = os.path.join(AUTO, "relocating-owner-leads.json")
 ro_n = 0
-if os.path.exists(ro_path):
-    for x in json.load(open(ro_path)):
-        L.append(x); ro_n += 1
+for x in lane("relocating-owner"):
+    L.append(x); ro_n += 1
 segPlay["\U0001F9ED RELOCATING OWNER — moving to territory"] = "An out-of-state clinician licensed in FL in the last ~12 months who ALSO owns a territory parcel is almost certainly moving here — the earliest ownership-backed relocation signal the system has, months before any entity filing. Source: FL DOR tax-roll NAL owners joined to the out-of-state FL DOH new-licensee pool by name. HIGH = the new licensee's state matches the parcel owner's mailing state (act on these); MEDIUM = name match with differing states (a common name can be a different person — verify identity first); LOW = likely a namesake owning many blank-address/non-residential parcels. A name match is not a person match: corroborate the person and the intent before any touch, and never reference how you knew to call."
 
 # National Accounts feed (curated, human-review — the all-client-types lane, added 2026-07-22, Joe).
@@ -210,17 +325,15 @@ segPlay["\U0001F9ED RELOCATING OWNER — moving to territory"] = "An out-of-stat
 # surgical/ASC + acute care). NOT auto-scored: a big expanding system the private-practice score
 # would call a "false positive" belongs HERE. No facility type/size auto-excluded. Seed: AltaPointe.
 NA_SEG = "🏥 NATIONAL ACCOUNT — multi-location / expanding"
-na_path = os.path.join(ROOT, "DNA", "Team", "national-accounts.json")
 na_n = 0
-if os.path.exists(na_path):
-    for x in json.load(open(na_path)):
-        summary = " \u00b7 ".join([t for t in [x.get("type",""), x.get("locations",""), x.get("status","")] if t])
-        loc = ", ".join([t for t in [x.get("ci",""), x.get("co","")] if t])
-        pathline = ("  \u00b7  warm path: " + x.get("path","")) if x.get("path") else ""
-        L.append({"s":NA_SEG,"n":x.get("n",""),"pr":summary,"ly":"","ab":"","na":"",
-                  "ad":loc + pathline,"ci":x.get("ci",""),"co":x.get("co",""),
-                  "e":x.get("email",""),"ph":x.get("phone",""),"own":x.get("own","")})
-        na_n += 1
+for x in lane("national-accounts"):
+    summary = " \u00b7 ".join([t for t in [x.get("type",""), x.get("locations",""), x.get("status","")] if t])
+    loc = ", ".join([t for t in [x.get("ci",""), x.get("co","")] if t])
+    pathline = ("  \u00b7  warm path: " + x.get("path","")) if x.get("path") else ""
+    L.append({"s":NA_SEG,"n":x.get("n",""),"pr":summary,"ly":"","ab":"","na":"",
+              "ad":loc + pathline,"ci":x.get("ci",""),"co":x.get("co",""),
+              "e":x.get("email",""),"ph":x.get("phone",""),"own":x.get("own","")})
+    na_n += 1
 segPlay[NA_SEG] = ("National Accounts: multi-location and expanding healthcare organizations \u2014 groups, DSOs, "
     "franchise/emerging operators, regional systems, and surgical/ASC + acute-care facilities. CARR represents "
     "these portfolio-wide across its agent network. This lane is CURATED and human-review, never auto-scored: a "
@@ -228,18 +341,67 @@ segPlay[NA_SEG] = ("National Accounts: multi-location and expanding healthcare o
     "Relationship-first \u2014 work the warm path to leadership, not a cold opener. No facility type or size is "
     "auto-excluded; the high-end boundary is Joe & Dell\u2019s judgment. Seed case: AltaPointe Health (Mobile, ~25 locations).")
 
-registry = load_registry(os.path.join(LEADS_DIR, "lead-registry.xlsx"))
+if MODE == MODE_RECORDS:
+    registry_all = load_registry(load_leads(ROOT, MODE_RECORDS))
+else:
+    registry_all = load_registry(registry_rows_from_file(os.path.join(LEADS_DIR, "lead-registry.xlsx")))
+registry = [r for r in registry_all if r["owner"] == "Joe"]
+# Owner is the routing key for the whole two-brain split, so a blank one means the
+# lead is on NOBODY's board. Surfaced as its own group rather than silently dropped.
+unowned = [r for r in registry_all if not r["owner"]]
 decisions_path = os.path.join(AUTO, "lead-board-decisions.json")
 DECISIONS = json.load(open(decisions_path)) if os.path.exists(decisions_path) else []
 hot_path = os.path.join(AUTO, "lead-board-hot.json")
 HOT = json.load(open(hot_path)) if os.path.exists(hot_path) else {"ranked":[],"proposed":[],"holds":[],"signals":[]}
 hot_n = len(HOT.get("ranked",[])) + len(HOT.get("proposed",[]))
 
+# ── Already-worked marking (2026-07-27) ────────────────────────────────────────
+# 34 router rows matched a registry contact by name and carried NO mark, so the
+# reservoir happily offered up people who are already an active deal — including
+# Dell's. The detail panel has always had an "Already in system" field; nothing
+# ever populated it for router rows. Name-only match on purpose: the registry
+# holds a City/Market, not a street address, so address cannot be the join key.
+# That makes this deliberately WIDE — a common name can collide. The mark
+# therefore reads "check before calling", never "this is the same person", and
+# it never removes anybody from the board (Joe qualifies, the system does not).
+def _namekey(n):
+    return re.sub(r"[^a-z]", "", str(n or "").lower())
+
+reg_by_name = {}
+for r in registry_all:
+    k = _namekey(r.get("name"))
+    if k: reg_by_name.setdefault(k, r)
+
+worked_n = 0
+for lead in L:
+    hit = reg_by_name.get(_namekey(lead["n"]))
+    if not hit: continue
+    who = hit.get("owner") or "unassigned"
+    stage = hit.get("stage") or "in the registry"
+    lead["flag"] = f"Already in the registry · {who} · {stage} — check before calling"
+    lead["worked"] = 1
+    worked_n += 1
+
 segCount = Counter(x["s"] for x in L)
 emailCov = sum(1 for x in L if x["e"] and "@" in str(x["e"]))
 counties_n = len({str(x["co"]).strip() for x in L if str(x.get("co","")).strip()})
 segmeta = [[m[0],m[1],m[2],m[3],segPlay.get(m[0],"")] for m in SEG_ORDER]
 queue_n = len([r for r in registry if r["stage"] != "Nurture (Drip)"])
+
+# ── the parity payload ───────────────────────────────────────────────────────
+# Everything the template is driven by, before a single byte of HTML exists.
+# tools/parity-lead-board.py diffs THIS, per ORDER 26(c)'s "diff the data
+# structure the template consumes, not the HTML". Writing it is opt-in so the
+# normal build is unchanged.
+_payload_to = os.environ.get("CARR_BOARD_PAYLOAD")
+if _payload_to:
+    json.dump({"leads": L, "registry": registry, "unowned": unowned,
+               "segcount": dict(segCount), "segmeta": segmeta,
+               "counties": counties_n, "emailcov": emailCov, "queue": queue_n,
+               "worked_n": worked_n, "dso_n": dso_n, "ef_n": ef_n, "ro_n": ro_n,
+               "na_n": na_n, "mode": MODE},
+              open(_payload_to, "w"), sort_keys=True, default=str)
+    print(f"payload -> {_payload_to}  (mode {MODE})")
 
 template = open(os.path.join(AUTO, "lead-board-template.html"), encoding="utf-8").read()
 stamp = date.today().strftime("%B %-d, %Y") if hasattr(date.today(),'strftime') else "today"
@@ -249,6 +411,24 @@ html = html.replace("__STAMP__", stamp)
 html = html.replace("__COUNTIES__", str(counties_n))
 html = html.replace("__TOTAL__", f"{len(L):,}").replace("__EMAIL__", f"{emailCov:,}")
 html = html.replace("__QUEUE__", str(queue_n)).replace("__DEC__", str(len(DECISIONS)))
+# Freshness, honestly (2026-07-27). The header used to show only the BUILD date, so a
+# board rebuilt today off a 15-day-old router read as current. Rule 28 says an
+# automation is verified by output freshness; this puts that check on the surface the
+# human actually reads, instead of leaving the source date alone in the footer.
+m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(router_path))
+if m:
+    src_d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    src_age = (date.today() - src_d).days
+    src_txt = src_d.strftime("%B %-d")
+    if   src_age <= 9:  src_state, src_note = "fresh", f"{src_age}d old"
+    elif src_age <= 16: src_state, src_note = "aging", f"{src_age}d old · a weekly refresh is due"
+    else:               src_state, src_note = "stale", f"{src_age}d old · OVERDUE, re-pull the router"
+else:
+    src_txt, src_state, src_note = "unknown", "stale", "the router filename carries no date"
+html = html.replace("__SRCDATE__", src_txt).replace("__SRCSTATE__", src_state).replace("__SRCNOTE__", src_note)
+html = html.replace("__UNOWNED_N__", str(len(unowned)))
+html = html.replace("__UNOWNED__", json.dumps(unowned,separators=(",",":")))
+html = html.replace("__WORKED_N__", str(worked_n))
 html = html.replace("__LEADS__", json.dumps(L,separators=(",",":")))
 html = html.replace("__REG__", json.dumps(registry,separators=(",",":")))
 html = html.replace("__SEGMETA__", json.dumps(segmeta,separators=(",",":")))
@@ -273,7 +453,10 @@ try:
 except Exception as e:
     publish_failed = e
     print(f"WARNING: shared-tier publish failed ({e}) — Dell's copy will go stale; fix before session end.")
-print(f"Router: {os.path.basename(router_path)} | {len(L):,} leads | queue {queue_n} | decisions {len(DECISIONS)}")
+_src = ("records (prospect_pool + v_export_leads)" if MODE == MODE_RECORDS
+        else "generated files")
+print(f"Router: {os.path.basename(router_path)} | {len(L):,} leads | queue {queue_n} | "
+      f"decisions {len(DECISIONS)} | source: {_src}")
 if publish_failed:
     # Corrective #2 (2026-07-25): a failed shared publish must FAIL the run, not
     # whisper — exit 0 here let the heartbeat report success while Dell's copy went stale.
