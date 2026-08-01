@@ -51,7 +51,7 @@
      "literal": ". Thank you."
     }
    ],
-   "owed_note": "Note the purchase template puts email before phone, the reverse of the lease template. Addressed by the map, not by a shared assumption."
+   "owed_note": "actor.phone + actor.email, purchase template's email-before-phone order per its segments."
   },
   "agent_block": {
    "where": "para:16",
@@ -78,7 +78,7 @@
      "from": "agent.phone"
     }
    ],
-   "owed_note": "No phone column on actor."
+   "owed_note": "actor.phone (column added + populated for joe 2026-07-31; owed only while an actor row genuinely lacks it, e.g. Dell until onboarding)."
   },
   "agent_email": {
    "where": "para:18",
@@ -90,7 +90,7 @@
      "from": "agent.email"
     }
    ],
-   "owed_note": "actor.email is null for joe and dell."
+   "owed_note": "actor.email (populated for joe 2026-07-31)."
   },
   "buyer": {
    "where": "table:0:0:1",
