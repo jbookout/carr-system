@@ -1,5 +1,7 @@
 # Vendor Info by Industry — CARR corporate approach reference (all 12 categories)
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Logged July 7, 2026 from CARR's corporate "Vendor Info by Industry" one-pager Joe provided (source PDF: `DNA/Network/CARR_VendorInfoByIndustry_source.pdf`, © CARR 2021). This is the FOUNDATIONAL, generic "how to approach each vendor category" layer — the pitch angle, conversation starters, meeting playbook, and conflict/overlap awareness for every referral-partner type. Two categories (bankers, supply reps) have DEEPER doctrine in `vendor-relationship-craft.md` Parts A–B — work from those; this file fills in the other ten and gives the one-screen version of all twelve. The per-category Conflicts/Overlap notes feed `introduction-rules.md` (see its "Cross-category service overlaps" block).*
 
 ## Where the deep guidance lives

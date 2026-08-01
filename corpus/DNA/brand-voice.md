@@ -1,5 +1,7 @@
 # CARR Brand Voice & Visual Identity
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Compiled from carr.us (national corporate site) and DNA/carr-profile.md. Use this for marketing/content work — flyers, social posts, web copy, presentations, signage, anything beyond 1:1 outreach. For email/outreach voice rules specifically, use DNA/templates.md, not this file — the two are intentionally different (see "Corporate vs. Local Voice" below).*
 
 Last updated: July 1, 2026

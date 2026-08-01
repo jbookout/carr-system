@@ -516,6 +516,11 @@ LOOP_TARGETS = {
     "open-loops-backlog.md": "00_Context/open-loops-backlog.md",
     "action-required.md": "DNA/Team/action-required.md",
     "team-loops.md": "DNA/Team/team-loops.md",
+    # ORDER 40. The idea bank is the same machinery with a different kind: its
+    # rows are loop_item kind='idea' and its scaffolding is loop_block, and
+    # build_loop_file is already generic over both. Nothing here is idea-specific,
+    # which is the argument for having put ideas on loop_item at all.
+    "idea-bank.md": "00_Context/idea-bank.md",
 }
 
 # NO GENERATED BANNER IS INJECTED INTO THESE FOUR, and that is deliberate.
@@ -826,8 +831,112 @@ def build_dossier(rel_path, mode="chronological"):
     return build
 
 
+# ---------------- decision history (one-writer, ORDER 40) ----------------
+
+DECISION_REL = "00_Context/decision-history.md"
+
+# THE BUDGET THAT REPLACES ORDER 4's MANUAL SPLIT.
+#
+# decision-history.md has been hand-split three times (Jul 22, Jul 25, Jul 31)
+# because a file that every session appends to grows past the 100KB tripwire and
+# somebody has to move the old half to an archive file. That whole ritual exists
+# only because the file WAS the storage. Now it is a render, so the window is a
+# query bound and the archive is the same query with a wider bound: the render
+# walks entries newest-first and stops before it would cross this budget.
+#
+# The consequence, which is the done-test: appending a 193rd entry can never
+# require a manual split again. The oldest entry simply falls out of the window
+# and stays exactly as reachable as it was — v_decision_entry holds all of them.
+# Nothing is deleted, nothing is moved, no second file is created.
+#
+# Set just under the 100KB tripwire the size sweep enforces.
+DECISION_BUDGET_BYTES = 95_000
+
+
+def build_decision_history(tmp_path, cur):
+    """Newest-first, grouped per session (rule 29), windowed by byte budget.
+
+    GROUPING IS HERE AND NOT IN THE VIEW, per R-40a: rule 29 ("one entry per
+    session") is doctrine, and doctrine belongs where Joe can change it without
+    a migration. v_decision_entry exposes session_key and entry_date and groups
+    nothing.
+    """
+    cur.execute(
+        "select entry_date, session_key, title, author, human_quote, agent_rationale, "
+        "       quote_absent, provenance "
+        "  from v_decision_entry "
+        " order by entry_date desc, session_key desc")
+    rows = cur.fetchall()
+
+    head = [
+        "# Decision History",
+        "",
+        "> **GENERATED from the CARR record layer — do not hand-edit.**",
+        "> Decisions are event rows (`subject_type='decision'`). To record one, use the",
+        "> verb; this file is a render of what the record already holds.",
+        ">",
+        "> **This is a WINDOW, not the whole history.** The render carries the most",
+        "> recent entries up to a size budget and stops. Everything older is not",
+        "> archived, moved or lost — it is the same query with a wider bound:",
+        "> `select * from v_decision_entry where entry_date >= '<date>' order by entry_date desc`.",
+        "> ORDER 4's manual 100KB split is retired by this: the window self-limits.",
+        "",
+    ]
+
+    body, shown, budget = [], 0, DECISION_BUDGET_BYTES - sum(len(l) + 1 for l in head)
+    used = 0
+    canonical = []
+    last_date = None
+    for (entry_date, session_key, title, author, quote, rationale,
+         quote_absent, provenance) in rows:
+        chunk = []
+        if entry_date != last_date:
+            chunk.append(f"## {entry_date}")
+            chunk.append("")
+        chunk.append(f"### {title}")
+        stamp = f"*{entry_date} · {author}*"
+        chunk.append(stamp)
+        chunk.append("")
+        if quote:
+            chunk.append(f"> {quote}")
+            chunk.append("")
+        if rationale:
+            chunk.append(rationale)
+            chunk.append("")
+
+        size = sum(len(l) + 1 for l in chunk)
+        if used + size > budget and shown:
+            break
+        body += chunk
+        used += size
+        shown += 1
+        last_date = entry_date
+        canonical.append([str(entry_date), session_key, title, author,
+                          quote or "", str(quote_absent)])
+
+    omitted = len(rows) - shown
+    tail = [
+        "---",
+        "",
+        f"*Window: {shown} of {len(rows)} recorded decisions"
+        + (f"; {omitted} older entr{'y' if omitted == 1 else 'ies'} are outside the "
+           "window and are read with a wider query, not from a second file."
+           if omitted else "; the whole history fits the window.") + "*",
+        "",
+    ]
+    from datetime import datetime, timezone
+    tail += [f"*Exported: {datetime.now(timezone.utc).isoformat()} · "
+             f"{len(rows)} decision(s) on record*", ""]
+
+    tmp_path.write_text("\n".join(head + body + tail))
+    return shown, canonical
+
+
 TARGETS = {
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
+    # ORDER 40. A render of decision events, windowed by byte budget rather than
+    # split by hand — see DECISION_BUDGET_BYTES.
+    "decision-history.md": (DECISION_REL, build_decision_history),
     "client-roster.xlsx": (ROSTER_REL, build_roster),
     "vendors.xlsx": (VENDORS_REL, build_vendors),
     "panhandle-team-deals.json": (DEALS_REL, build_deals),

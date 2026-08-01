@@ -1,5 +1,7 @@
 # CARR Profile — Shared Context
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *This file holds the stable background on Joe, Dell, and CARR. Referenced by all projects. Update only when something structurally changes (new partner, new territory, new services).*
 
 Last updated: July 2, 2026 (moved File & Folder Organization Standards to ai-operating-notes.md and AI Workflow Goals to its own roadmap.md, keeping this file scoped to stable business/background facts only)

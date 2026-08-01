@@ -1,5 +1,7 @@
 # CoStar Playbook — what's actually in there, and the ten workflows worth building
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Created 2026-07-13 from a live walk of Joe's logged-in CoStar (Tenants → Tenant Locations, Pensacola - FL market). Everything below was SEEN, not assumed. Where the data is missing, this file says so.*
 
 **The legal line, stated once:** CoStar is licensed to Joe as a subscriber. It **cannot be scraped** (that ruling is already in the idea bank as Retired R1). Everything here runs on **exports Joe is entitled to pull**, which we then process and enrich on our side. The derived lead lists are ours. Raw CoStar data is never redistributed, never published, and never handed to Dell's brain as raw CoStar data.

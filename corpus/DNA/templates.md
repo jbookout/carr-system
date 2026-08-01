@@ -1,5 +1,7 @@
 # Approved Email & Outreach Rules
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Consolidated from the CARR Outreach Agent Master Prompt (Make.com Scenario 1) and session learnings. Apply these rules to all written outreach — cold, warm, and re-engagement.*
 
 Last updated: July 12, 2026 (added Follow-Up & Objection Rules section — follow-up cadence, objection acknowledgment, one-option rule, proposal shape; Joe-directed X extraction). Prior: July 7, 2026 (added pitch hooks #11–13 patient-returns-ranking / most-options-wins / held-against-you, from CARR's flagship "Maximize Profitability" talk — Joe-approved). Prior: July 7, 2026 (added pitch hooks #8–10 advisor-incentive / dual-agency / negotiate-before-you-own, from CARR's "Startup vs. Acquisition" training talk — Joe-approved). July 7, 2026 (added pitch hooks #6 cost-of-going-unrepresented and #7 patient-experience, from the Colin Carr founder podcast — Joe-approved). July 3, 2026 (added the Make.com propagation note below)
@@ -125,3 +127,11 @@ The loop (runs before any draft reaches the human's send queue):
 4. Only a passing draft gets composed into the AI Gmail queue for the human to send.
 
 This makes the self-check a real generate → audit → revise loop instead of one pass, and moves the grading out of the maker's own context. Applies to every outreach type: T1 openers, the follow-up touches, vendor check-ins. Same evaluator-optimizer pattern the reply engine and the fill-engine use. Stamp: Joe's brain, 2026-07-20.
+
+## Signal-first outreach doctrine (merged 2026-07-31 from Vacca's 4-prompt outbound article, x.com/itsalexvacca/status/2082236149859488209 — read in full on the gold rule; his auto-send stage is DECLINED, the human gate stands, but two rules of his copy craft are adopted)
+
+1. **The signal answers "why are you writing to me this week" — and the copy is downstream of it.** Every outreach draft names its signal before a word gets written (lease event window, new entity filed, PECOS enrollment, relocation marker, a hire that means growth). A draft without a this-week reason is a drip, not outreach, and gets held for one. Our radar exists precisely to supply these; the draft's job is to carry the signal, not to decorate it.
+2. **One personalized line, carrying the signal — the rest stays standard.** Over-personalization is wasted work and reads as research theater: if the right doctor at the right practice in the right week gets ONE accurate observation about their situation ("your lease at [property] enters its option window this quarter"), that line proves the homework. If it is the wrong doctor, no anecdote about their podcast saves it. Templates stay templates; the signal line is the variable. (This also keeps drafts fast to review — Joe reads one line for truth, not five for cringe.)
+3. *Kept as ours, validated by his:* scripts train on what actually got replies (correction→rule already does this); first campaigns by hand, keep the winners — the stage we are in, by design.
+
+*[stamp: Joe's brain, Claude Code (Fable seat), 2026-07-31 night]*

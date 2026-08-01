@@ -1,5 +1,7 @@
 # CARR Training — Other Healthcare Reference (Chiropractic + Therapy: build-out, parking, the low-TI angle)
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Captured July 7, 2026 from CARR's internal Agent Training Portal (`training.carr.us`), the "Other Healthcare" dashboard. CARR proprietary agent knowledge — internal use. Source pages at the bottom. Companion to `dental-`, `medical-`, `vet-`, and `vision-vertical-guide.md`.*
 
 **What "Other Healthcare" is:** on the portal's vertical taxonomy this dashboard covers two smaller verticals — **Chiropractic** and **Therapy** (the therapy build-out page is **Physical Therapy**). CARR internally groups these with the specialist branches as the "**Vet, Vision, Therapy**" agent vertical (per the chiropractic page — that's the team to escalate these deals to). Neither page states a SF sizing band and neither has a standalone Pitch-to-Landlord page (the chiropractic page bakes the landlord narrative into its body). Both are **lower-build-out** uses, which is itself the negotiating angle.

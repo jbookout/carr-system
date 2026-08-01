@@ -49,3 +49,30 @@ DNA/Marketing/Social Media/facebook-strategy-2026.md	playbook	per-platform forma
 DNA/Marketing/Social Media/instagram-strategy-2026.md	playbook	per-platform format, strategy and distribution law
 DNA/Marketing/Social Media/facebook-ads-playbook-2026.md	playbook	the paid companion; ad mechanics transfer between both partners
 DNA/Marketing/Social Media/community-group-playbook-2026.md	playbook	purpose, membership and moderation law for the regional group
+
+# ── ORDER 30 phase 2 (added 2026-08-01 per ORDER 40 R-40d) ──────────────────
+# Joe-personal doctrine + the skill files. Two source roots outside the vault:
+#   drive: = 'My Drive' (the vault's parent)   home: = the Mac home directory
+# ai-operating-notes.md is deliberately ABSENT: it becomes compiled output of
+# the rule store, and a mirror of a generated file versions the wrong artifact.
+# Dell's tier is never mirrored in Joe's repo.
+00_Context/model-tiering.md	doctrine	which model tier does which work; Joe-personal operating doctrine (ORDER 30 phase 2)
+Marketing/Social Media/x-article-playbook.md	playbook	X article craft: research-first rule, batch-improvement law (ORDER 30 phase 2)
+Marketing/Social Media/social-media-workflow.md	playbook	the posting lanes and the video lane's standing state (ORDER 30 phase 2)
+drive:.claude/skills/network-debrief/SKILL.md	skill	network-debrief skill: operating instructions, canonical copy read by both harnesses
+drive:.claude/skills/social-media-manager/SKILL.md	skill	social-media-manager skill: operating instructions, canonical copy read by both harnesses
+drive:.claude/skills/watch-video/SKILL.md	skill	watch-video skill: operating instructions, canonical copy read by both harnesses
+drive:.claude/skills/write-content/SKILL.md	skill	write-content skill: operating instructions, canonical copy read by both harnesses
+drive:.claude/skills/writing-audit/SKILL.md	skill	writing-audit skill: operating instructions, canonical copy read by both harnesses
+home:.claude/skills/catchup/SKILL.md	skill	catchup portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/checkpoint/SKILL.md	skill	checkpoint portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/crux/SKILL.md	skill	crux portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/decide/SKILL.md	skill	decide portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/handoff/SKILL.md	skill	handoff portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/loose-ends/SKILL.md	skill	loose-ends portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/onboard/SKILL.md	skill	onboard portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/options/SKILL.md	skill	options portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/premortem/SKILL.md	skill	premortem portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/redteam/SKILL.md	skill	redteam portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/til/SKILL.md	skill	til portable meta-skill: local Claude Code only, Joe's tier
+home:.claude/skills/understand-check/SKILL.md	skill	understand-check portable meta-skill: local Claude Code only, Joe's tier

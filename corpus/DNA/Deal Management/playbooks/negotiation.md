@@ -1,5 +1,7 @@
 # Negotiation — Our Playbook (posture · landlord mindset · offers & documents)
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Our unified negotiation doctrine (consolidated July 8, 2026; sources in the ingestion ledger). ⚠️ The posture tactics, objection scripts, and financial-underwriting sections are INTERNAL — never client-facing, never content. The doctor-facing concepts (move-out math, options, "don't fixate on rate") are already routed to the content bank; the tactics stay here.*
 
 > **Two mantras under everything:** (1) **Start with the end in mind** — the target comes from research, never from the other side's number. (2) **It's the client's offer, not ours** — every counter is agreed with the client before it moves.
@@ -58,3 +60,38 @@
 
 ## Cross-references
 `renewals.md` (the renewal-specific application: Three Deals, move-out math, timing, objection scripts) · `diligence-and-valuation.md` (setting the number that goes in the document; purchase execution) · `financing.md` (lender mechanics behind guarantees/SBA/amortization) · `../deal-analysis-toolkit.md` + `../purchase-vs-lease-fill-guide.md` (the sheets every counter runs through) · `DNA/Research/costar-how-to.md` (comps; asking vs. effective rates). Content: five doctor-facing angles from this doctrine are already in the bank §2; everything marked ⚠️ stays internal.
+
+## Room command and coalition craft (merged 2026-07-31 from Nurijanian's "Dirty Secrets of Corporate Power," x.com/nurijanian/status/2074800431553995109 — written for PMs, mined for the deal table on Joe's directive; every line below re-aimed at tenant/buyer representation)
+
+- **Recommendation with a spine, always.** Never hand a client an option list and ask what they think. The shape: "My recommendation is B: it gets you X fastest without locking you into Y. The two risks are Z1 and Z2, and here is how I would manage each." The debate stays open; it just has a center. This IS the tenant-rep posture — doctors making their first CRE decision need direction, not a menu.
+- **Whoever names the tradeoff controls the decision.** Before the other side frames it ("quality vs speed," "rate vs term"), name the real one ("this is not rate vs term — it is flexibility-at-renewal vs total-occupancy-cost"). Applies to listing agents AND to keeping a client's decision on the right axis.
+- **Coalition before the meeting — public meetings punish surprise.** For any multi-stakeholder decision (partners, spouse, CPA, lender, a DSO's real owner): identify who can approve, who can block, who can quietly slow-roll, who makes it feel inevitable. Pre-brief the two who can kill it, separately, with the ask: "Before I take this to the group — what is your hardest objection?" Fix the real objections; ask the survivors for visible support. Not manipulation: respect for how groups actually decide.
+- **The crisis script, four sentences, verbatim shape:** "Here is what we know. Here is what we do not know yet. Here is the next move. Here is when I will update you." For inspection surprises, landlord pushback, financing wobbles. No fake optimism, no panicked over-explanation — clear-eyed about the problem, confident about the next move.
+- **Close every decision call with a spine:** "Decision: X. Owner: Y. Next evidence point: Z by <day>." A meeting that ends without that sentence did not end.
+- **Caveat-stripping (pairs with writing-rules):** in live rooms, cut "I could be wrong, but / just my opinion / maybe." Replace: "My read is… / The risk I would not ignore is… / The decision I would make is…"
+- **The broker principle, named:** the person sitting where information crosses becomes hard to ignore. That is the vendor-network model's mechanism — connect the lender's constraint to the CPA's timing to the contractor's lead time, and you are the indispensable center of the deal. Keep being the one who connects signals others see separately.
+
+*[stamp: Joe's brain, Claude Code (Fable seat), 2026-07-31 night — merged on Joe's read-everything-fully directive after a preview-only first pass missed this; the miss and the rule it produced are in the session record]*
+
+## The Deal Council — persona-lens critique before anything reaches the client (adopted 2026-07-31, Joe's go: "the deal council holy shit thats good"; lateral from the Lieberman interview-panel pattern)
+
+**When:** any client-bound deal document or recommendation — an LOI or RFP draft, a comparison sheet, a purchase-vs-lease recommendation, a search report's top picks — AFTER drafting and the writing-lint gate, BEFORE Joe (or the client) sees it.
+
+**How:** 3-5 parallel review agents, write-nothing, ONE lens each, none of them the drafting session (maker never checks its own work — preflight-pass.md §Multi-agent harness craft):
+- **The lender's chair:** would this finance? Rate/term realism, what underwriting asks, the number a bank will question first. (Purchase decks add the CPA lens: tax treatment, cash-flow after debt.)
+- **The contractor's chair:** is the build-out math real? TI allowance vs actual $/SF for this vertical (DNA/Reference guides carry the specs), timeline realism, the HVAC/electrical/mechanical line a GC would flag.
+- **The attorney's chair:** where's the redline bait? Ambiguous terms, missing protections (OpEx reassessment caps, assignment, exclusivity, relocation clauses), anything a landlord's counsel exploits.
+- **The skeptical advisor's chair — the Kevin Tuttle seat:** the hard money questions the client's own advisor will ask ("we pay you guys to do this"). If the document can't survive that voice, it isn't ready.
+
+**Output:** findings ranked by severity, each carrying the question the client would have been asked and the specific fix. Every finding gets addressed or consciously waived before handover — a waive is a decision, said out loud, never a skip. Significant catches log to the deal file (dated), because a council catch is exactly the evidence the learning loop feeds on. **The close (added same night, STORM's empty-chair check): the council's last line names the chair nobody sat in** — the seat this document's review DIDN'T cover (the patient-volume angle, the spouse's risk tolerance, the landlord's bank) — so the known gap travels with the document instead of hiding.
+
+**Why it wins:** the client's table always has more chairs than ours — the lender, the CPA, the spouse, the advisor. The council fills those chairs first, so the question gets answered in the document instead of in the meeting. Lenses are prompts, not people; the machinery (parallel write-nothing agents, adversarial posture) already exists and costs minutes.
+
+## Counterparty-tailored openings — the graph's offensive use (adopted 2026-07-31; extends §3 "know who's across the table" with the counterparty graph built the same night)
+
+Before ANY LOI, counter, or negotiation call: run `counterparty-history` on the listing agent / landlord / owner. Three postures by what comes back:
+- **Known counterparty with history:** adapt the opening to their documented moves. The live example: C-112's listing agent rewrites HVAC obligations into TI deductions and counters well above ask — so the next LOI against him spells HVAC responsibility unambiguously and anchors expecting the high counter. Pre-empting a counterparty's signature move in the FIRST draft is cheaper than negotiating it out of the third.
+- **Known counterparty, thin history:** use what exists, and treat the negotiation itself as capture — every observed pattern goes back in via `log-activity` / `add-premises` ownership rows, so the graph compounds per deal.
+- **No history:** say so honestly (a capture gap, not a clean slate), proceed on the §3 craft, and capture as you go.
+
+The seven-LOI Outlook archaeology (parked order) is the backfill that makes this rich for the counterparties we've faced most. Eventually a `prepare-document` input (counterparty-notes slot); doctrine first, plumbing when the factory next opens. *[stamp: Joe's brain, Claude Code (Fable seat session 4), 2026-07-31]*

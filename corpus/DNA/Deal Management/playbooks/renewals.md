@@ -1,5 +1,7 @@
 # Renewals — Our Playbook (strategy · sourcing · execution · scripts)
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Our unified renewal doctrine (consolidated July 8, 2026 from CARR training + producer practice; sources in the ingestion ledger). Renewals are the most common CRE transaction, the one healthcare providers get exploited on most, and the highest-return/lowest-labor deal type — and the one most agents underweight. Sections marked ⚠️ INTERNAL never go client-facing or into content.*
 
 ## 1. Doctrine — why renewals anchor the pipeline

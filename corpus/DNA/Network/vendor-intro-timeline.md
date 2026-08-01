@@ -1,5 +1,7 @@
 # Vendor Intro Timeline — introducing the client to the right vendor, at the right stage
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Added July 7, 2026 from Joe's "Vendor Intro Timeline." Source PDF filed alongside. This is the **concierge layer**: as a deal moves forward, the tenant rep connects the client to the right vendor category at the right moment. It's one of the concrete ways Joe & Dell add value beyond the lease itself.*
 
 ## How this differs from introduction-rules.md
@@ -22,7 +24,7 @@ Two notes on the mapping:
 1. When a prospect/client advances a deal stage, run the timeline for that stage.
 2. **Get the candidate vendors:** `python3 vendor_intro_for_stage.py <path>/vendors.xlsx "<stage>" [STATE]` — returns the stage's categories with real candidates, **referral-active ones first (★)**, state-matched, excluding "Avoid", "Target — not yet met", and "Prospect (uncontacted)" (never introduce a vendor you or Dell haven't actually built a relationship with — untouched/hunt-found prospects don't qualify until promoted). Run in the cloud workspace against a fresh export of the sheet.
 3. **Match on top of that:** honor `introduction-rules.md` — vertical fit and state split (e.g., BofA vet lending Diehl=AL / Nieto=FL), and skip anyone the client already has (from the intake "Key players").
-4. **Log every intro** in `DNA/Network/deals.md` (referral ledger) so the two-way referral relationship is tracked.
+4. **Log every intro** via the record layer — `link-parties` (or `links[]` on the touch's `log-activity`) — so the two-way referral relationship is tracked; deals.md's referral/reciprocity ledger renders from those rows (ORDER 39, 2026-08-01).
 
 ## Referral ethics — how to present multiple vendors (founder Q&A, Nov 2024)
 *(Added July 7, 2026 — from the Nov 2024 founder Q&A; source in the ingestion ledger.)*

@@ -67,8 +67,38 @@ def looks_binary(path):
         return b"\0" in fh.read(8192)
 
 
+# ── source roots (ORDER 30 phase 2 / ORDER 40 R-40d) ────────────────────────
+# Phase 1 mirrored one root: the CARR AI vault. Phase 2 adds doctrine that lives
+# OUTSIDE it — the skills, which sit in `.claude/skills` on the Drive (5) and on
+# the Mac (12). A row may therefore carry a root prefix:
+#
+#   00_Context/model-tiering.md          -> the vault (no prefix; phase 1 shape,
+#                                           so all 34 existing rows are untouched)
+#   drive:.claude/skills/x/SKILL.md      -> "My Drive", the vault's parent
+#   home:.claude/skills/x/SKILL.md       -> the Mac home directory
+#
+# Non-vault roots mirror under corpus/_drive/ and corpus/_home/ so the mirror
+# tree cannot collide with a vault path and nothing escapes corpus/ via `..`.
+#
+# DELL'S TIER IS NEVER MIRRORED HERE (R-40d). ~/.claude and this Drive account
+# are Joe's; Dell's equivalents live on his machine and mirror into his own repo.
+DRIVE_ROOT = os.path.dirname(VAULT)
+HOME_ROOT = os.path.expanduser("~")
+ROOTS = {"drive": (DRIVE_ROOT, "_drive"), "home": (HOME_ROOT, "_home")}
+
+
+def resolve(rel):
+    """A corpus-set row -> (absolute source path, absolute mirror path)."""
+    if ":" in rel:
+        prefix, _, tail = rel.partition(":")
+        if prefix in ROOTS:
+            root, sub = ROOTS[prefix]
+            return os.path.join(root, tail), os.path.join(CORPUS, sub, tail)
+    return os.path.join(VAULT, rel), os.path.join(CORPUS, rel)
+
+
 def load_set():
-    """corpus-set.tsv -> [(vault_relative_path, class, why)]. '#' comments, blank lines ok."""
+    """corpus-set.tsv -> [(path_with_optional_root_prefix, class, why)]. '#' comments ok."""
     rows = []
     with open(SET_FILE, encoding="utf-8") as fh:
         for line in fh:
@@ -104,8 +134,7 @@ def status():
 
     for rel, klass, why in load_set():
         in_set.add(rel)
-        src = os.path.join(VAULT, rel)
-        dst = os.path.join(CORPUS, rel)
+        src, dst = resolve(rel)
         rec = recorded.get(rel)
 
         if not os.path.exists(src):
@@ -161,8 +190,7 @@ def sync(force=False, prune=False):
     st_by_path = {f["path"]: f for f in status()["files"]} if os.path.exists(MANIFEST) else {}
 
     for rel, klass, why in load_set():
-        src = os.path.join(VAULT, rel)
-        dst = os.path.join(CORPUS, rel)
+        src, dst = resolve(rel)
         if not os.path.exists(src):
             refused.append((rel, "source missing on the Drive"))
             if rel in recorded:            # keep the old row; do not lose the history pointer

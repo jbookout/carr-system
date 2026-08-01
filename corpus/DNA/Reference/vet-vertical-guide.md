@@ -1,5 +1,7 @@
 # CARR Training — Veterinary Vertical Reference (build-out, sizing, the landlord pitch)
 
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+
 *Captured July 7, 2026 from CARR's internal Agent Training Portal (`training.carr.us/sessions/…`), Veterinary branch. CARR proprietary agent knowledge — internal use. The portal's Vet Sample Floorplan is marked "do not print/distribute to clients." Use this to size a vet client's space, run due-diligence, and negotiate TI/free rent. Source pages at the bottom. Companion to `dental-vertical-guide.md` and `medical-vertical-guide.md`.*
 
 **Good news vs. the medical branch:** the vet branch ships a full **Pitch to Landlord** on the portal — including the <1% default rate and two objection-killers (smell + sound) you won't find on the human-health pages. That pitch is CARR proprietary and captured verbatim-in-substance below (INTERNAL).
