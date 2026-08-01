@@ -17,11 +17,14 @@ compatibility_date = "2026-07-01"
 # fetching a client's metadata document.
 compatibility_flags = ["global_fetch_strictly_public"]
 
-# Custom domain on the practicecre.com zone (registered 7/30, this account).
-# api.* is the machine surface; reports.* (client links) is a separate Pages
-# project per open-loops #105; the apex stays free for the future public site.
+# Custom domains. api.* is the machine surface; reports.* (client links) is a
+# separate Pages project per open-loops #105; the apex stays free for the future
+# public site. doctorcre.com added 2026-08-01 (Joe's domain ruling): PRIMARY name
+# as of Dell's onboarding — practicecre.com stays live as an alias; its
+# retirement is a later, unhurried decision. Same Worker answers both.
 routes = [
-  { pattern = "api.practicecre.com", custom_domain = true }
+  { pattern = "api.practicecre.com", custom_domain = true },
+  { pattern = "api.doctorcre.com", custom_domain = true }
 ]
 
 # OAuth grant/token storage for workers-oauth-provider. The binding name is
