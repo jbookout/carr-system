@@ -91,10 +91,15 @@ def load_registry(path):
                         "Specialty", "City/Market", "County", "Email", "Phone", "Next Action",
                         "Next Action Date", "Last Touch", "Detail File"],
                    "lead-registry.xlsx[Registry]")
+    # Returns EVERY row with its owner attached (2026-07-27). It used to filter to
+    # Owner=="Joe" right here, which meant 37 rows with a BLANK owner were dropped on
+    # the floor: they appear on nobody's board, Joe's or Dell's. Splitting happens at
+    # the call site now, so the unowned ones can be surfaced instead of vanishing.
     out=[]
     for r in data_rows(ws):
-        if not r[c["Lead ID"]] or r[c["Owner"]] != "Joe": continue
-        out.append({"id":r[c["Lead ID"]],"stage":r[c["Stage"]],"seg":r[c["Segment"]],"name":r[c["Contact Name"]],
+        if not r[c["Lead ID"]]: continue
+        out.append({"owner":(r[c["Owner"]] or "").strip(),
+            "id":r[c["Lead ID"]],"stage":r[c["Stage"]],"seg":r[c["Segment"]],"name":r[c["Contact Name"]],
             "practice":r[c["Practice"]],"spec":r[c["Specialty"]],
             "city":r[c["City/Market"]],"county":r[c["County"]],"email":r[c["Email"]] or "","phone":r[c["Phone"]] or "",
             "next":str(r[c["Next Action"]] or ""),"nextdate":norm(r[c["Next Action Date"]]),"lasttouch":norm(r[c["Last Touch"]]),
@@ -228,12 +233,43 @@ segPlay[NA_SEG] = ("National Accounts: multi-location and expanding healthcare o
     "Relationship-first \u2014 work the warm path to leadership, not a cold opener. No facility type or size is "
     "auto-excluded; the high-end boundary is Joe & Dell\u2019s judgment. Seed case: AltaPointe Health (Mobile, ~25 locations).")
 
-registry = load_registry(os.path.join(LEADS_DIR, "lead-registry.xlsx"))
+registry_all = load_registry(os.path.join(LEADS_DIR, "lead-registry.xlsx"))
+registry = [r for r in registry_all if r["owner"] == "Joe"]
+# Owner is the routing key for the whole two-brain split, so a blank one means the
+# lead is on NOBODY's board. Surfaced as its own group rather than silently dropped.
+unowned = [r for r in registry_all if not r["owner"]]
 decisions_path = os.path.join(AUTO, "lead-board-decisions.json")
 DECISIONS = json.load(open(decisions_path)) if os.path.exists(decisions_path) else []
 hot_path = os.path.join(AUTO, "lead-board-hot.json")
 HOT = json.load(open(hot_path)) if os.path.exists(hot_path) else {"ranked":[],"proposed":[],"holds":[],"signals":[]}
 hot_n = len(HOT.get("ranked",[])) + len(HOT.get("proposed",[]))
+
+# ── Already-worked marking (2026-07-27) ────────────────────────────────────────
+# 34 router rows matched a registry contact by name and carried NO mark, so the
+# reservoir happily offered up people who are already an active deal — including
+# Dell's. The detail panel has always had an "Already in system" field; nothing
+# ever populated it for router rows. Name-only match on purpose: the registry
+# holds a City/Market, not a street address, so address cannot be the join key.
+# That makes this deliberately WIDE — a common name can collide. The mark
+# therefore reads "check before calling", never "this is the same person", and
+# it never removes anybody from the board (Joe qualifies, the system does not).
+def _namekey(n):
+    return re.sub(r"[^a-z]", "", str(n or "").lower())
+
+reg_by_name = {}
+for r in registry_all:
+    k = _namekey(r.get("name"))
+    if k: reg_by_name.setdefault(k, r)
+
+worked_n = 0
+for lead in L:
+    hit = reg_by_name.get(_namekey(lead["n"]))
+    if not hit: continue
+    who = hit.get("owner") or "unassigned"
+    stage = hit.get("stage") or "in the registry"
+    lead["flag"] = f"Already in the registry · {who} · {stage} — check before calling"
+    lead["worked"] = 1
+    worked_n += 1
 
 segCount = Counter(x["s"] for x in L)
 emailCov = sum(1 for x in L if x["e"] and "@" in str(x["e"]))
@@ -249,6 +285,24 @@ html = html.replace("__STAMP__", stamp)
 html = html.replace("__COUNTIES__", str(counties_n))
 html = html.replace("__TOTAL__", f"{len(L):,}").replace("__EMAIL__", f"{emailCov:,}")
 html = html.replace("__QUEUE__", str(queue_n)).replace("__DEC__", str(len(DECISIONS)))
+# Freshness, honestly (2026-07-27). The header used to show only the BUILD date, so a
+# board rebuilt today off a 15-day-old router read as current. Rule 28 says an
+# automation is verified by output freshness; this puts that check on the surface the
+# human actually reads, instead of leaving the source date alone in the footer.
+m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(router_path))
+if m:
+    src_d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+    src_age = (date.today() - src_d).days
+    src_txt = src_d.strftime("%B %-d")
+    if   src_age <= 9:  src_state, src_note = "fresh", f"{src_age}d old"
+    elif src_age <= 16: src_state, src_note = "aging", f"{src_age}d old · a weekly refresh is due"
+    else:               src_state, src_note = "stale", f"{src_age}d old · OVERDUE, re-pull the router"
+else:
+    src_txt, src_state, src_note = "unknown", "stale", "the router filename carries no date"
+html = html.replace("__SRCDATE__", src_txt).replace("__SRCSTATE__", src_state).replace("__SRCNOTE__", src_note)
+html = html.replace("__UNOWNED_N__", str(len(unowned)))
+html = html.replace("__UNOWNED__", json.dumps(unowned,separators=(",",":")))
+html = html.replace("__WORKED_N__", str(worked_n))
 html = html.replace("__LEADS__", json.dumps(L,separators=(",",":")))
 html = html.replace("__REG__", json.dumps(registry,separators=(",",":")))
 html = html.replace("__SEGMETA__", json.dumps(segmeta,separators=(",",":")))
