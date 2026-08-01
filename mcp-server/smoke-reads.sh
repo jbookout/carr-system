@@ -16,7 +16,9 @@
 # idempotency keys: they wrote once, on the first run in history, and replay for
 # ever after. Those few rows are the price of covering the write path, and a
 # twelve-hour production outage is what not covering it cost.
-# Eleven checks as of ORDER 19 (the eleventh is the completion path).
+# SEVENTEEN checks as of ORDER 36 (the seventeenth is the analysis write path).
+# The count had been stale at "eleven as of ORDER 19" since ORDER 27 — ORDERS 27,
+# 33, 34 and 36 each added a check without moving it. Recount when you add one.
 
 set -uo pipefail
 
@@ -246,6 +248,46 @@ if [ "$_l_ok" -eq 1 ]; then
   echo "  ok    auto-edge path: log-activity links[] resolves refs + returns existing edge  (${REPS}/${REPS})"; pass=$((pass+1))
 else
   echo "  FAIL  auto-edge path — $_l_why"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
+
+# --- ORDER 36: kind:analysis — the dossier write path --------------------------
+# FROZEN probe (fixed key + args; edit nothing, ever — the envelope hashes the
+# arguments with the key, so a one-character change returns key_reuse for ever).
+#
+# WHY THIS EXISTS. ORDER 36 makes the 20 prospect dossiers generated renders, and
+# the ONLY way new analysis reaches one is log-activity kind:analysis. That slug
+# has to clear TWO independent gates that fail in different places: the enum in
+# this Worker's inputSchema (a deploy) and the activity_kind ref-table row (a
+# migration, 0028). Deploy the Worker without applying 0028 and the row dies on
+# the FK; apply 0028 without deploying and the verb rejects the argument. This
+# probe is red until BOTH have landed, which is exactly the joint check the
+# supervisor's deploy-plus-apply needs.
+#
+# THE SUBJECT IS A VENDOR, DELIBERATELY. v_export_dossier_analysis only joins
+# client/lead subjects carrying notes_path, so an analysis row on V-CPA-006 can
+# never surface in a rendered dossier. A client fixture would print "smoke probe"
+# as the newest analysis, in full, in a real prospect file. kind:analysis is also
+# is_contact=false in 0028, so like the note probe above it cannot move a Last
+# Touch value in the exports.
+echo
+_a_ok=1; _a_why=""
+for i in $(seq 1 "$REPS"); do
+  call log-activity '{"idempotency_key":"smoke-analysis-probe-permanent","ref":"V-CPA-006","kind":"analysis","summary":"smoke analysis probe — replayed, never duplicated","detail":"ORDER 36 probe: proves the analysis slug clears both the Worker enum and the activity_kind ref table."}'
+  if echo "$RESULT" | grep -q '"error"'; then _a_ok=0; _a_why="transport/protocol error"; break; fi
+  if echo "$RESULT" | grep -q '"isError":true'; then
+    _a_ok=0; _a_why="verb returned isError — Worker not deployed with the analysis slug, or 0028 not applied (FK on activity_kind)"; break; fi
+  if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _a_ok=0; _a_why="no ok:true in the envelope response"; break; fi
+  # rep 1 may legitimately be the first-ever insert; every rep after it replays
+  if [ "$i" -gt 1 ] && ! echo "$RESULT" | grep -q '\\"replayed\\":true'; then
+    _a_ok=0; _a_why="rep $i did NOT replay — the envelope wrote twice"; break
+  fi
+  [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+done
+if [ "$_a_ok" -eq 1 ]; then
+  echo "  ok    analysis path: log-activity kind:analysis accepted + replays  (${REPS}/${REPS})"; pass=$((pass+1))
+else
+  echo "  FAIL  analysis path — $_a_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
 fi
 

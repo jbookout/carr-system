@@ -858,7 +858,13 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       ref: { type: "string", description: "L-/C-/V- ref or deal name" },
-      kind: { type: "string", enum: ["call","email_out","email_in","meeting","tour","text","note","counter_sent","counter_received","loi","lease_signed","task"] },
+      // 'analysis' added by ORDER 36 (one-writer Phase B). It is the LAST slug on
+      // purpose: it is not a touch (is_contact=false in activity_kind, so it can
+      // never move Last Touch) and it is the write path for dossier analysis
+      // prose — summary is the title, detail is the long text, and the newest
+      // one renders in full into DNA/Clients/prospects/<name>.md. Requires
+      // migration 0028; without it the FK to activity_kind rejects the row.
+      kind: { type: "string", enum: ["call","email_out","email_in","meeting","tour","text","note","counter_sent","counter_received","loi","lease_signed","task","analysis"] },
       summary: { type: "string" }, detail: { type: "string" },
       occurred_at: { type: "string", description: "ISO timestamp; omit for now" },
       owed: { type: "string", description: "what is missing (a figure, a name) — recorded as owed" },
