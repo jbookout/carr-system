@@ -15,28 +15,32 @@ distinguishes the two: 63 activity rows carry source='import' and one of them
 That is the ORDER 31 / import_wave1 pattern, and this importer follows it.
 Ratified by the Fable supervisor seat 2026-08-01 (lane (b)).
 
-WHAT IS IN SCOPE, AND WHY IT IS ONLY TWO ENTRIES. The two ledgers hold nine entries
-between them. Seven are parked or review-listed and are NOT touched here, because
-every one of them fails a stop rule the order states:
+WHAT IS IN SCOPE: THREE OF NINE ENTRIES, after Joe's rulings of 2026-08-01.
+The two ledgers hold nine entries between them. Six are deliberately not here:
 
-  hunt-ledger H2  Hunt #1, "run by the Monday brief" — that is the `automation`
-                  actor, which no verb and no ruling has made writable. Author
-                  cannot be preserved, so it is not imported. Parked.
-  hunt-ledger H3  "Honest note on hunt #1" — no date stamp, no author stamp, and
-                  no subject ref to attach to. Review list.
+  hunt-ledger H3  "Honest note on hunt #1" — no date stamp, no author stamp, no
+                  subject ref. DROPPED TO FREEZE by Joe's ruling: not imported,
+                  the text lives on in the freeze zip and nowhere else.
   hunt-ledger H4  "Hunt #2 upgrade" — dated, author unstamped, no subject ref.
-                  Review list.
-  deals R2/R3     Nilesh Patel / Jon Shaw "plugged into N deals" — no date, no
-                  author, and they are DERIVED COUNTS: deals.md's own line 120
-                  says of exactly these "don't hand-maintain counts, derive them
-                  on demand". Importing one would fossilize a number the file
-                  calls derived. Review list.
-  deals R4/R5     Nate @ EOS / Trey @ Lazzarri — each is in the vendor book TWICE,
-                  never merged (V-MKT-001/V-MSC-024 and V-GC-001/V-GC-013). The
-                  lone-name rule bars picking one. Parked pending Joe's merge.
+                  DROPPED TO FREEZE by the same ruling.
+  deals R2-R5     Nilesh Patel / Jon Shaw / Nate @ EOS / Trey @ Lazzarri,
+                  "plugged into N deals". NOT IMPORTED, by Joe's STANDING RULING:
+                  counts always derive from deal records, never import as notes.
+                  deals.md's own two-way-ledger section already said this ("don't
+                  hand-maintain counts, derive them on demand"); the ruling makes
+                  it binding. Each became a backfill-check loop item instead —
+                  find and record the underlying deals, and the count then derives
+                  itself. Importing the number would have frozen a stale 2 where
+                  the deal records already show Jon Shaw in three.
 
-Nothing is lost by leaving them: neither .md file is being retired (11 live writer
-sites still point at them), and both are frozen at
+H2 WAS PARKED AND IS NOW IN, and it is the reason this is an importer at all.
+It was held back because its author is "the Monday brief" — the automation that
+runs the weekly hunt, not a person. `log-activity` cannot express that: the Worker
+issues only `joe` or `dell`. Here `actor_id` is an ordinary column, so a non-human
+author is sayable. Joe ruled it imports with actor `system` and the provenance
+string preserved on the row, so the entry never claims a human wrote it.
+
+Nothing is lost either way: both source files are frozen at
 CARR AI/Archive/snapshots/2026-08-01-{hunt-ledger,deals-reciprocity}-freeze.zip.
 
 WHAT R1 IMPORTS, AND WHAT IT DELIBERATELY DOES NOT. Step 3 says import only the
@@ -94,6 +98,20 @@ HUNT_H1_TEXT = (
     "do. Candidates proposed: (to run). Verdicts: (to run)."
 )
 
+HUNT_H2_TEXT = (
+    "Hunt #1 (public-web track, run by the Monday brief), 2026-07-13. Gaps aimed at: "
+    "(a) Bay/Walton County — the sheet is Pensacola-heavy (41 of 219 territory-tagged rows are "
+    "Pensacola; Bay/Walton is near-empty) while the region's only new medical construction is "
+    "happening there; (b) veterinary vertical — exactly ONE vet-vertical record in 284 rows, "
+    "against a consolidation story Joe is publishing about this week; (c) Architect/Design "
+    "(7 records) and General Contractor (14) — thin categories with no PCB/Bay presence. "
+    "Candidates proposed: 5 (listed in the brief). Deduped against all 284 vendors.xlsx rows + "
+    "targets: no collisions. 1st Med Financial (vet lender) was dropped from the list to avoid "
+    "confusion with the existing V-BRK-007 1st Med Transitions, a different firm. Live Oak Bank "
+    "was dropped — already in the sheet (V-BNK-011 Mike Stanton). "
+    "Verdicts: PENDING JOE — connect / pass on each."
+)
+
 R1_TEXT = (
     "Standing reciprocity arrangement with Joe Ed Jackson (V-SUP-051, Benco Dental): CARR is "
     "passing him the Provide 1% lender referral credit on this deal and on every deal he "
@@ -118,6 +136,24 @@ ENTRIES = [
         # Every ref named by the entry as a subject it touches. All five resolved
         # against v_ref_index before this list was written; none is a guess.
         "subjects": ["V-MSC-017", "V-CPA-019", "V-BRK-015", "T-022", "L-165"],
+    },
+    {
+        "entry_id": "H2",
+        "ledger": "hunt-ledger",
+        "source_file": "DNA/Network/hunt-ledger.md",
+        # Not a person. Joe's ruling 2026-08-01: import with actor `system` and keep
+        # the provenance string on the row, so nothing reads as a human's note.
+        "author": "system",
+        "provenance": "Monday brief automation",
+        "occurred_on": "2026-07-13",
+        "summary": "Vendor hunt #1 RUN (public-web track) — Bay/Walton coverage, veterinary "
+                   "vertical, Architect/GC thin categories; 5 candidates proposed, verdicts "
+                   "pending Joe",
+        "detail": HUNT_H2_TEXT,
+        # The two refs the entry names. The five CANDIDATES it proposed are not refs:
+        # they were firms with no record at the time, and the entry itself says the
+        # list lives "in the brief". Minting records for them would be inventing data.
+        "subjects": ["V-BRK-007", "V-BNK-011"],
     },
     {
         "entry_id": "R1",
@@ -187,11 +223,19 @@ def main():
                     report.append(f"- SKIP (already imported) `{ext_key}` — {ref} {name}")
                     continue
 
+                # A non-human author is preserved twice on purpose: `actor_id` carries
+                # `system`, which is honest but coarse (every migration and exporter is
+                # also `system`), and the detail carries WHICH automation wrote it. The
+                # actor answers "not a person"; the provenance line answers "then what".
+                detail = e["detail"]
+                if e.get("provenance"):
+                    detail = f"[Recorded by: {e['provenance']}]\n\n{detail}"
+
                 cur.execute(
                     f"insert into activity (occurred_at, actor_id, kind, summary, detail, "
                     f"{FK[st]}, source) "
                     "values (%s::date, %s, 'note', %s, %s, %s, 'import') returning id",
-                    (e["occurred_on"], author_id, e["summary"], e["detail"], sid))
+                    (e["occurred_on"], author_id, e["summary"], detail, sid))
                 act_id = cur.fetchone()[0]
 
                 cur.execute(
@@ -207,11 +251,14 @@ def main():
                     "'import_migration')",
                     (system, st, sid,
                      f'{{"activity": "{act_id}", "external_key": "{ext_key}", '
-                     f'"source_file": "{e["source_file"]}", "author": "{e["author"]}"}}'))
+                     f'"source_file": "{e["source_file"]}", "author": "{e["author"]}"'
+                     + (f', "provenance": "{e["provenance"]}"' if e.get("provenance") else "")
+                     + "}"))
 
                 inserted += 1
+                prov = f" ({e['provenance']})" if e.get("provenance") else ""
                 report.append(f"- INSERT `{ext_key}` — {ref} {name} · {st} · "
-                              f"author {e['author']} · occurred {e['occurred_on']}")
+                              f"author {e['author']}{prov} · occurred {e['occurred_on']}")
 
         if a.dry_run:
             conn.rollback()
@@ -222,7 +269,8 @@ def main():
     out = ["# ORDER 39 — md ledger import", "",
            f"*{'DRY RUN (rolled back)' if a.dry_run else 'APPLIED'} · {stamp}*", "",
            f"**inserted {inserted} · skipped-existing {skipped} · "
-           f"entries in scope 2 of 9 (7 parked/review-listed, see module docstring)**", "",
+           f"entries in scope {len(ENTRIES)} of 9 (H3/H4 dropped to freeze; R2-R5 retired to "
+           f"derivation per Joe's standing counts ruling — see module docstring)**", "",
            *report, ""]
     os.makedirs("out", exist_ok=True)
     path = os.path.join("out", f"md-ledger-import-{stamp}.md")
