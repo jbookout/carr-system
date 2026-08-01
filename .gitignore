@@ -6,3 +6,7 @@ out/
 mcp-server/.neon
 _to_delete/
 *.bak-*
+
+# PII never lives in this repo (Joe ruling (a), 2026-08-01; ORDER 42)
+frozen-sources/
+exporters/templates/
