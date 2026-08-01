@@ -101,6 +101,55 @@ def build_vendors(tmp_path, cur):
     return len(in_market), in_market
 
 
+# ---------------- lead-router-2026-07-13.xlsx (target #8, Wave 3) ----------------
+#
+# The router regenerates from prospect_pool so every remaining reader keeps
+# working — Dell's side included, and Dell has no DB path at all (ORDER 28's
+# central finding). It rides the same A8 gate as the other seven.
+#
+# DEATH SENTENCE, recorded here and in the amendment-5 shim registry: this target
+# retires at the Wave 4 repoint, once the board view is CONFIRMED the only reader
+# — confirmed, not assumed. Until then it regenerates nightly.
+#
+# FIDELITY: the sheet's 17 columns split in two. Nine are DB-owned and come from
+# the record. The other eight (Owns?, SUNBIZ entities, Lic Yrs, Licensed, Age
+# Band, # at Address, Typical Term (est), License) pass back out of source_row
+# verbatim with their native types intact — the same rule build_deals applies to
+# the legacy deal fields. Row ORDER is the source file's, restored from
+# source_seq: jsonb carries no order, and a reshuffled sheet is a diff nobody
+# can read.
+#
+# EVERY POOL ROW EXPORTS, whatever its status. A suppressed_dup is still a row and
+# a promoted row is still part of the market map. Filtering here would quietly
+# shrink the file Dell reads, which is never-pre-qualify failing at the far end.
+
+ROUTER_REL = "DNA/Leads/lead-router-2026-07-13.xlsx"
+ROUTER_SHEET = "Lead Router"
+ROUTER_COLS = ["SEGMENT", "THE PLAY", "Owns?", "SUNBIZ entities", "Name", "Profession",
+               "Lic Yrs", "Licensed", "Age Band", "# at Address", "Practice Address",
+               "City", "County", "Typical Term (est)", "Email", "Phone", "License"]
+ROUTER_DB_OWNED = {
+    "SEGMENT": "SEGMENT", "THE PLAY": "THE PLAY", "Name": "Name", "Profession": "Profession",
+    "Practice Address": "Practice Address", "City": "City", "County": "County",
+    "Email": "Email", "Phone": "Phone",
+}
+
+
+def build_router(tmp_path, cur):
+    cur.execute("select * from v_export_pool order by source_seq")
+    cols = [d[0] for d in cur.description]
+    rows = []
+    for r in cur.fetchall():
+        rec = dict(zip(cols, r))
+        legacy = rec.get("source_row") or {}
+        rows.append([rec[ROUTER_DB_OWNED[c]] if c in ROUTER_DB_OWNED else legacy.get(c)
+                     for c in ROUTER_COLS])
+    wb = openpyxl.load_workbook(_template(ROUTER_REL))
+    _rewrite_sheet(wb, ROUTER_SHEET, ROUTER_COLS, rows)
+    wb.save(tmp_path)
+    return len(rows), rows
+
+
 # ---------------- panhandle-team-deals.json ----------------
 
 DEALS_REL = "DNA/Deal Management/panhandle-team-deals.json"
@@ -284,4 +333,6 @@ TARGETS = {
     "clients-active.md": (ACTIVE_REL, build_clients_active),
     "compiled-rules-shared": (RULES_SHARED_REL, build_rules_shared),
     "compiled-rules-joe": (RULES_JOE_REL, build_rules_joe),
+    # #8 (Wave 3, ORDER 25d). Carries a death sentence — see build_router.
+    "lead-router-2026-07-13.xlsx": (ROUTER_REL, build_router),
 }

@@ -731,6 +731,74 @@ export const TOOLS = {
     }),
   },
 
+  "promote-pool": {
+    write: true,
+    description: "Promote a prospect_pool row into a real lead: mints the party, mints the next L-ref, copies the identity, contact and est-lease-event stamps across, points the pool row at the new lead and flips it to 'promoted'. ONE-WAY BY DESIGN — there is no demote verb; a lead created in error is worked through the lead's own lifecycle. Only a row whose status is still 'pool' can promote: a 'promoted' row would duplicate, and a 'suppressed_dup' row already points at the record it duplicates. A dup_tier 'review' row IS promotable — that tier exists precisely so a weak match never silently blocks Joe. Read the row from v_pool first and pass its version as base_version.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      pool_id: { type: "string", description: "prospect_pool.id, from v_pool" },
+      base_version: { type: "integer", description: "the pool row's version, from a fresh read" },
+      stage: { type: "string", description: "lead_stage slug — a promoted lead is one Joe is working, so it needs a real stage" },
+      lane: { type: "string", description: "lead_lane slug (optional)" },
+      source_detail: { type: "string", description: "why this one, now — free text provenance" } },
+      required: ["idempotency_key","pool_id","base_version","stage"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "promote-pool", args, async () => {
+      await versionGuard(c, "prospect_pool", args.pool_id, args.base_version);
+      const p = (await c.query(
+        `select id, source, source_key, status, dup_tier, dup_ref, name, org_name, vertical,
+                city, county, state, email, phone, segment, est_lease_event, est_basis
+           from prospect_pool where id = $1`, [args.pool_id])).rows[0];
+      if (p.status !== "pool")
+        throw new ToolError({ error: "not_promotable", status: p.status, dup_ref: p.dup_ref,
+          hint: p.status === "promoted"
+            ? "this row already became a lead; read v_pool for its promoted_ref"
+            : "this row is marked as a duplicate of an existing record — work that record instead" });
+
+      // The org, when the source named one, becomes its own party so the lead
+      // hangs off a person who belongs to a practice — the shape add-party and
+      // every export view already assume.
+      let orgId = null;
+      if (p.org_name) {
+        orgId = (await c.query(
+          "insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id",
+          [p.org_name, actor.id])).rows[0].id;
+      }
+      const partyId = (await c.query(
+        `insert into party (kind,name,org_id,phone,email,city,state,county,specialty,
+                            created_by,updated_by)
+         values ('person',$1,$2,$3,$4,$5,$6,$7,$8,$9,$9) returning id`,
+        [p.name, orgId, p.phone || null, p.email || null, p.city || null,
+         p.state || null, p.county || null, p.vertical || null, actor.id])).rows[0].id;
+
+      const ref = (await c.query(
+        "select 'L-' || lpad(nextval('ref_lead_seq')::text, 3, '0') as r")).rows[0].r;
+      // est_lease_event rides along per Joe's ruling 3, and it keeps its est-
+      // naming on the far side: it lands in lead.est_lease_event with its basis
+      // in event_source, never in a field that reads as a confirmed date.
+      const lead = (await c.query(
+        `insert into lead (registry_ref, party_id, stage, lane, segment, source_type,
+           source_detail, est_lease_event, event_source, owner_id, owner_label,
+           created_by, updated_by)
+         values ($1,$2,$3,$4,$5,'prospect-pool',$6,$7,$8,$9,$10,$9,$9) returning id`,
+        [ref, partyId, args.stage, args.lane || null, p.segment || null,
+         args.source_detail || `promoted from ${p.source} ${p.source_key}`,
+         p.est_lease_event || null, p.est_basis || null, actor.id, actor.display])).rows[0].id;
+
+      await c.query(
+        `update prospect_pool set status='promoted', promoted_lead_id=$1, updated_by=$2
+          where id=$3 and status='pool'`, [lead, actor.id, args.pool_id]);
+
+      await writeEvent(c, actor, "promote-pool", "lead", lead,
+        { new: { ref, from_pool: p.source_key, est_lease_event: p.est_lease_event },
+          idempotency_key: args.idempotency_key });
+      await writeEvent(c, actor, "promote-pool", "prospect_pool", args.pool_id,
+        { field: "status", old: { status: "pool" }, new: { status: "promoted", lead: ref },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, lead_id: lead, ref, party_id: partyId,
+               est_lease_event: p.est_lease_event, est_basis: p.est_basis };
+    }),
+  },
+
   "new-client": {
     write: true,
     description: "Create a client over a party; mints the next C-ref. ALWAYS ask how they found us (acquisition_source) at intake — consult attribution starts day one.",

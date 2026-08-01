@@ -197,6 +197,18 @@ def main():
         "vendors.xlsx",
         sheet_dict(vault / "DNA/Network/vendors.xlsx", "Vendors", "ID"),
         sheet_dict(staged / "vendors.xlsx", "Vendors", "ID")))
+    # Target #8 (Wave 3, ORDER 25d). Checked only when it has actually been
+    # staged: the pool migration has to land before the exporter can produce it,
+    # and a missing staged file must not crash the reconcile for the other seven.
+    # Keyed on License — the router's own identifier, measured present and unique
+    # on all 9,320 rows, which is also what the importer keys idempotency on.
+    router_staged = staged / "lead-router-2026-07-13.xlsx"
+    if router_staged.exists():
+        results.append(diff_target(
+            "lead-router-2026-07-13.xlsx",
+            sheet_dict(vault / "DNA/Leads/lead-router-2026-07-13.xlsx", "Lead Router", "License"),
+            sheet_dict(router_staged, "Lead Router", "License")))
+
     live_deals = {d["name"]: d for d in json.loads(
         (vault / "DNA/Deal Management/panhandle-team-deals.json").read_text())["deals"]}
     staged_deals = {d["name"]: d for d in json.loads(
