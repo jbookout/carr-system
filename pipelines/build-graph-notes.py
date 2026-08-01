@@ -27,7 +27,8 @@ import sys, os, re, json, glob, shutil, unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
-                                load_leads, load_vendors, resolve_mode, source_note)
+                                load_leads, load_party_links, load_vendors, resolve_mode,
+                                source_note)
 
 MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
 MODE = effective_mode(MODE, "graph-notes")
@@ -118,6 +119,8 @@ vendors = load_vendors(ROOT, MODE)
 leads   = load_leads(ROOT, MODE)
 clients = load_clients(ROOT, MODE)
 deals   = load_deals_doc(ROOT, MODE)["deals"]
+# [ORDER 32] The intro graph's REAL edges (v_party_graph), or None in files mode.
+party_links = load_party_links(MODE)
 detail_files = {os.path.splitext(f)[0].lower(): os.path.splitext(f)[0]
                 for f in os.listdir(os.path.join(ROOT, "DNA/Clients/prospects")) if f.endswith(".md")}
 
@@ -182,6 +185,13 @@ open(os.path.join(OUT, "README.txt"), "w").write(
 
 counts = {"vendors":0, "leads":0, "clients":0, "deals":0}
 
+# [ORDER 32] node title -> the file that node was written to, so the intro-graph
+# pass can append edges to notes this script actually owns. A node with no entry
+# here (a hand-maintained client dossier outside Graph/) is NEVER written to —
+# it is reported instead.
+node_file = {}
+lead_by_id = {}
+
 for v in vendors:
     vid, node = s(v.get("ID")), v["_node"]
     tags = ["vendor", "network", owner_tag(v.get("Owner"))]
@@ -194,11 +204,19 @@ for v in vendors:
                 f"last-touch: {esc(datestr(v.get('Last Touch')))}",
                 "tags: [" + ", ".join(tags) + "]"])]
     body.append(f"**{s(v.get('Name')) or node}** — {s(v.get('Company'))} · {s(v.get('Category'))} · {s(v.get('Territory'))} {s(v.get('State'))}\n")
-    links = []
-    for m in re.findall(r"V-[A-Z]+-\d+", s(v.get("Links")).upper()):
-        if m in vend_by_id and vend_by_id[m] != node: links.append(f"- knows [[{vend_by_id[m]}]]")
-    if links: body.append("## Links\n" + "\n".join(sorted(set(links))) + "\n")
-    open(os.path.join(OUT, "vendors", node + ".md"), "w").write("\n".join(body))
+    # [ORDER 32] The Links REGEX is now the files-mode fallback only. In records
+    # mode the intro-graph pass below writes these edges from party_link — the
+    # actual record — which is strictly more than this regex ever saw: it catches
+    # C-/L-/T- refs and the exact-name matches too, and it carries the real edge
+    # kind instead of labelling everything "knows".
+    if party_links is None:
+        links = []
+        for m in re.findall(r"V-[A-Z]+-\d+", s(v.get("Links")).upper()):
+            if m in vend_by_id and vend_by_id[m] != node: links.append(f"- knows [[{vend_by_id[m]}]]")
+        if links: body.append("## Links\n" + "\n".join(sorted(set(links))) + "\n")
+    p = os.path.join(OUT, "vendors", node + ".md")
+    open(p, "w").write("\n".join(body))
+    node_file[node] = p
     counts["vendors"] += 1
 
 for c in clients:
@@ -218,7 +236,9 @@ for c in clients:
     if ref_node: links.append(f"- referred by [[{ref_node}]]")
     elif ref_txt: links.append(f"- referral source: {ref_txt} (no exact match)")
     if links: body.append("## Links\n" + "\n".join(links) + "\n")
-    open(os.path.join(OUT, "clients", node + ".md"), "w").write("\n".join(body))
+    p = os.path.join(OUT, "clients", node + ".md")
+    open(p, "w").write("\n".join(body))
+    node_file[node] = p
     counts["clients"] += 1
 
 lead_taken = set()
@@ -250,7 +270,10 @@ for l in leads:
         c_node, _ = find_client(l.get("Contact Name"))
         if c_node: links.append(f"- possibly same person as [[{c_node}]] (name match — confirm)")
     if links: body.append("## Links\n" + "\n".join(links) + "\n")
-    open(os.path.join(OUT, "leads", node + ".md"), "w").write("\n".join(body))
+    p = os.path.join(OUT, "leads", node + ".md")
+    open(p, "w").write("\n".join(body))
+    node_file[node] = p
+    if lid: lead_by_id[lid.upper()] = node
     counts["leads"] += 1
 
 # Territory footprint (AL gulf coast + FL panhandle). Used ONLY to separate deals CARR
@@ -304,7 +327,66 @@ for d in deals:
     open(os.path.join(OUT, "deals", node + ".md"), "w").write("\n".join(body))
     counts["deals"] += 1
 
+# ---------- [ORDER 32] the intro graph, rendered from party_link ----------
+# Joe: "i like visualized data the most." This is the one graph with revenue on
+# it — who can introduce whom — and until now it was invisible: the notes carried
+# a regex over the Links PROSE that could only ever see vendor-to-vendor V-refs,
+# so the intro that matters (a vendor reaching a CLIENT) drew no line at all.
+#
+# EXACT-MATCH-ONLY, and here that costs nothing: these edges are already record
+# rows keyed by ref, so the mapping is ref -> the node title this script just
+# wrote. No name matching, no partial matching, no surname anywhere. An endpoint
+# whose ref names no node in Graph/ is COUNTED AND NAMED, never dropped quietly —
+# an intro path that silently vanishes from the picture is worse than one the
+# picture admits it cannot draw.
+#
+# The edges are appended AFTER every note exists, because an edge can point at a
+# lead or a client whose node had not been minted when its own note was written.
+intro_stats = {"edges": 0, "rendered": 0, "unmapped_from": [], "unmapped_to": [],
+               "unwritable": []}
+if party_links is not None:
+    ref_node = {}
+    ref_node.update({k.upper(): v for k, v in vend_by_id.items()})
+    ref_node.update({k.upper(): v for k, v in cli_by_id.items()})
+    ref_node.update({k.upper(): v for k, v in lead_by_id.items()})
+
+    by_source = {}
+    for e in party_links:
+        intro_stats["edges"] += 1
+        fr, to = s(e["from_ref"]).upper(), s(e["to_ref"]).upper()
+        fnode, tnode = ref_node.get(fr), ref_node.get(to)
+        if not fnode:
+            intro_stats["unmapped_from"].append(fr); continue
+        if not tnode:
+            intro_stats["unmapped_to"].append(f"{fr}->{to}"); continue
+        if fnode == tnode:
+            continue                                    # a self-link draws nothing
+        if fnode not in node_file:
+            # A hand-maintained client dossier is the node, and this script does
+            # not own that file. Reported, never edited.
+            intro_stats["unwritable"].append(f"{fr} ({fnode})"); continue
+        by_source.setdefault(fnode, []).append(
+            f"- {s(e['kind']).replace('_', ' ')} → [[{tnode}]]"
+            + (f"  <!-- {to} -->" if to else ""))
+
+    for fnode, lines in by_source.items():
+        with open(node_file[fnode], "a") as fh:
+            fh.write("\n## Intro graph\n" + "\n".join(sorted(set(lines))) + "\n")
+        intro_stats["rendered"] += len(set(lines))
+
 # success — swap the finished tree into place
 if os.path.isdir(FINAL_OUT): shutil.rmtree(FINAL_OUT)
 os.rename(OUT, FINAL_OUT)
 print("Graph notes written:", counts, "→", FINAL_OUT, "| source:", source_note(MODE))
+if party_links is None:
+    print("Intro graph: SKIPPED — files mode has no party_link twin; "
+          "vendor notes carry the legacy Links regex instead.")
+else:
+    print(f"Intro graph: {intro_stats['edges']} party_link edge(s) · "
+          f"{intro_stats['rendered']} rendered as wikilinks · "
+          f"unmapped source refs {len(intro_stats['unmapped_from'])} "
+          f"{sorted(set(intro_stats['unmapped_from'])) or ''} · "
+          f"unmapped targets {len(intro_stats['unmapped_to'])} "
+          f"{sorted(set(intro_stats['unmapped_to'])) or ''} · "
+          f"source note not owned by Graph/ {len(intro_stats['unwritable'])} "
+          f"{sorted(set(intro_stats['unwritable'])) or ''}")

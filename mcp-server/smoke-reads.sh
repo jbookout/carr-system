@@ -111,6 +111,32 @@ echo
 check "graph probe: find surfaces the Shaw -> Tyrer intro" \
       find '{"query":"Jon Shaw"}' '\\"connections\\"' 'Tyrer'
 
+# --- ORDER 32: the multi-hop half, and the probe is a REAL two-hop chain --------
+# V-ATT-009 Dion Moniz's Links names Jon Shaw; V-BNK-013 Jon Shaw's Links names
+# C-155 Dr. James Allen Tyrer. Neither row names the other end, so a response to
+# target C-155 containing 'Dion Moniz' can only have come from the recursive walk
+# joining two separate edges. If the traversal ever breaks, this goes red.
+check "who-do-we-know: the two-hop Moniz -> Shaw -> Tyrer path" \
+      who-do-we-know '{"target":"C-155"}' 'Dion Moniz' '\\"hops\\":2'
+# The refuse-to-guess half. 'Ric' matches more than one graph node (V-BNK-030 Ric
+# McClanahan and V-BNK-034 Ric Nickelsen), and the verb must hand back candidates
+# rather than pick one (amendment 7). needs_disambiguation travels as isError by
+# the ToolError convention, so `check` cannot express this — same bespoke loop the
+# catch-me-up ambiguity probe above uses, and for the same reason.
+_wamb_ok=1
+for i in $(seq 1 "$REPS"); do
+  call who-do-we-know '{"target":"Ric"}'
+  echo "$RESULT" | grep -q 'needs_disambiguation' || { _wamb_ok=0; break; }
+  echo "$RESULT" | grep -q 'V-BNK-034' || { _wamb_ok=0; break; }
+  [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+done
+if [ "$_wamb_ok" -eq 1 ]; then
+  echo "  ok    who-do-we-know: ambiguous name returns candidates, never a guess  (${REPS}/${REPS})"; pass=$((pass+1))
+else
+  echo "  FAIL  who-do-we-know did NOT refuse an ambiguous name with candidates"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
+
 # --- ORDER 18 addendum: the WRITE path, using the A1 replay property -----------
 # WHY THIS EXISTS. On 2026-07-31 every ref-based WRITE verb returned 500
 # "permission denied for view v_ref_index" for roughly twelve hours. ORDER 7

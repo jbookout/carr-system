@@ -214,6 +214,34 @@ const FK = { deal: "deal_id", client: "client_id", lead: "lead_id", vendor: "ven
 // subgraph belongs to a graph verb nobody has ordered yet.
 const CONNECTIONS_CAP = 12;
 
+// [ORDER 32] who-do-we-know: the multi-hop half of the intro graph.
+//
+// DEPTH IS CAPPED AT 3 AND THE CAP IS NOT A PREFERENCE. A referral path four
+// people long is not an asset — nobody makes that ask — and an uncapped
+// recursive walk over a graph that will keep growing is a Worker timeout waiting
+// for a busy night. The order says depth <= 3; this is where it is enforced, and
+// a caller asking for more gets 3 rather than an error, because the answer at 3
+// is still the right answer.
+const WHO_MAX_DEPTH = 3;
+const WHO_PATH_CAP = 25;
+
+// THE NODE KEY IS THE REF, NOT THE NAME, and that choice is load-bearing.
+// v_party_graph carries exactly one ref per party (0020's `distinct on`), so a
+// ref identifies a party. A name does not: production holds `Dr. James Allen
+// Tyrer` twice — L-208 and C-155, the same human as two un-merged records — and
+// joining paths on the name string would silently weld those two records into
+// one node and invent hops that do not exist. Refs keep them separate, which is
+// the truth of the book today, duplicate and all.
+//
+// The cost, stated rather than hidden: an edge whose endpoint carries NO ref
+// cannot be walked. Today that is zero edges of 31. The verb counts them and
+// returns the count as `edges_unwalkable` rather than dropping them quietly, so
+// the day it stops being zero the answer says so instead of just getting smaller.
+const WHO_EDGES = `
+  select from_ref, from_name, kind, to_ref, to_name, note
+    from v_party_graph
+   where from_ref is not null and to_ref is not null`;
+
 // [ORDER 18] The kind vocabulary lives in party_link_kind (0020) — the verb has no
 // enum of its own any more, so widening it is a row a human adds, not a deploy.
 // Validated against the table so an unknown kind is refused with the legal list
@@ -505,6 +533,107 @@ export const TOOLS = {
          order by linked_at desc, from_name, to_name limit $3`,
         [`%${q}%`, q, CONNECTIONS_CAP]);
       return { parties: parties.rows, deals: deals.rows, connections: connections.rows };
+    },
+  },
+
+  "who-do-we-know": {
+    write: false,
+    description: "\"Who gets me to X?\" — walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops, shortest first, each rendered as a readable chain (\"Dion Moniz -knows-> Jon Shaw -intro-> Dr. James Allen Tyrer\"). The first name in a chain is who Joe asks. Read-only, and it never guesses: an ambiguous name returns needs_disambiguation with the candidates, and a target that exists but carries no edges says so rather than returning an empty list that reads like 'no such person'.",
+    inputSchema: { type: "object", properties: {
+      target: { type: "string", description: "who you want to reach — C-155, V-CPA-006, L-208, or a full name" },
+      max_depth: { type: "integer", description: `hops to walk, 1-${WHO_MAX_DEPTH} (default ${WHO_MAX_DEPTH})` },
+      limit: { type: "integer", description: `paths returned, capped at ${WHO_PATH_CAP}` } },
+      required: ["target"] },
+    handler: async (c, _a, args) => {
+      const q = String(args.target || "").trim();
+      if (!q) throw new ToolError({ error: "missing_target", hint: "pass a ref (C-155) or a name" });
+      const depth = Math.max(1, Math.min(WHO_MAX_DEPTH, args.max_depth || WHO_MAX_DEPTH));
+      const cap = Math.max(1, Math.min(WHO_PATH_CAP, args.limit || WHO_PATH_CAP));
+
+      // ── resolve the target to ONE node of the graph ──────────────────────
+      // Ref first and exactly, name second and only on a distinct-ref basis: two
+      // rows for one ref is the same party appearing on both ends of edges, not
+      // an ambiguity, so the distinct is what makes the count mean something.
+      const nodes = await c.query(
+        `with n as (
+           select from_ref as ref, from_name as name from v_party_graph
+           union
+           select to_ref,   to_name             from v_party_graph)
+         select distinct ref, name from n
+          where ref ilike $1 or name ilike $2
+          order by ref`, [q, `%${q}%`]);
+      let node = null;
+      if (nodes.rows.length === 1) {
+        node = nodes.rows[0];
+      } else if (nodes.rows.length > 1) {
+        // An exact ref among several name-ish matches is not ambiguous.
+        const exact = nodes.rows.filter(r => (r.ref || "").toLowerCase() === q.toLowerCase());
+        if (exact.length === 1) node = exact[0];
+        else throw new ToolError({ error: "needs_disambiguation", target: q,
+          candidates: nodes.rows.map(r => ({ ref: r.ref, name: r.name })),
+          hint: "more than one party in the intro graph matches — pass the exact ref" });
+      }
+
+      if (!node) {
+        // NOT the same answer as "no path". A record that exists and simply has
+        // no edges is a gap in the Links data; a name nobody has ever recorded is
+        // a different problem, and collapsing the two would hide both.
+        const known = await c.query(
+          `select display_name as name, ref, subject_type as kind from v_ref_index
+            where subject_type in ('lead','client','vendor')
+              and (ref ilike $1 or display_name ilike $2) limit 5`, [q, `%${q}%`]);
+        return { target: q, resolved: null, paths: [],
+                 in_graph: false,
+                 matching_records: known.rows,
+                 note: known.rows.length
+                   ? "This record exists but carries no intro-graph edges yet — the connection may simply not be logged. Record it with link-parties."
+                   : "No record and no graph node matches that name. Try `find` first." };
+      }
+
+      // ── walk BACKWARD from the target, following edge direction ──────────
+      // Direction is the semantics: an edge A -> B means A can reach B, so the
+      // people who get Joe to the target are the ones upstream of it. The
+      // visited-array guard is what keeps the Coleman <-> Nickelsen pair (a real
+      // two-cycle in the book) from generating paths for ever.
+      const paths = await c.query(
+        `with recursive e as (${WHO_EDGES}),
+         back as (
+           select e.from_ref as head_ref, e.from_name as head_name, 1 as hops,
+                  array[e.from_ref, e.to_ref] as ref_path,
+                  e.from_name || ' -' || e.kind || '-> ' || e.to_name as chain,
+                  e.note as first_note
+             from e where e.to_ref = $1
+           union all
+           select e.from_ref, e.from_name, b.hops + 1,
+                  array_prepend(e.from_ref, b.ref_path),
+                  e.from_name || ' -' || e.kind || '-> ' || b.chain,
+                  e.note
+             from e join back b on e.to_ref = b.head_ref
+            where b.hops < $2 and not (e.from_ref = any(b.ref_path)))
+         select hops, head_ref as ask_ref, head_name as ask_name,
+                ref_path, chain, first_note
+           from back order by hops, head_name, chain limit $3`,
+        [node.ref, depth, cap]);
+
+      const unwalkable = await c.query(
+        `select count(*)::int as n from v_party_graph
+          where from_ref is null or to_ref is null`);
+
+      return {
+        target: q,
+        resolved: { ref: node.ref, name: node.name },
+        in_graph: true,
+        max_depth: depth,
+        path_count: paths.rows.length,
+        capped: paths.rows.length === cap,
+        edges_unwalkable: unwalkable.rows[0].n,
+        paths: paths.rows.map(r => ({
+          hops: r.hops, ask_ref: r.ask_ref, ask_name: r.ask_name,
+          path: r.chain, ref_path: r.ref_path, evidence: r.first_note })),
+        note: paths.rows.length
+          ? "The FIRST name in each chain is who to ask. Run the pairing through DNA/Network/introduction-rules.md before making the ask — a path existing does not make it a clean ask."
+          : "Nobody in the intro graph reaches this record within " + depth + " hops. That may mean the connection is not logged rather than not real.",
+      };
     },
   },
 

@@ -268,6 +268,34 @@ def load_deals_doc(root, mode):
     }
 
 
+# ---------------- the intro graph (ORDER 32) ----------------
+
+def load_party_links(mode):
+    """The intro graph's real edges, or None when only the files are reachable.
+
+    RECORDS ONLY, AND THE None IS THE POINT. `party_link` has no file twin: the
+    xlsx `Links` column is the PROSE the edges were parsed out of, not the edges,
+    and re-deriving edges from that prose inside the graph pipeline would be a
+    second parser with a second grammar quietly disagreeing with
+    `parse_party_links.py`. Two vocabularies is the mistake ORDER 18 already had
+    to unpick once. So a files-mode consumer gets None and keeps its own
+    historical behaviour, out loud, rather than a half-graph that looks complete.
+
+    Reads `v_party_graph` — the ORDER 18 reader-safe view: refs, names, the kind
+    and the provenance note, never contact detail — so the graph pipeline sees
+    exactly what a reader-scoped session sees.
+    """
+    if mode != MODE_RECORDS:
+        return None
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("""select from_ref, from_name, kind, to_ref, to_name, note
+                         from v_party_graph
+                        where from_ref is not null and to_ref is not null
+                        order by from_ref, kind, to_ref""")
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
 # ---------------- the prospect pool ----------------
 
 def _elevated_url():
