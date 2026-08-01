@@ -59,7 +59,9 @@ def deg2num(lat, lon, z):
 
 # The search area. Bounding the geocoder to it is what makes a bare street name
 # resolvable; unbounded, Nominatim rejects most of these or wanders out of state.
-VIEWBOX = "-86.55,30.48,-86.10,30.28"
+VIEWBOX = "-86.80,30.65,-86.05,30.25"   # widened 2026-07-31: the old box topped out at
+# 30.48N, which sits SOUTH of Niceville (30.52). Every Niceville and mid-bay address in the
+# expanded Hughes search failed to geocode because of it, silently, with no pin and no error.
 OVERPASS = "https://overpass-api.de/api/interpreter"
 
 # Roads the listings name one way and OpenStreetMap names another, or does not
@@ -99,7 +101,7 @@ def overpass_street(name):
     Nominatim will not return for an address query."""
     esc = name.replace('"', "")
     query = (f'[out:json][timeout:40];way["highway"]["name"~"{esc}",i]'
-             f'(30.28,-86.55,30.48,-86.10);out tags center 1;')
+             f'(30.25,-86.80,30.65,-86.05);out tags center 1;')
     try:
         req = urllib.request.Request(
             OVERPASS, data=urllib.parse.urlencode({"data": query}).encode(),

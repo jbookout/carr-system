@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .venv/
 out/
+mcp-server/.neon
+_to_delete/
+*.bak-*
