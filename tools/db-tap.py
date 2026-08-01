@@ -14,6 +14,11 @@ a SQL file or execs a pipelines/ script with DATABASE_URL set.
 Usage:
   .venv/bin/python tools/db-tap.py sql pipelines/r2-quota-seed.sql
   .venv/bin/python tools/db-tap.py run pipelines/backfill_document_attachments.py [--apply ...]
+  .venv/bin/python tools/db-tap.py --branch rehearse-0026 run tools/migrate.py --apply --yes
+
+--branch <name> (before the mode) targets a Neon branch instead of production —
+the rehearse-on-branch pattern through the same no-substitution path (added
+2026-07-31, Fable seat session 4, for the 0026 rehearsal).
 
 Never prints the DSN. ON_ERROR_STOP is always set for sql mode.
 """
@@ -30,9 +35,9 @@ PSQL_CANDIDATES = [
 ]
 
 
-def dsn() -> str:
+def dsn(branch: str = "production") -> str:
     out = subprocess.run(
-        [NEONCTL, "connection-string", "production",
+        [NEONCTL, "connection-string", branch,
          "--project-id", "steep-field-48688294",
          "--role-name", "neondb_owner"],
         capture_output=True, text=True, timeout=60,
@@ -51,13 +56,19 @@ def psql_bin() -> str:
 
 
 def main() -> None:
-    if len(sys.argv) < 3 or sys.argv[1] not in ("sql", "run"):
+    argv = sys.argv[1:]
+    branch = "production"
+    if argv and argv[0] == "--branch":
+        if len(argv) < 2:
+            sys.exit("--branch needs a name")
+        branch, argv = argv[1], argv[2:]
+    if len(argv) < 2 or argv[0] not in ("sql", "run"):
         sys.exit(__doc__)
-    mode, target, extra = sys.argv[1], sys.argv[2], sys.argv[3:]
+    mode, target, extra = argv[0], argv[1], argv[2:]
     target_abs = target if os.path.isabs(target) else os.path.join(REPO, target)
     if not os.path.exists(target_abs):
         sys.exit(f"no such file: {target_abs}")
-    url = dsn()
+    url = dsn(branch)
     os.chdir(REPO)
     if mode == "sql":
         rc = subprocess.run([psql_bin(), url, "-v", "ON_ERROR_STOP=1", "-f", target_abs]).returncode

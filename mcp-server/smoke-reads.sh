@@ -211,6 +211,44 @@ else
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
 fi
 
+# --- ORDER 27 EXT / ORDER 33: the counterparty + attribution views are live ----
+# counterparty-history on a name nobody carries must answer with the honest
+# "not captured" note rather than error — proves the verb + view + reader grant.
+echo
+check "counterparty-history: unknown name gets the honest no-capture answer" \
+      counterparty-history '{"target":"Nobody Smokeprobe Xyzzy"}' 'No counterparty history'
+
+# source-attribution: the funnel view answers, and the reconciliation row that
+# keeps the money math honest ('unattributed') is present.
+check "source-attribution: lanes answer incl. the unattributed reconciler" \
+      source-attribution '{}' '\\"lanes\\"' 'unattributed'
+
+# --- ORDER 34: links[] on log-activity — the auto-edge capture path ------------
+# FROZEN probe (fixed key + args, same rule as the two probes above: edit
+# nothing, ever). The edge V-BNK-013 -> C-155 'intro' already exists in
+# production (ORDER 32's proven chain), so this exercises ref resolution +
+# kind validation + the conflict path (existing:true) without ever growing the
+# graph. Rep 1 may insert the one fixture activity row; every later rep replays.
+echo
+_l_ok=1; _l_why=""
+for i in $(seq 1 "$REPS"); do
+  call log-activity '{"idempotency_key":"smoke-links-probe-permanent","ref":"V-BNK-013","kind":"note","summary":"smoke links probe — edge already exists, replayed for ever after","links":[{"from_ref":"V-BNK-013","to_ref":"C-155","kind":"intro"}]}'
+  if echo "$RESULT" | grep -q '"error"'; then _l_ok=0; _l_why="transport/protocol error"; break; fi
+  if echo "$RESULT" | grep -q '"isError":true'; then _l_ok=0; _l_why="verb returned isError (ref resolution under carr_writer?)"; break; fi
+  if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _l_ok=0; _l_why="no ok:true in the envelope response"; break; fi
+  if ! echo "$RESULT" | grep -q '\\"existing\\":true'; then _l_ok=0; _l_why="links[] did not return the existing edge — resolution or upsert broke"; break; fi
+  if [ "$i" -gt 1 ] && ! echo "$RESULT" | grep -q '\\"replayed\\":true'; then
+    _l_ok=0; _l_why="rep $i did NOT replay — the envelope wrote twice"; break
+  fi
+  [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+done
+if [ "$_l_ok" -eq 1 ]; then
+  echo "  ok    auto-edge path: log-activity links[] resolves refs + returns existing edge  (${REPS}/${REPS})"; pass=$((pass+1))
+else
+  echo "  FAIL  auto-edge path — $_l_why"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
+
 echo
 echo "passed $pass · failed $fail"
 [ "$fail" -eq 0 ] || exit 1

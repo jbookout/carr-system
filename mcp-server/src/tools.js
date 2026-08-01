@@ -11,8 +11,26 @@ export class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
 }
 
+// [ORDER 34 review, blocker 1] The old array-replacer form of JSON.stringify
+// FILTERED nested keys instead of canonicalizing them — links[]/building/spaces
+// payloads hashed as empty, so a corrected retry under a reused key replayed
+// stale data silently. canon() deep-sorts instead. For FLAT args (every
+// historical call that replays, incl. the frozen smoke probes) the output
+// string — sorted top-level keys — is byte-identical to the old form, so
+// stored hashes stay valid. A historical NESTED-args row would key_reuse
+// loudly on replay rather than lie quietly; that trade is deliberate.
+function canon(v) {
+  if (Array.isArray(v)) return v.map(canon);
+  if (v && typeof v === "object")
+    return Object.keys(v).sort().reduce((o, k) => {
+      if (v[k] !== undefined) o[k] = canon(v[k]);
+      return o;
+    }, {});
+  return v;
+}
+
 async function requestHash(args) {
-  const data = new TextEncoder().encode(JSON.stringify(args, Object.keys(args).sort()));
+  const data = new TextEncoder().encode(JSON.stringify(canon(args)));
   const d = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
@@ -254,6 +272,67 @@ async function validateLinkKind(client, kind) {
   throw new ToolError({ error: "unknown_kind", kind,
     valid: all.rows.map(x => x.slug),
     hint: "party_link_kind is the vocabulary; add a row there if a genuinely new kind is needed" });
+}
+
+// [ORDER 34] ref -> party.id, REFS ONLY. A name here is an error by design:
+// production holds the same human twice un-merged (L-208 / C-155), and a name
+// match would weld them. Same rule that makes who-do-we-know's node key the ref.
+async function resolvePartyByRef(c, ref) {
+  if (!/^[LCVT]-/i.test(ref || ""))
+    throw new ToolError({ error: "ref_required", got: ref || null,
+      hint: "links take refs only (L-### / C-### / V-XXX-### / T-###), never names; use find first" });
+  // [ORDER 34 review, blocker 2] Follows party.merged_into to the SURVIVOR
+  // (A3: reads follow merge pointers) and excludes client tombstones — an edge
+  // written to a merged-away party would defeat the merge silently. And more
+  // than one live match for a ref is a data fault to surface, never rows[0].
+  const r = await c.query(
+    `select distinct coalesce(p.merged_into, p.id) as party_id
+       from (
+         select c2.party_id, c2.roster_ref  as ref from client c2 where c2.merged_into is null
+         union all select v.party_id, v.vendor_ref   from vendor v
+         union all select l.party_id, l.registry_ref from lead l
+       ) x
+       join party p on p.id = x.party_id
+      where x.ref ilike $1`, [ref]);
+  if (!r.rows.length) throw new ToolError({ error: "ref_not_found", ref,
+    hint: "no live record carries this ref, or it has no party row; use find" });
+  if (r.rows.length > 1) throw new ToolError({ error: "ambiguous_ref", ref,
+    candidates: r.rows.map(x => x.party_id),
+    hint: "this ref string resolves to more than one live party — a data fault; surface to the human" });
+  return r.rows[0].party_id;
+}
+
+// [ORDER 34] shared edge-writer for log-activity links[] — link-parties' exact
+// upsert semantics (conflict returns the existing edge, no event row) so touch
+// and edge are one atomic capture inside one envelope.
+async function writeLinks(c, actor, links, idempotencyKey) {
+  if (links.length > 10)
+    throw new ToolError({ error: "too_many_links", count: links.length, hint: "max 10 per call" });
+  const out = [];
+  for (const ln of links) {
+    const kind = await validateLinkKind(c, ln.kind);
+    const fromId = await resolvePartyByRef(c, ln.from_ref);
+    const toId = await resolvePartyByRef(c, ln.to_ref);
+    if (fromId === toId)
+      throw new ToolError({ error: "self_link", ref: ln.from_ref,
+        hint: "both refs resolve to the same party" });
+    const ins = await c.query(
+      `insert into party_link (from_party, to_party, kind, note, source, created_by)
+       values ($1,$2,$3,$4,'stated',$5)
+       on conflict (from_party, to_party, kind) do nothing returning id`,
+      [fromId, toId, kind, ln.note || null, actor.id]);
+    if (ins.rows.length) {
+      await writeEvent(c, actor, "log-activity:link", "party", fromId,
+        { new: { kind, to_ref: ln.to_ref }, idempotency_key: idempotencyKey });
+      out.push({ from_ref: ln.from_ref, to_ref: ln.to_ref, kind, link_id: ins.rows[0].id, existing: false });
+    } else {
+      const cur = await c.query(
+        "select id from party_link where from_party=$1 and to_party=$2 and kind=$3",
+        [fromId, toId, kind]);
+      out.push({ from_ref: ln.from_ref, to_ref: ln.to_ref, kind, link_id: cur.rows[0].id, existing: true });
+    }
+  }
+  return out;
 }
 
 // ---------- [ORDER 13] the document factory's resolver ----------
@@ -637,6 +716,91 @@ export const TOOLS = {
     },
   },
 
+  // [ORDER 27 EXT (d)] "We're negotiating against X — where have we faced X,
+  // what happened?" Reads v_counterparty_history ONLY (safe columns; [D5]:
+  // internal-seat, never client-facing). Counterparties mostly carry no ref,
+  // so resolution is name-based with party_id disambiguation — ORDER 32's
+  // three-answer convention: disambiguate / exists-but-empty / no match.
+  "counterparty-history": {
+    write: false,
+    description: "Counterparty intelligence: every deal where we have faced this listing agent, landlord, owner, or property manager, and what happened. Ask before any negotiation. Name or ref; ambiguous names return candidates with party_id — retry with party_id.",
+    inputSchema: { type: "object", properties: {
+      target: { type: "string", description: "counterparty name, or a ref if they are also in the book" },
+      party_id: { type: "string", description: "exact party_id from a disambiguation retry" } },
+      required: ["target"] },
+    handler: async (c, _a, args) => {
+      if (args.party_id) {
+        const rows = await c.query(
+          `select * from v_counterparty_history where party_id = $1
+           order by closed_on desc nulls first`, [args.party_id]);
+        return { target: args.target, party_id: args.party_id, deals: rows.rows,
+                 note: rows.rows.length ? noteFor(rows.rows) : "This party carries no counterparty history rows." };
+      }
+      let name = args.target;
+      if (/^[LCVT]-/i.test(args.target)) {
+        // [ORDER 34 review, fix 3] Ref -> party_id via 0027's v_ref_index
+        // column, then filter the view by party_id — never by name, which
+        // silently welds duplicate-name humans (the Tyrer condition).
+        const r = await c.query(
+          "select party_id, display_name from v_ref_index where ref ilike $1", [args.target]);
+        if (!r.rows.length)
+          return { target: args.target, deals: [], note: "No record matches this ref." };
+        if (r.rows[0].party_id) {
+          const rows = await c.query(
+            `select * from v_counterparty_history where party_id = $1
+             order by closed_on desc nulls first`, [r.rows[0].party_id]);
+          return { target: args.target, resolved_name: r.rows[0].display_name, deals: rows.rows,
+                   note: rows.rows.length
+                     ? `${rows.rows.filter(x => x.deal_id).length} deal(s) against this counterparty.`
+                     : "This record exists but carries no counterparty history rows." };
+        }
+        name = r.rows[0].display_name;
+      }
+      const parties = await c.query(
+        `select distinct party_id, party_name, party_city, party_state
+           from v_counterparty_history where party_name ilike $1`, [`%${name}%`]);
+      if (!parties.rows.length)
+        return { target: args.target, deals: [],
+                 note: "No counterparty history under this name. That may mean we have not captured the relationship (add-premises / ownership rows), not that we have never faced them." };
+      if (parties.rows.length > 1)
+        throw new ToolError({ error: "needs_disambiguation", target: args.target,
+          candidates: parties.rows,
+          hint: "more than one counterparty matches; retry with party_id" });
+      const rows = await c.query(
+        `select * from v_counterparty_history where party_id = $1
+         order by closed_on desc nulls first`, [parties.rows[0].party_id]);
+      function noteFor(rr) {
+        const won = rr.filter(x => x.outcome === "won").length;
+        const withDeal = rr.filter(x => x.deal_id).length;
+        return `${withDeal} deal(s) against this counterparty (${won} won). Rounds and counters live on each deal — catch-me-up the deal for the blow-by-blow.`;
+      }
+      return { target: args.target, party: parties.rows[0], deals: rows.rows,
+               note: rows.rows.length && rows.rows.some(x => x.deal_id)
+                 ? noteFor(rows.rows)
+                 : "Known counterparty, no deal linkage captured yet." };
+    },
+  },
+
+  // [ORDER 33 (b)] Which lane has ever produced a commission. Reads
+  // v_source_attribution; the honest-limits note travels with every answer.
+  "source-attribution": {
+    write: false,
+    description: "Prospecting ROI: per source lane, the funnel pool -> promoted -> leads -> clients -> deals -> commissions. Answers 'which radar lane has ever produced a commission'. Optional lane filter.",
+    inputSchema: { type: "object", properties: {
+      lane: { type: "string", description: "one lane slug to filter (e.g. lead-router, renewal-radar, direct:renewal, __unattributed__)" } },
+      required: [] },
+    handler: async (c, _a, args) => {
+      const rows = args.lane
+        ? await c.query("select * from v_source_attribution where lane = $1", [args.lane])
+        : await c.query("select * from v_source_attribution order by lane");
+      return { lanes: rows.rows,
+        note: "Attribution walks pool.promoted_lead_id -> lead.client_id -> deal -> commission. " +
+          "Limits, honestly: conversion links were only restored at the 7/30 cutover; leads with no lane " +
+          "read direct:unknown; deals with no lead linkage sit in '__unattributed__' so totals reconcile " +
+          "against the whole book; the commission table is the ONLY money source here (placeholders never sum)." };
+    },
+  },
+
   "catch-me-up": {
     write: false,
     description: "The merged timeline (events + activities) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer. Use before any conversation about a record.",
@@ -699,6 +863,12 @@ export const TOOLS = {
       occurred_at: { type: "string", description: "ISO timestamp; omit for now" },
       owed: { type: "string", description: "what is missing (a figure, a name) — recorded as owed" },
       human_quote: { type: "string", description: "the human's literal words, if dictated" },
+      links: { type: "array", maxItems: 10, description:
+        "[ORDER 34] introductions carried by this touch become intro-graph edges NOW, atomically. REFS ONLY (L-/C-/V-/T-), never names — ambiguity is find's job, before this call.",
+        items: { type: "object", properties: {
+          from_ref: { type: "string" }, to_ref: { type: "string" },
+          kind: { type: "string", description: "party_link_kind slug: knows, intro, intro_received, can_introduce, works_with, referral" },
+          note: { type: "string" } }, required: ["from_ref","to_ref","kind"] } },
     }, required: ["idempotency_key","ref","kind","summary"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "log-activity", args, async () => {
       const s = await resolveSubject(c, args.ref);
@@ -708,7 +878,10 @@ export const TOOLS = {
         [args.occurred_at || null, actor.id, args.kind, args.summary, args.detail || null, args.owed || null, s.id]);
       await writeEvent(c, actor, "log-activity", s.type, s.id,
         { new: { activity: r.rows[0].id, kind: args.kind }, human_quote: args.human_quote, idempotency_key: args.idempotency_key });
-      return { ok: true, activity_id: r.rows[0].id, subject: s };
+      const links = args.links && args.links.length
+        ? await writeLinks(c, actor, args.links, args.idempotency_key) : [];
+      return { ok: true, activity_id: r.rows[0].id, subject: s,
+               ...(links.length ? { links } : {}) };
     }),
   },
 
@@ -892,6 +1065,155 @@ export const TOOLS = {
       await writeEvent(c, actor, "add-party", "party", r.rows[0].id,
         { new: { name: args.name }, idempotency_key: args.idempotency_key });
       return { ok: true, party_id: r.rows[0].id };
+    }),
+  },
+
+  // [ORDER 27 (a) + EXT (c)] One atomic call gives a deal its physical +
+  // counterparty spine: building (exact-address match or create), space rows,
+  // premises + premises_space, building_ownership rows, optional listing_side
+  // participant. Vocabularies are the EXISTING CHECKs — nothing reopens here.
+  "add-premises": {
+    write: true,
+    description: "Capture a deal's premises: the building (matched by exact address or created), its space rows (suite, SF, basis), the premises linkage, and the counterparty spine — building_ownership rows (owner / landlord_rep / property_manager / listing_agent) and optionally the deal's listing_side participant. Feeds the counterparty graph, the LOI Premises/Size slots, and the grid. Ownership parties resolve by REF, or are CREATED via new_party — an existing party is never name-matched.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      deal_ref: { type: "string", description: "deal name, or a C- ref when the client has exactly one deal" },
+      label: { type: "string", description: "premises label, e.g. '4301 Spanish Trail, ~3,424 SF'" },
+      building: { type: "object", properties: {
+        address: { type: "string" }, city: { type: "string" }, state: { type: "string" },
+        zip: { type: "string" }, name: { type: "string" } }, required: ["address"] },
+      spaces: { type: "array", minItems: 1, items: { type: "object", properties: {
+        suite: { type: "string" }, floor: { type: "number" },
+        area_amount: { type: "number" },
+        area_basis: { type: "string", enum: ["rentable","usable","county_heated","listed_unverified"],
+          description: "what the PAPER says; omit for listed_unverified — never guessed upward" },
+        condition: { type: "string" } }, required: [] } },
+      ownership: { type: "array", maxItems: 10, items: { type: "object", properties: {
+        party_ref: { type: "string", description: "ref of an EXISTING party (V-/C-/L-/T-)" },
+        new_party: { type: "object", properties: {
+          name: { type: "string" }, kind: { type: "string", enum: ["person","org"] },
+          org_name: { type: "string" }, force_new: { type: "boolean" } }, required: ["name"] },
+        kind: { type: "string", enum: ["owner","landlord_rep","property_manager","listing_agent"] },
+        also_listing_side: { type: "boolean", description: "also record this party as the deal's listing_side participant" },
+        source: { type: "string" } }, required: ["kind"] } },
+    }, required: ["idempotency_key","deal_ref","label","building","spaces"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "add-premises", args, async () => {
+      // deal resolution: a C- ref resolves through the client's deals — exactly
+      // one or refuse (amendment 7's rule, applied to the deal hop).
+      let dealId;
+      const s = await resolveSubject(c, args.deal_ref);
+      if (s.type === "deal") dealId = s.id;
+      else if (s.type === "client") {
+        const d = await c.query("select id, name from deal where client_id = $1", [s.id]);
+        if (!d.rows.length) throw new ToolError({ error: "no_deal_for_client", deal_ref: args.deal_ref });
+        if (d.rows.length > 1)
+          throw new ToolError({ error: "needs_disambiguation", deal_ref: args.deal_ref,
+            candidates: d.rows.map(x => ({ name: x.name })), hint: "pass the deal name" });
+        dealId = d.rows[0].id;
+      } else throw new ToolError({ error: "not_a_deal", deal_ref: args.deal_ref, resolved: s.type });
+
+      // building: exact-address match (case-insensitive), else create. More than
+      // one match is a data problem to surface, never a coin flip.
+      const b = args.building;
+      const match = await c.query(
+        `select id, address, city from building
+          where lower(address) = lower($1) and merged_into is null`, [b.address]);
+      let buildingId, buildingCreated = false;
+      if (match.rows.length > 1)
+        throw new ToolError({ error: "needs_disambiguation", address: b.address,
+          candidates: match.rows, hint: "two building rows share this address — merge or pass city" });
+      if (match.rows.length === 1) buildingId = match.rows[0].id;
+      else {
+        const ins = await c.query(
+          `insert into building (address, city, state, zip, name, created_by, updated_by)
+           values ($1,$2,$3,$4,$5,$6,$6) returning id`,
+          [b.address, b.city || null, b.state || null, b.zip || null, b.name || null, actor.id]);
+        buildingId = ins.rows[0].id; buildingCreated = true;
+      }
+
+      const spaceIds = [];
+      for (const sp of args.spaces) {
+        // [ORDER 34 review, fix 6] surface the schema's band as a ToolError,
+        // not a truncated raw SQL check_violation.
+        if (sp.area_amount != null && (sp.area_amount < 50 || sp.area_amount > 500000))
+          throw new ToolError({ error: "area_out_of_band", area_amount: sp.area_amount,
+            hint: "space.area_amount accepts 50-500000 SF; a 3,424 SF suite is 3424, not 3.424" });
+        const basis = sp.area_amount != null ? (sp.area_basis || "listed_unverified") : sp.area_basis || null;
+        const ins = await c.query(
+          `insert into space (building_id, suite, floor, area_amount, area_basis, condition, created_by, updated_by)
+           values ($1,$2,$3,$4,$5,$6,$7,$7) returning id`,
+          [buildingId, sp.suite || null, sp.floor ?? null, sp.area_amount ?? null, basis, sp.condition || null, actor.id]);
+        spaceIds.push(ins.rows[0].id);
+      }
+
+      const pr = await c.query(
+        `insert into premises (deal_id, label, created_by) values ($1,$2,$3) returning id`,
+        [dealId, args.label, actor.id]);
+      const premisesId = pr.rows[0].id;
+      for (const sid of spaceIds)
+        await c.query("insert into premises_space (premises_id, space_id) values ($1,$2)", [premisesId, sid]);
+
+      const ownershipOut = [];
+      for (const o of args.ownership || []) {
+        let partyId;
+        if (o.party_ref && o.new_party)
+          throw new ToolError({ error: "conflicting_party_inputs",
+            hint: "an ownership row carries party_ref OR new_party, never both" });
+        if (o.party_ref) partyId = await resolvePartyByRef(c, o.party_ref);
+        else if (o.new_party) {
+          // Same dedup intent as add-party's guard, expressed as a THROW so a
+          // refused attempt never lands a tool_call row (safer for key hygiene;
+          // add-party returns needs_confirm inline instead — deliberate divergence).
+          if (!o.new_party.force_new) {
+            const cand = await c.query(
+              `select id, name, city from party where merged_into is null and name % $1
+               order by similarity(name, $1) desc limit 5`, [o.new_party.name]);
+            if (cand.rows.length)
+              throw new ToolError({ error: "needs_confirm", name: o.new_party.name,
+                candidates: cand.rows,
+                hint: "similar parties exist; pass party_ref if it is one of them (when it has a ref), or new_party.force_new:true after the human confirms it is a different person" });
+          }
+          let orgId = null;
+          if (o.new_party.org_name) {
+            const og = await c.query(
+              "insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id",
+              [o.new_party.org_name, actor.id]);
+            orgId = og.rows[0].id;
+          }
+          const np = await c.query(
+            `insert into party (kind, name, org_id, created_by, updated_by)
+             values ($1,$2,$3,$4,$4) returning id`,
+            [o.new_party.kind || "person", o.new_party.name, orgId, actor.id]);
+          partyId = np.rows[0].id;
+        } else throw new ToolError({ error: "ownership_needs_party",
+          hint: "each ownership row carries party_ref or new_party" });
+        await c.query(
+          `insert into building_ownership (building_id, party_id, kind, source, created_by)
+           values ($1,$2,$3,$4,$5)`,
+          [buildingId, partyId, o.kind, o.source || "stated", actor.id]);
+        if (o.also_listing_side) {
+          // [ORDER 34 review, fix 5] check-before-insert: a second capture pass
+          // on the same deal must not duplicate the participant row (which would
+          // double-count the deal in counterparty history).
+          const dup = await c.query(
+            `select 1 from deal_participant
+              where deal_id=$1 and party_id=$2 and role='listing_side' and to_at is null`,
+            [dealId, partyId]);
+          if (!dup.rows.length)
+            await c.query(
+              `insert into deal_participant (deal_id, party_id, role, set_by)
+               values ($1,$2,'listing_side',$3)`, [dealId, partyId, actor.id]);
+        }
+        ownershipOut.push({ party_id: partyId, kind: o.kind,
+          listing_side: !!o.also_listing_side });
+      }
+
+      await writeEvent(c, actor, "add-premises", "deal", dealId,
+        { new: { premises: premisesId, building: buildingId, building_created: buildingCreated,
+                 spaces: spaceIds.length, ownership: ownershipOut.length },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, deal_id: dealId, premises_id: premisesId, building_id: buildingId,
+               building_created: buildingCreated, space_ids: spaceIds, ownership: ownershipOut };
     }),
   },
 
