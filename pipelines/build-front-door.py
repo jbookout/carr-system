@@ -28,7 +28,7 @@ GROUPS = [
  ("File a Comp","Real deal terms only",
   "File a comp for the CARR system. Read the DNA/Deal Management comps conventions (real terms only, no estimates). Interview me one question at a time, multiple-choice where possible (deal type, market, property type, lease or purchase) and fill-in-the-blank for the terms. Write the comp row, then tell me what you filed."),
  ("Teach a Rule","Intro politics, permanent",
-  "I want to teach the system an intro-politics rule that is permanent and binds both brains. Read DNA/Network/introduction-rules.md. Ask me the rule in one or two questions (who cannot meet whom, and why), write it as law, and confirm it back to me."),
+  "I want to teach the system an intro-politics rule that is permanent and binds both brains. Read DNA/Network/introduction-rules.md. Ask me the rule in one or two questions (who cannot meet whom, and why), capture it with the teach verb (scope intro_politics, my verbatim words), propose activation, and confirm it back to me."),
 ]),
 ("Deals & matchmaking", [
  ("Vendor to Vendor Match","Partners who should know each other",

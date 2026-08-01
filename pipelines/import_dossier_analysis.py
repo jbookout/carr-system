@@ -272,18 +272,14 @@ def main():
     if not url:
         sys.exit("no DATABASE_URL — run through tools/db-tap.py")
 
-    if not a.rehearse:
-        sys.exit("--apply is HELD against production: the live import is the "
-                 "supervisor's tap and waits on Joe's review of the diff packet "
-                 "(record-layer/order36-dossier-review-packet-2026-08-01.md). The "
-                 "gate above already confirmed the database is ready. To produce "
-                 "the packet's diffs, run --apply --rehearse against a Neon branch. "
-                 "To go live, remove this hold.")
+    # Hold removed 2026-08-01 by the supervisor seat after Joe's packet review
+    # and GO (flat render + owner lines ruled; execution log has the record).
+    # --rehearse remains available for branch runs.
 
     # --rehearse: import into a BRANCH so the review packet can show Joe the real
     # post-import diffs. It proves it is not production rather than trusting the
     # caller — a flag that only promises to be safe is not a safety mechanism.
-    if _is_production(url):
+    if a.rehearse and _is_production(url):
         sys.exit("--rehearse was pointed at PRODUCTION. Refusing. Run it through "
                  "tools/db-tap.py --branch <name>.")
 
