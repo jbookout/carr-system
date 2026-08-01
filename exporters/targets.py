@@ -607,20 +607,29 @@ def build_loop_file(rel_path):
 
 DOSSIER_DIR = "DNA/Clients/prospects"
 
-# The 20 hand-maintained dossiers, enumerated by the RECORD LAYER, not by a
+# The 23 hand-maintained dossiers, enumerated by the RECORD LAYER, not by a
 # directory listing: they are exactly the clients carrying `notes_path`
-# (`select count(*) from client where notes_path is not null` = 20, verified in
-# production 2026-08-01). Migration 0028 normalises those paths and asserts the
-# count of 20 inside the migration, so this list and the database cannot drift
-# apart silently — each builder re-checks its own rel_path against
-# v_export_dossier_subject and refuses to write if it is missing.
+# (`select count(*) from client where notes_path is not null` = 23, verified in
+# production 2026-08-01 after Joe's ruling). Each builder re-checks its own
+# rel_path against v_export_dossier_subject and refuses to write if it is
+# missing, so this list and the database cannot drift apart silently.
 #
-# Four dossier-SHAPED files in the same folder are deliberately NOT here because
-# no record points at them: Ahlborn-FamilyDental-Loxley.md (C-153),
-# Finelli-JosephFinelli.md (C-154), AltaPointe-enterprise.md, VictusDental-Le.md
-# (a fifth, Beasley-intake.md, is an intake per DNA/Clients/INDEX.md, not a
-# dossier). They stay hand-maintained; parked for Fable, see the ORDER 36 log.
+# WAS 20. Joe's ruling of 2026-08-01 extended the set by three, closing the gap
+# this order's first pass flagged — three live, hand-maintained dossiers the
+# record did not point at:
+#   Ahlborn-FamilyDental-Loxley.md  C-153 Michael Ahlborn
+#   Finelli-JosephFinelli.md        C-154 Joseph Finelli
+#   VictusDental-Le.md              C-063 Anthony Le — the record existed all
+#     along under the practice owner's name, which is why a name-based sweep
+#     never matched the file; the supervisor found it and set notes_path.
+#
+# Two files in the same folder stay OUT, each for its own reason:
+#   AltaPointe-enterprise.md — a NATIONAL ACCOUNT, a separate business model with
+#     its own lane, and Joe deferred its roster row on 2026-07-22. Excluded by
+#     ruling, not by oversight. Do not add it.
+#   Beasley-intake.md — an intake, not a dossier (DNA/Clients/INDEX.md:9).
 DOSSIER_FILES = [
+    "Ahlborn-FamilyDental-Loxley.md",
     "AmericanFamilyCare.md",
     "AnointedOT-Sears.md",
     "BayAreaOralSurgery.md",
@@ -628,6 +637,7 @@ DOSSIER_FILES = [
     "BlakesEnrickment-Heard.md",
     "CosmeticDermatology.md",
     "DeepWaters-Pappas.md",
+    "Finelli-JosephFinelli.md",
     "FirstCallDPC-Petersen.md",
     "GulfCoastPelvicFloor.md",
     "HealthcareForKids.md",
@@ -640,6 +650,7 @@ DOSSIER_FILES = [
     "Renalus.md",
     "SerenityCardiology-Brown.md",
     "Tyrer-DentalStartup-Moultrie.md",
+    "VictusDental-Le.md",
     "Weiler-Rejuvime.md",
 ]
 
@@ -683,15 +694,27 @@ DOSSIER_HEADER_FIELDS = [
 ]
 
 
-def _dossier_stamp(occurred_at, author):
-    """Date + author for one analysis row. Never fabricated.
+def _dossier_stamp(occurred_at, author, source=None):
+    """Date + author for one analysis row, WITH its confidence. Never fabricated.
 
-    A row whose author could not be established at import is stored against the
-    importing actor with source='import'; the render says so rather than
-    printing a name the file never claimed.
+    Joe's 2026-08-01 ruling lets a section with no author stamp of its own
+    inherit the file's `owner:` frontmatter — which is the difference between a
+    reviewable corpus and 84 flagged rows. The cost is that an inherited name
+    looks identical to a stamped one unless the render says otherwise, so it
+    does. `source` carries the confidence off the imported row:
+      import              — the section stamped this author itself
+      import_file_stamp   — inherited from the file's owner stamp
+      import_unattributed — nobody claimed it; actor is 'system'
+    Anything written live through the verb carries 'stated' and needs no
+    qualifier: the actor IS the author.
     """
     when = occurred_at.date().isoformat() if occurred_at else "date unrecorded"
-    return f"{when} · {author or 'author unrecorded'}"
+    who = author or "author unrecorded"
+    if source == "import_file_stamp":
+        who += " (per file stamp, not this section)"
+    elif source == "import_unattributed":
+        who = "author unrecorded in the source file"
+    return f"{when} · {who}"
 
 
 def build_dossier(rel_path):
@@ -727,9 +750,9 @@ def build_dossier(rel_path):
                       "file has not run. Nothing is missing from the record; nothing "
                       "has been written to it either.*", ""]
         else:
-            _rank, occurred_at, title, body, owed, author, _source = notes[0]
+            _rank, occurred_at, title, body, owed, author, source = notes[0]
             lines += ["## Analysis — current", "",
-                      f"### {title}", f"*{_dossier_stamp(occurred_at, author)}*", ""]
+                      f"### {title}", f"*{_dossier_stamp(occurred_at, author, source)}*", ""]
             if body:
                 lines += [body, ""]
             if owed:
@@ -738,8 +761,8 @@ def build_dossier(rel_path):
                 lines += ["## Earlier analysis", "",
                           "*Collapsed to title, date and author. The full text lives on the "
                           "record — ask for the subject's timeline.*", ""]
-                for _r, occ, ttl, _b, _o, auth, _s in notes[1:]:
-                    lines.append(f"- **{ttl}** — {_dossier_stamp(occ, auth)}")
+                for _r, occ, ttl, _b, _o, auth, src in notes[1:]:
+                    lines.append(f"- **{ttl}** — {_dossier_stamp(occ, auth, src)}")
                 lines.append("")
 
         from datetime import datetime, timezone
@@ -774,7 +797,7 @@ TARGETS = {
     # #9-#12 (one-writer Phase A, ORDER 31d). `--only loop` refreshes all four,
     # the same prefix-match convenience `--only compiled-rules` relies on.
     **{f"loop-{name}": (rel, build_loop_file(rel)) for name, rel in LOOP_TARGETS.items()},
-    # #13-#32 (one-writer Phase B, ORDER 36). `--only dossier` refreshes all 20;
+    # #13-#35 (one-writer Phase B, ORDER 36). `--only dossier` refreshes all 23;
     # `--only dossier-Renalus.md` refreshes exactly one, which is what the
     # file-by-file migration gate in step 8 calls per file.
     **{f"dossier-{name}": (f"{DOSSIER_DIR}/{name}", build_dossier(f"{DOSSIER_DIR}/{name}"))
