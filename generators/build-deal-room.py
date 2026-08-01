@@ -1,22 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Deal Room generator v2 (2026-07-22). JSON-driven working surface, not a report mirror.
-Single source of truth = panhandle-team-deals.json (schema v2: activity + next_step + key_dates + docs).
+Deal Room generator v2 (2026-07-22). A working surface, not a report mirror.
+Source of truth = the deal record (`v_export_deals`), read live by default since
+ORDER 29a; panhandle-team-deals.json is the same data exported to a file, and
+`--files` builds from it instead (schema v2: activity + next_step + key_dates + docs).
 Salesforce stays the paperwork rail (ETLs, signature agreements, corporate invoicing);
 this room is where the deals get worked: triage queue, phase board, per-deal detail.
-Usage:  python3 build-deal-room.py [deals.json] [out.html]
+Usage:  python3 build-deal-room.py [--records|--files] [deals.json] [out.html]
 Defaults (when run from DNA/Team/live-boards/): JSON at ../../Deal Management/panhandle-team-deals.json,
-HTML written next to this script as deal-room-panhandle.html. Pure stdlib.
+HTML written next to this script as deal-room-panhandle.html.
+Records mode needs psycopg and the exporter credential; without either it says so
+and falls back to the file, so the room never goes dark.
 Doctrine: DNA/ux-doctrine.md (all 11 laws) + DNA/writing-rules.md on every visible string.
 """
 import json, os, sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-JSON_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.normpath(os.path.join(HERE, "..", "..", "Deal Management", "panhandle-team-deals.json"))
-OUT_PATH  = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "deal-room-panhandle.html")
+# ORDER 29a (2026-07-31): the room reads the RECORD by default — the same
+# `v_export_deals` the deals file is exported from — rather than the file the
+# exporter wrote. The file keeps being generated, and `--files` still builds from
+# it byte for byte, so no other reader loses anything; this only stops the room
+# from deriving today's queue from an export that may have failed hours ago.
+# Parity between the two modes is proven by tools/parity-records.py, not assumed.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.record_sources import MODE_RECORDS, effective_mode, load_deals_doc, resolve_mode, source_note
 
-data = json.load(open(JSON_PATH))
+MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+MODE = effective_mode(MODE, "deal-room")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+JSON_PATH = ARGS[0] if len(ARGS) > 0 else os.path.normpath(os.path.join(HERE, "..", "..", "Deal Management", "panhandle-team-deals.json"))
+OUT_PATH  = ARGS[1] if len(ARGS) > 1 else os.path.join(HERE, "deal-room-panhandle.html")
+
+# File mode reads exactly the path it was handed, as it always has. Records mode
+# ignores that path: there is no file in it to read, only the view behind it.
+data = load_deals_doc(None, MODE) if MODE == MODE_RECORDS else json.load(open(JSON_PATH))
 deals = data["deals"]
 STAMP = data.get("captured", "")
 
@@ -562,4 +580,5 @@ DOC = (BODY.replace("__CSS__", CSS)
 open(OUT_PATH, "w").write(DOC)
 n_story = sum(1 for d in deals if (d.get("activity") or d.get("carr_status")))
 n_next = sum(1 for d in deals if d.get("next_step"))
-print("wrote", OUT_PATH, "|", len(deals), "deals |", n_story, "with a story |", n_next, "with a next step")
+print("wrote", OUT_PATH, "|", len(deals), "deals |", n_story, "with a story |", n_next,
+      "with a next step | source:", source_note(MODE))

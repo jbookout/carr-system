@@ -27,9 +27,15 @@ Exit 0 always — this is a report, not a gate.
 """
 import sys, os, re, json, glob, difflib
 from collections import defaultdict
-import openpyxl
 
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
+                                load_leads, load_vendors, resolve_mode, source_note)
+
+MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+MODE = effective_mode(MODE, "graph-health")
+
+args = [a for a in ARGS if not a.startswith("--")]
 VERBOSE = "--verbose" in sys.argv
 ROOT = args[0] if args else os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -37,21 +43,12 @@ GRAPH = os.path.join(ROOT, "Graph")
 
 def s(v): return str(v if v is not None else "").strip()
 
-def rows(path, sheet):
-    if not os.path.exists(path): return []
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    if sheet not in wb.sheetnames: wb.close(); return []
-    ws = wb[sheet]; it = ws.iter_rows(values_only=True)
-    hdr = [s(h) for h in next(it, [])]
-    out = [dict(zip(hdr, r)) for r in it if any(x is not None for x in r)]
-    wb.close(); return out
-
-vendors = rows(os.path.join(ROOT, "DNA/Network/vendors.xlsx"), "Vendors")
-leads   = rows(os.path.join(ROOT, "DNA/Leads/lead-registry.xlsx"), "Registry")
-clients = rows(os.path.join(ROOT, "DNA/Clients/client-roster.xlsx"), "Clients")
-deals   = []
-dp = os.path.join(ROOT, "DNA/Deal Management/panhandle-team-deals.json")
-if os.path.exists(dp): deals = json.load(open(dp)).get("deals", [])
+# ORDER 29a: the anomaly report reads what the graph read. Two readers on two
+# sources would report anomalies the graph does not have and miss the ones it does.
+vendors = load_vendors(ROOT, MODE)
+leads   = load_leads(ROOT, MODE)
+clients = load_clients(ROOT, MODE)
+deals   = load_deals_doc(ROOT, MODE)["deals"]
 
 findings = []          # (severity, category, detail)
 def add(sev, cat, detail): findings.append((sev, cat, detail))
@@ -355,7 +352,7 @@ by_cat = defaultdict(list)
 for sev, cat, detail in findings: by_cat[(ORDER[sev], sev, cat)].append(detail)
 
 print(f"\nGRAPH HEALTH — {len(vendors)} vendors, {len(leads)} leads, "
-      f"{len(clients)} clients, {len(deals)} deals\n" + "=" * 72)
+      f"{len(clients)} clients, {len(deals)} deals  [source: {source_note(MODE)}]\n" + "=" * 72)
 if not findings:
     print("\nNo anomalies found.\n"); sys.exit(0)
 

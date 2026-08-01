@@ -34,28 +34,28 @@ NON-DESTRUCTIVE: writes only to Graph/hubs/. Never edits the entity notes.
 """
 import sys, os, re, json, shutil, unicodedata
 from collections import defaultdict
-import openpyxl
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
+                                load_leads, load_vendors, resolve_mode, source_note)
+
+MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+MODE = effective_mode(MODE, "graph-structure")
+
+ROOT = ARGS[0] if ARGS else os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", ".."))
 GRAPH = os.path.join(ROOT, "Graph")
 OUT = os.path.join(GRAPH, "hubs")
 
-SRC = {"vendors": os.path.join(ROOT, "DNA/Network/vendors.xlsx"),
-       "leads":   os.path.join(ROOT, "DNA/Leads/lead-registry.xlsx"),
-       "clients": os.path.join(ROOT, "DNA/Clients/client-roster.xlsx"),
-       "deals":   os.path.join(ROOT, "DNA/Deal Management/panhandle-team-deals.json")}
+# ORDER 29a: the same four records build-graph-notes.py just used, read the same
+# way. The skeleton has to agree with the notes it hangs off; two readers with two
+# different sources would put a record in a pole its own note never mentioned.
+VENDORS = load_vendors(ROOT, MODE)
+LEADS = load_leads(ROOT, MODE)
+CLIENTS = load_clients(ROOT, MODE)
+DEALS = load_deals_doc(ROOT, MODE)["deals"]
 
 def s(v): return str(v if v is not None else "").strip()
-
-def rows(path, sheet):
-    if not os.path.exists(path): return []
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    if sheet not in wb.sheetnames: wb.close(); return []
-    ws = wb[sheet]; it = ws.iter_rows(values_only=True)
-    hdr = [s(h) for h in next(it, [])]
-    out = [dict(zip(hdr, r)) for r in it if any(x is not None for x in r)]
-    wb.close(); return out
 
 # ---------- node titles build-graph-notes.py actually wrote ----------
 node_titles, kind_of = {}, {}
@@ -121,13 +121,13 @@ def source_node(label):
     flows[n].add("① LEADS")
     return n
 
-for v in rows(SRC["vendors"], "Vendors"):
+for v in VENDORS:
     n = node_for(v.get("Name"), v.get("Company"))
     if not n: continue
     if (p := owner_pole(v.get("Owner"))): members[p].add(n)
     if (f := norm_firm(v.get("Company"))): members[f"🏢 {f}"].add(n)
 
-for l in rows(SRC["leads"], "Registry"):
+for l in LEADS:
     n = node_for(l.get("Contact Name"), l.get("Practice"), kind="lead")
     if not n: continue
     if (p := owner_pole(l.get("Owner"))): members[p].add(n)
@@ -137,7 +137,7 @@ for l in rows(SRC["leads"], "Registry"):
     if det and not re.match(r"^V-[A-Z]+-\d+$", det.upper()):
         if (sn := source_node(det)): members[sn].add(n)
 
-for c in rows(SRC["clients"], "Clients"):
+for c in CLIENTS:
     n = node_for(c.get("Name"), c.get("Practice / Entity"))
     if not n: continue
     if (p := owner_pole(c.get("Owner"))): members[p].add(n)
@@ -145,13 +145,12 @@ for c in rows(SRC["clients"], "Clients"):
     if (r := clean(c.get("Referral Source"))) and len(r) < 45:
         members[f"⚑ {r}"].add(n)
 
-if os.path.exists(SRC["deals"]):
-    for d in json.load(open(SRC["deals"])).get("deals", []):
-        n = node_for(d.get("name"), d.get("contact"), d.get("company"), kind="deal")
-        if not n: continue
-        if (p := owner_pole(d.get("owner"))): members[p].add(n)
-        if (r := clean(d.get("referral"))) and len(r) < 45:
-            members[f"⚑ {r}"].add(n)
+for d in DEALS:
+    n = node_for(d.get("name"), d.get("contact"), d.get("company"), kind="deal")
+    if not n: continue
+    if (p := owner_pole(d.get("owner"))): members[p].add(n)
+    if (r := clean(d.get("referral"))) and len(r) < 45:
+        members[f"⚑ {r}"].add(n)
 
 # ---------- write ----------
 if os.path.isdir(OUT): shutil.rmtree(OUT)
@@ -214,4 +213,4 @@ if skipped:
 poles  = sum(1 for t in members if tag_for(t) == "pole")
 stages = sum(1 for t in members if tag_for(t) == "stage")
 print(f"\nstructure: {written} nodes, {edges} edges  ({poles} poles, {stages} stages, "
-      f"{written-poles-stages} firm/source clusters)")
+      f"{written-poles-stages} firm/source clusters) | source: {source_note(MODE)}")
