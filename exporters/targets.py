@@ -325,6 +325,100 @@ def build_rules_joe(tmp_path, cur):
         "lives on his side and is generated the same way.")
 
 
+# ---------------- the loop accumulators (one-writer Phase A, ORDER 31) ----------------
+
+LOOP_TARGETS = {
+    "open-loops.md": "00_Context/open-loops.md",
+    "open-loops-backlog.md": "00_Context/open-loops-backlog.md",
+    "action-required.md": "DNA/Team/action-required.md",
+    "team-loops.md": "DNA/Team/team-loops.md",
+}
+
+# NO GENERATED BANNER IS INJECTED INTO THESE FOUR, and that is deliberate.
+# Every other generated file opens with one. These four are read by the heartbeat,
+# the Monday brief and Dell's sessions as a first act, and each OPENS with a
+# doctrine paragraph that IS the rule those readers obey — open-loops.md's marker
+# convention, action-required.md's escalation clause. A banner above that prose
+# changes the first thing every reader sees and breaks the round-trip diff the
+# order's done-test turns on. The do-not-hand-edit warning belongs IN the stored
+# prose, added once by a human at the live flip, into the block the human owns.
+# Until that flip these renders are staging-only, so nothing sits unlabelled in
+# the vault.
+
+
+def _loop_cell(v):
+    """One cell, verbatim.
+
+    NOT _md_cell. That escapes pipes and folds newlines to <br>, which is right
+    for a value arriving from a spreadsheet and wrong here: these values came OUT
+    of markdown tables carrying their own escapes (team-loops T36 quotes an email
+    subject containing an escaped pipe) and one cell legitimately spans two lines
+    (T54). Re-escaping would double the backslashes and folding would destroy the
+    line break. Both are content changes, on the one surface whose entire test is
+    that nothing changed.
+    """
+    return "" if v is None else str(v)
+
+
+def build_loop_file(rel_path):
+    """One builder per file; the render walks the stored blocks in order."""
+
+    def build(tmp_path, cur):
+        cur.execute(
+            "select seq, block_key, prose_md, header_cols, col_order "
+            "from loop_block where rel_path = %s order by seq", (rel_path,))
+        blocks = cur.fetchall()
+        if not blocks:
+            raise ValueError(f"no loop_block rows for {rel_path} — the importer has not run")
+
+        lines, canonical = [], []
+        for seq, block_key, prose_md, header_cols, col_order in blocks:
+            # A prose-only block is emitted even when EMPTY: the last block of
+            # open-loops-backlog.md is exactly that, and it is what carries the
+            # file's trailing newline. Dropping it as falsy cost a byte and the
+            # round-trip diff caught it.
+            if prose_md or block_key is None:
+                lines.append(prose_md)
+            if block_key is None:
+                continue
+            if header_cols:
+                lines.append("| " + " | ".join(header_cols) + " |")
+                lines.append("|" + "---|" * len(header_cols))
+            cur.execute(
+                "select row_col_order, number, owner, title, body, since_text, "
+                "       unblocks, source_note, closed_text, outcome, "
+                "       marker_literal, extra_cells "
+                "  from v_export_loops "
+                " where rel_path = %s and block_key = %s and loop_id is not null "
+                " order by render_seq", (rel_path, block_key))
+            for r in cur.fetchall():
+                (row_order, number, owner, title, body, since_text, unblocks,
+                 source_note, closed_text, outcome, marker_literal, extra) = r
+                vals = {"number": number, "owner": owner, "title": title, "body": body,
+                        "since_text": since_text, "unblocks": unblocks,
+                        "source_note": source_note, "closed_text": closed_text,
+                        "outcome": outcome}
+                # The marker literal was split off the item's own text at import;
+                # it goes back onto the same cell with the same single space.
+                if marker_literal:
+                    text_field = "body" if body is not None else "title"
+                    vals[text_field] = marker_literal + " " + _loop_cell(vals[text_field])
+                order = row_order or col_order
+                cells = []
+                for name in order:
+                    if name.startswith("extra:"):
+                        cells.append(_loop_cell((extra or {}).get(name.split(":", 1)[1])))
+                    else:
+                        cells.append(_loop_cell(vals.get(name)))
+                lines.append("| " + " | ".join(cells) + " |")
+                canonical.append([number, list(order), cells])
+
+        tmp_path.write_text("\n".join(lines))
+        return len(canonical), canonical
+
+    return build
+
+
 TARGETS = {
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
     "client-roster.xlsx": (ROSTER_REL, build_roster),
@@ -335,4 +429,7 @@ TARGETS = {
     "compiled-rules-joe": (RULES_JOE_REL, build_rules_joe),
     # #8 (Wave 3, ORDER 25d). Carries a death sentence — see build_router.
     "lead-router-2026-07-13.xlsx": (ROUTER_REL, build_router),
+    # #9-#12 (one-writer Phase A, ORDER 31d). `--only loop` refreshes all four,
+    # the same prefix-match convenience `--only compiled-rules` relies on.
+    **{f"loop-{name}": (rel, build_loop_file(rel)) for name, rel in LOOP_TARGETS.items()},
 }

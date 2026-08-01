@@ -149,6 +149,64 @@ async function resolveSubject(client, ref) {
     hint: "use find first; refs look like L-204 / C-127 / V-CPA-006 or a deal name" });
 }
 
+// ---------- loop helpers (one-writer Phase A, ORDER 31) ----------
+
+// A LOOP NUMBER IS NOT AN IDENTIFIER, and pretending otherwise is how a verb
+// writes to the wrong row. Measured in the source files 2026-07-31: '111' names
+// two different items inside open-loops.md, '103'/'95'/'88'/'108' each name one
+// hot item and a different backlog item, 'T34' names one row in team-loops' Open
+// table and another in its Done table. So `number` narrows and `loop_id`
+// identifies, and an ambiguous number REFUSES with the candidates listed —
+// ORDER 1's needs_disambiguation behaviour, applied to a surface that is
+// genuinely ambiguous rather than occasionally so.
+async function resolveLoop(client, args) {
+  if (args.loop_id) {
+    const r = await client.query(
+      `select li.id, li.kind, li.number, li.status, li.marker, li.due_on,
+              li.close_outcome, lb.block_key as section
+         from loop_item li join loop_block lb on lb.id = li.block_id
+        where li.id = $1`, [args.loop_id]);
+    if (!r.rows.length) throw new ToolError({ error: "not_found", loop_id: args.loop_id });
+    return r.rows[0];
+  }
+  if (!args.number)
+    throw new ToolError({ error: "missing_loop_ref",
+      hint: "pass loop_id, or number (plus kind when the number is shared across kinds)" });
+  const r = await client.query(
+    `select li.id, li.kind, li.number, li.status, li.marker, li.due_on,
+            li.close_outcome, lb.block_key as section, lb.rel_path
+       from loop_item li join loop_block lb on lb.id = li.block_id
+      where li.number = $1 and li.status = 'open'
+        and ($2::text is null or li.kind = $2)`, [args.number, args.kind || null]);
+  if (!r.rows.length)
+    throw new ToolError({ error: "loop_not_found", number: args.number, kind: args.kind || null,
+      hint: "only OPEN loops resolve by number; a closed one needs its loop_id" });
+  if (r.rows.length > 1)
+    throw new ToolError({ error: "needs_disambiguation", number: args.number,
+      candidates: r.rows.map(x => ({ loop_id: x.id, kind: x.kind, section: x.section,
+                                     renders_into: x.rel_path })),
+      hint: "this number names more than one live row — pass loop_id. The collision is " +
+            "real and in the source files; it is Joe's to renumber, not a verb's." });
+  return r.rows[0];
+}
+
+// Next visible ref for a kind. Numeric part only, because that is the part the
+// files increment; the prefix is the kind's own. Reads the MAX across every row
+// including closed ones, so a number is never reused after a close.
+async function nextLoopNumber(client, kind) {
+  const prefix = kind === "team_loop" ? "T" : kind === "action_required" ? "A" : "";
+  const r = await client.query(
+    `select coalesce(max(nullif(regexp_replace(number, '\\D', '', 'g'), '')::int), 0) as m
+       from loop_item where kind = $1`, [kind]);
+  return `${prefix}${r.rows[0].m + 1}`;
+}
+
+async function nextRenderSeq(client, blockId) {
+  const r = await client.query(
+    "select coalesce(max(render_seq), 0) + 1 as n from loop_item where block_id = $1", [blockId]);
+  return r.rows[0].n;
+}
+
 const FK = { deal: "deal_id", client: "client_id", lead: "lead_id", vendor: "vendor_id" };
 
 // [ORDER 18] How many intro-graph edges `find` returns per query. A cap, not a
@@ -1185,6 +1243,207 @@ export const TOOLS = {
       await writeEvent(c, actor, "activate-rule", "rule", args.rule_id,
         { new: { status: "active" }, idempotency_key: args.idempotency_key });
       return { ok: true };
+    }),
+  },
+
+  // ---------- the loop accumulators (one-writer Phase A, ORDER 31) ----------
+  // open-loops.md, open-loops-backlog.md, action-required.md and team-loops.md
+  // are generated renders of loop_item after this lands. Sessions stop editing
+  // those four files and use these three verbs instead — which is the whole
+  // point of Joe's ruling: "if i do something in my session, i want dell to be
+  // able to instantly recall it in his session."
+
+  "add-loop": {
+    write: true,
+    description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), or a cross-brain interrupt (action_required). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 5 across the hot list — more than 5 means re-tier, not stack), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required"] },
+      title: { type: "string", description: "team_loop 'Ask' / action_required 'Action needed'. Not used by open_loop, whose text is `body`." },
+      body: { type: "string", description: "open_loop 'Item' / team_loop 'Notes / links'" },
+      owner: { type: "string", description: "the label the file uses: 'Joe', 'Joe/Claude', 'Dell', 'Joe→Dell'" },
+      unblocks: { type: "string", description: "what it unblocks / why it matters" },
+      source_note: { type: "string", description: "source / detail / links" },
+      marker: { type: "string", enum: ["bell", "dated", "decision", "none"] },
+      due_on: { type: "string", description: "YYYY-MM-DD; required when marker is 'dated'" },
+      drift_critical: { type: "boolean", description: "the ⚡ — leaving it undone causes system drift; BOTH brains' heartbeats surface it daily" },
+      number: { type: "string", description: "override the auto-assigned ref. Only pass this to reproduce a number that already exists somewhere; the files already contain collisions." },
+      since: { type: "string", description: "YYYY-MM-DD; defaults to today" } },
+      required: ["idempotency_key", "kind", "owner"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "add-loop", args, async () => {
+      if (!args.title && !args.body)
+        throw new ToolError({ error: "empty_loop",
+          hint: "a loop needs text: `body` for an open_loop, `title` for a team_loop or action_required" });
+      if (args.marker === "dated" && !args.due_on)
+        throw new ToolError({ error: "dated_marker_needs_date",
+          hint: "a 🗓 row is silent until its day — without a date it would be silent forever" });
+
+      const marker = args.marker || (args.due_on ? "dated" : "none");
+      const literal = marker === "bell" ? "🔔"
+        : marker === "decision" ? "❓"
+        : marker === "dated" ? `🗓${args.due_on}` : null;
+
+      // Placement follows the files' own rule. It is STORED, not derived, so a
+      // later promotion is a recorded act (see v_loop_promotion_due).
+      const nowDue = marker === "dated" && args.due_on <= new Date().toISOString().slice(0, 10);
+      const wantKey = args.kind !== "open_loop" ? "open"
+        : (marker === "bell" || nowDue) ? "hot" : "backlog";
+      const b = await c.query(
+        "select id, rel_path, col_order from loop_block where kind=$1 and block_key=$2",
+        [args.kind, wantKey]);
+      if (!b.rows.length)
+        throw new ToolError({ error: "no_block", kind: args.kind, section: wantKey,
+          hint: "the loop importer has not run for this kind — nothing to render into" });
+      const block = b.rows[0];
+
+      const num = args.number || await nextLoopNumber(c, args.kind);
+      const seq = await nextRenderSeq(c, block.id);
+      const tier = args.kind === "open_loop" ? "personal" : "shared";
+      const personal = tier === "personal" ? actor.id : null;
+
+      const r = await c.query(
+        `insert into loop_item (kind, number, block_id, render_seq, title, body, owner,
+           since_text, unblocks, source_note, marker, marker_literal, due_on,
+           drift_critical, status, tier, personal_to, created_by, updated_by)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'open',$15,$16,$17,$17)
+         returning id`,
+        [args.kind, num, block.id, seq, args.title || null, args.body || null, args.owner,
+         args.since || new Date().toISOString().slice(0, 10), args.unblocks || null,
+         args.source_note || null, marker, literal, args.due_on || null,
+         args.drift_critical === true, tier, personal, actor.id]);
+
+      await writeEvent(c, actor, "add-loop", "loop", r.rows[0].id,
+        { new: { number: num, kind: args.kind, section: wantKey, marker,
+                 due_on: args.due_on || null, owner: args.owner },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, loop_id: r.rows[0].id, number: num, kind: args.kind,
+               section: wantKey, renders_into: block.rel_path };
+    }),
+  },
+
+  "update-loop": {
+    write: true,
+    description: "Change an open loop — its text, its owner, its marker, or which section it sits in. This is also how a due backlog row gets PROMOTED to the hot list: pass section 'hot'. Promotion is a recorded act by an actor, never something a view does to Joe's file behind his back — read v_loop_promotion_due for what has come due. Pass only the fields you are changing; anything omitted is left alone. Closing is a different act: use close-loop, which requires an outcome.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      loop_id: { type: "string" },
+      number: { type: "string", description: "alternative to loop_id; refuses when the number is ambiguous, and several are" },
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required"], description: "narrows an ambiguous number" },
+      base_version: { type: "integer" },
+      title: { type: "string" }, body: { type: "string" }, owner: { type: "string" },
+      unblocks: { type: "string" }, source_note: { type: "string" },
+      marker: { type: "string", enum: ["bell", "dated", "decision", "none"] },
+      due_on: { type: "string", description: "YYYY-MM-DD" },
+      drift_critical: { type: "boolean" },
+      section: { type: "string", enum: ["hot", "backlog", "open"], description: "move the row to this section of its file" } },
+      required: ["idempotency_key"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "update-loop", args, async () => {
+      const cur = await resolveLoop(c, args);
+      await versionGuard(c, "loop_item", cur.id, args.base_version);
+      if (cur.status !== "open")
+        throw new ToolError({ error: "loop_not_open", loop_id: cur.id, status: cur.status,
+          hint: "a closed loop is history; open a new one rather than editing the record of what happened" });
+
+      const sets = [], vals = [];
+      const set = (col, v) => { vals.push(v); sets.push(`${col}=$${vals.length}`); };
+      for (const f of ["title", "body", "owner", "unblocks", "source_note"])
+        if (args[f] !== undefined) set(f, args[f]);
+      if (args.drift_critical !== undefined) set("drift_critical", args.drift_critical === true);
+
+      if (args.marker !== undefined || args.due_on !== undefined) {
+        const marker = args.marker !== undefined ? args.marker : cur.marker;
+        const due = args.due_on !== undefined ? args.due_on : cur.due_on;
+        if (marker === "dated" && !due)
+          throw new ToolError({ error: "dated_marker_needs_date",
+            hint: "a 🗓 row without a date is silent forever" });
+        set("marker", marker);
+        set("due_on", marker === "dated" ? due : null);
+        set("marker_literal", marker === "bell" ? "🔔"
+          : marker === "decision" ? "❓"
+          : marker === "dated" ? `🗓${due}` : null);
+      }
+
+      let moved = null;
+      if (args.section && args.section !== cur.section) {
+        const b = await c.query(
+          "select id, rel_path from loop_block where kind=$1 and block_key=$2",
+          [cur.kind, args.section]);
+        if (!b.rows.length)
+          throw new ToolError({ error: "no_such_section", kind: cur.kind, section: args.section,
+            hint: `open_loop has hot and backlog; team_loop and action_required have open` });
+        set("block_id", b.rows[0].id);
+        set("render_seq", await nextRenderSeq(c, b.rows[0].id));
+        moved = { from: cur.section, to: args.section };
+      }
+
+      if (!sets.length)
+        throw new ToolError({ error: "nothing_to_update",
+          hint: "pass at least one field; base_version alone changes nothing" });
+
+      vals.push(actor.id); sets.push(`updated_by=$${vals.length}`);
+      vals.push(cur.id);
+      await c.query(`update loop_item set ${sets.join(", ")} where id=$${vals.length}`, vals);
+      await writeEvent(c, actor, "update-loop", "loop", cur.id,
+        { new: { changed: sets.map(s => s.split("=")[0]), moved },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, loop_id: cur.id, number: cur.number, moved };
+    }),
+  },
+
+  "close-loop": {
+    write: true,
+    description: "Close a loop — done, or deliberately dropped. AN OUTCOME IS REQUIRED and the verb refuses without one: team-loops states the reason in its own words, 'outcomes are how the asker finds out without asking twice.' Say what actually came of it, not that it is closed. A team_loop or action_required row moves to its file's Done table carrying the outcome; an open_loop leaves the hot/backlog render, the same thing closing a row has always done. Use resolution 'dropped' when it is being abandoned rather than finished — recording an abandonment as done inflates every completion measure built on this.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      loop_id: { type: "string" },
+      number: { type: "string", description: "alternative to loop_id; refuses when ambiguous" },
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required"] },
+      base_version: { type: "integer" },
+      outcome: { type: "string", description: "REQUIRED: what came of it, in your words" },
+      resolution: { type: "string", enum: ["done", "dropped"] } },
+      required: ["idempotency_key", "outcome"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "close-loop", args, async () => {
+      // The refusal is first and unconditional. A whitespace-only outcome is no
+      // outcome: the record-level CHECK would accept ' ' and the asker would still
+      // never find out, which is the failure this rule exists to prevent.
+      const outcome = (args.outcome || "").trim();
+      if (!outcome)
+        throw new ToolError({ error: "outcome_required",
+          hint: "close-loop will not close a loop silently — say what came of it. " +
+                "If nothing came of it and you are abandoning it, say that and pass resolution 'dropped'." });
+
+      const cur = await resolveLoop(c, args);
+      await versionGuard(c, "loop_item", cur.id, args.base_version);
+      if (cur.status !== "open")
+        throw new ToolError({ error: "loop_not_open", loop_id: cur.id, status: cur.status,
+          closed_outcome: cur.close_outcome,
+          hint: "already closed — this is what came of it" });
+
+      const resolution = args.resolution || "done";
+
+      // A file with a Done table keeps its closed rows visible in the render; that
+      // is the file's own convention, not a new one. open_loop has no Done table
+      // in either of its two files, so a closed one simply leaves the list.
+      const done = await c.query(
+        "select id, rel_path from loop_block where kind=$1 and block_key='done'", [cur.kind]);
+      const sets = ["status=$1", "close_outcome=$2", "closed_by=$3", "closed_at=now()",
+                    "outcome=$2", "closed_text=to_char(now(),'YYYY-MM-DD')", "updated_by=$3"];
+      const vals = [resolution, outcome, actor.id];
+      let movedTo = null;
+      if (done.rows.length) {
+        vals.push(done.rows[0].id); sets.push(`block_id=$${vals.length}`);
+        vals.push(await nextRenderSeq(c, done.rows[0].id)); sets.push(`render_seq=$${vals.length}`);
+        movedTo = done.rows[0].rel_path;
+      }
+      vals.push(cur.id);
+      await c.query(`update loop_item set ${sets.join(", ")} where id=$${vals.length}`, vals);
+
+      await writeEvent(c, actor, "close-loop", "loop", cur.id,
+        { field: "status", old: { status: "open" },
+          new: { status: resolution, outcome }, human_quote: outcome,
+          idempotency_key: args.idempotency_key });
+      return { ok: true, loop_id: cur.id, number: cur.number, status: resolution,
+               moved_to_done_table_in: movedTo };
     }),
   },
 };
