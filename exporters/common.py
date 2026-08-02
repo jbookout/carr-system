@@ -70,6 +70,97 @@ def record_run(cur, target, row_count, checksum, status):
                 "values (%s,%s,%s,%s)", (target, row_count, checksum, status))
 
 
+# ---------------- the coverage note (absence is not absence, at the render) ----------------
+#
+# This system has read an empty cell as a fact five separate times: a lookup verb
+# that invented an absence, an open-deals-only JSON read as the whole book,
+# `stale-records` needing its own docstring to warn its caller that empty may mean
+# nothing-captured, email silence treated as a cold prospect, and a grep too narrow
+# to support what it was denying. Every one of those was caught after the fact.
+#
+# The renders are where the misreading actually starts, because a blank cell in a
+# vault file looks exactly like a recorded zero to whoever opens it, and one of the
+# two people opening these is newer to the system than the other. So each render
+# carrying an absence-ambiguous column states its own coverage, in plain language,
+# in the file, next to the column.
+#
+# WHICH columns are absence-ambiguous is a judgment and is authored per target: most
+# blanks are ordinary (a vendor with no Notes is a vendor with no notes), and a note
+# on every sparse column would be noise nobody reads. THE NUMBERS ARE NEVER AUTHORED.
+# They are counted from the rows being written, on every run. That is not a style
+# preference: the audit of 2026-08-02 measured vendor Last Touch at 0 of 290, and by
+# the time this shipped the export view was already deriving 2. A number typed into a
+# file would have shipped stale on day one. A column at full coverage drops out of
+# the note entirely, so the note empties itself as the book fills in, and nobody has
+# to remember to go delete it.
+
+
+def _has_value(v):
+    """Blank is blank: None, empty string and whitespace-only all count as unrecorded.
+
+    NOT `is not None`. A view that renders '' and a view that renders NULL look the
+    same to the reader, and the reader is who this number is for.
+    """
+    return v is not None and str(v).strip() != ""
+
+
+def coverage_findings(rows, cols, watched):
+    """[(column, filled, total, blurb)] for each watched column short of full coverage.
+
+    `watched` maps a column name to the misreading it invites, phrased as what a
+    blank does NOT tell you. `rows`/`cols` are the rows and header being written, so
+    the count describes the file the partners open rather than some wider query
+    sitting behind it. A watched column the render does not carry is skipped, which
+    is what lets two targets share one watch list.
+    """
+    total = len(rows)
+    if not total:
+        return []
+    found = []
+    for col, blurb in watched.items():
+        if col not in cols:
+            continue
+        i = cols.index(col)
+        filled = sum(1 for r in rows if _has_value(r[i]))
+        if filled < total:
+            found.append((col, filled, total, blurb))
+    return found
+
+
+def _pct(filled, total):
+    return round(filled / total * 100)
+
+
+def coverage_note_md(rows, cols, watched, noun):
+    """The markdown block for a rendered table, or [] when every watched column is full."""
+    findings = coverage_findings(rows, cols, watched)
+    if not findings:
+        return []
+    bullets = [f"- **{col}**: recorded on {filled} of {total} {noun} ({_pct(filled, total)}%). "
+               f"A blank tells you nothing about {blurb}."
+               for col, filled, total, blurb in findings]
+    return [
+        "",
+        "### Coverage note",
+        "",
+        "Blanks in the columns listed here mean nobody has recorded a value yet. Read them",
+        "as unknown.",
+        "",
+        *bullets,
+        "",
+        "*Counted from the rows above on every export. A column leaves this list once every",
+        "row has a value.*",
+    ]
+
+
+def coverage_note_cell(finding, noun):
+    """The same finding as one flat sentence, sized for a spreadsheet cell comment."""
+    col, filled, total, blurb = finding
+    return (f"Coverage note (generated). {col} is recorded on {filled} of {total} {noun} "
+            f"({_pct(filled, total)}%). A blank tells you nothing about {blurb}. "
+            f"Recounted on every export.")
+
+
 def keep_generation(final_path: Path):
     if not final_path.exists():
         return

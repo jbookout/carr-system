@@ -14,8 +14,10 @@ from these files, so the nightly order is: five exporters, then graph.
 from pathlib import Path
 
 import openpyxl
+from openpyxl.comments import Comment
 
-from .common import VAULT
+from .common import VAULT, coverage_findings, coverage_note_cell, coverage_note_md
+from .dictionary import DICT_REL, build_dictionary
 from .ledger_targets import (HUNT_REL as LEDGER_HUNT_REL, RECIP_REL as LEDGER_RECIP_REL,
                              build_hunt_ledger, build_reciprocity)
 
@@ -40,6 +42,39 @@ def _rewrite_sheet(wb, sheet_name, header, rows):
     return ws
 
 
+# The absence-ambiguous columns, per render. The phrase is what a blank does NOT
+# tell the reader; common.coverage_findings supplies the live numbers.
+#
+# Deliberately short lists. Every one of these is a column whose blank a reader
+# converts into a fact about the person ("nobody has called them", "there is
+# nothing to do here") rather than a fact about our capture. Columns whose blank
+# means what it looks like (Notes, Rivalry Group) stay off, or the note becomes
+# wallpaper and stops being read.
+TOUCH_WATCH = {
+    "Last Touch": "whether anyone has been in contact",
+    "Next Step": "whether something is owed on this relationship",
+    "Next Action": "whether something is owed on this relationship",
+    "Next Action Date": "when the next action is due",
+}
+
+
+def _annotate_coverage(ws, header, rows, noun, watched=TOUCH_WATCH):
+    """Hang the coverage note off the header cell of each short column.
+
+    NOT a prose row under the table and NOT an extra sheet. These workbooks are
+    parsed by the Dashboard formulas, by the graph builder and by Dell's side, and
+    a sentence sitting inside the data range is a row those readers try to read as
+    a vendor. A cell comment changes no value at all, so the canonical rows and the
+    A8 checksum are byte-identical with it and without it, and it lands exactly
+    where the misreading starts: the reader is already looking at that column.
+    """
+    for finding in coverage_findings(rows, header, watched):
+        cell = ws.cell(row=1, column=header.index(finding[0]) + 1)
+        cell.comment = Comment(coverage_note_cell(finding, noun), "CARR record layer")
+        cell.comment.width = 340
+        cell.comment.height = 130
+
+
 # ---------------- lead-registry.xlsx ----------------
 
 REGISTRY_REL = "DNA/Leads/lead-registry.xlsx"
@@ -56,7 +91,8 @@ def build_registry(tmp_path, cur):
     data = cur.fetchall()
     rows = [[r[cols.index(c)] for c in REGISTRY_COLS] for r in data]  # _suppressed carried in DB, not a sheet column
     wb = openpyxl.load_workbook(_template(REGISTRY_REL))
-    _rewrite_sheet(wb, "Registry", REGISTRY_COLS, rows)
+    ws = _rewrite_sheet(wb, "Registry", REGISTRY_COLS, rows)
+    _annotate_coverage(ws, REGISTRY_COLS, rows, "leads")
     wb.save(tmp_path)
     return len(rows), rows
 
@@ -95,7 +131,10 @@ def build_vendors(tmp_path, cur):
     in_market = [[r[cols.index(c)] for c in VENDORS_COLS]
                  for r in data if not r[cols.index("_out_of_market")]]
     wb = openpyxl.load_workbook(_template(VENDORS_REL))
-    _rewrite_sheet(wb, "Vendors", VENDORS_COLS, in_market)
+    ws = _rewrite_sheet(wb, "Vendors", VENDORS_COLS, in_market)
+    # Counted over the IN-MARKET rows, which are the rows this sheet holds. Counting
+    # the whole view would state a coverage figure for rows the reader cannot see.
+    _annotate_coverage(ws, VENDORS_COLS, in_market, "vendors")
     # Out of Market sheet keeps its explanatory first row; data rows follow it.
     # v1: out-of-market rows stay wherever the sheet held them at freeze; the
     # flag routes NEW moves. Revisit at freeze with real data.
@@ -259,6 +298,7 @@ def build_clients_active(tmp_path, cur):
     ]
     for r in rows:
         lines.append("| " + " | ".join(_md_cell(v) for v in r) + " |")
+    lines += coverage_note_md(rows, ACTIVE_COLS, TOUCH_WATCH, "clients")
     from datetime import datetime, timezone
     lines += ["", f"*Exported: {datetime.now(timezone.utc).isoformat()}*", ""]
     tmp_path.write_text("\n".join(lines))
@@ -1005,6 +1045,11 @@ TARGETS = {
     # Dell onboarding prep (2026-08-01): Dell's personal compiled rules, in the
     # DNA share. Prefix-matches --only compiled-rules → rides hourly + nightly.
     "compiled-rules-dell": (RULES_DELL_REL, build_rules_dell),
+    # The data dictionary. Structure, the migrations' own COMMENT ON prose, the
+    # closed vocabularies and per-column fill counts — no row values (see the
+    # module docstring's three rules). Shared tier: both partners read the same
+    # record and both ask the same "what does status = 'roster' mean".
+    "record-layer-dictionary.md": (DICT_REL, build_dictionary),
     # ORDER 39 (2026-08-01): the two md-ledger renders. hunt-ledger.md is the
     # live flipped file; the reciprocity render lives beside deals.md because
     # deals.md is section-scoped (27 hand-kept deal records stay hand-kept).
