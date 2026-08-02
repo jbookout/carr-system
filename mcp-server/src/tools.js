@@ -988,17 +988,19 @@ export const TOOLS = {
 
   "update-deal": {
     write: true,
-    description: "Field-level change to a deal (phase, segment, outcome, notes_path). Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. Phase must be an existing slug (list: pending/research/site_selection/negotiation/closing/closed + imported).",
+    description: "Field-level change to a deal (phase, segment, outcome, notes_path, salesforce_id). Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. Phase must be an existing slug (list: pending/research/site_selection/negotiation/closing/closed + imported). salesforce_id is the reconciliation key back to the system of record and was NULL on all 40 deals as of 2026-08-02, which forced salesforce-diff to match on name — the matching that mis-filed thirteen deals in the first place; fill it during the Salesforce read. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
-      fields: { type: "object", description: "subset of: phase, segment, outcome, closed_on, won_value, notes_path" } },
+      fields: { type: "object", description: "subset of: phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id" } },
       required: ["idempotency_key","deal","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       await versionGuard(c, "deal", s.id, args.base_version);
-      const allowed = ["phase","segment","outcome","closed_on","won_value","notes_path"];
+      const allowed = ["phase","segment","outcome","closed_on","won_value","notes_path","salesforce_id"];
+      if ("client_id" in args.fields) throw new ToolError({ error: "use_reassign_deal",
+        hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
       const old = (await c.query(`select ${keys.join(",")} from deal where id=$1`, [s.id])).rows[0];
@@ -1009,6 +1011,55 @@ export const TOOLS = {
         await writeEvent(c, actor, "update-deal", "deal", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys };
+    }),
+  },
+
+  "reassign-deal": {
+    write: true, humanOnly: true,
+    description: "Move a deal onto the client it actually belongs to. THIS IS THE ONLY VERB THAT CHANGES deal.client_id — update-deal refuses that field on purpose, because re-pointing a deal changes whose book it sits in and is structural, not a field edit (the same reason set-lead owns the owner). Built 2026-08-02 for the Musicologie finding: an import filed THIRTEEN deals under C-131, twelve of them belonging to other franchisees who each had their own client record, so nine clients rendered as 'Active deal – no deal on file' while their deals sat under someone else's name. Requires base_version from a fresh read. Refuses a no-op, refuses a merged-away target, and records the old and new client on the event so the move is auditable. It does NOT touch the client rows themselves: a parent/sub-client structure (a national account over its franchisees) is expressed by party.org_id, not by moving deals up to the parent.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, deal: { type: "string" },
+      base_version: { type: "integer" },
+      new_client: { type: "string", description: "C-ref or exact name of the client the deal really belongs to" },
+      reason: { type: "string", description: "why it moved; lands on the event as agent_rationale" },
+      human_quote: { type: "string", description: "the partner's verbatim words, when they directed the move" } },
+      required: ["idempotency_key","deal","base_version","new_client"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "reassign-deal", args, async () => {
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      await versionGuard(c, "deal", s.id, args.base_version);
+
+      const t = await resolveSubject(c, args.new_client);
+      if (t.type !== "client") throw new ToolError({ error: "not_a_client", resolved: t,
+        hint: "new_client must resolve to a client (C-ref or exact name), not a lead, vendor or deal" });
+
+      // A merged-away client is a tombstone, not a destination. Moving a deal onto
+      // one would hide it behind a pointer — the exact shape this verb exists to undo.
+      const tgt = (await c.query("select merged_into from client where id=$1", [t.id])).rows[0];
+      if (!tgt) throw new ToolError({ error: "not_found", table: "client", id: t.id });
+      if (tgt.merged_into) throw new ToolError({ error: "client_merged_away",
+        merged_into: tgt.merged_into, hint: "re-point to the surviving client instead" });
+
+      const cur = (await c.query("select client_id from deal where id=$1", [s.id])).rows[0];
+      if (cur.client_id === t.id) throw new ToolError({ error: "no_op",
+        hint: "the deal already belongs to that client; nothing was written" });
+
+      const label = async (id) => (await c.query(
+        `select ref, display_name from v_ref_index where subject_type='client' and subject_id=$1`, [id]
+      )).rows[0] || { ref: null, display_name: null };
+      const from = await label(cur.client_id);
+      const to = await label(t.id);
+
+      await c.query("update deal set client_id=$1, updated_by=$2 where id=$3", [t.id, actor.id, s.id]);
+      await writeEvent(c, actor, "reassign-deal", "deal", s.id, {
+        field: "client_id",
+        old: { client_id: cur.client_id, ref: from.ref, name: from.display_name },
+        new: { client_id: t.id, ref: to.ref, name: to.display_name },
+        agent_rationale: args.reason || null,
+        human_quote: args.human_quote || null,
+        idempotency_key: args.idempotency_key });
+      return { ok: true, deal: s.id, from: { ref: from.ref, name: from.display_name },
+               to: { ref: to.ref, name: to.display_name } };
     }),
   },
 
@@ -1694,6 +1745,73 @@ export const TOOLS = {
     }),
   },
 
+  "record-finding": {
+    write: true,
+    description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is passed as proposes_correction, which is recorded as a proposal for the owning partner and applied by them, never by this verb. STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      subject: { type: "string", description: "C-127 / L-204 / V-CPA-006 / P-0301, or an exact deal name" },
+      subject_kind: { type: "string", enum: ["auto","party"], default: "auto",
+        description: "'party' pins the flag to the person/org behind a ref instead of the client/lead/vendor record" },
+      kind: { type: "string", description: "what was looked for: verified, email, cell, social, npi, title, discrepancy..." },
+      value: { type: "object", description: "the finding, structured. Omit when found:false." },
+      found: { type: "boolean", default: true, description: "false records a searched-and-empty result" },
+      source: { type: "string", description: "REQUIRED. Where it came from: a URL, 'NPPES', 'Sunbiz', 'practice website'." },
+      observed_at: { type: "string", description: "when the source was read (ISO); defaults to now" },
+      expires_on: { type: "string", description: "date after which this reads as unverified again (volatile fields)" },
+      proposes_correction: { type: "object",
+        description: "{field, current, proposed} — RECORDED ONLY. The owning partner applies it." } },
+      required: ["idempotency_key","subject","kind","source"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "record-finding", args, async () => {
+      const src = String(args.source || "").trim();
+      if (!src) throw new ToolError({ error: "source_required",
+        hint: "every finding carries its provenance; a finding without a source is a rumour" });
+
+      const found = args.found !== false;
+      if (found && (!args.value || typeof args.value !== "object" || !Object.keys(args.value).length))
+        throw new ToolError({ error: "value_required",
+          hint: "pass the finding as value{}, or pass found:false to record a searched-and-empty result" });
+
+      let subjectType, subjectId;
+      if (args.subject_kind === "party") {
+        subjectType = "party";
+        subjectId = await resolvePartyByRef(c, args.subject);
+      } else {
+        const s = await resolveSubject(c, args.subject);
+        subjectType = s.type; subjectId = s.id;
+      }
+
+      // The correction is DATA, not an instruction. It rides inside value so it is
+      // impossible to store one without its provenance, and no code path applies it.
+      const value = {
+        found,
+        ...(found ? args.value : { searched_for: args.kind }),
+        ...(args.proposes_correction
+            ? { proposes_correction: { ...args.proposes_correction, applied: false,
+                                       note: "proposal only — the owning partner applies identity changes" } }
+            : {}),
+      };
+
+      const r = await c.query(
+        `insert into record_flag (subject_type, subject_id, kind, value, source, observed_at, expires_on, created_by)
+         values ($1,$2,$3,$4,$5, coalesce($6::timestamptz, now()), $7::date, $8) returning id, observed_at`,
+        [subjectType, subjectId, args.kind, JSON.stringify(value), src,
+         args.observed_at || null, args.expires_on || null, actor.id]);
+
+      await writeEvent(c, actor, "record-finding", subjectType, subjectId, {
+        occurred_at: args.observed_at || null,
+        field: args.kind,
+        new: { found, source: src, expires_on: args.expires_on || null,
+               proposes_correction: args.proposes_correction ? args.proposes_correction.field : null },
+        agent_rationale: found ? null : "searched, nothing found",
+        idempotency_key: args.idempotency_key });
+
+      return { ok: true, flag_id: r.rows[0].id, subject_type: subjectType, subject_id: subjectId,
+               kind: args.kind, found, observed_at: r.rows[0].observed_at,
+               correction_proposed: !!args.proposes_correction };
+    }),
+  },
+
   "teach": {
     write: true, humanOnly: true,
     description: "Write a rule from the human's own words (status: proposed — it activates only via activate-rule, also human-gated). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to.",
@@ -1799,6 +1917,55 @@ export const TOOLS = {
       return { ok: true, decision_id: decisionId, event_id: ev.id,
                session_key: sessionKey, quote_absent: !args.human_quote,
                renders_into: "00_Context/decision-history.md" };
+    }),
+  },
+
+  // ---------- correcting a decision already recorded ----------
+  // Added 2026-08-02 because two decision entries landed with quote_absent:true when the
+  // session malformed the human_quote parameter twice. The flag then read as "no quote
+  // existed" when the truth was that one existed and was fumbled — a defective record, not
+  // history worth preserving. Joe: "create an update-decision verb and then update them".
+  //
+  // MUTATES THE ENTRY, APPENDS THE AMENDMENT. The decision event itself is corrected in
+  // place so v_decision_entry and decision-history.md read the truth, AND a separate
+  // amend-decision event records what changed and why. Correcting the record without a
+  // trace would be the worse half of both options.
+  "update-decision": {
+    write: true,
+    description: "Correct a decision entry already recorded by log-decision — a wrong or missing title, rationale, human_quote or provenance. Use for a DEFECTIVE record (a quote that was lost, a rationale that stated something untrue), never to rewrite what was actually decided: a decision that CHANGED is a new log-decision, because the old one really was the call at the time. Pass only the fields you are correcting. Re-derives quote_absent from whether a quote is present afterwards, and appends an amend-decision event recording the change.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      decision_id: { type: "string", description: "the decision_id returned by log-decision" },
+      title: { type: "string" }, rationale: { type: "string" },
+      human_quote: { type: "string", description: "the partner's literal words. Never paraphrase into this field." },
+      provenance: { type: "string" },
+      reason: { type: "string", description: "why the entry needed correcting — recorded on the amendment" } },
+      required: ["idempotency_key","decision_id"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "update-decision", args, async () => {
+      const cur = (await c.query(
+        `select id, new_value, human_quote, agent_rationale from event
+          where subject_id = $1 and verb = 'log-decision' limit 1`, [args.decision_id])).rows[0];
+      if (!cur) throw new ToolError({ error: "decision_not_found", decision_id: args.decision_id,
+        hint: "pass the decision_id log-decision returned, not the event_id" });
+
+      const nv = cur.new_value || {};
+      const quote = args.human_quote !== undefined ? args.human_quote : cur.human_quote;
+      const next = { ...nv,
+        title: args.title !== undefined ? args.title : nv.title,
+        provenance: args.provenance !== undefined ? args.provenance : nv.provenance,
+        quote_absent: !quote };
+
+      await c.query(
+        `update event set new_value = $1, human_quote = $2, agent_rationale = $3 where id = $4`,
+        [JSON.stringify(next), quote || null,
+         args.rationale !== undefined ? args.rationale : cur.agent_rationale, cur.id]);
+
+      const changed = ["title","rationale","human_quote","provenance"].filter(f => args[f] !== undefined);
+      await writeEvent(c, actor, "amend-decision", "decision", args.decision_id,
+        { old: { quote_absent: nv.quote_absent }, new: { fields: changed, quote_absent: !quote },
+          agent_rationale: args.reason || null, idempotency_key: args.idempotency_key });
+
+      return { ok: true, decision_id: args.decision_id, amended: changed, quote_absent: !quote };
     }),
   },
 
