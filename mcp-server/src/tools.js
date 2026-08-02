@@ -1152,11 +1152,22 @@ export const TOOLS = {
           return { needs_confirm: true, candidates: cand.rows,
                    hint: "existing similar parties; reuse one, or resubmit force_new:true" };
       }
+      // THE GENERATOR, CLOSED (0059, 2026-08-02). This line used to INSERT an org
+      // unconditionally with no lookup, so every contact minted a private copy of
+      // their own employer: Henry Schein existed as 17 org rows, one per rep,
+      // Patterson Dental as 10, and all 415 org rows had exactly one inbound person
+      // — a distribution with a single bucket, which is the signature. That is why
+      // "who do we know at X" could not be answered: there was no X, only copies.
+      // 0059 consolidated the 115 surplus rows AND added a unique index, so this
+      // insert would now raise unique_violation on any org that already exists.
+      // org_party_id() normalises the name, returns the existing survivor, and
+      // mints only when genuinely new — so the duplicate count stops being a
+      // running total. Placeholders like '(TBD — enrich)' deliberately still mint
+      // separately: collapsing those would assert six unrelated people share an
+      // employer, which is a fabricated fact, not a merge.
       let orgId = null;
       if (args.org_name) {
-        const o = await c.query(
-          `insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id`,
-          [args.org_name, actor.id]);
+        const o = await c.query("select org_party_id($1,$2) as id", [args.org_name, actor.id]);
         orgId = o.rows[0].id;
       }
       const r = await c.query(
@@ -1275,11 +1286,12 @@ export const TOOLS = {
                 candidates: cand.rows,
                 hint: "similar parties exist; pass party_ref if it is one of them (when it has a ref), or new_party.force_new:true after the human confirms it is a different person" });
           }
+          // Same generator, second site — see the note in add-party. 0059's unique
+          // index makes the old blind insert a unique_violation waiting to happen.
           let orgId = null;
           if (o.new_party.org_name) {
-            const og = await c.query(
-              "insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id",
-              [o.new_party.org_name, actor.id]);
+            const og = await c.query("select org_party_id($1,$2) as id",
+                                     [o.new_party.org_name, actor.id]);
             orgId = og.rows[0].id;
           }
           const np = await c.query(

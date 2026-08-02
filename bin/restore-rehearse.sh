@@ -311,9 +311,37 @@ say "  ok    empty database $RESTORE_DB created on the branch"
 # pipefail matters just as much: without it the pipeline's status is psql's, and
 # psql exits 0 on an empty stdin. A failed decrypt would have loaded nothing and
 # passed.
+# THE ACL FILTER, and why it is a filter rather than ON_ERROR_STOP=0.
+#
+# FOUND BY THE FIRST REAL RUN, 2026-08-02: the restore died on
+#   ERROR: permission denied to change default privileges
+# `bin/backup-dump.sh` calls plain `pg_dump` with no --no-owner/--no-acl, so
+# every dump carries ALTER DEFAULT PRIVILEGES / GRANT / REVOKE / OWNER TO
+# statements naming the role that owned the source database. Restoring into a
+# fresh database on a branch, those roles are not ours to act for, so the first
+# one errors and ON_ERROR_STOP=1 abandons the whole load. The DATA was never the
+# problem; the permission grammar wrapped around it was.
+#
+# backup-dump.sh is fixed so future dumps carry none of this. That does NOT help
+# the dumps we already hold, and those are the only backups that exist — which is
+# exactly the situation a restore has to survive. So the stream is filtered here.
+#
+# ON_ERROR_STOP STAYS 1. Dropping it would have been one word and would have made
+# every future failure silent — a restore that skips a broken COPY and reports
+# success is worse than one that fails loudly, and is the same false-comfort
+# defect this whole drill was built to expose. Filtering removes exactly the
+# statement classes we know cannot apply and leaves every other error fatal.
+#
+# The count assertion in phase 4 is what proves the filter did not eat data: ACL
+# statements move no rows, so if stripping them changed a single count, the
+# comparison fails.
+ACL_FILTER='/^(ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMENT ON EXTENSION )/d'
+
 say "  decrypting and loading (this is the slow step) ..."
+say "  note: stripping ownership/ACL statements the source dump carries (see comment)"
 set -o pipefail
 if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/restore.err" \
+     | sed -E "$ACL_FILTER" \
      | psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -q >"$WORKDIR/restore.out" 2>>"$WORKDIR/restore.err"; then
   set +o pipefail
   say ""
