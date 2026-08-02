@@ -89,10 +89,10 @@ union all
     from critical_date cd
    where cd.status = 'open' and cd.due_on <= (current_date + 14)
 union all
-  select 'ingest'::text, i.id, i.subject_type, i.subject_id, null::text,
-         coalesce(i.summary, i.kind), null::date
-    from ingest_item i
-   where i.status = 'untriaged';
+  select 'ingest'::text, i.id, 'inbox'::text, i.id, null::text,
+         i.source || ' item awaiting triage', i.received_at::date
+    from ingest_inbox i
+   where i.status = 'new';
 
 -- ---------- guards: every claim above, asserted ----------
 do $$
