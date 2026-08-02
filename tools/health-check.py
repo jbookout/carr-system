@@ -127,6 +127,47 @@ for name, out_pat, max_age, inputs, note in WATCH:
     else:
         print(f"  OK {name:<18} {a:.1f}d old")
 
+# --- schedule drift (added 2026-08-02) ---------------------------------------
+# WHY THIS EXISTS. Every check above measures output AGE, so a job scheduled for
+# 2:05am that actually runs at 8:49am still looks perfectly fresh that day. Joe
+# found this by noticing it himself: "nightly record layer does not run unless my
+# computer is on. its scheduled for 230am but it only runs when i open a session
+# the next morning." He was right — `pmset -g sched` carried no wake event, so the
+# Mac slept through 2am and the task fired on wake. Nothing here could see it.
+#
+# The scheduler's own lastRunAt is NOT readable from a script (it lives in the app's
+# store, reachable only through the list_scheduled_tasks MCP tool), so this uses the
+# signal that is local: the TIME OF DAY the output was written. A nightly whose files
+# carry an 08:49 mtime did not run at 02:05, whatever the schedule claims.
+#
+# name, output glob, expected local hour, tolerance hours, note
+SCHEDULE = [
+    ("nightly-record-layer", "DNA/Leads/lead-registry.xlsx", 2, 2.5,
+     "cron 0 2 * * * (local CT). Landing hours late means the Mac slept through it and "
+     "the task fired on wake — step 3 of that chain is the encrypted backup, so it is "
+     "skipped for as long as no session opens. Fix: sudo pmset repeat wakeorpoweron "
+     "MTWRFSU 01:55:00"),
+]
+
+print("Schedule drift — did the job run WHEN scheduled, not merely recently")
+for name, out_pat, want_hour, tol_h, note in SCHEDULE:
+    out = newest(out_pat)
+    if not out:
+        print(f"  MISSING {name:<22} no file matches {out_pat}")
+        rc = 1
+        continue
+    lt = time.localtime(os.path.getmtime(out))
+    ran_h = lt.tm_hour + lt.tm_min / 60.0
+    # circular distance on a 24h clock: 23:50 against 00:10 is 20 minutes, not 23.7h
+    d = abs(ran_h - want_hour)
+    drift = min(d, 24 - d)
+    if drift > tol_h:
+        print(f"  ⚠︎ {name:<22} ran {time.strftime('%H:%M', lt)}, scheduled ~{want_hour:02d}:00 "
+              f"— {drift:.1f}h drift  · {note}")
+        rc = 1
+    else:
+        print(f"  OK {name:<22} ran {time.strftime('%H:%M', lt)}, within {tol_h}h of ~{want_hour:02d}:00")
+
 # --- the R2 archive quota (added 2026-07-31, ORDER 20c) ----------------------
 # NOT a freshness check, and it is here rather than in WATCH for that reason.
 # The ledger only moves when a document is archived, so an old ledger is normal
