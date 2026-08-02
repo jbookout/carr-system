@@ -116,6 +116,86 @@ and views; step 4 is bulk and sits behind that gate.
 
 ---
 
+---
+
+# Part 2: retire the role refs
+
+**Added 2026-08-02 after the first ten merges landed. Joe's conclusion, reached by pulling
+on `V-CPA-006` until it came apart.**
+
+## Every role ref encodes a fact that can change
+
+Unpack `V-CPA-006`:
+
+| Part | Asserts | Already stored in |
+|---|---|---|
+| `V` | this is a vendor | the vendor record existing |
+| `CPA` | they are a CPA | `vendor.category_slug` |
+| `006` | a unique number | `party.ref` (P-####) |
+
+Three facts, all held properly elsewhere, frozen into a string that cannot update. Joe:
+*"theres no need to tag it as V-CPA-006. it would only need to be: 'CPA' or 'Lender' etc
+because they are already tagged as a vendor in the database and they already have a unique
+id 'P-#'."*
+
+**Proven the same afternoon.** Chris Kelly was recorded as `V-CPA-006` and is a financial
+advisor. Adding the category took one row — the ref-table design working as intended — and
+his ref still reads CPA. **227 vendor refs encode a category that can now change beneath
+them.**
+
+`L-` and `C-` fail the same way, and Joe found that first: *"whats the point of having an L
+tag once you've progressed to a client?"* `L-201` asserts "Petersen is a lead"; `C-126`
+asserts "Petersen is a client". Both are the SAME relationship at different stages, which is
+why the ten merges each produced one person holding two refs. `V-` survives a merge with a
+lead because vendor genuinely IS a separate relationship — Derrick Richardson is a vendor and
+a lead simultaneously. Lead and client can never coexist.
+
+That asymmetry is the tell: `lead` and `client` are two tables for one journey, and the
+duplicate parties were the symptom.
+
+## End state
+
+`P-####` is the only identifier. Everything else is an attribute that can change without
+breaking an ID:
+
+```
+P-0603 · Justin Dansby        · Vendor  · Financial Advisor · Established
+P-0425 · Dr. Erik Petersen    · Client
+P-0355 · Derrick Richardson   · Vendor + Lead · Supply
+```
+
+- **journey stage** (lead / prospect / client / past_client) — an attribute of the person
+- **vendor** — derived from a vendor record existing (Part 1)
+- **category, relationship level, disposition** — attributes of the vendor role
+
+## The constraint that makes this safe
+
+**Old refs must keep resolving, forever.** Every email, Salesforce record, dossier line and
+document citing `V-CPA-006`, `L-163` or `C-126` has to look up. They become **aliases** —
+resolvable, never assigned. Without that this is a break rather than a migration, and it
+recreates at scale the exact problem it is fixing.
+
+## Blast radius
+
+Every surface that displays a role ref: the deal board, the 23 dossiers, `registry-audit`
+(whose entire pointer-rot check reads `Registry: L-###` out of dossier prose), the
+exporters, `lead-registry.xlsx` / `client-roster.xlsx` / `vendors.xlsx`, and the verbs that
+mint refs (`new-lead`, `new-client`, `new-vendor`, `promote-pool`).
+
+Bigger than any single migration done on 2026-08-02, and it should not be improvised.
+
+## Sequencing — and why NOT yet
+
+1. **Enrichment first.** Thursday's routine gathers email and cell, which is the second
+   signal the 32 remaining name-only pairs need. Merging on a name alone is how the wrong
+   Beasley got merged.
+2. **Then the remaining merges**, one at a time through `confirm-merge`.
+3. **Then collapse `lead` + `client`** into one relationship record carrying a stage.
+4. **Then retire the refs**, with the alias table landing in the same migration.
+
+Doing identity work while 32 known duplicates are outstanding is the wrong order: each
+unmerged pair would need its aliases reconciled twice.
+
 ## Provenance
 
 Every element here came from Joe pushing back on a weaker proposal in the 2026-08-02
