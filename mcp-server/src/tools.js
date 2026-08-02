@@ -59,7 +59,8 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
      values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11, $12, $13)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
-     fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null]);
+     fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
+     actor.via || null, actor.client_id || null]);
 }
 
 async function versionGuard(client, table, id, baseVersion) {
@@ -1735,15 +1736,16 @@ export const TOOLS = {
       const decisionId = (await c.query("select gen_random_uuid() as id")).rows[0].id;
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
-           new_value, cause, human_quote, agent_rationale, idempotency_key)
+           new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id)
          values (coalesce($1::timestamptz, now()), $2, 'log-decision', 'decision', $3,
-                 $4, 'human_stated', $5, $6, $7)
+                 $4, 'human_stated', $5, $6, $7, $8, $9)
          returning id, occurred_at::date as entry_date`,
         [args.occurred_at || null, actor.id, decisionId,
          JSON.stringify({ title: args.title,
                           quote_absent: !args.human_quote,
                           provenance: args.provenance || null }),
-         args.human_quote || null, args.rationale, args.idempotency_key]);
+         args.human_quote || null, args.rationale, args.idempotency_key,
+         actor.via || null, actor.client_id || null]);
 
       const ev = r.rows[0];
       const sessionKey = args.session_key || `${ev.entry_date}-${actor.slug}`;
