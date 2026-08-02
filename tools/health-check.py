@@ -141,8 +141,13 @@ for name, out_pat, max_age, inputs, note in WATCH:
 # carry an 08:49 mtime did not run at 02:05, whatever the schedule claims.
 #
 # name, output glob, expected local hour, tolerance hours, note
+# The watched file must be one ONLY THE SCHEDULED JOB writes. The first version of this
+# check watched an exported .xlsx and immediately produced a false positive: a manual
+# `CARR_EXPORT_LIVE=1 ./run.sh export` rewrote it at 11:38 and the check reported "9.6h
+# drift" from that, not from the scheduler. It was measuring when a FILE was written, not
+# when the JOB ran. out/nightly.log is appended by bin/nightly.sh and by nothing else.
 SCHEDULE = [
-    ("nightly-record-layer", "DNA/Leads/lead-registry.xlsx", 2, 2.5,
+    ("nightly-record-layer", "~/carr-system/out/nightly.log", 2, 2.5,
      "cron 0 2 * * * (local CT). Landing hours late means the Mac slept through it and "
      "the task fired on wake — step 3 of that chain is the encrypted backup, so it is "
      "skipped for as long as no session opens. Fix: sudo pmset repeat wakeorpoweron "
@@ -151,7 +156,9 @@ SCHEDULE = [
 
 print("Schedule drift — did the job run WHEN scheduled, not merely recently")
 for name, out_pat, want_hour, tol_h, note in SCHEDULE:
-    out = newest(out_pat)
+    # SCHEDULE watches job artefacts, which may sit in the repo rather than the vault.
+    out = (newest(out_pat) if not out_pat.startswith(("~", "/"))
+           else (lambda h: h if os.path.exists(h) else None)(os.path.expanduser(out_pat)))
     if not out:
         print(f"  MISSING {name:<22} no file matches {out_pat}")
         rc = 1
