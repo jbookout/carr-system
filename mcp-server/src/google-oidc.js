@@ -318,7 +318,10 @@ export async function handleCallback(request, env) {
     metadata: { label: slug, signed_in_at: new Date().toISOString() },
     // Grant exactly what was requested. Never widen on our own judgment.
     scope: Array.isArray(pending.req.scope) ? pending.req.scope : [],
-    props: propsForSlug(slug, { email: claims.email, sub: claims.sub, via: "oauth-google" }),
+    // client_id names the SURFACE holding this grant (Claude Code, a phone connector,
+    // a script). Taken from the auth request, never from anything the caller sends.
+    props: propsForSlug(slug, { email: claims.email, sub: claims.sub, via: "oauth-google",
+                                client_id: pending.req?.clientId || null }),
   });
 
   return Response.redirect(redirectTo, 302);

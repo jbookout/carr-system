@@ -37,7 +37,12 @@ export function propsForSlug(slug, extra = {}) {
 /** ctx.props → the actor object the verbs expect. Fails closed. */
 export function actorFromProps(props) {
   if (!props || !isKnownActor(props.slug)) return null;
-  return { slug: props.slug, display: DISPLAY[props.slug], human: props.human !== false };
+  // via/client_id ride through to the write path (0037). They were already on the
+  // grant props and this function was dropping them, so no row ever recorded which
+  // surface made the write. Both are server-derived — a verb never accepts them —
+  // which is the whole point: an attestation the caller controls proves nothing.
+  return { slug: props.slug, display: DISPLAY[props.slug], human: props.human !== false,
+           via: props.via || null, client_id: props.client_id || null };
 }
 
 // ---------- legacy interim auth (PARTNER_TOKENS), retired after both phones verify ----------

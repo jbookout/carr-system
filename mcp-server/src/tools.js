@@ -47,16 +47,16 @@ async function withEnvelope(client, actor, verb, args, fn) {
   }
   const result = await fn();                                        // inside the open transaction
   await client.query(
-    "insert into tool_call (idempotency_key, verb, actor_id, request_hash, response) values ($1,$2,$3,$4,$5)",
-    [key, verb, actor.id, hash, JSON.stringify(result)]);
+    "insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id) values ($1,$2,$3,$4,$5,$6,$7)",
+    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null]);
   return result;
 }
 
 async function writeEvent(client, actor, verb, subjectType, subjectId, fields = {}) {
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
-       old_value, new_value, cause, human_quote, agent_rationale, idempotency_key)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11)`,
+       old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id)
+     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11, $12, $13)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null]);
@@ -1777,10 +1777,10 @@ export const TOOLS = {
 
   "add-loop": {
     write: true,
-    description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), or a cross-brain interrupt (action_required). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 5 across the hot list — more than 5 means re-tier, not stack), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is.",
+    description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), a cross-brain interrupt (action_required), or a parked idea (kind idea, which renders into 00_Context/idea-bank.md and is personal, never shared). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 5 across the hot list — more than 5 means re-tier, not stack), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required"] },
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"] },
       title: { type: "string", description: "team_loop 'Ask' / action_required 'Action needed'. Not used by open_loop, whose text is `body`." },
       body: { type: "string", description: "open_loop 'Item' / team_loop 'Notes / links'" },
       owner: { type: "string", description: "the label the file uses: 'Joe', 'Joe/Claude', 'Dell', 'Joe→Dell'" },
@@ -1808,7 +1808,10 @@ export const TOOLS = {
       // Placement follows the files' own rule. It is STORED, not derived, so a
       // later promotion is a recorded act (see v_loop_promotion_due).
       const nowDue = marker === "dated" && args.due_on <= new Date().toISOString().slice(0, 10);
-      const wantKey = args.kind !== "open_loop" ? "open"
+      // 'idea' has no "open" block — its live section is 'parked' (44 rows) and
+      // 'retired' is its closed state. Asking for "open" would throw no_block.
+      const wantKey = args.kind === "idea" ? "parked"
+        : args.kind !== "open_loop" ? "open"
         : (marker === "bell" || nowDue) ? "hot" : "backlog";
       const b = await c.query(
         "select id, rel_path, col_order from loop_block where kind=$1 and block_key=$2",
@@ -1820,7 +1823,7 @@ export const TOOLS = {
 
       const num = args.number || await nextLoopNumber(c, args.kind);
       const seq = await nextRenderSeq(c, block.id);
-      const tier = args.kind === "open_loop" ? "personal" : "shared";
+      const tier = (args.kind === "open_loop" || args.kind === "idea") ? "personal" : "shared";
       const personal = tier === "personal" ? actor.id : null;
 
       const r = await c.query(
@@ -1850,7 +1853,7 @@ export const TOOLS = {
       idempotency_key: { type: "string" },
       loop_id: { type: "string" },
       number: { type: "string", description: "alternative to loop_id; refuses when the number is ambiguous, and several are" },
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required"], description: "narrows an ambiguous number" },
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"], description: "narrows an ambiguous number" },
       base_version: { type: "integer" },
       title: { type: "string" }, body: { type: "string" }, owner: { type: "string" },
       unblocks: { type: "string" }, source_note: { type: "string" },
@@ -1919,7 +1922,7 @@ export const TOOLS = {
       idempotency_key: { type: "string" },
       loop_id: { type: "string" },
       number: { type: "string", description: "alternative to loop_id; refuses when ambiguous" },
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required"] },
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"] },
       base_version: { type: "integer" },
       outcome: { type: "string", description: "REQUIRED: what came of it, in your words" },
       resolution: { type: "string", enum: ["done", "dropped"] } },
