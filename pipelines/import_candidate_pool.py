@@ -1,4 +1,4 @@
-"""Import DNA/Leads/lead-router-2026-07-13.xlsx into prospect_pool (ORDER 25(b)).
+"""Import DNA/Leads/lead-router-2026-07-13.xlsx into candidate_pool (ORDER 25(b)).
 
 WHAT THIS IS. The router is the market map: 9,320 licensed practitioners across
 six territory counties, segmented by buying signal, built 2026-07-13. Until now
@@ -70,7 +70,7 @@ measured present and unique on all 9,320 rows. A rerun writes 0 new rows and
 reports what it skipped.
 
 Usage:
-  CARR_IMPORT_DB_URL=... .venv/bin/python -m pipelines.import_prospect_pool
+  CARR_IMPORT_DB_URL=... .venv/bin/python -m pipelines.import_candidate_pool
       [--source PATH] [--dry-run] [--refresh-suppression]
 """
 
@@ -306,7 +306,7 @@ def main():
         for g in known:                       # first writer wins; leads load before clients
             if g["email"] and g["email"] not in by_email:
                 by_email[g["email"]] = g
-        cur.execute("select source_key, status from prospect_pool where source = %s",
+        cur.execute("select source_key, status from candidate_pool where source = %s",
                     (SOURCE_SLUG,))
         existing = dict(cur.fetchall())
 
@@ -339,7 +339,7 @@ def main():
                                                  a.strict_suppression)
                     if g and tier == "suppressed" and not a.dry_run:
                         cur.execute("""
-                            update prospect_pool
+                            update candidate_pool
                                set status='suppressed_dup', dup_tier='suppressed',
                                    dup_subject_type=%s, dup_ref=%s, dup_basis=%s,
                                    dup_do_not_contact=%s, updated_by=%s
@@ -391,7 +391,7 @@ def main():
         # conflict clause, same idempotency — only the number of round trips changes.
         if pending and not a.dry_run:
             cur.executemany("""
-                insert into prospect_pool
+                insert into candidate_pool
                     (source, source_key, source_seq, source_row, name, org_name,
                      vertical, address, city, county, state, email, phone,
                      segment, segment_play, score, score_basis, status, dup_tier,
@@ -407,11 +407,11 @@ def main():
         else:
             conn.commit()
 
-        cur.execute("select count(*) from prospect_pool where source = %s", (SOURCE_SLUG,))
+        cur.execute("select count(*) from candidate_pool where source = %s", (SOURCE_SLUG,))
         total_after = cur.fetchone()[0]
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    lines = [f"# lead-router -> prospect_pool — {stamp}"
+    lines = [f"# lead-router -> candidate_pool — {stamp}"
              + ("  (DRY RUN — nothing written)" if a.dry_run else ""), "",
              f"Source: `{a.source}`", f"Sheet data rows: {len(rows)}",
              f"Pool rows for source '{SOURCE_SLUG}' after this run: {total_after}", "",

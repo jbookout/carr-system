@@ -27,7 +27,7 @@ deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" \
 # ORDER 26(b): the board gained --files/--records. The DEFAULT IS STILL FILES and
 # the chain still calls this with no arguments, so `run.sh all` is byte-for-byte
 # what it was. Records mode is reachable by hand — and needs the repo venv (it
-# speaks to Neon through psycopg) plus a DSN that can read prospect_pool, which
+# speaks to Neon through psycopg) plus a DSN that can read candidate_pool, which
 # `tools/db-tap.py run` supplies. Parity passed 2026-07-31; the default flip waits
 # on a pool read surface the exporter credential can reach (parked, see the
 # ORDER 26 execution log).

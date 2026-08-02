@@ -14,6 +14,8 @@ false-alarm a weekly pipeline.
 """
 import os, sys, glob, time
 
+REPO_ROOT = os.path.expanduser("~/carr-system")
+
 VAULT = os.environ.get("CARR_VAULT",
     "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
@@ -174,6 +176,59 @@ for name, out_pat, want_hour, tol_h, note in SCHEDULE:
         rc = 1
     else:
         print(f"  OK {name:<22} ran {time.strftime('%H:%M', lt)}, within {tol_h}h of ~{want_hour:02d}:00")
+
+# --- deprecation register (added 2026-08-02) ---------------------------------
+# Joe, on the 0048 compatibility shim: "i dont want bloat in the system but if it makes
+# sense to create a 'self-healing' component to this so that it slowly erases the old way".
+# Self-healing here means DETECT AND PROMPT, never auto-drop: dropping is irreversible and
+# cannot be verified beforehand, detecting is free. Same posture as v_drip_conflict and
+# v_loop_bell_cap — report, never enforce.
+#
+# Answers the only question that matters about a shim: is anything still using it, and can
+# I delete it yet? Greps the repo rather than guessing. KNOWN GAP, stated rather than
+# assumed away: this sees THIS REPO only. A Cowork session or a script on Dell's Mac would
+# not show up; pg_stat_statements would catch those and is available but not installed.
+print("Deprecation register — what is kept alive only for compatibility")
+import subprocess
+_q = ("select object_name, object_kind, coalesce(replaced_by,''), "
+      "coalesce(safe_to_drop_after::text,'') from deprecation where dropped_at is null;")
+_p = subprocess.run([os.path.join(REPO_ROOT, ".venv/bin/python"),
+                     os.path.join(REPO_ROOT, "tools/db-tap.py"), "sql", "/dev/stdin"],
+                    input=_q, capture_output=True, text=True, timeout=90)
+if _p.returncode != 0:
+    # A FAILED READ IS NOT AN EMPTY REGISTER. The first cut of this check passed "-" as the
+    # filename, db-tap rejected it, and the empty output printed as "none outstanding" — a
+    # detector reporting all-clear because it could not see, which is the exact defect 0034
+    # was written to name. It is now loud.
+    print(f"  \u26a0\ufe0e register UNREADABLE — cannot say whether anything is deprecated "
+          f"({(_p.stderr or '').strip().splitlines()[-1] if _p.stderr.strip() else 'no stderr'})")
+    rc = 1
+else:
+    _rows = []
+    for _line in _p.stdout.splitlines():
+        if "|" not in _line or "object_name" in _line or "---" in _line or "row" in _line:
+            continue
+        _c = [c.strip() for c in _line.split("|")]
+        if len(_c) >= 4 and _c[0]:
+            _rows.append(_c)
+    if not _rows:
+        print("  OK none outstanding (register read successfully)")
+    for _name, _kind, _repl, _after in _rows:
+        _hits = subprocess.run(["grep", "-rl", _name, REPO_ROOT, "--include=*.py",
+                                "--include=*.js", "--include=*.sh"],
+                               capture_output=True, text=True)
+        _files = [f for f in _hits.stdout.splitlines()
+                  if "/migrations/" not in f and "node_modules" not in f
+                  and "/corpus/" not in f and f"import_{_name}" not in f]
+        _due = bool(_after) and _after <= time.strftime("%Y-%m-%d")
+        if not _files:
+            _flag = "SAFE TO DROP" if _due else f"unused; scheduled {_after or 'no date'}"
+            print(f"  OK {_name:<22} {_kind}, 0 code refs — {_flag}"
+                  + (f"  (replaced by {_repl})" if _repl else ""))
+        else:
+            print(f"  \u26a0\ufe0e {_name:<22} {_kind}, still referenced by {len(_files)} file(s): "
+                  + ", ".join(os.path.basename(f) for f in _files[:4]))
+            rc = 1
 
 # --- the R2 archive quota (added 2026-07-31, ORDER 20c) ----------------------
 # NOT a freshness check, and it is here rather than in WATCH for that reason.

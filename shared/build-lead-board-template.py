@@ -13,7 +13,7 @@ TWO SOURCE MODES (ORDER 26(b), the ORDER 29a pattern).
              xlsx. Still the default, still the fallback, still what the nightly
              chain runs, and still the only mode Dell's runtime and any machine
              without a database credential can use.
-  --records  the same board derived from the record layer: `prospect_pool` (the
+  --records  the same board derived from the record layer: `candidate_pool` (the
              router rows ORDER 25 imported plus the radar-lane rows ORDER 26(a)
              maps) and the lead registry's export view.
 
@@ -453,7 +453,7 @@ try:
 except Exception as e:
     publish_failed = e
     print(f"WARNING: shared-tier publish failed ({e}) — Dell's copy will go stale; fix before session end.")
-_src = ("records (prospect_pool + v_export_leads)" if MODE == MODE_RECORDS
+_src = ("records (candidate_pool + v_export_leads)" if MODE == MODE_RECORDS
         else "generated files")
 print(f"Router: {os.path.basename(router_path)} | {len(L):,} leads | queue {queue_n} | "
       f"decisions {len(DECISIONS)} | source: {_src}")

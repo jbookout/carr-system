@@ -1,6 +1,6 @@
-"""Map the radar lanes' outputs into prospect_pool through the ingest socket (ORDER 26(a)).
+"""Map the radar lanes' outputs into candidate_pool through the ingest socket (ORDER 26(a)).
 
-WHAT THIS IS. ORDER 25 lifted the 9,320-row lead router into `prospect_pool`.
+WHAT THIS IS. ORDER 25 lifted the 9,320-row lead router into `candidate_pool`.
 The router is one finder among several: five other lanes write row-shaped JSON
 that the Lead Board appends straight onto the same surface. Until now those rows
 existed only as files. This maps each lane's output into the pool with its own
@@ -22,7 +22,7 @@ alongside the pool's own (source, source_key).
 
 DEDUP SEMANTICS ARE ORDER 25'S, IMPORTED NOT FORKED. `val`, `distinct`,
 `name_parts`, `load_known` and `match_known` are imported from
-pipelines.import_prospect_pool, including the two precision corrections measured
+pipelines.import_candidate_pool, including the two precision corrections measured
 there (the parenthetical/credential/first==last guards on the contact rule, and
 the practice-token rule's demotion to the 'review' tier). `--strict-suppression`
 still reproduces the renewal-radar suppressor's verbatim behaviour, because the
@@ -65,7 +65,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 # Imported, never copied: one definition of what a duplicate is.
-from pipelines.import_prospect_pool import (          # noqa: E402
+from pipelines.import_candidate_pool import (          # noqa: E402
     jsonable, load_known, match_known, val,
 )
 
@@ -219,7 +219,7 @@ def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep
         rep[slug] = {"error": f"lane output is {type(rows).__name__}, expected a list"}
         return
 
-    cur.execute("select source_key from prospect_pool where source = %s", (slug,))
+    cur.execute("select source_key from candidate_pool where source = %s", (slug,))
     existing = {r[0] for r in cur.fetchall()}
     cur.execute("select external_id from ingest_inbox where source = %s", (slug,))
     existing_ingest = {r[0] for r in cur.fetchall()}
@@ -253,7 +253,7 @@ def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep
                 f = spec["fields"](x)
                 if not dry:
                     cur.execute("""
-                        update prospect_pool
+                        update candidate_pool
                            set source_row=%s, source_seq=%s, score=%s, score_basis=%s,
                                est_lease_event=%s, est_basis=%s, updated_by=%s
                          where source=%s and source_key=%s and status='pool'
@@ -295,7 +295,7 @@ def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep
             r["ingest_new"] += 1
 
         cur.execute("""
-            insert into prospect_pool
+            insert into candidate_pool
                 (source, source_key, source_seq, source_row, name, org_name, vertical,
                  address, city, county, state, email, phone, segment, segment_play,
                  score, score_basis, est_lease_event, est_basis, status, dup_tier,
@@ -317,12 +317,12 @@ def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep
         if got:
             cur.execute("""update ingest_inbox
                               set status='filed',
-                                  filed_refs = jsonb_build_object('prospect_pool', %s::text)
+                                  filed_refs = jsonb_build_object('candidate_pool', %s::text)
                             where source=%s and external_id=%s and status <> 'filed'""",
                         (str(got[0]), slug, key))
             r["inserted"] += 1
 
-    cur.execute("select count(*) from prospect_pool where source = %s", (slug,))
+    cur.execute("select count(*) from candidate_pool where source = %s", (slug,))
     r["pool_total"] = cur.fetchone()[0]
     rep[slug] = r
 
@@ -367,7 +367,7 @@ def main():
             conn.commit()
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    lines = [f"# radar lanes -> prospect_pool — {stamp}"
+    lines = [f"# radar lanes -> candidate_pool — {stamp}"
              + ("  (DRY RUN — nothing written)" if a.dry_run else ""), ""]
     bad = False
     for slug in lanes:

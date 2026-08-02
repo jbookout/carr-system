@@ -299,7 +299,7 @@ def load_party_links(mode):
 # ---------------- the prospect pool ----------------
 
 def _elevated_url():
-    """A DSN that can read prospect_pool itself. `tools/db-tap.py run` sets DATABASE_URL."""
+    """A DSN that can read candidate_pool itself. `tools/db-tap.py run` sets DATABASE_URL."""
     return os.environ.get("CARR_DB_POOL_URL") or os.environ.get("DATABASE_URL")
 
 
@@ -320,9 +320,9 @@ def pool_reach(wanted):
             return psycopg.connect(url)
         try:
             with _c() as conn, conn.cursor() as cur:
-                cur.execute("select 1 from prospect_pool limit 1")
+                cur.execute("select 1 from candidate_pool limit 1")
         except Exception as e:                                  # noqa: BLE001
-            return False, f"elevated DSN cannot read prospect_pool ({type(e).__name__})", None, False
+            return False, f"elevated DSN cannot read candidate_pool ({type(e).__name__})", None, False
         return True, "", _c, True
     if not _exporter_url():
         return False, "no CARR_DB_POOL_URL and no CARR_DB_EXPORTER_URL", None, False
@@ -368,7 +368,7 @@ def load_pool(wanted):
 
     sel = ", ".join(f'{v} as "{k}"' for k, v in _ROUTER_DB_COLS.items())
     if all_sources:
-        q = (f"select source, source_seq, source_row, {sel} from prospect_pool "
+        q = (f"select source, source_seq, source_row, {sel} from candidate_pool "
              "where source = any(%s) order by source, source_seq")
         args = (list(wanted),)
     else:

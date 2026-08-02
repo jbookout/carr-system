@@ -1249,21 +1249,21 @@ export const TOOLS = {
 
   "promote-pool": {
     write: true,
-    description: "Promote a prospect_pool row into a real lead: mints the party, mints the next L-ref, copies the identity, contact and est-lease-event stamps across, points the pool row at the new lead and flips it to 'promoted'. ONE-WAY BY DESIGN — there is no demote verb; a lead created in error is worked through the lead's own lifecycle. Only a row whose status is still 'pool' can promote: a 'promoted' row would duplicate, and a 'suppressed_dup' row already points at the record it duplicates. A dup_tier 'review' row IS promotable — that tier exists precisely so a weak match never silently blocks Joe. Read the row from v_pool first and pass its version as base_version.",
+    description: "Promote a candidate_pool row into a real lead: mints the party, mints the next L-ref, copies the identity, contact and est-lease-event stamps across, points the pool row at the new lead and flips it to 'promoted'. ONE-WAY BY DESIGN — there is no demote verb; a lead created in error is worked through the lead's own lifecycle. Only a row whose status is still 'pool' can promote: a 'promoted' row would duplicate, and a 'suppressed_dup' row already points at the record it duplicates. A dup_tier 'review' row IS promotable — that tier exists precisely so a weak match never silently blocks Joe. Read the row from v_pool first and pass its version as base_version.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
-      pool_id: { type: "string", description: "prospect_pool.id, from v_pool" },
+      pool_id: { type: "string", description: "candidate_pool.id, from v_pool" },
       base_version: { type: "integer", description: "the pool row's version, from a fresh read" },
       stage: { type: "string", description: "lead_stage slug — a promoted lead is one Joe is working, so it needs a real stage" },
       lane: { type: "string", description: "lead_lane slug (optional)" },
       source_detail: { type: "string", description: "why this one, now — free text provenance" } },
       required: ["idempotency_key","pool_id","base_version","stage"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "promote-pool", args, async () => {
-      await versionGuard(c, "prospect_pool", args.pool_id, args.base_version);
+      await versionGuard(c, "candidate_pool", args.pool_id, args.base_version);
       const p = (await c.query(
         `select id, source, source_key, status, dup_tier, dup_ref, name, org_name, vertical,
                 city, county, state, email, phone, segment, est_lease_event, est_basis
-           from prospect_pool where id = $1`, [args.pool_id])).rows[0];
+           from candidate_pool where id = $1`, [args.pool_id])).rows[0];
       if (p.status !== "pool")
         throw new ToolError({ error: "not_promotable", status: p.status, dup_ref: p.dup_ref,
           hint: p.status === "promoted"
@@ -1301,13 +1301,13 @@ export const TOOLS = {
          p.est_lease_event || null, p.est_basis || null, actor.id, actor.display])).rows[0].id;
 
       await c.query(
-        `update prospect_pool set status='promoted', promoted_lead_id=$1, updated_by=$2
+        `update candidate_pool set status='promoted', promoted_lead_id=$1, updated_by=$2
           where id=$3 and status='pool'`, [lead, actor.id, args.pool_id]);
 
       await writeEvent(c, actor, "promote-pool", "lead", lead,
         { new: { ref, from_pool: p.source_key, est_lease_event: p.est_lease_event },
           idempotency_key: args.idempotency_key });
-      await writeEvent(c, actor, "promote-pool", "prospect_pool", args.pool_id,
+      await writeEvent(c, actor, "promote-pool", "candidate_pool", args.pool_id,
         { field: "status", old: { status: "pool" }, new: { status: "promoted", lead: ref },
           idempotency_key: args.idempotency_key });
       return { ok: true, lead_id: lead, ref, party_id: partyId,

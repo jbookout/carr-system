@@ -105,7 +105,7 @@ def build_vendors(tmp_path, cur):
 
 # ---------------- lead-router-2026-07-13.xlsx (target #8, Wave 3) ----------------
 #
-# The router regenerates from prospect_pool so every remaining reader keeps
+# The router regenerates from candidate_pool so every remaining reader keeps
 # working — Dell's side included, and Dell has no DB path at all (ORDER 28's
 # central finding). It rides the same A8 gate as the other seven.
 #
