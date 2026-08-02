@@ -1658,11 +1658,39 @@ export const TOOLS = {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" } },
       required: ["idempotency_key","survivor_party","merged_party"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-merge", args, async () => {
+      if (args.survivor_party === args.merged_party)
+        throw new ToolError({ error: "same_party", hint: "a party cannot be merged into itself" });
+
+      // THE ROLE ROWS MOVE WITH THE PERSON. Until 2026-08-02 this verb set merged_into and
+      // nothing else, so the loser's lead/client/vendor rows were left pointing at a party
+      // that no longer resolves — they vanished from every party-based view while still
+      // existing. Three such orphans predated the fix, and merging Petersen produced a
+      // fourth: his lead L-201 disappeared and he read as "Client" only, when the entire
+      // point of the merge was one person holding BOTH roles.
+      const moved = {};
+      for (const t of ["lead", "client", "vendor"]) {
+        const r = await c.query(
+          `update ${t} set party_id=$1, updated_by=$2 where party_id=$3 returning id`,
+          [args.survivor_party, actor.id, args.merged_party]);
+        if (r.rows.length) moved[t] = r.rows.length;
+      }
+
       await c.query("update party set merged_into=$1, updated_by=$2 where id=$3",
         [args.survivor_party, actor.id, args.merged_party]);
+
+      // A survivor holding two rows of the SAME role is a second duplicate hiding behind
+      // the first. Reported, never auto-resolved: which of two lead records is authoritative
+      // is a human call, and guessing is how the wrong Beasley got merged.
+      const dup = await c.query(
+        `select 'lead' k, count(*) n from lead where party_id=$1 having count(*)>1
+         union all select 'client', count(*) from client where party_id=$1 and merged_into is null having count(*)>1
+         union all select 'vendor', count(*) from vendor where party_id=$1 having count(*)>1`,
+        [args.survivor_party]);
+
       await writeEvent(c, actor, "confirm-merge", "party", args.merged_party,
-        { new: { merged_into: args.survivor_party }, idempotency_key: args.idempotency_key });
-      return { ok: true };
+        { new: { merged_into: args.survivor_party, roles_moved: moved }, idempotency_key: args.idempotency_key });
+      return { ok: true, roles_moved: moved,
+               duplicate_roles_on_survivor: dup.rows.length ? dup.rows : undefined };
     }),
   },
 
