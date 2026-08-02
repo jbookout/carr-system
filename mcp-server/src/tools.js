@@ -164,6 +164,24 @@ async function resolveSubject(client, ref) {
       candidates: r.rows.map(x => ({ name: x.display_name, ref: x.ref, kind: x.subject_type, city: x.city })),
       hint: "pass the exact ref or full name" });
   }
+  // BARE PARTIES ARE A FALLBACK, NEVER A COMPETITOR (0056, 2026-08-02). Migration
+  // 0056 put every party in v_ref_index, which is what finally makes an org like
+  // Henry Schein — 17 rows, no lead/client/vendor among them — resolvable at all.
+  // But this is the WRITE path: folding parties into the query above would let a
+  // bare party outrank the client or vendor a name resolves to today and quietly
+  // move where writes land. So the role query runs first and unchanged, and this
+  // runs ONLY when it found nothing. Purely additive: anything that resolves today
+  // resolves to exactly the same record.
+  r = await client.query(
+    `select subject_type, subject_id, display_name, ref, city from v_ref_index
+      where subject_type='party' and not merged and display_name ilike $1
+      order by similarity(display_name, $2) desc limit 5`, [`%${ref}%`, ref]);
+  if (r.rows.length === 1) return { type: "party", id: r.rows[0].subject_id };
+  if (r.rows.length > 1) {
+    throw new ToolError({ error: "needs_disambiguation", ref,
+      candidates: r.rows.map(x => ({ name: x.display_name, ref: x.ref, kind: x.subject_type, city: x.city })),
+      hint: "more than one party carries this name — often duplicate org rows for one company; pass the exact P-ref" });
+  }
   throw new ToolError({ error: "subject_not_found", ref,
     hint: "use find first; refs look like L-204 / C-127 / V-CPA-006 or a deal name" });
 }
@@ -593,6 +611,25 @@ export const TOOLS = {
          where subject_type in ('lead','client','vendor')
            and (display_name % $1 or display_name ilike $2)
          order by similarity(display_name,$1) desc limit 10`, [q, `%${q}%`]);
+      // ORGS AND UNLINKED PEOPLE, GROUPED (0056, 2026-08-02). Until migration 0056
+      // v_ref_index held only role records, so 415 org parties were invisible here:
+      // `find "Henry Schein"` returned "Henry Pruett" — a trigram hit on one word —
+      // and none of the 17 rows literally named Henry Schein.
+      // GROUPED BY NAME ON PURPOSE. Those 17 rows are one company minted 17 times,
+      // once per rep, and listing them raw would spend the whole 10-row budget on
+      // copies of one answer and push every other match out. One row per name, with
+      // the count and the refs, answers "who do we know at X" AND surfaces the
+      // duplication instead of hiding it. Kept separate from the role query above so
+      // a bare party never outranks a real client or vendor.
+      const orgs = await c.query(
+        `select display_name as name, count(*)::int as duplicate_rows,
+                array_agg(ref order by ref) as refs,
+                bool_or(merged) as any_merged
+         from v_ref_index
+         where subject_type='party'
+           and (display_name % $1 or display_name ilike $2)
+         group by display_name
+         order by similarity(display_name,$1) desc limit 5`, [q, `%${q}%`]);
       const deals = await c.query(
         // The column is lead_owner; `owner` never existed on this view, so this
         // query has always thrown. It stayed invisible because the query above it
@@ -612,7 +649,8 @@ export const TOOLS = {
             or from_ref  ilike $2 or to_ref  ilike $2
          order by linked_at desc, from_name, to_name limit $3`,
         [`%${q}%`, q, CONNECTIONS_CAP]);
-      return { parties: parties.rows, deals: deals.rows, connections: connections.rows };
+      return { parties: parties.rows, deals: deals.rows, connections: connections.rows,
+               organizations: orgs.rows };
     },
   },
 
@@ -658,9 +696,15 @@ export const TOOLS = {
         // NOT the same answer as "no path". A record that exists and simply has
         // no edges is a gap in the Links data; a name nobody has ever recorded is
         // a different problem, and collapsing the two would hide both.
+        // 'party' INCLUDED (0056, 2026-08-02). This block is the verb's honesty
+        // guarantee — "exists but has no edges" must never collapse into "no such
+        // person". Restricted to role records it was breaking exactly that promise:
+        // asked for Henry Schein, which is 17 party rows, it answered "No record and
+        // no graph node matches that name", which was simply false. A read-only
+        // existence check has no reason to be narrower than the record.
         const known = await c.query(
           `select display_name as name, ref, subject_type as kind from v_ref_index
-            where subject_type in ('lead','client','vendor')
+            where subject_type in ('lead','client','vendor','party')
               and (ref ilike $1 or display_name ilike $2) limit 5`, [q, `%${q}%`]);
         return { target: q, resolved: null, paths: [],
                  in_graph: false,
