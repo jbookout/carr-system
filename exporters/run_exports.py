@@ -29,8 +29,16 @@ def main():
     ap.add_argument("--bootstrap", action="store_true")
     a = ap.parse_args()
     targets = select(a.only)
-    ok = all(run_export(k, rel, fn, bootstrap=a.bootstrap) for k, (rel, fn) in targets.items())
-    sys.exit(0 if ok else 1)
+    # NOT `all(...)`: it short-circuits, so ONE failing target silently cancels every
+    # target after it in dict order. That is exactly what bit on 2026-08-02 — an
+    # unbootstrapped decision-history target aborted the whole nightly export sweep and
+    # five generated files went stale, while the chain reported only the first failure.
+    # Run every target, then fail if any did.
+    results = [run_export(k, rel, fn, bootstrap=a.bootstrap) for k, (rel, fn) in targets.items()]
+    failed = [k for k, r in zip(targets, results) if not r]
+    if failed:
+        print(f"\n{len(failed)} of {len(results)} target(s) FAILED: {', '.join(failed)}")
+    sys.exit(0 if not failed else 1)
 
 if __name__ == "__main__":
     main()

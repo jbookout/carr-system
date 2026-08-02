@@ -534,7 +534,10 @@ LOOP_TARGETS = {
     # rows are loop_item kind='idea' and its scaffolding is loop_block, and
     # build_loop_file is already generic over both. Nothing here is idea-specific,
     # which is the argument for having put ideas on loop_item at all.
-    "idea-bank.md": "00_Context/idea-bank.md",
+    # UNREGISTERED 2026-08-02, same reason as decision-history.md: registered while
+    # 00_Context/idea-bank.md is STILL HAND-MAINTAINED, so it failed every nightly run.
+    # ORDER 40's file swaps are held pending Joe's activation sitting; re-register then.
+    # "idea-bank.md": "00_Context/idea-bank.md",
 }
 
 # NO GENERATED BANNER IS INJECTED INTO THESE FOUR, and that is deliberate.
@@ -950,7 +953,13 @@ TARGETS = {
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
     # ORDER 40. A render of decision events, windowed by byte budget rather than
     # split by hand — see DECISION_BUDGET_BYTES.
-    "decision-history.md": (DECISION_REL, build_decision_history),
+    # UNREGISTERED 2026-08-02 until ORDER 40's file swaps are ratified. It was
+    # registered while decision-history.md is STILL HAND-MAINTAINED, so every nightly
+    # run failed it ("no prior ok run") and — before run_exports stopped short-
+    # circuiting — killed every export after it. Bootstrapping it instead would have
+    # been worse: it would overwrite the live hand-written file, which ORDER 40
+    # explicitly holds pending Joe's activation sitting. Re-register at swap time.
+    # "decision-history.md": (DECISION_REL, build_decision_history),
     "client-roster.xlsx": (ROSTER_REL, build_roster),
     "vendors.xlsx": (VENDORS_REL, build_vendors),
     "panhandle-team-deals.json": (DEALS_REL, build_deals),

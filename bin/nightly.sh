@@ -93,6 +93,12 @@ step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
 step "graph (derived from the exported files)"       ./run.sh graph
 step "encrypted backup -> git"                       ./bin/backup-dump.sh
 
+# Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
+# its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
+# writing to it, so it read stale from 7/30 onward while passing 17/17 every time anyone
+# ran it by hand — a canary whose silence was indistinguishable from its health.
+step "smoke probes + heartbeat"                      ./bin/smoke-and-record.sh
+
 # ── ORDER 5: dead-man pings LAST — a ping means the whole chain above ran ────
 step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 
