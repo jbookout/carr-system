@@ -1814,22 +1814,31 @@ export const TOOLS = {
 
   "teach": {
     write: true, humanOnly: true,
-    description: "Write a rule from the human's own words (status: proposed — it activates only via activate-rule, also human-gated). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to.",
+    description: "Write a rule from the human's own words (status: proposed — it activates only via activate-rule, also human-gated). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
-      personal: { type: "boolean", description: "true = applies to this partner only" } },
+      personal: { type: "boolean", description: "true = applies to this partner only" },
+      supersedes: { type: "string", description: "rule_id this one replaces; recorded as a link, does not retire it" } },
       required: ["idempotency_key","statement","human_quote"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "teach", args, async () => {
+      // A supersedes pointer at a rule that does not exist is a silent lie in the
+      // audit trail, so it is checked rather than trusted.
+      if (args.supersedes) {
+        const prior = await c.query("select id, status from rule where id=$1", [args.supersedes]);
+        if (!prior.rows.length) throw new ToolError({ error: "supersedes_not_found",
+          rule_id: args.supersedes, hint: "pass the id of a real rule, or omit supersedes" });
+      }
       const r = await c.query(
-        `insert into rule (statement, human_quote, taught_by, scope, personal_to)
-         values ($1,$2,$3,$4,$5) returning id`,
+        `insert into rule (statement, human_quote, taught_by, scope, personal_to, supersedes)
+         values ($1,$2,$3,$4,$5,$6) returning id`,
         [args.statement, args.human_quote, actor.id, JSON.stringify(args.scope || {}),
-         args.personal ? actor.id : null]);
+         args.personal ? actor.id : null, args.supersedes || null]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
-        { new: { statement: args.statement }, human_quote: args.human_quote,
-          idempotency_key: args.idempotency_key });
-      return { ok: true, rule_id: r.rows[0].id, status: "proposed" };
+        { new: { statement: args.statement, supersedes: args.supersedes || null },
+          human_quote: args.human_quote, idempotency_key: args.idempotency_key });
+      return { ok: true, rule_id: r.rows[0].id, status: "proposed",
+               supersedes: args.supersedes || null };
     }),
   },
 
@@ -1847,6 +1856,46 @@ export const TOOLS = {
       await writeEvent(c, actor, "activate-rule", "rule", args.rule_id,
         { new: { status: "active" }, idempotency_key: args.idempotency_key });
       return { ok: true };
+    }),
+  },
+
+  "retire-rule": {
+    write: true, humanOnly: true,
+    description: "Withdraw a rule — proposed OR active — by setting status='retired'. THE PRESSURE VALVE THE RULE STORE WAS MISSING: until 2026-08-02 a rule could only go proposed -> active, so a rule taught in a wrong scope, a duplicate, or a draft the partner never wanted could never be taken back. 56 proposed rules had piled up by then, including two that stated Joe's own start date differently and no way to kill the wrong one. Retiring is NOT deleting: the row stays, the statement stays readable, and the compiled-rules exports simply stop carrying it (they read active only). A reason is REQUIRED — an unexplained retirement is indistinguishable from a mistake six months later, and the reason is the only thing that stops the same rule being re-taught. Pass superseded_by when a replacement already exists, so the pair reads as one decision rather than two unrelated events. Retiring an ACTIVE rule changes what binds every session, so it is human-gated like teach and activate-rule.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, rule_id: { type: "string" },
+      reason: { type: "string", description: "REQUIRED. Why it is being withdrawn — wrong scope, duplicate, superseded, never wanted." },
+      superseded_by: { type: "string", description: "rule_id of the replacement, when there is one" } },
+      required: ["idempotency_key","rule_id","reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "retire-rule", args, async () => {
+      const reason = String(args.reason || "").trim();
+      if (!reason) throw new ToolError({ error: "reason_required",
+        hint: "an unexplained retirement reads as a mistake later; say why in one line" });
+
+      const cur = await c.query("select status, statement, personal_to from rule where id=$1", [args.rule_id]);
+      if (!cur.rows.length) throw new ToolError({ error: "rule_not_found", rule_id: args.rule_id });
+      if (cur.rows[0].status === "retired") throw new ToolError({ error: "already_retired",
+        rule_id: args.rule_id, hint: "nothing was written; the rule is already withdrawn" });
+
+      if (args.superseded_by) {
+        const rep = await c.query("select id from rule where id=$1", [args.superseded_by]);
+        if (!rep.rows.length) throw new ToolError({ error: "superseded_by_not_found",
+          rule_id: args.superseded_by, hint: "pass the id of a real replacement rule, or omit it" });
+        if (args.superseded_by === args.rule_id) throw new ToolError({ error: "self_supersede",
+          hint: "a rule cannot replace itself" });
+      }
+
+      const was = cur.rows[0].status;
+      await c.query("update rule set status='retired' where id=$1", [args.rule_id]);
+      await writeEvent(c, actor, "retire-rule", "rule", args.rule_id, {
+        field: "status", old: { status: was }, new: { status: "retired" },
+        agent_rationale: reason,
+        idempotency_key: args.idempotency_key });
+      return { ok: true, rule_id: args.rule_id, was, now: "retired", reason,
+               superseded_by: args.superseded_by || null,
+               note: was === "active"
+                 ? "this rule was BINDING — re-export compiled-rules so sessions stop loading it"
+                 : "it bound nobody; no re-export needed" };
     }),
   },
 
