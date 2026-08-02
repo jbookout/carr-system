@@ -16,7 +16,12 @@
 # idempotency keys: they wrote once, on the first run in history, and replay for
 # ever after. Those few rows are the price of covering the write path, and a
 # twelve-hour production outage is what not covering it cost.
-# SEVENTEEN checks as of ORDER 36 (the seventeenth is the analysis write path).
+# TWENTY-THREE checks as of the 2026-08-02 audit: seventeen plumbing checks
+# (ORDER 36's analysis write path was the seventeenth) plus SIX negative-answer
+# probes in the clearly-marked section at the bottom. Two of those six are gated
+# on org visibility and report SKIP rather than FAIL until 0056 plus the Worker
+# filter widening have both landed, so a healthy run is 23 or 21 depending on
+# that gate — the script says which.
 # The count had been stale at "eleven as of ORDER 19" since ORDER 27 — ORDERS 27,
 # 33, 34 and 36 each added a check without moving it. Recount when you add one.
 
@@ -290,6 +295,142 @@ else
   echo "  FAIL  analysis path — $_a_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
 fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NEGATIVE-ANSWER PROBES (2026-08-02 cold-session audit)
+#
+# EVERYTHING ABOVE THIS LINE IS A PLUMBING CHECK. `check` says so in its own
+# comment: "A verb returning an empty-but-valid result still passes: this is a
+# plumbing check, not a data assertion." That is a reasonable contract and it is
+# also exactly how a real bug survived roughly forty migrations.
+#
+# THE BUG. Ask `find` for "Henry Schein" and it answered "Henry Pruett" — a
+# trigram hit on one word of the query — while 17 real Henry Schein party rows
+# sat in the table untouched. `who-do-we-know "Henry Schein"` went further and
+# replied "No record and no graph node matches that name", which is not a miss,
+# it is a false statement about the book. Root cause was in 0016 and inherited
+# unchanged all the way to 0056: every branch of v_ref_index reached party
+# THROUGH a role, so the view indexed ROLES, not subjects, and 432 of 1,084
+# parties — including all 415 orgs — were invisible to the primary lookup verb.
+#
+# THIS SCRIPT WAS GREEN EVERY ONE OF THOSE DAYS, and correctly so by its own
+# rules: the verb responded, it was not an error, the envelope was well formed.
+# A verb that confidently returns the WRONG answer is indistinguishable from a
+# healthy one to a plumbing check, and it is far more dangerous than one that
+# errors: an error gets investigated, "we don't know them" gets believed and
+# acted on.
+#
+# SO THIS CLASS ASSERTS THE ANSWER, NOT THE RESPONSE. Every probe below fails on
+# a wrong answer, not merely on a dead verb. They come in matched pairs on
+# purpose — a probe that says "never claim absence" can be passed by a verb that
+# has simply lost the ability to say it, so each such probe is paired with one
+# that requires the same claim to still appear when it is TRUE.
+#
+# FIXTURE DURABILITY. Nothing here depends on a count that grows, a date, a
+# stage, or a row anybody edits in the normal course of work:
+#   · 'Henry Schein' — the reported defect itself, a supplier org nobody owns.
+#   · 'Mia Arafa' C-036/C-046 — a completed merge. A merge is permanent and the
+#     tombstone is kept on purpose (the 0016 posture, so a search for a merged
+#     name learns where it went), so this pair cannot rot back.
+#   · 'Qwertzuiop Vraxmandel' — deliberate nonsense that will never be a record.
+# If a fixture ever does rot, MOVE THE FIXTURE. Do not delete the probe.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# refute <label> <verb> <args> <pattern-that-must-NOT-appear> [pattern-that-MUST-appear]
+# The mirror of `check`. Same REPS discipline, same half-deployed-Worker
+# reasoning: one clean sample proves nothing right after a deploy.
+refute() {
+  local label="$1" verb="$2" args="$3" forbidden="$4" required="${5:-}" i why=""
+  for i in $(seq 1 "$REPS"); do
+    call "$verb" "$args"
+    if echo "$RESULT" | grep -q '"error"'; then why="transport/protocol error"
+    elif echo "$RESULT" | grep -q '"isError":true'; then why="verb returned isError"
+    elif echo "$RESULT" | grep -q "$forbidden"; then
+      why="WRONG ANSWER: the result contains /$forbidden/, which it must not"
+    elif [ -n "$required" ] && ! echo "$RESULT" | grep -q "$required"; then
+      why="expected /$required/ in the result"
+    else why=""; fi
+    if [ -n "$why" ]; then
+      echo "  FAIL  $label — $why (rep $i of $REPS)"
+      echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1)); return
+    fi
+    [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+  done
+  echo "  ok    $label  (${REPS}/${REPS})"; pass=$((pass+1))
+}
+
+echo
+echo "--- negative-answer probes: a WRONG answer must fail, not just a dead verb ---"
+
+# THE ORG-VISIBILITY GATE. Two independent things have to have landed for an org
+# to be findable: migration 0056 (the party branch of v_ref_index — the data
+# half) and a Worker carrying the widened subject_type filter (0056's own header
+# says so: both read verbs hardcoded subject_type in ('lead','client','vendor'),
+# "the new rows are queryable but not yet queried").
+#
+# WHEN NEITHER HAS LANDED THIS IS A SKIP, NOT A FAILURE, and the discriminator
+# is structural rather than a guess: the `organizations` key either exists in the
+# response shape or it does not. No key at all means the deploy predates the fix
+# — nothing has regressed, so going red would be a false alarm on work that is
+# simply not done yet. Key present but WRONG CONTENT is a real regression and
+# goes red. CAP_ORG carries that decision to the second probe so the two cannot
+# disagree about whether the feature exists.
+CAP_ORG=1
+call find '{"query":"Henry Schein"}'
+if ! echo "$RESULT" | grep -q '\\"organizations\\"'; then
+  CAP_ORG=0
+  echo "  SKIP  org visibility — this Worker has no \"organizations\" block in its find response."
+  echo "        That means migration 0056 (v_ref_index party branch) and/or the widened"
+  echo "        subject_type filter in mcp-server/src/tools.js has not reached production."
+  echo "        Apply 0056 and deploy the Worker, then these two probes go live. Not a failure."
+fi
+
+if [ "$CAP_ORG" -eq 1 ]; then
+  # The reported defect, asserted directly. 'Henry Schein' must come back, and
+  # the organizations block must not be empty — an empty block with a trigram
+  # hit on 'Henry' in parties is precisely the original wrong answer wearing the
+  # new response shape. The 17-row count is deliberately NOT asserted: the right
+  # fix for 17 duplicate supplier rows is to merge them, and a probe that goes
+  # red when someone cleans up the data is a probe that teaches people to delete
+  # probes.
+  refute "find 'Henry Schein' surfaces the ORG, not a trigram hit on 'Henry'" \
+         find '{"query":"Henry Schein"}' '\\"organizations\\":\[\]' 'Henry Schein'
+
+  # The false-absence half, and the worse of the two symptoms. This verb used to
+  # answer "No record and no graph node matches that name" for an org carrying
+  # 17 live rows. That sentence must never appear for a name the book holds.
+  refute "who-do-we-know 'Henry Schein' does NOT claim absence" \
+         who-do-we-know '{"target":"Henry Schein"}' 'No record and no graph node matches' \
+         '\\"matching_records\\"'
+fi
+
+# THE PAIR TO THE PROBE ABOVE. "Never say you don't know them" is trivially
+# satisfied by a verb that has lost the ability to say it at all, and that
+# failure would look identical to a fix. So the absence claim is required to
+# still fire on a name that genuinely is not in the book. Together the two
+# probes assert the sentence is load-bearing rather than dead code.
+check "who-do-we-know DOES claim absence for a name nobody carries" \
+      who-do-we-know '{"target":"Qwertzuiop Vraxmandel"}' 'No record and no graph node matches'
+
+# THE SAME SHAPE ON `find`: a query with no answer must return NO answer. The
+# original defect was not that find missed Henry Schein, it was that find
+# offered an unrelated human in its place and the caller had no way to tell.
+# Empty is the correct answer to an unanswerable query, and asserting it is the
+# only thing that stops a near-miss from being dressed up as a hit.
+check "find returns EMPTY for a name nobody carries (no trigram near-miss)" \
+      find '{"query":"Qwertzuiop Vraxmandel"}' '\\"parties\\":\[\]' '\\"organizations\\":\[\]'
+
+# MERGED RECORDS SURFACE AS TOMBSTONES RATHER THAN VANISHING. C-036 and C-046
+# are both 'Mia Arafa'; C-046 is the completed merge. Both must come back, and
+# the merged flag must be present — a merge that removes the old ref from `find`
+# silently breaks every note, email and document that still cites C-046, and it
+# does it in the same "the record simply isn't there" way the Henry Schein bug
+# did. Asserting BOTH refs is the point: the survivor alone would pass a lookup
+# while the pointer that makes the merge navigable had been lost.
+check "merged record C-046 surfaces as a tombstone, not a disappearance" \
+      find '{"query":"Mia Arafa"}' 'C-046' '\\"merged\\":true'
+check "…and the surviving record C-036 comes back with it" \
+      find '{"query":"Mia Arafa"}' 'C-036'
 
 echo
 echo "passed $pass · failed $fail"

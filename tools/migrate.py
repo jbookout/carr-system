@@ -30,6 +30,41 @@ from pathlib import Path
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 NAME_RE = re.compile(r"^\d{4}_[a-z0-9_]+\.sql$")
 
+# ── DDL TIMEOUTS (added 2026-08-02, cold-session audit) ──────────────────────
+# WHY. Migrations are applied by hand against production Neon while a Cloudflare
+# Worker holds live connections. An ALTER TABLE needs an ACCESS EXCLUSIVE lock,
+# and Postgres queues lock requests: if the ALTER lands behind a long-running
+# read it waits — and every query that arrives after it, including trivial ones
+# that would not otherwise conflict, queues behind the ALTER. A change that
+# takes two milliseconds of actual work can therefore stall the whole API for as
+# long as one unrelated slow read runs. Without lock_timeout the runner waits
+# for ever and looks like it is "still applying".
+#
+# 5 SECONDS, because the failure mode we are avoiding IS the wait. Every DDL in
+# migrations/ is a catalog change on a database of ~67 tables and ~17k rows;
+# none of them needs five seconds to ACQUIRE a lock, so anything that does is
+# blocked rather than busy. Failing fast costs a re-run; waiting costs an
+# outage. This is the standard online-migration posture (gitlab, strong_migrations
+# and friends all sit in the 50ms–5s band); 5s is the forgiving end of it,
+# chosen because a human is watching this run and a spurious abort wastes their
+# attention.
+#
+# statement_timeout is the second half and a much blunter tool: it bounds how
+# long a migration may HOLD a lock once it has one. Set too low it kills
+# legitimate backfills, so it is deliberately generous at 5 minutes — roughly
+# two orders of magnitude more than anything in migrations/ has ever needed on
+# this data, while still guaranteeing a runaway statement cannot pin the API
+# indefinitely.
+#
+# BOTH ARE OVERRIDABLE, because the day someone writes a genuine long backfill
+# they should raise the ceiling consciously rather than delete this block:
+#   CARR_MIGRATE_LOCK_TIMEOUT=30s CARR_MIGRATE_STATEMENT_TIMEOUT=30min
+# A migration may also override either one for itself with `set local ...` as
+# its first statement; SET LOCAL inside the transaction wins over the session
+# value set here, and reverts at commit.
+LOCK_TIMEOUT = os.environ.get("CARR_MIGRATE_LOCK_TIMEOUT", "5s")
+STATEMENT_TIMEOUT = os.environ.get("CARR_MIGRATE_STATEMENT_TIMEOUT", "5min")
+
 BOOTSTRAP = """
 create table if not exists schema_migrations (
   filename   text primary key,
@@ -108,10 +143,40 @@ def main() -> None:
             if answer != host:
                 fail("confirmation did not match host; nothing applied")
 
+        print(f"lock_timeout: {LOCK_TIMEOUT}   statement_timeout: {STATEMENT_TIMEOUT}")
         for name, sql, digest in pending:
             with conn.cursor() as cur:
                 print(f"applying {name} ...", end=" ", flush=True)
-                cur.execute(sql)
+                # SET LOCAL, not SET: scoped to THIS migration's transaction and
+                # reverted at commit, so one migration can never leak a timeout
+                # onto the next. It is re-issued per migration on purpose — a
+                # migration that resets the session must not silently disarm the
+                # guard for everything that follows it.
+                cur.execute(f"set local lock_timeout = '{LOCK_TIMEOUT}'")
+                cur.execute(f"set local statement_timeout = '{STATEMENT_TIMEOUT}'")
+                try:
+                    cur.execute(sql)
+                except psycopg.errors.LockNotAvailable:
+                    # Named explicitly so nobody debugs the migration. Nothing is
+                    # applied: this migration's transaction rolls back whole, and
+                    # every migration before it is already committed and recorded,
+                    # so a re-run picks up exactly here. Forward-only is intact.
+                    conn.rollback()
+                    fail(f"{name} could not acquire its lock within {LOCK_TIMEOUT} and was "
+                         "ABANDONED (nothing applied from this file).\n"
+                         "  This is the guard working, not a broken migration. Something else "
+                         "is holding a lock on the tables it touches — usually a long-running "
+                         "read from the Worker.\n"
+                         "  Check pg_stat_activity for the blocker, then just re-run: earlier "
+                         "migrations are already committed and will be skipped.\n"
+                         f"  To wait longer on purpose: CARR_MIGRATE_LOCK_TIMEOUT=30s")
+                except psycopg.errors.QueryCanceled:
+                    conn.rollback()
+                    fail(f"{name} exceeded statement_timeout ({STATEMENT_TIMEOUT}) and was "
+                         "ABANDONED (nothing applied from this file).\n"
+                         "  If this migration genuinely needs longer, raise the ceiling "
+                         "deliberately rather than removing it:\n"
+                         f"  CARR_MIGRATE_STATEMENT_TIMEOUT=30min python3 tools/migrate.py --apply")
                 cur.execute(
                     "insert into schema_migrations (filename, sha256) values (%s, %s)",
                     (name, digest),

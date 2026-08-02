@@ -7,6 +7,7 @@
 #   ./run.sh all           — all three, renewal-feed before lead-board (feed order matters)
 #   ./run.sh review-queue  — rebuild the ONE review queue (out/review-queue/), a surface only
 #   ./run.sh brief-pack    — the four brief sections as callable units (out/brief-pack/)
+#   ./run.sh restore-rehearse — prove the encrypted backups actually restore (needs the age key)
 # CARR_VAULT overrides the vault path (default: Joe's Drive mount).
 
 set -eu
@@ -50,6 +51,12 @@ registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit
 review_queue() { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/review_queue.py" "$@"; }
 brief_pack()   { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/brief_pack.py" "$@"; }
 verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" "$@"; }
+# The restore rehearsal (2026-08-02). Proves backups/*.sql.age can come BACK:
+# throwaway Neon branch, decrypt, load, reconcile row counts, delete the branch.
+# It writes NOTHING to production and needs the age PRIVATE key, which this repo
+# does not carry — pass --identity or set CARR_AGE_IDENTITY. --preflight runs the
+# checks alone and creates nothing.
+restore_rehearse(){ shift; "$REPO/bin/restore-rehearse.sh" "$@"; }
 
 case "${1:-}" in
   deal-room)    shift; deal_room "$@" ;;
@@ -68,11 +75,12 @@ case "${1:-}" in
   review-queue) review_queue "$@" ;;
   brief-pack)   brief_pack "$@" ;;
   verify-emails) verify_emails "$@" ;;
+  restore-rehearse) restore_rehearse "$@" ;;
   retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
 esac
