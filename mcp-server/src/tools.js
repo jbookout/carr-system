@@ -1783,10 +1783,12 @@ export const TOOLS = {
 
   "add-loop": {
     write: true,
-    description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), a cross-brain interrupt (action_required), or a parked idea (kind idea, which renders into 00_Context/idea-bank.md and is personal, never shared). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 5 across the hot list — more than 5 means re-tier, not stack), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is.",
+    description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), a cross-brain interrupt (action_required), or a parked idea (kind idea, which renders into 00_Context/idea-bank.md and is personal, never shared). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 3 PER DOMAIN — more than 3 means re-tier, not stack; read v_loop_bell_cap for breaches. The old cap was 5 across the whole hot list, written before domains existed: with six lanes that was under one bell each, so everything drifted to 'none' until the hot list held 21 items against a cap of 5), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"] },
+      domain: { type: "string", enum: ["deals","prospecting","networking","marketing","business","system"],
+        description: "deals | prospecting | networking | marketing | business | system. Classify by WHAT THE WORK IS, not who appears in it: a vendor introducing a PROSPECT normally means real intent and is DEALS (prospecting only while no deal has formed); a vendor introducing a VENDOR is networking; connecting a prospect to a vendor is networking; connecting a client to a vendor on a LIVE deal is deals. Omit only when genuinely unclear — an unclassified loop renders in its own unsorted section, which is honest, but a loop nobody can find is a loop nobody does." },
       title: { type: "string", description: "team_loop 'Ask' / action_required 'Action needed'. Not used by open_loop, whose text is `body`." },
       body: { type: "string", description: "open_loop 'Item' / team_loop 'Notes / links'" },
       owner: { type: "string", description: "the label the file uses: 'Joe', 'Joe/Claude', 'Dell', 'Joe→Dell'" },
@@ -1835,17 +1837,17 @@ export const TOOLS = {
       const r = await c.query(
         `insert into loop_item (kind, number, block_id, render_seq, title, body, owner,
            since_text, unblocks, source_note, marker, marker_literal, due_on,
-           drift_critical, status, tier, personal_to, created_by, updated_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'open',$15,$16,$17,$17)
+           drift_critical, status, tier, personal_to, created_by, updated_by, domain)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'open',$15,$16,$17,$17,$18)
          returning id`,
         [args.kind, num, block.id, seq, args.title || null, args.body || null, args.owner,
          args.since || new Date().toISOString().slice(0, 10), args.unblocks || null,
          args.source_note || null, marker, literal, args.due_on || null,
-         args.drift_critical === true, tier, personal, actor.id]);
+         args.drift_critical === true, tier, personal, actor.id, args.domain || null]);
 
       await writeEvent(c, actor, "add-loop", "loop", r.rows[0].id,
         { new: { number: num, kind: args.kind, section: wantKey, marker,
-                 due_on: args.due_on || null, owner: args.owner },
+                 due_on: args.due_on || null, owner: args.owner, domain: args.domain || null },
           idempotency_key: args.idempotency_key });
       return { ok: true, loop_id: r.rows[0].id, number: num, kind: args.kind,
                section: wantKey, renders_into: block.rel_path };
@@ -1863,6 +1865,8 @@ export const TOOLS = {
       base_version: { type: "integer" },
       title: { type: "string" }, body: { type: "string" }, owner: { type: "string" },
       unblocks: { type: "string" }, source_note: { type: "string" },
+      domain: { type: "string", enum: ["deals","prospecting","networking","marketing","business","system"],
+        description: "reclassify the loop. Same rule as add-loop: classify by what the WORK is, not who appears in it." },
       marker: { type: "string", enum: ["bell", "dated", "decision", "none"] },
       due_on: { type: "string", description: "YYYY-MM-DD" },
       drift_critical: { type: "boolean" },
@@ -1877,7 +1881,7 @@ export const TOOLS = {
 
       const sets = [], vals = [];
       const set = (col, v) => { vals.push(v); sets.push(`${col}=$${vals.length}`); };
-      for (const f of ["title", "body", "owner", "unblocks", "source_note"])
+      for (const f of ["title", "body", "owner", "unblocks", "source_note", "domain"])
         if (args[f] !== undefined) set(f, args[f]);
       if (args.drift_critical !== undefined) set("drift_critical", args.drift_critical === true);
 

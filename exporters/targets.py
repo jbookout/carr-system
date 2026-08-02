@@ -566,6 +566,11 @@ def _loop_cell(v):
     return "" if v is None else str(v)
 
 
+# Sentinel for "no group emitted yet". None is a real domain (unclassified), so it
+# cannot double as the not-started marker without swallowing the first heading.
+_NO_DOMAIN_YET = object()
+
+
 def build_loop_file(rel_path):
     """One builder per file; the render walks the stored blocks in order."""
 
@@ -587,19 +592,45 @@ def build_loop_file(rel_path):
                 lines.append(prose_md)
             if block_key is None:
                 continue
-            if header_cols:
-                lines.append("| " + " | ".join(header_cols) + " |")
-                lines.append("|" + "---|" * len(header_cols))
+            # ORDER 0042: grouped by DOMAIN, deals first, unclassified (sort 999)
+            # last. Joe: "important transactional and business things get burried by
+            # system loops." One flat table was the burial; a table per lane is the fix.
             cur.execute(
                 "select row_col_order, number, owner, title, body, since_text, "
                 "       unblocks, source_note, closed_text, outcome, "
-                "       marker_literal, extra_cells "
+                "       marker_literal, extra_cells, domain, domain_label "
                 "  from v_export_loops "
                 " where rel_path = %s and block_key = %s and loop_id is not null "
-                " order by render_seq", (rel_path, block_key))
-            for r in cur.fetchall():
+                " order by domain_sort, render_seq", (rel_path, block_key))
+            rows = cur.fetchall()
+            # Domain is an OPEN_LOOP axis. team_loop and action_required rows are partner
+            # handoffs and cross-brain interrupts — a different question entirely — and
+            # their domain is legitimately NULL. Grouping them produced an "Unsorted — no
+            # domain set" heading on team-loops.md and action-required.md, which is not a
+            # gap to fix but a category error. If no row in this block is classified, the
+            # block renders exactly as it did before domains existed.
+            group_by_domain = any(r[12] is not None for r in rows)
+            current_domain = _NO_DOMAIN_YET
+            if not group_by_domain and header_cols:
+                lines.append("| " + " | ".join(header_cols) + " |")
+                lines.append("|" + "---|" * len(header_cols))
+            for r in rows:
                 (row_order, number, owner, title, body, since_text, unblocks,
-                 source_note, closed_text, outcome, marker_literal, extra) = r
+                 source_note, closed_text, outcome, marker_literal, extra,
+                 domain, domain_label) = r
+                # A heading and a fresh header row per lane. Emitted only when the
+                # domain CHANGES, so a block holding one domain looks exactly as it
+                # did before — and a block holding none (the closed/DONE tables,
+                # which carry no domain) never grows a heading at all.
+                if group_by_domain:
+                    if domain != current_domain:
+                        current_domain = domain
+                        if header_cols:
+                            lines.append("")
+                            lines.append(f"**{domain_label or 'Unsorted — no domain set'}**")
+                            lines.append("")
+                            lines.append("| " + " | ".join(header_cols) + " |")
+                            lines.append("|" + "---|" * len(header_cols))
                 vals = {"number": number, "owner": owner, "title": title, "body": body,
                         "since_text": since_text, "unblocks": unblocks,
                         "source_note": source_note, "closed_text": closed_text,
