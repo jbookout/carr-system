@@ -26,7 +26,7 @@ Adapted 2026-07-31 from George Nurijanian's "/find-the-strategic-crux" (prodmgmt
 - Sequential and strict: no options before a named cause, no recommendation before the stress tests. Pillars feel like progress and diagnosis feels like delay — hold the line anyway.
 - The output artifacts, always: the one-sentence gap, the candidate map, the crux sentence, the lever-tied option list, the stress-tested recommendation with its first move.
 - Hand off downstream: the crux feeds /options for a full matrix, /premortem before committing, /decide to log the ruling.
-- In the CARR system: log the crux and ruling per house convention (decision-history / the decide flow); the crux sentence is exactly what a decision log wants.
+- In the CARR system: log the crux and ruling with the **`log-decision`** verb (the crux sentence is exactly what its `title` wants, the diagnosis its `rationale`). `00_Context/decision-history.md` is a GENERATED render of those events — never hand-edit it.
 
 ## When NOT to use
 

@@ -33,7 +33,7 @@ This is **build-and-deliver**. It never sends anything, never opens the new sess
 This skill runs in any project. Before writing, take ten seconds to fit the local conventions:
 
 - **Read the project's own context** if present — `CLAUDE.md`, `AGENTS.md`, `README`, or a docs index — to learn the project's operating rules, vocabulary, and where notes live.
-- **Find the handoff home.** If the project already has an obvious place for continuation notes, decisions, or open items (a `handoffs/` or `docs/` folder, a decision log, an open-loops or TODO file), plan to offer that. If nothing exists, the default is a `handoffs/` folder at the project root with a dated file.
+- **Find the handoff home, and check it is writable.** If the project already has an obvious place for continuation notes, decisions, or open items (a `handoffs/` or `docs/` folder, a decision log, an open-loops or TODO file), plan to offer that — but first confirm it is not a generated projection. In CARR, `open-loops.md`, `decision-history.md` and `idea-bank.md` are all renders: an open item goes in through `add-loop`, a settled decision through `log-decision`. If nothing exists, the default is a `handoffs/` folder at the project root with a dated file.
 - **Carry the project's guardrails.** If the project's context defines standing rules — an approval gate before outbound actions, confidentiality boundaries, formatting defaults, a house style — restate the ones the successor could trip over in the packet. If there is no such context, skip this section rather than inventing rules.
 
 ## Two modes — decide first
@@ -72,6 +72,8 @@ Deliver it in-chat first. Then offer, as a yes/no question — never assume:
 
 - **Save it** into the project's handoff home (from "Adapt to the project"), as a dated markdown file, creating the folder if needed.
 - **Log it** in the project's open-items / TODO / decision file if one exists, so the thread does not fall off the radar.
+
+**Check first whether that file is generated.** In projects where the tracking file is a projection of a database or another source of truth, hand-editing it does nothing — the next export overwrites it, and the entry silently disappears. Look for a header saying the file is generated, a build or export step that writes it, or a note in the project's context file. If it is generated, log the item through the system's own write path (the verb, API, or command that owns that record) and never by editing the file. In CARR specifically, `open-loops.md`, `decision-history.md`, and the `dossier-*.md` set are all generated exports: open items go in through the `add-loop` verb, and a hand-edit there is a lost entry, not a saved one.
 
 Do either only on a yes. If the user just wants the packet to paste and move on, stop after delivering it.
 

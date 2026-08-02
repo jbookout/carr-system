@@ -52,7 +52,7 @@ Joe can jump to it.
 and before anything is written anywhere permanent, summarize what the source contains and ask Joe
 whether it applies system-wide or belongs somewhere more specific (own section/business model,
 one prospect, personal tier, or nowhere).** Ask Joe whether findings belong anywhere permanent before writing: tactics worth repeating →
-idea-bank or DNA/templates.md as a PROPOSED rule (his yes required); post patterns →
+the `add-loop` verb with kind `idea` (`00_Context/idea-bank.md` is a GENERATED render of those rows — never edit it), or, when the tactic is a standing rule meant to bind future sessions, the `teach` verb with Joe's verbatim words, which stays PROPOSED until he activates it (his yes required); post patterns →
 content-inspiration-bank Section 1 with the transferable pattern named; market data points →
 substance bank (dated, sourced). Then delete the temp dir.
 
