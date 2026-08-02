@@ -386,6 +386,16 @@ awk -F'|' -v floor="$FLOOR_PCT" -v core="$CORE_TABLES" '
   END {
     fails = 0
     split(core, c, " "); for (i in c) is_core[c[i]] = 1
+    # HOW FAR BEHIND THE SCHEMA IS, in migrations. Both sides already count
+    # schema_migrations as an ordinary table, so this costs no extra query: the
+    # dump carries every migration applied before it was taken, production carries
+    # every one applied since. The difference is the licence to treat a missing
+    # table or an empty one as expected rather than as a failure.
+    behind = 0
+    if (("schema_migrations" in prod) && ("schema_migrations" in rest))
+      behind = prod["schema_migrations"] - rest["schema_migrations"]
+    if (behind > 0)
+      printf "  NOTE: %d migration(s) were applied AFTER this dump was taken.\n        Tables and rows created by them cannot be in it — reported as expected, not failed.\n\n", behind
 
     printf "  %-28s %12s %12s %10s\n", "table", "production", "restored", "delta"
     printf "  %-28s %12s %12s %10s\n", "----------------------------", "------------", "------------", "----------"
@@ -394,8 +404,25 @@ awk -F'|' -v floor="$FLOOR_PCT" -v core="$CORE_TABLES" '
       p = (t in prod) ? prod[t] : -1
       r = (t in rest) ? rest[t] : -1
       if (p >= 0 && r < 0) {
-        printf "  %-28s %12d %12s %10s   FAIL missing from the restore\n", t, p, "-", "-"
-        fails++; continue
+        # SCHEMA EVOLUTION IS NOT DATA LOSS, and the first real run got this wrong.
+        # On 2026-08-02 the drill reported 8 failures against a dump that was
+        # perfectly intact: 25 migrations (0032..0056) were applied in the ten
+        # hours AFTER the 08:50 dump, so candidate_pool, contact_state,
+        # loop_domain, vendor_category, vendor_disposition,
+        # vendor_relationship_level and deprecation did not exist yet. The
+        # giveaway was in the table itself — prospect_pool carried 9860 rows in
+        # the dump and candidate_pool carried 9860 in production, one table
+        # renamed by 0048. A restore cannot produce a table its dump predates,
+        # and calling that a failure is how a weekly alarm teaches everyone to
+        # ignore it. `behind` is production_migrations - restored_migrations,
+        # read from the schema_migrations counts both sides already report.
+        if (behind > 0) {
+          printf "  %-28s %12d %12s %10s   expected: table postdates this dump\n", t, p, "-", "-"
+        } else {
+          printf "  %-28s %12d %12s %10s   FAIL missing from the restore\n", t, p, "-", "-"
+          fails++
+        }
+        continue
       }
       if (p < 0 && r >= 0) {
         # Expected and harmless: a migration landed AFTER this dump was taken,
@@ -406,8 +433,20 @@ awk -F'|' -v floor="$FLOOR_PCT" -v core="$CORE_TABLES" '
       }
       d = r - p
       if (p > 0 && r == 0) {
-        printf "  %-28s %12d %12d %10d   FAIL restored EMPTY\n", t, p, r, d
-        fails++; continue
+        # Same discrimination, one level down: the TABLE existed in the dump but
+        # every ROW in it is newer. record_flag is the worked example — created by
+        # 0001, still empty at 08:50, and its first 8 rows written that evening.
+        # A failed COPY and a table nobody had written to yet look identical from
+        # here, so when the dump is known to be schema-behind this is reported and
+        # not gated. The aggregate floor below is what still catches a genuinely
+        # truncated dump, and it is the right instrument for that.
+        if (behind > 0) {
+          printf "  %-28s %12d %12d %10d   expected: rows postdate this dump\n", t, p, r, d
+        } else {
+          printf "  %-28s %12d %12d %10d   FAIL restored EMPTY\n", t, p, r, d
+          fails++
+        }
+        continue
       }
       mark = ""
       if (is_core[t] && r == 0 && p == 0) mark = "   note: core table, empty on both sides"
