@@ -578,7 +578,7 @@ export const TOOLS = {
 
   "find": {
     write: false,
-    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. Read-only.",
+    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Matches party.name / deal.name / client.roster_ref. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. Read-only.",
     inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     handler: async (c, _a, args) => {
       const q = args.query;
@@ -617,7 +617,7 @@ export const TOOLS = {
 
   "who-do-we-know": {
     write: false,
-    description: "\"Who gets me to X?\" — walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops, shortest first, each rendered as a readable chain (\"Dion Moniz -knows-> Jon Shaw -intro-> Dr. James Allen Tyrer\"). The first name in a chain is who Joe asks. Read-only, and it never guesses: an ambiguous name returns needs_disambiguation with the candidates, and a target that exists but carries no edges says so rather than returning an empty list that reads like 'no such person'.",
+    description: "\"Who gets me to X?\" — walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops (walks the party_link table), shortest first, each rendered as a readable chain (\"Dion Moniz -knows-> Jon Shaw -intro-> Dr. James Allen Tyrer\"). The first name in a chain is who Joe asks. Read-only, and it never guesses: an ambiguous name returns needs_disambiguation with the candidates, and a target that exists but carries no edges says so rather than returning an empty list that reads like 'no such person'.",
     inputSchema: { type: "object", properties: {
       target: { type: "string", description: "who you want to reach — C-155, V-CPA-006, L-208, or a full name" },
       max_depth: { type: "integer", description: `hops to walk, 1-${WHO_MAX_DEPTH} (default ${WHO_MAX_DEPTH})` },
@@ -785,7 +785,7 @@ export const TOOLS = {
   // v_source_attribution; the honest-limits note travels with every answer.
   "source-attribution": {
     write: false,
-    description: "Prospecting ROI: per source lane, the funnel pool -> promoted -> leads -> clients -> deals -> commissions. Answers 'which radar lane has ever produced a commission'. Optional lane filter.",
+    description: "Prospecting ROI: per source lane, the funnel pool -> promoted -> leads -> clients -> deals -> commissions. Answers 'which radar lane has ever produced a commission'. Reads acquisition_source per lane. Optional lane filter.",
     inputSchema: { type: "object", properties: {
       lane: { type: "string", description: "one lane slug to filter (e.g. lead-router, renewal-radar, direct:renewal, __unattributed__)" } },
       required: [] },
@@ -803,7 +803,7 @@ export const TOOLS = {
 
   "catch-me-up": {
     write: false,
-    description: "The merged timeline (events + activities) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer. Use before any conversation about a record.",
+    description: "The merged timeline (event + activity rows) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer (notes_path). Use before any conversation about a record.",
     inputSchema: { type: "object", properties: { ref: { type: "string", description: "L-204 / C-127 / V-CPA-006 / deal or party name" }, limit: { type: "integer", default: 20 } }, required: ["ref"] },
     handler: async (c, _a, args) => {
       const s = await resolveSubject(c, args.ref);
@@ -817,7 +817,7 @@ export const TOOLS = {
 
   "today-triage": {
     write: false,
-    description: "What needs attention now: due next-actions, critical dates inside 14 days, untriaged ingest items. The morning-brief substrate.",
+    description: "What needs attention now: due next-actions (next_action.due_on, suppressed by hold_until), critical_date rows inside 14 days, untriaged ingest items. The morning-brief substrate.",
     inputSchema: { type: "object", properties: {} },
     handler: async (c) => ({ items: (await c.query("select * from v_today_triage order by due_on nulls last limit 50")).rows }),
   },
@@ -831,21 +831,21 @@ export const TOOLS = {
 
   "lead-hot": {
     write: false,
-    description: "Scored, unsuppressed leads. ALL of them surface — qualification is the human's job, never pre-filtered.",
+    description: "Scored, unsuppressed leads (score, lane, est_lease_event, next_action_date). ALL of them surface — qualification is the human's job, never pre-filtered.",
     inputSchema: { type: "object", properties: { limit: { type: "integer", default: 30 } } },
     handler: async (c, _a, args) => ({ leads: (await c.query("select * from v_lead_hot order by score desc nulls last limit $1", [args.limit || 30])).rows }),
   },
 
   "stale-records": {
     write: false,
-    description: "Active deals gone quiet 14+ days. Replaces the hand-run staleness sweep.",
+    description: "Active deals gone quiet 14+ days, measured on last_touch (see v_last_touch; a deal inherits its client's touch since 0033). Replaces the hand-run staleness sweep. Empty can mean 'nothing stale' OR 'nothing captured' — check v_capture_coverage before trusting a clean result.",
     inputSchema: { type: "object", properties: {} },
     handler: async (c) => ({ stale: (await c.query("select * from v_stale_records order by days_quiet desc nulls first")).rows }),
   },
 
   "integrity-digest": {
     write: false,
-    description: "The heartbeat's lines: row counts, export freshness (dead-man), writes-by-dell, norm-owed, triage queue.",
+    description: "The heartbeat's lines: row counts, export freshness (dead-man; stale/last_ok per target), writes_by_dell_24h, norm_owed_open, merge_queue, triage queue.",
     inputSchema: { type: "object", properties: {} },
     handler: async (c) => ({ digest: (await c.query("select * from v_integrity_digest")).rows }),
   },
@@ -854,7 +854,7 @@ export const TOOLS = {
 
   "log-activity": {
     write: true,
-    description: "Log a business touch (call, email, meeting, tour, text, note, LOI...) against a deal/client/lead/vendor. THE default verb after any real-world contact. occurred_at = when it happened (defaults now); anything missing goes in 'owed', never invented.",
+    description: "Log a business touch (call, email, meeting, tour, text, note, LOI...) against a deal/client/lead/vendor. THE default verb after any real-world contact. occurred_at = when it happened (defaults now); anything missing goes in 'owed', never invented. Writes an activity row; contact-kind rows are what move last_touch and lift capture coverage.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       ref: { type: "string", description: "L-/C-/V- ref or deal name" },
@@ -893,7 +893,7 @@ export const TOOLS = {
 
   "stamp-touch": {
     write: true,
-    description: "Truck shorthand for log-activity: one-line call/text stamp. 'Called Hughes, going well' and done. Contact kinds only — a note is annotation, not a touch (it would not move Last Touch since 0017); use log-activity kind:note or an event for annotation.",
+    description: "Truck shorthand for log-activity: one-line call/text stamp. 'Called Hughes, going well' and done. Sets last_touch. Contact kinds only — a note is annotation, not a touch (it would not move Last Touch since 0017); use log-activity kind:note or an event for annotation.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, ref: { type: "string" },
       kind: { type: "string", enum: ["call","text"], default: "call" },
@@ -904,7 +904,7 @@ export const TOOLS = {
 
   "set-next-action": {
     write: true,
-    description: "Set YOUR one open ball on a subject (replaces your previous open one; Dell's stays untouched — one ball per person per subject). Say whose turn it is and by when.",
+    description: "Set YOUR one open ball on a subject (replaces your previous open one; Dell's stays untouched — one ball per person per subject). Say whose turn it is and by when. Writes next_action (owner, due_on); set hold_until to keep a dated row from surfacing in today-triage.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, ref: { type: "string" },
       description: { type: "string" }, due_on: { type: "string", description: "YYYY-MM-DD, optional" } },
@@ -967,7 +967,7 @@ export const TOOLS = {
 
   "add-critical-date": {
     write: true,
-    description: "A date with consequences (LOI expiry, lease expiration, option window, earnout). source is REQUIRED — where did this date come from?",
+    description: "A critical_date — a date with consequences (LOI expiry, lease expiration, option window, earnout). Surfaces in today-triage inside 14 days. source is REQUIRED — where did this date come from?",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       kind: { type: "string" }, due_on: { type: "string" }, note: { type: "string" },
@@ -1013,7 +1013,7 @@ export const TOOLS = {
 
   "set-lead": {
     write: true,
-    description: "THE handoff: make joe or dell the current lead on a deal. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
+    description: "THE handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       new_lead: { type: "string", enum: ["joe","dell"] } },
@@ -1036,7 +1036,7 @@ export const TOOLS = {
 
   "add-party": {
     write: true,
-    description: "Create a person or org. CHECKS for existing matches first (email, similar name) and returns candidates INSTEAD of inserting when found — pass force_new:true only after the human confirms it is genuinely a different person. Never store 205-643-6555 (it is Dell's placeholder, not a contact).",
+    description: "Create a party (person or org). CHECKS for existing matches first (email, similar name) and returns candidates INSTEAD of inserting when found — pass force_new:true only after the human confirms it is genuinely a different person. Never store 205-643-6555 (it is Dell's placeholder, not a contact).",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, name: { type: "string" },
       kind: { type: "string", enum: ["person","org"], default: "person" },
@@ -1225,7 +1225,7 @@ export const TOOLS = {
 
   "new-lead": {
     write: true,
-    description: "Create a lead over a new or existing party; mints the next L-ref atomically. Stage must be an existing stage slug (they were imported from the live registry).",
+    description: "Create a lead over a new or existing party; mints the next L-ref atomically. Sets lead_stage and owner_id/owner_label. Stage must be an existing lead_stage slug (they were imported from the live registry).",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       party_id: { type: "string", description: "from add-party or find" },
@@ -1316,7 +1316,7 @@ export const TOOLS = {
 
   "new-client": {
     write: true,
-    description: "Create a client over a party; mints the next C-ref. ALWAYS ask how they found us (acquisition_source) at intake — consult attribution starts day one.",
+    description: "Create a client over a party; mints the next C-ref (roster_ref). Sets client_status and acquisition_source. ALWAYS ask how they found us (acquisition_source) at intake — consult attribution starts day one.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, party_id: { type: "string" },
       status: { type: "string" }, vertical: { type: "string" }, subtype: { type: "string" },
@@ -1338,7 +1338,7 @@ export const TOOLS = {
 
   "new-vendor": {
     write: true,
-    description: "Create a vendor over a party; mints V-<CODE>-### (pass the category code explicitly: CPA, LEN, GC...). A Claude-found vendor enters at the prospect stage until a real call happens — that is a standing rule, not a suggestion.",
+    description: "Create a vendor over a party; sets vendor stage; mints V-<CODE>-### (pass the category code explicitly: CPA, LEN, GC...). A Claude-found vendor enters at the prospect stage until a real call happens — that is a standing rule, not a suggestion.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, party_id: { type: "string" },
       category: { type: "string" }, ref_code: { type: "string", description: "CPA / LEN / GC / ..." },
@@ -1384,7 +1384,7 @@ export const TOOLS = {
 
   "record-counter": {
     write: true,
-    description: "Log a negotiation round: whose paper (side), the economics (rate REQUIRES its basis — never a bare number), TI, free rent, term. Round number auto-increments per deal+side if omitted. Out-of-band rates ask for confirm.",
+    description: "Log a negotiation round: whose paper (side), the economics (rate REQUIRES its basis — never a bare number), TI, free rent, term. Writes a counter row (side, rate + basis, ti, free_rent, term). Round number auto-increments per deal+side if omitted. Out-of-band rates ask for confirm.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       side: { type: "string", enum: ["tenant","landlord","buyer","seller"] },
@@ -1426,7 +1426,7 @@ export const TOOLS = {
 
   "register-template": {
     write: true,
-    description: "Register (or re-version) a CARR template so prepare-document can fill it. field_map is the reviewable contract between the template's slots and the record layer — a map carrying unreviewed:true is REFUSED by prepare-document until a human has read it. Registering never touches the template file; source_path points at the real file in Templates/ and nothing writes there, ever.",
+    description: "Register (or re-version) a CARR template so prepare-document can fill it. Writes the template row; field_map is the reviewable contract between the template's slots and the record layer — a map carrying unreviewed:true is REFUSED by prepare-document until a human has read it. Registering never touches the template file; source_path points at the real file in Templates/ and nothing writes there, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       slug: { type: "string", description: "stable id, e.g. loi-lease / loi-purchase / loi-grid" },
@@ -1575,7 +1575,7 @@ export const TOOLS = {
 
   "update-document-status": {
     write: true,
-    description: "Record what a HUMAN says happened to a prepared document: draft -> handed_to_joe -> sent. It records a statement; it does not send anything and no verb anywhere does. Also the place to record the lint and leak-guard results and the filed attachments once the local fill run has produced them.",
+    description: "Record what a HUMAN says happened to a prepared document — sets document status: draft -> handed_to_joe -> sent. It records a statement; it does not send anything and no verb anywhere does. Also the place to record the lint and leak-guard results and the filed attachments once the local fill run has produced them.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       document_id: { type: "string" },
@@ -1614,7 +1614,7 @@ export const TOOLS = {
 
   "link-parties": {
     write: true,
-    description: "Record an intro-graph edge: who can introduce whom, who referred whom. Feeds who-do-we-know (find returns these) and the reciprocity ledger. kind comes from the party_link_kind table — today knows, intro, intro_received, can_introduce, works_with, referral — and the same edge recorded twice returns the first one, never a duplicate.",
+    description: "Record an intro-graph edge (a party_link row): who can introduce whom, who referred whom. Feeds who-do-we-know (find returns these) and the reciprocity ledger. kind comes from the party_link_kind table — today knows, intro, intro_received, can_introduce, works_with, referral — and the same edge recorded twice returns the first one, never a duplicate.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, from_party: { type: "string" }, to_party: { type: "string" },
       kind: { type: "string", description: "a slug from party_link_kind: knows, intro, intro_received, can_introduce, works_with, referral" },
@@ -1652,7 +1652,7 @@ export const TOOLS = {
 
   "confirm-merge": {
     write: true, humanOnly: true,
-    description: "HUMAN-confirmed merge of two duplicate parties: the merged one becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
+    description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" } },
       required: ["idempotency_key","survivor_party","merged_party"] },
@@ -1688,7 +1688,7 @@ export const TOOLS = {
 
   "activate-rule": {
     write: true, humanOnly: true,
-    description: "proposed -> active. The context compiler reads ACTIVE rules only; activation is a human decision by design.",
+    description: "Set a rule's status proposed -> active. The context compiler (compiled-rules exports) reads ACTIVE rules only; activation is a human decision by design.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, rule_id: { type: "string" } },
       required: ["idempotency_key","rule_id"] },
@@ -1700,6 +1700,71 @@ export const TOOLS = {
       await writeEvent(c, actor, "activate-rule", "rule", args.rule_id,
         { new: { status: "active" }, idempotency_key: args.idempotency_key });
       return { ok: true };
+    }),
+  },
+
+  // ---------- decisions (the verb 0031 named and nobody built) ----------
+  // 0031 built v_decision_entry as "the read side of decision-history-as-events"
+  // and said verb='log-decision' is what "a future present-tense verb would
+  // write". That verb was never written, so decision-history.md could only ever
+  // render the one-time import — which is why its export has last_ok = null to
+  // this day, and why a 2026-08-02 session with a settled decision to record had
+  // nowhere to put it and hand-wrote a DECISIONS.md instead. The generated header
+  // on decision-history.md has been telling readers "to record one, use the verb"
+  // the whole time. This is that verb.
+  //
+  // Shape is dictated by v_decision_entry, not invented: an event row carrying
+  // title/quote_absent/provenance in new_value plus human_quote and
+  // agent_rationale, and a record_source row keyed '<source_file>#<session_key>'
+  // under source_system='decision-history'. Grouping stays the render's job
+  // (rule 29, one entry per session) — this verb exposes session_key and groups
+  // nothing, exactly as the view does.
+  "log-decision": {
+    write: true,
+    description: "Record a SETTLED decision and its rationale — the thing that stops it being relitigated next session. Writes a decision event (subject_type='decision', verb='log-decision') that v_decision_entry reads and decision-history.md renders; never hand-edit that file. NOT the same as add-loop marker:'decision', which is an OPEN question awaiting a ruling, and not the same as teach, which stores a standing rule that binds future sessions. Use this when a fork has been closed: what was decided, why, what lost. human_quote is Joe's or Dell's literal words when he said them — omit it and the entry is flagged quote_absent rather than paraphrase being passed off as a quote.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      title: { type: "string", description: "the decision itself, in one line, stated as settled" },
+      rationale: { type: "string", description: "why — including alternatives considered and why they lost, and any condition that would reopen it" },
+      human_quote: { type: "string", description: "the partner's literal words, when he said them. Never paraphrase into this field." },
+      session_key: { type: "string", description: "groups entries per session (rule 29). Defaults to <date>-<actor>." },
+      provenance: { type: "string", description: "where this came from — a session, a call, a document" },
+      occurred_at: { type: "string", description: "when it was decided; defaults now" } },
+      required: ["idempotency_key","title","rationale"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "log-decision", args, async () => {
+      const decisionId = (await c.query("select gen_random_uuid() as id")).rows[0].id;
+      const r = await c.query(
+        `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
+           new_value, cause, human_quote, agent_rationale, idempotency_key)
+         values (coalesce($1::timestamptz, now()), $2, 'log-decision', 'decision', $3,
+                 $4, 'human_stated', $5, $6, $7)
+         returning id, occurred_at::date as entry_date`,
+        [args.occurred_at || null, actor.id, decisionId,
+         JSON.stringify({ title: args.title,
+                          quote_absent: !args.human_quote,
+                          provenance: args.provenance || null }),
+         args.human_quote || null, args.rationale, args.idempotency_key]);
+
+      const ev = r.rows[0];
+      const sessionKey = args.session_key || `${ev.entry_date}-${actor.slug}`;
+      // source_file 'live' distinguishes verb-written entries from the imported
+      // ones, whose key carries the markdown file they came out of.
+      //
+      // The event id is the THIRD segment and it is load-bearing: record_source is
+      // unique on (source_system, external_key) and v_decision_entry JOINS through
+      // it, so a key of just 'live#<session>' would make the second decision of any
+      // session collide and vanish from the render entirely. The view reads
+      // source_file from segment 1 and session_key from segment 2, so a third
+      // segment costs nothing and buys per-decision uniqueness.
+      await c.query(
+        `insert into record_source (entity_type, entity_id, source_system, external_key)
+         values ('event', $1, 'decision-history', $2)
+         on conflict (source_system, external_key) do nothing`,
+        [ev.id, `live#${sessionKey}#${ev.id}`]);
+
+      return { ok: true, decision_id: decisionId, event_id: ev.id,
+               session_key: sessionKey, quote_absent: !args.human_quote,
+               renders_into: "00_Context/decision-history.md" };
     }),
   },
 
