@@ -1739,7 +1739,11 @@ export const TOOLS = {
            new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id)
          values (coalesce($1::timestamptz, now()), $2, 'log-decision', 'decision', $3,
                  $4, 'human_stated', $5, $6, $7, $8, $9)
-         returning id, occurred_at::date as entry_date`,
+         -- to_char, not ::date: node-postgres hands a ::date back as a JS Date, and
+         -- interpolating that into session_key produced
+         -- "Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated Universal Time)-joe"
+         -- on the first live decision. A text date interpolates as a text date.
+         returning id, to_char(coalesce($1::timestamptz, now()), 'YYYY-MM-DD') as entry_date`,
         [args.occurred_at || null, actor.id, decisionId,
          JSON.stringify({ title: args.title,
                           quote_absent: !args.human_quote,
