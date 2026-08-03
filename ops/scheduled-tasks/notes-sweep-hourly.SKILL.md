@@ -1,4 +1,3 @@
-<!-- CANONICAL COPY, versioned 2026-07-31 (ORDER 12 lane a; reworked same day on the Fable ruling to a single-command sweep). RUNTIME lives at ~/.claude/scheduled-tasks/notes-sweep-hourly/SKILL.md — edit there, then sync this copy in the same commit. Same convention as nightly-record-layer.SKILL.md. -->
 ---
 name: notes-sweep-hourly
 description: Hourly business-hours sweep of the iPhone call-recording notes into the record layer's ingest socket (ORDER 12 lane a). One command; verified by an ingest row, never by lastRunAt.

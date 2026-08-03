@@ -1,4 +1,3 @@
-<!-- CANONICAL COPY, versioned 2026-07-31 by ORDER 15 (same ruling as nightly-record-layer: a task file the chain depends on must not live only in ~/.claude, unversioned and invisible to Dell's side). RUNTIME lives at ~/.claude/scheduled-tasks/social-metrics-pull-weekly/SKILL.md — edit there, then sync this copy in the same commit. -->
 ---
 name: social-metrics-pull-weekly
 description: Weekly social analytics pull (Chrome): reads FB/IG/LinkedIn/X post metrics from Joe's logged-in browser and fills post-performance-log.md rows so the monthly review steers from data
@@ -21,7 +20,7 @@ THEN VERIFY BY OUTPUT, NOT BY THE EXIT CODE (protocol rule 28 — an automation 
 
 A report saying "no conclusions yet, threshold is 30" or "the placement records could not be read under this credential" is a SUCCESSFUL run — those jobs are built to speak honestly below their evidence floor, and a below-threshold report is the correct output, not a fault. The only real failures are a FAIL line in out/learning.log or a report file that did not update. Do NOT edit any file under Automation/Learning/ — they are generated. Do NOT try to fix a credential yourself; if a step reports one missing, say which one in your summary and move on to the browser work below.
 
-CONTEXT TO READ FIRST (all under /Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/):
+CONTEXT TO READ FIRST (all under {{VAULT}}/):
 1. Marketing/Social Media/post-performance-log.md — the log you are filling. Read its "How to use" header; it defines the columns and the measurement routes. You are executing route (2): Claude in Chrome reads each post's native analytics.
 2. Marketing/Social Media/published-log.md — background on what's published and each post's live URL, for the CARR-branded platforms (FB/IG/LinkedIn) and for content/topic labels. For X specifically, treat this file as INCOMPLETE by default (see step 2 below) — it has a history of drifting out of sync with what's actually live.
 3. Marketing/Social Media/x-posting-spec.md — X runs as a separate lane from the CARR-branded batch (own cadence, standalone posts, own topics). Don't assume an X post exists only because a same-day FB/LinkedIn/IG post does, or vice versa.

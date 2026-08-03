@@ -1,4 +1,3 @@
-<!-- CANONICAL COPY, versioned 2026-07-31 (ORDER 12 lane c added step 2 to a pre-existing task). RUNTIME lives at ~/.claude/scheduled-tasks/calendar-fetch-daily/SKILL.md — edit there, then sync this copy in the same commit. Same convention as nightly-record-layer.SKILL.md. -->
 ---
 name: calendar-fetch-daily
 description: Weekday calendar feed fetch, then push into the record layer: runs ~/carr-local/fetch-calendar.sh (replaces the launchd job us.carr.fetchcalendar) and then posts the normalized events to the ingest socket (ORDER 12 lane c)
@@ -10,9 +9,9 @@ Run the CARR calendar feed fetch, then push the events into the record layer. Tw
 
 Execute exactly this via Bash:
 
-bash "/Users/booko/carr-local/fetch-calendar.sh"
+bash "{{HOME}}/carr-local/fetch-calendar.sh"
 
-Then verify success: the last line of "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/DNA/Team/calendar-fetch.log" must be a fresh timestamp with "OK". If it shows an error or the file was not touched in this run, report the failure plainly (name the error line) — do not retry more than once, do not modify the script, do not create any other task.
+Then verify success: the last line of "{{VAULT}}/DNA/Team/calendar-fetch.log" must be a fresh timestamp with "OK". If it shows an error or the file was not touched in this run, report the failure plainly (name the error line) — do not retry more than once, do not modify the script, do not create any other task.
 
 ## Step 2 — push the events to the ingest socket
 

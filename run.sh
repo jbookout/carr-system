@@ -78,9 +78,10 @@ case "${1:-}" in
   restore-rehearse) restore_rehearse "$@" ;;
   retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
+  config)       shift; python3 "$REPO/ops/config-as-code.py" "$@" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
 esac

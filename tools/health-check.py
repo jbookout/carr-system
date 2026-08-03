@@ -680,4 +680,35 @@ except Exception as e:
     print(f"  ⚠︎ {'corpus mirror':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# ── machine config vs the repo (added 2026-08-03) ────────────────────────────
+# Joe: "shouldnt all code be in the repo? .json is code". He was right, and the
+# exposure was wider than the file he named: the five hook SCRIPTS were version
+# controlled while the settings.json block that makes them RUN was not, along
+# with both launchd plists and 11 of 15 scheduled tasks.
+#
+# The reason this is a CHECK and not just a one-time commit: hooks/SETTINGS-BLOCK.md
+# already existed as the written record of that config, and it had silently
+# drifted — it documented two hooks while four were live, and nothing noticed
+# because nothing compared them. A document DESCRIBING config drifts. A check
+# COMPARING config cannot. Same rule-28 logic as everything above: verify by
+# output, never by the artifact existing.
+try:
+    _cac = os.path.join(REPO_ROOT, "ops", "config-as-code.py")
+    if not os.path.exists(_cac):
+        print(f"  -- {'machine config':<18} ops/config-as-code.py not present; skipped")
+    else:
+        _p = subprocess.run([sys.executable, _cac, "check"],
+                            capture_output=True, text=True, timeout=30)
+        _lines = (_p.stdout or "").strip().splitlines()
+        _first = _lines[0] if _lines else "(no output)"
+        if _p.returncode == 0:
+            print(f"  OK {'machine config':<18} {_first.split('— ', 1)[-1]}")
+        else:
+            print(f"  ⚠︎ {'machine config':<18} {_first.split(': ', 1)[-1]}  · "
+                  f"run python3 ops/config-as-code.py check")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'machine config':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
