@@ -66,7 +66,11 @@ SAFE_ZONES = (
 
 # Hosts this system legitimately talks to.
 KNOWN_HOSTS = (
-    "api.practicecre.com", "api.anthropic.com", "console.neon.tech",
+    # api.doctorcre.com is the SAME Worker as api.practicecre.com — both are custom
+    # domains on carr-mcp. It became the PRIMARY name on Joe's 2026-08-01 domain
+    # ruling, which reached wrangler.toml and the Worker routes but never reached
+    # this list, so calls to the primary domain were blocked until 2026-08-03.
+    "api.practicecre.com", "api.doctorcre.com", "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
     "npiregistry.cms.hhs.gov", "download.cms.gov",
