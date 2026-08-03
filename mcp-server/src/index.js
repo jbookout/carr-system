@@ -7,8 +7,8 @@
 // default handler and is NOT behind an access token.
 //
 //   /mcp        API route. Token validated by the provider; the actor arrives as
-//               ctx.props. Also accepts a legacy PARTNER_TOKENS bearer for the
-//               duration of the migration (resolveExternalToken, below).
+//               ctx.props. A provider-issued token is the only way in — the
+//               legacy PARTNER_TOKENS bearer was retired 2026-08-03.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
 //   /token      implemented by the provider
@@ -24,7 +24,6 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon } from "@neondatabase/serverless";
 import { mcpApiHandler } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { slugForLegacyToken, propsForSlug } from "./identity.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -120,19 +119,10 @@ export default new OAuthProvider({
   // flag (set in wrangler.toml) for SSRF protection.
   clientIdMetadataDocumentEnabled: true,
 
-  // ---- MIGRATION ONLY -------------------------------------------------------
-  // Consulted only when a bearer is NOT a valid provider-issued token. A valid
-  // legacy PARTNER_TOKENS string therefore authenticates exactly as it does
-  // today, through the same actor mapping and into the same ctx.props.
-  //
-  // RETIREMENT (its own commit, after BOTH partners' connectors are verified
-  // live on their phones): delete this option, delete slugForLegacyToken in
-  // identity.js, and remove the PARTNER_TOKENS secret. Nothing else changes.
-  async resolveExternalToken({ token, env }) {
-    const slug = slugForLegacyToken(token, env);
-    if (!slug) return null;
-    return { props: propsForSlug(slug, { via: "partner-token-legacy" }) };
-  },
+  // The MIGRATION-ONLY resolveExternalToken option lived here until 2026-08-03.
+  // It let a legacy PARTNER_TOKENS bearer authenticate while the OAuth connectors
+  // were being rolled out, and it was retired on exactly the terms it was written
+  // under. /mcp now accepts a provider-issued token and nothing else.
 
   onError({ code, description, status }) {
     console.warn(`OAuth error response: ${status} ${code} - ${description}`);

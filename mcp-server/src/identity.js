@@ -45,23 +45,7 @@ export function actorFromProps(props) {
            via: props.via || null, client_id: props.client_id || null };
 }
 
-// ---------- legacy interim auth (PARTNER_TOKENS), retired after both phones verify ----------
-//
-// Migration coexistence: a request carrying a valid PARTNER_TOKENS string
-// authenticates exactly as it does today. Retirement is deleting the secret and
-// the resolveExternalToken option in index.js — this function goes with them.
-// Semantics are unchanged from the pre-OAuth build: exact match, >= 32 chars.
-
-export function slugForLegacyToken(token, env) {
-  if (typeof token !== "string" || token.length < 32) return null;
-  let map;
-  try {
-    map = JSON.parse(env.PARTNER_TOKENS || "{}");
-  } catch {
-    return null;
-  }
-  for (const [slug, t] of Object.entries(map)) {
-    if (typeof t === "string" && t.length >= 32 && t === token && isKnownActor(slug)) return slug;
-  }
-  return null;
-}
+// The legacy interim auth (slugForLegacyToken, PARTNER_TOKENS) was retired
+// 2026-08-03, on the schedule set when it was written: both partners' OAuth
+// connectors are live and the bearer path had no traffic left. /mcp now
+// authenticates one way only, through a provider-issued token.

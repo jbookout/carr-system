@@ -5,9 +5,9 @@
 // `apiHandler` for `/mcp`, so it only ever runs on a request whose token the
 // provider already validated. The actor comes from `ctx.props` — which the
 // provider decrypts from the grant — and NEVER from a header this file parses
-// or from the request payload. Two ways to arrive at the same props:
-//   1. an OAuth grant issued after a verified Google identity passed the allow-list
-//   2. (migration only) a legacy PARTNER_TOKENS bearer, via resolveExternalToken
+// or from the request payload. One way, and only one, to arrive at those props:
+// an OAuth grant issued after a verified Google identity passed the allow-list.
+// The migration-only PARTNER_TOKENS bearer was retired 2026-08-03.
 //
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
