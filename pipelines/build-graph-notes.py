@@ -27,8 +27,42 @@ import sys, os, re, json, glob, shutil, unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
-                                load_leads, load_party_links, load_vendors, resolve_mode,
-                                source_note)
+                                load_leads, load_party_links, load_ref_index, load_vendors,
+                                resolve_mode, source_note)
+
+# [loop #133] THE TWO PARTNERS ARE NODES OF THIS GRAPH, not just owner colours.
+#
+# THE DEFECT. v_party_graph held 31 edges and this script drew 24. Six of the
+# seven it dropped were Joe's own `can_introduce` edges — Heather Lavallo,
+# Josh Durst, Bruce Pardington, Justin Gay, Katherine Wilborn, Gary Tringas — so
+# 100% of the "Joe can introduce you to X" class, which is the single most
+# valuable edge class in the referral engine, was missing from the one surface
+# built to show relationships. Joe is party P-1084 and carries no client, lead or
+# vendor row (correctly — he is the agent, not his own prospect), so
+# v_party_graph resolves his endpoint to NULL and the ref_node map below, built
+# only from V-/C-/L- ids, could never contain him.
+#
+# WHY THE NAMES ARE HARDCODED, since that deserves an answer. The record layer
+# has no partner flag: `actor` knows who Joe and Dell are, but carr_reader and
+# carr_exporter have no grant on it, and there is nothing on party.kind that
+# separates an agent from any other person. Two names in one constant, resolved
+# against v_ref_index at run time and reported if they do not resolve, is honest
+# about that; inventing a heuristic ("whoever sources the most can_introduce
+# edges") would be a guess wearing the costume of a rule. When the record layer
+# grows a real partner marker, read it here and delete this list.
+#
+# BOTH PARTNERS GET A NODE EVEN WITH ZERO EDGES. Dell has no logged intro edges
+# today, and his node rendering as an isolated dot is the correct picture — it
+# says his side of the network is uncaptured, which is exactly the class of
+# anomaly the design bar above asks this graph to show.
+PARTNER_NAMES = ("Joe Bookout", "Dell McCraney")
+
+# Which role a party's ref should come from when it carries more than one. The
+# same preference v_party_graph's own `party_ref` CTE uses (client, then vendor,
+# then lead), so a name resolved here and a ref resolved by the view never
+# disagree about which record represents a person. Dr. James Allen Tyrer is the
+# live case: party P-0384 carries BOTH C-155 and L-208.
+REF_PREFERENCE = ("client", "vendor", "lead", "party")
 
 MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
 MODE = effective_mode(MODE, "graph-notes")
@@ -121,6 +155,9 @@ clients = load_clients(ROOT, MODE)
 deals   = load_deals_doc(ROOT, MODE)["deals"]
 # [ORDER 32] The intro graph's REAL edges (v_party_graph), or None in files mode.
 party_links = load_party_links(MODE)
+# [loop #133] Every ref the record layer carries, so an edge endpoint with no
+# business ref can still be identified. None in files mode, same as above.
+ref_index = load_ref_index(MODE)
 detail_files = {os.path.splitext(f)[0].lower(): os.path.splitext(f)[0]
                 for f in os.listdir(os.path.join(ROOT, "DNA/Clients/prospects")) if f.endswith(".md")}
 
@@ -170,7 +207,10 @@ def find_client(text):
 FINAL_OUT = OUT
 OUT = FINAL_OUT.rstrip("/\\") + ".tmp"
 if os.path.isdir(OUT): shutil.rmtree(OUT)
-for sub in ("vendors", "leads", "clients", "deals"): os.makedirs(os.path.join(OUT, sub))
+# 'partners' added by loop #133. build-graph-structure.py enumerates only the
+# four pipeline folders, so a partner note joins no stage pole and no owner pole —
+# which is right: Joe is not a lead, a client or a deal. He is a node with edges.
+for sub in ("vendors", "leads", "clients", "deals", "partners"): os.makedirs(os.path.join(OUT, sub))
 
 # .txt not .md — Obsidian graphs every markdown file, so a README with no
 # links renders as a floating dot in the middle of the graph.
@@ -327,6 +367,61 @@ for d in deals:
     open(os.path.join(OUT, "deals", node + ".md"), "w").write("\n".join(body))
     counts["deals"] += 1
 
+# ---------- [loop #133] the partners, and the name->ref resolver ----------
+# Built AFTER every pipeline note so the partner nodes cannot steal a title from a
+# real record, and BEFORE the intro pass so their notes exist to be written to.
+partner_stats = {"nodes": 0, "unresolved": [], "ambiguous_names": [], "recovered": 0}
+partner_ref_node = {}
+name_to_ref = {}
+
+if ref_index is not None:
+    # ONE ENTRY PER NAME, AND ONLY WHEN THE NAME IS UNAMBIGUOUS. 30-plus names in
+    # this book belong to two different live parties (Gina Bagneris is C-006 and
+    # C-050's survivor; 'Ric' is two bankers), and the standing identity rule says
+    # a name that could mean two people links to neither. So the index counts
+    # DISTINCT PARTY, not distinct row: Dr. James Allen Tyrer holds two refs
+    # (C-155 client, L-208 lead) on ONE party and is therefore unambiguous, which
+    # is exactly the seventh dropped edge. Tombstones are excluded outright — a
+    # merged row must never be the thing a name resolves to.
+    _live_by_name = {}
+    for r in ref_index:
+        if r["merged"] or not r["party_id"]:
+            continue
+        _live_by_name.setdefault((r["name"] or "").strip().lower(), []).append(r)
+
+    def name_ref(name):
+        """The one live ref this exact full name means, or None. Never a guess."""
+        rows = _live_by_name.get(s(name).lower())
+        if not rows:
+            return None
+        if len({r["party_id"] for r in rows}) != 1:
+            partner_stats["ambiguous_names"].append(s(name))
+            return None
+        rows = sorted(rows, key=lambda r: (REF_PREFERENCE.index(r["kind"])
+                                           if r["kind"] in REF_PREFERENCE else 99, r["ref"]))
+        return rows[0]["ref"]
+
+    for pname in PARTNER_NAMES:
+        pref = name_ref(pname)
+        if not pref:
+            partner_stats["unresolved"].append(pname)
+            continue
+        node = unique_node(pname, "partner", taken, pref)
+        body = [fm([f"type: partner", f"id: {esc(pref)}", f"owner: {esc(pname)}",
+                    "tags: [" + ", ".join(["partner", "network", owner_tag(pname)]) + "]"]),
+                f"**{pname}** — CARR agent · healthcare tenant and buyer representation\n",
+                "*This is the PERSON, not the ★ JOE / ★ DELL owner pole. The pole groups every\n"
+                "record that partner owns; this node carries the intro-graph edges the partner\n"
+                "is an endpoint of — the \"I can introduce you to X\" relationships.*\n"]
+        p = os.path.join(OUT, "partners", node + ".md")
+        open(p, "w").write("\n".join(body))
+        node_file[node] = p
+        partner_ref_node[pref.upper()] = node
+        partner_stats["nodes"] += 1
+else:
+    def name_ref(name):
+        return None
+
 # ---------- [ORDER 32] the intro graph, rendered from party_link ----------
 # Joe: "i like visualized data the most." This is the one graph with revenue on
 # it — who can introduce whom — and until now it was invisible: the notes carried
@@ -349,16 +444,48 @@ if party_links is not None:
     ref_node.update({k.upper(): v for k, v in vend_by_id.items()})
     ref_node.update({k.upper(): v for k, v in cli_by_id.items()})
     ref_node.update({k.upper(): v for k, v in lead_by_id.items()})
+    ref_node.update(partner_ref_node)
+
+    def endpoint(ref, name):
+        """(node title or None, the ref it resolved to). Ref first, exact name second.
+
+        [loop #133] A NULL ref is not "no such party" — v_party_graph simply has no
+        business ref to hand over, for one of two reasons, and both are recoverable
+        here without loosening the identity rule one inch:
+          · the party is a bare party (Joe, P-1084) — name_ref finds it, and the
+            partner pass above has already minted the node;
+          · the link still points at a MERGED party (P-0365 -> P-0384, Tyrer) — the
+            tombstone is excluded from the name index, so the exact name resolves
+            to the SURVIVOR's preferred ref (C-155) and the edge lands on the one
+            node that record has. The already-live duplicate of that same edge
+            dedups against it in the set() below.
+        Still exact-match-only: full name, case-insensitive, one live party or
+        nothing. No partial match, no surname, no scoring.
+        """
+        r = s(ref).upper()
+        if r:
+            return ref_node.get(r), r
+        alt = name_ref(name)
+        if alt:
+            node = ref_node.get(alt.upper())
+            if node:
+                partner_stats["recovered"] += 1
+            return node, alt.upper()
+        return None, ""
 
     by_source = {}
     for e in party_links:
         intro_stats["edges"] += 1
-        fr, to = s(e["from_ref"]).upper(), s(e["to_ref"]).upper()
-        fnode, tnode = ref_node.get(fr), ref_node.get(to)
+        fnode, fr = endpoint(e["from_ref"], e["from_name"])
+        tnode, to = endpoint(e["to_ref"], e["to_name"])
         if not fnode:
-            intro_stats["unmapped_from"].append(fr); continue
+            # Name it by whatever identifies it — the ref when there is one, the
+            # name when the null endpoint could not be resolved either. "->" with
+            # a blank on the left told nobody anything.
+            intro_stats["unmapped_from"].append(fr or f"(no ref) {s(e['from_name'])}"); continue
         if not tnode:
-            intro_stats["unmapped_to"].append(f"{fr}->{to}"); continue
+            intro_stats["unmapped_to"].append(
+                f"{fr}->{to or '(no ref) ' + s(e['to_name'])}"); continue
         if fnode == tnode:
             continue                                    # a self-link draws nothing
         if fnode not in node_file:
@@ -390,3 +517,14 @@ else:
           f"{sorted(set(intro_stats['unmapped_to'])) or ''} · "
           f"source note not owned by Graph/ {len(intro_stats['unwritable'])} "
           f"{sorted(set(intro_stats['unwritable'])) or ''}")
+    # [loop #133] The edge count above is now the WHOLE view (31), not the 24 the
+    # loader used to pre-filter, so this line has to say what happened to the
+    # difference or the totals stop reconciling.
+    print(f"Partners: {partner_stats['nodes']} node(s) · "
+          f"{partner_stats['recovered']} edge endpoint(s) with no business ref recovered "
+          f"by exact name"
+          + (f" · UNRESOLVED partner(s) {sorted(partner_stats['unresolved'])}"
+             if partner_stats["unresolved"] else "")
+          + (f" · names too ambiguous to resolve "
+             f"{sorted(set(partner_stats['ambiguous_names']))}"
+             if partner_stats["ambiguous_names"] else ""))

@@ -16,14 +16,23 @@
 # idempotency keys: they wrote once, on the first run in history, and replay for
 # ever after. Those few rows are the price of covering the write path, and a
 # twelve-hour production outage is what not covering it cost.
-# TWENTY-THREE checks as of the 2026-08-02 audit: seventeen plumbing checks
-# (ORDER 36's analysis write path was the seventeenth) plus SIX negative-answer
-# probes in the clearly-marked section at the bottom. Two of those six are gated
-# on org visibility and report SKIP rather than FAIL until 0056 plus the Worker
-# filter widening have both landed, so a healthy run is 23 or 21 depending on
-# that gate — the script says which.
+# FORTY-FOUR checks as of the 2026-08-02 0066 marketing pass: seventeen plumbing
+# checks (ORDER 36's analysis write path was the seventeenth), SEVENTEEN
+# negative-answer probes, and TEN 0066 marketing probes at the very bottom.
+# Twenty-two of them sit behind five capability gates (org visibility, the
+# merge-split response shape, the unwalkable-edge report, the 0063 contract, and
+# 0066's two-stage worker/migration gate) and print SKIP rather than FAIL when
+# the Worker or the schema predates the fix they cover, so a healthy run is
+# anywhere from 22 to 44 — the script says which gate is closed and why.
 # The count had been stale at "eleven as of ORDER 19" since ORDER 27 — ORDERS 27,
 # 33, 34 and 36 each added a check without moving it. Recount when you add one.
+#
+# THE 0066 SECTION IS ALL REFUSALS, and that is not a shortcut — it is the only
+# safe shape for those verbs (a success probe would mint a permanent fake
+# campaign or hang a fake number on a real post) and it is also the behaviour
+# that matters: the marketing verbs exist to say NO to the shapes that turn an
+# unmeasured post into a measured zero. Their idempotency keys are NOT frozen
+# fixtures, because a refusal rolls back and stores no tool_call row.
 
 set -uo pipefail
 
@@ -431,6 +440,392 @@ check "merged record C-046 surfaces as a tombstone, not a disappearance" \
       find '{"query":"Mia Arafa"}' 'C-046' '\\"merged\\":true'
 check "…and the surviving record C-036 comes back with it" \
       find '{"query":"Mia Arafa"}' 'C-036'
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOOP #132 — A TOMBSTONE IS NOT A DUPLICATE, AND IT IS NEVER A TARGET
+#
+# THE BUG THE PROBES ABOVE COULD NOT CATCH, and it is worth being precise about
+# why, because the answer is the whole design of this section. The Henry Schein
+# probe above deliberately does NOT assert the row count: "the right fix for 17
+# duplicate supplier rows is to merge them, and a probe that goes red when
+# someone cleans up the data is a probe that teaches people to delete probes."
+# That reasoning was right. Then 0059 DID merge them — 415 org rows into 306
+# survivors and 109 tombstones — and `find` went on reporting
+# `duplicate_rows: 17` for a company that now has exactly ONE live row, because
+# the grouping query (b0fda91) landed before 0059 and was never taught about
+# merged_into. The same for Musicologie: 13 reported, 1 live, 12 retired.
+# `who-do-we-know "Musicologie"` was worse — it offered five tombstones as
+# selectable records and never mentioned the survivor at all.
+#
+# So the probes below assert counts after all, and the difference is that these
+# counts are INVARIANTS rather than inventory. `party_org_identity_uniq` (0059)
+# permits exactly one live row per organisation name, so `live_rows: 1` is
+# enforced by the database and a 2 is a real defect. Tombstone counts cannot
+# grow either: a new tombstone requires a new duplicate, which that same index
+# forbids. The one thing that moves them is 0059's documented reversal, which is
+# a loud deliberate act — if it happens, MOVE THE FIXTURE, do not delete the probe.
+#
+# THE MERGE-SPLIT GATE. Same structural discriminator as CAP_ORG, one layer in:
+# the response either carries the separated `live_rows` key or the old blended
+# `duplicate_rows`. Blended means the Worker predates this fix — nothing has
+# regressed, so SKIP. Neither key means the org block itself is missing, which
+# CAP_ORG has already reported.
+CAP_SPLIT=0
+if [ "$CAP_ORG" -eq 1 ]; then
+  CAP_SPLIT=1
+  call find '{"query":"Henry Schein"}'
+  if echo "$RESULT" | grep -q '\\"duplicate_rows\\"'; then
+    CAP_SPLIT=0
+    echo
+    echo "  SKIP  merge split — this Worker still reports the blended \"duplicate_rows\" count."
+    echo "        Deploy mcp-server (loop #132) and these probes go live. Not a failure."
+  fi
+fi
+
+if [ "$CAP_SPLIT" -eq 1 ]; then
+  echo
+  # The reported defect, asserted as a number. The blended key must be GONE — not
+  # merely accompanied by better ones, because a caller reading the old key would
+  # still be reading the wrong answer.
+  refute "find 'Henry Schein': one LIVE org row, and no blended duplicate count" \
+         find '{"query":"Henry Schein"}' '\\"duplicate_rows\\"' '\\"live_rows\\":1'
+  # …and the tombstones are still counted rather than deleted from the answer.
+  # Paired with the zero-side probe below: together they prove retired_aliases is
+  # read from the data and is not a constant in either direction.
+  refute "…and its retired aliases are counted, not dropped" \
+         find '{"query":"Henry Schein"}' '\\"retired_aliases\\":0' '\\"retired_refs\\"'
+  check  "…and retired_aliases really reads 0 for an org that has no tombstones" \
+         find '{"query":"1st Med Transitions"}' '\\"retired_aliases\\":0' '1st Med Transitions'
+
+  # Musicologie: 13 party rows, 12 retired, and the survivor NO LONGER HAS A PARTY
+  # REF. This fixture was rewritten 2026-08-02 and the reason is the whole lesson.
+  # 0061 gave org party P-0111 a client record, and v_ref_index indexes SUBJECTS
+  # rather than roles (0056), so P-0111 stopped appearing as a party and started
+  # appearing as client C-161. The verb still filtered its org branch to
+  # subject_type='party', saw only tombstones, reported live_rows:0, and emitted a
+  # note swearing the survivor "carries a DIFFERENT name and is not in this result"
+  # while the survivor sat in the SAME payload under the SAME name. The old fixture
+  # asserted refs:["P-0111"], which is now the WRONG answer — asserting it would
+  # have pinned the verb to a shape the database had already left behind. A fixture
+  # that outlives its data is how a probe starts defending a defect.
+  refute "find 'Musicologie': survivor promoted to a role ref, not a lost merge" \
+         find '{"query":"Musicologie"}' '\\"all_retired\\":true' '\\"role_refs\\":\[\\"C-161\\"\]'
+  # The pair: the tombstones must still be COUNTED, not quietly dropped, or the fix
+  # above could pass by simply forgetting they exist.
+  check  "…and its 12 tombstones are still counted, not dropped" \
+         find '{"query":"Musicologie"}' '\\"retired_aliases\\":12'
+
+  # who-do-we-know handed P-0840, P-1044, P-0909 and P-0796 back as candidates and
+  # never named the survivor. A caller that links or writes to one of those defeats
+  # the merge, so a tombstone ref must not appear in this verb's answer AT ALL —
+  # find is where tombstones stay navigable, with their refs; this verb resolves.
+  # It names C-161 now for the same reason as above: that is where the survivor is.
+  refute "who-do-we-know 'Musicologie' names the survivor and never a tombstone" \
+         who-do-we-know '{"target":"Musicologie"}' 'P-0840' 'C-161'
+  refute "who-do-we-know 'Henry Schein' names the survivor and never a tombstone" \
+         who-do-we-know '{"target":"Henry Schein"}' 'P-0099' 'P-0055'
+  # Refusing to OFFER a tombstone must not mean pretending it is not there.
+  check  "…and it still says how many retired aliases it declined to offer" \
+         who-do-we-know '{"target":"Musicologie"}' '\\"retired_alias_count\\":12'
+  # The pair, same shape as the absence-claim pair above: a count that is always
+  # nonzero would pass the probe above while telling the caller nothing.
+  check  "…and that count reads 0 for a name nobody carries" \
+         who-do-we-know '{"target":"Qwertzuiop Vraxmandel"}' '\\"retired_alias_count\\":0'
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOOP #133 — AN EDGE THAT CANNOT BE WALKED MUST BE REPORTED, NOT DROPPED
+#
+# v_party_graph holds 31 edges; seven have a NULL ref on one endpoint and six of
+# those seven are Joe's own `can_introduce` edges, because Joe is party P-1084
+# with no client/lead/vendor row and therefore no business ref. WHO_EDGES filters
+# NULL endpoints out of the walk, correctly — the walker keys on refs — but the
+# verb then answered as though the relationship did not exist. Asking who reaches
+# Heather Lavallo returned Chris Kelly and said nothing about Joe, whose offered
+# introduction is sitting in the record.
+#
+# THE FIXTURE IS CHOSEN TO SURVIVE THE REAL FIX. specs/party-graph-ref-fallback.md
+# proposes teaching v_party_graph to fall back to the P- ref; when that lands,
+# Joe becomes a walkable node and this edge moves out of `unwalkable_edges` and
+# into `paths`. The probe asserts 'Joe Bookout' appears in the answer to "who
+# gets me to V-CPA-036" — true through the unwalkable report today, true through
+# the path after the view change, and false in both the old code and any future
+# regression that silently drops the edge again.
+CAP_UNWALK=1
+call who-do-we-know '{"target":"V-CPA-036"}'
+if ! echo "$RESULT" | grep -q '\\"unwalkable_edges\\"'; then
+  CAP_UNWALK=0
+  echo
+  echo "  SKIP  unwalkable-edge report — this Worker has no \"unwalkable_edges\" key."
+  echo "        Deploy mcp-server (loop #133) and these two probes go live. Not a failure."
+fi
+
+if [ "$CAP_UNWALK" -eq 1 ]; then
+  echo
+  check "who-do-we-know V-CPA-036 surfaces Joe's own offered intro, one way or the other" \
+        who-do-we-know '{"target":"V-CPA-036"}' 'Joe Bookout' '\\"unwalkable_edges\\"'
+  # The pair. A report that always lists something is not a report — C-155 has
+  # three walkable paths and nothing blocked, so its list must be empty.
+  check "…and the list is EMPTY where nothing is blocked, not a hardcoded fixture" \
+        who-do-we-know '{"target":"C-155"}' '\\"unwalkable_edges\\":\[\]'
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 0063 — record-counter CAN CARRY A CLAIM AND A SUBMARKET
+#
+# WHY THIS ONE PROBES THE SCHEMA AND NOT THE WRITE PATH, deliberately and not out
+# of laziness. Every other write probe here is safe because its idempotency key
+# is frozen: it inserted once in history and replays for ever. record-counter has
+# no such fixture — a probe call would insert a REAL negotiation_round on a REAL
+# deal, and worse, a Worker that has NOT been deployed with these arguments would
+# ignore `claims` as an unknown property and insert the round anyway. That is the
+# one shape of probe that does damage when the thing it tests is missing. So the
+# assertion is the verb's published contract, read from tools/list, which cannot
+# write anything and still fails on a Worker that lacks the parameters.
+#
+# Rehearse the actual write on a Neon branch instead, never against production:
+#   DATABASE_URL=<branch> node mcp-server/local-verb.mjs record-counter '{...}'
+#
+# tools/list is a different JSON-RPC method, so it needs its own call. Note the
+# payload here is RAW json — unlike a tools/call result, which arrives as a JSON
+# string inside the envelope — so these patterns carry no backslash escaping.
+echo
+list_call() {
+  _id=$((_id+1))
+  RESULT=$(curl -s --max-time 30 -X POST "$API" \
+    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":$_id,\"method\":\"tools/list\",\"params\":{}}")
+}
+
+# Same gate discipline as CAP_ORG: absent entirely means the Worker predates the
+# work, which is not a regression. Present-but-wrong is a regression and goes red.
+CAP_0063=1
+list_call
+if echo "$RESULT" | grep -q '"error"'; then
+  CAP_0063=0
+  echo "  FAIL  tools/list errored — cannot read the published verb contract"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+elif ! echo "$RESULT" | grep -q 'submarket_condition'; then
+  CAP_0063=0
+  echo "  SKIP  record-counter 0063 contract — this Worker publishes no submarket_condition"
+  echo "        parameter, so the counterparty-observation verb support is not deployed yet."
+  echo "        Deploy mcp-server and this probe goes live. Not a failure."
+fi
+
+if [ "$CAP_0063" -eq 1 ]; then
+  _rc_ok=1; _rc_why=""
+  for i in $(seq 1 "$REPS"); do
+    list_call
+    if echo "$RESULT" | grep -q '"error"'; then _rc_ok=0; _rc_why="tools/list errored"; break; fi
+    if ! echo "$RESULT" | grep -q 'negotiation_claim_type slug'; then
+      _rc_ok=0; _rc_why="submarket_condition ships but claims[] does not — half the 0063 contract"; break; fi
+    # THE PAIRED ASSERTION, and it is the one that matters most. 0063 marks
+    # `deadline` derived=true and makes it physically unloggable, because the
+    # deadline already IS negotiation_round.expires_on. A schema that offered a
+    # deadline claim would advertise a write the database refuses, and the only
+    # thing keeping a future editor from adding one is this sentence.
+    if ! echo "$RESULT" | grep -q 'THE DEADLINE LIVES HERE'; then
+      _rc_ok=0; _rc_why="expires_on no longer states that it is the ONLY home for a deadline"; break; fi
+    [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+  done
+  if [ "$_rc_ok" -eq 1 ]; then
+    echo "  ok    record-counter publishes submarket_condition + claims[], deadline still expires_on  (${REPS}/${REPS})"; pass=$((pass+1))
+  else
+    echo "  FAIL  record-counter 0063 contract — $_rc_why"
+    echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+  fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 0066 — THE MARKETING LANE: A CAMPAIGN CAN BE RECORDED, AND SILENCE IS NOT ZERO
+#
+# WHY EVERY PROBE HERE IS A REFUSAL, and why that is stronger coverage than a
+# success would be. The frozen-key trick that makes the log-activity and
+# complete-action probes safe does not transfer to these verbs: open-campaign
+# would mint a REAL campaign row, and campaign_name_uniq means that fixture would
+# then exist for ever in the one table whose entire value is that every row in it
+# means something. measure-placement would put a permanent fake number on a real
+# post. Neither is a price worth paying.
+#
+# A refusal writes nothing by construction — the ToolError is thrown inside the
+# transaction, which rolls back — so these probes are free to run for ever AND
+# their idempotency keys are never stored, which is why (unlike the frozen write
+# probes above) the argument strings here may be edited without causing key_reuse.
+#
+# And a refusal is the behaviour that actually matters in this lane. The whole
+# point of 0066 is that the verbs say NO to the specific shapes that turn silence
+# into a number: an all-zero payload, an empty call, a verdict over unmeasured
+# placements, a hand-written row wearing the scheduled pull's provenance. A probe
+# that only proved the happy path would pass on a Worker that had lost every one
+# of those guards.
+#
+# TWO GATES, because two things deploy separately and either can be behind.
+#   CAP_MKT   — the Worker publishes the verbs at all (tools/list).
+#   CAP_0066  — migration 0066 has been applied (the verbs answer
+#               migration_not_applied until it is). This gate is not a
+#               formality: on 2026-08-02 the deployed Worker still predated
+#               commits 49a53ba and dc83da6, so record-finding, reassign-deal and
+#               retire-rule were in tools.js and NOT callable. These four verbs
+#               ship into exactly that state and stay there until Joe deploys.
+
+# refuses <label> <verb> <args> <required-error-code> [forbidden-string]
+# Passes when the verb returns isError with the NAMED error code. A verb that
+# succeeds, returns a different refusal, or errors at the transport fails.
+refuses() {
+  local label="$1" verb="$2" args="$3" code="$4" forbidden="${5:-}" i why=""
+  for i in $(seq 1 "$REPS"); do
+    call "$verb" "$args"
+    if echo "$RESULT" | grep -q '"error"'; then why="transport/protocol error"
+    elif ! echo "$RESULT" | grep -q '"isError":true'; then
+      why="the verb ACCEPTED input it must refuse"
+    elif ! echo "$RESULT" | grep -q "$code"; then
+      why="refused with the wrong reason — expected /$code/"
+    elif [ -n "$forbidden" ] && echo "$RESULT" | grep -q "$forbidden"; then
+      why="the refusal contains /$forbidden/, which it must not"
+    else why=""; fi
+    if [ -n "$why" ]; then
+      echo "  FAIL  $label — $why (rep $i of $REPS)"
+      echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1)); return
+    fi
+    [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+  done
+  echo "  ok    $label  (${REPS}/${REPS})"; pass=$((pass+1))
+}
+
+echo
+CAP_MKT=1
+list_call
+if echo "$RESULT" | grep -q '"error"'; then
+  CAP_MKT=0
+  echo "  FAIL  tools/list errored — cannot read the marketing verb contract"
+  echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+elif ! echo "$RESULT" | grep -q '"open-campaign"'; then
+  CAP_MKT=0
+  echo "  SKIP  0066 marketing verbs — this Worker publishes no open-campaign."
+  echo "        open-campaign, score-campaign, attach-to-campaign and measure-placement are"
+  echo "        in mcp-server/src/tools.js and are NOT deployed. Until the Worker ships them"
+  echo "        the marketing lane still cannot record a campaign. Deploy, then re-run."
+  echo "        Not a failure."
+fi
+
+if [ "$CAP_MKT" -eq 1 ]; then
+  echo
+  # ── contract probes: tools/list cannot write, and still catches present-but-wrong
+  # The criterion is REQUIRED at open time. A campaign whose success test can be
+  # written after the numbers arrive is not a campaign, it is a press release, and
+  # the only thing keeping that field mandatory is this assertion and the schema.
+  _c_ok=1; _c_why=""
+  for i in $(seq 1 "$REPS"); do
+    list_call
+    if echo "$RESULT" | grep -q '"error"'; then _c_ok=0; _c_why="tools/list errored"; break; fi
+    if ! echo "$RESULT" | grep -q '"success_criterion","starts_on","channels"'; then
+      _c_ok=0; _c_why="open-campaign no longer REQUIRES success_criterion/starts_on/channels"; break; fi
+    # The doctrine sentence, same shape as 0063's "THE DEADLINE LIVES HERE". If a
+    # future edit softens this, the model stops being told the one rule the verb
+    # exists to enforce, and the probe is what notices.
+    if ! echo "$RESULT" | grep -q 'must never read as a zero'; then
+      _c_ok=0; _c_why="measure-placement no longer states that an unmeasured placement is not a zero"; break; fi
+    # Blocker 2's contract: a finding can be about a THING.
+    if ! echo "$RESULT" | grep -q '"auto","party","campaign","platform","pillar","format"'; then
+      _c_ok=0; _c_why="record-finding does not publish the four non-party subject kinds — a marketing finding still has no home"; break; fi
+    # The no-second-birth-path decision, kept stated. All 89 pieces are born in
+    # pull_placement_metrics.py keyed on external_id, so a creation path here
+    # would mint duplicates on the ingest's next run. If this sentence goes, the
+    # reasoning has been lost and the duplicate path is one edit away.
+    if ! echo "$RESULT" | grep -q 'IT DOES NOT CREATE CONTENT'; then
+      _c_ok=0; _c_why="attach-to-campaign no longer states that it binds content rather than creating it"; break; fi
+    [ "$i" -lt "$REPS" ] && sleep "$REP_SLEEP"
+  done
+  if [ "$_c_ok" -eq 1 ]; then
+    echo "  ok    0066 contract: criterion required, zero-rule stated, findings reach non-party subjects  (${REPS}/${REPS})"; pass=$((pass+1))
+  else
+    echo "  FAIL  0066 contract — $_c_why"
+    echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+  fi
+
+  # ── the migration gate. Every marketing verb calls require0066 first, so this
+  # single call tells us whether the schema half has landed.
+  CAP_0066=1
+  call measure-placement '{"idempotency_key":"smoke-0066-gate","placement":"smoke-nonexistent","source":"blotato_api"}'
+  if echo "$RESULT" | grep -q 'migration_not_applied'; then
+    CAP_0066=0
+    echo
+    echo "  SKIP  0066 behaviour probes — the Worker ships the verbs but migration 0066 is NOT"
+    echo "        applied, so every marketing verb correctly answers migration_not_applied and"
+    echo "        writes nothing. Run: ~/carr-system/run.sh migrate --apply --yes"
+    echo "        (This SKIP is itself the answer to \"is the lane live?\" — it is not.)"
+  fi
+
+  if [ "$CAP_0066" -eq 1 ]; then
+    echo
+    # THE PROVENANCE REFUSAL, and the assertion is also about ORDER. The source
+    # check must fire BEFORE the placement lookup, or a caller would learn their
+    # post id is wrong and never learn that the source string was a lie. The
+    # forbidden pattern is what proves the ordering.
+    refuses "measure-placement refuses to forge the scheduled pull's provenance" \
+            measure-placement \
+            '{"idempotency_key":"smoke-0066-src","placement":"smoke-nonexistent","source":"blotato_api"}' \
+            'reserved_source' 'placement_not_found'
+
+    # THE CENTRAL RAIL. An empty measurement call must not be quietly accepted:
+    # accepting it would leave the placement looking exactly like the 73 nobody
+    # has measured, which is the failure this verb was built to prevent.
+    refuses "measure-placement refuses an EMPTY measurement (silence is not a result)" \
+            measure-placement \
+            '{"idempotency_key":"smoke-0066-empty","placement":"smoke-nonexistent","source":"platform_native"}' \
+            'nothing_to_record'
+
+    # …and its opposite: "no data" and "here is the data" are two different acts
+    # and may not be sent as one.
+    refuses "measure-placement refuses metrics and unavailable in the same act" \
+            measure-placement \
+            '{"idempotency_key":"smoke-0066-both","placement":"smoke-nonexistent","source":"platform_native","unavailable":true,"metrics":{"views_count":5}}' \
+            'ambiguous_measurement'
+
+    # An unavailability with no reason is indistinguishable from apathy six months
+    # later, and the three possible reasons lead to three different next moves.
+    refuses "measure-placement refuses 'no data' with no reason" \
+            measure-placement \
+            '{"idempotency_key":"smoke-0066-noreason","placement":"smoke-nonexistent","source":"platform_native","unavailable":true}' \
+            'reason_required'
+
+    # A criterion that restates the objective is how a campaign gets declared a
+    # success on vibes. Crude check, deliberately: it catches the copy-paste.
+    refuses "open-campaign refuses a success criterion that just restates the goal" \
+            open-campaign \
+            '{"idempotency_key":"smoke-0066-crit","name":"smoke probe never opened","goal":"grow awareness on X","success_criterion":"Grow awareness on X","starts_on":"2026-08-01","channels":["twitter"]}' \
+            'criterion_restates_goal'
+
+    # A channel nobody registered is a channel no rollup will ever see, so the
+    # campaign would be structurally unmeasurable from birth. The refusal must
+    # also NAME the real platforms — a refusal that does not say what is allowed
+    # just gets guessed at.
+    refuses "open-campaign refuses an unregistered channel and names the real ones" \
+            open-campaign \
+            '{"idempotency_key":"smoke-0066-chan","name":"smoke probe never opened","goal":"reach practice owners in Pensacola","success_criterion":"three replies from practice owners by 2026-09-30","starts_on":"2026-08-01","channels":["tiktok"]}' \
+            'unknown_channel'
+    # The pair: the SAME refusal must carry the live platform list, or it is a
+    # dead end rather than a correction.
+    refuses "…and that refusal carries the registered platform list" \
+            open-campaign \
+            '{"idempotency_key":"smoke-0066-chan2","name":"smoke probe never opened","goal":"reach practice owners in Pensacola","success_criterion":"three replies from practice owners by 2026-09-30","starts_on":"2026-08-01","channels":["tiktok"]}' \
+            'instagram'
+
+    # ATTACHING TO A CAMPAIGN THAT WAS NEVER STATED IS THE WHOLE DEFECT. 89 pieces
+    # carry a null campaign_id today; the fix is not to let content point at an
+    # invented campaign, it is to make somebody write the objective down first.
+    refuses "attach-to-campaign refuses a campaign nobody opened" \
+            attach-to-campaign \
+            '{"idempotency_key":"smoke-0066-att","campaign":"Qwertzuiop Vraxmandel Campaign","items":["https://example.invalid/p/1"]}' \
+            'campaign_not_found'
+
+    # And the absence claim must still be able to fire on the scoring side.
+    refuses "score-campaign refuses to score a campaign nobody opened" \
+            score-campaign \
+            '{"idempotency_key":"smoke-0066-score","campaign":"Qwertzuiop Vraxmandel Campaign","base_version":1,"verdict":"worked","evidence":"none — smoke probe"}' \
+            'campaign_not_found'
+  fi
+fi
 
 echo
 echo "passed $pass · failed $fail"

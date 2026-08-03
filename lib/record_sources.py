@@ -113,7 +113,10 @@ def _exporter_url():
     if env.exists():
         for line in env.read_text().splitlines():
             if line.startswith("CARR_DB_EXPORTER_URL="):
-                return line.split("=", 1)[1].strip() or None
+                # .strip("\"'") — db.env values are shell-quoted so `set -a; . db.env`
+                # survives an `&` in the DSN; psycopg needs them unquoted. Full reasoning
+                # in exporters/common.py. Added 2026-08-02.
+                return line.split("=", 1)[1].strip().strip("\"'") or None
     return None
 
 
@@ -284,16 +287,62 @@ def load_party_links(mode):
     Reads `v_party_graph` — the ORDER 18 reader-safe view: refs, names, the kind
     and the provenance note, never contact detail — so the graph pipeline sees
     exactly what a reader-scoped session sees.
+
+    EVERY EDGE COMES BACK NOW, INCLUDING THE ONES WITH A NULL REF (loop #133,
+    2026-08-02). This used to filter `from_ref is not null and to_ref is not
+    null` in SQL, which meant seven of thirty-one edges never reached the
+    consumer at all — the pipeline reported "31 edges" only because it happened
+    to be told 24, and six of the seven were Joe's own `can_introduce` edges,
+    the highest-value class in the referral engine. A filter in the loader is a
+    filter nobody downstream can see or count. The consumer now decides what to
+    do with a null endpoint (build-graph-notes.py resolves it by exact name and
+    reports whatever it still cannot map), which is the same posture the rest of
+    this module takes: hand over the record, do not quietly shrink it.
     """
     if mode != MODE_RECORDS:
         return None
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("""select from_ref, from_name, kind, to_ref, to_name, note
                          from v_party_graph
-                        where from_ref is not null and to_ref is not null
-                        order by from_ref, kind, to_ref""")
+                        order by from_ref nulls last, kind, to_ref nulls last""")
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def load_ref_index(mode):
+    """Every ref the record layer carries — {ref, name, kind, merged, party_id} — or None.
+
+    WHY A CONSUMER NEEDS THIS (loop #133). `v_party_graph` resolves an edge
+    endpoint to ONE business ref (C- / V- / L-) and hands back NULL when the
+    party has none. Two real cases produce that null and they need opposite
+    treatment, so a consumer has to be able to look the party up:
+
+      · a BARE PARTY — Joe Bookout is P-1084 with no client, lead or vendor row,
+        because he is the agent, not a record in his own pipeline. He is a
+        legitimate node and the graph should draw him.
+      · a TOMBSTONE the link still points at — party_link 4aecf3b0 points at
+        P-0365, merged into P-0384 (Dr. James Allen Tyrer). The survivor carries
+        C-155 and L-208; the loser carries no role at all, hence the null. That
+        edge should resolve to the SURVIVOR, not become a second Tyrer node.
+
+    `v_ref_index` distinguishes the two: the party branch carries P- refs and
+    the merged flag, so a live bare party is findable and a tombstone is
+    identifiable. Reader-safe columns only — name, ref, kind, merged, party_id —
+    the same posture load_party_links takes.
+
+    party_id comes back as a string so it can be a dict key without a uuid
+    import leaking into every consumer.
+    """
+    if mode != MODE_RECORDS:
+        return None
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("""select ref, display_name, subject_type, merged, party_id
+                         from v_ref_index
+                        where ref is not null
+                        order by subject_type, ref""")
+        return [{"ref": r[0], "name": r[1], "kind": r[2],
+                 "merged": bool(r[3]), "party_id": str(r[4]) if r[4] else None}
+                for r in cur.fetchall()]
 
 
 # ---------------- the prospect pool ----------------

@@ -11,13 +11,168 @@ Read-only. Exit 0 = all fresh; exit 1 = at least one STALE/BEHIND (so the
 heartbeat can surface findings). Run: python3 tools/health-check.py  (or run.sh health)
 Cadences are calendar days, padded so weekends (off days, both humans) never
 false-alarm a weekly pipeline.
+
+Second mode, added 2026-08-02:
+  python3 tools/health-check.py --tasks <list_scheduled_tasks.json>
+classifies scheduled tasks by whether a firing window has actually PASSED, so a
+brand-new task is never mistaken for a broken one. See the scheduler section below.
 """
-import os, sys, glob, time
+import json, os, sys, glob, time, re, subprocess
+from datetime import datetime, timedelta
 
 REPO_ROOT = os.path.expanduser("~/carr-system")
 
 VAULT = os.environ.get("CARR_VAULT",
     "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+
+# ── scheduler register (added 2026-08-02) ────────────────────────────────────
+# A TASK THAT HAS NEVER REACHED ITS FIRST WINDOW LOOKS EXACTLY LIKE A TASK THAT IS
+# FAILING. Both show an absent `lastRunAt`. On 2026-08-02 that cost two readers in a
+# row: an audit reported "health-audit-monthly has never run" and "contact-enrichment-
+# weekly has never run" as defects, and neither was one — all four never-run tasks were
+# created AFTER their most recent firing window, so their first window is still ahead.
+# Same principle as GATED-vs-MISSING above: an alarm that fires on healthy state gets
+# ignored by the time it means something.
+#
+# WHAT THIS CAN AND CANNOT SEE, stated rather than assumed. The scheduler's cron
+# expressions and `lastRunAt` live in the app's own store, NOT on disk — the task
+# directories under ~/.claude/scheduled-tasks hold only a SKILL.md. So this cannot run
+# unattended. It is a classifier you feed: paste the output of the `list_scheduled_tasks`
+# MCP tool into a file and run
+#
+#     python3 tools/health-check.py --tasks /tmp/tasks.json
+#
+# and every task comes back as one of
+#   OK             a window passed and lastRunAt is at or after it
+#   AWAITING FIRST no window has passed since the task was created — expected, not a fault
+#   MISSED         a window passed with no run since; the count of missed windows is shown
+#   DISABLED       enabled:false, reported and never counted as a fault
+#
+# NO SPECIAL WEEKEND RULE, on purpose. Joe's weekends-are-off rule is already encoded in
+# the crons themselves (`* * 1-5`), so evaluating the real cron gets Saturday and Sunday
+# right for free. A separate weekend heuristic layered on top would be a second, weaker
+# copy of a rule the data already carries, and the two would eventually disagree.
+
+TASK_DIRS = os.path.expanduser("~/.claude/scheduled-tasks")
+
+
+def _cron_field(spec, lo, hi):
+    """One cron field -> the set of values it matches. Handles * , - and /."""
+    out = set()
+    for part in spec.split(","):
+        step = 1
+        if "/" in part:
+            part, _, s = part.partition("/")
+            step = int(s)
+        if part in ("*", "?"):
+            start, end = lo, hi
+        elif "-" in part.lstrip("-"):
+            a, _, b = part.partition("-")
+            start, end = int(a), int(b)
+        else:
+            start = end = int(part)
+        out.update(range(start, end + 1, step))
+    return out
+
+
+def cron_windows(expr, start, end):
+    """Every firing time of a 5-field cron in (start, end]. Minute-exact, day-stepped."""
+    m, h, dom, mon, dow = expr.split()
+    mins = sorted(_cron_field(m, 0, 59))
+    hrs = sorted(_cron_field(h, 0, 23))
+    doms = _cron_field(dom, 1, 31)
+    mons = _cron_field(mon, 1, 12)
+    dows = {d % 7 for d in _cron_field(dow, 0, 7)}
+    dom_restricted = dom not in ("*", "?")
+    dow_restricted = dow not in ("*", "?")
+    hits = []
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day <= end:
+        if day.month in mons:
+            # Vixie cron: with BOTH day-of-month and day-of-week restricted, either
+            # matching fires. Getting this backwards silently drops or invents windows.
+            d_ok = day.day in doms
+            w_ok = ((day.weekday() + 1) % 7) in dows
+            fires = (d_ok or w_ok) if (dom_restricted and dow_restricted) \
+                else (d_ok if dom_restricted else (w_ok if dow_restricted else True))
+            if fires:
+                for hh in hrs:
+                    for mm in mins:
+                        t = day.replace(hour=hh, minute=mm)
+                        if start < t <= end:
+                            hits.append(t)
+        day += timedelta(days=1)
+    return hits
+
+
+def _task_created(task_id, path=None):
+    """Birth time of the task's own directory. The only creation signal on disk."""
+    d = os.path.dirname(path) if path else os.path.join(TASK_DIRS, task_id)
+    try:
+        st = os.stat(d)
+        return datetime.fromtimestamp(getattr(st, "st_birthtime", st.st_mtime))
+    except OSError:
+        return None
+
+
+def classify_tasks(path):
+    """Read list_scheduled_tasks JSON; print a per-task verdict. Returns an exit code."""
+    with open(path) as fh:
+        tasks = json.load(fh)
+    if isinstance(tasks, dict):
+        tasks = tasks.get("tasks", [])
+    now = datetime.now()
+    bad = 0
+    print(f"Scheduler register — {now:%Y-%m-%d %H:%M} — has a window actually PASSED?")
+    for t in sorted(tasks, key=lambda x: x.get("taskId", "")):
+        tid = t.get("taskId", "?")
+        expr = t.get("cronExpression")
+        born = _task_created(tid, t.get("path"))
+        last = t.get("lastRunAt")
+        if not t.get("enabled", True):
+            print(f"  -- DISABLED       {tid}")
+            continue
+        if not expr:
+            # A one-time fireAt task, or a shape this classifier does not model. Say so
+            # rather than guessing — a wrong verdict here is worse than no verdict.
+            print(f"  ?? NO CRON        {tid} (fireAt={t.get('fireAt') or 'none'}) — not classified")
+            continue
+        if born is None:
+            print(f"  ?? NO DIR         {tid} — no task directory on disk, cannot date it")
+            continue
+        lastdt = None
+        if last:
+            try:
+                lastdt = datetime.fromisoformat(last.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+            except ValueError:
+                lastdt = None
+        # Windows since the task existed. A window before its creation could never
+        # have fired it and must not be counted against it.
+        wins = cron_windows(expr, born, now)
+        if not wins:
+            nxt = cron_windows(expr, now, now + timedelta(days=400))
+            when = f"{nxt[0]:%Y-%m-%d %H:%M}" if nxt else "none within a year"
+            print(f"  -- AWAITING FIRST {tid:<30} created {born:%Y-%m-%d}, cron `{expr}` — "
+                  f"no window has passed yet; first is {when}. Absent lastRunAt is CORRECT here")
+            continue
+        missed = [w for w in wins if not (lastdt and lastdt >= w - timedelta(hours=1))]
+        if not missed:
+            print(f"  OK {tid:<33} last run {lastdt:%Y-%m-%d %H:%M}, most recent window "
+                  f"{wins[-1]:%Y-%m-%d %H:%M}")
+        else:
+            _tail = (f"last run {lastdt:%Y-%m-%d %H:%M}" if lastdt
+                     else f"it has NEVER run and was created {born:%Y-%m-%d}")
+            print(f"  ⚠︎ MISSED         {tid:<30} {len(missed)} window(s) passed with no run; "
+                  f"latest missed {missed[-1]:%Y-%m-%d %H:%M}; {_tail}")
+            bad = 1
+    return bad
+
+
+if "--tasks" in sys.argv:
+    _i = sys.argv.index("--tasks")
+    if _i + 1 >= len(sys.argv):
+        sys.exit("usage: health-check.py --tasks <list_scheduled_tasks.json>")
+    sys.exit(classify_tasks(sys.argv[_i + 1]))
 
 # name, output (glob ok — newest match wins), max_age_days (None = no cadence),
 # input globs (any newer than output => BEHIND), note shown on failure
@@ -91,14 +246,87 @@ WATCH = [
     ("JOB review-queue",  os.path.expanduser("~/carr-system/out/review-queue/review-queue.html"), 26/24, [],
      "run.sh review-queue (heartbeat JOB 4b)"),
     ("JOB matcher",       os.path.expanduser("~/carr-system/out/availability-matches.md"), 26/24, [],
-     "availability_matcher.py, step 2 of the nightly chain (SKIPs until CARR_DB_JOBS_URL exists)"),
+     "availability_matcher.py, step 2 of the nightly chain (exits 78 without a jobs credential)"),
     ("JOB cadence",       os.path.expanduser("~/carr-system/out/cadence-latest.md"), 26/24, [],
-     "cadence_engine.py, step 1 of the nightly chain (SKIPs until CARR_DB_JOBS_URL exists)"),
+     "cadence_engine.py, step 1 of the nightly chain (exits 78 without a jobs credential)"),
     ("Joe calendar feed", "DNA/Team/calendar-latest.ics", 4, [],
      "fetch-calendar.sh; business days only"),
     ("Dell calendar feed","DNA/Team/calendar-latest-dell.ics", 4, [],
      "KNOWN BLOCKED on Dell's OS update (memory: dell-calendar-fetch-blocked) — expected stale until he updates"),
 ]
+
+# --- credential gates (added 2026-08-02) -------------------------------------
+# A JOB THAT CANNOT RUN IS NOT A JOB THAT FAILED, and reporting both as MISSING
+# is how a dashboard loses its readers. The matcher and the cadence engine exit
+# 78 (EX_CONFIG — ran, found no credential, wrote nothing, said so) and the
+# nightly chain already counts that as SKIP rather than FAIL. This check now
+# agrees with the chain instead of contradicting it: a gated job reports GATED
+# and does NOT set rc, so a REAL absence somewhere else in this list still turns
+# the run red and still gets read.
+#
+# THREE STATES, not two, and the third is the reason this is not a one-liner.
+# The credential may be PRESENT IN THE FILE and still never reach the job. That
+# is not hypothetical: on 2026-08-02 this check found CARR_DB_JOBS_URL sitting in
+# ~/.config/carr/db.env since 07-31 with its value UNQUOTED and containing an `&`,
+# so `set -a; . db.env` — the exact line bin/nightly.sh uses — died on a parse
+# error at that line and the variable was never set. Every nightly run since
+# printed "NOT CONFIGURED", which read like "Joe has not set it yet" and was
+# false. A gate check that only asked "is the key in the file" would have flipped
+# these two rows to a permanent, wrong GATED; a gate check that only sourced the
+# file would have called it a permanent, uninformative CLOSED. It asks both and
+# reports the disagreement, because the disagreement IS the bug.
+#
+# Values are never read into this process and never printed — the shell probe
+# reports set/not-set as an exit code and nothing else.
+DB_ENV = os.path.expanduser("~/.config/carr/db.env")
+
+# watch name -> the credential names the job itself accepts, in its own order
+GATES = {
+    "JOB matcher": ("CARR_DB_JOBS_URL", "CARR_DB_MATCHER_URL", "DATABASE_URL"),
+    "JOB cadence": ("CARR_DB_JOBS_URL", "CARR_DB_CADENCE_URL", "DATABASE_URL"),
+}
+
+
+def _keys_in_env_file():
+    """Key names declared in db.env, parsed as text. Never sources, never stores values."""
+    try:
+        with open(DB_ENV) as fh:
+            return {ln.split("=", 1)[0].strip()
+                    for ln in fh
+                    if "=" in ln and not ln.lstrip().startswith("#") and ln.split("=", 1)[1].strip()}
+    except OSError:
+        return set()
+
+
+def _shell_can_load(key):
+    """Would bin/nightly.sh's own `set -a; . db.env` leave this key set?"""
+    if not os.path.exists(DB_ENV):
+        return False
+    probe = subprocess.run(
+        ["/bin/zsh", "-c", 'set -a; . "$1" >/dev/null 2>&1; set +a; [ -n "${'+key+':-}" ]',
+         "_", DB_ENV],
+        capture_output=True, text=True)
+    return probe.returncode == 0
+
+
+def gate_state(names):
+    """('open'|'gated'|'broken', detail). 'broken' = declared but unreachable."""
+    for k in names:
+        if os.environ.get(k):
+            return "open", f"{k} set in this environment"
+    declared = _keys_in_env_file() & set(names)
+    for k in names:
+        if k in declared and _shell_can_load(k):
+            return "open", f"{k} loads from {DB_ENV}"
+    if declared:
+        k = next(k for k in names if k in declared)
+        return "broken", (
+            f"{k} IS present in {DB_ENV} but `set -a; . db.env` cannot load it — the value is "
+            f"unquoted and carries a shell metacharacter, so the source line dies on a parse "
+            f"error and the job sees nothing. Fix: wrap the value in single quotes. This is why "
+            f"the nightly log says NOT CONFIGURED for a credential that exists")
+    return "gated", f"none of {', '.join(names)} is set — the job exits 78 and writes nothing"
+
 
 def newest(pattern):
     hits = glob.glob(os.path.join(VAULT, pattern))
@@ -112,6 +340,15 @@ print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — output
 for name, out_pat, max_age, inputs, note in WATCH:
     out = newest(out_pat)
     if not out:
+        if name in GATES:
+            state, detail = gate_state(GATES[name])
+            if state == "gated":
+                print(f"  -- GATED {name:<16} not runnable, so no output is expected: {detail}  · {note}")
+                continue
+            if state == "broken":
+                print(f"  ⚠︎ {name:<18} CREDENTIAL PRESENT BUT UNREACHABLE — {detail}  · {note}")
+                rc = 1
+                continue
         print(f"  MISSING {name:<18} no file matches {out_pat}  · {note}")
         rc = 1
         continue
@@ -176,6 +413,13 @@ for name, out_pat, want_hour, tol_h, note in SCHEDULE:
         rc = 1
     else:
         print(f"  OK {name:<22} ran {time.strftime('%H:%M', lt)}, within {tol_h}h of ~{want_hour:02d}:00")
+# The scheduler's own store is not readable from a script (see the scheduler register at
+# the top of this file), so this run cannot judge the other 14 tasks. It says so instead
+# of staying quiet, because silence here reads as "all clear" for tasks nobody checked.
+print(f"  -- {'scheduled tasks':<22} not checked here — cron and lastRunAt live in the app "
+      f"store. Paste `list_scheduled_tasks` output to a file and run "
+      f"`python3 tools/health-check.py --tasks <file>`; a task whose first window has not "
+      f"arrived reports AWAITING FIRST, not a fault")
 
 # --- deprecation register (added 2026-08-02) ---------------------------------
 # Joe, on the 0048 compatibility shim: "i dont want bloat in the system but if it makes
@@ -213,22 +457,131 @@ else:
             _rows.append(_c)
     if not _rows:
         print("  OK none outstanding (register read successfully)")
+    # PROSE IS NOT A DEPENDENCY, and the first version of this check did not know it.
+    # On 2026-08-02 it held `prospect_pool` open on the strength of ONE line: an awk
+    # comment in bin/restore-rehearse.sh narrating the 0048 rename as the clue that
+    # proved the restore drill's eight "failures" were schema evolution and not data
+    # loss. Deleting that sentence to satisfy a grep trades a true piece of history for
+    # a green line; leaving it holds the shim alive forever. Neither is right, because
+    # the CHECK was wrong: a name inside a comment executes nothing and breaks nothing
+    # when the object is dropped. Comment-only lines are now excluded and the match is
+    # word-bounded (`prospect_pool` no longer matches `v_prospect_pool_x`). A file that
+    # cannot be read counts as a live reference — same posture as the UNREADABLE branch
+    # above, because a check that cannot see must never report all-clear.
+    def _live_refs(_n):
+        _h = subprocess.run(["grep", "-rlw", _n, REPO_ROOT, "--include=*.py",
+                             "--include=*.js", "--include=*.sh"],
+                            capture_output=True, text=True)
+        _out = []
+        for _f in _h.stdout.splitlines():
+            if ("/migrations/" in _f or "node_modules" in _f or "/corpus/" in _f
+                    or f"import_{_n}" in _f):
+                continue
+            try:
+                _lines = open(_f, errors="replace").read().splitlines()
+            except OSError:
+                _out.append(_f)
+                continue
+            if any(re.search(rf"\b{re.escape(_n)}\b", _l)
+                   and not _l.lstrip().startswith(("#", "//", "--", "*"))
+                   for _l in _lines):
+                _out.append(_f)
+        return _out
+
     for _name, _kind, _repl, _after in _rows:
-        _hits = subprocess.run(["grep", "-rl", _name, REPO_ROOT, "--include=*.py",
-                                "--include=*.js", "--include=*.sh"],
-                               capture_output=True, text=True)
-        _files = [f for f in _hits.stdout.splitlines()
-                  if "/migrations/" not in f and "node_modules" not in f
-                  and "/corpus/" not in f and f"import_{_name}" not in f]
+        _files = _live_refs(_name)
         _due = bool(_after) and _after <= time.strftime("%Y-%m-%d")
         if not _files:
             _flag = "SAFE TO DROP" if _due else f"unused; scheduled {_after or 'no date'}"
-            print(f"  OK {_name:<22} {_kind}, 0 code refs — {_flag}"
+            print(f"  OK {_name:<22} {_kind}, 0 executable refs (comments ignored) — {_flag}"
                   + (f"  (replaced by {_repl})" if _repl else ""))
         else:
             print(f"  \u26a0\ufe0e {_name:<22} {_kind}, still referenced by {len(_files)} file(s): "
                   + ", ".join(os.path.basename(f) for f in _files[:4]))
             rc = 1
+
+# --- the export register (added 2026-08-02) ----------------------------------
+# WHY THIS EXISTS: v_integrity_digest's `export_freshness` is built by grouping
+# export_run BY TARGET, so every target that ever wrote a row stays in it forever.
+# Two targets — decision-history.md and loop-idea-bank.md — were registered, failed
+# every run because the files they render are STILL HAND-MAINTAINED, and were then
+# deliberately unregistered. Their failed rows remain, so the digest reports
+# {"stale": null, "last_ok": null} for both. A null there reads as "no data yet" or
+# "something is broken", and it is neither: those two are not export targets, on
+# purpose, and nothing is wrong.
+#
+# The view cannot be repaired from here (changing it needs a migration, which this
+# session is not writing; the proposed SQL is filed at specs/v_integrity_digest-
+# unregistered-targets.sql as a handoff). What CAN be fixed is the reading surface:
+# this section joins the same export_run data against the LIVE exporter registry and
+# names each state instead of leaving a null to be interpreted.
+#
+#   NOT A TARGET   rows exist, the key is not in exporters.targets.TARGETS. Expected
+#                  null in the digest. Informational, never red.
+#   NEVER OK       the key IS registered and has no successful run. A real defect.
+#   STALE          registered, last ok older than 26h — the nightly chain missed it.
+#   NEVER RAN      registered with no export_run row at all.
+print("Export register — a target nobody registered is not a target that failed")
+# DELIBERATELY NOT THROUGH db-tap. The deprecation register above reads production via
+# neonctl, and on 2026-08-02 the neonctl OAuth token expired mid-session and took every
+# db-tap call down with it. That is precisely the moment a health check needs to keep
+# working. export_run is inside the exporter credential's own grant, so this section
+# reads it the same way the exporters do: a local DSN from ~/.config/carr/db.env, no
+# browser token, no interactive auth. One subprocess does both halves (import the live
+# registry, query the table) so the registry and the rows are read by the same process.
+_probe = r'''
+import sys
+from exporters.targets import TARGETS
+from exporters.common import connect
+print("REG\t" + "\t".join(sorted(TARGETS)))
+with connect() as c, c.cursor() as cur:
+    cur.execute("""select target,
+                          coalesce(max(ran_at) filter (where status='ok')::text,''),
+                          coalesce((array_agg(status order by ran_at desc))[1],'')
+                     from export_run group by target""")
+    for t, lastok, st in cur.fetchall():
+        print("ROW\t%s\t%s\t%s" % (t, lastok, st))
+'''
+_ep = subprocess.run([os.path.join(REPO_ROOT, ".venv/bin/python"), "-c", _probe],
+                     cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+if _ep.returncode != 0:
+    # Same rule as the deprecation register: a read that failed is not a clean register.
+    _tail = (_ep.stderr or "").strip().splitlines()
+    print(f"  ⚠︎ register UNREADABLE — cannot classify any export target "
+          f"({_tail[-1] if _tail else 'no stderr'})")
+    rc = 1
+else:
+    _registered, _seen, _bad = set(), {}, []
+    for _line in _ep.stdout.splitlines():
+        _c = _line.split("\t")
+        if _c[0] == "REG":
+            _registered = {x for x in _c[1:] if x}
+        elif _c[0] == "ROW" and len(_c) >= 4:
+            _seen[_c[1]] = (_c[2], _c[3])
+    _unreg = sorted(k for k in _seen if k not in _registered)
+    for _k in _unreg:
+        _lastok, _status = _seen[_k]
+        print(f"  -- NOT A TARGET  {_k:<26} no such key in exporters.targets.TARGETS "
+              f"(last attempt: {_status or 'none'}"
+              + (f", last ok {_lastok[:16]}Z" if _lastok else ", never ok")
+              + ") — nothing exports it, so the digest's null for this key is "
+                "correct rather than a fault")
+    for _k in sorted(_registered):
+        if _k not in _seen:
+            _bad.append(f"NEVER RAN {_k}")
+            continue
+        _lastok, _status = _seen[_k]
+        if not _lastok:
+            _bad.append(f"NEVER OK {_k} (latest run: {_status or 'unknown'})")
+        elif (time.time() - time.mktime(time.strptime(_lastok[:19], "%Y-%m-%d %H:%M:%S"))
+              + time.timezone) > 26 * 3600:
+            _bad.append(f"STALE {_k} (last ok {_lastok[:16]}Z)")
+    for _b in _bad:
+        print(f"  ⚠︎ {_b}")
+        rc = 1
+    if not _bad:
+        print(f"  OK {len(_registered)} registered target(s), all with a successful run "
+              f"inside 26h; {len(_unreg)} unregistered key(s) held in history only")
 
 # --- the R2 archive quota (added 2026-07-31, ORDER 20c) ----------------------
 # NOT a freshness check, and it is here rather than in WATCH for that reason.

@@ -262,6 +262,15 @@ const CONNECTIONS_CAP = 12;
 const WHO_MAX_DEPTH = 3;
 const WHO_PATH_CAP = 25;
 
+// [loop #132] How many RETIRED refs `find` lists per organisation group.
+//
+// A tombstone list is navigation, not an answer. 0059 consolidated 415 org rows
+// into 306 survivors plus 109 tombstones and one name alone (Henry Schein) carries
+// sixteen of them; the useful facts are "sixteen exist" and "here is where to look
+// them up", not sixteen refs spending the whole payload. The COUNT is always exact
+// and never truncated — only the ref list is capped, and the row says so.
+const RETIRED_REF_CAP = 10;
+
 // THE NODE KEY IS THE REF, NOT THE NAME, and that choice is load-bearing.
 // v_party_graph carries exactly one ref per party (0020's `distinct on`), so a
 // ref identifies a party. A name does not: production holds `Dr. James Allen
@@ -291,6 +300,149 @@ async function validateLinkKind(client, kind) {
   throw new ToolError({ error: "unknown_kind", kind,
     valid: all.rows.map(x => x.slug),
     hint: "party_link_kind is the vocabulary; add a row there if a genuinely new kind is needed" });
+}
+
+// ---------- [0063] the counterparty-observation vocabularies ----------
+//
+// Same posture as validateLinkKind above and for the same reason: 0063 put
+// submarket_condition and negotiation_claim_type in ref TABLES, with
+// `falsifiable` and `derived` as columns rather than as lists hardcoded in a
+// view, so widening either vocabulary is a row a human adds and not a deploy.
+// A verb that carried its own enum would put a second copy of that list in a
+// file only a deploy can change — the exact drift 0052/0053 had to unpick.
+
+async function validateSubmarket(c, slug) {
+  const r = await c.query("select slug from submarket_condition where slug=$1", [slug]);
+  if (r.rows.length) return slug;
+  const all = await c.query("select slug, label, tightness from submarket_condition order by sort");
+  throw new ToolError({ error: "unknown_submarket_condition", got: slug, valid: all.rows,
+    hint: "submarket_condition is a ref table (0063) — add a row there if a genuinely new " +
+          "value is needed. Omitting it means NOT RECORDED, which is never a synonym for " +
+          "'balanced'; do not pick one to fill the field." });
+}
+
+async function validateClaimType(c, slug) {
+  const r = await c.query(
+    "select slug, label, falsifiable, derived, reversal_test from negotiation_claim_type where slug=$1",
+    [slug]);
+  if (!r.rows.length) {
+    const all = await c.query(
+      "select slug, label, falsifiable, derived from negotiation_claim_type order by sort");
+    throw new ToolError({ error: "unknown_claim_type", got: slug, valid: all.rows,
+      hint: "negotiation_claim_type is the vocabulary (0063); widening it is a row a human adds" });
+  }
+  // The composite FK in 0063 makes a derived class physically unloggable. Catching
+  // it here turns a foreign_key_violation into the sentence that says what to do.
+  if (r.rows[0].derived)
+    throw new ToolError({ error: "derived_claim_type", got: slug,
+      reversal_test: r.rows[0].reversal_test,
+      hint: "this claim class is already recorded elsewhere on the round, and two homes for " +
+            "one fact is the 0045 fault. 'deadline' IS negotiation_round.expires_on — pass " +
+            "expires_on on this same call instead." });
+  return r.rows[0];
+}
+
+// 0063 lands as a migration Joe applies by hand, and this Worker deploys
+// separately. Either order is possible, so the new arguments check for their own
+// schema and say which half is missing instead of surfacing an undefined_column
+// from inside a rolled-back transaction. Only runs when a new argument is used —
+// an old-shaped record-counter call never pays for it.
+async function require0063(c) {
+  const r = await c.query(
+    `select to_regclass('public.negotiation_claim') is not null as claims,
+            exists (select 1 from information_schema.columns
+                     where table_schema='public' and table_name='negotiation_round'
+                       and column_name='submarket_condition') as submarket`);
+  if (r.rows[0].claims && r.rows[0].submarket) return;
+  throw new ToolError({ error: "migration_not_applied", migration: "0063_counterparty_observation",
+    present: r.rows[0],
+    hint: "submarket_condition and claims[] need migration 0063. Apply it " +
+          "(`~/carr-system/run.sh migrate --apply --yes`) and retry; every other argument on " +
+          "this verb works without it." });
+}
+
+// ---------- [0066] the marketing lane's resolvers and gates ----------
+// Same split-deploy discipline require0063 established, and it matters more here:
+// all four marketing verbs are brand new, so a Worker deployed ahead of the
+// migration would fail on undefined_table from inside a rolled-back transaction
+// and the caller would read it as "the verb is broken" rather than "the schema
+// has not landed". Every marketing verb calls this FIRST, before it touches
+// anything.
+async function require0066(c) {
+  const r = await c.query(
+    `select to_regclass('public.marketing_subject')       is not null as subjects,
+            to_regclass('public.placement_measurement')   is not null as attempts,
+            to_regclass('public.v_campaign_scorecard')    is not null as scorecard,
+            to_regclass('public.v_placement_measurement') is not null as coverage,
+            exists (select 1 from information_schema.columns
+                     where table_schema='public' and table_name='campaign'
+                       and column_name='success_criterion') as campaign_shape`);
+  const s = r.rows[0];
+  if (s.subjects && s.attempts && s.scorecard && s.coverage && s.campaign_shape) return;
+  throw new ToolError({ error: "migration_not_applied",
+    migration: "0066_marketing_campaign_and_measurement", present: s,
+    hint: "the marketing verbs need 0066 (campaign window/criterion/verdict columns, " +
+          "marketing_subject, placement_measurement, and the measurement views). Apply it " +
+          "(`~/carr-system/run.sh migrate --apply --yes`) and retry. NOTHING was written." });
+}
+
+// A campaign by uuid or by name. Name matching is normalised the same way
+// campaign_name_uniq normalises it, so the verb and the index agree about what
+// "the same campaign" means — 0059's whole lesson was two layers disagreeing
+// about identity and minting 415 rows for 306 organisations.
+async function resolveCampaign(c, ref) {
+  const raw = String(ref || "").trim();
+  if (!raw) throw new ToolError({ error: "campaign_required" });
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
+    const r = await c.query("select * from campaign where id=$1", [raw]);
+    if (r.rows.length) return r.rows[0];
+    throw new ToolError({ error: "campaign_not_found", campaign: raw });
+  }
+  const r = await c.query(
+    "select * from campaign where lower(btrim(name)) = lower(btrim($1))", [raw]);
+  if (r.rows.length) return r.rows[0];
+  const near = await c.query(
+    "select name, status from campaign order by created_at desc limit 5");
+  throw new ToolError({ error: "campaign_not_found", campaign: raw,
+    recent_campaigns: near.rows,
+    hint: near.rows.length
+      ? "match the name exactly, or pass the campaign uuid"
+      : "no campaign exists yet — open-campaign is what creates one. Do NOT attach content " +
+        "to a campaign that was never stated; the whole point of the object is that the " +
+        "objective was written down BEFORE the results came in." });
+}
+
+// A placement by uuid, live URL, or Blotato external_id. The URL and the id are
+// what a caller actually holds: the marketing seat's own campaign-proposal block
+// names content "by placement URL or Blotato id" because those are the only
+// handles that appear in the published log. Measured 2026-08-02: all 89
+// placements carry a non-null external_id and url, and all 89 of each are
+// distinct, so both are usable as keys and neither can silently collide.
+async function resolvePlacement(c, ref) {
+  const raw = String(ref || "").trim();
+  if (!raw) throw new ToolError({ error: "placement_required" });
+  const by = async (sql, v) => (await c.query(sql, [v])).rows;
+  let rows = [];
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw))
+    rows = await by("select * from placement where id=$1", raw);
+  if (!rows.length && /^https?:\/\//i.test(raw))
+    rows = await by("select * from placement where url = $1", raw);
+  if (!rows.length) rows = await by("select * from placement where external_id = $1", raw);
+  if (rows.length === 1) return rows[0];
+  if (rows.length > 1) throw new ToolError({ error: "ambiguous_placement", ref: raw,
+    candidates: rows.map(r => ({ placement_id: r.id, platform: r.platform, url: r.url })),
+    hint: "this handle resolves to more than one placement — a data fault; surface it" });
+  throw new ToolError({ error: "placement_not_found", ref: raw,
+    hint: "pass the live post URL, the Blotato post id, or the placement uuid. Placements " +
+          "are created by pipelines/pull_placement_metrics.py when a post publishes — if " +
+          "the post is live and this fails, the pull has not run since it published. Do NOT " +
+          "invent a placement to hang a number on." });
+}
+
+async function livePlatformSlugs(c) {
+  const r = await c.query(
+    "select slug from marketing_subject where subject_type='platform' and retired_at is null order by slug");
+  return r.rows.map(x => x.slug);
 }
 
 // [ORDER 34] ref -> party.id, REFS ONLY. A name here is an error by design:
@@ -597,7 +749,7 @@ export const TOOLS = {
 
   "find": {
     write: false,
-    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Matches party.name / deal.name / client.roster_ref. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. Read-only.",
+    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Matches party.name / deal.name / client.roster_ref. Survivors come first and are counted separately from retired aliases: `refs`/`live_rows` are what you may write to, `retired_refs`/`retired_aliases` are tombstones of completed merges, kept navigable but never a target. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. NOT the verb for a ref you already hold (catch-me-up takes that), and NOT the referral-path verb (who-do-we-know walks the graph). Read-only.",
     inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     handler: async (c, _a, args) => {
       const q = args.query;
@@ -605,12 +757,17 @@ export const TOOLS = {
       // KEPT here (unlike resolveSubject) and carry the flag: someone searching a
       // merged name should learn the record exists and where it went, rather than
       // be told nothing matched.
+      // SURVIVORS FIRST (loop #132). The flag was already on every row, but the
+      // ordering was pure similarity, so a name carrying tombstones could spend the
+      // ten-row budget on retired refs and push its own survivor out of the answer.
+      // Sorting on `merged` first costs nothing — the tombstones still come back,
+      // they just stop outranking the record that is actually live.
       const parties = await c.query(
         `select display_name as name, city, specialty, org_name, ref, subject_type as kind, merged
          from v_ref_index
          where subject_type in ('lead','client','vendor')
            and (display_name % $1 or display_name ilike $2)
-         order by similarity(display_name,$1) desc limit 10`, [q, `%${q}%`]);
+         order by merged, similarity(display_name,$1) desc limit 10`, [q, `%${q}%`]);
       // ORGS AND UNLINKED PEOPLE, GROUPED (0056, 2026-08-02). Until migration 0056
       // v_ref_index held only role records, so 415 org parties were invisible here:
       // `find "Henry Schein"` returned "Henry Pruett" — a trigram hit on one word —
@@ -621,14 +778,50 @@ export const TOOLS = {
       // the count and the refs, answers "who do we know at X" AND surfaces the
       // duplication instead of hiding it. Kept separate from the role query above so
       // a bare party never outranks a real client or vendor.
+      //
+      // LIVE AND RETIRED ARE COUNTED SEPARATELY, AND THE BLEND WAS THE BUG (loop
+      // #132, 2026-08-02). This grouping shipped in b0fda91, BEFORE 0059 consolidated
+      // the orgs, and it was never taught about merged_into. Afterwards it kept
+      // reporting `duplicate_rows: 17` for Henry Schein and `13` for Musicologie —
+      // both of which are ONE live row plus sixteen and twelve tombstones. That
+      // number then read as "the book is still full of duplicates", which is the
+      // opposite of what 0059 did, and every ref in the list read as a live target.
+      // There is no single honest count here, so there is no single count: the
+      // survivors and the tombstones are two facts and they travel as two fields.
+      // party_org_identity_uniq makes live_rows=1 the invariant for any consolidated
+      // org, so a live_rows above 1 is now a real signal rather than noise.
       const orgs = await c.query(
-        `select display_name as name, count(*)::int as duplicate_rows,
-                array_agg(ref order by ref) as refs,
-                bool_or(merged) as any_merged
+        // 2026-08-02: the subject_type='party' restriction moved OFF the WHERE and
+        // ONTO each aggregate. It has to, because v_ref_index indexes SUBJECTS rather
+        // than roles (0056): the moment an org party gains a client, lead or vendor
+        // record it stops appearing as a party row and starts appearing under that
+        // role's ref. 0061 did exactly that to Musicologie — P-0111 is live and
+        // unmerged, but it now indexes as client C-161, so a party-only query saw its
+        // twelve tombstones, reported live_rows:0, and fired the all_retired note
+        // claiming the survivor "carries a DIFFERENT name and is not in this result"
+        // while the survivor sat in the SAME payload under the SAME name. Counting
+        // live rows of any subject_type is what makes all_retired mean what it says.
+        `select display_name as name,
+                count(*) filter (where not merged and subject_type = 'party')::int
+                  as live_rows,
+                count(*) filter (where merged and subject_type = 'party')::int
+                  as retired_aliases,
+                coalesce(array_agg(ref order by ref)
+                           filter (where not merged and subject_type = 'party'),
+                         '{}'::text[]) as refs,
+                coalesce((array_agg(ref order by ref)
+                            filter (where merged and subject_type = 'party'))
+                           [1:${RETIRED_REF_CAP}],
+                         '{}'::text[]) as retired_refs,
+                count(*) filter (where not merged and subject_type <> 'party')::int
+                  as live_as_role,
+                coalesce(array_agg(ref order by ref)
+                           filter (where not merged and subject_type <> 'party'),
+                         '{}'::text[]) as role_refs
          from v_ref_index
-         where subject_type='party'
-           and (display_name % $1 or display_name ilike $2)
+         where (display_name % $1 or display_name ilike $2)
          group by display_name
+        having count(*) filter (where subject_type='party') > 0
          order by similarity(display_name,$1) desc limit 5`, [q, `%${q}%`]);
       const deals = await c.query(
         // The column is lead_owner; `owner` never existed on this view, so this
@@ -649,14 +842,61 @@ export const TOOLS = {
             or from_ref  ilike $2 or to_ref  ilike $2
          order by linked_at desc, from_name, to_name limit $3`,
         [`%${q}%`, q, CONNECTIONS_CAP]);
+
+      // The org rows carry their own truncation flag rather than a silent slice:
+      // retired_aliases is the exact count, retired_refs may be the first
+      // RETIRED_REF_CAP of them, and the reader is told which it is looking at.
+      const organizations = orgs.rows.map(r => ({
+        name: r.name,
+        live_rows: r.live_rows,
+        refs: r.refs,
+        retired_aliases: r.retired_aliases,
+        retired_refs: r.retired_refs,
+        retired_refs_truncated: r.retired_aliases > r.retired_refs.length,
+        // live_as_role / role_refs: the survivor is live but now carries a client,
+        // lead or vendor ref instead of its bare party ref. all_retired means NOBODY
+        // under this name is live ANYWHERE, which is the only case where telling the
+        // reader to go search another name is true.
+        live_as_role: r.live_as_role,
+        role_refs: r.role_refs,
+        all_retired: r.live_rows === 0 && r.live_as_role === 0,
+      }));
+      const retiredSeen = parties.rows.filter(r => r.merged).length
+        + organizations.reduce((n, r) => n + r.retired_aliases, 0);
+      const orphanNames = organizations.filter(r => r.all_retired).map(r => r.name);
+      const promoted = organizations.filter(r => r.live_rows === 0 && r.live_as_role > 0);
+
+      const notes = [];
+      if (retiredSeen)
+        notes.push("LIVE and RETIRED are counted separately here and are never blended. " +
+          "`refs` / `live_rows` (and any row with merged:false) are the survivors — those are " +
+          "the refs write verbs take. `retired_refs` / `retired_aliases` and any row with " +
+          "merged:true are tombstones of completed merges: they stay listed so a note, email or " +
+          "document citing an old ref is still navigable, but they are not duplicates and are " +
+          "never a write target.");
+      else
+        notes.push("No retired aliases among these matches — every ref listed is live.");
+      if (promoted.length)
+        notes.push(promoted.map(r =>
+          `"${r.name}" has no live PARTY row, but it is not gone: the survivor is live in this ` +
+          `same result under ${r.role_refs.join(", ")}. It stopped indexing as a bare party ` +
+          `when it gained that record, which is how this index works — it indexes subjects, ` +
+          `not roles. Write to ${r.role_refs.join(", ")}, not to a retired P- ref.`).join(" "));
+      if (orphanNames.length)
+        notes.push("Every row under " + orphanNames.map(n => `"${n}"`).join(", ") +
+          " is retired, and nothing under that name is live anywhere: that merge's survivor " +
+          "carries a DIFFERENT name and is not in this result. Search the survivor's name, or " +
+          "catch-me-up one of the retired refs to see where it went. This is not a claim that " +
+          "we do not know them.");
+
       return { parties: parties.rows, deals: deals.rows, connections: connections.rows,
-               organizations: orgs.rows };
+               organizations, note: notes.join(" ") };
     },
   },
 
   "who-do-we-know": {
     write: false,
-    description: "\"Who gets me to X?\" — walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops (walks the party_link table), shortest first, each rendered as a readable chain (\"Dion Moniz -knows-> Jon Shaw -intro-> Dr. James Allen Tyrer\"). The first name in a chain is who Joe asks. Read-only, and it never guesses: an ambiguous name returns needs_disambiguation with the candidates, and a target that exists but carries no edges says so rather than returning an empty list that reads like 'no such person'.",
+    description: "\"Who gets me to X?\" — walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops (walks the party_link table), shortest first, each rendered as a readable chain (\"Dion Moniz -knows-> Jon Shaw -intro-> Dr. James Allen Tyrer\"). The first name in a chain is who Joe asks. Use it before asking for an introduction; NOT for looking a record up (that is `find`) and NOT for what happened with a record (that is `catch-me-up`). Read-only, and it never guesses: it resolves to the SURVIVOR of a merge and never offers a tombstone as a target, an ambiguous LIVE name returns needs_disambiguation with the candidates, and a target that exists but carries no walkable edges says which of those two it is rather than returning an empty list that reads like 'no such person'.",
     inputSchema: { type: "object", properties: {
       target: { type: "string", description: "who you want to reach — C-155, V-CPA-006, L-208, or a full name" },
       max_depth: { type: "integer", description: `hops to walk, 1-${WHO_MAX_DEPTH} (default ${WHO_MAX_DEPTH})` },
@@ -672,25 +912,82 @@ export const TOOLS = {
       // Ref first and exactly, name second and only on a distinct-ref basis: two
       // rows for one ref is the same party appearing on both ends of edges, not
       // an ambiguity, so the distinct is what makes the count mean something.
+      //
+      // MERGE-AWARE SINCE loop #132 (2026-08-02). Two changes, both about not
+      // handing back a retired record. The null-ref filter: a NULL endpoint used to
+      // resolve to a node with ref=null, which then walked nothing and reported
+      // in_graph:true with zero paths — a live-looking answer built on a node the
+      // walker cannot address. Those edges are now reported as unwalkable below,
+      // by name, which is the truth. And the merged flag: a graph node can be a
+      // tombstone (C-050 Gina Bagneris is one today), so the survivor is preferred
+      // whenever both are matched, and a tombstone that resolves anyway — because
+      // the caller named it, or because it is the only match and its edges are
+      // real — comes back FLAGGED rather than silently standing in for the survivor.
       const nodes = await c.query(
         `with n as (
            select from_ref as ref, from_name as name from v_party_graph
+            where from_ref is not null
            union
-           select to_ref,   to_name             from v_party_graph)
-         select distinct ref, name from n
-          where ref ilike $1 or name ilike $2
-          order by ref`, [q, `%${q}%`]);
+           select to_ref, to_name from v_party_graph
+            where to_ref is not null)
+         select n.ref, n.name, coalesce(bool_or(ri.merged), false) as merged
+           from n left join v_ref_index ri on ri.ref = n.ref
+          where n.ref ilike $1 or n.name ilike $2
+          group by n.ref, n.name
+          order by merged, n.ref`, [q, `%${q}%`]);
       let node = null;
-      if (nodes.rows.length === 1) {
-        node = nodes.rows[0];
-      } else if (nodes.rows.length > 1) {
+      if (nodes.rows.length) {
         // An exact ref among several name-ish matches is not ambiguous.
         const exact = nodes.rows.filter(r => (r.ref || "").toLowerCase() === q.toLowerCase());
+        const live = nodes.rows.filter(r => !r.merged);
+        const retired = nodes.rows.filter(r => r.merged);
         if (exact.length === 1) node = exact[0];
+        else if (live.length === 1) node = live[0];
+        else if (live.length > 1) throw new ToolError({ error: "needs_disambiguation", target: q,
+          candidates: live.map(r => ({ ref: r.ref, name: r.name })),
+          retired_aliases: retired.map(r => ({ ref: r.ref, name: r.name })),
+          hint: "more than one LIVE party in the intro graph matches — pass the exact ref. " +
+                "retired_aliases are tombstones of completed merges, listed so you can see them; " +
+                "never pass one back as the target" });
+        else if (retired.length === 1) node = retired[0];
         else throw new ToolError({ error: "needs_disambiguation", target: q,
-          candidates: nodes.rows.map(r => ({ ref: r.ref, name: r.name })),
-          hint: "more than one party in the intro graph matches — pass the exact ref" });
+          candidates: [],
+          retired_aliases: retired.map(r => ({ ref: r.ref, name: r.name })),
+          hint: "every graph node matching this name is a RETIRED alias of a completed merge, " +
+                "and more than one matched. Run `find` on the name to see which survivor each " +
+                "one points at, then target the survivor" });
       }
+
+      // EDGES THIS NAME OWNS BUT THE WALKER CANNOT FOLLOW (loop #133). An edge whose
+      // endpoint carries no business ref is invisible to WHO_EDGES, and staying
+      // silent about it produced a flat lie: Joe Bookout is party P-1084 with no
+      // client/lead/vendor row, so all six of his `can_introduce` edges — the single
+      // most valuable edge class in the book — have a NULL from_ref, and asking for
+      // him answered "this record exists but carries no intro-graph edges yet". It
+      // carries six. Scoped to the query so the answer names the actual edges rather
+      // than a global count nobody can act on.
+      // Matched on REF AS WELL AS NAME. Half of every unwalkable edge has a ref on
+      // the other end, and asking by that ref — who gets me to V-CPA-036 — is the
+      // normal way this verb is called. Name-only matching would have answered
+      // "nobody reaches her" while the Joe Bookout -> V-CPA-036 edge sat right there.
+      const blocked = await c.query(
+        `select from_ref, from_name, kind, to_ref, to_name, note
+           from v_party_graph
+          where (from_ref is null or to_ref is null)
+            and (from_name ilike $1 or to_name ilike $1
+                 or from_ref ilike $2 or to_ref ilike $2)
+          order by from_name, to_name limit $3`, [`%${q}%`, q, CONNECTIONS_CAP]);
+      const unwalkableHere = blocked.rows.map(r => ({
+        from: r.from_name, from_ref: r.from_ref, kind: r.kind,
+        to: r.to_name, to_ref: r.to_ref, evidence: r.note,
+        blocked_end: r.from_ref === null ? "from" : "to" }));
+      const blockedNote = unwalkableHere.length
+        ? `${unwalkableHere.length} intro-graph edge(s) touching this name CANNOT be walked: ` +
+          "one endpoint carries no business ref (a bare party — a CARR agent with no " +
+          "client/lead/vendor row, or a party a link still points at after a merge). They are " +
+          "listed in unwalkable_edges and they are real; the path walker simply has no node to " +
+          "address. Do not read their absence from `paths` as an absence of the relationship."
+        : "";
 
       if (!node) {
         // NOT the same answer as "no path". A record that exists and simply has
@@ -702,16 +999,58 @@ export const TOOLS = {
         // asked for Henry Schein, which is 17 party rows, it answered "No record and
         // no graph node matches that name", which was simply false. A read-only
         // existence check has no reason to be narrower than the record.
+        // MATCHING_RECORDS IS LIVE-ONLY, AND THE COUNT OF TOMBSTONES TRAVELS BESIDE
+        // IT (loop #132). Unordered and capped at five, this block handed back five
+        // tombstones for "Musicologie" — P-0840, P-1044, P-0909, P-0796 — as
+        // selectable records while the survivor P-0111 never appeared. A caller that
+        // links or writes to one of those defeats the merge. So: survivors in
+        // matching_records, tombstones as a COUNT only (find lists them with their
+        // refs; that is find's job, and it is where they stay navigable), and the
+        // window counts are computed before the limit so the numbers are exact even
+        // when the list is truncated.
         const known = await c.query(
-          `select display_name as name, ref, subject_type as kind from v_ref_index
+          `select display_name as name, ref, subject_type as kind, merged,
+                  (count(*) filter (where not merged) over ())::int as live_total,
+                  (count(*) filter (where merged)     over ())::int as retired_total
+             from v_ref_index
             where subject_type in ('lead','client','vendor','party')
-              and (ref ilike $1 or display_name ilike $2) limit 5`, [q, `%${q}%`]);
+              and (ref ilike $1 or display_name ilike $2)
+            order by merged, ref limit 10`, [q, `%${q}%`]);
+        const liveTotal = known.rows.length ? known.rows[0].live_total : 0;
+        const retiredTotal = known.rows.length ? known.rows[0].retired_total : 0;
+        const liveRows = known.rows.filter(r => !r.merged)
+          .map(r => ({ name: r.name, ref: r.ref, kind: r.kind }));
+
+        let note;
+        if (liveTotal) {
+          note = unwalkableHere.length
+            // "log the connection" would be wrong advice here: the connection IS
+            // logged, it just has no walkable node. Telling Joe to record it again
+            // would mint a duplicate edge and hide the actual defect.
+            ? "This record exists and its intro-graph edges ARE logged — they are the " +
+              "unwalkable ones above, not missing. Nothing to re-record with link-parties."
+            : "This record exists but carries no WALKABLE intro-graph edges — the " +
+              "connection may simply not be logged. Record it with link-parties.";
+          if (retiredTotal)
+            note += ` Plus ${retiredTotal} retired alias(es) under this name from completed ` +
+                    "merges; they are history, never link targets — run `find` to see them.";
+        } else if (retiredTotal) {
+          note = `Every record under this name is a RETIRED alias (${retiredTotal}) of a ` +
+                 "completed merge. The survivor carries a different name and is not in this " +
+                 "result — run `find` on it, or catch-me-up one of the retired refs to see " +
+                 "where it went. This is NOT a claim that we do not know them.";
+        } else {
+          note = "No record and no graph node matches that name. Try `find` first.";
+        }
+        if (blockedNote) note = blockedNote + " " + note;
+
         return { target: q, resolved: null, paths: [],
                  in_graph: false,
-                 matching_records: known.rows,
-                 note: known.rows.length
-                   ? "This record exists but carries no intro-graph edges yet — the connection may simply not be logged. Record it with link-parties."
-                   : "No record and no graph node matches that name. Try `find` first." };
+                 matching_records: liveRows,
+                 live_record_count: liveTotal,
+                 retired_alias_count: retiredTotal,
+                 unwalkable_edges: unwalkableHere,
+                 note };
       }
 
       // ── walk BACKWARD from the target, following edge direction ──────────
@@ -743,20 +1082,38 @@ export const TOOLS = {
         `select count(*)::int as n from v_party_graph
           where from_ref is null or to_ref is null`);
 
+      const notes = [];
+      if (node.merged)
+        notes.push("WARNING: " + node.ref + " is a RETIRED alias of a completed merge, not the " +
+          "survivor — it resolved because you named it, or because it is the only node matching. " +
+          "Its edges below are real, but run `find` on the name and re-target the survivor before " +
+          "you write anything.");
+      if (paths.rows.length)
+        notes.push("The FIRST name in each chain is who to ask. Run the pairing through DNA/Network/introduction-rules.md before making the ask — a path existing does not make it a clean ask.");
+      else if (unwalkableHere.length)
+        // "may not be logged" would be the wrong diagnosis when the edges are
+        // sitting right there. Zero walkable paths and a non-empty unwalkable list
+        // is a REF problem, not a capture problem, and it needs the opposite action.
+        notes.push("Zero WALKABLE paths, but that is not the same as no relationship — see " +
+          "unwalkable_edges. The gap is a missing ref on an endpoint, not a missing capture; " +
+          "logging the connection again would only duplicate it.");
+      else
+        notes.push("Nobody in the intro graph reaches this record within " + depth + " hops. That may mean the connection is not logged rather than not real.");
+      if (blockedNote) notes.push(blockedNote);
+
       return {
         target: q,
-        resolved: { ref: node.ref, name: node.name },
+        resolved: { ref: node.ref, name: node.name, merged: node.merged },
         in_graph: true,
         max_depth: depth,
         path_count: paths.rows.length,
         capped: paths.rows.length === cap,
         edges_unwalkable: unwalkable.rows[0].n,
+        unwalkable_edges: unwalkableHere,
         paths: paths.rows.map(r => ({
           hops: r.hops, ask_ref: r.ask_ref, ask_name: r.ask_name,
           path: r.chain, ref_path: r.ref_path, evidence: r.first_note })),
-        note: paths.rows.length
-          ? "The FIRST name in each chain is who to ask. Run the pairing through DNA/Network/introduction-rules.md before making the ask — a path existing does not make it a clean ask."
-          : "Nobody in the intro graph reaches this record within " + depth + " hops. That may mean the connection is not logged rather than not real.",
+        note: notes.join(" "),
       };
     },
   },
@@ -1492,7 +1849,7 @@ export const TOOLS = {
 
   "record-counter": {
     write: true,
-    description: "Log a negotiation round: whose paper (side), the economics (rate REQUIRES its basis — never a bare number), TI, free rent, term. Writes a counter row (side, rate + basis, ti, free_rent, term). Round number auto-increments per deal+side if omitted. Out-of-band rates ask for confirm.",
+    description: "Log a negotiation round: whose paper (side), the economics (rate REQUIRES its basis — never a bare number), TI, free rent, term, PLUS what that side CLAIMED about its own position (\"best and final\", \"the owner won't go below 18\", \"we walk Friday\") and how the submarket stood when they said it. Use it after every counter, and log the claims at the same time — a claim is only ever falsifiable against the rounds that come after it, so a claim not captured now is uncomputable for ever. Round number auto-increments per deal+side if omitted. Out-of-band rates ask for confirm. NOT a place for a characterisation of a human being: 'aggressive', 'bluffs', 'reasonable' have no field here and never will — claims[] records what was SAID, and whether it was later contradicted is computed at read time.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       side: { type: "string", enum: ["tenant","landlord","buyer","seller"] },
@@ -1501,7 +1858,17 @@ export const TOOLS = {
       rate_basis: { type: "string", enum: ["usd_sf_yr","usd_sf_mo","usd_mo_gross","usd_yr_gross"] },
       ti_amount: { type: "number" }, ti_basis: { type: "string", enum: ["usd_total","usd_sf"] },
       free_rent_months: { type: "number" }, term_months: { type: "integer" },
-      options_note: { type: "string" }, escalator: { type: "string" }, expires_on: { type: "string" },
+      options_note: { type: "string" }, escalator: { type: "string" },
+      expires_on: { type: "string", description: "YYYY-MM-DD. THE DEADLINE LIVES HERE — 'this offer dies Friday' is this field, never a claims[] row; a deadline claim is refused on purpose (0063), because a later round from the same side dated after this date already falsifies it." },
+      submarket_condition: { type: "string", description: "soft | balanced | tight — how the submarket stood WHEN THIS ROUND was proposed (0063; validated against the submarket_condition ref table, so widening it is a row a human adds). It separates leverage from skill: a landlord in a tight market concedes nothing because he need not, and scoring that as toughness credits the market to the man. Record it once per deal — the scorecard reads the latest non-null. OMIT IT when you do not know; blank means not recorded and is never a synonym for 'balanced'." },
+      claims: { type: "array", maxItems: 6, description:
+        "[0063] What this side CLAIMED about its own position ON THIS ROUND. A list, not a field, because a side routinely makes three at once (\"best and final, the owner won't go below eighteen, and we have another tenant looking\") and one slot would keep one and discard two. Observations only — what was said, on this round. 'deadline' is not loggable here; that is expires_on.",
+        items: { type: "object", properties: {
+          type: { type: "string", description: "negotiation_claim_type slug: finality (best and final), authority (\"the owner won't go below X\"), walk_away (\"we're done\"), competing_interest (\"another tenant is looking\" — logged for the history, permanently excluded from every score because nothing could ever falsify it)" },
+          stated_floor: { type: "number", description: "the number named in an AUTHORITY claim when it differs from this round's own rate — \"won't go below 18\" while offering 19. Omit when the claim was about the round's own position; never a guess." },
+          stated_floor_basis: { type: "string", enum: ["usd_sf_yr","usd_sf_mo","usd_mo_gross","usd_yr_gross","usd_total","usd_sf_total"], description: "REQUIRED whenever stated_floor is given — the same no-bare-numbers rule the rate follows" },
+          quote: { type: "string", description: "their words, as close to verbatim as was heard. Evidence for a human reader; no score ever reads this text." },
+          note: { type: "string" } }, required: ["type"] } },
       note: { type: "string" }, confirm: { type: "boolean" } },
       required: ["idempotency_key","deal","side"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "record-counter", args, async () => {
@@ -1510,23 +1877,85 @@ export const TOOLS = {
       if (args.rate_amount != null && !args.rate_basis)
         throw new ToolError({ error: "missing_basis", hint: "a rate is meaningless without its basis" });
       await rateConfirm(c, args, normRate(args.rate_amount, args.rate_basis), "rate.asking_confirm_band_sf_yr");
+
+      // [0063] EVERYTHING NEW IS VALIDATED BEFORE THE ROUND IS INSERTED. The
+      // envelope would roll a late failure back cleanly, but the caller would get
+      // a foreign_key_violation where it deserves the legal vocabulary — and the
+      // 'deadline' refusal in particular is a sentence, not a constraint name.
+      let submarket = null;
+      const claims = Array.isArray(args.claims) ? args.claims : [];
+      if (args.submarket_condition || claims.length) {
+        await require0063(c);
+        if (args.submarket_condition)
+          submarket = await validateSubmarket(c, args.submarket_condition);
+      }
+      const claimTypes = [];
+      for (const cl of claims) {
+        const t = await validateClaimType(c, cl.type);
+        if (claimTypes.some(x => x.slug === t.slug))
+          throw new ToolError({ error: "duplicate_claim", claim_type: t.slug,
+            hint: "one row per (round, claim class) — a class said twice in one breath is " +
+                  "still one claim. Put the second wording in `quote` or `note`." });
+        if (cl.stated_floor != null && !cl.stated_floor_basis)
+          throw new ToolError({ error: "missing_basis", claim_type: t.slug,
+            hint: "a stated floor is meaningless without its basis, exactly as a rate is" });
+        claimTypes.push(t);
+      }
+
       const round = (await c.query(
         "select coalesce(max(round_no),0)+1 as n from negotiation_round where deal_id=$1 and side=$2",
         [s.id, args.side])).rows[0].n;
+      // submarket_condition joins the column list ONLY when it was given, so this
+      // verb keeps working byte-for-byte on a database where 0063 has not been
+      // applied yet. The Worker deploy and the migration are two separate human
+      // taps and either can come first.
+      const params = [s.id, round, args.side, args.proposed_on || null, args.rate_amount || null,
+        args.rate_basis || null, args.ti_amount || null, args.ti_basis || null,
+        args.free_rent_months || null, args.term_months || null, args.options_note || null,
+        args.escalator || null, args.expires_on || null, args.note || null, actor.id];
+      if (submarket) params.push(submarket);
       const r = await c.query(
         `insert into negotiation_round (deal_id, round_no, side, proposed_on, rate_amount, rate_basis,
            ti_amount, ti_basis, free_rent_months, term_months, options_note, escalator, expires_on,
-           note, created_by, updated_by)
-         values ($1,$2,$3,coalesce($4::date,current_date),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
-         returning id, round_no`,
-        [s.id, round, args.side, args.proposed_on || null, args.rate_amount || null,
-         args.rate_basis || null, args.ti_amount || null, args.ti_basis || null,
-         args.free_rent_months || null, args.term_months || null, args.options_note || null,
-         args.escalator || null, args.expires_on || null, args.note || null, actor.id]);
+           note, created_by, updated_by${submarket ? ", submarket_condition" : ""})
+         values ($1,$2,$3,coalesce($4::date,current_date),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15${submarket ? ", $16" : ""})
+         returning id, round_no`, params);
+
+      const claimsOut = [];
+      for (let i = 0; i < claims.length; i++) {
+        const cl = claims[i], t = claimTypes[i];
+        const ins = await c.query(
+          `insert into negotiation_claim (round_id, claim_type, stated_floor, stated_floor_basis,
+             quote, note, source, created_by)
+           values ($1,$2,$3,$4,$5,$6,'stated',$7) returning id`,
+          [r.rows[0].id, t.slug, cl.stated_floor ?? null, cl.stated_floor_basis || null,
+           cl.quote || null, cl.note || null, actor.id]);
+        claimsOut.push({ claim_id: ins.rows[0].id, type: t.slug, label: t.label,
+                         falsifiable: t.falsifiable, reversal_test: t.reversal_test });
+      }
+
       await writeEvent(c, actor, "record-counter", "deal", s.id,
-        { new: { round, side: args.side, rate: args.rate_amount, basis: args.rate_basis },
+        { new: { round, side: args.side, rate: args.rate_amount, basis: args.rate_basis,
+                 submarket_condition: submarket, claims: claimsOut.map(x => x.type) },
           idempotency_key: args.idempotency_key });
-      return { ok: true, round_id: r.rows[0].id, round_no: r.rows[0].round_no };
+
+      const notes = [];
+      if (claimsOut.some(x => !x.falsifiable))
+        notes.push("One or more of these claims is NOT falsifiable (" +
+          claimsOut.filter(x => !x.falsifiable).map(x => x.type).join(", ") +
+          ") — logged so the tactic is visible in the history, and permanently excluded from " +
+          "every score. Nothing we could ever observe would contradict it.");
+      if (!submarket)
+        notes.push("No submarket_condition on this round. That is fine — the scorecard reads " +
+          "the latest non-null value on the deal — but if nobody has ever recorded one, " +
+          "leverage and skill stay welded together in the numbers.");
+      if (claimsOut.length)
+        notes.push("Each claim is checked against the rounds that come AFTER it; " +
+          "reversal_test says how. Nothing is scored now.");
+
+      return { ok: true, round_id: r.rows[0].id, round_no: r.rows[0].round_no,
+               submarket_condition: submarket, claims: claimsOut,
+               note: notes.join(" ") || undefined };
     }),
   },
 
@@ -1803,12 +2232,12 @@ export const TOOLS = {
 
   "record-finding": {
     write: true,
-    description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is passed as proposes_correction, which is recorded as a proposal for the owning partner and applied by them, never by this verb. STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface.",
+    description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is passed as proposes_correction, which is recorded as a proposal for the owning partner and applied by them, never by this verb. STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface. NOT ONLY PEOPLE SINCE 0066: subject_kind campaign / platform / pillar / format files a finding against a THING — a platform, a content pillar, a format, a campaign — which is how the marketing seat's measured conclusions finally get a home. Read them back through v_record_flag_subject, which resolves every branch to a name.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
-      subject: { type: "string", description: "C-127 / L-204 / V-CPA-006 / P-0301, or an exact deal name" },
-      subject_kind: { type: "string", enum: ["auto","party"], default: "auto",
-        description: "'party' pins the flag to the person/org behind a ref instead of the client/lead/vendor record" },
+      subject: { type: "string", description: "C-127 / L-204 / V-CPA-006 / P-0301, an exact deal name, or — when subject_kind is campaign/platform/pillar/format — a campaign name or a marketing_subject slug ('twitter', 'reel')" },
+      subject_kind: { type: "string", enum: ["auto","party","campaign","platform","pillar","format"], default: "auto",
+        description: "'party' pins the flag to the person/org behind a ref instead of the client/lead/vendor record. THE FOUR MARKETING KINDS (0066) are how a finding about a THING rather than a PERSON gets recorded: 'X has returned no analytics for any of 42 placements' is a platform finding, 'reels outperform statics on reach' is a format finding. Before 0066 those had no subject at all and the marketing seat's core output went nowhere. A platform/pillar/format subject must already exist in marketing_subject — this verb registers nothing, because a typo'd slug minting a new pillar is how a taxonomy becomes noise." },
       kind: { type: "string", description: "what was looked for: verified, email, cell, social, npi, title, discrepancy..." },
       value: { type: "object", description: "the finding, structured. Omit when found:false." },
       found: { type: "boolean", default: true, description: "false records a searched-and-empty result" },
@@ -1829,9 +2258,45 @@ export const TOOLS = {
           hint: "pass the finding as value{}, or pass found:false to record a searched-and-empty result" });
 
       let subjectType, subjectId;
+      const MARKETING_KINDS = ["campaign", "platform", "pillar", "format"];
       if (args.subject_kind === "party") {
         subjectType = "party";
         subjectId = await resolvePartyByRef(c, args.subject);
+      } else if (MARKETING_KINDS.includes(args.subject_kind)) {
+        // [0066] The non-party branch. It resolves through the SAME
+        // (subject_type, subject_id) pointer every other branch uses — a campaign
+        // already has a uuid, and marketing_subject exists to give platforms,
+        // pillars and formats one, rather than bolting a second pointer column
+        // onto record_flag.
+        await require0066(c);
+        if (args.subject_kind === "campaign") {
+          subjectType = "campaign";
+          subjectId = (await resolveCampaign(c, args.subject)).id;
+        } else {
+          const slug = String(args.subject || "").trim().toLowerCase();
+          const r = await c.query(
+            "select id, retired_at from marketing_subject where subject_type=$1 and slug=$2",
+            [args.subject_kind, slug]);
+          if (!r.rows.length) {
+            const known = await c.query(
+              "select slug from marketing_subject where subject_type=$1 and retired_at is null order by slug",
+              [args.subject_kind]);
+            throw new ToolError({ error: "marketing_subject_not_found",
+              subject_kind: args.subject_kind, slug,
+              known_slugs: known.rows.map(x => x.slug),
+              hint: known.rows.length
+                ? "use one of the registered slugs, or register a new one deliberately — this verb never mints one"
+                : `no ${args.subject_kind} is registered yet. 0066 deliberately seeds ZERO pillars ` +
+                  "because none is evidenced anywhere in the record; naming the first one is a " +
+                  "human modelling act, not a side effect of filing a finding." });
+          }
+          subjectType = args.subject_kind;
+          subjectId = r.rows[0].id;
+          if (r.rows[0].retired_at)
+            throw new ToolError({ error: "marketing_subject_retired", slug,
+              retired_at: r.rows[0].retired_at,
+              hint: "findings stay readable against a retired subject, but new ones do not attach to it" });
+        }
       } else {
         const s = await resolveSubject(c, args.subject);
         subjectType = s.type; subjectId = s.id;
@@ -1952,6 +2417,89 @@ export const TOOLS = {
                note: was === "active"
                  ? "this rule was BINDING — re-export compiled-rules so sessions stop loading it"
                  : "it bound nobody; no re-export needed" };
+    }),
+  },
+
+  // ---------- amend-rule (2026-08-02) ----------
+  // The store shipped one-way: teach -> activate -> retire. There was no way to
+  // fix the WORDS of a rule that was otherwise right, so every wording fix meant
+  // retire + re-teach: a new id (breaking every citation), a lost created_at and
+  // activation event, and a REQUIRED fresh human_quote — forcing the partner to
+  // re-say something he already said, to fix prose he never wrote.
+  //
+  // 53 of the 54 proposed rules carry no quote at all; they were imported from
+  // ai-operating-notes.md by a pipeline that correctly refused to fabricate one.
+  // Their statement is our articulation, not his testimony. `update-decision`
+  // already established that a durable record can be corrected rather than
+  // re-litigated; rules simply never got the same affordance.
+  "amend-rule": {
+    write: true, humanOnly: true,
+    description: "Correct the WORDS of an existing rule in place, keeping its id, created_at, taught_by, quote and activation history. THE LINE: amend = same rule, better words; teach + retire = a different rule. Use it to fix compiled prose, tighten an over-broad statement, drop a clause that has gone stale, or re-scope a rule shipped in the wrong scope — anywhere the RULE is right and the SENTENCE is not. Do NOT use it to change what a rule means: a genuinely different ruling is a new rule (teach, with the partner's own words) plus retire-rule on the old one, so the change reads as a decision instead of an edit. human_quote is IMMUTABLE once set — it is the partner's testimony, not prose, and this verb refuses to overwrite it. It WILL fill a NULL quote, which is the backfill path for the imported rules that never had one. Requires base_version from a fresh read; a conflict means someone else wrote, so ask the human and never retry blind. Amending an ACTIVE rule changes what binds every session, so it is human-gated like teach, activate-rule and retire-rule, and the old text is written onto the event so the change is auditable and reversible.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      rule_id: { type: "string" },
+      base_version: { type: "integer", description: "the rule's version, from a fresh read" },
+      statement: { type: "string", description: "the corrected rule text. Omit to leave it as-is." },
+      human_quote: { type: "string", description: "ONLY to fill a quote that is currently absent — the partner's literal words. Refused if the rule already carries one. Never paraphrase into this field." },
+      scope: { type: "object", description: "replacement scope object, e.g. {\"section\":\"...\"}. Omit to leave it as-is." },
+      reason: { type: "string", description: "REQUIRED. Why the wording is being corrected — an unexplained edit to a binding rule is indistinguishable from drift." } },
+      required: ["idempotency_key","rule_id","base_version","reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "amend-rule", args, async () => {
+      const reason = String(args.reason || "").trim();
+      if (!reason) throw new ToolError({ error: "reason_required",
+        hint: "say in one line why the wording is wrong; a silent edit to a binding rule reads as drift later" });
+
+      const cur = await c.query(
+        "select status, statement, human_quote, scope, version from rule where id=$1", [args.rule_id]);
+      if (!cur.rows.length) throw new ToolError({ error: "rule_not_found", rule_id: args.rule_id });
+      const row = cur.rows[0];
+
+      // A retired rule is history. Editing a tombstone rewrites the past instead
+      // of correcting the present.
+      if (row.status === "retired") throw new ToolError({ error: "rule_retired",
+        rule_id: args.rule_id, current_status: row.status,
+        hint: "a withdrawn rule stays as written; teach a new one rather than editing the tombstone" });
+
+      await versionGuard(c, "rule", args.rule_id, args.base_version);
+
+      const hasQuote = !!String(row.human_quote || "").trim();
+      const quoteIn  = args.human_quote === undefined ? undefined : String(args.human_quote).trim();
+      if (quoteIn !== undefined && hasQuote && quoteIn !== String(row.human_quote).trim())
+        throw new ToolError({ error: "human_quote_immutable",
+          current_quote: row.human_quote,
+          hint: "the partner's words are testimony, not prose. Amend the statement instead; to record something DIFFERENT he said, teach a new rule and retire this one." });
+
+      const nextStatement = args.statement === undefined ? row.statement : String(args.statement).trim();
+      if (!nextStatement) throw new ToolError({ error: "empty_statement",
+        hint: "a rule with no words binds nothing — pass the corrected text, or omit the field to leave it alone" });
+
+      const nextQuote = (!hasQuote && quoteIn) ? quoteIn : row.human_quote;
+      const nextScope = args.scope === undefined ? row.scope : args.scope;
+
+      const changed = [];
+      if (nextStatement !== row.statement) changed.push("statement");
+      if (nextQuote !== row.human_quote) changed.push("human_quote");
+      if (JSON.stringify(nextScope) !== JSON.stringify(row.scope)) changed.push("scope");
+      if (!changed.length) throw new ToolError({ error: "no_change",
+        hint: "nothing was written; the rule already reads exactly this way" });
+
+      await c.query("update rule set statement=$1, human_quote=$2, scope=$3 where id=$4",
+        [nextStatement, nextQuote, JSON.stringify(nextScope), args.rule_id]);
+
+      await writeEvent(c, actor, "amend-rule", "rule", args.rule_id, {
+        field: changed.join(","),
+        old: { statement: row.statement, human_quote: row.human_quote, scope: row.scope },
+        new: { statement: nextStatement, human_quote: nextQuote, scope: nextScope },
+        human_quote: nextQuote || null,
+        agent_rationale: reason,
+        idempotency_key: args.idempotency_key });
+
+      const after = await c.query("select version from rule where id=$1", [args.rule_id]);
+      return { ok: true, rule_id: args.rule_id, status: row.status,
+               changed, version: after.rows[0].version, reason,
+               note: row.status === "active"
+                 ? "this rule is BINDING — re-export compiled-rules so sessions load the corrected words"
+                 : "it binds nobody yet; activate-rule is still the gate" };
     }),
   },
 
@@ -2279,6 +2827,599 @@ export const TOOLS = {
           idempotency_key: args.idempotency_key });
       return { ok: true, loop_id: cur.id, number: cur.number, status: resolution,
                moved_to_done_table_in: movedTo };
+    }),
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MARKETING (0066) — the four verbs that give the lane an intent and an answer
+  //
+  // WHAT WAS BROKEN, measured on 2026-08-02 and not inferred. `campaign` held 0
+  // rows. `content_piece` held 89 and every single campaign_id was null. 259
+  // placement_metric rows existed and could not answer whether anything worked,
+  // because nothing in the database ever said what any of it was FOR. The only
+  // writer of any of these tables was pipelines/pull_placement_metrics.py, a
+  // scheduled ingest that creates pieces and placements from Blotato and sets
+  // campaign_id to nothing. The marketing COO seat could SPECIFY a campaign in
+  // prose and could not RECORD one.
+  //
+  // WHY FOUR VERBS AND NOT THREE — the close/score question, answered.
+  // open-campaign and score-campaign are separate on this system's own
+  // precedent: activate-rule and retire-rule are separate, and update-loop and
+  // close-loop are separate, because a state transition that carries a JUDGMENT
+  // needs arguments the opening act must never accept. Folding them together
+  // would mean a verb whose required fields depend on a mode flag, and a mode
+  // flag is how a campaign gets closed by accident. More concretely: scoring
+  // requires a verdict, evidence, and a measurement-coverage check that
+  // open-campaign has no business running, and it must REFUSE a "worked" verdict
+  // formed over unmeasured placements — a refusal that only makes sense at the
+  // closing end. The cost is one more verb; the benefit is that "we decided this
+  // worked" can never be a side effect of editing a start date.
+  //
+  // WHY NO VERB CREATES A content_piece. Checked before deciding, which is the
+  // only reason the answer is trustworthy: all 89 existing pieces were born in
+  // pull_placement_metrics.py, keyed on placement.external_id, at publish time.
+  // A second birth path would mint duplicates the moment the ingest next runs,
+  // because the ingest matches on external_id and a hand-made piece has none.
+  // So pieces arrive by publishing, and attach-to-campaign BINDS them. The real
+  // consequence, stated rather than hidden: content that is PLANNED but not yet
+  // published has no record-layer home at all, and that is a genuine gap for
+  // Joe to rule on, not something to paper over by minting orphan rows here.
+  //
+  // NOTHING HERE IS OUTBOUND AND NOTHING HERE SPENDS. These four verbs write
+  // records about content that already exists. No verb publishes, schedules,
+  // boosts, funds or touches a platform credential — the one human gate is
+  // unchanged.
+
+  "open-campaign": {
+    write: true,
+    description: "Open a campaign: the object that says what a run of content is FOR, so its results can later be judged instead of admired. THIS IS THE MISSING MIDDLE OF THE WHOLE MARKETING LANE — as of 2026-08-02 the campaign table held 0 rows while 89 content pieces and 259 metrics existed, so nothing published in the system's entire recorded history had a stated objective. Requires the objective (goal), the WINDOW (starts_on, optionally ends_on), the CHANNELS, and a success_criterion written so it can be CHECKED: 'X drives three practice-owner replies by Sept 30' is a criterion; 'grow awareness on X' is a restated goal and this verb refuses it. The criterion is required at OPEN because a criterion invented after the numbers arrive is not a criterion, and score-campaign quotes this one back before it accepts any verdict. ONE CAMPAIGN PER NAME, enforced by a unique index — reopening the same name is refused with the existing campaign's id, because the way this system produced 415 organisation rows for 306 real organisations was writers that never looked first. Backdating over content that already published is legitimate and normal (all 89 existing pieces are historical), so a start far in the past asks for confirm rather than refusing. NOT a publishing verb: it schedules nothing, spends nothing, and posts nothing. NOT the place for a piece of content — attach-to-campaign binds those, and it can only bind pieces that already published.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      name: { type: "string", description: "short, human, no ids. Unique — one campaign per name." },
+      goal: { type: "string", description: "the objective in one sentence: what this run of content is FOR" },
+      success_criterion: { type: "string",
+        description: "REQUIRED. What would have to be observably TRUE for this to have worked, stated so it can be checked against the record. Name the observable and, where you can, the number and the date." },
+      starts_on: { type: "string", description: "YYYY-MM-DD. Required — a campaign is a window." },
+      ends_on: { type: "string", description: "YYYY-MM-DD. Omit for an open-ended run; scoring works either way." },
+      channels: { type: "array", items: { type: "string" },
+        description: "platform slugs this runs on: facebook, instagram, linkedin, twitter. Validated against the registered platforms; never empty." },
+      note: { type: "string", description: "anything a later reader needs in order to judge the verdict" },
+      human_quote: { type: "string", description: "the partner's literal words when he set this campaign" },
+      confirm: { type: "boolean", description: "acknowledge an implausible window (deep backdate, or over a year long)" } },
+      required: ["idempotency_key","name","goal","success_criterion","starts_on","channels"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "open-campaign", args, async () => {
+      await require0066(c);
+
+      const name = String(args.name || "").trim();
+      const goal = String(args.goal || "").trim();
+      const crit = String(args.success_criterion || "").trim();
+      if (!name) throw new ToolError({ error: "name_required" });
+      if (!goal) throw new ToolError({ error: "goal_required",
+        hint: "one sentence: what is this run of content FOR?" });
+      if (!crit) throw new ToolError({ error: "success_criterion_required",
+        hint: "what would have to be observably true for this to have worked?" });
+      // A criterion that merely restates the goal is the shape that lets a
+      // campaign be declared a success on vibes. The check is deliberately crude
+      // — it catches the copy-paste, not the merely vague — because a verb
+      // cannot judge prose and pretending otherwise would be worse.
+      if (crit.toLowerCase() === goal.toLowerCase())
+        throw new ToolError({ error: "criterion_restates_goal",
+          hint: "the success criterion must be CHECKABLE, and different from the objective: " +
+                "name the observable, and where you can the number and the date" });
+
+      const existing = await c.query(
+        "select id, status, starts_on, ends_on from campaign where lower(btrim(name))=lower($1)",
+        [name]);
+      if (existing.rows.length)
+        throw new ToolError({ error: "campaign_exists", campaign: existing.rows[0],
+          hint: "one campaign per name. Attach to the existing one, or pick a name that says " +
+                "what makes this run different. Nothing was written." });
+
+      const channels = Array.isArray(args.channels)
+        ? [...new Set(args.channels.map(x => String(x || "").trim().toLowerCase()).filter(Boolean))]
+        : [];
+      if (!channels.length) throw new ToolError({ error: "channels_required",
+        hint: "a campaign with no channel cannot be measured; name at least one platform" });
+      const live = await livePlatformSlugs(c);
+      const unknown = channels.filter(ch => !live.includes(ch));
+      if (unknown.length) throw new ToolError({ error: "unknown_channel", unknown,
+        known_platforms: live,
+        hint: "register a platform in marketing_subject before running a campaign on it — a " +
+              "channel nobody registered is a channel no view will ever roll up" });
+
+      const start = String(args.starts_on || "").trim();
+      const end = args.ends_on ? String(args.ends_on).trim() : null;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(start))
+        throw new ToolError({ error: "bad_date", field: "starts_on", got: args.starts_on });
+      if (end && !/^\d{4}-\d{2}-\d{2}$/.test(end))
+        throw new ToolError({ error: "bad_date", field: "ends_on", got: args.ends_on });
+      if (end && end < start) throw new ToolError({ error: "window_inverted", starts_on: start, ends_on: end,
+        hint: "an end before its start would exclude every piece from every date filter" });
+
+      // PLAUSIBILITY, NOT PROHIBITION. Backdating a campaign over content that
+      // already published is exactly what this lane needs first — all 89 pieces
+      // are historical — so a deep backdate ASKS rather than refuses.
+      const today = new Date().toISOString().slice(0, 10);
+      const days = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+      if (!args.confirm) {
+        if (days(start, today) > 90)
+          throw new ToolError({ error: "needs_confirm",
+            reason: `starts_on is ${days(start, today)} days in the past`,
+            hint: "backdating over already-published content is legitimate — resubmit with " +
+                  "confirm:true if that is what you mean, and say so in note" });
+        if (end && days(start, end) > 365)
+          throw new ToolError({ error: "needs_confirm",
+            reason: `the window is ${days(start, end)} days long`,
+            hint: "a campaign longer than a year is usually a pillar wearing a campaign's " +
+                  "clothes, and it will never be scorable. Resubmit with confirm:true if intended" });
+      }
+
+      const r = await c.query(
+        `insert into campaign (name, goal, success_criterion, starts_on, ends_on, channels,
+                               status, created_by, updated_by)
+         values ($1,$2,$3,$4::date,$5::date,$6,'active',$7,$7)
+         returning id, version, starts_on, ends_on`,
+        [name, goal, crit, start, end, channels, actor.id]);
+      const row = r.rows[0];
+
+      // WHAT EVIDENCE THIS CAMPAIGN CAN EVEN HOPE FOR, returned at open time
+      // rather than discovered at scoring time. On these channels, in this
+      // window: how many placements exist and how many of them are measured. If
+      // the answer is "42 placements, 0 measured", the caller learns NOW that
+      // this campaign is unscorable, instead of six weeks from now.
+      const ev = await c.query(
+        `select count(*)::int as placements,
+                count(*) filter (where measured)::int as measured,
+                count(*) filter (where campaign_id is null)::int as unattached
+           from v_placement_measurement
+          where platform = any($1)
+            and (live_at is null or live_at::date >= $2::date)
+            and ($3::date is null or live_at is null or live_at::date <= $3::date)`,
+        [channels, start, end]);
+
+      await writeEvent(c, actor, "open-campaign", "campaign", row.id,
+        { new: { name, goal, success_criterion: crit, starts_on: start, ends_on: end,
+                 channels, status: "active" },
+          human_quote: args.human_quote || null,
+          agent_rationale: args.note || null,
+          idempotency_key: args.idempotency_key });
+
+      return { ok: true, campaign_id: row.id, name, version: row.version,
+               starts_on: row.starts_on, ends_on: row.ends_on, channels, status: "active",
+               success_criterion: crit,
+               evidence_available_in_window: {
+                 placements: ev.rows[0].placements,
+                 measured: ev.rows[0].measured,
+                 unmeasured: ev.rows[0].placements - ev.rows[0].measured,
+                 unattached_to_any_campaign: ev.rows[0].unattached },
+               note: ev.rows[0].measured === 0
+                 ? "NOTHING in this window on these channels is measured today. This campaign " +
+                   "is not scorable until measure-placement or the Blotato pull lands metrics — " +
+                   "say that to the human rather than letting the campaign imply evidence it has not got."
+                 : null };
+    }),
+  },
+
+  "score-campaign": {
+    write: true,
+    description: "Close a campaign with a VERDICT against the criterion it was opened with — the act that turns a pile of metrics into an answer. Separate from open-campaign on purpose (the same reason retire-rule is separate from activate-rule): a verdict is a judgment, it needs arguments opening must never accept, and it must be impossible to reach by accident while editing a date. THE REFUSAL THAT MATTERS: it will not accept 'worked' or 'did_not_work' over ZERO measured placements, and it asks for confirm below the coverage floor in system_config (marketing.scoring_min_coverage_pct). 73 of 89 placements in this system have never been measured, including all 42 on X, so a verdict formed over them would be a guess wearing a number. 'inconclusive' is always available and is the HONEST answer when the measurement never happened — use it rather than reaching for confirm. Snapshots the coverage into coverage_at_scoring so nobody can later re-read a thin verdict as a thick one. Requires base_version from a fresh read. Refuses a campaign that is already scored: changing a recorded verdict is a new fact, not an edit, and Joe rules on it.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      campaign: { type: "string", description: "campaign name (exact) or uuid" },
+      base_version: { type: "integer", description: "from a fresh read; a conflict is a question for the human, never a retry" },
+      verdict: { type: "string", enum: ["worked","did_not_work","inconclusive"],
+        description: "measured against the success_criterion this campaign was OPENED with — the verb quotes it back to you in the response" },
+      evidence: { type: "string",
+        description: "REQUIRED. What in the record supports this verdict, in one or two lines. Name the numbers you read." },
+      close: { type: "boolean", default: true,
+        description: "false scores it but leaves status active — for a mid-flight read-out. The verdict is still recorded and still requires evidence." },
+      human_quote: { type: "string", description: "the partner's literal words when he called it" },
+      confirm: { type: "boolean", description: "acknowledge scoring below the coverage floor" } },
+      required: ["idempotency_key","campaign","base_version","verdict","evidence"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "score-campaign", args, async () => {
+      await require0066(c);
+
+      const evidence = String(args.evidence || "").trim();
+      if (!evidence) throw new ToolError({ error: "evidence_required",
+        hint: "a verdict with no evidence is an opinion the record will later quote as a fact" });
+
+      const cam = await resolveCampaign(c, args.campaign);
+      await versionGuard(c, "campaign", cam.id, args.base_version);
+      if (cam.scored_at) throw new ToolError({ error: "already_scored",
+        campaign_id: cam.id, verdict: cam.outcome_verdict, scored_at: cam.scored_at,
+        outcome_note: cam.outcome_note,
+        hint: "this campaign already carries a verdict. Changing it is a new fact, not an " +
+              "edit — surface the existing verdict to the human and let him rule. Nothing was written." });
+
+      const sc = (await c.query(
+        `select placements, pieces, measured_placements, unmeasured_placements,
+                coverage_pct, views_total, interactions_total
+           from v_campaign_scorecard where campaign_id=$1`, [cam.id])).rows[0]
+        || { placements: 0, pieces: 0, measured_placements: 0, unmeasured_placements: 0,
+             coverage_pct: null, views_total: null, interactions_total: null };
+
+      const measured = Number(sc.measured_placements || 0);
+      const coverage = sc.coverage_pct === null ? null : Number(sc.coverage_pct);
+
+      // THE HARD FLOOR, and confirm cannot cross it. A campaign over which
+      // nothing at all was measured has no evidence of any kind, so 'worked' and
+      // 'did_not_work' are both unsupportable — not merely thin. 'inconclusive'
+      // is the true answer and is always allowed, which is why this refuses
+      // instead of asking: an unmeasured campaign is exactly the case where a
+      // confirm prompt would be clicked through.
+      if (measured === 0 && args.verdict !== "inconclusive")
+        throw new ToolError({ error: "no_measured_evidence",
+          campaign_id: cam.id, placements: Number(sc.placements || 0),
+          measured_placements: 0, unmeasured_placements: Number(sc.unmeasured_placements || 0),
+          hint: "not one placement on this campaign carries a metric, so '" + args.verdict +
+                "' cannot be supported by anything. Record 'inconclusive' with the reason, or " +
+                "measure the placements first. An unmeasured placement is NOT a zero result." });
+
+      // THE SOFT FLOOR: thin but real evidence asks rather than refuses.
+      const floor = Number(await config(c, "marketing.scoring_min_coverage_pct", 50));
+      if (!args.confirm && coverage !== null && coverage < floor && args.verdict !== "inconclusive")
+        throw new ToolError({ error: "needs_confirm",
+          reason: `only ${coverage}% of this campaign's placements are measured ` +
+                  `(${measured} of ${sc.placements}); the floor is ${floor}%`,
+          measured_placements: measured, unmeasured_placements: Number(sc.unmeasured_placements || 0),
+          hint: "the unmeasured placements are not zeros, they are unknowns. Either measure " +
+                "more, record 'inconclusive', or resubmit with confirm:true and say in evidence " +
+                "why the measured subset is representative." });
+
+      const snapshot = { placements: Number(sc.placements || 0), pieces: Number(sc.pieces || 0),
+                         measured_placements: measured,
+                         unmeasured_placements: Number(sc.unmeasured_placements || 0),
+                         coverage_pct: coverage,
+                         views_total: sc.views_total === null ? null : Number(sc.views_total),
+                         interactions_total: sc.interactions_total === null ? null : Number(sc.interactions_total),
+                         floor_pct: floor, confirmed_below_floor: !!args.confirm,
+                         snapshot_at: new Date().toISOString() };
+
+      const close = args.close !== false;
+      await c.query(
+        `update campaign set outcome_verdict=$1, outcome_note=$2, coverage_at_scoring=$3,
+                             scored_at=now(), scored_by=$4, updated_by=$4,
+                             status = case when $5 then 'closed' else status end
+          where id=$6`,
+        [args.verdict, evidence, JSON.stringify(snapshot), actor.id, close, cam.id]);
+
+      await writeEvent(c, actor, "score-campaign", "campaign", cam.id, {
+        field: "outcome_verdict",
+        old: { status: cam.status, outcome_verdict: null },
+        new: { status: close ? "closed" : cam.status, outcome_verdict: args.verdict,
+               coverage: snapshot },
+        agent_rationale: evidence,
+        human_quote: args.human_quote || null,
+        idempotency_key: args.idempotency_key });
+
+      return { ok: true, campaign_id: cam.id, name: cam.name,
+               verdict: args.verdict, status: close ? "closed" : cam.status,
+               scored_against_criterion: cam.success_criterion,
+               coverage: snapshot,
+               note: coverage !== null && coverage < 100
+                 ? `${snapshot.unmeasured_placements} of ${snapshot.placements} placements on this ` +
+                   "campaign were never measured. Say that beside the verdict — the totals above " +
+                   "cover the measured subset only and are not the campaign's whole result."
+                 : null };
+    }),
+  },
+
+  "attach-to-campaign": {
+    write: true,
+    description: "Bind published content to the campaign it belongs to — the link that makes 259 metrics answerable. Takes content by the handles a caller actually holds: the live post URL, the Blotato post id, or a placement/piece uuid. IT DOES NOT CREATE CONTENT, and that is a decision from evidence rather than a limitation: all 89 existing pieces were created by pipelines/pull_placement_metrics.py at publish time, keyed on placement.external_id, so a second birth path here would mint a duplicate the moment the ingest next ran. Content that is PLANNED but unpublished therefore has no record-layer home yet — say so plainly rather than inventing a row. ATOMIC: if any item cannot be resolved the WHOLE call refuses and nothing is written, because a partial attach that silently skips two items is a campaign that quietly under-reports its own content. A piece already attached to a DIFFERENT campaign is refused; moving one is `reattach` with base_version and a reason, one piece at a time, because re-pointing content rewrites what a past verdict was based on. Attaching content that published outside the campaign's window asks for confirm. The response always reports how many of the attached placements are actually MEASURED — usually the answer is few, and the caller needs to know that before quoting any total.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      campaign: { type: "string", description: "campaign name (exact) or uuid" },
+      items: { type: "array", items: { type: "string" },
+        description: "post URLs, Blotato post ids, placement uuids or content_piece uuids. Max 100." },
+      reattach: { type: "boolean",
+        description: "move a piece off another campaign. Requires exactly ONE item, a reason, and piece_base_version." },
+      piece_base_version: { type: "integer", description: "content_piece.version, from a fresh read. reattach only." },
+      reason: { type: "string", description: "REQUIRED for reattach: why this content belongs to a different campaign than the one it was filed under" },
+      confirm: { type: "boolean", description: "acknowledge attaching content published outside the campaign window" } },
+      required: ["idempotency_key","campaign","items"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "attach-to-campaign", args, async () => {
+      await require0066(c);
+
+      const items = Array.isArray(args.items) ? args.items.filter(x => String(x || "").trim()) : [];
+      if (!items.length) throw new ToolError({ error: "items_required" });
+      if (items.length > 100) throw new ToolError({ error: "too_many_items", count: items.length,
+        hint: "max 100 per call — split the batch" });
+
+      const cam = await resolveCampaign(c, args.campaign);
+      if (cam.scored_at && !args.confirm)
+        throw new ToolError({ error: "needs_confirm",
+          reason: "this campaign is already scored; adding content changes what the recorded verdict covers",
+          verdict: cam.outcome_verdict, scored_at: cam.scored_at,
+          hint: "resubmit with confirm:true only if the verdict is still honest with this " +
+                "content in it, and expect to re-state the coverage" });
+
+      // RESOLVE EVERYTHING FIRST, WRITE NOTHING UNTIL IT ALL RESOLVES. A partial
+      // attach is the false-completeness failure in this domain: the campaign
+      // would look complete while quietly missing whatever did not resolve.
+      const resolved = [];
+      const failed = [];
+      for (const raw of items) {
+        const ref = String(raw).trim();
+        try {
+          let piece = null, placement = null;
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)) {
+            const p = await c.query("select id, campaign_id, version, status from content_piece where id=$1", [ref]);
+            if (p.rows.length) piece = p.rows[0];
+          }
+          if (!piece) {
+            placement = await resolvePlacement(c, ref);
+            const p = await c.query(
+              "select id, campaign_id, version, status from content_piece where id=$1", [placement.piece_id]);
+            piece = p.rows[0];
+          }
+          resolved.push({ ref, piece, placement });
+        } catch (e) {
+          failed.push({ ref, error: e.payload ? e.payload.error : "unresolved",
+                        detail: e.payload ? e.payload.hint : String(e) });
+        }
+      }
+      if (failed.length)
+        throw new ToolError({ error: "unresolved_items", unresolved: failed,
+          resolved_count: resolved.length,
+          hint: "NOTHING was written. Every item must resolve, because a campaign that " +
+                "silently dropped two of its twelve posts under-reports its own content and " +
+                "nothing downstream can tell." });
+
+      // Reattach is a different act with a different blast radius, so it has
+      // different rules: one piece, a version guard, and a stated reason. The
+      // plain attach path needs no version guard because it only ever writes
+      // null -> value and the update is conditional on the null, so it cannot
+      // clobber a concurrent writer — it loses the race visibly instead.
+      const reattach = args.reattach === true;
+      if (reattach) {
+        if (resolved.length !== 1) throw new ToolError({ error: "reattach_is_one_at_a_time",
+          count: resolved.length,
+          hint: "moving content between campaigns rewrites what a past verdict was based on; " +
+                "do it deliberately, one piece at a time" });
+        if (!String(args.reason || "").trim()) throw new ToolError({ error: "reason_required",
+          hint: "say why this content belongs to a different campaign than the one it was filed under" });
+        await versionGuard(c, "content_piece", resolved[0].piece.id, args.piece_base_version);
+      }
+
+      // Window plausibility, across the batch, once.
+      if (!args.confirm) {
+        const ids = resolved.map(r => r.piece.id);
+        const out = await c.query(
+          `select count(*)::int as n from placement p
+            where p.piece_id = any($1) and p.live_at is not null
+              and (p.live_at::date < $2::date
+                   or ($3::date is not null and p.live_at::date > $3::date))`,
+          [ids, cam.starts_on, cam.ends_on]);
+        if (out.rows[0].n > 0)
+          throw new ToolError({ error: "needs_confirm",
+            reason: `${out.rows[0].n} of these placements published outside the campaign window ` +
+                    `(${cam.starts_on} to ${cam.ends_on || "open"})`,
+            hint: "either the window is wrong or this content is not part of this campaign. " +
+                  "Resubmit with confirm:true if you mean it." });
+      }
+
+      const attached = [], already = [], conflicts = [];
+      for (const r of resolved) {
+        if (r.piece.campaign_id === cam.id) { already.push(r.ref); continue; }
+        if (r.piece.campaign_id && !reattach) {
+          const other = await c.query("select name from campaign where id=$1", [r.piece.campaign_id]);
+          conflicts.push({ ref: r.ref, piece_id: r.piece.id,
+                           currently_on: other.rows[0] ? other.rows[0].name : r.piece.campaign_id });
+          continue;
+        }
+        const upd = reattach
+          ? await c.query(
+              "update content_piece set campaign_id=$1, updated_by=$2 where id=$3 returning id",
+              [cam.id, actor.id, r.piece.id])
+          : await c.query(
+              "update content_piece set campaign_id=$1, updated_by=$2 where id=$3 and campaign_id is null returning id",
+              [cam.id, actor.id, r.piece.id]);
+        if (!upd.rows.length) { // lost a race with a concurrent attach
+          const now = await c.query("select campaign_id from content_piece where id=$1", [r.piece.id]);
+          conflicts.push({ ref: r.ref, piece_id: r.piece.id,
+                           currently_on: now.rows[0] ? now.rows[0].campaign_id : null,
+                           note: "another writer attached this piece first — nothing was overwritten" });
+          continue;
+        }
+        attached.push({ ref: r.ref, piece_id: r.piece.id,
+                        moved_from: reattach ? r.piece.campaign_id : null });
+        await writeEvent(c, actor, reattach ? "attach-to-campaign:reattach" : "attach-to-campaign",
+          "content_piece", r.piece.id,
+          { field: "campaign_id",
+            old: { campaign_id: r.piece.campaign_id },
+            new: { campaign_id: cam.id, campaign: cam.name },
+            agent_rationale: args.reason || null,
+            idempotency_key: args.idempotency_key });
+      }
+
+      if (conflicts.length)
+        throw new ToolError({ error: "already_on_another_campaign", conflicts,
+          hint: "a piece belongs to one campaign. Use reattach (one item, a reason and " +
+                "piece_base_version) if it really moved. This call is rolled back whole." });
+
+      // THE COVERAGE LINE. Attaching content does not measure it, and a caller
+      // who reads only "12 attached" will quote totals that cover almost none of
+      // them. As of 2026-08-02 that is 73 placements out of 89.
+      const cov = (await c.query(
+        `select count(*)::int as placements,
+                count(*) filter (where measured)::int as measured
+           from v_placement_measurement where campaign_id=$1`, [cam.id])).rows[0];
+
+      return { ok: true, campaign_id: cam.id, campaign: cam.name,
+               attached: attached.length, attached_items: attached,
+               already_attached: already,
+               campaign_now_covers: {
+                 placements: cov.placements, measured: cov.measured,
+                 unmeasured: cov.placements - cov.measured },
+               note: cov.measured < cov.placements
+                 ? `${cov.placements - cov.measured} of this campaign's ${cov.placements} ` +
+                   "placements carry NO metrics. They are unmeasured, not zero — do not " +
+                   "average or total over them as if they scored nothing."
+                 : null };
+    }),
+  },
+
+  "measure-placement": {
+    write: true,
+    description: "Record what one placement actually did — including, and especially, that it could not be measured. THE RULE THIS VERB EXISTS FOR: an unmeasured placement must stay VISIBLY unmeasured and must never read as a zero. 73 of 89 placements have never been measured, among them all 42 on X, and a reader who totals metrics by platform is currently handed 0 for X, which is a lie about performance rather than a fact about it. So `unavailable:true` with a reason is a first-class outcome here, exactly the way record-finding's found:false is: it lands a real placement_measurement row saying we looked and there was nothing, which is a different fact from nobody having looked. USE THIS FOR MEASUREMENTS THE SCHEDULED PULL CANNOT SEE — a figure read off a platform's own dashboard, an off-platform outcome (a DM, a reply, a consult that traced back to a post), or a confirmed 'this platform returns no analytics for us'. It REFUSES source 'blotato_api': that provenance belongs to pipelines/pull_placement_metrics.py, and a hand-written row claiming it would make the pull's output untrustworthy — use 'blotato_ui_manual', 'platform_native', 'joe_observed' or similar. A genuine measured zero IS allowed and is common (173 of 259 existing metric values are 0), but a payload where EVERY value is zero asks for confirm, because that is the shape an empty API response takes and it is precisely how an unmeasured post becomes a measured zero. Metrics are snapshots keyed (placement, kind, observed_at), so re-recording the same instant is a no-op rather than a duplicate.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      placement: { type: "string", description: "the live post URL, the Blotato post id, or the placement uuid" },
+      source: { type: "string",
+        description: "REQUIRED. Where the number came from: 'blotato_ui_manual', 'platform_native', 'joe_observed', a URL. 'blotato_api' is REFUSED — that source string belongs to the scheduled pull." },
+      metrics: { type: "object",
+        description: "{kind: number}. Kinds are stored verbatim as the source names them, snake_cased — views_count, reach_count, likes_count, comments_count, shares_count, saves_count, follows_count, interactions_sum, profile_visits_count, profile_activity_count. Do NOT map a platform's word onto a different platform's word; an equivalence nobody ruled is a wrong number later." },
+      unavailable: { type: "boolean",
+        description: "true records that measurement was ATTEMPTED and returned nothing. Requires reason. This is the honest alternative to silence, and to a zero." },
+      reason: { type: "string", description: "REQUIRED with unavailable: why there is no number — 'the platform exposes no analytics for this account', 'post deleted', 'API returns 404'." },
+      observed_at: { type: "string", description: "when the number was read (ISO); defaults to now. The snapshot key — pass the real read time, not the time you typed it." },
+      note: { type: "string", description: "anything a later reader needs" },
+      confirm: { type: "boolean", description: "acknowledge an all-zero payload or an out-of-band value" } },
+      required: ["idempotency_key","placement","source"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "measure-placement", args, async () => {
+      await require0066(c);
+
+      const source = String(args.source || "").trim();
+      if (!source) throw new ToolError({ error: "source_required",
+        hint: "a number with no provenance is a rumour; say where you read it" });
+      if (source.toLowerCase() === "blotato_api")
+        throw new ToolError({ error: "reserved_source", source,
+          hint: "'blotato_api' is the scheduled pull's provenance " +
+                "(pipelines/pull_placement_metrics.py). A hand-written row wearing it would " +
+                "make every API row unverifiable. Use 'blotato_ui_manual' for a figure read " +
+                "off Blotato's own screen, 'platform_native' for the platform's dashboard, or " +
+                "'joe_observed' for something Joe saw happen." });
+
+      const unavailable = args.unavailable === true;
+      const metrics = (args.metrics && typeof args.metrics === "object") ? args.metrics : null;
+      const kinds = metrics ? Object.keys(metrics).filter(k => metrics[k] !== undefined && metrics[k] !== null) : [];
+
+      // THE TWO REFUSALS THAT KEEP SILENCE OUT OF THE RECORD.
+      if (unavailable && kinds.length)
+        throw new ToolError({ error: "ambiguous_measurement",
+          hint: "unavailable:true says there was nothing to record. Send the metrics, or send " +
+                "the unavailability — never both in one act." });
+      if (!unavailable && !kinds.length)
+        throw new ToolError({ error: "nothing_to_record",
+          hint: "pass metrics{}, or pass unavailable:true with a reason. An empty call would " +
+                "leave this placement looking exactly like the 73 nobody has ever measured, " +
+                "which is the one outcome this verb exists to prevent." });
+      if (unavailable && !String(args.reason || "").trim())
+        throw new ToolError({ error: "reason_required",
+          hint: "'no data' with no reason cannot be acted on. Say whether the platform gives " +
+                "us nothing, the post is gone, or the pull has simply never run — those lead " +
+                "to three different next moves." });
+
+      const pl = await resolvePlacement(c, args.placement);
+      const observedAt = args.observed_at || null;
+
+      if (unavailable) {
+        const att = await c.query(
+          `insert into placement_measurement (placement_id, attempted_at, source, outcome, reason,
+                                              metric_kinds, note, recorded_by)
+           values ($1, coalesce($2::timestamptz, now()), $3, 'unavailable', $4, '{}', $5, $6)
+           on conflict (placement_id, source, attempted_at) do nothing
+           returning id, attempted_at`,
+          [pl.id, observedAt, source, String(args.reason).trim(), args.note || null, actor.id]);
+        await writeEvent(c, actor, "measure-placement", "placement", pl.id, {
+          occurred_at: observedAt,
+          field: "measurement",
+          new: { outcome: "unavailable", source, reason: String(args.reason).trim() },
+          agent_rationale: "attempted and returned nothing — recorded so it is not mistaken for zero",
+          idempotency_key: args.idempotency_key });
+        return { ok: true, placement_id: pl.id, platform: pl.platform,
+                 outcome: "unavailable", source, reason: String(args.reason).trim(),
+                 recorded: !!att.rows.length,
+                 measured: false,
+                 note: "This placement is now recorded as ATTEMPTED AND UNMEASURED. It still " +
+                       "reports measured:false in v_placement_measurement and it still has no " +
+                       "number — that is the point. Do not read it as a zero." };
+      }
+
+      // ── values: validated one at a time, and the refusals are specific ──────
+      const band = await config(c, "marketing.metric_value_band", { max: 1000000 });
+      const clean = {};
+      let allZero = true;
+      for (const k of kinds) {
+        const key = String(k).trim();
+        if (!/^[a-z][a-z0-9_]*$/.test(key))
+          throw new ToolError({ error: "bad_metric_kind", kind: k,
+            hint: "kinds are the source's own names, snake_cased: views_count, reach_count, " +
+                  "interactions_sum. Never invent an equivalence between two platforms' words." });
+        const v = Number(metrics[k]);
+        if (!Number.isFinite(v))
+          throw new ToolError({ error: "bad_metric_value", kind: key, got: metrics[k],
+            hint: "values are numbers. A missing number is not 0 — omit the kind entirely, or " +
+                  "record the whole placement as unavailable." });
+        if (v < 0)
+          throw new ToolError({ error: "negative_metric", kind: key, got: v,
+            hint: "no engagement count is negative; this is a sign error or a delta pasted as a total" });
+        if (!args.confirm && Number(band.max) && v > Number(band.max))
+          throw new ToolError({ error: "needs_confirm",
+            reason: `${key} = ${v} exceeds the plausibility band (${band.max})`,
+            hint: "the largest real value in placement_metric on 2026-08-02 was 845,877 " +
+                  "(view_time_ms_sum). Check for a units error, then resubmit with confirm:true if real." });
+        if (v !== 0) allZero = false;
+        clean[key] = v;
+      }
+
+      // THE ALL-ZERO GATE, and the number behind it. Real zeros are ordinary: 173
+      // of 259 existing metric values are 0. But across 26 real analytics
+      // snapshots, ZERO of them were all-zero — an entirely zero payload is not
+      // what real data looks like, it is what an empty API response looks like.
+      // Writing one turns an unmeasured placement into a measured zero, which is
+      // exactly the false completeness this whole verb guards against.
+      if (allZero && !args.confirm)
+        throw new ToolError({ error: "needs_confirm",
+          reason: `every one of the ${Object.keys(clean).length} values is 0`,
+          hint: "0 of 26 real snapshots in this system were all-zero, so this is far more " +
+                "likely an empty response than a measured nothing. If the platform genuinely " +
+                "returned no data, use unavailable:true with a reason — that keeps the " +
+                "placement UNMEASURED instead of recording it as a zero result. Resubmit with " +
+                "confirm:true only if the post truly earned zero of everything." });
+
+      let landed = 0, unchanged = 0;
+      for (const [kind, value] of Object.entries(clean)) {
+        const r = await c.query(
+          `insert into placement_metric (placement_id, observed_at, kind, value, source)
+           values ($1, coalesce($2::timestamptz, now()), $3, $4, $5)
+           on conflict (placement_id, kind, observed_at) do nothing returning kind`,
+          [pl.id, observedAt, kind, value, source]);
+        if (r.rows.length) landed++; else unchanged++;
+      }
+
+      await c.query(
+        `insert into placement_measurement (placement_id, attempted_at, source, outcome, reason,
+                                            metric_kinds, note, recorded_by)
+         values ($1, coalesce($2::timestamptz, now()), $3, 'recorded', null, $4, $5, $6)
+         on conflict (placement_id, source, attempted_at) do nothing`,
+        [pl.id, observedAt, source, Object.keys(clean), args.note || null, actor.id]);
+
+      // The same status catch-up the scheduled pull performs, for the same
+      // reason: a piece whose placements gained metrics is 'measured'. Guarded on
+      // the current status so it can never walk a retired or rejected piece back
+      // into the live funnel.
+      const promoted = await c.query(
+        `update content_piece set status='measured', updated_by=$1
+          where id=$2 and status in ('live','scheduled') returning id`,
+        [actor.id, pl.piece_id]);
+
+      await writeEvent(c, actor, "measure-placement", "placement", pl.id, {
+        occurred_at: observedAt,
+        field: "metrics",
+        new: { outcome: "recorded", source, kinds: Object.keys(clean), values: clean },
+        agent_rationale: args.note || null,
+        idempotency_key: args.idempotency_key });
+
+      return { ok: true, placement_id: pl.id, platform: pl.platform, piece_id: pl.piece_id,
+               outcome: "recorded", source, measured: true,
+               metrics_written: landed, metrics_already_present: unchanged,
+               piece_marked_measured: !!promoted.rows.length,
+               note: unchanged && !landed
+                 ? "every kind already had a row at this exact observed_at — nothing changed. " +
+                   "Pass the real read time if this was a new pull."
+                 : null };
     }),
   },
 };

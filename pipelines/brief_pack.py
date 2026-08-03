@@ -89,7 +89,10 @@ def db_url():
     if env.exists():
         for line in env.read_text().splitlines():
             if line.startswith("CARR_DB_EXPORTER_URL="):
-                return line.split("=", 1)[1].strip()
+                # .strip("\"'") — db.env values are shell-quoted so `set -a; . db.env`
+                # survives an `&` in the DSN; psycopg needs them unquoted. Full reasoning
+                # in exporters/common.py. Added 2026-08-02.
+                return line.split("=", 1)[1].strip().strip("\"'")
     return None
 
 
