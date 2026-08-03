@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.carr.partner-ping — buzz this partner when the OTHER one needs them.
+
+  Install (per machine, once):
+    cp ops/com.carr.partner-ping.plist ~/Library/LaunchAgents/
+    # set CARR_PARTNER below to joe or dell FIRST — it is the one machine-specific
+    # value, and a wrong one makes the watcher silently watch the wrong partner
+    launchctl load ~/Library/LaunchAgents/com.carr.partner-ping.plist
+
+  Stop it:
+    launchctl unload ~/Library/LaunchAgents/com.carr.partner-ping.plist
+
+  Runs every 120s. It is a single SQL query plus a notification, not a Claude
+  session, which is the whole reason it can run this often without costing
+  anything. Do not convert this into a routine — see the header of
+  pipelines/partner_ping.py for why that would be ~288 agent runs a day.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.carr.partner-ping</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/booko/carr-system/.venv/bin/python</string>
+    <string>/Users/booko/carr-system/tools/db-tap.py</string>
+    <string>run</string>
+    <string>pipelines/partner_ping.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/booko/carr-system</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- THE ONE MACHINE-SPECIFIC VALUE. joe on Joe's Mac, dell on Dell's. -->
+    <key>CARR_PARTNER</key>
+    <string>joe</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>120</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/carr-partner-ping.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/carr-partner-ping.err</string>
+</dict>
+</plist>
