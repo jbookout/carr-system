@@ -12,10 +12,11 @@ WHERE an answer lives without opening files (graph-engineering build,
 DERIVED VIEW: regenerate any time with `./run.sh section-index`; never
 hand-edit the output. Truth is the markdown files themselves.
 
-Excluded on purpose: cold storage (Source Material, Output, archives),
-app internals (.obsidian, .claude), and any file self-marked SUPERSEDED
-(e.g. DNA/Network/vendors.md — frozen backup; retrieval must never route a
-session into stale data). Graph/ IS indexed: its per-entity notes are derived
+Excluded on purpose: cold storage (Source Material, Output, archives), staging
+and pending-deletion folders (_asset_staging, _to_delete), the exporter's own
+*.generations snapshot directories, app internals (.obsidian, .claude), and any
+file self-marked SUPERSEDED — retrieval must never route a session into stale
+data. Graph/ IS indexed: its per-entity notes are derived
 from the live xlsx/JSON sources of truth, so they are the entity-level nodes
 retrieval should land on.
 
@@ -28,9 +29,27 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.pat
 OUT  = os.path.join(ROOT, "Automation", "section-index.tsv")
 
 SKIP_DIRS  = {"Source Material", "Output", ".obsidian", ".claude", ".git",
-              "source-exports", "photos", "Prospects"}
+              "source-exports", "photos", "Prospects",
+              # 2026-08-03, IT sweep. _asset_staging put 352 rows into the index
+              # and _to_delete 36 — a folder whose entire purpose is pending
+              # deletion was being served to sessions as retrievable knowledge.
+              "_asset_staging", "_to_delete"}
 SKIP_FILES = {"decision-history-archive.md", "open-loops-closed.md", "section-index.tsv"}
 SUPERSEDED = re.compile(r"SUPERSEDED|RETIRED\b", re.IGNORECASE)
+
+# THE ARCHIVE LEAK, 2026-08-03. The exporter keeps per-file version snapshots in
+# SUFFIX-named directories ("introduction-rules.md.generations"), and the prune
+# below only dropped dot-PREFIXED names. Forty such dirs exist in the vault and
+# ZERO are named ".generations", so every one of them was walked: 55 dead paths
+# entered the index, and a live query ranked a DELETED archive copy of
+# introduction-rules.md at 12.0 ABOVE the live file at 8.0.
+#
+# The SUPERSEDED guard could never have caught these either. It reads a file's
+# first three lines, and a byte-copy snapshot carries the ORIGINAL's header —
+# including its "GENERATED ... do not hand-edit" banner — not an archive marker.
+# A snapshot is indistinguishable from the live file by content; only its
+# LOCATION says it is old. So this has to be a path rule.
+GENERATIONS_SUFFIX = ".generations"
 
 HDR = re.compile(r"^(#{1,4})\s+(.*\S)\s*$")
 
@@ -84,7 +103,10 @@ def index_file(abspath, relpath, rows):
 def main():
     rows = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in SKIP_DIRS
+                             and not d.startswith(".")
+                             and not d.endswith(GENERATIONS_SUFFIX))
         for name in sorted(filenames):
             if not name.endswith(".md") or name in SKIP_FILES:
                 continue
