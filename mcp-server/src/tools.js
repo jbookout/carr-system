@@ -281,8 +281,10 @@ const RETIRED_REF_CAP = 10;
 //
 // The cost, stated rather than hidden: an edge whose endpoint carries NO ref
 // cannot be walked. Today that is zero edges of 31. The verb counts them and
-// returns the count as `edges_unwalkable` rather than dropping them quietly, so
-// the day it stops being zero the answer says so instead of just getting smaller.
+// returns the count as `edges_unwalkable_total` rather than dropping them
+// quietly, so the day it stops being zero the answer says so instead of just
+// getting smaller. That field is graph-wide; the per-target list beside it in
+// the response is `unwalkable_edges`, and the two carry different scopes.
 const WHO_EDGES = `
   select from_ref, from_name, kind, to_ref, to_name, note
     from v_party_graph
@@ -1108,7 +1110,16 @@ export const TOOLS = {
         max_depth: depth,
         path_count: paths.rows.length,
         capped: paths.rows.length === cap,
-        edges_unwalkable: unwalkable.rows[0].n,
+        // SYSTEM-WIDE total, and the name now says so. Renamed 2026-08-03: it
+        // sat directly beside the per-target list reading `6` next to `[]`, and
+        // a session read that pair as data corruption and started diagnosing an
+        // integrity failure that did not exist. Both values were always correct
+        // — the scalar counts every unwalkable edge in the graph (its purpose,
+        // per opus-work-orders-2026-07-31: "if a ref-less party ever joins the
+        // graph, this goes non-zero and THAT is the trigger"), while the list
+        // below carries only the edges touching THIS target. Two scopes, two
+        // names that looked like one. Nothing consumed the old name.
+        edges_unwalkable_total: unwalkable.rows[0].n,
         unwalkable_edges: unwalkableHere,
         paths: paths.rows.map(r => ({
           hops: r.hops, ask_ref: r.ask_ref, ask_name: r.ask_name,

@@ -207,14 +207,35 @@ def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
         # Small files break percent gates: 2 rules -> 3 is 50% "drift" but normal
         # growth. An absolute floor lets small deltas through regardless of percent.
         abs_floor = float(config(cur, "export.row_tolerance_abs", 3))
+        # ASYMMETRIC BY DIRECTION, 2026-08-03. This guard exists to stop a
+        # truncated or half-built export from overwriting a good file. That is
+        # DATA LOSS, and data loss always shows up as rows going DOWN. Growth is
+        # the opposite signal: on an accumulator (open-loops-backlog, the
+        # record-layer dictionary) it is just the week's work landing. One
+        # symmetric 5% gate treated both the same and FROZE open-loops-backlog.md
+        # for two days across three nightly runs (51->59, then 65->72), so loop
+        # #146 was filed into a render nobody could read on the morning it was
+        # needed. A guard that fires on normal use is one people learn to
+        # --bootstrap past without reading, which is exactly how the real failure
+        # gets waved through. So: shrink stays tight, growth gets room. Growth is
+        # still bounded, because a runaway duplication balloons rather than
+        # truncates. Both limits are DB-tunable; the growth key falls back to its
+        # default when absent, so no migration is owed.
+        tol_grow = float(config(cur, "export.row_tolerance_growth_pct", 30))
         if prev is not None and prev > 0 and not bootstrap:
-            drift = abs(row_count - prev) / prev * 100
-            if drift > tol and abs(row_count - prev) > abs_floor:
+            delta = row_count - prev
+            drift = abs(delta) / prev * 100
+            limit = tol_grow if delta > 0 else tol
+            if drift > limit and abs(delta) > abs_floor:
                 record_run(cur, target_key, row_count, checksum, "validation_failed")
                 conn.commit()
                 tmp_path.unlink()
-                print(f"[{target_key}] VALIDATION FAILED: {row_count} rows vs last ok {prev} "
-                      f"({drift:.1f}% > {tol}%). Previous good file untouched.", file=sys.stderr)
+                way = "GREW to" if delta > 0 else "SHRANK to"
+                kind = "growth" if delta > 0 else "shrink"
+                print(f"[{target_key}] VALIDATION FAILED: {way} {row_count} rows from last ok {prev} "
+                      f"({drift:.1f}% > {limit}% {kind} limit). Previous good file untouched. "
+                      f"If the change is real, rerun this target with --bootstrap.",
+                      file=sys.stderr)
                 return False
         elif prev is None and not bootstrap:
             record_run(cur, target_key, row_count, checksum, "validation_failed")
