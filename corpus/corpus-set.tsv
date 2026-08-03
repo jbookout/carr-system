@@ -76,3 +76,33 @@ home:.claude/skills/premortem/SKILL.md	skill	premortem portable meta-skill: loca
 home:.claude/skills/redteam/SKILL.md	skill	redteam portable meta-skill: local Claude Code only, Joe's tier
 home:.claude/skills/til/SKILL.md	skill	til portable meta-skill: local Claude Code only, Joe's tier
 home:.claude/skills/understand-check/SKILL.md	skill	understand-check portable meta-skill: local Claude Code only, Joe's tier
+
+# --- AGENTS (added 2026-08-03) -------------------------------------------------
+# Joe: "i thought our files went to github now". Skills were mirrored here since
+# ORDER 30; the eighteen AGENT definitions were not, so none of them had any git
+# history at all. They are closer to code than to prose — branching instructions
+# with tool grants — and four were edited on 2026-08-03 with no diff and no
+# rollback but Drive's own version history.
+#
+# THE DRIVE IS STILL CANONICAL. This is versioning, not a second home: Dell reads
+# skills and agents from the Drive and Cowork sessions cannot reach this repo.
+# Making the repo canonical is a real decision and has not been taken.
+drive:.claude/skills/council/SKILL.md	skill	council skill: the Deal Council panel runner, operating instructions, canonical copy read by both harnesses
+drive:.claude/agents/README.md	agent	agent roster and census
+drive:.claude/agents/_ROSTER-ADDITIONS-it-support.md	agent	roster addition, pending merge into README
+drive:.claude/agents/_ROSTER-ADDITIONS-sop-specialists.md	agent	roster addition, pending merge into README
+drive:.claude/agents/benefit-summary.md	agent	benefit-summary agent: job description, tool grant and operating contract
+drive:.claude/agents/client-intake.md	agent	client-intake agent: job description, tool grant and operating contract
+drive:.claude/agents/costar-operator.md	agent	costar-operator agent: job description, tool grant and operating contract
+drive:.claude/agents/council-attorney.md	agent	council-attorney agent: job description, tool grant and operating contract
+drive:.claude/agents/council-contractor.md	agent	council-contractor agent: job description, tool grant and operating contract
+drive:.claude/agents/council-landlord.md	agent	council-landlord agent: job description, tool grant and operating contract
+drive:.claude/agents/council-lender.md	agent	council-lender agent: job description, tool grant and operating contract
+drive:.claude/agents/council-listing-agent.md	agent	council-listing-agent agent: job description, tool grant and operating contract
+drive:.claude/agents/council-skeptic.md	agent	council-skeptic agent: job description, tool grant and operating contract
+drive:.claude/agents/it-lane-worker.md	agent	it-lane-worker agent: job description, tool grant and operating contract
+drive:.claude/agents/it-support.md	agent	it-support agent: job description, tool grant and operating contract
+drive:.claude/agents/marketing-ads.md	agent	marketing-ads agent: job description, tool grant and operating contract
+drive:.claude/agents/marketing-coo.md	agent	marketing-coo agent: job description, tool grant and operating contract
+drive:.claude/agents/marketing-research.md	agent	marketing-research agent: job description, tool grant and operating contract
+drive:.claude/agents/salesforce-reader.md	agent	salesforce-reader agent: job description, tool grant and operating contract

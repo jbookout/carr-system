@@ -37,7 +37,7 @@ Larry Tesler's Law of Conservation of Complexity: complexity cannot be deleted, 
    **What law 11 explicitly REJECTS** *(reviewed from an external "frontend design" prompt on Jul 14, 2026 and judged against laws 2, 7, and 8):* the operating surfaces are not marketing pages. We do NOT chase a "radical art direction," maximalism, or a fresh look per surface. "No two designs should converge" is the opposite of law 8 and of this system's whole value, which is that every surface feels like one calm family. We do NOT add decorative signature gimmicks, custom cursors, scroll-triggered reveals, or heavy texture that delay or crowd the vital few (laws 2 and 7). And the functional status glyphs (🔔 ♻️ 🔴 ⭐ 🕰 ⚡) STAY, because they are card grammar, not emoji decoration; restraint on emoji applies only to client-facing deliverables, where they read as informal. The craft floor above is the improvement worth taking from that prompt; the expressive-portfolio philosophy is not, for internal tools.
 
 ## How to use it
-When you build or change ANY user-facing surface, run all eleven as a checklist before shipping. Both brains follow it (shared). It is a living doctrine: add a law only when it is a durable principle, not a one-off patch, and log the why in decision-history.
+When you build or change ANY user-facing surface, run all eleven as a checklist before shipping. Both brains follow it (shared). It is a living doctrine: add a law only when it is a durable principle, not a one-off patch, and log the why with the `log-decision` verb (not by writing into decision-history.md, which is a render).
 
 
 ## Implementation note — deep links from artifacts (Jul 14, 2026)

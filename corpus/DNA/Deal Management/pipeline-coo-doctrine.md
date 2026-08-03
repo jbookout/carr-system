@@ -10,14 +10,29 @@ Own the pipeline the way a COO owns operations: it is current because you keep i
 ## Log-on-arrival (the first duty)
 The moment a deal signal reaches a session, log it that same session. Never answer "I'll note it" or defer to a later pass. A signal is anything that moves a deal: a call held, a counter sent or received, an LOI or lease signed, a new named prospect, a follow-up date Joe sets, a price or term change, a deal paused or lost, a tour booked. If Joe gives you the fact but not the full substance (for example, he says a call happened but the numbers are in a transcript you cannot see), log what you know now and record the missing piece as OWED. Never invent it. Stale notes are not status, and a fabricated figure is worse than a blank.
 
-## The propagation set (log it everywhere, one session)
-Every deal event touches more than one file. After any change, walk this set, update each place that applies, then tell Joe in one line what moved:
-1. The prospect detail file, DNA/Clients/prospects/<name>.md (narrative + a dated addendum).
-2. DNA/Clients/clients-active.md (the shared index row: Status, Last Touch, Next Step; add a "Last updated" stamp line).
-3. 00_Context/open-loops.md (the deal's row: status, next-action date; close it if done).
-4. The lead-registry, DNA/Leads/lead-registry.xlsx (the L-### row: Last Touch, Next Action Date, Stage).
-5. The deal room, if the deal has one: <name>-dealroom/milestones.md (checkbox marker + a Log line) and the Deal Room artifact/HTML card.
-6. Comps + registry lease-event fields on execution (comps.xlsx Executed row; registry Est-Lease-Event set to the new expiration).
+## The propagation set — now ONE act (rewritten 2026-08-03, record layer)
+**This used to be six files. It is one verb call plus two real steps.**
+
+A deal event is recorded ONCE, with `log-activity` against the deal, and it renders
+everywhere by itself. The four files this section used to name — the prospect
+dossier `DNA/Clients/prospects/<name>.md`, `DNA/Clients/clients-active.md`,
+`00_Context/open-loops.md`, and `DNA/Leads/lead-registry.xlsx` — are ALL GENERATED
+RENDERS of the record layer. Typing into any of them is refused by
+`hooks/record-home-gate.py`, and before that gate existed the write succeeded
+silently and was erased by the next export with nothing reporting the loss.
+
+Propagation existed because six files each kept their own copy of the same fact.
+The record layer removed the copies; keeping the walk would only reintroduce them.
+
+1. **`log-activity`** on the deal — what happened, and the next step. This is the
+   whole of the old steps 1-4. Add `set-next-action` or `add-loop` if a date is set,
+   and `update-deal` for a phase or term change.
+2. The deal room, if the deal has one: `<name>-dealroom/milestones.md` (checkbox
+   marker + a Log line) and the Deal Room artifact/HTML card. Still hand-maintained.
+3. Comps + lease-event fields on execution (comps.xlsx Executed row; the lease-event
+   stamp set to the new expiration).
+
+Then tell Joe in one line what moved. That part never changed.
 
 ## The staleness sweep (the second duty: catch drift on your own)
 At the top of any pipeline-touching session, before waiting for instructions, cross-check the active deals and fix what has drifted:
