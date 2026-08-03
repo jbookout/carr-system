@@ -1,0 +1,84 @@
+#!/bin/sh
+# pre-push — refuse a direct push to main from anyone but the repo owner.
+#
+# WHY THIS EXISTS. On 2026-08-03 Dell was granted WRITE on carr-system,
+# superseding the read-plus-fork-PR model in team-loops T39 where every change
+# of his went through a pull request Joe approved. That review WAS the guard.
+# GitHub branch protection would replace it, but this repo is private on a free
+# plan and the API refuses: "Upgrade to GitHub Pro or make this repository
+# public to enable this feature." So there is no server-side gate at all.
+#
+# The realistic failure is not malice, it is history. This repo's history was
+# REWRITTEN on 2026-08-01 for the PII purge, which is why Dell re-clones from
+# scratch rather than pulling. A session on a second machine that does not know
+# that can force-push over the purge while doing something entirely reasonable.
+#
+# WHAT THIS IS AND IS NOT. It is an accident-stopper, not a security control.
+# It is a local hook: anyone can bypass it by editing this file, unsetting
+# core.hooksPath, or passing --no-verify. That is fine and expected — it exists
+# to catch the push nobody meant to make, which is the only kind that has ever
+# happened here. If real enforcement is wanted, GitHub Pro at roughly 4 USD a
+# month enables branch protection and this file becomes redundant.
+#
+# HOW IT DECIDES, with no per-machine configuration to forget: the repo owner is
+# identified by git identity. Joe's is set globally on his Mac and matches
+# OWNER_EMAIL below. Any other identity pushing to main is stopped and told to
+# branch instead. An explicit override exists for the case where the owner is on
+# a machine whose identity is not yet configured.
+
+OWNER_EMAIL="64207374+jbookout@users.noreply.github.com"
+PROTECTED="refs/heads/main"
+
+# Deliberate escape hatch. Set it for one command, never export it in a profile:
+#   CARR_ALLOW_MAIN_PUSH=1 git push
+if [ "$CARR_ALLOW_MAIN_PUSH" = "1" ]; then
+  exit 0
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "$PROTECTED" ] || continue
+
+  ME="$(git config user.email 2>/dev/null)"
+  [ "$ME" = "$OWNER_EMAIL" ] && continue
+
+  # A deletion or a non-fast-forward is the shape that destroys history.
+  EXTRA=""
+  if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+    EXTRA="  This push DELETES the branch."
+  elif [ -n "$remote_sha" ] && [ "$remote_sha" != "0000000000000000000000000000000000000000" ]; then
+    if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+      EXTRA="  This push REWRITES history that is already on the remote — the shape that would undo the 2026-08-01 PII purge."
+    fi
+  fi
+
+  cat >&2 <<EOF
+
+  ────────────────────────────────────────────────────────────────
+  PUSH TO main REFUSED — carr-system pre-push hook
+  ────────────────────────────────────────────────────────────────
+  Pushing as: ${ME:-(no git identity set)}
+  Only the repo owner pushes straight to main.${EXTRA}
+
+  Do this instead:
+
+      git switch -c your-branch-name
+      git push -u origin your-branch-name
+
+  Then open a pull request. Joe reviews and merges. Nothing of yours
+  is blocked by his side and nothing of his is overwritten by yours.
+
+  If you are Joe and this machine has no git identity yet:
+
+      git config --global user.email "$OWNER_EMAIL"
+
+  Genuine one-off override, for this single command only:
+
+      CARR_ALLOW_MAIN_PUSH=1 git push
+
+  ────────────────────────────────────────────────────────────────
+
+EOF
+  exit 1
+done
+
+exit 0

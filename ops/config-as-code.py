@@ -44,6 +44,7 @@ the config we think we have", which is the question nobody could answer tonight.
 import json
 import os
 import shutil
+import subprocess
 import sys
 
 HOME = os.path.expanduser("~")
@@ -230,6 +231,32 @@ def cmd_install(apply):
             with open(dest, "w", encoding="utf-8") as fh:
                 fh.write(body)
             print(f"      then: launchctl unload -w {dest}; launchctl load -w {dest}")
+
+    # Git hooks. Added 2026-08-03, when Dell was granted WRITE and it turned out
+    # branch protection is unavailable on a private free-plan repo — so the pull
+    # request review team-loops T39 relied on has no server-side replacement.
+    # ops/githooks/pre-push refuses a direct push to main from any identity but
+    # the owner's. It installs HERE rather than being a step in the runbook,
+    # because a guard that depends on someone remembering a config command is
+    # not a guard. Machine config ships with the code; that is what this file is.
+    hooks_dir = os.path.join(REPO, "ops", "githooks")
+    if os.path.isdir(hooks_dir):
+        current = subprocess.run(
+            ["git", "-C", REPO, "config", "--get", "core.hooksPath"],
+            capture_output=True, text=True).stdout.strip()
+        if current == "ops/githooks":
+            print("  git hooksPath already points at ops/githooks")
+        else:
+            print(f"  git hooksPath: {current or '(unset)'} -> ops/githooks"
+                  + ("" if apply else "   [would set]"))
+        if apply:
+            subprocess.run(["git", "-C", REPO, "config", "core.hooksPath", "ops/githooks"],
+                           check=False)
+            for h in sorted(os.listdir(hooks_dir)):
+                p = os.path.join(hooks_dir, h)
+                if os.path.isfile(p):
+                    os.chmod(p, os.stat(p).st_mode | 0o111)
+            print("  git hooks installed (pre-push guards main)")
 
     if not apply:
         print("\nDRY RUN — nothing written. Re-run with --apply.")
