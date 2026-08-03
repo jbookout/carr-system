@@ -72,7 +72,7 @@ KNOWN_HOSTS = (
     # this list, so calls to the primary domain were blocked until 2026-08-03.
     # Microsoft identity + Graph: the carr.us mailbox is Microsoft 365, and the
     # draft transport talks to these two and nothing else on Microsoft's side.
-    "login.microsoftonline.com", "graph.microsoft.com",
+    "login.microsoftonline.com", "graph.microsoft.com", "outlook.office365.com",
     "api.practicecre.com", "api.doctorcre.com", "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
