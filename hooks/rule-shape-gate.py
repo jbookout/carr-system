@@ -61,10 +61,23 @@ PROACTIVE = re.compile(
     r"checks? for|reminds?|raises?|flags?|scores?|reviews? periodically)\b", re.I)
 
 # A moment a session can actually detect.
+#
+# SECOND PERSON ADDED 2026-08-03. The alternation covered "when the / a / joe /
+# dell / he / they" and not "when you", so a rule addressed directly to the
+# session — which is the NATURAL voice for a rule a session obeys — read as
+# having no trigger at all. It false-positived twice in a row on the escalation
+# contract (c20dc3d5), whose three moments are "when you hand a finding upward",
+# "when you receive a subagent's finding", "when you are about to act but are
+# missing something". Those are as detectable as any moment in this file; the
+# regex simply could not see them. A gate that cries wolf on well-shaped rules
+# trains the author to click past it, which costs more than the rule it was
+# guarding — the same alarm-fatigue argument the façade check (rule 28) already
+# makes about health checks that report everything at one severity.
 TRIGGER = re.compile(
-    r"(\bwhen (the|a|an|joe|dell|he|she|they|any)\b|\bbefore any\b|\bbefore a\b|"
-    r"\bbefore writing\b|\beach time\b|\bevery time\b|\bwhenever\b|\bon any\b|"
-    r"\bat the event\b|\bthe moment\b|\btriggers?\b|\bfires? on\b|\bboundary sweep)", re.I)
+    r"(\bwhen (the|a|an|joe|dell|he|she|they|any|you|we|your|this|it)\b|"
+    r"\bbefore any\b|\bbefore a\b|\bbefore you\b|\bbefore writing\b|"
+    r"\beach time\b|\bevery time\b|\bwhenever\b|\bon any\b|\bat the event\b|"
+    r"\bthe moment\b|\btriggers?\b|\bfires? on\b|\bboundary sweep)", re.I)
 
 # Something that makes the omission visible.
 AUDIT = re.compile(
