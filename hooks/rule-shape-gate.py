@@ -54,7 +54,25 @@ LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 # and therefore did NOT match "captures" — so it passed rule 21, the ledger rule
 # that produced zero entries and motivated this entire gate. Tested against the
 # real failures rather than invented examples, which is the only reason it showed.
+# DETERMINER GUARD ADDED 2026-08-03. Half this list is noun/verb ambiguous —
+# record, report, flag, check, sweep, score, notice, log — and the nouns are
+# everywhere in a system whose central object is literally called the RECORD
+# LAYER. Unguarded, `\brecords?\b` matched "a row in the record layer" and "the
+# records", so the gate fired PROACTIVE on almost every rule written about the
+# system it guards, including pure prohibitions like "never store an SSN in the
+# record layer".
+#
+# A noun in English is nearly always preceded by a determiner and a verb is not:
+# "the records" is a thing, "the session records it" is an act. Refusing to
+# match right after a determiner separates them cheaply and without a parser.
+# Deliberately conservative — it can still miss a proactive rule phrased oddly,
+# and that is the correct direction to fail, because a gate that warns on
+# everything gets clicked past and then catches nothing at all. Same
+# alarm-fatigue argument the façade check (rule 28) makes about health checks
+# that report every finding at one severity.
 PROACTIVE = re.compile(
+    r"(?<!\bthe )(?<!\ba )(?<!\ban )(?<!\bits )(?<!\bthis )(?<!\bthat )"
+    r"(?<!\bevery )(?<!\ball )(?<!\bany )(?<!\bthose )(?<!\bthese )"
     r"\b(logs?|logged|logging|captures?|captured|capturing|records?|recorded|"
     r"recording|surfaces?|surfaced|surfacing|sweeps?|swept|proposes?|proposed|"
     r"reports?|reported|recites?|recited|states? back|watch(?:es)? for|notices?|"
@@ -84,7 +102,21 @@ AUDIT = re.compile(
     r"(\bcount\b|\btally\b|\bstate the\b|\brecit|\bvisible\b|\bsurfaces? in\b|"
     r"\bmonday brief\b|\bzero is\b|\baudit signal\b|\brenders? (in|to)\b)", re.I)
 
-# Constraints bind at the action; they do not need a trigger.
+# Constraints bind at the action, so a PURE constraint needs no trigger — and it
+# already gets that for free: with no proactive verb in it, assess() returns
+# early and never reaches this test.
+#
+# What this flag actually does is narrower, and the old comment oversold it: a
+# rule that BOTH prohibits something AND asks for unprompted work still needs a
+# trigger for the second half. "PII may not leave the system; flag it to the
+# partner" prohibits cleanly but never says when the flagging fires.
+#
+# NOT exempting on the constraint word alone, and this was measured rather than
+# assumed on 2026-08-03: rule bbffc139 — the canonical proactive rule, the one
+# whose failure to fire is why this gate exists at all — contains "never" in a
+# mid-sentence clause. A blanket constraint exemption would have waved through
+# precisely the rule the gate was built to catch. One stray prohibition word in
+# a long statement cannot be allowed to disarm the check.
 CONSTRAINT = re.compile(r"\b(never|always|must not|may not|is banned|hard ban|"
                         r"refuses?|forbidden|absolute)\b", re.I)
 
