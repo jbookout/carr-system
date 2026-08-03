@@ -90,6 +90,37 @@ TRIGGERS = [
         r"\bwell if\b|\bif you\b.{0,60}\b(then|protect|fix|do)\b|"
         r"\bso (what|why|everything|whats|is|does)\b|"
         r"\bhave you\b|\bhopefully for the last time\b|\bever\b.{0,20}\?)", re.I)),
+    # TRIGGER 7 exists because triggers 1-6 missed FIVE of seven qualifying
+    # turns on 2026-08-03, and every miss had the same shape: hedged confidence.
+    # "I'll argue you on drive", "I'm almost positive we already addressed all
+    # these D's", "I thought we had switched to refreshing files every 30
+    # minutes?", "I'm fairly certain the other session is done." Joe corrects by
+    # hedging, never by contradicting, so patterns built around assertive
+    # openers ("actually", "no,", "i disagree", "i'd argue") structurally cannot
+    # see him. That is the same class of blindness that produced trigger 6, one
+    # register further out.
+    #
+    # THE HEDGE IS NOT LOW CONFIDENCE AND MUST NOT BE READ AS ONE. On the night
+    # this was written he was right FIVE times out of five while the session was
+    # wrong five out of five: the D-rulings already settled, the Drive-to-git
+    # plan, the launchd refresh job, the other session's state, and the file
+    # conversions. This register carries his HIGHEST-value interventions, not
+    # his softest. It also matches the posture he holds himself to in rule
+    # 95e76c1f, "confidence without cockiness" — so a hook that only sees blunt
+    # contradiction is reading for a partner this system's own doctrine says he
+    # is not.
+    #
+    # The final clauses catch the flat correction carrying no hedge at all
+    # ("we just converted X tonight"), which trigger 5 missed because it looked
+    # for "i already" and never for "we already".
+    ("7 · HEDGED-CONFIDENT RECALL OR CORRECTION", re.compile(
+        r"(\bi'?ll argue\b|\balmost positive\b|\bfairly (certain|sure|positive)\b|"
+        r"\bpretty (certain|positive)\b|\bi thought (we|you|it|that|this|there)\b|"
+        r"\bi'?m remembering\b|\bif i recall\b|\biirc\b|\bi could be wrong\b|"
+        r"\bdidn'?t we\b|\bweren'?t we\b|\bwasn'?t (it|that)\b|\bwe already\b|"
+        r"\bwe (just|already) (did|have|had|converted|addressed|switched|"
+        r"solved|built|found|determined|disassembled|migrated|moved|retired|"
+        r"flipped|wired|shipped|finished|ran)\b|\bwe found\b|\bwe determined\b)", re.I)),
 ]
 
 
