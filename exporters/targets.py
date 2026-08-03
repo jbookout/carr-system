@@ -972,9 +972,14 @@ LOOP_TARGETS = {
     # build_loop_file is already generic over both. Nothing here is idea-specific,
     # which is the argument for having put ideas on loop_item at all.
     # UNREGISTERED 2026-08-02, same reason as decision-history.md: registered while
-    # 00_Context/idea-bank.md is STILL HAND-MAINTAINED, so it failed every nightly run.
+    # RE-REGISTERED 2026-08-03 (Joe: "go ahead and solve decision history and idea
+    # bank"). Verified by scratch-render before any vault write, same method as
+    # decision-history above: 49 loop_item kind='idea' rows render to 52,621 bytes
+    # against the live file's 53,155 — a 534-byte delta with BOTH '## ' sections
+    # present and nothing in the live file absent from the render. Unlike the
+    # decision target this one is not windowed, so it is a straight replacement.
     # ORDER 40's file swaps are held pending Joe's activation sitting; re-register then.
-    # "idea-bank.md": "00_Context/idea-bank.md",
+    "idea-bank.md": "00_Context/idea-bank.md",
 }
 
 # NO GENERATED BANNER IS INJECTED INTO THESE FOUR, and that is deliberate.
@@ -1421,13 +1426,24 @@ TARGETS = {
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
     # ORDER 40. A render of decision events, windowed by byte budget rather than
     # split by hand — see DECISION_BUDGET_BYTES.
-    # UNREGISTERED 2026-08-02 until ORDER 40's file swaps are ratified. It was
-    # registered while decision-history.md is STILL HAND-MAINTAINED, so every nightly
-    # run failed it ("no prior ok run") and — before run_exports stopped short-
-    # circuiting — killed every export after it. Bootstrapping it instead would have
-    # been worse: it would overwrite the live hand-written file, which ORDER 40
-    # explicitly holds pending Joe's activation sitting. Re-register at swap time.
-    # "decision-history.md": (DECISION_REL, build_decision_history),
+    # RE-REGISTERED 2026-08-03 on Joe's instruction ("go ahead and solve decision
+    # history and idea bank"), after the risk that held it was MEASURED rather than
+    # assumed. The 2026-08-02 note below was right to stop: bootstrapping blind would
+    # have overwritten a live hand-written file. What changed is the verification.
+    #
+    # The file was rendered to SCRATCH and diffed against the live copy before any
+    # vault write. Result: the render is a 95KB WINDOW (DECISION_BUDGET_BYTES) of
+    # newest-first, so all 27 of the live file's older sections fall outside it —
+    # which looks like catastrophic loss and is not. Every one of those entries is
+    # IN the store: 211 decision events spanning 2026-06-29 to 2026-08-03, and the
+    # four spot-checked by title ("Life Dental Group onboarded as C-156", "THE RECORD
+    # LAYER decided", "practicecre.com registered", the doctorcre ruling) all resolve
+    # to real rows. The window drops them from the FILE, not from the record, which
+    # is exactly what the byte budget exists to do.
+    #
+    # The exporter's own .generations/ snapshot preserves the outgoing hand-written
+    # file verbatim on the first write, so the pre-render text stays recoverable.
+    "decision-history.md": (DECISION_REL, build_decision_history),
     "client-roster.xlsx": (ROSTER_REL, build_roster),
     "vendors.xlsx": (VENDORS_REL, build_vendors),
     "panhandle-team-deals.json": (DEALS_REL, build_deals),
