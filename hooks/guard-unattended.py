@@ -43,6 +43,7 @@ DISABLE FAST: remove the hooks block from settings.json, or `chmod -x` this file
 """
 
 import json
+from datetime import datetime, timezone
 import os
 import re
 import sys
@@ -98,10 +99,16 @@ URL_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
 
 
 def log(msg):
+    """Timestamped and self-identifying. Before 2026-08-03 no hook stamped its
+    lines, so out/hook-guard.log could not answer "when did this fire" or even
+    "which gate wrote this" — 51 lines with test fixtures indistinguishable from
+    production denials. A log you cannot read chronologically is an artifact,
+    not a check."""
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
         with open(LOG, "a") as fh:
-            fh.write(msg.rstrip() + "\n")
+            fh.write(f"{ts} guard-unattended {msg.rstrip()}\n")
     except Exception:
         pass
 

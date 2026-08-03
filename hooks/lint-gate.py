@@ -28,11 +28,30 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 VAULT = ("/Users/booko/Library/CloudStorage/"
          "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 RUN_SH = "/Users/booko/carr-system/run.sh"
+LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 TIMEOUT = 25
+
+
+def log(msg):
+    """Added 2026-08-03 by the IT hook-coverage sweep, which found this was the
+    ONLY hook of the five that wrote nothing, ever. That made the one gate
+    enforcing writing-rules.md on client-facing surfaces unauditable: nobody
+    could answer "has it ever fired", or "did it skip that draft or pass it".
+    A check that cannot be seen is a defect even while the thing it watches is
+    fine, and it is the same silent-success shape as the markdown-write defect
+    this whole night was about."""
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        with open(LOG, "a") as fh:
+            fh.write(f"{ts} lint-gate {msg.rstrip()}\n")
+    except Exception:
+        pass
 
 # Generated renders — never hand-edited, so never linted here.
 GENERATED = (
@@ -123,6 +142,7 @@ def main():
         # on stdout is not injected into context, so the earlier draft of this hook
         # would have run the linter and thrown the result away. additionalContext
         # arrives as a system reminder the session reads.
+        log(f"REPORT {msg.splitlines()[0][:180] if msg else '(empty)'}")
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
@@ -130,7 +150,10 @@ def main():
             }
         }))
         sys.exit(0)
-    except Exception:
+    except Exception as exc:
+        # fails open and silent to the session, per the docstring — but NOT
+        # silent to the log, which is the whole point of adding one.
+        log(f"ALLOW(internal-error) {type(exc).__name__}: {exc}")
         sys.exit(0)
 
 

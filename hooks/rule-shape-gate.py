@@ -42,6 +42,7 @@ FAILS OPEN on any error, like every other hook here. Logged to out/hook-guard.lo
 """
 
 import json
+from datetime import datetime, timezone
 import os
 import re
 import sys
@@ -76,10 +77,16 @@ CONSTRAINT = re.compile(r"\b(never|always|must not|may not|is banned|hard ban|"
 
 
 def log(msg):
+    """Timestamped and self-identifying. Before 2026-08-03 no hook stamped its
+    lines, so out/hook-guard.log could not answer "when did this fire" or even
+    "which gate wrote this" — 51 lines with test fixtures indistinguishable from
+    production denials. A log you cannot read chronologically is an artifact,
+    not a check."""
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
         with open(LOG, "a") as fh:
-            fh.write(msg.rstrip() + "\n")
+            fh.write(f"{ts} rule-shape-gate {msg.rstrip()}\n")
     except Exception:
         pass
 

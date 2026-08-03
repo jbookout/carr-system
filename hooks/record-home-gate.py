@@ -78,6 +78,7 @@ single-operator machine.
 """
 
 import json
+from datetime import datetime, timezone
 import os
 import re
 import sys
@@ -238,10 +239,16 @@ USE_INSTEAD = ("Use a verb: log-decision (a settled call and why), add-loop (an 
 
 
 def log(msg):
+    """Timestamped and self-identifying. Before 2026-08-03 no hook stamped its
+    lines, so out/hook-guard.log could not answer "when did this fire" or even
+    "which gate wrote this" — 51 lines with test fixtures indistinguishable from
+    production denials. A log you cannot read chronologically is an artifact,
+    not a check."""
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
         with open(LOG, "a") as fh:
-            fh.write(f"record-home-gate {msg}\n")
+            fh.write(f"{ts} record-home-gate {msg.rstrip()}\n")
     except Exception:
         pass
 
