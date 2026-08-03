@@ -27,6 +27,18 @@ CASES = [
     ("A · generated render (non-md: deals json)", DENY, "Write",
      {"file_path": f"{VAULT}/DNA/Deal Management/panhandle-team-deals.json", "content": "{}"}),
 
+    # --- the 2026-08-03 IT sweep found 27 of 41 targets unguarded. These four
+    # were all in that gap; they pass only because the set is now parsed from
+    # exporters/targets.py instead of retyped.
+    ("A · client dossier (the worst case, dir-guarded)", DENY, "Edit",
+     {"file_path": f"{VAULT}/DNA/Clients/prospects/LifeDentalGroup.md", "new_string": "deal update"}),
+    ("A · a dossier that does not exist yet (dir, not a list)", DENY, "Write",
+     {"file_path": f"{VAULT}/DNA/Clients/prospects/BrandNewClient.md", "content": "x"}),
+    ("A · hunt-ledger (was unguarded)", DENY, "Edit",
+     {"file_path": f"{VAULT}/DNA/Network/hunt-ledger.md", "new_string": "x"}),
+    ("A · record-layer-dictionary (was unguarded)", DENY, "Edit",
+     {"file_path": f"{VAULT}/DNA/Team/record-layer-dictionary.md", "new_string": "x"}),
+
     ("B · NEW md in 00_Context/", DENY, "Write",
      {"file_path": f"{VAULT}/00_Context/audit-findings-2026-08-03.md", "content": "findings"}),
     ("B · NEW md at the vault root", DENY, "Write",

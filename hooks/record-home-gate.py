@@ -86,8 +86,116 @@ VAULT = os.path.expanduser(
     "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 
-# --- A. generated renders (from exporters/targets.py, 2026-08-03) ------------
-GENERATED = {
+# --- A. generated renders ----------------------------------------------------
+# READ FROM THE EXPORTER, NOT RETYPED. The first cut of this file hardcoded 16
+# paths lifted from exporters/targets.py by hand, and the IT sweep on 2026-08-03
+# measured the result: 16 guarded against 41 real targets, TWENTY-SEVEN
+# unguarded — including all 23 client dossiers, which is exactly where the sweep's
+# worst finding points (four live doctrine files tell sessions to type deal
+# updates into those dossiers, and the export rewrites them several times a day,
+# so anything typed there is gone by morning and nothing reports it missing).
+#
+# A duplicated list is the same two-homes disease this whole system is built to
+# avoid, one layer down. So the set is PARSED from targets.py at call time —
+# statically, via ast, with no import and no dependency, because the hook runs
+# under /usr/bin/env python3 rather than the repo venv and must not need it.
+#
+# TWO THINGS THE FLAT DIFF GOT WRONG, and both matter:
+#
+#   * CLAUDE.md is a PARTIAL target. Only the block between the rule-gist-index
+#     markers is generated; the rest is hand-authored doctrine that Joe edits
+#     often. Denying the whole file would block real work, and partial.py already
+#     fails loudly on missing or mangled markers, so a bad edit is caught at
+#     export time. Partial targets are EXCLUDED from the deny set on purpose.
+#   * The dossiers are a DIRECTORY (DOSSIER_DIR), not a fixed list. Guarding the
+#     directory covers the 23 that exist and every one minted later; enumerating
+#     them would reopen the same gap the day a new client lands.
+TARGETS_PY = os.path.expanduser("~/carr-system/exporters/targets.py")
+PARTIAL_TARGET_KEYS = {"compiled-rules-gist-index"}
+
+
+def generated_paths():
+    """(exact vault-relative paths, generated directories) parsed from targets.py.
+
+    Falls back to GENERATED_FALLBACK on any parse failure and LOGS that it did,
+    so a silently degraded gate is still discoverable — same convention as the
+    other hooks' allow-on-error logging.
+    """
+    import ast
+    exact, dirs = set(), set()
+    tree = ast.parse(open(TARGETS_PY).read())
+
+    def module_consts(path):
+        """module-level NAME = "literal" pairs, or {} when unreadable."""
+        try:
+            out = {}
+            for n in ast.parse(open(path).read()).body:
+                if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                        and isinstance(n.targets[0], ast.Name)
+                        and isinstance(n.value, ast.Constant)
+                        and isinstance(n.value.value, str)):
+                    out[n.targets[0].id] = n.value.value
+            return out
+        except Exception:
+            return {}
+
+    consts, dict_nodes = {}, {}
+    for node in tree.body:
+        # Two of the eventual paths (DICT_REL, the two ledger RELs) are not
+        # defined here at all — they arrive as `from .dictionary import DICT_REL`
+        # and `from .ledger_targets import HUNT_REL as LEDGER_HUNT_REL`. Parsing
+        # only this file's own assignments silently missed them, which the test
+        # suite caught. Follow relative imports one level into the same package.
+        if isinstance(node, ast.ImportFrom) and node.level and node.module:
+            sib = os.path.join(os.path.dirname(TARGETS_PY), f"{node.module}.py")
+            sibling = module_consts(sib)
+            for alias in node.names:
+                if alias.name in sibling:
+                    consts[alias.asname or alias.name] = sibling[alias.name]
+            continue
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        name, val = node.targets[0].id, node.value
+        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+            consts[name] = val.value
+        elif isinstance(val, ast.Dict):
+            dict_nodes[name] = val
+
+    def as_str(n):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        if isinstance(n, ast.Name):
+            return consts.get(n.id)
+        return None
+
+    # every loop file is a target; LOOP_TARGETS maps name -> relative path
+    for v in (dict_nodes.get("LOOP_TARGETS") or ast.Dict(keys=[], values=[])).values:
+        s = as_str(v)
+        if s:
+            exact.add(s)
+
+    for k, v in zip((dict_nodes.get("TARGETS") or ast.Dict(keys=[], values=[])).keys,
+                    (dict_nodes.get("TARGETS") or ast.Dict(keys=[], values=[])).values):
+        key = as_str(k) if k is not None else None
+        if key in PARTIAL_TARGET_KEYS:          # partial render — see the note above
+            continue
+        if isinstance(v, ast.Tuple) and v.elts:
+            s = as_str(v.elts[0])
+            if s:
+                exact.add(s)
+
+    if consts.get("DOSSIER_DIR"):
+        dirs.add(consts["DOSSIER_DIR"].rstrip("/") + "/")
+
+    if not exact:
+        raise ValueError("parsed no targets")
+    return exact, dirs
+
+
+# Used only when the parse fails. Deliberately the ORIGINAL sixteen: a stale
+# guard on sixteen files beats no guard at all, and the log line says it happened.
+GENERATED_FALLBACK = {
     "00_Context/compiled-rules-joe.md",
     "00_Context/decision-history.md",
     "00_Context/idea-bank.md",
@@ -107,7 +215,13 @@ GENERATED = {
 }
 
 # --- B. directories where a NEW .md is a record masquerading as a note -------
-NEW_MD_DENIED_DIRS = ("00_Context/", "out/", "")   # "" = the vault root itself
+# "out/" was here in the first cut and COULD NEVER FIRE: rel_to_vault returns
+# None for anything outside the vault, and the vault has no out/ directory at all
+# (the one that matters is ~/carr-system/out/, which is gitignored). The IT sweep
+# caught it. A rule that cannot fire is worse than no rule, because it reads as
+# coverage. The repo's out/ problem is real but belongs to the jobs writing there,
+# not to a gate scoped to the vault.
+NEW_MD_DENIED_DIRS = ("00_Context/", "")           # "" = the vault root itself
 
 # --- C. the handoff shape ----------------------------------------------------
 HANDOFF_DIR = "00_Context/handoffs/"
@@ -153,10 +267,25 @@ def check(tool, ti):
         return None                                   # outside the vault: not ours
 
     # A. generated renders — any tool, any extension
-    if rel in GENERATED:
+    try:
+        exact, dirs = generated_paths()
+    except Exception as exc:
+        log(f"FALLBACK generated-list parse failed ({exc}) — guarding {len(GENERATED_FALLBACK)} "
+            f"hardcoded paths only")
+        exact, dirs = GENERATED_FALLBACK, set()
+
+    if rel in exact:
         return (f"'{rel}' is a GENERATED render — hand-editing it is overwritten by the next "
                 f"export and the change is lost. Change the record through a verb, or change "
                 f"the exporter in ~/carr-system/exporters/. {USE_INSTEAD}")
+
+    for d in dirs:
+        if rel.startswith(d):
+            return (f"'{rel}' sits under '{d}', which the exporter GENERATES in full. The client "
+                    f"dossiers are rewritten several times a day — a deal update typed here is "
+                    f"gone by morning and nothing reports it missing. This is the single worst "
+                    f"case of the defect in the system, because four doctrine files still tell "
+                    f"sessions to write here. {USE_INSTEAD}")
 
     if not rel.lower().endswith(".md"):
         return None                                   # B-D are markdown-only
