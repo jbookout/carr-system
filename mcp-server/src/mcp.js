@@ -56,6 +56,46 @@ const PROFILES = {
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
   ]),
 
+  // AWAY MODE, added 2026-08-03 on Joe's ruling. The scheduled CEO session that
+  // runs the book while he is gone, plus the system-administrator seat it
+  // convenes. Wider than `capture` because away mode's whole purpose is that
+  // DEALS KEEP MOVING rather than merely not breaking — a profile that cannot
+  // advance a deal or produce a document delivers a healthy system and a dead
+  // week. Narrower than `full` because rule b42e217e still binds: unattended
+  // runs get a narrow profile, since nobody is watching and a scheduled run's
+  // model cannot reliably be pinned.
+  //
+  // THE LINE: it may RECORD, ADVANCE and DRAFT. It may not DESTROY, RE-POINT
+  // OWNERSHIP, EDIT IDENTITY, or CREATE A PARTY.
+  //
+  // Each exclusion earns its place rather than being cautious by default.
+  // confirm-merge destroys a record irreversibly and is the one write no
+  // unattended seat should ever hold. reassign-deal and set-lead move ownership,
+  // which is a matter between two humans and never a machine's call while one of
+  // them is unreachable. add-party, new-lead, new-client and new-vendor create
+  // records, and a duplicate created here can only be cleaned up by
+  // confirm-merge, which this profile deliberately lacks — so it could make a
+  // mess it cannot clean. update-vendor edits identity fields, which rule
+  // 5d44d3f3 says are never changed on research alone. promote-pool and
+  // register-template are judgment and config. The rule verbs are human-gated by
+  // design and appear here only to say they were considered.
+  //
+  // link-parties is excluded on purpose and it is the closest call: it is purely
+  // additive, but an intro-graph edge is a CLAIM ABOUT A RELATIONSHIP BETWEEN
+  // TWO PEOPLE, and asserting one while the only humans who could vouch for it
+  // are away is exactly the wrong direction of error.
+  away: new Set([
+    // everything capture holds
+    "log-activity", "stamp-touch", "add-loop", "update-loop",
+    "set-next-action", "complete-action", "add-critical-date", "record-finding",
+    // plus: close what it opened, advance the book, draft, and keep the record honest
+    "close-loop", "update-deal", "add-premises", "record-counter",
+    "prepare-document", "update-document-status",
+    "log-decision", "update-decision",
+    // plus: the marketing lane, since social is carved out of Dell's review
+    "open-campaign", "score-campaign", "attach-to-campaign", "measure-placement",
+  ]),
+
   // Observation only. No writes at all.
   read: new Set(),
 };
@@ -66,6 +106,16 @@ const PROFILE_NOTICE = {
     "only. Verbs that re-point, merge, retire or delete a record are not available here. This is " +
     "intentional — the session is unattended or delegated. Do not try to work around it; report " +
     "what you would have done and let a partner's interactive session do it.</notice>",
+  away:
+    "\n\n<notice>This session runs on the AWAY profile: Joe is not reachable. You may record, " +
+    "advance and draft. You may NOT merge, re-point ownership, edit an identity field, create a " +
+    "party, or assert a relationship — those verbs are absent by design, not by oversight, and " +
+    "the absence is the control. Anything client-facing or binding goes to DELL for review before " +
+    "it leaves the system (rule 1e62c007); anything involving money waits for Joe and does not " +
+    "proceed. When unsure, convene the red team with distinct lenses and a seat that re-runs the " +
+    "evidence rather than arguing the conclusion (rule 81709f57). Report what you could not do " +
+    "rather than working around it — a queue Joe returns to is recoverable; a wrong write made " +
+    "while nobody was watching is not.</notice>",
   read:
     "\n\n<notice>This session runs on the READ profile: no write verb is available. This is " +
     "intentional. Do not try to work around it; report what you would have written.</notice>",
