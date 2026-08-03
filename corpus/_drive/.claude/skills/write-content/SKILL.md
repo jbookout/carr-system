@@ -143,7 +143,7 @@ Before generating in any engine, check `DNA/Marketing/Social Media/content-inspi
 - **Canva — when the post wants a designed / photo-led layout** the card template doesn't cover (a photo background, a richer multi-element composition, or when Joe wants Canva variety). Template-based; refine with the editing layer (Step 8B).
 - **Blotato template visual — when the post wants multiple slides or motion**: a carousel (e.g., "3 things that get missed" as swipeable slides), an infographic, or a short AI video. Template-based with color/font inputs.
 - **Photoreal scene — via manual Firefly (Joe's Adobe plan), see Step 8D**: when a post wants an actual photographic/illustrated scene beyond a card or a Canva layout. Joe generates it himself in Firefly (keeps Adobe's IP indemnification; the no-API rationale lives in 8D).
-- **Real brand asset — always prefer over anything generated when one fits.** Check `Marketing/Brand Assets/` for an approved logo/photo (if none found, generated is the fallback, not a failure state). A real property photo or approved headshot can drop into a code card or a Canva design.
+- **Real brand asset — always prefer over anything generated when one fits.** Check `DNA/Marketing/Brand Assets/` for an approved logo/photo (if none found, generated is the fallback, not a failure state). A real property photo or approved headshot can drop into a code card or a Canva design.
 
 One graphic per post unless Joe asked for multi-platform (then size one per platform — see Output format). If a post genuinely needs no visual (rare), say so rather than making a throwaway.
 

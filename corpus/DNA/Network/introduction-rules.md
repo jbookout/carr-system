@@ -1,7 +1,7 @@
 # Introduction Rules — the taught compatibility layer
 
 > **GENERATED from the CARR record layer's rule store — do not hand-edit.**
-> These rules BIND like the rules in `00_Context/ai-operating-notes.md`.
+> These rules BIND like the standing rules in `CARR AI/CLAUDE.md`.
 > DOMAIN SCOPE `intro_politics`: vendor ↔ vendor compatibility, shared by both partners.
 > They are deliberately NOT in `DNA/compiled-rules-shared.md` — that file is the
 > always-read core, and this one is read when an intro or a guest list is on the table.
@@ -101,4 +101,4 @@ are columns there.*
 - date not recorded in the source file — UNCONFIRMED DEFAULT — Banker ↔ SBDC consultant (startup pipeline both directions) is plausible but unruled. Suggest it o…  ·  *system-proposed default listed in introduction-rules.md; author not identifiable*
 - date not recorded in the source file — EVENT GUEST LISTS — before any joint event (happy hour, speaker panel, lunch-and-learn), run the invite list through the…  ·  *introduction-rules.md "Event guest-list rule" section; undated and no author stamped*
 
-*Exported: 2026-08-03T00:00:07.578764+00:00 · 19 active rule(s)*
+*Exported: 2026-08-03T03:54:06.796295+00:00 · 19 active rule(s)*

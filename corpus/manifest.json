@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-02T19:06:30-0500",
+  "generated_at": "2026-08-02T23:02:46-0500",
   "generator": "tools/corpus-sync.py (ORDER 30, Wave 4 phase 1)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "THE DRIVE. This mirror is versioning only — never edit files under corpus/.",
@@ -207,11 +207,11 @@
     {
       "source": "DNA/Network/introduction-rules.md",
       "mirror": "corpus/DNA/Network/introduction-rules.md",
-      "sha256": "c8765d67a409be9edfd492f5bf5baf6c839e9a0f3e9156f1dd3291bec6f48e1a",
-      "bytes": 18744,
-      "mtime": 1785715207.581,
-      "mtime_iso": "2026-08-02T19:00:07",
-      "mirrored_at": "2026-08-02T19:06:30-0500",
+      "sha256": "f7147f68423457aab8c9103fb30561e616b77dd756ce17cc49581bde7b9f8280",
+      "bytes": 18738,
+      "mtime": 1785729246.797,
+      "mtime_iso": "2026-08-02T22:54:06",
+      "mirrored_at": "2026-08-02T23:02:46-0500",
       "class": "craft",
       "why": "the taught compatibility layer; every rule here arrived by a human decision"
     },
@@ -427,11 +427,11 @@
     {
       "source": "drive:.claude/skills/social-media-manager/SKILL.md",
       "mirror": "corpus/_drive/.claude/skills/social-media-manager/SKILL.md",
-      "sha256": "bc3bf78d91f35fbdf026faf32c81ec2812893d17e8178922dab5bcfe0b1cd8e5",
-      "bytes": 16343,
-      "mtime": 1785681237.441,
-      "mtime_iso": "2026-08-02T09:33:57",
-      "mirrored_at": "2026-08-02T10:07:25-0500",
+      "sha256": "4f0af64789496ab74d10b6ec406fe7d05d51c3efcd20a9d1919a57cc07f47634",
+      "bytes": 16351,
+      "mtime": 1785729308.983,
+      "mtime_iso": "2026-08-02T22:55:08",
+      "mirrored_at": "2026-08-02T23:02:46-0500",
       "class": "skill",
       "why": "social-media-manager skill: operating instructions, canonical copy read by both harnesses"
     },
@@ -449,11 +449,11 @@
     {
       "source": "drive:.claude/skills/write-content/SKILL.md",
       "mirror": "corpus/_drive/.claude/skills/write-content/SKILL.md",
-      "sha256": "4b163859a89c046be7547aef1d3e0ad257747334bcb767213c0e016cd4b9025c",
-      "bytes": 45374,
-      "mtime": 1785600368.996,
-      "mtime_iso": "2026-08-01T11:06:08",
-      "mirrored_at": "2026-08-01T11:07:10-0500",
+      "sha256": "82c63056b86ec1a85f225fd51f5101f1064f920faa9419b943cf8edca35fbd59",
+      "bytes": 45378,
+      "mtime": 1785729308.984,
+      "mtime_iso": "2026-08-02T22:55:08",
+      "mirrored_at": "2026-08-02T23:02:46-0500",
       "class": "skill",
       "why": "write-content skill: operating instructions, canonical copy read by both harnesses"
     },
