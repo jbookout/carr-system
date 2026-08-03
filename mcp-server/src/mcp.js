@@ -126,6 +126,15 @@ async function callTool(env, actor, name, args, profile = "full") {
   try {
     await client.query("begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
+    // Guarded 2026-08-03. Unguarded, a missing actor row made this a raw
+    // TypeError on `undefined.id` — a 500 with a stack trace where the real
+    // answer is "this token names an actor nobody provisioned". The token has
+    // already passed the identity allow-list by here, so the two can disagree:
+    // adding a partner to ALLOW_LIST without inserting their actor row lands
+    // exactly here, and that is a plausible shape of mistake during onboarding.
+    if (!a.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug,
+      hint: "the token authenticates as this actor but no row exists in the actor table — " +
+            "provision the actor before any write verb will run" });
     const fullActor = { ...actor, id: a.rows[0].id };
     const result = await tool.handler(client, fullActor, args || {});
     await client.query("commit");

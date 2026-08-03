@@ -2363,14 +2363,32 @@ export const TOOLS = {
       }
       const r = await c.query(
         `insert into rule (statement, human_quote, taught_by, scope, personal_to, supersedes)
-         values ($1,$2,$3,$4,$5,$6) returning id`,
+         values ($1,$2,$3,$4,$5,$6) returning id, personal_to`,
         [args.statement, args.human_quote, actor.id, JSON.stringify(args.scope || {}),
          args.personal ? actor.id : null, args.supersedes || null]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
         { new: { statement: args.statement, supersedes: args.supersedes || null },
           human_quote: args.human_quote, idempotency_key: args.idempotency_key });
+      // SCOPE IS ECHOED BACK, added 2026-08-03, because it defaulted silently
+      // once and nothing in the response could show it. A rule taught with
+      // personal:true landed SHARED, and the only thing that caught it was a
+      // row-count comparison between two exported files minutes after it was
+      // already ACTIVE and binding both partners. `personal_to` is derived from
+      // args.personal AND a resolved actor, so a caller genuinely cannot know
+      // which scope it got from an envelope that says only {ok, rule_id,
+      // status}. The failure direction is always toward binding MORE people
+      // than intended, which is the direction that matters least to the caller
+      // and most to the other partner. So the verb now states what it did.
+      const scopeApplied = r.rows[0].personal_to ? `personal:${actor.slug}` : "shared";
+      const scopeMismatch = args.personal === true && !r.rows[0].personal_to;
       return { ok: true, rule_id: r.rows[0].id, status: "proposed",
-               supersedes: args.supersedes || null };
+               scope_applied: scopeApplied,
+               personal_requested: args.personal === true,
+               supersedes: args.supersedes || null,
+               ...(scopeMismatch ? { warning:
+                 "personal:true was requested but this rule was stored SHARED — activating it " +
+                 "will bind BOTH partners, including any wording specific to one of them or to " +
+                 "one machine. Retire it and re-teach before activating if that is wrong." } : {}) };
     }),
   },
 
