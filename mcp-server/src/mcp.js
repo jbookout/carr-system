@@ -113,9 +113,14 @@ const PROFILE_NOTICE = {
     "the absence is the control. Anything client-facing or binding goes to DELL for review before " +
     "it leaves the system (rule 1e62c007); anything involving money waits for Joe and does not " +
     "proceed. When unsure, convene the red team with distinct lenses and a seat that re-runs the " +
-    "evidence rather than arguing the conclusion (rule 81709f57). Report what you could not do " +
-    "rather than working around it — a queue Joe returns to is recoverable; a wrong write made " +
-    "while nobody was watching is not.</notice>",
+    "evidence rather than arguing the conclusion (rule 81709f57). A queue Joe returns to is " +
+    "recoverable; a wrong write made while nobody was watching is not.\n\n" +
+    "BLOCKED WORK IS FILED, NEVER DROPPED. When this profile lacks the verb you need — a party " +
+    "to create, a merge to confirm, an owner to re-point — you MUST open a loop describing what " +
+    "needs doing, for whom, and the evidence you already gathered. `add-loop` is in this profile " +
+    "for exactly that reason. The missing verb means 'not by you, not now'; it never means 'this " +
+    "did not need to happen.' A blocked action that leaves no loop is lost work, and lost work is " +
+    "worse than the write you were stopped from making.</notice>",
   read:
     "\n\n<notice>This session runs on the READ profile: no write verb is available. This is " +
     "intentional. Do not try to work around it; report what you would have written.</notice>",
