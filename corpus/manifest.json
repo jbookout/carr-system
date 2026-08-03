@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-02T23:12:52-0500",
+  "generated_at": "2026-08-03T11:25:28-0500",
   "generator": "tools/corpus-sync.py (ORDER 30, Wave 4 phase 1)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "THE DRIVE. This mirror is versioning only — never edit files under corpus/.",
@@ -207,11 +207,11 @@
     {
       "source": "DNA/Network/introduction-rules.md",
       "mirror": "corpus/DNA/Network/introduction-rules.md",
-      "sha256": "f7147f68423457aab8c9103fb30561e616b77dd756ce17cc49581bde7b9f8280",
+      "sha256": "2c2d2d0f9b96b02c8054965942d66d1b83d5427f07240e514432e917e92aa2c1",
       "bytes": 18738,
-      "mtime": 1785729246.797,
-      "mtime_iso": "2026-08-02T22:54:06",
-      "mirrored_at": "2026-08-02T23:02:46-0500",
+      "mtime": 1785774185.849,
+      "mtime_iso": "2026-08-03T11:23:05",
+      "mirrored_at": "2026-08-03T11:25:28-0500",
       "class": "craft",
       "why": "the taught compatibility layer; every rule here arrived by a human decision"
     },
