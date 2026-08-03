@@ -30,9 +30,18 @@ CASES = [
     # --- the 2026-08-03 IT sweep found 27 of 41 targets unguarded. These four
     # were all in that gap; they pass only because the set is now parsed from
     # exporters/targets.py instead of retyped.
-    ("A · client dossier (the worst case, dir-guarded)", DENY, "Edit",
+    ("A · client dossier (the worst case, list-guarded)", DENY, "Edit",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/LifeDentalGroup.md", "new_string": "deal update"}),
-    ("A · a dossier that does not exist yet (dir, not a list)", DENY, "Write",
+    # NOT a blanket directory rule, and that distinction is load-bearing:
+    # prospects/ holds 23 GENERATED dossiers alongside hand-authored files the
+    # client-intake agent writes on purpose. Guarding the directory blocked those
+    # too, and over-blocking a partner's own writing surface is how a gate ends up
+    # switched off. The set is the exporter's own DOSSIER_FILES list.
+    ("allow · hand-authored intake file in prospects/", ALLOW, "Write",
+     {"file_path": f"{VAULT}/DNA/Clients/prospects/Beasley-intake.md", "new_string": "x"}),
+    ("allow · hand-authored enterprise file in prospects/", ALLOW, "Edit",
+     {"file_path": f"{VAULT}/DNA/Clients/prospects/AltaPointe-enterprise.md", "new_string": "x"}),
+    ("allow · a name not in DOSSIER_FILES", ALLOW, "Write",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/BrandNewClient.md", "content": "x"}),
     ("A · hunt-ledger (was unguarded)", DENY, "Edit",
      {"file_path": f"{VAULT}/DNA/Network/hunt-ledger.md", "new_string": "x"}),

@@ -186,8 +186,25 @@ def generated_paths():
             if s:
                 exact.add(s)
 
-    if consts.get("DOSSIER_DIR"):
-        dirs.add(consts["DOSSIER_DIR"].rstrip("/") + "/")
+    # THE DOSSIER DIRECTORY IS NOT ALL GENERATED, and blanket-guarding it was a
+    # defect in this file's first cut. DNA/Clients/prospects/ holds 23 generated
+    # dossiers AND 2 hand-authored files (AltaPointe-enterprise.md,
+    # Beasley-intake.md) with no GENERATED banner, and the client-intake agent
+    # deliberately writes `<name>-intake.md` there by hand. A directory rule
+    # blocks those too — over-blocking a partner's own writing surface is how a
+    # gate gets switched off, and switched off it protects nothing.
+    #
+    # targets.py enumerates the real ones in DOSSIER_FILES precisely because a
+    # directory listing is the wrong source ("enumerated by the RECORD LAYER, not
+    # by a directory listing"). Guard exactly that list, and it stays current
+    # with the exporter for free: a new dossier lands in DOSSIER_FILES the moment
+    # its client gets a notes_path.
+    dossier_dir = (consts.get("DOSSIER_DIR") or "").rstrip("/")
+    if dossier_dir:
+        for k in (dict_nodes.get("DOSSIER_FILES") or ast.Dict(keys=[], values=[])).keys:
+            name = as_str(k)
+            if name:
+                exact.add(f"{dossier_dir}/{name}")
 
     if not exact:
         raise ValueError("parsed no targets")
