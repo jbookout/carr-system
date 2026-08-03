@@ -61,6 +61,37 @@ GENERATED = (
     "deals-reciprocity.generated.md", "record-layer-dictionary.md",
 )
 
+# INTERNAL BY CONSTRUCTION — never linted, checked BEFORE the surface map.
+#
+# Added 2026-08-03. `("Deal Management", "proposal")` below is a broad fragment
+# and it swallowed `DNA/Deal Management/record-layer/`, which is the ENGINEERING
+# folder: work orders, design memos, onboarding runbooks. Those got the full
+# prospect-facing ruleset, so a MARKETING rule enforcing solo-Joe framing fired
+# on `dell-onboarding-runbook`, a document whose entire subject is Dell, and a
+# style rule about colons fired on a spec. Six "hard ban" hits on a file no
+# prospect will ever see.
+#
+# Rule ede4c735 is explicit that writing-rules binds PROSPECT-VISIBLE SURFACES
+# ONLY, so this is not a relaxation — the gate was overreaching its own charter.
+# The cost of overreach is not noise, it is that a human learns the alarm is
+# usually wrong and starts clicking past it, and then it catches nothing on the
+# day it is right. That is the same failure the façade check (rule 28) names for
+# health checks reporting everything at one severity.
+#
+# Deliberately narrow: only folders that are internal by their nature. Anything
+# that could plausibly reach a prospect keeps its surface, because a false
+# NEGATIVE here is far worse than a false positive.
+INTERNAL = (
+    "/record-layer/",      # work orders, design memos, specs, runbooks
+    "/dna/team/",          # protocol, twin-system playbook, the starter kit
+    "/00_context/",        # operating notes, decision history, loops, handoffs
+    "/automation/",        # scripts, job docs
+    "/archive/",           # snapshots and retired material
+    "/idea-inbox/",        # raw capture, never client-facing
+    "/_to_delete/",        # staging for deletion
+    "/_asset_staging/",    # raw intake
+)
+
 # Path fragment -> linter surface. First match wins, most specific first.
 SURFACES = (
     ("Marketing/Social Media", "social"),
@@ -88,6 +119,8 @@ def surface_for(path):
     if not path.startswith(VAULT):
         return None
     if not path.endswith((".md", ".txt", ".html")):
+        return None
+    if any(frag in low for frag in INTERNAL):
         return None
     for frag, surf in SURFACES:
         if frag.lower() in low:
