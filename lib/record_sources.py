@@ -352,16 +352,30 @@ def _elevated_url():
     return os.environ.get("CARR_DB_POOL_URL") or os.environ.get("DATABASE_URL")
 
 
+# Which relation a reachable pool read comes from. Returned by pool_reach as its
+# fourth element and branched on by load_pool. All three project the same keys.
+POOL_BASE = "candidate_pool"        # elevated DSN, base table, every source
+POOL_ALL = "v_export_pool_all"      # exporter credential, every source (0025)
+POOL_ROUTER = "v_export_pool"       # exporter credential, source='lead-router' only
+
+
 def pool_reach(wanted):
-    """(ok, why-not, connect-fn, all_sources) for the pool sources `wanted` needs.
+    """(ok, why-not, connect-fn, relation) for the pool sources `wanted` needs.
 
     Reports rather than raises: the board turns a miss into a loud fallback to
     files, which is the ORDER 29a contract for an unreachable record path.
+
+    The exporter credential reaches every source through `v_export_pool_all`
+    (migration 0025, ORDER 26's parked flip). `v_export_pool` stays router-scoped
+    because it IS export target #8 and must not grow the lane rows; the all-source
+    view is a consumer read path and is not an export target. This function
+    refused the lanes outright until 2026-08-04 — the view had been applied since
+    2026-07-31 and nothing here had been taught to look for it.
     """
     try:
         import psycopg  # noqa: F401
     except ImportError:
-        return False, "psycopg not importable by this interpreter (use .venv/bin/python)", None, False
+        return False, "psycopg not importable by this interpreter (use .venv/bin/python)", None, None
     url = _elevated_url()
     if url:
         def _c():
@@ -371,17 +385,24 @@ def pool_reach(wanted):
             with _c() as conn, conn.cursor() as cur:
                 cur.execute("select 1 from candidate_pool limit 1")
         except Exception as e:                                  # noqa: BLE001
-            return False, f"elevated DSN cannot read candidate_pool ({type(e).__name__})", None, False
-        return True, "", _c, True
+            return False, f"elevated DSN cannot read candidate_pool ({type(e).__name__})", None, None
+        return True, "", _c, POOL_BASE
     if not _exporter_url():
-        return False, "no CARR_DB_POOL_URL and no CARR_DB_EXPORTER_URL", None, False
-    if set(wanted) - {ROUTER_SOURCE}:
+        return False, "no CARR_DB_POOL_URL and no CARR_DB_EXPORTER_URL", None, None
+    if not set(wanted) - {ROUTER_SOURCE}:
+        return True, "", _connect, POOL_ROUTER
+    # Lanes wanted. Prove the all-source view rather than assuming the grant:
+    # a missing view here must fall back loudly, not raise mid-board.
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(f"select 1 from {POOL_ALL} limit 1")
+    except Exception as e:                                      # noqa: BLE001
         return (False,
-                "the exporter credential reaches only v_export_pool, which is scoped to "
-                f"source='{ROUTER_SOURCE}'; {sorted(set(wanted) - {ROUTER_SOURCE})} are "
-                "unreachable without an all-source view (parked, ORDER 26)",
-                None, False)
-    return True, "", _connect, False
+                f"the exporter credential cannot read {POOL_ALL} ({type(e).__name__}), so "
+                f"{sorted(set(wanted) - {ROUTER_SOURCE})} are unreachable; "
+                "migration 0025 creates and grants it",
+                None, None)
+    return True, "", _connect, POOL_ALL
 
 
 def load_pool(wanted):
@@ -391,7 +412,7 @@ def load_pool(wanted):
     consumer able to reproduce a file-mode one exactly: the transform is shared,
     only where the raw row came from changes.
     """
-    ok, why, conn_fn, all_sources = pool_reach(wanted)
+    ok, why, conn_fn, relation = pool_reach(wanted)
     if not ok:
         raise RuntimeError(why)
 
@@ -416,14 +437,20 @@ def load_pool(wanted):
     from exporters.targets import ROUTER_DB_OWNED
 
     sel = ", ".join(f'{v} as "{k}"' for k, v in _ROUTER_DB_COLS.items())
-    if all_sources:
-        q = (f"select source, source_seq, source_row, {sel} from candidate_pool "
+    cols = ", ".join(f'"{k}"' for k in ROUTER_DB_OWNED)
+    if relation == POOL_BASE:
+        q = (f"select source, source_seq, source_row, {sel} from {POOL_BASE} "
+             "where source = any(%s) order by source, source_seq")
+        args = (list(wanted),)
+    elif relation == POOL_ALL:
+        # The view already publishes v_export_pool's aliases, so the projection is
+        # the router branch's, widened by `source` and filtered to what was asked.
+        q = (f"select source, source_seq, source_row, {cols} from {POOL_ALL} "
              "where source = any(%s) order by source, source_seq")
         args = (list(wanted),)
     else:
-        cols = ", ".join(f'"{k}"' for k in ROUTER_DB_OWNED)
         q = (f"select %s::text as source, source_seq, source_row, {cols} "
-             "from v_export_pool order by source_seq")
+             f"from {POOL_ROUTER} order by source_seq")
         args = (ROUTER_SOURCE,)
 
     out = {s: [] for s in wanted}

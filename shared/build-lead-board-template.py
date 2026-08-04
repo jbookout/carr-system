@@ -10,9 +10,9 @@ Usage:
 
 TWO SOURCE MODES (ORDER 26(b), the ORDER 29a pattern).
   --files    the historical read: the router xlsx, the lane JSONs, the registry
-             xlsx. Still the default, still the fallback, still what the nightly
-             chain runs, and still the only mode Dell's runtime and any machine
-             without a database credential can use.
+             xlsx. Still the fallback, and still the only mode Dell's runtime and
+             any machine without a database credential can use. No longer the
+             default: the chain flipped to records on 2026-08-04 (ORDER 26(c)).
   --records  the same board derived from the record layer: `candidate_pool` (the
              router rows ORDER 25 imported plus the radar-lane rows ORDER 26(a)
              maps) and the lead registry's export view.
@@ -62,11 +62,18 @@ except ImportError:
     MODE_FILES, MODE_RECORDS, _HAVE_RECORDS = "files", "records", False
 
 if _HAVE_RECORDS:
-    # Default stays FILES until parity has been proven AND the chain can actually
-    # reach the pool unattended (ORDER 26(c)). Flipping the default before both
-    # are true would give a board that falls back every night while reporting a
-    # records-mode flag on its command line.
-    MODE, _ = resolve_mode(sys.argv[1:], default=MODE_FILES)
+    # ORDER 26(c)'s two conditions, both met 2026-08-04, which is why the default
+    # is RECORDS and no longer FILES:
+    #   parity proven — tools/parity-lead-board.py under the EXPORTER credential
+    #     (not an elevated DSN): 9,859 rows, 16 segments, full row equality EXACT.
+    #   pool reachable unattended — run.sh drives this with $REPO/.venv/bin/python,
+    #     which imports psycopg, and pool_reach now finds all six sources through
+    #     v_export_pool_all (migration 0025, applied 2026-07-31). Until today this
+    #     file's records mode was unreachable in the chain: the view existed and
+    #     lib/record_sources.py had never been taught to look for it.
+    # The fallback below stays exactly as it was — a board that cannot reach the
+    # pool still says so loudly and derives from files rather than failing.
+    MODE, _ = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
     if MODE == MODE_RECORDS:
         _want = (ROUTER_SOURCE,) + LANE_SOURCES
         _ok, _why, _, _ = pool_reach(_want)
