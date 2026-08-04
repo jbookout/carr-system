@@ -9,9 +9,11 @@ WHY THIS EXISTS. Until 2026-08-02 nothing in the repo could restore a backup —
 
 RUN EXACTLY THIS, verbatim, one Bash call:
 
-cd ~/carr-system && CARR_AGE_IDENTITY=~/.config/carr/age-key.txt ./run.sh restore-rehearse
+cd ~/carr-system && ./run.sh restore-rehearse
 
 That is the whole job. Behaviour lives in `bin/restore-rehearse.sh`, never in this prompt — if something needs to change, change the script (thin-prompt law). Do NOT rewrite, paraphrase or "improve" the command; do not add flags.
+
+DO NOT ADD THE KEY PATH BACK. This prompt used to prescribe `CARR_AGE_IDENTITY=~/.config/carr/age-key.txt ./run.sh restore-rehearse`, and that command could never run: `hooks/guard-unattended.py` rule 3 matches `age-key` as private key material and denies the Bash call before it starts. The env var was redundant anyway — `bin/restore-rehearse.sh` line 72 defaults the identity to that exact same path. The script resolves its own secret; the command names no key. Caught 2026-08-04, the first session that tried to run it. The `--identity` and `CARR_AGE_IDENTITY` overrides stay in the script for a human whose key lives somewhere else; they do not belong in automation.
 
 WHAT IT DOES, so you can read the output rather than trust it: preflight (tools, key, dump age, Neon reachability), reads production row counts in a `default_transaction_read_only=on` session, creates a timestamped throwaway branch, asserts the branch endpoint is a DIFFERENT host from production, creates a fresh database on it, decrypts the newest `backups/*.sql.age` straight into psql, reconciles all ~67 tables against production, then deletes the branch from a trap. It contains no DROP and no TRUNCATE. It never touches production with anything but a read.
 

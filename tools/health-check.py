@@ -233,11 +233,24 @@ WATCH = [
     # (7 days), and the brief pack plus the queue are rebuilt by the heartbeat.
     # WHAT A FAILURE HERE MEANS, so nobody debugs the wrong end: cadence and
     # matcher going stale means the nightly chain SKIPPED them, which until Joe's
-    # role tap lands is the DESIGNED state (exit 78, not a fault). Brief pack and
-    # review queue going stale on a Monday is the weekends-off rule showing
-    # through, since the heartbeat stands down Sat/Sun and JOB 4a runs before
-    # JOB 4b rebuilds them — flagged to Fable rather than padded on my own
-    # judgment, because the order set the cadence explicitly at 26h.
+    # role tap lands is the DESIGNED state (exit 78, not a fault).
+    #
+    # CORRECTED 2026-08-04. This comment used to say brief pack and review queue
+    # going stale "is the weekends-off rule showing through, since the heartbeat
+    # stands down Sat/Sun". That was never the mechanism, and believing it cost a
+    # day: THE HEARTBEAT HAS NO SCHEDULE AT ALL. Verified against all three
+    # collections that hold scheduled work — the Claude scheduler (16 tasks, none
+    # invokes it), launchd (com.carr.partner-ping, com.carr.videopipeline,
+    # com.carr.rules-refresh only) and cron (no crontab for booko). Nothing runs
+    # `run.sh brief-pack` or `run.sh review-queue` on any cadence; their last
+    # write was an ad-hoc session run, Sun 2026-08-02 15:18, which is not the
+    # heartbeat's ~08:00 CT slot. The weekend alibi held because it was checked
+    # on a Monday and never re-checked on a Tuesday.
+    #
+    # The Monday brief (monday-brief-task.md) is unscheduled by the same gap and
+    # has NO row here at all, so it fails silently — the one failure mode with no
+    # detector. Tracked as an open loop; do not re-explain these rows as a
+    # weekend artifact until a schedule actually exists.
     ("JOB brief-pack",    os.path.expanduser("~/carr-system/out/brief-pack/brief-pack-latest.md"), 26/24, [],
      "run.sh brief-pack (heartbeat JOB 4b)"),
     ("JOB monday-agenda", os.path.expanduser("~/carr-system/out/brief-pack/monday-agenda.md"), 26/24, [],
@@ -709,6 +722,58 @@ try:
             rc = 1
 except Exception as e:
     print(f"  ⚠︎ {'machine config':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
+# ── taught rules: store vs the file that actually binds (added 2026-08-04) ────
+# Every row above this one asks "is the output FRESH". This one asks "is the
+# output TRUE", because freshness could not have caught the defect it exists for.
+#
+# 2026-08-04: teach returned ok, activate-rule returned ok, and
+# `run.sh export --only compiled-rules` returned ok reporting 56 rows. The rule
+# was still absent from the file sessions read. `run.sh export` writes to
+# out/exports/ STAGING by default; only CARR_EXPORT_LIVE=1 reaches the vault
+# (exporters/common.py:32), and CLAUDE.md documented the command without the
+# flag. The vault file was fresh the whole time — the hourly refresh keeps it
+# that way — so an mtime check would have shown green while a rule taught after
+# 20:00 bound nobody until morning.
+#
+# The count is the signal because both halves already carry it: the store knows
+# how many rules are active, and each file declares its own total in its header.
+# Nothing compared them. The session-start recitation reads that header and
+# states it to the partner as fact, so a stale file makes the session misreport
+# what is binding it — which is the audit signal rule 4f7c348f exists to provide.
+try:
+    _rlc = os.path.join(REPO_ROOT, "ops", "rules-live-check.py")
+    if not os.path.exists(_rlc):
+        print(f"  -- {'rules live':<18} ops/rules-live-check.py not present; skipped")
+    else:
+        # NOT sys.executable. `run.sh health` invokes this file with bare
+        # `python3` (run.sh:80) while every other entry point uses "$PY", the
+        # repo venv — health-check.py is deliberately stdlib-only so it runs
+        # anywhere. The child is not: it needs psycopg. Handing it sys.executable
+        # gave it system python3, which failed the import, exited non-zero and
+        # printed nothing, so the row read "(no output)" and looked like a broken
+        # check rather than a missing dependency. Resolve the venv explicitly and
+        # leave health-check's own stdlib-only property intact.
+        _venv = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+        _py = _venv if os.path.exists(_venv) else sys.executable
+        _p = subprocess.run([_py, _rlc], capture_output=True, text=True, timeout=60)
+        _lines = (_p.stdout or "").strip().splitlines()
+        # Carry stderr into the message on a silent failure. The first version of
+        # this block swallowed it, which is the defect this whole row exists for.
+        _first = _lines[0] if _lines else (
+            f"(no output; stderr: {(_p.stderr or '').strip().splitlines()[-1]})"
+            if (_p.stderr or "").strip() else "(no output, no stderr)")
+        if _first.startswith("SKIP"):
+            print(f"  -- {'rules live':<18} {_first.split(': ', 1)[-1]}")
+        elif _p.returncode == 0:
+            print(f"  OK {'rules live':<18} {_first.split('— ', 1)[-1]}")
+        else:
+            print(f"  ⚠︎ {'rules live':<18} {_first.split('— ', 1)[-1]}  · "
+                  f"run ~/carr-system/bin/refresh-rules.sh")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'rules live':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
 sys.exit(rc)
