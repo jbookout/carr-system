@@ -97,7 +97,26 @@ step "encrypted backup -> git"                       ./bin/backup-dump.sh
 # its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
 # writing to it, so it read stale from 7/30 onward while passing 17/17 every time anyone
 # ran it by hand — a canary whose silence was indistinguishable from its health.
-step "smoke probes + heartbeat"                      ./bin/smoke-and-record.sh
+#
+# REPLACED 2026-08-04 (loop #178, Joe's ruling). smoke-and-record.sh runs
+# mcp-server/smoke-reads.sh, which authenticates to /mcp with the legacy
+# PARTNER_TOKENS bearer. That auth path was retired on purpose (5b13ed7,
+# 2026-08-03), so the suite has returned 23 failed / 0 passed every night since —
+# a canary that is not merely silent but structurally dead, and whose red had
+# already become background noise in one day.
+#
+# Joe ruled against minting a machine credential to revive it, since that would
+# partly undo a deliberate retirement. So the chain now runs what it CAN verify
+# without a partner identity: the Worker is deployed and still refuses anonymous
+# callers, and all 40 v_* views the read verbs sit on are queryable — which is
+# the failure that actually bites, because migrations break views and sixteen
+# landed in one day on 2026-08-02.
+#
+# THE FULL VERB SUITE IS NOT DEAD, IT MOVED: run ./mcp-server/smoke-reads.sh
+# AFTER EVERY WORKER DEPLOY from an interactive session holding a real grant. It
+# still covers transport, dispatch and answer correctness, and this probe says so
+# in its own output rather than letting a green row imply more than it proves.
+step "verb probe (worker gate + view sweep)"         ./.venv/bin/python ops/nightly-verb-probe.py
 
 # ── ORDER 5: dead-man pings LAST — a ping means the whole chain above ran ────
 step "healthchecks dead-man pings"               ./bin/hc-ping.sh
