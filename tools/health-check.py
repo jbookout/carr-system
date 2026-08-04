@@ -235,17 +235,27 @@ WATCH = [
     # matcher going stale means the nightly chain SKIPPED them, which until Joe's
     # role tap lands is the DESIGNED state (exit 78, not a fault).
     #
-    # CORRECTED 2026-08-04. This comment used to say brief pack and review queue
-    # going stale "is the weekends-off rule showing through, since the heartbeat
-    # stands down Sat/Sun". That was never the mechanism, and believing it cost a
-    # day: THE HEARTBEAT HAS NO SCHEDULE AT ALL. Verified against all three
-    # collections that hold scheduled work — the Claude scheduler (16 tasks, none
-    # invokes it), launchd (com.carr.partner-ping, com.carr.videopipeline,
-    # com.carr.rules-refresh only) and cron (no crontab for booko). Nothing runs
-    # `run.sh brief-pack` or `run.sh review-queue` on any cadence; their last
-    # write was an ad-hoc session run, Sun 2026-08-02 15:18, which is not the
-    # heartbeat's ~08:00 CT slot. The weekend alibi held because it was checked
-    # on a Monday and never re-checked on a Tuesday.
+    # CORRECTED TWICE ON 2026-08-04, and the second correction is the one to read.
+    #
+    # This comment first said these rows going stale "is the weekends-off rule
+    # showing through, since the heartbeat stands down Sat/Sun". That was never
+    # the mechanism: Monday 2026-08-03 was a full business day, npi-sweep-weekly
+    # fired at 12:31Z and the vault took writes that morning, while brief-pack
+    # and review-queue did not. Their last write was an ad-hoc session run, Sun
+    # 2026-08-02 15:18, which is not the heartbeat's ~08:00 CT slot.
+    #
+    # The replacement text then claimed THE HEARTBEAT HAS NO SCHEDULE AT ALL,
+    # having checked the Claude scheduler, launchd and cron. Joe corrected that
+    # the same day: the heartbeat is scheduled in COWORK, which a local Claude
+    # Code session cannot enumerate. Both the subagent and the main session named
+    # Cowork as unreachable and then wrote the negative anyway — rule 2b889e80
+    # says an unreachable collection makes a finding partial BY DEFINITION.
+    #
+    # SO THE STATE IS: the trigger fires every morning and these two jobs do not
+    # run. Leading hypothesis, UNTESTED — a Cowork session cannot reach
+    # ~/carr-system, so it cannot execute `run.sh brief-pack` at all. Do not
+    # re-explain these rows as a weekend artifact, and do not assert a cause
+    # until someone reads the Cowork task's own run history. Tracked as loop 181.
     #
     # The Monday brief (monday-brief-task.md) is unscheduled by the same gap and
     # has NO row here at all, so it fails silently — the one failure mode with no
