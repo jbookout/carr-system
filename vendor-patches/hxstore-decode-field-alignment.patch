@@ -1,0 +1,174 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 0ee30d1..a492c99 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -18,7 +18,6 @@ classifiers = [
+     "Environment :: Console",
+     "Intended Audience :: Developers",
+     "Intended Audience :: System Administrators",
+-    "License :: OSI Approved :: MIT License",
+     "Operating System :: MacOS",
+     "Programming Language :: Python :: 3",
+     "Programming Language :: Python :: 3.10",
+diff --git a/src/hxdecode/extract.py b/src/hxdecode/extract.py
+index 9b6de33..fc9045e 100644
+--- a/src/hxdecode/extract.py
++++ b/src/hxdecode/extract.py
+@@ -535,21 +535,100 @@ def _extract_cocoa_median(data: bytes) -> datetime | None:
+ # Module-level email regex for UTF-16 string matching (text, not bytes).
+ _TEXT_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.]+\.\w{2,6}")
+ 
++# --- LOCAL PATCH (2026-08-03) ------------------------------------------------
++# Upstream assigns fields BY POSITION in the string sequence and never checks
++# that a value looks like what it is being assigned to. On a real mailbox that
++# puts MIME types ("image/png"), GUIDs and bare email addresses into `subject`,
++# and puts subjects into `sender_name`. These predicates let the extractor
++# REJECT a candidate rather than accept whatever sat at a given index.
++_MIME_RE = re.compile(r"^[a-z]+/[a-z0-9.+_-]+$", re.I)
++_GUID_RE = re.compile(
++    r"^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$", re.I
++)
++_HEXID_RE = re.compile(r"^[0-9A-Fa-f]{16,}$")
++# Content-IDs appear both bare ("deadbeef@AAAA.BBBB") and with a filename
++# prefix ("image862976.png@67EC6C94.8A6BED82"). Both are attachment plumbing.
++_CONTENT_ID_RE = re.compile(r"^\S*@[0-9A-F]{6,}\.[0-9A-F]{6,}$", re.I)
++# Long unbroken base64 runs are tokens (Defender SafeLinks, tracking payloads),
++# never a human subject.
++_B64_BLOB_RE = re.compile(r"^[A-Za-z0-9+/=_-]{40,}$")
++
++
++def _is_msgid(s: str) -> bool:
++    return s.startswith("<") and "@" in s
++
++
++def _is_noise(s: str) -> bool:
++    """True when a string is structural metadata, never a human-facing field."""
++    if len(s.strip()) < 2:
++        return True
++    if _MIME_RE.match(s) or _GUID_RE.match(s) or _HEXID_RE.match(s):
++        return True
++    if _CONTENT_ID_RE.match(s) or _is_msgid(s):
++        return True
++    if " " not in s and _B64_BLOB_RE.match(s):
++        return True
++    if s in {"IPM.Note", "Standard", "Normal", "SMTP", "EX", "text/html", "UTF-8"}:
++        return True
++    return False
++
++
++def _undouble(s: str) -> str:
++    """Collapse a string that is exactly itself twice.
++
++    HxStore stores some display names doubled ("Wayne 'Dell' McCraneyWayne
++    'Dell' McCraney"), which upstream passes through verbatim.
++    """
++    n = len(s)
++    if n >= 6 and n % 2 == 0 and s[: n // 2] == s[n // 2:]:
++        return s[: n // 2]
++    return s
++
++
++def _is_name_like(s: str) -> bool:
++    """A display name: short, no address syntax, not a sentence."""
++    if _is_noise(s) or "@" in s or "/" in s:
++        return False
++    return 2 <= len(s) <= 60
++
++
++def _looks_like_person(s: str) -> bool:
++    """Title-cased, 1-5 words, no sentence punctuation. "Wayne 'Dell' McCraney"."""
++    if not s or "@" in s or _is_noise(s) or len(s) > 45:
++        return False
++    words = s.split()
++    if not 1 <= len(words) <= 5:
++        return False
++    if any(ch in s for ch in ".:!?;") and not s.endswith("."):
++        return False
++    capped = sum(1 for w in words if w[:1].isupper() or w[:1] in "'\"")
++    return capped >= max(1, len(words) - 1)
++
++
++def _looks_like_subject(s: str) -> bool:
++    """Long, or carrying the punctuation/prefixes that mark a subject line."""
++    if not s or _is_noise(s):
++        return False
++    if s[:3].upper() in ("RE:", "FW:") or s[:4].upper() == "FWD:":
++        return True
++    return len(s) > 45 or len(s.split()) > 5 or " - " in s
++
+ 
+ def _extract_subject_from_sequence(strings: list[str]) -> str:
+-    """Extract subject from a string sequence: msg_ids... -> body_preview -> subject."""
+-    pos = 0
+-    for s in strings:
+-        if s.startswith("<") and "@" in s:
+-            pos += 1
+-        else:
+-            break
+-    remaining = strings[pos:]
+-    if len(remaining) >= 2:
+-        return remaining[1]
+-    elif len(remaining) == 1:
+-        return remaining[0]
+-    return ""
++    """Pick the best SUBJECT candidate from a string sequence.
++
++    Upstream returned `remaining[1]` unconditionally. This keeps the same
++    preference for that position but rejects candidates that are demonstrably
++    not subjects (addresses, MIME types, GUIDs, message-ids), falling through
++    to the next plausible string instead of emitting a wrong value.
++    """
++    candidates = [s for s in strings if not _is_noise(s) and not _TEXT_EMAIL_RE.fullmatch(s)]
++    if not candidates:
++        return ""
++    # Upstream's positional preference, kept when it survives validation.
++    if len(candidates) >= 2:
++        return _undouble(candidates[1])
++    return _undouble(candidates[0])
+ 
+ 
+ def extract_email_fields(
+@@ -605,14 +684,40 @@ def extract_email_fields(
+         for s in utf16_strings:
+             if s in skip_strs or s == subject:
+                 continue
+-            if s.startswith("<"):
++            if _is_noise(s):
+                 continue
+             if _TEXT_EMAIL_RE.fullmatch(s) and not sender_email:
+                 sender_email = s
+-            elif sender_email and not sender_name and "@" not in s and "<" not in s and len(s) >= 2:
+-                sender_name = s
++            elif sender_email and not sender_name and _is_name_like(s):
++                sender_name = _undouble(s)
+                 break
+ 
++    # --- LOCAL PATCH (2026-08-03): validate before returning ----------------
++    # Upstream can return a MIME type, GUID or bare address as `subject`, and a
++    # subject line as `sender_name`, because assignment is positional. An empty
++    # field is far more useful than a confidently wrong one: a blank tells the
++    # caller to go look, a wrong value gets believed.
++    sender_name = _undouble(sender_name)
++    subject = _undouble(subject)
++
++    if subject and (_TEXT_EMAIL_RE.fullmatch(subject) or _is_noise(subject)):
++        subject = ""
++    if sender_name and (_TEXT_EMAIL_RE.fullmatch(sender_name) or _is_noise(sender_name)):
++        sender_name = ""
++    # A "name" that is really the subject: identical strings, or a long sentence.
++    if sender_name and sender_name == subject:
++        sender_name = ""
++    if sender_email and sender_name == sender_email:
++        sender_name = ""
++
++    # THE SWAP CASE. Positional extraction routinely lands the display name in
++    # `subject` and the subject line in `sender_name`. Detect and correct it,
++    # rather than emit two confidently wrong fields. Only swap when BOTH sides
++    # look wrong — a person's name is short and title-cased, a subject is long
++    # or carries sentence punctuation.
++    if sender_name and subject and _looks_like_person(subject) and _looks_like_subject(sender_name):
++        sender_name, subject = subject, sender_name
++
+     return sender_email, sender_name, subject
+ 
+ 
