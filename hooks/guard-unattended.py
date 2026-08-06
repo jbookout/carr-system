@@ -77,7 +77,103 @@ KNOWN_HOSTS = (
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
     "npiregistry.cms.hhs.gov", "download.cms.gov",
+    # raw.githubusercontent.com: loop #163 named its absence as the gap forcing
+    # the gh-api workaround for plain changelog reads. Added 2026-08-06 with the
+    # WebFetch widening.
+    "raw.githubusercontent.com",
 )
+
+# ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
+# The record-home gate denies Edit/Write on generated renders, but an ordinary
+# shell redirect walked around it: the #214 audit proved `echo >> open-loops.md`
+# ALLOWED while Edit on the same file was DENIED. This closes the second door.
+# The protected-path list is record-home-gate's own (parsed live from
+# exporters/targets.py) — one list, two doors. BEST-EFFORT PARSER, stated
+# plainly: it catches the ordinary write shapes the audit demonstrated
+# (>, >>, tee, cp/mv/rsync targets, sed -i, truncate, python open(...,'w')).
+# It does not chase adversarial obfuscation; the gate degrades open on its own
+# errors like the rest of this file.
+
+_VAULT_SPELLINGS = (
+    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/",
+    "/Users/booko/My Drive/CARR AI/",
+)
+
+_render_paths_cache = None
+
+
+def _protected_abs_paths():
+    """Absolute protected render paths under BOTH vault spellings, from
+    record-home-gate's generated_paths(). Cached per invocation; [] on any
+    error (fail open, logged by caller)."""
+    global _render_paths_cache
+    if _render_paths_cache is not None:
+        return _render_paths_cache
+    try:
+        import importlib.util
+        gate_py = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "record-home-gate.py")
+        spec = importlib.util.spec_from_file_location("_rhg", gate_py)
+        g = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(g)
+        exact, dirs = g.generated_paths()
+        paths = []
+        for rel in list(exact):
+            for v in _VAULT_SPELLINGS:
+                paths.append(v + rel)
+        _render_paths_cache = (paths, [v + d.rstrip("/") + "/" for d in dirs for v in _VAULT_SPELLINGS])
+    except Exception:
+        _render_paths_cache = ([], [])
+    return _render_paths_cache
+
+
+# sed -i: any protected path inside a `sed -i` clause IS the in-place write
+# target, so the pattern accepts anything between -i and the path short of a
+# clause separator (macOS sed carries a backup-suffix arg the first version
+# of this regex missed).
+_WRITE_BEFORE_CTX = re.compile(
+    r"(>>?|\btee(\s+-a)?|\bsed\s+-i[^|;&]*|\btruncate\b[^|;&]*)\s*[\"']?$")
+
+
+def render_write_target(cmd):
+    """Reason string when the command writes onto a protected render, else None."""
+    exact, gen_dirs = _protected_abs_paths()
+    if not exact and not gen_dirs:
+        return None
+    hits = [p for p in exact if p in cmd]
+    hits += [d for d in gen_dirs if d in cmd]
+    if not hits:
+        return None
+    for p in hits:
+        idx = 0
+        while True:
+            idx = cmd.find(p, idx)
+            if idx < 0:
+                break
+            before = cmd[max(0, idx - 60):idx]
+            if _WRITE_BEFORE_CTX.search(before):
+                return (f"write onto a generated render via shell ({os.path.basename(p.rstrip('/'))}) — "
+                        f"renders are written by the exporter only; use the record verb instead "
+                        f"(blocked by the CARR guard, second door of record-home-gate)")
+            idx += len(p)
+    # cp/mv/rsync: protected path as the DESTINATION (last path argument of the clause)
+    for clause in re.split(r"[;&|]", cmd):
+        toks = clause.strip().split()
+        if not toks:
+            continue
+        if toks[0] in ("cp", "mv", "rsync"):
+            tail = clause.strip()
+            for p in hits:
+                if tail.rstrip("\"' ").endswith(p.rstrip("/")):
+                    return (f"{toks[0]} onto a generated render ({os.path.basename(p.rstrip('/'))}) — "
+                            f"renders are written by the exporter only; use the record verb instead "
+                            f"(blocked by the CARR guard, second door of record-home-gate)")
+    # python inline write onto a protected path
+    for p in hits:
+        if re.search(r"open\(\s*[\"']" + re.escape(p) + r"[\"']\s*,\s*[\"'][wa]", cmd):
+            return (f"python write onto a generated render ({os.path.basename(p)}) — "
+                    f"use the record verb instead (blocked by the CARR guard)")
+    return None
 
 RULES = [
     # 1. destructive filesystem
@@ -141,6 +237,10 @@ def check(cmd):
             if not any(host == k or host.endswith("." + k) for k in KNOWN_HOSTS):
                 return (f"network send to an unrecognised host ({host}) — blocked by the "
                         f"CARR unattended guard. Add it to KNOWN_HOSTS if it is legitimate.")
+
+    reason = render_write_target(cmd)
+    if reason:
+        return reason
     return None
 
 
@@ -154,6 +254,26 @@ def main():
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
         ti = payload.get("tool_input") or payload.get("toolInput") or {}
+
+        # [2026-08-06, loop #163 closed on Joe's "Fix both now"] WebFetch joins
+        # the egress allowlist. Before this, `if tool != "Bash": sys.exit(0)`
+        # meant WebFetch reached ANY host while the identical curl was blocked —
+        # demonstrated live on 2026-08-03. Same KNOWN_HOSTS list, same tuning
+        # path (a block names the host to add). WebSearch is deliberately NOT
+        # gated: it reaches a search API, not an arbitrary host. Requires the
+        # settings matcher to include WebFetch — changed the same sitting.
+        if tool == "WebFetch":
+            url = (ti.get("url", "") if isinstance(ti, dict) else "") or ""
+            m = URL_RE.search(url if url.startswith("http") else f"https://{url}")
+            host = m.group(1) if m else ""
+            if host and not any(host == k or host.endswith("." + k) for k in KNOWN_HOSTS):
+                reason = (f"WebFetch to an unrecognised host ({host}) — blocked by the CARR "
+                          f"guard (loop #163 widening). Add it to KNOWN_HOSTS if it is legitimate.")
+                log(f"DENY {reason} :: {url[:200]}")
+                print(reason, file=sys.stderr)
+                sys.exit(2)
+            sys.exit(0)
+
         if tool != "Bash":
             sys.exit(0)
         cmd = ti.get("command", "") if isinstance(ti, dict) else ""

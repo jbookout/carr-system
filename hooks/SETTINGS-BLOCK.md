@@ -16,7 +16,7 @@ That file already has `skipWorkflowUsageWarning`, `agentPushNotifEnabled`, `inpu
 "hooks": {
   "PreToolUse": [
     {
-      "matcher": "Bash",
+      "matcher": "Bash|WebFetch",
       "hooks": [
         {
           "type": "command",
