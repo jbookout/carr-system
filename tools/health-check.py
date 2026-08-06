@@ -786,4 +786,34 @@ except Exception as e:
     print(f"  ⚠︎ {'rules live':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# ── forgetting (loop #212, migration 0071) ──────────────────────────────────
+# The store's forgetting policy, surfaced daily: re-verify queue depth (expired
+# + unstamped-volatile verifications), ingest_inbox backlog, and growth SLOPE
+# per accumulating table. The child also writes today's growth snapshot — the
+# health check is the one daily process guaranteed to run, so the snapshot
+# rides it. Same delegate pattern as rules-live: stdlib parent, venv child.
+try:
+    _fgc = os.path.join(REPO_ROOT, "ops", "forgetting-check.py")
+    if not os.path.exists(_fgc):
+        print(f"  -- {'forgetting':<18} ops/forgetting-check.py not present; skipped")
+    else:
+        _venv = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+        _py = _venv if os.path.exists(_venv) else sys.executable
+        _p = subprocess.run([_py, _fgc], capture_output=True, text=True, timeout=60)
+        _lines = (_p.stdout or "").strip().splitlines()
+        _first = _lines[0] if _lines else (
+            f"(no output; stderr: {(_p.stderr or '').strip().splitlines()[-1]})"
+            if (_p.stderr or "").strip() else "(no output, no stderr)")
+        if _first.startswith("SKIP"):
+            print(f"  -- {'forgetting':<18} {_first.split(': ', 1)[-1]}")
+        elif _p.returncode == 0:
+            print(f"  OK {'forgetting':<18} {_first.split('— ', 1)[-1]}")
+        else:
+            print(f"  ⚠︎ {'forgetting':<18} {_first.split('— ', 1)[-1]}  · "
+                  f"re-verify queue: v_expired_verification; intake: v_ingest_backlog")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'forgetting':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
