@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-08-05T23:39:28-0500",
+  "generated_at": "2026-08-06T00:08:31-0500",
   "generator": "tools/corpus-sync.py (ORDER 30, Wave 4 phase 1)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "THE DRIVE. This mirror is versioning only — never edit files under corpus/.",
   "max_bytes": 5242880,
-  "count": 73,
+  "count": 78,
   "files": [
     {
       "source": "00_Context/model-tiering.md",
@@ -115,6 +115,17 @@
       "mirrored_at": "2026-08-01T11:07:10-0500",
       "class": "method",
       "why": "CARR's fill-and-interpret methodology; the judgment layer over the worksheets"
+    },
+    {
+      "source": "DNA/Deal Management/record-layer/dell-onboarding-runbook-2026-08-01.md",
+      "mirror": "corpus/DNA/Deal Management/record-layer/dell-onboarding-runbook-2026-08-01.md",
+      "sha256": "34f6d7c3eba29bd184b3c3015d66af7fdcea047e8941d432ee153efde54be5ba",
+      "bytes": 7171,
+      "mtime": 1785767096.372,
+      "mtime_iso": "2026-08-03T09:24:56",
+      "mirrored_at": "2026-08-06T00:08:31-0500",
+      "class": "onboarding",
+      "why": "the record-layer onboarding runbook Dell's first session could not find"
     },
     {
       "source": "DNA/Leads/costar-playbook.md",
@@ -324,6 +335,50 @@
       "mirrored_at": "2026-08-01T11:07:10-0500",
       "class": "method",
       "why": "how CARR's mapping team is engaged; process, not data"
+    },
+    {
+      "source": "DNA/Team/dell-starter-kit/DELL-START-HERE.md",
+      "mirror": "corpus/DNA/Team/dell-starter-kit/DELL-START-HERE.md",
+      "sha256": "3a20aecfc3ff10e0e29805f3a8fa76454c2f2a0a4520b552526e4ce9ef84327e",
+      "bytes": 10090,
+      "mtime": 1785763579.343,
+      "mtime_iso": "2026-08-03T08:26:19",
+      "mirrored_at": "2026-08-06T00:08:31-0500",
+      "class": "onboarding",
+      "why": "Dell's day-one boot file; freshness matters most exactly when Drive sync lags"
+    },
+    {
+      "source": "DNA/Team/dell-starter-kit/dell-project-instructions.md",
+      "mirror": "corpus/DNA/Team/dell-starter-kit/dell-project-instructions.md",
+      "sha256": "46c836f67b3f64dc87772b9052b38f5406ef40cbb9a726ff5ed7af09a728a8a6",
+      "bytes": 3546,
+      "mtime": 1785729733.766,
+      "mtime_iso": "2026-08-02T23:02:13",
+      "mirrored_at": "2026-08-06T00:08:31-0500",
+      "class": "onboarding",
+      "why": "Dell's Cowork project-instructions stub source"
+    },
+    {
+      "source": "DNA/Team/dell-starter-kit/structure-manifest.md",
+      "mirror": "corpus/DNA/Team/dell-starter-kit/structure-manifest.md",
+      "sha256": "7878bd4e10607d955146b5ee0ef753b5858337ac7392021090f7accaea925abd",
+      "bytes": 11356,
+      "mtime": 1785729733.765,
+      "mtime_iso": "2026-08-02T23:02:13",
+      "mirrored_at": "2026-08-06T00:08:31-0500",
+      "class": "onboarding",
+      "why": "the structure manifest the kit ships"
+    },
+    {
+      "source": "DNA/Team/dell-starter-kit/template-INDEX.md",
+      "mirror": "corpus/DNA/Team/dell-starter-kit/template-INDEX.md",
+      "sha256": "5539914ffd8d6e4d77f3e62b8caf7ee9a671ea9b29c24a8d9ddf17ab4a642a1e",
+      "bytes": 1724,
+      "mtime": 1785729733.765,
+      "mtime_iso": "2026-08-02T23:02:13",
+      "mirrored_at": "2026-08-06T00:08:31-0500",
+      "class": "onboarding",
+      "why": "Dell's template INDEX (his always-read core)"
     },
     {
       "source": "DNA/brand-voice.md",

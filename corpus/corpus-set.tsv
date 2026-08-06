@@ -106,3 +106,10 @@ drive:.claude/agents/marketing-ads.md	agent	marketing-ads agent: job description
 drive:.claude/agents/marketing-coo.md	agent	marketing-coo agent: job description, tool grant and operating contract
 drive:.claude/agents/marketing-research.md	agent	marketing-research agent: job description, tool grant and operating contract
 drive:.claude/agents/salesforce-reader.md	agent	salesforce-reader agent: job description, tool grant and operating contract
+# Loop #162 (2026-08-06): the Dell starter kit gains a second path — Drive sync
+# latency blocked his onboarding on day one and these files existed on one medium.
+DNA/Team/dell-starter-kit/DELL-START-HERE.md	onboarding	Dell's day-one boot file; freshness matters most exactly when Drive sync lags
+DNA/Team/dell-starter-kit/dell-project-instructions.md	onboarding	Dell's Cowork project-instructions stub source
+DNA/Team/dell-starter-kit/template-INDEX.md	onboarding	Dell's template INDEX (his always-read core)
+DNA/Team/dell-starter-kit/structure-manifest.md	onboarding	the structure manifest the kit ships
+DNA/Deal Management/record-layer/dell-onboarding-runbook-2026-08-01.md	onboarding	the record-layer onboarding runbook Dell's first session could not find
