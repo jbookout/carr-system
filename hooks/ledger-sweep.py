@@ -38,6 +38,18 @@ health checks that report everything at one severity.
 FAILS OPEN AND SILENT on any error: unreadable transcript, unknown format,
 anything. It is a nudge on top of an existing rule and must never be the reason
 a response appears to fail. Logged to out/hook-guard.log for auditing.
+
+LOOP #191 (2026-08-05/06) fixed two false-positive classes without touching
+the triggers themselves. First, the walk-back to "the last human turn" could
+land on a harness-injected record — it once quoted a <task-notification>
+block as "his words" while Joe's actual last message was "go". Fixed by
+`is_harness_injected`, which prefers the transcript's own `origin.kind`
+field over content sniffing. Second, trigger 4 fired on a plain question
+("do we need to do a confirmation run of that last command or are you
+good?"). Fixed by `is_pure_question`, which suppresses triggers 1 and 4 only
+when the turn both opens with an interrogative lead and ends in "?" — a
+question with an embedded ruling ("we're doing X from now on, right?") opens
+as a declarative and still fires.
 """
 
 import json
@@ -123,6 +135,72 @@ TRIGGERS = [
         r"flipped|wired|shipped|finished|ran)\b|\bwe found\b|\bwe determined\b)", re.I)),
 ]
 
+# --- Harness-injected message detection (loop #191, fix 1) -----------------
+# A Stop hook reads the raw transcript, which interleaves genuine keystrokes
+# from the partner with records the HARNESS itself injects: task-notification
+# events (a background agent finished), system-reminder blocks, and tool
+# results. On 2026-08-05/06 this hook quoted a task-notification block as
+# "his words" while Joe's actual last message was "go" — the walk-back landed
+# on a harness record because nothing distinguished it from real speech.
+#
+# Prefer the STRUCTURAL signal over content sniffing wherever the transcript
+# carries one: modern records stamp `origin: {"kind": "human"}` on a genuine
+# typed turn and `origin: {"kind": "task-notification"}` on an injected one
+# (confirmed against live transcripts in ~/.claude/projects/). Content
+# prefixes remain the fallback for older records or a bare fixture with no
+# `origin` field at all.
+NON_HUMAN_ORIGIN_KINDS = {"task-notification"}
+NON_HUMAN_TEXT_PREFIXES = ("<task-notification", "<system-reminder", "[SYSTEM")
+
+
+def is_harness_injected(rec, text):
+    """True if `rec` (whose extracted text is `text`) was injected by the
+    harness rather than typed by the partner. Shape first; content is only a
+    fallback for records that carry no `origin` field."""
+    origin = rec.get("origin")
+    if isinstance(origin, dict):
+        kind = origin.get("kind")
+        if kind in NON_HUMAN_ORIGIN_KINDS:
+            return True
+        if kind == "human":
+            return False
+    if text and text.lstrip().startswith(NON_HUMAN_TEXT_PREFIXES):
+        return True
+    return False
+
+
+# --- Pure-interrogative detection (loop #191, fix 2) ------------------------
+# Trigger 4 fired on "do we need to do a confirmation run of that last command
+# or are you good?" — a question, not a ruling. A turn that OPENS with an
+# interrogative form aimed at the assistant and ends in "?" is a question, and
+# a plain question does not by itself rule on structure (trigger 4) or
+# overrule a recommendation (trigger 1).
+#
+# Deliberately narrow, both in which triggers it touches and in what it
+# matches: only triggers 1 and 4 are ever suppressed by this check, and only
+# when the turn LEADS with the interrogative. A trailing tag-question ("we're
+# doing X from now on, right?") still OPENS as a declarative ruling — the
+# question is bolted on at the end — and must keep firing. Requiring the lead
+# (not just a trailing "?") is what keeps that case intact.
+INTERROGATIVE_LEAD = re.compile(
+    r"^\s*(do we|does (it|this|that)|did (we|you)|should we|shall we|"
+    r"can you|could you|would you|will you|are you|is (there|that|this|it)|"
+    r"what|how about|who|when|where|why|which)\b", re.I)
+
+SUPPRESSIBLE_ON_QUESTION = {
+    "1 · OVERRULED A RECOMMENDATION",
+    "4 · RULED ON HOW SOMETHING IS STRUCTURED",
+}
+
+
+def is_pure_question(text):
+    """A turn that opens with an interrogative lead AND ends in '?'. Both
+    conditions matter: ends-in-'?' alone would also swallow a tag-question
+    like "...right?" that closes out an embedded ruling, which must keep
+    firing (see SUPPRESSIBLE_ON_QUESTION comment)."""
+    t = text.strip()
+    return bool(t) and t.endswith("?") and bool(INTERROGATIVE_LEAD.match(t))
+
 
 def log(msg):
     """Timestamped and self-identifying. Before 2026-08-03 no hook stamped its
@@ -189,14 +267,18 @@ def main():
             sys.exit(0)
 
         recs = read_tail(path)
-        # Walk backwards to the last human turn; note anything after it.
+        # Walk backwards to the last GENUINE human turn. Skip harness-injected
+        # records (task-notifications, system-reminders, tool results) rather
+        # than stopping at the raw last "user"-typed record in the transcript.
         last_human_idx, last_human = None, None
         for i in range(len(recs) - 1, -1, -1):
             t = human_text(recs[i])
-            # Skip harness-injected system reminders and tool results.
-            if t and not t.lstrip().startswith(("<system-reminder", "[SYSTEM")):
-                last_human_idx, last_human = i, t
-                break
+            if not t:
+                continue
+            if is_harness_injected(recs[i], t):
+                continue
+            last_human_idx, last_human = i, t
+            break
         if last_human is None:
             sys.exit(0)
 
@@ -205,6 +287,11 @@ def main():
             sys.exit(0)
 
         hits = [name for name, pat in TRIGGERS if pat.search(last_human)]
+        if is_pure_question(last_human):
+            # A pure interrogative doesn't rule or overrule on its own; an
+            # embedded ruling inside a question (trailing "right?") still has
+            # a declarative lead and was never suppressed here.
+            hits = [h for h in hits if h not in SUPPRESSIBLE_ON_QUESTION]
         if not hits:
             sys.exit(0)
 
