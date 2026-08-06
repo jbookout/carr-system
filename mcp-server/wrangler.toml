@@ -9,6 +9,20 @@
 #                         index.js before the OAuthProvider ever sees the request.
 #                         See secrets-inventory.md and mcp-server/smoke-reads.sh's
 #                         header for the provisioning runbook.
+#   REVIEW_TOKENS       — JSON map { "<slug>": "<token>" } for the Automatic Review
+#                         Council (built 2026-08-06). Same shape and same
+#                         before-the-OAuthProvider check as PROBE_TOKENS, modeled
+#                         directly on it. Authenticates a reviewer actor
+#                         ('codex-reviewer', 'grok-reviewer') locked server-side to
+#                         the 'reviewer' profile: ALL reads + EXACTLY record-finding.
+#                         TWO KEYS as of the 2026-08-06 scope extension — Codex was
+#                         the original frozen scope; Grok joined the same day once
+#                         its subscription-covered headless path (OAuth device
+#                         flow, no XAI_API_KEY) was live-verified. Paste both keys
+#                         together: {"codex-reviewer":"<t1>","grok-reviewer":"<t2>"}.
+#                         See pipelines/provision-review-council.sql and
+#                         bin/review-council-runner.sh for the provisioning runbook
+#                         and NOT YET RUN status.
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
 #                         provider-issued tokens; the secret is deleted and the

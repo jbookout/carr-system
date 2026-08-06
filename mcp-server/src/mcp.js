@@ -130,6 +130,31 @@ const PROFILES = {
   // tools/list capability check, and tools/list is itself profile-filtered,
   // so a probe-authenticated caller never even sees those verbs are there.
   probe: new Set(["log-activity", "set-next-action", "complete-action"]),
+
+  // REVIEWER (Automatic Review Council, Codex lane, 2026-08-06). The write set
+  // is EXACTLY `record-finding` — nothing else, ever. Like `probe`, this
+  // profile is NOT selected by ?profile= — it is forced in dispatch() below
+  // whenever the actor authenticated via a REVIEW_TOKENS bearer (see
+  // reviewActorFor in index.js), and ?profile= is ignored entirely for that
+  // actor. Reads need no entry here at all: allowedIn() already grants every
+  // read verb in every profile (`if (!tool.write) return true;`), so "ALL
+  // reads + exactly record-finding" falls straight out of that existing rule
+  // plus this one-verb write set — no separate read allowlist to keep in sync.
+  //
+  // WHY record-finding AND NOTHING ELSE. A reviewer's whole job is to land a
+  // structured, sourced opinion beside a record or a commit — which is
+  // precisely what record-finding is for (subject_kind defaults to resolving
+  // a C-127/L-204/deal ref, or a work-order/record ref passed as the subject;
+  // source is required, so every reviewer finding carries its provenance: the
+  // model, the commit sha, the contract version — exactly like a human
+  // researcher's URL). It is NOT humanOnly, so a machine actor can call it.
+  // No other write verb belongs here: a reviewer reads code and a record, and
+  // reports what it found. It never advances a deal, never drafts a document,
+  // never touches a party or a rule, and never gets a wider grant by asking —
+  // the profile is the whole point, not a suggestion the model could widen by
+  // passing a different verb name (callTool's allowedIn() check enforces this
+  // at call time, same as every other profile).
+  reviewer: new Set(["record-finding"]),
 };
 
 const PROFILE_NOTICE = {
@@ -162,6 +187,15 @@ const PROFILE_NOTICE = {
     "complete-action). Every other write verb refuses with not_in_profile. This profile is locked " +
     "server-side by a PROBE_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
     "under any request. This is the smoke-probe machine actor, never a human seat.</notice>",
+  reviewer:
+    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly one write verb, " +
+    "record-finding. Every other write verb refuses with not_in_profile — no advancing a deal, no " +
+    "drafting a document, no touching a party or a rule. This profile is locked server-side by a " +
+    "REVIEW_TOKENS bearer, not by ?profile=, and cannot be widened by this token under any request. " +
+    "This is the Automatic Review Council's Codex-reviewer machine actor, never a human seat. Land " +
+    "your findings as one or more record-finding calls: source is required on every one (name the " +
+    "model, the commit sha, and the contract version), and a clean run with nothing to flag is still " +
+    "a finding worth recording (found:false), not silence.</notice>",
 };
 
 /** Resolve ?profile= to a name, defaulting to full. An unknown value fails CLOSED to read. */
@@ -256,7 +290,10 @@ export async function dispatch(request, env, ctx, actor) {
   // is decided here, server-side, and NEVER by ?profile= — actor.probe is set
   // in exactly one place (index.js's probeActorFor, on a PROBE_TOKENS bearer
   // match) and cannot be set by anything a caller sends on the wire.
-  const profile = actor.probe ? "probe" : profileFor(request);
+  // REVIEWER LOCK (Automatic Review Council, 2026-08-06): same mechanism, same
+  // reasoning, for actor.review, set in exactly one place (index.js's
+  // reviewActorFor, on a REVIEW_TOKENS bearer match).
+  const profile = actor.probe ? "probe" : actor.review ? "reviewer" : profileFor(request);
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 

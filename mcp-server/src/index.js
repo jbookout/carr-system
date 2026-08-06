@@ -17,6 +17,14 @@
 //               maps to one locked-profile machine actor, never a human, and
 //               its profile can never be widened by the request — the OAuth
 //               path above is otherwise completely untouched.
+//               A THIRD, equally narrow door was added the same day for the
+//               Automatic Review Council's Codex lane (see "review token"
+//               below): a REVIEW_TOKENS bearer, checked immediately after the
+//               probe-token check and on the exact same before-the-provider
+//               pattern. It maps a reviewer slug (e.g. 'codex-reviewer') to
+//               the 'reviewer' capability profile locked in mcp.js: ALL reads
+//               + EXACTLY record-finding. Nothing about the OAuth path or the
+//               probe-token path changes because it exists.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
 //   /token      implemented by the provider
@@ -158,6 +166,63 @@ function probeActorFor(request, env) {
   return { slug, display: `Probe (${slug})`, human: false, probe: true, via: "probe-token", client_id: null };
 }
 
+// ---------- review token (Automatic Review Council, Codex lane, 2026-08-06) ----------
+//
+// A narrow, locked-profile machine identity for the Deal Council's automated
+// Codex reviewer, built directly on the PROBE_TOKENS pattern above — same
+// shape (a JSON map of slug -> secret, one Worker secret, replaced whole),
+// same lookup style, same "checked before the OAuthProvider ever sees the
+// request" placement. The differences mirror why PROBE_TOKENS exists as its
+// own thing rather than widening INGEST_TOKENS or PARTNER_TOKENS:
+//
+//   - REVIEW_TOKENS authenticates ONLY /mcp, and only a request whose bearer
+//     matches. A /mcp request whose bearer matches neither PROBE_TOKENS nor
+//     REVIEW_TOKENS falls straight through to oauthProvider.fetch exactly as
+//     before — this door adds nothing to that path.
+//   - The matched map key becomes the actor slug. TWO are expected to hold a
+//     live secret as of the 2026-08-06 scope extension: 'codex-reviewer'
+//     (the original frozen scope) and 'grok-reviewer' (added the same day
+//     once Grok's subscription-covered headless path — OAuth device flow,
+//     no XAI_API_KEY — was live-verified; decision 65468572's Codex-only
+//     cost override was superseded by that verification, not overridden by
+//     assumption). Nothing in this file names either slug specially — this
+//     code path is, and was designed to be, generic: adding a THIRD reviewer
+//     later is a secret update and an actor row (pipelines/provision-review-
+//     council.sql), never another code change here.
+//   - actor.review = true is the ONLY thing that can put mcp.js's dispatch()
+//     into the 'reviewer' capability profile (see the check there). ?profile=
+//     is read for every other caller but is IGNORED here on purpose, exactly
+//     like the probe path: the token cannot be asked for more than it was
+//     provisioned for, no matter what the request says.
+//   - human: false, always. A reviewer actor is a machine and is never
+//     eligible for a humanOnly verb, independent of whatever the profile Set
+//     does or does not name.
+//   - The actor must exist as a row in `actor` (kind='automation') before
+//     record-finding — the ONE write this profile allows — will run; mcp.js's
+//     callTool() looks it up by slug inside the write transaction and refuses
+//     actor_not_provisioned if it is missing, exactly as it does for every
+//     other actor. See pipelines/provision-review-council.sql (prepared, not
+//     yet run — see that file's own header for the exact status).
+//
+// Checked AFTER probeActorFor so a token that happens to collide with both
+// maps (it never will in practice — they are separate secrets) resolves
+// deterministically to probe first; in practice a caller only ever holds one
+// of the two tokens.
+function reviewActorFor(request, env) {
+  const auth = request.headers.get("authorization") || "";
+  const token = auth.replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  let tokens;
+  try {
+    tokens = JSON.parse(env.REVIEW_TOKENS || "{}");
+  } catch {
+    tokens = {};
+  }
+  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
+  if (!slug) return null;
+  return { slug, display: `Reviewer (${slug})`, human: false, review: true, via: "review-token", client_id: null };
+}
+
 // ---------- the provider ----------
 
 const oauthProvider = new OAuthProvider({
@@ -198,14 +263,16 @@ const oauthProvider = new OAuthProvider({
   },
 });
 
-// Top-level export. Everything not /mcp-with-a-matching-probe-token flows into
-// the OAuthProvider exactly as it always has — this wrapper adds one narrow
-// short-circuit and changes nothing else about the fetch surface.
+// Top-level export. Everything not /mcp-with-a-matching-probe-or-review-token
+// flows into the OAuthProvider exactly as it always has — this wrapper adds
+// two narrow short-circuits and changes nothing else about the fetch surface.
 export default {
   async fetch(request, env, ctx) {
     if (new URL(request.url).pathname === "/mcp") {
       const probeActor = probeActorFor(request, env);
       if (probeActor) return dispatch(request, env, ctx, probeActor);
+      const reviewActor = reviewActorFor(request, env);
+      if (reviewActor) return dispatch(request, env, ctx, reviewActor);
     }
     return oauthProvider.fetch(request, env, ctx);
   },
