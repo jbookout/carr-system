@@ -502,6 +502,53 @@ def find_grok_binary() -> tuple[Optional[str], list[str]]:
 # 4. the review-contract prompt (ONE versioned string, every reviewer)
 # ---------------------------------------------------------------------------
 
+# Paths whose change means the commit touches the trust surface: the Worker's
+# auth doors and verb layer, the hooks that enforce write policy, migrations
+# (grants live there), and the Worker's deploy config. Prefix match on the
+# repo-relative path.
+SECURITY_SENSITIVE_PATHS = (
+    "mcp-server/src/",
+    "mcp-server/wrangler.toml",
+    "hooks/",
+    "migrations/",
+    "bin/",
+)
+
+SECURITY_LENS = (
+    "SECURITY (auto-armed: this commit touches auth, grants, hooks, or "
+    "migrations) — evaluate as an attacker and as an auditor: does any change "
+    "widen a token door, a capability profile, or a role grant beyond its "
+    "stated intent; can any new code path be reached without the auth it "
+    "assumes; do hooks or guards still cover every tool/path they claim to "
+    "(name what escapes them); does any migration grant more than its header "
+    "argues for, or grant DELETE where a log claims to never shrink; could a "
+    "secret, token, or credential path leak into logs, renders, or error "
+    "messages; and does anything here weaken an existing enforcement the rest "
+    "of the system relies on."
+)
+
+
+def security_lens_if_triggered(commit_sha: str) -> Optional[str]:
+    """Return the security lens when the commit touches sensitive paths, else
+    None. Fails OPEN (None) on any git error, with the error logged — a broken
+    trigger must degrade to a normal review, never block one."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "diff-tree", "--no-commit-id",
+             "--name-only", "-r", commit_sha],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            log(f"security-lens trigger check failed (git rc={out.returncode}); lens not armed")
+            return None
+        changed = [l.strip() for l in out.stdout.splitlines() if l.strip()]
+        if any(f.startswith(p) for f in changed for p in SECURITY_SENSITIVE_PATHS):
+            return SECURITY_LENS
+        return None
+    except Exception as e:  # noqa: BLE001 — fail open by design, but say so
+        log(f"security-lens trigger check errored ({type(e).__name__}); lens not armed")
+        return None
+
+
 def render_contract_prompt(req: dict) -> str:
     """Pure function: request dict -> the fixed prompt sent to EVERY reviewer
     named on the request, byte-for-byte identical regardless of which one —
@@ -1016,6 +1063,18 @@ def process_request(request_path: Path) -> int:
             # design review: no code checkout — run in the repo root, read-only,
             # exactly like the code path's sandboxing (no write access assumed).
             cwd = REPO
+
+        # THE SECURITY LENS (Joe, 2026-08-06: "Also make the security lens").
+        # Auto-appended — never at the request author's discretion — whenever the
+        # commit touches the system's enforcement or trust surface. The trigger
+        # exists because loop #163 (the egress guard covering only Bash) was found
+        # BY ACCIDENT; a lens finds that class by assignment. Fails open with a
+        # log line: a git error must never block a review that would otherwise run.
+        if req["kind"] == "code":
+            lens = security_lens_if_triggered(req["evidence"]["commit_sha"])
+            if lens:
+                req["lenses"] = list(req.get("lenses") or []) + [lens]
+                log(f"security lens armed for request={request_id} (sensitive paths touched)")
 
         prompt = render_contract_prompt(req)
 
