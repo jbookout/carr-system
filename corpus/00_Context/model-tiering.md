@@ -25,7 +25,7 @@ Rule of thumb: T3 decides and verifies; T2 reasons through the routine; T1 does 
 
 ## Mechanics
 
-- **Claude Code sessions (local):** the Agent tool takes a `model` parameter (`haiku`, `sonnet`, `opus`). Delegating a T1/T2 step = spawning a subagent with that model set. Shape rule unchanged (ai-operating-notes): simple fan-out only, narrow jobs, each worker sees only what its job needs.
+- **Claude Code sessions (local):** the Agent tool takes a `model` parameter (`haiku`, `sonnet`, `opus`). Delegating a T1/T2 step = spawning a subagent with that model set. Shape rule unchanged (fan-out hygiene, rule `2b66211d`, DNA/compiled-rules-shared.md): simple fan-out only, narrow jobs, each worker sees only what its job needs.
 - **Standing amendment to the subagent rule (Joe's tiering go, 7/24):** routine tiered delegation INSIDE a task Claude already owns (a heartbeat step, a sweep, a feed distill) is pre-approved — do it, report it in one line. Genuinely heavy or novel fan-outs are still suggest-first, Joe decides.
 - **Cowork scheduled runs:** the app controls the parent model and no config pins it (memory: scheduled-run-model-not-config-pinnable). Tiering there means: the run delegates T1/T2 steps to cheaper subagents where the environment offers model control, and the Opus-only halt-gates protect voice runs regardless. Never promise a config fix.
 - **When unsure which tier:** take the higher one. A wrong answer from Haiku costs more than the tokens saved; the savings target is volume routine work, not edge cases.

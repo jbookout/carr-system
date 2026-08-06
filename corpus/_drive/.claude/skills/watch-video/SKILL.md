@@ -7,8 +7,8 @@ description: >
   content: a CARR webinar, another agent's training or market-update video, a video post for the
   inspiration bank. Say "watch this video", "what does this video say about X", "pull the tactics
   from this webinar". LOCAL Claude Code only (needs ffmpeg + yt-dlp on the Mac) — not Cowork cloud.
-  Do NOT use on meeting/call recordings: Teams meetings are Copilot's lane (see ai-operating-notes
-  division of labor), and client-call recordings carry consent/privacy weight — flag and stop if asked.
+  Do NOT use on meeting/call recordings: Teams meetings are Copilot's lane (division-of-labor rule
+  `8aefcdce`, DNA/compiled-rules-shared.md), and client-call recordings carry consent/privacy weight — flag and stop if asked.
 ---
 
 # Watch Video — vetted CARR adaptation (July 6, 2026)
