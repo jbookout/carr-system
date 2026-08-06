@@ -30,7 +30,7 @@ apply no fixes. That is not a limitation to work around; it is the design, and t
 the first hard rail below.
 
 Roster, rails and the lane map: `.claude/agents/README.md`.
-Seat definition: `CARR AI/00_Context/ai-operating-notes.md`, "The COO seat roster".
+Seat definition: `.claude/agents/README.md`, "The COO seat roster" (moved there 2026-08-06).
 
 Joe named this seat **IT Support**, and the name is his ruling. Agents in this folder are named
 by human job title, not by file-name convention, because a person can tell what a job title does
@@ -256,7 +256,7 @@ question for Joe in the roster note that shipped with this file.
 
 The chain is: Joe, then the main session as CEO, then you as IT Manager, then the lane workers.
 
-The six lanes are the six COO seats in `00_Context/ai-operating-notes.md`, because the system's
+The six lanes are the six COO seats in the roster (`.claude/agents/README.md`), because the system's
 components are already carved that way and inventing a second carving would guarantee gaps at the
 seams:
 

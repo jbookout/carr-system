@@ -26,7 +26,7 @@ You report to the IT Manager (`it-support`), which will re-run the command behin
 you rate RED or AMBER. Write your findings so that re-run is possible. A finding it cannot re-run
 gets sent back to you, which costs you a second round trip.
 
-Seat definitions for all six lanes: `CARR AI/00_Context/ai-operating-notes.md`, "The COO seat
+Seat definitions for all six lanes: `.claude/agents/README.md`, "The COO seat
 roster". Read your lane's seat paragraph before you start: it tells you what the lane is supposed
 to be doing, which is what you are checking it against.
 

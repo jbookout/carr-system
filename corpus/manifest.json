@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-08-06T00:51:10-0500",
+  "generated_at": "2026-08-06T01:00:11-0500",
   "generator": "tools/corpus-sync.py (ORDER 30, Wave 4 phase 1)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "THE DRIVE. This mirror is versioning only — never edit files under corpus/.",
   "max_bytes": 5242880,
-  "count": 78,
+  "count": 77,
   "files": [
     {
       "source": "00_Context/model-tiering.md",
@@ -214,17 +214,6 @@
       "mirrored_at": "2026-08-01T11:07:10-0500",
       "class": "playbook",
       "why": "transferable persuasion craft; grows by merge, which is doctrine growth, not a log"
-    },
-    {
-      "source": "DNA/Network/introduction-rules.md",
-      "mirror": "corpus/DNA/Network/introduction-rules.md",
-      "sha256": "9d8292d99fab2e4dd2073976e3cbdeb8ea1edf927d23d1d0d599660d67cc45b6",
-      "bytes": 18738,
-      "mtime": 1785994525.985,
-      "mtime_iso": "2026-08-06T00:35:25",
-      "mirrored_at": "2026-08-06T00:51:10-0500",
-      "class": "craft",
-      "why": "the taught compatibility layer; every rule here arrived by a human decision"
     },
     {
       "source": "DNA/Network/vendor-by-industry-reference.md",
@@ -471,22 +460,22 @@
     {
       "source": "drive:.claude/agents/README.md",
       "mirror": "corpus/_drive/.claude/agents/README.md",
-      "sha256": "dc738a9d87f5a57b0ff72b94db515cef71d764698dd5e5925a3537ac32f0cb7b",
-      "bytes": 22069,
-      "mtime": 1785717430.354,
-      "mtime_iso": "2026-08-02T19:37:10",
-      "mirrored_at": "2026-08-02T23:12:52-0500",
+      "sha256": "1ab09f432d0df20953f5909dc8889a19888320165fe5c927723ac6d5eb715516",
+      "bytes": 25421,
+      "mtime": 1785995940.511,
+      "mtime_iso": "2026-08-06T00:59:00",
+      "mirrored_at": "2026-08-06T01:00:11-0500",
       "class": "agent",
       "why": "agent roster and census"
     },
     {
       "source": "drive:.claude/agents/_ROSTER-ADDITIONS-it-support.md",
       "mirror": "corpus/_drive/.claude/agents/_ROSTER-ADDITIONS-it-support.md",
-      "sha256": "73f53c593bff366e42bd40f5dfd7e4650e7ed52f3dc9d5b1ee44ccfbce79259c",
-      "bytes": 14530,
-      "mtime": 1785720830.102,
-      "mtime_iso": "2026-08-02T20:33:50",
-      "mirrored_at": "2026-08-02T23:12:52-0500",
+      "sha256": "ea8a204a6afe0a44572e9c4d3bdb0c33ffdd4a483e273197e93873d34e7ecd8c",
+      "bytes": 14583,
+      "mtime": 1785995917.1,
+      "mtime_iso": "2026-08-06T00:58:37",
+      "mirrored_at": "2026-08-06T01:00:11-0500",
       "class": "agent",
       "why": "roster addition, pending merge into README"
     },
@@ -603,22 +592,22 @@
     {
       "source": "drive:.claude/agents/it-lane-worker.md",
       "mirror": "corpus/_drive/.claude/agents/it-lane-worker.md",
-      "sha256": "0b53d168cb6def852dfe1b59675b4ed2c2b75afff7698282351aa5e1e73e2c8e",
-      "bytes": 19943,
-      "mtime": 1785720816.884,
-      "mtime_iso": "2026-08-02T20:33:36",
-      "mirrored_at": "2026-08-02T23:12:52-0500",
+      "sha256": "28eb246b7f345ad2ddd5c617f17c3c365bc65b3af1785e215ed8d2246996c628",
+      "bytes": 19927,
+      "mtime": 1785995917.1,
+      "mtime_iso": "2026-08-06T00:58:37",
+      "mirrored_at": "2026-08-06T01:00:11-0500",
       "class": "agent",
       "why": "it-lane-worker agent: job description, tool grant and operating contract"
     },
     {
       "source": "drive:.claude/agents/it-support.md",
       "mirror": "corpus/_drive/.claude/agents/it-support.md",
-      "sha256": "be54341122f13ea4327d5eb05a43b0b98560aa8fefecd1d5215a123bb357edbe",
-      "bytes": 35762,
-      "mtime": 1785720810.262,
-      "mtime_iso": "2026-08-02T20:33:30",
-      "mirrored_at": "2026-08-02T23:12:52-0500",
+      "sha256": "7659128a70bd3120d7a9f22edaa7001ea84ba80d6582eeb882720665848e6b8d",
+      "bytes": 35776,
+      "mtime": 1785995917.101,
+      "mtime_iso": "2026-08-06T00:58:37",
+      "mirrored_at": "2026-08-06T01:00:11-0500",
       "class": "agent",
       "why": "it-support agent: job description, tool grant and operating contract"
     },
@@ -636,11 +625,11 @@
     {
       "source": "drive:.claude/agents/marketing-coo.md",
       "mirror": "corpus/_drive/.claude/agents/marketing-coo.md",
-      "sha256": "f9830826de0cb6ca13a7ee2e97ddd9ad678ac027a1f5c65eee113cd68b5cf62b",
-      "bytes": 26183,
-      "mtime": 1785717105.518,
-      "mtime_iso": "2026-08-02T19:31:45",
-      "mirrored_at": "2026-08-02T23:12:52-0500",
+      "sha256": "1959b1a26fb932264956a7167c66739432b2f1d9df13f7baa471966ccc5b758b",
+      "bytes": 26192,
+      "mtime": 1785995917.101,
+      "mtime_iso": "2026-08-06T00:58:37",
+      "mirrored_at": "2026-08-06T01:00:11-0500",
       "class": "agent",
       "why": "marketing-coo agent: job description, tool grant and operating contract"
     },

@@ -30,7 +30,11 @@ DNA/Deal Management/pipeline-coo-doctrine.md	craft	names itself doctrine; how th
 DNA/Leads/pipeline-craft.md	craft	the craft layer of the lead system (lead-system.md is its SOP layer, held back)
 DNA/Leads/costar-playbook.md	craft	what is actually in CoStar and the workflows worth building on it
 DNA/Network/vendor-relationship-craft.md	craft	how referrals are earned per vendor type; unified vendor doctrine
-DNA/Network/introduction-rules.md	craft	the taught compatibility layer; every rule here arrived by a human decision
+# DNA/Network/introduction-rules.md — REMOVED from the set 2026-08-06 (the corpus-treadmill ruling,
+# loop #140 item 2): it became a GENERATED render of the rule store (ORDER 37). A render's source of
+# truth is the database, which already survives Drive; mirroring it re-stamped the export footer
+# hourly and made the drift check amber with no doctrine changed. The 19 intro rules live in the
+# store; the render is reproducible from it at any time.
 DNA/Network/vendor-by-industry-reference.md	method	CARR's approach per vendor category; the generic layer under the craft file
 DNA/Network/vendor-intro-timeline.md	method	deal stage to vendor category; the concierge sequence
 DNA/Deal Management/legal-considerations-lease-review.md	method	distilled legal-risk framework for agents; paraphrase-only capture, no transcript

@@ -21,7 +21,7 @@ this folder produce questions about one document; you produce a state report and
 what the lane does next, backed by numbers you actually pulled.
 
 Roster, rails and the lane map: `.claude/agents/README.md`.
-Seat definition: `CARR AI/00_Context/ai-operating-notes.md`, "The COO seat roster".
+Seat definition: `.claude/agents/README.md`, "The COO seat roster" (moved there 2026-08-06).
 
 ## The seat you are filling (quoted verbatim from the roster, Joe, Jul 21 2026)
 

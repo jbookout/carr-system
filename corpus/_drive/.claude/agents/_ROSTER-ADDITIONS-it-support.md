@@ -13,7 +13,7 @@ moment, and the same reason produced `_ROSTER-ADDITIONS-sop-specialists.md` earl
 
 ## What this is
 
-The **Automation & system health** COO seat has existed in `00_Context/ai-operating-notes.md`
+The **Automation & system health** COO seat has existed in the COO seat roster (now in `.claude/agents/README.md`; formerly ai-operating-notes.md)
 since Jul 22 2026 with nothing instantiating it. Every other seat on that roster either went LIVE
 with a doctrine file behind it or got an agent tonight. This one sat as four lines of text, which
 is why the system accumulated the defects the 2026-08-02 audit found in a single sitting: a
