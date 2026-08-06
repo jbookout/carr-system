@@ -149,6 +149,12 @@ TRIGGERS = [
 # (confirmed against live transcripts in ~/.claude/projects/). Content
 # prefixes remain the fallback for older records or a bare fixture with no
 # `origin` field at all.
+# KNOWN NOISE, deliberately NOT patched (2026-08-06, fourth observed shape):
+# a genuine human turn that PASTES another session's output can trip triggers
+# on the pasted narration ("Now I'll record the verdict..."). No detector here:
+# a paste is a real human turn and sometimes carries a real ruling appended to
+# it, so suppressing the class would eat true positives. The receiving session
+# decides; expect occasional no-entry answers on paste-heavy turns.
 NON_HUMAN_ORIGIN_KINDS = {"task-notification"}
 # Third shape found live 2026-08-06, minutes after the first fix shipped: the
 # autonomous-loop tick prompt ("# Autonomous loop check ... invoked on a
