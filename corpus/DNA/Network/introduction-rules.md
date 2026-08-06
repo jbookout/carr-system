@@ -101,4 +101,4 @@ are columns there.*
 - date not recorded in the source file — UNCONFIRMED DEFAULT — Banker ↔ SBDC consultant (startup pipeline both directions) is plausible but unruled. Suggest it o…  ·  *system-proposed default listed in introduction-rules.md; author not identifiable*
 - date not recorded in the source file — EVENT GUEST LISTS — before any joint event (happy hour, speaker panel, lunch-and-learn), run the invite list through the…  ·  *introduction-rules.md "Event guest-list rule" section; undated and no author stamped*
 
-*Exported: 2026-08-05T12:02:04.083421+00:00 · 19 active rule(s)*
+*Exported: 2026-08-06T05:35:25.984118+00:00 · 19 active rule(s)*
