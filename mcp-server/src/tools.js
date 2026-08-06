@@ -1845,9 +1845,25 @@ export const TOOLS = {
       const s = await resolveSubject(c, args.vendor);
       if (s.type !== "vendor") throw new ToolError({ error: "not_a_vendor", resolved: s });
       await versionGuard(c, "vendor", s.id, args.base_version);
-      const allowed = ["stage","seeking","offers","referral_active","territory","rivalry_group","out_of_market","intro_notes"];
+      // [0069] category_slug + verticals joined the list — the columns existed since
+      // 0001/0050 but no verb could reach them, which left the 63 null-category
+      // vendors unfixable (loop #199). category_slug, not free-text category: 0050
+      // deprecated the free-text field after a stage value got stored as a
+      // profession, and reopening it here would reopen that defect.
+      const allowed = ["stage","seeking","offers","referral_active","territory","rivalry_group","out_of_market","intro_notes","category_slug","verticals"];
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // Pre-validate rather than letting the FK abort the transaction: a poisoned
+      // transaction cannot even fetch the slug list to explain itself.
+      if (keys.includes("category_slug") && args.fields.category_slug !== null) {
+        const slugs = (await c.query("select slug from vendor_category order by sort")).rows.map(r => r.slug);
+        if (!slugs.includes(args.fields.category_slug))
+          throw new ToolError({ error: "unknown_category_slug", got: args.fields.category_slug, allowed: slugs,
+            hint: "a rare type is an INSERT into vendor_category by a human, never a guess" });
+      }
+      if (keys.includes("verticals") && args.fields.verticals !== null &&
+          !(Array.isArray(args.fields.verticals) && args.fields.verticals.every(v => typeof v === "string")))
+        throw new ToolError({ error: "verticals_not_array", hint: 'pass an array of strings, e.g. ["dental","vet"]' });
       const old = (await c.query(`select ${keys.join(",")} from vendor where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
       await c.query(`update vendor set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
@@ -1856,6 +1872,78 @@ export const TOOLS = {
         await writeEvent(c, actor, "update-vendor", "vendor", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys };
+    }),
+  },
+
+  // [0069, loop #199] The promotion path from evidence to live contact data. Before
+  // this verb, record-finding could store a verified cell/email/title beside the
+  // record but NOTHING could write it onto the party — contact-enrichment-weekly
+  // hit the same wall every Thursday, and the 2026-08-06 Outlook mining run left
+  // 8 verified facts stranded in record_flag.
+  "update-party-contact": {
+    write: true,
+    description: "Promote a VERIFIED contact fact onto a party: phone (office), cell (mobile), email, title, city, county — CONTACT FACTS ONLY. Identity fields (name, org, npi, specialty) are deliberately out of reach: a discrepancy there goes through record-finding's proposes_correction and is applied by the owning partner, never by this verb (rule 5d44d3f3). source is REQUIRED on every call — provenance is binding, and the usual value is the record-finding row or thread being promoted. Accepts any ref (P-####, V-/C-/L-/T-, or a name); a role ref resolves to the PERSON under it, and a merged party hops to its survivor (reported in the result). base_version is the PARTY's version, from a fresh read. Placeholder guard: a CARR agent's own number or any carr.us address in a client/vendor contact field is a placeholder, never data — refused, not stored.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      party: { type: "string", description: "P-#### ref, a role ref (V-/C-/L-/T-), or a name" },
+      base_version: { type: "integer" },
+      fields: { type: "object", properties: {
+        phone: { type: ["string","null"] }, cell: { type: ["string","null"] },
+        email: { type: ["string","null"] }, title: { type: ["string","null"] },
+        city: { type: ["string","null"] }, county: { type: ["string","null"] } },
+        additionalProperties: false },
+      source: { type: "string", description: "where the fact came from: 'record-finding <kind> observed <date>', 'outlook thread <subject> <date>', 'practice website', ..." } },
+      required: ["idempotency_key","party","base_version","fields","source"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "update-party-contact", args, async () => {
+      if (!args.source || !args.source.trim())
+        throw new ToolError({ error: "missing_source", hint: "a contact fact without provenance is a rumour; say where it came from" });
+      const s = await resolveSubject(c, args.party);
+      if (s.type === "deal")
+        throw new ToolError({ error: "not_a_party", hint: "a deal has no contact fields; pass the person or their role ref" });
+      let partyId;
+      if (s.type === "party") partyId = s.id;
+      else {
+        const r = await c.query(
+          "select party_id from v_ref_index where subject_type=$1 and subject_id=$2", [s.type, s.id]);
+        if (!r.rows.length || !r.rows[0].party_id)
+          throw new ToolError({ error: "no_party_under_ref", resolved: s });
+        partyId = r.rows[0].party_id;
+      }
+      // A merged party is a pointer; writing to a tombstone strands the fact.
+      const hop = await c.query("select merged_into from party where id=$1", [partyId]);
+      if (!hop.rows.length) throw new ToolError({ error: "not_found", table: "party", id: partyId });
+      const hopped = hop.rows[0].merged_into !== null;
+      if (hopped) partyId = hop.rows[0].merged_into;
+
+      const allowed = ["phone","cell","email","title","city","county"];
+      const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
+      if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed,
+        hint: "contact facts only; identity corrections go through record-finding proposes_correction" });
+
+      // Placeholder rule 54e2bcb9: an agent's own details standing in for a contact
+      // nobody had. Stored, they read as enriched while being emptier than a blank.
+      for (const k of ["phone","cell"]) {
+        if (args.fields[k] && String(args.fields[k]).replace(/\D/g, "").endsWith("2056436555"))
+          throw new ToolError({ error: "placeholder_phone", field: k,
+            hint: "205-643-6555 is a CARR agent's own line, never a contact — record the field as unknown instead" });
+      }
+      if (args.fields.email && /@carr\.us\s*$/i.test(String(args.fields.email).trim()))
+        throw new ToolError({ error: "placeholder_email",
+          hint: "a carr.us address in a contact field is a placeholder, never data — record the field as unknown instead" });
+
+      await versionGuard(c, "party", partyId, args.base_version);
+      const clean = {};
+      for (const k of keys)
+        clean[k] = (k === "phone" || k === "cell") ? fmtPhoneUS(args.fields[k]) : args.fields[k];
+      const old = (await c.query(`select ${keys.join(",")} from party where id=$1`, [partyId])).rows[0];
+      const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
+      await c.query(`update party set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
+        [actor.id, ...keys.map(k => clean[k]), partyId]);
+      for (const k of keys)
+        await writeEvent(c, actor, "update-party-contact", "party", partyId,
+          { field: k, old: { [k]: old[k] }, new: { [k]: clean[k] },
+            agent_rationale: `source: ${args.source}`, idempotency_key: args.idempotency_key });
+      return { ok: true, party_id: partyId, updated: keys, hopped_to_survivor: hopped || undefined };
     }),
   },
 
@@ -2206,8 +2294,32 @@ export const TOOLS = {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" } },
       required: ["idempotency_key","survivor_party","merged_party"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-merge", args, async () => {
-      if (args.survivor_party === args.merged_party)
+      // [0069] Inputs used to be assumed party uuids; a V- ref passed here died in
+      // the update below as "invalid input syntax for type uuid" — an internal
+      // error where a routing answer belonged (loop #199). Resolve refs properly,
+      // and name the one case this verb structurally cannot do.
+      const toParty = async (input) => {
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input))
+          return { partyId: input, via: "uuid" };
+        const s = await resolveSubject(c, input);
+        if (s.type === "party") return { partyId: s.id, via: "party" };
+        if (s.type === "deal")
+          throw new ToolError({ error: "not_a_party", ref: input, hint: "a deal cannot be merged; pass a party or role ref" });
+        const r = await c.query(
+          "select party_id from v_ref_index where subject_type=$1 and subject_id=$2", [s.type, s.id]);
+        if (!r.rows.length || !r.rows[0].party_id)
+          throw new ToolError({ error: "no_party_under_ref", ref: input, resolved: s });
+        return { partyId: r.rows[0].party_id, via: s.type, roleId: s.id };
+      };
+      const surv = await toParty(args.survivor_party);
+      const merg = await toParty(args.merged_party);
+      if (surv.partyId === merg.partyId) {
+        if (surv.via === "vendor" && merg.via === "vendor" && surv.roleId !== merg.roleId)
+          throw new ToolError({ error: "one_party_two_vendor_rows",
+            hint: "these two vendor refs ride ONE party — that is a vendor-row duplicate, not a party duplicate. Use merge-vendor-rows." });
         throw new ToolError({ error: "same_party", hint: "a party cannot be merged into itself" });
+      }
+      args = { ...args, survivor_party: surv.partyId, merged_party: merg.partyId };
 
       // THE ROLE ROWS MOVE WITH THE PERSON. Until 2026-08-02 this verb set merged_into and
       // nothing else, so the loser's lead/client/vendor rows were left pointing at a party
@@ -2239,6 +2351,100 @@ export const TOOLS = {
         { new: { merged_into: args.survivor_party, roles_moved: moved }, idempotency_key: args.idempotency_key });
       return { ok: true, roles_moved: moved,
                duplicate_roles_on_survivor: dup.rows.length ? dup.rows : undefined };
+    }),
+  },
+
+  // [0069, loop #199] The case confirm-merge structurally cannot do: two VENDOR
+  // rows riding ONE party. The 8/1-ruled Crowley and Woulston merges executed at
+  // party level and left exactly this behind (V-GC-001+V-GC-013, V-MKT-001+
+  // V-MSC-024), and the build sweep found a third pair the loop never named
+  // (T-004+T-040). Backlog #119/#120's "executed" claims were true-but-incomplete.
+  "merge-vendor-rows": {
+    write: true, humanOnly: true,
+    description: "HUMAN-confirmed merge of two vendor rows that ride the SAME party — a duplicate role, not a duplicate person. Survivorship is deterministic (rule 4c21d86b applied at role level): the survivor keeps every value it has, its NULLs fill from the loser, and a field where both rows disagree is REPORTED untouched for a human to settle — never coin-flipped. Activities, findings and next actions move to the survivor; the loser becomes a tombstone (merged_into) that v_ref_index still resolves with merged=true, and renders exclude. Different-party duplicates are confirm-merge's lane, and this verb refuses them. Nothing auto-merges, ever: a human picks the pair and the survivor. Survivor choice per rule 4c21d86b: more corroborated identity, then more linked records, then oldest.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      survivor_vendor: { type: "string", description: "V-/T- ref of the row that keeps the ref cited elsewhere" },
+      merged_vendor: { type: "string", description: "V-/T- ref of the row that becomes the tombstone" } },
+      required: ["idempotency_key","survivor_vendor","merged_vendor"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "merge-vendor-rows", args, async () => {
+      const resolveVendor = async (ref) => {
+        const s = await resolveSubject(c, ref);
+        if (s.type !== "vendor") throw new ToolError({ error: "not_a_vendor", ref, resolved: s.type });
+        return s.id;
+      };
+      const survId = await resolveVendor(args.survivor_vendor);
+      const mergId = await resolveVendor(args.merged_vendor);
+      if (survId === mergId)
+        throw new ToolError({ error: "same_vendor_row", hint: "both refs resolve to one row; nothing to merge" });
+
+      const FIELDS = ["category","category_slug","verticals","stage","owner_id","owner_label",
+        "referral_active","territory","offers","seeking","rivalry_group","originated",
+        "intro_notes","links_label","last_touch","relationship_level"];
+      const rows = (await c.query(
+        `select id, vendor_ref, party_id, merged_into, ${FIELDS.join(",")} from vendor where id = any($1)`,
+        [[survId, mergId]])).rows;
+      const surv = rows.find(r => r.id === survId), merg = rows.find(r => r.id === mergId);
+      if (surv.merged_into || merg.merged_into)
+        throw new ToolError({ error: "already_merged",
+          which: [surv, merg].filter(r => r.merged_into).map(r => r.vendor_ref),
+          hint: "a tombstone cannot merge again; resolve to the live survivor first" });
+      if (surv.party_id !== merg.party_id)
+        throw new ToolError({ error: "different_parties",
+          hint: "these vendor rows sit on two different people — that is a PARTY duplicate. confirm-merge is the verb, and it moves the vendor rows with the person." });
+
+      // Survivorship: fill the survivor's NULLs, report disagreements, change nothing else.
+      const filled = {}, conflicts = [];
+      for (const f of FIELDS) {
+        const a = surv[f], b = merg[f];
+        const empty = (v) => v === null || v === undefined || (Array.isArray(v) && v.length === 0);
+        if (empty(a) && !empty(b)) filled[f] = b;
+        else if (!empty(a) && !empty(b) && JSON.stringify(a) !== JSON.stringify(b))
+          conflicts.push({ field: f, survivor: a, merged: b });
+      }
+      const fk = Object.keys(filled);
+      if (fk.length) {
+        const sets = fk.map((k, i) => `${k}=$${i + 2}`).join(", ");
+        await c.query(`update vendor set ${sets}, updated_by=$1 where id=$${fk.length + 2}`,
+          [actor.id, ...fk.map(k => filled[k]), survId]);
+      }
+
+      // Dependents move; event rows stay where they happened (history is immutable).
+      const moved = {};
+      const act = await c.query(
+        "update activity set vendor_id=$1 where vendor_id=$2 returning id", [survId, mergId]);
+      if (act.rows.length) moved.activities = act.rows.length;
+      const rf = await c.query(
+        "update record_flag set subject_id=$1 where subject_type='vendor' and subject_id=$2 returning id",
+        [survId, mergId]);
+      if (rf.rows.length) moved.findings = rf.rows.length;
+      // next_action: a unique index guards one OPEN action per (subject, owner).
+      // A colliding open action on the loser is dropped and reported, never lost silently.
+      const droppedActions = [];
+      const na = await c.query(
+        "select id, owner_id, description, status from next_action where subject_type='vendor' and subject_id=$1", [mergId]);
+      for (const row of na.rows) {
+        const clash = row.status === "open" && (await c.query(
+          `select 1 from next_action where subject_type='vendor' and subject_id=$1
+            and owner_id=$2 and status='open'`, [survId, row.owner_id])).rows.length;
+        if (clash) {
+          await c.query("update next_action set status='dropped', updated_by=$1 where id=$2", [actor.id, row.id]);
+          droppedActions.push(row.description);
+        } else {
+          await c.query("update next_action set subject_id=$1, updated_by=$2 where id=$3", [survId, actor.id, row.id]);
+          moved.next_actions = (moved.next_actions || 0) + 1;
+        }
+      }
+
+      await c.query("update vendor set merged_into=$1, updated_by=$2 where id=$3",
+        [survId, actor.id, mergId]);
+      await writeEvent(c, actor, "merge-vendor-rows", "vendor", mergId,
+        { new: { merged_into: args.survivor_vendor, filled, conflicts, moved },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, survivor: surv.vendor_ref, tombstone: merg.vendor_ref,
+               fields_filled: fk.length ? filled : undefined,
+               conflicts_left_for_human: conflicts.length ? conflicts : undefined,
+               moved, dropped_duplicate_open_actions: droppedActions.length ? droppedActions : undefined };
     }),
   },
 
