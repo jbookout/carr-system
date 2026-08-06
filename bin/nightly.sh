@@ -103,6 +103,15 @@ step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
 step "graph (derived from the exported files)"       ./run.sh graph
 step "encrypted backup -> git"                       ./bin/backup-dump.sh
 
+# Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
+# (~1 month back on current publish settings), so history that scrolls out is
+# gone forever and any "look back N months" backfill silently under-covers.
+# This step snapshots both partners' feeds into out/calendar-archive/ (dedup by
+# content, gitignored — PII stays out of git). It fetches independently of the
+# Shortcuts drop files, so archiving survives a dead Shortcut. Exit 78 = SKIP
+# when ~/.config/carr/calendar.env is absent, same contract as the other steps.
+step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
+
 # Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
 # its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
 # writing to it, so it read stale from 7/30 onward while passing 17/17 every time anyone
