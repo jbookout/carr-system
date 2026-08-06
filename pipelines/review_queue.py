@@ -125,7 +125,17 @@ def db_url() -> str | None:
         for line in env.read_text().splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
-                found[k.strip()] = v.strip()
+                # .strip("\"'") IS LOAD-BEARING — db.env values are shell-quoted so
+                # `set -a; . db.env` survives an `&` in the DSN, but this hand-rolled
+                # parser doesn't get quote-stripping for free the way bash does. Without
+                # it, psycopg gets a DSN with a literal leading/trailing quote character
+                # and fails at connection-string-parsing time with a generic
+                # ProgrammingError ("invalid connection option") before the query ever
+                # reaches the server — masking the real InsufficientPrivilege (or lack
+                # thereof) underneath. Same fix already in exporters/common.py,
+                # pipelines/brief_pack.py, lib/record_sources.py. Added 2026-08-06,
+                # loop #188: this file's copy of the parser was the one left unfixed.
+                found[k.strip()] = v.strip().strip("\"'")
         for name in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL"):
             # preference, not file order: db.env is a list, not a ranking
             if found.get(name):
@@ -164,11 +174,23 @@ def read_ingest(url):
         return rows, "ok"
     except Exception as e:
         name = type(e).__name__
-        if "InsufficientPrivilege" in name or "permission denied" in str(e):
+        msg = str(e)
+        if "InsufficientPrivilege" in name or "permission denied" in msg:
             return [], ("not configured: the only credential on this Mac is the views-only "
                         "exporter role, which is refused SELECT on the intake table. "
                         "Needs a role holding `select on ingest_inbox`.")
-        return [], f"could not read the intake table ({name})"
+        # Everything else, named precisely rather than folded into "ProgrammingError"
+        # for everything: a malformed DSN (bad quoting, invalid option) and an actual
+        # server-side ProgrammingError (renamed column, bad SQL) are different repairs,
+        # and a status note that can't tell them apart sends the next session hunting
+        # for a grant that was never the problem (loop #188, 2026-08-06). The DSN never
+        # goes in the message — a connection string carries the password.
+        if "invalid connection option" in msg or "invalid dsn" in msg.lower():
+            detail = ("malformed connection string (unstripped quoting from db.env, "
+                      "most likely) — check db_url() parsing, not a grant")
+        else:
+            detail = msg.splitlines()[0][:160] if msg and "://" not in msg else "(message withheld: looked like it contained a DSN)"
+        return [], f"could not read the intake table ({name}: {detail})"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
