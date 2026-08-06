@@ -609,7 +609,15 @@ def build_codex_command(codex_bin: str, prompt: str, cwd: Path) -> list[str]:
     logic. `cwd` is accepted for signature symmetry with build_grok_command
     but unused here — the working directory is set by the subprocess launch
     (see run_one_reviewer), same as the original single-backend build."""
-    return [codex_bin, "exec", "--sandbox", "read-only", "--json", prompt]
+    # LIVE-CORRECTED 2026-08-06, first real run: `--json` emits a JSONL EVENT
+    # stream (thread.started, ...) — extract_json grabbed the first event and
+    # the actual review was lost. Plain `codex exec` prints the final agent
+    # message on stdout (smoke-verified same day: prompt in, answer out), and
+    # the shared extract_json finds the review object inside it. The
+    # `-o/--output-last-message FILE` flag exists as a stronger capture if
+    # stdout ever proves noisy; not adopted yet to keep the parser signature
+    # untouched.
+    return [codex_bin, "exec", "--sandbox", "read-only", prompt]
 
 
 def build_grok_command(grok_bin: str, prompt: str, cwd: Path) -> list[str]:
