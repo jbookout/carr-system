@@ -201,8 +201,10 @@ function probeActorFor(request, env) {
 //     record-finding — the ONE write this profile allows — will run; mcp.js's
 //     callTool() looks it up by slug inside the write transaction and refuses
 //     actor_not_provisioned if it is missing, exactly as it does for every
-//     other actor. See pipelines/provision-review-council.sql (prepared, not
-//     yet run — see that file's own header for the exact status).
+//     other actor. See pipelines/provision-review-council.sql. PROVISIONED
+//     AND ACTIVE as of 2026-08-06 (verified live by the #214 audit: both
+//     reviewer actor rows exist, active=t) — the refusal backstop below is
+//     therefore already open; the profile lock is the operative control.
 //
 // Checked AFTER probeActorFor so a token that happens to collide with both
 // maps (it never will in practice — they are separate secrets) resolves

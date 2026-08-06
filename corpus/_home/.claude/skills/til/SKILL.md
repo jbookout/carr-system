@@ -13,6 +13,14 @@ description: >
 
 # til — capture a lesson before it's forgotten
 
+> **RECORD-BACKED PROJECTS (fixed 2026-08-06, loop #142's sweep):** in a project
+> with a record layer (CARR), a lesson is NOT a LESSONS.md row — a standing
+> lesson in the partner's words goes through the `teach` verb (proposed, then
+> activated on his yes), and a one-off gotcha goes through `log-decision` so it
+> renders into decision-history. The file mechanics below apply ONLY to projects
+> with no record layer.
+
+
 > **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
 
 ## What this is for

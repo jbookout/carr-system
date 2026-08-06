@@ -1,5 +1,11 @@
 -- provision-review-council.sql — Automatic Review Council, 2026-08-06.
 --
+-- STATUS: APPLIED. Verified live by the #214 security audit (2026-08-06,
+-- direct query): both reviewer actor rows exist and are active=t. Any wording
+-- below implying this file has not yet run is historical. The operative
+-- control on the reviewer doors is therefore the profile lock in mcp.js —
+-- the actor_not_provisioned backstop this header describes is already open.
+--
 -- WHAT THIS IS. Inserts the actor rows a REVIEW_TOKENS bearer authenticates
 -- as. mcp-server/src/mcp.js's callTool() looks up every write actor by slug
 -- inside the write transaction (`select id from actor where slug=$1`) and

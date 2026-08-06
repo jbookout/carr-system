@@ -13,6 +13,15 @@ description: >
 
 # checkpoint — mid-session state snapshot
 
+> **RECORD-BACKED PROJECTS (fixed 2026-08-06, loop #142's sweep):** in a project
+> with a record layer (CARR: the MCP verbs), a checkpoint is NOT a dated state
+> file — it is a `log-decision` entry (state, decisions, exact next step in the
+> rationale) plus `add-loop` rows for anything mid-flight. The record-home gate
+> denies checkpoint-shaped files there, and the denial is correct: a checkpoint
+> is a record wearing narrative clothing. The file mechanics below apply ONLY
+> to projects with no record layer.
+
+
 > **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
 
 ## What this is for

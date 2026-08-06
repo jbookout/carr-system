@@ -21,8 +21,9 @@
 #                         flow, no XAI_API_KEY) was live-verified. Paste both keys
 #                         together: {"codex-reviewer":"<t1>","grok-reviewer":"<t2>"}.
 #                         See pipelines/provision-review-council.sql and
-#                         bin/review-council-runner.sh for the provisioning runbook
-#                         and NOT YET RUN status.
+#                         bin/review-council-runner.sh for the provisioning runbook.
+#                         PROVISIONED AND ACTIVE as of 2026-08-06 (#214 audit,
+#                         verified live: both reviewer actors exist, active=t).
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
 #                         provider-issued tokens; the secret is deleted and the

@@ -18,13 +18,43 @@ description: >
 
 # handoff — session takeover packet builder (portable)
 
-> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3).
+> **Doctrine ownership: single writer.** One seat edits this file, the Fable design seat. Every other session, either brain, proposes changes through the `teach` verb or a team-board row, and the seat lands them. Set 2026-08-01 per ORDER 38 (two-writer endgame D3). *(This revision: Joe's direct order, loop #142 Job 1, executed 2026-08-06 — "fix the handoff skills"; the human's own order outranks the seat gate.)*
+
+## RECORD-BACKED PROJECTS FIRST — the packet is the fallback, not the default
+
+**Before building anything, check whether this project has a record layer** (in
+CARR: the MCP verb connector — `log-decision`, `add-loop`, `record-finding`,
+`teach` — plus `catch-me-up` / `today-triage` on the receiving end). **If it
+does, a handoff is NOT a markdown packet.** A handoff is records wearing
+narrative clothing: every piece of it already has a verb —
+
+| Packet section | Where it actually goes |
+|---|---|
+| Decisions made, with rationale | `log-decision` (one call per settled call, alternatives in the rationale) |
+| Open questions / next actions | `add-loop` (owner, marker, what it unblocks) |
+| Research results, verified facts | `record-finding` (source required) |
+| Standing rules the successor must honor | `teach` (only if genuinely new — usually they already bind via compiled rules) |
+| Current state / watch-outs | the decision entries' rationale carries them |
+
+The RECEIVING end already exists: the next session runs `catch-me-up` /
+`today-triage` and gets briefed straight from the database — no file to point
+at, no packet to paste. Deliver a SHORT in-chat note to the user naming what
+was logged (refs/numbers) and the literal words to say to the next session.
+
+**Do not write the packet to a file in a record-backed project.** In CARR the
+record-home gate DENIES writes under `00_Context/handoffs/` — the denial is
+correct, not an obstacle to route around. A handoff filed as markdown strands
+the work where nothing reads it (Joe, loop #142: handoffs, checkpoints, and
+status writeups are RECORDS, not narrative).
+
+**Only when the project has NO record layer** does the markdown packet below
+apply — it remains the right tool for plain repos and folders.
 
 ## What this skill is for
 
-A new session starts blank. It does not remember this conversation, the decisions made in it, the files touched, or the dead ends already ruled out. `/handoff` closes that gap: it packages everything a fresh session needs to resume the work without the user re-explaining anything.
+A new session starts blank. It does not remember this conversation, the decisions made in it, the files touched, or the dead ends already ruled out. `/handoff` closes that gap: it gets everything a fresh session needs where that session will actually find it — the record layer when one exists, a packet when not.
 
-The output is **one markdown packet**, written **as a briefing addressed to the next session** ("You are picking up..."), not as a recap addressed to the user. The user pastes or attaches it into a fresh session, and that session reads it and continues.
+In packet mode the output is **one markdown packet**, written **as a briefing addressed to the next session** ("You are picking up..."), not as a recap addressed to the user. The user pastes or attaches it into a fresh session, and that session reads it and continues.
 
 This is **build-and-deliver**. It never sends anything, never opens the new session itself, and never saves a file without the user's go-ahead.
 
@@ -73,7 +103,7 @@ Deliver it in-chat first. Then offer, as a yes/no question — never assume:
 - **Save it** into the project's handoff home (from "Adapt to the project"), as a dated markdown file, creating the folder if needed.
 - **Log it** in the project's open-items / TODO / decision file if one exists, so the thread does not fall off the radar.
 
-**Check first whether that file is generated.** In projects where the tracking file is a projection of a database or another source of truth, hand-editing it does nothing — the next export overwrites it, and the entry silently disappears. Look for a header saying the file is generated, a build or export step that writes it, or a note in the project's context file. If it is generated, log the item through the system's own write path (the verb, API, or command that owns that record) and never by editing the file. In CARR specifically, `open-loops.md`, `decision-history.md`, and the `dossier-*.md` set are all generated exports: open items go in through the `add-loop` verb, and a hand-edit there is a lost entry, not a saved one.
+**Check first whether that file is generated.** In projects where the tracking file is a projection of a database or another source of truth, hand-editing it does nothing — the next export overwrites it, and the entry silently disappears. Look for a header saying the file is generated, a build or export step that writes it, or a note in the project's context file. If it is generated, log the item through the system's own write path (the verb, API, or command that owns that record) and never by editing the file. (In a record-backed project you should not be in packet mode at all — see the first section; this paragraph exists for projects with a partial system, where some files are generated and no full record layer exists.)
 
 Do either only on a yes. If the user just wants the packet to paste and move on, stop after delivering it.
 

@@ -82,6 +82,8 @@ That file already has `skipWorkflowUsageWarning`, `agentPushNotifEnabled`, `inpu
 
 **`lint-gate.py`** runs `run.sh lint` after a write to a plausibly client-facing vault file and injects the result back into the session. It never blocks. It skips generated renders, repo code and scratch files.
 
+**`ledger-boundary-sweep.py`** — WRITTEN BUT REGISTERED NOWHERE (found by the 2026-08-06 #214 audit: no settings file names it, `out/hook-guard.log` shows zero firings against 75 for ledger-sweep). Its docstring says it blocks once; it currently blocks nothing. Registering it is a Joe call — a second blocking hook on Bash has a real false-stop cost.
+
 **`ledger-sweep.py`** is a Stop hook: it reads the last human turn against the five ledger triggers and, when one matched and no `log-decision` or `teach` followed, names the trigger and quotes the line.
 
 ## Why the record-home gate had to be a hook
