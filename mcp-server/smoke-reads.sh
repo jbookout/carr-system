@@ -42,6 +42,26 @@ ENVFILE="${CARR_MCP_ENV:-$HOME/.config/carr/mcp-tokens.env}"
 TOKEN="${CARR_MCP_TOKEN_JOE:-${JOE_TOKEN:-}}"
 if [ -z "$TOKEN" ]; then echo "FAIL: no MCP token (looked in $ENVFILE)"; exit 2; fi
 
+# PREFLIGHT (2026-08-05): prove the token is ACCEPTED before running 44 checks.
+# The legacy PARTNER_TOKENS bearer this file historically used was retired on
+# 2026-08-03 (#111b, commit 5b13ed7) — the secret is gone from the Worker, so
+# that token now fails every call with invalid_token and a run prints 23
+# phantom FAILs that look like a broken deploy. This suite needs an OAuth-era
+# credential to run again (tracked as an open loop); until then, post-deploy
+# verification is `ops/nightly-verb-probe.py` (gate + all views) plus one live
+# verb through a partner's OAuth connector.
+_pf=$(curl -sS "$API" -X POST \
+    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":0,"method":"tools/list"}' 2>/dev/null)
+if printf '%s' "$_pf" | grep -q '"invalid_token"'; then
+  echo "RETIRED AUTH — this token is no longer accepted by the Worker (PARTNER_TOKENS"
+  echo "retired 2026-08-03, #111b). The 44 checks below would all print phantom FAILs."
+  echo "Verify deploys with: ~/carr-system/.venv/bin/python ops/nightly-verb-probe.py"
+  echo "plus one live verb through the OAuth connector. Re-crediting this suite is an"
+  echo "open loop; nothing about the deploy itself can be concluded from this exit."
+  exit 3
+fi
+
 pass=0; fail=0
 _id=0
 
