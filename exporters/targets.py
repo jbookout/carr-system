@@ -1422,8 +1422,92 @@ def build_decision_history(tmp_path, cur):
     return shown, canonical
 
 
+# ---------------- Source Material capture log ----------------
+# 0070 (Joe, 2026-08-06: record-master the capture log so the dedup check can't
+# race two writers). Header prose lives HERE, not in a block table — the one
+# deliberate divergence from 0024's loop_block reasoning, justified in the
+# migration header: since the corpus flip, a prose change being a git edit is
+# the system's stated direction. The seat can overrule.
+
+SOURCES_REL = "DNA/Marketing/Source Material/INDEX.md"
+
+
+def build_source_captures(tmp_path, cur):
+    cur.execute(
+        "select captured_on, session, visibility, status, merge_note "
+        "  from v_export_source_captures order by captured_on, id")
+    rows = cur.fetchall()
+
+    lines = [
+        "# Source Material — Capture Log (the dedup guard)",
+        "",
+        "> **GENERATED from the CARR record layer — do not hand-edit; a new capture",
+        "> is `log-capture` (which dedup-checks for you), never a row typed here.**",
+        "",
+        "*This is a bare CAPTURE LOG, nothing more (slimmed July 8, 2026 — Joe's call: "
+        "provenance bookkeeping beyond dedup was documentation for documentation's sake; "
+        "record-mastered Aug 6, 2026 so the check-before-capture step cannot race two "
+        "writers). Its one job: **before capturing any training/portal/podcast session, "
+        "check this list — if it's here, it's already absorbed** (the `log-capture` verb "
+        "runs that check for you). Knowledge lives in the domain playbooks as our own "
+        "doctrine; the narrative of how the system evolved lives in decision-history.*",
+        "",
+        "## Capture policies (encoded in the watch-video skill — summary)",
+        "Transcribe on-device → **SCOPE CHECKPOINT (Joe's rule, Jul 11, 2026: after the "
+        "transcript is complete and before anything is routed, summarize the source to "
+        "Joe and ask whether it applies system-wide or somewhere more specific — own "
+        "section/business model, one prospect, personal tier, or not at all)** → distill "
+        "→ DISCARD (no transcripts, no timestamps, no attributed statements; public "
+        "founder material excepted). Knowledge MERGES at the scope Joe chose (default "
+        "domains: `DNA/Deal Management/playbooks/` renewals · negotiation · financing · "
+        "diligence-and-valuation, `DNA/Leads/pipeline-craft.md`, "
+        "`DNA/Network/vendor-relationship-craft.md`, content lanes → concept "
+        "library/bank). Who-knows-what directory facts → "
+        "`DNA/Network/carr-colleague-contacts.md`. No source .pptx/PDF archiving — the "
+        "source link is the record. One pipeline for EVERY learning source (podcasts, "
+        "YouTube, webinars, CARR portal alike).",
+        "",
+        "## Captured (check before ANY capture)",
+        "",
+        "| Date | Session | Status |",
+        "|---|---|---|",
+    ]
+    canonical = []
+    queued = []
+    for captured_on, session, visibility, status, merge_note in rows:
+        if status == "queued":
+            queued.append((captured_on, session, merge_note))
+            continue
+        note = merge_note
+        if status == "declined" and not note.upper().startswith("DECLINED"):
+            note = f"DECLINED — {note}"
+        lines.append(f"| {captured_on} | {session} | {note} |")
+        canonical.append([str(captured_on), session, visibility, status, merge_note])
+
+    lines += [
+        "",
+        "## Queue (sessions to capture next)",
+        "*Log with `log-capture status:\"queued\"` (or just tell Claude) when Joe spots "
+        "a source worth mining.*",
+        "",
+        "| Date | Session | Note |",
+        "|---|---|---|",
+    ]
+    for captured_on, session, merge_note in queued:
+        lines.append(f"| {captured_on} | {session} | {merge_note} |")
+        canonical.append([str(captured_on), session, "", "queued", merge_note])
+
+    from datetime import datetime, timezone
+    lines += ["",
+              f"*Exported: {datetime.now(timezone.utc).isoformat()} · "
+              f"{len(rows)} capture(s) on record*", ""]
+    tmp_path.write_text("\n".join(lines))
+    return len(rows), canonical
+
+
 TARGETS = {
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
+    "source-captures": (SOURCES_REL, build_source_captures),
     # ORDER 40. A render of decision events, windowed by byte budget rather than
     # split by hand — see DECISION_BUDGET_BYTES.
     # RE-REGISTERED 2026-08-03 on Joe's instruction ("go ahead and solve decision

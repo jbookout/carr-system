@@ -2755,6 +2755,56 @@ export const TOOLS = {
   // under source_system='decision-history'. Grouping stays the render's job
   // (rule 29, one entry per session) — this verb exposes session_key and groups
   // nothing, exactly as the view does.
+  // [0070] The Source Material capture log as a verb. The markdown INDEX was a
+  // table wearing prose: append-only rows plus a check-before-capture dedup step
+  // that two concurrent sessions could race. The check now runs inside the write
+  // transaction and cannot.
+  "log-capture": {
+    write: true,
+    description: "Log a learning-source capture into the Source Material capture log — one row per source (podcast, article, video, portal session, thread). Its ONE job is the dedup guard: it CHECKS for an existing capture first (exact URL, then session-name similarity) and returns candidates INSTEAD of inserting when found — if it's already here, it's already absorbed; pass force_new:true only after a human confirms it is genuinely a different source. The knowledge itself NEVER lives here: it merges into the domain playbooks per the knowledge policy, and merge_note records where it merged and what was declined, honestly. status: merged (absorbed), declined (evaluated, not adopted — say why), queued (spotted, capture later; merge_note may be empty only here). Renders to DNA/Marketing/Source Material/INDEX.md — never hand-edit that file.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      session: { type: "string", description: "what the source is, in the words a future dedup check would search — include the author/platform and [public source] / [colleague source] style markers as before" },
+      merge_note: { type: "string", description: "where it merged and what was declined, with reasons. Required unless status is queued." },
+      captured_on: { type: "string", description: "YYYY-MM-DD; defaults today" },
+      source_url: { type: "string", description: "primary link when one exists — it becomes the exact-match dedup key" },
+      visibility: { type: "string", enum: ["public","member_gated","colleague","internal"], default: "public" },
+      status: { type: "string", enum: ["merged","declined","queued"], default: "merged" },
+      force_new: { type: "boolean", description: "insert despite dedup candidates — only after a human confirmed it is a different source" } },
+      required: ["idempotency_key","session"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "log-capture", args, async () => {
+      const status = args.status || "merged";
+      if (status !== "queued" && !(args.merge_note && args.merge_note.trim()))
+        throw new ToolError({ error: "missing_merge_note",
+          hint: "a merged or declined capture must say where it went or why it was declined; only a queued row may be empty" });
+      if (!args.force_new) {
+        const cand = await c.query(
+          `select captured_on, session, status, left(merge_note, 160) as merge_note
+             from source_capture
+            where ($1::text is not null and source_url is not null
+                   and lower(source_url) = lower($1))
+               or session % $2
+            order by similarity(session, $2) desc limit 5`,
+          [args.source_url || null, args.session]);
+        if (cand.rows.length)
+          return { needs_confirm: true, candidates: cand.rows,
+                   hint: "similar captures exist — if it's here, it's already absorbed; resubmit force_new:true only for a genuinely different source" };
+      }
+      const r = await c.query(
+        `insert into source_capture
+           (captured_on, session, source_url, visibility, status, merge_note,
+            created_by, updated_by)
+         values (coalesce($1::date, current_date),$2,$3,$4,$5,$6,$7,$7)
+         returning id, captured_on`,
+        [args.captured_on || null, args.session, args.source_url || null,
+         args.visibility || "public", status, args.merge_note || "", actor.id]);
+      await writeEvent(c, actor, "log-capture", "source_capture", r.rows[0].id,
+        { new: { session: args.session, status }, idempotency_key: args.idempotency_key });
+      return { ok: true, capture_id: r.rows[0].id, captured_on: r.rows[0].captured_on,
+               status, renders_into: "DNA/Marketing/Source Material/INDEX.md" };
+    }),
+  },
+
   "log-decision": {
     write: true,
     description: "Record a SETTLED decision and its rationale — the thing that stops it being relitigated next session. Writes a decision event (subject_type='decision', verb='log-decision') that v_decision_entry reads and decision-history.md renders; never hand-edit that file. NOT the same as add-loop marker:'decision', which is an OPEN question awaiting a ruling, and not the same as teach, which stores a standing rule that binds future sessions. Use this when a fork has been closed: what was decided, why, what lost. human_quote is Joe's or Dell's literal words when he said them — omit it and the entry is flagged quote_absent rather than paraphrase being passed off as a quote.",
