@@ -166,6 +166,16 @@ async function callTool(env, actor, name, args, profile = "full") {
   if (!allowedIn(profile, name, tool))
     throw new ToolError({ error: "not_in_profile", verb: name, profile,
       hint: "this session is scoped; report what you would have done and let an interactive partner session do it" });
+  // Payload-aware profile guard (2026-08-05). Name-level gating cannot see that
+  // add-premises' ownership[].new_party path CREATES a party row — the exact act
+  // the away profile's own charter excludes (asserting a new identity while the
+  // only humans who could vouch for it are away). The verb stays in the profile
+  // because premises capture against existing parties is squarely away-mode work;
+  // only the create path is refused, filed-not-dropped like any other block.
+  if (profile === "away" && name === "add-premises" &&
+      Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
+    throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
+      hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
   if (tool.humanOnly && !actor.human)
     throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
 
