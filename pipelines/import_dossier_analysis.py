@@ -357,8 +357,19 @@ def main():
                      r["title"], r["body"], client_id, source_for(r)))
                 written += 1
         conn.commit()
-    print(f"\nREHEARSAL import: {written} analysis rows written to the branch, "
-          f"{skipped} file(s) skipped. Production untouched.")
+    # Keyed off a.rehearse — the SAME flag that gated the connection above (line
+    # 282's _is_production check only runs, and only refuses, when a.rehearse is
+    # set). Before this fix the message was unconditional and always said
+    # "REHEARSAL ... Production untouched", which was a lie on a plain --apply
+    # run: with no --rehearse, writes go straight to whatever DATABASE_URL
+    # resolves to, production in the normal invocation. Fixed 2026-08-06, loop
+    # #189.
+    if a.rehearse:
+        print(f"\nREHEARSAL import: {written} analysis rows written to the branch, "
+              f"{skipped} file(s) skipped. Production untouched.")
+    else:
+        print(f"\nPRODUCTION import: {written} analysis rows WRITTEN TO PRODUCTION, "
+              f"{skipped} file(s) skipped.")
 
 
 if __name__ == "__main__":
