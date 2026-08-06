@@ -33,15 +33,49 @@ NOT a person match: every row is filtered to a corroborating signal (the merged 
 is a healthcare-type entity, OR it sits in a territory city) and stays confidence L until
 a conversation narrows it. Never a fabricated single date — every row is a 2-5yr RANGE.
 
-USAGE: python3 date-founders.py [CARR_ROOT] [SCRATCH_DIR]   (raws live in SCRATCH, OFF Drive)
+USAGE: python3 date-founders.py [CARR_ROOT] [SCRATCH_DIR] [--files]   (raws live in SCRATCH, OFF Drive)
+
+SOURCE MODE (ORDER 29b, the ORDER 29a pattern). Stage 0's founder read defaults
+to RECORDS — the router rows come off the pool (`v_export_pool`, the router
+source alone) — and falls back to the generated router xlsx, LOUDLY on
+stderr, when the pool is unreachable. --files forces the file read. Stages
+1-5 (corevent/cordata) are untouched: they read only the scratch zips, never
+the router.
 """
 import sys, os, glob, json, zipfile, io, re
 from datetime import date
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-SCRATCH = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "Automation", "radar", "_data")
+# lib/record_sources.py lives two levels up from pipelines/radar/ in the repo;
+# the vault copy of this script has no lib/ beside it (manifest.tsv), so the
+# import is guarded exactly like every other repointed consumer.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from lib.record_sources import (MODE_FILES, MODE_RECORDS, ROUTER_SOURCE, load_pool,
+                                     pool_reach, resolve_mode, source_note)
+    _HAVE_RECORDS = True
+except ImportError:
+    MODE_FILES, MODE_RECORDS, _HAVE_RECORDS = "files", "records", False
+
+if _HAVE_RECORDS:
+    MODE, _rest = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+else:
+    MODE = MODE_FILES
+    _rest = [a for a in sys.argv[1:] if a not in ("--files", "--records")]
+    if "--records" in sys.argv[1:]:
+        print("[date-founders] this copy has no lib/record_sources.py — running file mode",
+              file=sys.stderr)
+
+ROOT = _rest[0] if len(_rest) > 0 else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SCRATCH = _rest[1] if len(_rest) > 1 else os.path.join(ROOT, "Automation", "radar", "_data")
 LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
 RADAR = os.path.join(ROOT, "Automation", "radar")
+
+if MODE == MODE_RECORDS:
+    _ok, _why, _, _ = pool_reach((ROUTER_SOURCE,))
+    if not _ok:
+        print(f"[date-founders] records mode unavailable ({_why}) — falling back to the "
+              f"generated files", file=sys.stderr)
+        MODE = MODE_FILES
 
 TERRITORY_COUNTIES = {"ESCAMBIA","SANTA ROSA","OKALOOSA","WALTON","BAY","LEON",
                       "MOBILE","BALDWIN"}  # FL panhandle + the AL edge
@@ -109,7 +143,9 @@ def _merger_date(line):
     return d if _valid_date(d) else None
 
 # ---------- Stage 0: the founders + the visible gap ----------
-def load_founders():
+ROUTER_COLS = ["SEGMENT", "Name", "Profession", "City", "County"]
+
+def router_rows_from_file(path):
     import openpyxl
     # Schema-validated (orchestrator-lane corrective #1, 2026-07-25): headers by name.
     _d = os.path.dirname(os.path.abspath(__file__))
@@ -117,17 +153,27 @@ def load_founders():
         if os.path.isfile(os.path.join(_c, "sheets.py")):
             sys.path.insert(0, _c); break
     from sheets import header_map, data_rows
-    path = latest(os.path.join(LEADS_DIR, "lead-router-*.xlsx"))
-    if not path: raise SystemExit("No lead-router-*.xlsx found.")
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb["Lead Router"]
-    c = header_map(ws, ["SEGMENT", "Name", "Profession", "City", "County"],
-                   f"{os.path.basename(path)}[Lead Router]")
-    f = []
-    for r in data_rows(ws):
-        if r[c["SEGMENT"]] and "POST-SALE FOUNDER" in str(r[c["SEGMENT"]]):
-            f.append({"name": r[c["Name"]], "prof": r[c["Profession"]], "city": r[c["City"]], "county": r[c["County"]]})
+    c = header_map(ws, ROUTER_COLS, f"{os.path.basename(path)}[Lead Router]")
+    out = [{h: r[c[h]] for h in ROUTER_COLS} for r in data_rows(ws)]
     wb.close()
+    return out
+
+def load_founders():
+    if MODE == MODE_RECORDS:
+        rows = load_pool((ROUTER_SOURCE,))[ROUTER_SOURCE]
+        label = source_note(MODE)
+    else:
+        path = latest(os.path.join(LEADS_DIR, "lead-router-*.xlsx"))
+        if not path: raise SystemExit("No lead-router-*.xlsx found.")
+        rows = router_rows_from_file(path)
+        label = os.path.basename(path)
+    print(f"[date-founders] source: {label}", file=sys.stderr)
+    f = []
+    for r in rows:
+        if r["SEGMENT"] and "POST-SALE FOUNDER" in str(r["SEGMENT"]):
+            f.append({"name": r["Name"], "prof": r["Profession"], "city": r["City"], "county": r["County"]})
     return f
 
 def stage0(founders):
