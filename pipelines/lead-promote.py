@@ -29,11 +29,37 @@ WHAT THIS DOES — AND DELIBERATELY DOES NOT DO
   worth asking about.
 
 Usage:
-  run.sh lead-promote [--count N] [--county NAME] [--segment KEY] [--all-segments]
+  run.sh lead-promote [--count N] [--county NAME] [--segment KEY] [--all-segments] [--files]
+
+SOURCE MODE (ORDER 29b, the ORDER 29a pattern). Reads default to RECORDS: the
+router rows come from the record layer's pool (`v_export_pool` / the all-source
+view), and lead-registry.xlsx / client-roster.xlsx / panhandle-team-deals.json
+come from their own export views via lib/record_sources.py. --files forces the
+historical read of the four generated files instead, and records mode falls
+back to files, LOUDLY on stderr, whenever the pool or a view is unreachable —
+never a silent short count.
 """
 import sys, os, re, json, glob, argparse
 from collections import Counter, defaultdict
 import openpyxl
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from lib.record_sources import (MODE_FILES, MODE_RECORDS, ROUTER_SOURCE, load_clients,
+                                     load_deals_doc, load_leads, load_pool, pool_reach,
+                                     resolve_mode, source_note)
+    _HAVE_RECORDS = True
+except ImportError:
+    MODE_FILES, MODE_RECORDS, _HAVE_RECORDS = "files", "records", False
+
+if _HAVE_RECORDS:
+    _MODE, _rest = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+else:
+    _MODE = MODE_FILES
+    _rest = [x for x in sys.argv[1:] if x not in ("--files", "--records")]
+    if "--records" in sys.argv[1:]:
+        print("[lead-promote] this copy has no lib/record_sources.py — running file mode",
+              file=sys.stderr)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("root", nargs="?")
@@ -42,9 +68,17 @@ ap.add_argument("--county", help="restrict to one county")
 ap.add_argument("--segment", help="restrict to one segment (substring match)")
 ap.add_argument("--all-segments", action="store_true",
                 help="include watch-list segments, not just event-driven ones")
-a = ap.parse_args()
+a = ap.parse_args(_rest)
 
 ROOT = a.root or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+MODE = _MODE
+if MODE == MODE_RECORDS:
+    _ok, _why, _, _ = pool_reach((ROUTER_SOURCE,))
+    if not _ok:
+        print(f"[lead-promote] records mode unavailable ({_why}) — falling back to the "
+              f"generated files", file=sys.stderr)
+        MODE = MODE_FILES
 
 def s(v): return str(v if v is not None else "").strip()
 
@@ -61,12 +95,24 @@ def rows(path, sheet=None):
 routers = sorted(glob.glob(os.path.join(ROOT, "DNA/Leads/lead-router-*.xlsx")))
 if not routers:
     sys.exit("no lead-router-*.xlsx found in DNA/Leads/")
-RESERVOIR = routers[-1]                                    # latest by name
-reservoir = rows(RESERVOIR, "Lead Router")
-registry  = rows(os.path.join(ROOT, "DNA/Leads/lead-registry.xlsx"), "Registry")
-clients   = rows(os.path.join(ROOT, "DNA/Clients/client-roster.xlsx"), "Clients")
-dealsp    = os.path.join(ROOT, "DNA/Deal Management/panhandle-team-deals.json")
-deals     = json.load(open(dealsp)).get("deals", []) if os.path.exists(dealsp) else []
+RESERVOIR = routers[-1]                                    # latest by name; the FILENAME
+                                                             # still carries the router's own
+                                                             # date for display, in both modes
+if MODE == MODE_RECORDS:
+    reservoir = load_pool((ROUTER_SOURCE,))[ROUTER_SOURCE]
+    registry  = load_leads(ROOT, MODE_RECORDS)
+    clients   = load_clients(ROOT, MODE_RECORDS)
+    deals     = load_deals_doc(ROOT, MODE_RECORDS).get("deals", [])
+else:
+    reservoir = rows(RESERVOIR, "Lead Router")
+    registry  = rows(os.path.join(ROOT, "DNA/Leads/lead-registry.xlsx"), "Registry")
+    clients   = rows(os.path.join(ROOT, "DNA/Clients/client-roster.xlsx"), "Clients")
+    dealsp    = os.path.join(ROOT, "DNA/Deal Management/panhandle-team-deals.json")
+    deals     = json.load(open(dealsp)).get("deals", []) if os.path.exists(dealsp) else []
+
+print(f"[lead-promote] source: "
+      f"{source_note(MODE) if _HAVE_RECORDS else 'generated files (no lib/record_sources.py)'}",
+      file=sys.stderr)
 
 # ---------- the dedupe gate ----------
 # The lead-sweep workflow once created L-170 for a practice already a client at

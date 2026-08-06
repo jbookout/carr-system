@@ -33,7 +33,7 @@ deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" \
 # on a pool read surface the exporter credential can reach (parked, see the
 # ORDER 26 execution log).
 lead_board()   { "$PY" "$REPO/generators/build-lead-board.py" "$VAULT" "$@"; }
-lead_promote() { shift; python3 "$REPO/pipelines/lead-promote.py" "$VAULT" "$@"; }
+lead_promote() { shift; "$PY" "$REPO/pipelines/lead-promote.py" "$VAULT" "$@"; }  # ORDER 29b flip: venv, records-mode reads (parity byte-identical 2026-08-05)
 renewal_feed() { "$PY" "$REPO/generators/build-renewal-feed.py" "$VAULT"; }  # ORDER 29b flip: venv, records-mode suppressor (parity byte-identical 2026-08-05)
 corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
 space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
