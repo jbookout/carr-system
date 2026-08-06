@@ -33,33 +33,105 @@
 # that matters: the marketing verbs exist to say NO to the shapes that turn an
 # unmeasured post into a measured zero. Their idempotency keys are NOT frozen
 # fixtures, because a refusal rolls back and stores no tool_call row.
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# RE-CREDITED (loop #192, 2026-08-06), replacing the PREFLIGHT block below in
+# place. The 2026-08-05 version of that block correctly reported this suite
+# dead in the water: the legacy PARTNER_TOKENS bearer it authenticated with was
+# retired 2026-08-03 (#111b), and nothing OAuth-shaped can replace it here —
+# this is a cron-friendly script running curl, not an interactive session that
+# can complete a Google sign-in.
+#
+# THE FIX IS A NEW, NARROWER CREDENTIAL, NOT A REBUILT OLD ONE. `PROBE_TOKENS`
+# (mcp-server/src/index.js) is a bearer, checked before the OAuthProvider ever
+# sees the request, that maps to ONE actor ('smoke-probe') pinned server-side to
+# a 'probe' capability profile (mcp-server/src/mcp.js) — reads, plus EXACTLY the
+# three write verbs this file replays under a frozen idempotency key
+# (log-activity, set-next-action, complete-action). ?profile= cannot widen it;
+# every other write verb refuses with not_in_profile. It is not a second copy of
+# the retired bearer: that one authenticated as a full human actor on the full
+# profile, and this one cannot.
+#
+# PROVISIONING (JOE ONLY — an agent is blocked from production writes and from
+# ever holding a secret value):
+#   1. Generate the token:
+#        openssl rand -hex 32
+#   2. Put it in the Worker as PROBE_TOKENS, a JSON map keyed by actor slug
+#      (same shape as INGEST_TOKENS) — REPLACES the whole map, so if a second
+#      probe identity is ever added, put both keys together:
+#        cd ~/carr-system/mcp-server
+#        wrangler secret put PROBE_TOKENS
+#        # paste: {"smoke-probe":"<the token from step 1>"}
+#   3. Insert the 'smoke-probe' actor row (kind='automation') — prepared, NOT
+#      run, as pipelines/provision-smoke-probe.sql. Apply it through db-tap
+#      (never a raw psql command substitution — see that tool's own docstring):
+#        cd ~/carr-system && .venv/bin/python tools/db-tap.py sql pipelines/provision-smoke-probe.sql
+#      Without this row, every one of the three probe write verbs refuses with
+#      actor_not_provisioned even though the token authenticates fine.
+#   4. Add the SAME token from step 1 to this suite's env file:
+#        # ~/.config/carr/mcp-tokens.env (600, outside the repo)
+#        CARR_MCP_PROBE_TOKEN=<the token from step 1>
+#   5. Deploy the Worker (classifier-gated; Joe/the parent session runs this,
+#      never this script) and re-run smoke-reads.sh. The preflight below picks
+#      CARR_MCP_PROBE_TOKEN up automatically and needs no other change here.
+# ══════════════════════════════════════════════════════════════════════════════
 
 set -uo pipefail
 
 API="${CARR_MCP_URL:-https://api.practicecre.com/mcp}"
 ENVFILE="${CARR_MCP_ENV:-$HOME/.config/carr/mcp-tokens.env}"
 [ -f "$ENVFILE" ] && { set -a; . "$ENVFILE"; set +a; }
-TOKEN="${CARR_MCP_TOKEN_JOE:-${JOE_TOKEN:-}}"
-if [ -z "$TOKEN" ]; then echo "FAIL: no MCP token (looked in $ENVFILE)"; exit 2; fi
 
-# PREFLIGHT (2026-08-05): prove the token is ACCEPTED before running 44 checks.
-# The legacy PARTNER_TOKENS bearer this file historically used was retired on
-# 2026-08-03 (#111b, commit 5b13ed7) — the secret is gone from the Worker, so
-# that token now fails every call with invalid_token and a run prints 23
-# phantom FAILs that look like a broken deploy. This suite needs an OAuth-era
-# credential to run again (tracked as an open loop); until then, post-deploy
-# verification is `ops/nightly-verb-probe.py` (gate + all views) plus one live
-# verb through a partner's OAuth connector.
+# PREFLIGHT (2026-08-06, loop #192 re-credit): CARR_MCP_PROBE_TOKEN is the
+# preferred credential — see the provisioning runbook just above. When it is
+# absent this falls back to the old partner-token env vars purely so a run
+# against a Worker that somehow still accepted one would not silently do
+# nothing; on production today that fallback always lands on the RETIRED AUTH
+# message below, exactly as it did before this suite was re-credited.
+PROBE_MODE=0
+TOKEN="${CARR_MCP_PROBE_TOKEN:-}"
+if [ -n "$TOKEN" ]; then
+  PROBE_MODE=1
+else
+  TOKEN="${CARR_MCP_TOKEN_JOE:-${JOE_TOKEN:-}}"
+fi
+if [ -z "$TOKEN" ]; then
+  echo "FAIL: no MCP token (looked for CARR_MCP_PROBE_TOKEN, then CARR_MCP_TOKEN_JOE / JOE_TOKEN, in $ENVFILE)"
+  exit 2
+fi
+
+# Prove the token is ACCEPTED before running 44 checks, under whichever role it
+# authenticates as. A rejected token would otherwise print dozens of phantom
+# FAILs that look exactly like a broken deploy.
 _pf=$(curl -sS "$API" -X POST \
     -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
     -d '{"jsonrpc":"2.0","id":0,"method":"tools/list"}' 2>/dev/null)
 if printf '%s' "$_pf" | grep -q '"invalid_token"'; then
+  if [ "$PROBE_MODE" -eq 1 ]; then
+    echo "PROBE TOKEN REJECTED — CARR_MCP_PROBE_TOKEN did not authenticate against $API."
+    echo "This is NOT the retired-PARTNER_TOKENS case (that path is gone on purpose and"
+    echo "this one should work). Most likely causes, in order: (1) the value here does not"
+    echo "match the Worker's PROBE_TOKENS secret — re-check step 2 of the provisioning"
+    echo "runbook above; (2) the Worker has not been deployed with the probe-token check in"
+    echo "mcp-server/src/index.js yet. Note this failure is auth, not provisioning — even a"
+    echo "correctly-authenticating token still needs the 'smoke-probe' actor row (step 3,"
+    echo "pipelines/provision-smoke-probe.sql) before any write check below will pass."
+    exit 3
+  fi
   echo "RETIRED AUTH — this token is no longer accepted by the Worker (PARTNER_TOKENS"
   echo "retired 2026-08-03, #111b). The 44 checks below would all print phantom FAILs."
-  echo "Verify deploys with: ~/carr-system/.venv/bin/python ops/nightly-verb-probe.py"
-  echo "plus one live verb through the OAuth connector. Re-crediting this suite is an"
-  echo "open loop; nothing about the deploy itself can be concluded from this exit."
+  echo "Provision CARR_MCP_PROBE_TOKEN per the runbook above this preflight block to run"
+  echo "this suite for real, under the locked 'probe' profile. Until then, post-deploy"
+  echo "verification is ~/carr-system/.venv/bin/python ops/nightly-verb-probe.py (gate +"
+  echo "all views) plus one live verb through a partner's OAuth connector."
   exit 3
+fi
+if [ "$PROBE_MODE" -eq 1 ]; then
+  echo "probe token accepted — running under the locked 'probe' profile: reads, plus"
+  echo "log-activity / set-next-action / complete-action only. Checks needing any other"
+  echo "write verb are expected to print SKIP (profile: probe), not FAIL — that is the"
+  echo "server-side lock working, not a regression."
+  echo
 fi
 
 pass=0; fail=0
@@ -627,9 +699,16 @@ if echo "$RESULT" | grep -q '"error"'; then
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
 elif ! echo "$RESULT" | grep -q 'submarket_condition'; then
   CAP_0063=0
-  echo "  SKIP  record-counter 0063 contract — this Worker publishes no submarket_condition"
-  echo "        parameter, so the counterparty-observation verb support is not deployed yet."
-  echo "        Deploy mcp-server and this probe goes live. Not a failure."
+  if [ "$PROBE_MODE" -eq 1 ]; then
+    echo "  SKIP  record-counter 0063 contract — record-counter is a write verb outside the"
+    echo "        locked 'probe' profile (see mcp-server/src/mcp.js), so tools/list under this"
+    echo "        token never publishes its schema at all. Not a failure — run under a partner's"
+    echo "        OAuth session to exercise this contract."
+  else
+    echo "  SKIP  record-counter 0063 contract — this Worker publishes no submarket_condition"
+    echo "        parameter, so the counterparty-observation verb support is not deployed yet."
+    echo "        Deploy mcp-server and this probe goes live. Not a failure."
+  fi
 fi
 
 if [ "$CAP_0063" -eq 1 ]; then
@@ -721,11 +800,20 @@ if echo "$RESULT" | grep -q '"error"'; then
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
 elif ! echo "$RESULT" | grep -q '"open-campaign"'; then
   CAP_MKT=0
-  echo "  SKIP  0066 marketing verbs — this Worker publishes no open-campaign."
-  echo "        open-campaign, score-campaign, attach-to-campaign and measure-placement are"
-  echo "        in mcp-server/src/tools.js and are NOT deployed. Until the Worker ships them"
-  echo "        the marketing lane still cannot record a campaign. Deploy, then re-run."
-  echo "        Not a failure."
+  if [ "$PROBE_MODE" -eq 1 ]; then
+    echo "  SKIP  0066 marketing verbs — open-campaign, score-campaign, attach-to-campaign and"
+    echo "        measure-placement are write verbs outside the locked 'probe' profile (see"
+    echo "        mcp-server/src/mcp.js). Their idempotency keys vary per call by design (a"
+    echo "        refusal stores no row), so a probe call against them would be a LIVE write"
+    echo "        attempt rather than a replay — exactly what this profile exists to rule out."
+    echo "        Not a failure — run under a partner's OAuth session to exercise this lane."
+  else
+    echo "  SKIP  0066 marketing verbs — this Worker publishes no open-campaign."
+    echo "        open-campaign, score-campaign, attach-to-campaign and measure-placement are"
+    echo "        in mcp-server/src/tools.js and are NOT deployed. Until the Worker ships them"
+    echo "        the marketing lane still cannot record a campaign. Deploy, then re-run."
+    echo "        Not a failure."
+  fi
 fi
 
 if [ "$CAP_MKT" -eq 1 ]; then

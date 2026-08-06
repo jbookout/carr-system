@@ -3,11 +3,19 @@
 #   DATABASE_URL_READER — Neon login role granted carr_reader (views only)
 #   DATABASE_URL_WRITER — Neon login role granted carr_writer (write path; set when verbs land)
 #   INGEST_TOKENS       — JSON map { "<source>": "<token>" } for the ingest socket
+#   PROBE_TOKENS        — JSON map { "<slug>": "<token>" } for the smoke suite ONLY
+#                         (loop #192, 2026-08-06). Authenticates as one locked-
+#                         profile machine actor ('smoke-probe'); checked in
+#                         index.js before the OAuthProvider ever sees the request.
+#                         See secrets-inventory.md and mcp-server/smoke-reads.sh's
+#                         header for the provisioning runbook.
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
 #                         provider-issued tokens; the secret is deleted and the
 #                         code path is gone. Listed here only so the next reader
-#                         of an old commit knows where it went.)
+#                         of an old commit knows where it went. PROBE_TOKENS above
+#                         is NOT its replacement — it authenticates as its own
+#                         narrow machine actor, never as a full human actor.)
 #   GOOGLE_CLIENT_ID    — Google Cloud OAuth 2.0 web client (upstream sign-in)
 #   GOOGLE_CLIENT_SECRET— ditto. Joe sets both himself; Claude never holds them.
 name = "carr-mcp"

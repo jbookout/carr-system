@@ -98,6 +98,38 @@ const PROFILES = {
 
   // Observation only. No writes at all.
   read: new Set(),
+
+  // PROBE (loop #192, 2026-08-06). The smoke suite's identity, re-credited
+  // after the legacy PARTNER_TOKENS bearer it used to run under was retired
+  // 2026-08-03 (#111b). This profile is NOT selected by ?profile= like the
+  // others above — it is the ONLY profile a caller cannot ask for. It is
+  // forced in dispatch() below whenever the actor authenticated via a
+  // PROBE_TOKENS bearer (see index.js), and ?profile= is ignored entirely for
+  // that actor. That is the server-side lock: the token cannot be asked for
+  // more than it was provisioned for, no matter what the request says.
+  //
+  // THE WRITE SET IS EXACTLY THE VERBS THE SUITE REPLAYS UNDER A FROZEN
+  // IDEMPOTENCY KEY, never a verb it would have to mint a fresh key for:
+  //   - log-activity: three fixtures — the ORDER 18 addendum write probe
+  //     (smoke-write-probe-permanent), the ORDER 34 auto-edge probe
+  //     (smoke-links-probe-permanent), the ORDER 36 analysis probe
+  //     (smoke-analysis-probe-permanent).
+  //   - set-next-action + complete-action: the ORDER 19 completion-path pair
+  //     on the AMA Law Office fixture (smoke-ball-probe-permanent /
+  //     smoke-complete-probe-permanent).
+  // Every one of those keys already exists in `tool_call` from years of runs
+  // under a human actor, and withEnvelope() in tools.js keys its replay
+  // lookup on idempotency_key + request hash alone, never on the calling
+  // actor — so a probe call against any of them can only ever replay the
+  // stored response, never insert a second row. No other write verb is safe
+  // to hand this token: the 0066 marketing negative-answer probes vary their
+  // idempotency key on purpose (a refusal stores no row, so editing them
+  // never causes key_reuse), which means a probe call against them would be a
+  // LIVE write attempt, not a replay — exactly what this profile exists to
+  // rule out. Those checks self-skip instead: they are gated behind a
+  // tools/list capability check, and tools/list is itself profile-filtered,
+  // so a probe-authenticated caller never even sees those verbs are there.
+  probe: new Set(["log-activity", "set-next-action", "complete-action"]),
 };
 
 const PROFILE_NOTICE = {
@@ -124,6 +156,12 @@ const PROFILE_NOTICE = {
   read:
     "\n\n<notice>This session runs on the READ profile: no write verb is available. This is " +
     "intentional. Do not try to work around it; report what you would have written.</notice>",
+  probe:
+    "\n\n<notice>This session runs on the PROBE profile: reads, plus exactly the three write " +
+    "verbs the smoke suite replays under a frozen idempotency key (log-activity, set-next-action, " +
+    "complete-action). Every other write verb refuses with not_in_profile. This profile is locked " +
+    "server-side by a PROBE_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
+    "under any request. This is the smoke-probe machine actor, never a human seat.</notice>",
 };
 
 /** Resolve ?profile= to a name, defaulting to full. An unknown value fails CLOSED to read. */
@@ -213,8 +251,12 @@ async function callTool(env, actor, name, args, profile = "full") {
   }
 }
 
-async function dispatch(request, env, ctx, actor) {
-  const profile = profileFor(request);
+export async function dispatch(request, env, ctx, actor) {
+  // PROBE LOCK (loop #192, 2026-08-06): a probe-authenticated actor's profile
+  // is decided here, server-side, and NEVER by ?profile= — actor.probe is set
+  // in exactly one place (index.js's probeActorFor, on a PROBE_TOKENS bearer
+  // match) and cannot be set by anything a caller sends on the wire.
+  const profile = actor.probe ? "probe" : profileFor(request);
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 

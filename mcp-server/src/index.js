@@ -6,9 +6,17 @@
 // dead-man probe, the ingest socket, and the Google sign-in leg — goes to the
 // default handler and is NOT behind an access token.
 //
-//   /mcp        API route. Token validated by the provider; the actor arrives as
-//               ctx.props. A provider-issued token is the only way in — the
-//               legacy PARTNER_TOKENS bearer was retired 2026-08-03.
+//   /mcp        API route for humans: a provider-issued OAuth token, validated
+//               by the provider, with the actor arriving as ctx.props. The
+//               legacy PARTNER_TOKENS bearer that used to share this route was
+//               retired 2026-08-03 (#111b).
+//               A SECOND, much narrower door onto the same route was added
+//               2026-08-06 (loop #192), for the smoke suite only: a
+//               PROBE_TOKENS bearer, checked in THIS file BEFORE the request
+//               ever reaches the OAuthProvider (see "probe token" below). It
+//               maps to one locked-profile machine actor, never a human, and
+//               its profile can never be widened by the request — the OAuth
+//               path above is otherwise completely untouched.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
 //   /token      implemented by the provider
@@ -22,7 +30,7 @@
 
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon } from "@neondatabase/serverless";
-import { mcpApiHandler } from "./mcp.js";
+import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -99,9 +107,60 @@ const defaultHandler = {
   },
 };
 
+// ---------- probe token (loop #192, 2026-08-06) ----------
+//
+// A narrow, locked-profile machine identity for the smoke suite, re-credited
+// after the PARTNER_TOKENS retirement (#111b) took the suite's old bearer with
+// it. Modeled directly on the INGEST_TOKENS check in ingest() above: same
+// shape (a JSON map of name -> secret, one Worker secret, replaced whole),
+// same lookup style. The differences are deliberate and narrow the blast
+// radius further than a second INGEST_TOKENS-style socket would:
+//
+//   - PROBE_TOKENS authenticates ONLY /mcp, and only a request whose bearer
+//     matches. Checked in the wrapper below, BEFORE the request ever reaches
+//     the OAuthProvider, so it is never confused with a provider-issued
+//     grant, and the whole OAuth path is untouched for every other request —
+//     including a /mcp request whose bearer does NOT match PROBE_TOKENS,
+//     which falls straight through to oauthProvider.fetch exactly as before.
+//   - The matched map key becomes the actor slug. Exactly one is expected to
+//     exist — 'smoke-probe' — but the map shape leaves room for a second
+//     narrow probe identity later without another code change.
+//   - actor.probe = true is the ONLY thing that can put mcp.js's dispatch()
+//     into the 'probe' capability profile (see the check there). ?profile=
+//     is read for every other caller but is IGNORED here on purpose: the
+//     whole point of this token is that it cannot be asked for more than it
+//     was provisioned for, no matter what the request says.
+//   - human: false, always. A probe actor is a machine and is never eligible
+//     for a humanOnly verb (teach, retire-rule, confirm-merge, reassign-deal,
+//     …), independent of whatever verbs the profile Set does or does not name.
+//   - The actor must exist as a row in `actor` (kind='automation') before any
+//     write verb will run — mcp.js's callTool() looks it up by slug inside the
+//     write transaction and refuses actor_not_provisioned if it is missing,
+//     exactly as it does for every other actor. See
+//     pipelines/provision-smoke-probe.sql (prepared, not yet run).
+//
+// NOT a rebuild of the retired PARTNER_TOKENS bearer: that token authenticated
+// as a full human actor (joe or dell) on the full profile. This token
+// authenticates as its own machine actor, locked to three write verbs, and
+// nothing about the humans' OAuth path changes because it exists.
+function probeActorFor(request, env) {
+  const auth = request.headers.get("authorization") || "";
+  const token = auth.replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  let tokens;
+  try {
+    tokens = JSON.parse(env.PROBE_TOKENS || "{}");
+  } catch {
+    tokens = {};
+  }
+  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
+  if (!slug) return null;
+  return { slug, display: `Probe (${slug})`, human: false, probe: true, via: "probe-token", client_id: null };
+}
+
 // ---------- the provider ----------
 
-export default new OAuthProvider({
+const oauthProvider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler: mcpApiHandler,
   defaultHandler,
@@ -122,9 +181,23 @@ export default new OAuthProvider({
   // The MIGRATION-ONLY resolveExternalToken option lived here until 2026-08-03.
   // It let a legacy PARTNER_TOKENS bearer authenticate while the OAuth connectors
   // were being rolled out, and it was retired on exactly the terms it was written
-  // under. /mcp now accepts a provider-issued token and nothing else.
+  // under. /mcp now accepts a provider-issued token OR the narrow probe-token
+  // path below, and nothing else.
 
   onError({ code, description, status }) {
     console.warn(`OAuth error response: ${status} ${code} - ${description}`);
   },
 });
+
+// Top-level export. Everything not /mcp-with-a-matching-probe-token flows into
+// the OAuthProvider exactly as it always has — this wrapper adds one narrow
+// short-circuit and changes nothing else about the fetch surface.
+export default {
+  async fetch(request, env, ctx) {
+    if (new URL(request.url).pathname === "/mcp") {
+      const probeActor = probeActorFor(request, env);
+      if (probeActor) return dispatch(request, env, ctx, probeActor);
+    }
+    return oauthProvider.fetch(request, env, ctx);
+  },
+};
