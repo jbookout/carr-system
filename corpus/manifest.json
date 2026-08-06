@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-06T02:24:06-0500",
-  "generator": "tools/corpus-sync.py --push (CORPUS FLIP, 2026-08-06)",
+  "generated_at": "2026-08-06T17:44:57-0500",
+  "generator": "tools/corpus-sync.py --sync (conflict-resolution path, post-flip)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "GIT. This repo's corpus/ is the doctrine tier's source of truth; the Drive/vault/home copies are renders kept current by `--push`. Flipped 2026-08-06 (was Drive-canonical under ORDER 30 phase 1). `--sync` remains only as the conflict-resolution path, pulling a source-side change INTO git.",
   "max_bytes": 5242880,
@@ -746,10 +746,10 @@
     {
       "source": "home:.claude/skills/checkpoint/SKILL.md",
       "mirror": "corpus/_home/.claude/skills/checkpoint/SKILL.md",
-      "sha256": "18689f1658feaa19027623c699de15f6ddbfe448a5b2f722b4b06163ee1af0da",
-      "bytes": 2774,
-      "mtime": 1785600368.998,
-      "mtime_iso": "2026-08-01T11:06:08",
+      "sha256": "8f6144b0282f486762d55ab4b4eacd27925d87e333ea51b3e97e10be26ca0f93",
+      "bytes": 3292,
+      "mtime": 1786056210.447,
+      "mtime_iso": "2026-08-06T17:43:30",
       "mirrored_at": "2026-08-01T11:07:10-0500",
       "class": "skill",
       "why": "checkpoint portable meta-skill: local Claude Code only, Joe's tier"
@@ -779,10 +779,10 @@
     {
       "source": "home:.claude/skills/handoff/SKILL.md",
       "mirror": "corpus/_home/.claude/skills/handoff/SKILL.md",
-      "sha256": "c0c072e5c2d4ac77599ae8713e257e14ce4fbd90c9934574e933f5a4e09ecea0",
-      "bytes": 8850,
-      "mtime": 1785681196.542,
-      "mtime_iso": "2026-08-02T09:33:16",
+      "sha256": "965bd63ffbd3f4ce76adca77791c7a0807305cbc14faa02d2a7435fabc0f28f7",
+      "bytes": 10836,
+      "mtime": 1786055248.014,
+      "mtime_iso": "2026-08-06T17:27:28",
       "mirrored_at": "2026-08-02T10:07:25-0500",
       "class": "skill",
       "why": "handoff portable meta-skill: local Claude Code only, Joe's tier"
@@ -845,10 +845,10 @@
     {
       "source": "home:.claude/skills/til/SKILL.md",
       "mirror": "corpus/_home/.claude/skills/til/SKILL.md",
-      "sha256": "fe14cfa71b7c8b9b472faa0de3ba47a621d28359a2f12f994d1fb313d9602c36",
-      "bytes": 2449,
-      "mtime": 1785600369.003,
-      "mtime_iso": "2026-08-01T11:06:09",
+      "sha256": "8355167b797709b19f2cb5e09f720b9bb73ffe2b6d8719016a0fe386cd480027",
+      "bytes": 2873,
+      "mtime": 1786056210.448,
+      "mtime_iso": "2026-08-06T17:43:30",
       "mirrored_at": "2026-08-01T11:07:10-0500",
       "class": "skill",
       "why": "til portable meta-skill: local Claude Code only, Joe's tier"
