@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-08-06T02:20:05-0500",
+  "generated_at": "2026-08-06T02:24:06-0500",
   "generator": "tools/corpus-sync.py --push (CORPUS FLIP, 2026-08-06)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "GIT. This repo's corpus/ is the doctrine tier's source of truth; the Drive/vault/home copies are renders kept current by `--push`. Flipped 2026-08-06 (was Drive-canonical under ORDER 30 phase 1). `--sync` remains only as the conflict-resolution path, pulling a source-side change INTO git.",
   "max_bytes": 5242880,
-  "count": 77,
+  "count": 78,
   "files": [
     {
       "source": "00_Context/model-tiering.md",
@@ -352,8 +352,8 @@
       "mirror": "corpus/DNA/Team/dell-starter-kit/structure-manifest.md",
       "sha256": "f0b36ff7c8b6185fd744660bbdfb34fdd7aa7bb60f00197fcf9b5b2883001c03",
       "bytes": 11405,
-      "mtime": 1785996325.075,
-      "mtime_iso": "2026-08-06T01:05:25",
+      "mtime": 1786000800.788,
+      "mtime_iso": "2026-08-06T02:20:00",
       "mirrored_at": "2026-08-06T01:31:02-0500",
       "class": "onboarding",
       "why": "the structure manifest the kit ships"
@@ -434,6 +434,17 @@
       "mirrored_at": "2026-08-01T11:07:10-0500",
       "class": "doctrine-root",
       "why": "the zero-tolerance writing ruleset; binds every prospect-facing surface"
+    },
+    {
+      "source": "INDEX.md",
+      "mirror": "corpus/INDEX.md",
+      "sha256": "53a1f0a3bc8cb31bce7f339bc6fce999b2cb34b76fa72683f981d2dcb62ac3a6",
+      "bytes": 22135,
+      "mtime": 1786001046.253,
+      "mtime_iso": "2026-08-06T02:24:06",
+      "mirrored_at": "2026-08-06T02:24:06-0500",
+      "class": "doctrine-root",
+      "why": "the master orientation file + task router; the hand-authored half of the always-read core"
     },
     {
       "source": "Marketing/Social Media/social-media-workflow.md",
