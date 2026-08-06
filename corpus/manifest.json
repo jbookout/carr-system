@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-06T17:44:57-0500",
+  "generated_at": "2026-08-06T18:57:56-0500",
   "generator": "tools/corpus-sync.py --sync (conflict-resolution path, post-flip)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "GIT. This repo's corpus/ is the doctrine tier's source of truth; the Drive/vault/home copies are renders kept current by `--push`. Flipped 2026-08-06 (was Drive-canonical under ORDER 30 phase 1). `--sync` remains only as the conflict-resolution path, pulling a source-side change INTO git.",
@@ -680,10 +680,10 @@
     {
       "source": "drive:.claude/skills/network-debrief/SKILL.md",
       "mirror": "corpus/_drive/.claude/skills/network-debrief/SKILL.md",
-      "sha256": "733d72f1f2c3268106d40b51f86ed008367b242c74cd1ad297cfea8bb8b9d7c2",
-      "bytes": 15850,
-      "mtime": 1785681439.333,
-      "mtime_iso": "2026-08-02T09:37:19",
+      "sha256": "d6330722d956c58f691fc15e5f86cc1184dcc9cd5a13273a54ad8f1b0ed55ab2",
+      "bytes": 16527,
+      "mtime": 1786060580.761,
+      "mtime_iso": "2026-08-06T18:56:20",
       "mirrored_at": "2026-08-02T10:07:25-0500",
       "class": "skill",
       "why": "network-debrief skill: operating instructions, canonical copy read by both harnesses"
