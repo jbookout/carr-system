@@ -18,16 +18,36 @@ Routes the radar's sub-types into three board segments:
   owner-occupiers         -> OWNER-OCCUPIER (2nd location)
   institutional tenants   -> INSTITUTIONAL (watch the physicians)
 
-SUPPRESSOR (Joe, 2026-07-14): cross-check every row against lead-registry.xlsx.
+SUPPRESSOR (Joe, 2026-07-14): cross-check every row against the lead registry —
+read live from the record layer by default since ORDER 29b (`v_export_leads`,
+the same view lead-registry.xlsx is exported from); --files reads the xlsx
+directly, and records mode falls back to it, loudly, wherever the record layer
+is unreachable.
   - a match flagged do-not-contact / paused / closed  -> DROPPED (never resurface)
   - any other registry match                          -> KEPT but FLAGGED "already L-xxx · stage"
   - no match                                          -> normal lease-event lead
 Every suppression/flag is printed, so a bad match is visible (stale beats silent).
+
+Usage: python3 build-renewal-feed.py [--records|--files] [CARR_ROOT]
 """
 import os, glob, json, re, sys
 import openpyxl
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(HERE, ".."))
+sys.path.insert(0, os.path.dirname(HERE))
+# ORDER 29b: the registry suppressor reads the RECORD (v_export_leads through
+# lib/record_sources.py) by default now, the same view the exporter renders
+# lead-registry.xlsx from — this file gains a second read path, same as the
+# ORDER 29a consumers. The radar xlsx this generator turns into board rows is a
+# separate, external CoStar export and is untouched: it still only ever comes
+# from a file, and the JSON this file writes (Automation/renewal-radar.json)
+# still lands exactly where it always has.
+from lib.record_sources import MODE_RECORDS, effective_mode, load_leads, resolve_mode, source_note
+
+MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+MODE = effective_mode(MODE, "renewal-feed")
+
+ROOT = ARGS[0] if ARGS else os.path.abspath(os.path.join(HERE, ".."))
 LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
 AUTO = os.path.join(ROOT, "Automation")
 
@@ -75,30 +95,29 @@ def distinct(s):
     return {t for t in re.sub(r'[^a-z0-9 ]',' ',str(s or '').lower()).split() if t not in GENERIC and len(t)>2}
 
 def load_registry():
-    """Return list of {id, owner, stage, last, first, ptoks, dnc}."""
-    # Schema-validated (orchestrator-lane corrective #1, 2026-07-25): headers by name,
-    # loud halt on a moved column. Bootstrap finds lib/sheets.py (repo) or a flat copy.
-    _d = os.path.dirname(os.path.abspath(__file__))
-    for _c in (os.path.join(_d, "..", "lib"), _d):
-        if os.path.isfile(os.path.join(_c, "sheets.py")):
-            sys.path.insert(0, _c); break
-    from sheets import header_map, data_rows
-    reg = os.path.join(LEADS_DIR, "lead-registry.xlsx")
-    wb = openpyxl.load_workbook(reg, read_only=True, data_only=True)
-    ws = wb["Registry"]; out=[]
-    c = header_map(ws, ["Lead ID", "Owner", "Stage", "Contact Name", "Practice",
-                        "Next Action", "Notes"], "lead-registry.xlsx[Registry]")
-    for r in data_rows(ws):
-        if not r or not r[c["Lead ID"]]: continue
-        contact = val(r[c["Contact Name"]]); practice = val(r[c["Practice"]]); stage = val(r[c["Stage"]])
-        nexta = val(r[c["Next Action"]]) if len(r)>c["Next Action"] else ""; notes = val(r[c["Notes"]]) if len(r)>c["Notes"] else ""
+    """Return list of {id, owner, stage, last, first, ptoks, dnc}.
+
+    ORDER 29b: reads through lib/record_sources.load_leads, which is
+    records-mode by default (the same `v_export_leads` view the exporter
+    renders lead-registry.xlsx from) and falls back to the file, loudly, when
+    the record layer is unreachable. Both modes hand back dicts keyed by the
+    exact column names in exporters/targets.py:REGISTRY_COLS ("Lead ID",
+    "Owner", "Stage", "Contact Name", "Practice", "Next Action", "Notes"), so
+    the field access below is mode-agnostic.
+    """
+    out=[]
+    for r in load_leads(ROOT, MODE):
+        lead_id = r.get("Lead ID")
+        if not lead_id: continue
+        contact = val(r.get("Contact Name")); practice = val(r.get("Practice")); stage = val(r.get("Stage"))
+        nexta = val(r.get("Next Action")); notes = val(r.get("Notes"))
         cn = [t for t in re.sub(r'[^a-z ]',' ',contact.lower()).split() if t not in ("dr","mr","mrs","ms")]
         first = cn[0] if cn else ""; last = cn[-1] if len(cn)>1 else ""
         blob = (nexta+" "+notes).lower()
         dnc = bool(re.search(r"do not contact|do not nudge|no further outreach|inbound only|no nudges|sequence closed|no follow", blob)) or stage.strip().lower() in ("paused","closed","lost","dead","do not contact")
-        out.append({"id":r[c["Lead ID"]],"owner":val(r[c["Owner"]]),"stage":stage,"last":last,"first":first,
+        out.append({"id":lead_id,"owner":val(r.get("Owner")),"stage":stage,"last":last,"first":first,
                     "ptoks":distinct(practice),"dnc":dnc})
-    wb.close(); return out
+    return out
 
 def match_registry(tenant, contact, reg):
     tks = distinct(tenant) | distinct(contact)
@@ -171,7 +190,7 @@ def main():
             # corruption, not absence; absence is the guarded no-op above. Fail loudly.
             raise SystemExit(f"GCCMLS feed exists but is unreadable ({ex}) — fix or remove {gc}")
     json.dump(out, open(os.path.join(AUTO,"renewal-radar.json"),"w"), indent=1)
-    print(f"source: {os.path.basename(path)} -> {len(out)} rows on the board")
+    print(f"source: {os.path.basename(path)} -> {len(out)} rows on the board | registry source: {source_note(MODE)}")
     for s,n in dist.items(): print(f"   {n:>4}  {s}")
     print(f"\nSUPPRESSOR: {len(dropped)} dropped (do-not-contact/paused), {len(flagged)} flagged (already a known lead)")
     for t,i,st,o in dropped: print(f"   DROP  {t}  ->  {i} ({o}, {st})")

@@ -34,7 +34,7 @@ deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" \
 # ORDER 26 execution log).
 lead_board()   { "$PY" "$REPO/generators/build-lead-board.py" "$VAULT" "$@"; }
 lead_promote() { shift; python3 "$REPO/pipelines/lead-promote.py" "$VAULT" "$@"; }
-renewal_feed() { python3 "$REPO/generators/build-renewal-feed.py" "$VAULT"; }
+renewal_feed() { "$PY" "$REPO/generators/build-renewal-feed.py" "$VAULT"; }  # ORDER 29b flip: venv, records-mode suppressor (parity byte-identical 2026-08-05)
 corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
 space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
 graph()        { "$PY" "$REPO/pipelines/build-graph-notes.py" "$VAULT" "$@" \
