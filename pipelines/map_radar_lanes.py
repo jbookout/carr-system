@@ -327,6 +327,70 @@ def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep
     rep[slug] = r
 
 
+def run_lane(slug, dry_run=False, refresh=False, strict=False, url=None, quiet=False):
+    """Single-lane writer-side hook (ORDER 26b). A lane writer (corroborate.py,
+    build-renewal-feed.py, ...) calls this at the END of its own run, right
+    after it writes its lane's JSON file, so the pool is current the moment
+    the writer finishes instead of waiting on a separate hand-run of this
+    module. Opens its own short-lived connection and reuses map_lane() (and
+    therefore import_candidate_pool's dedup logic) verbatim — nothing here is
+    a fork of that logic, only a thinner call path onto it.
+
+    NEVER RAISES for an unavailable credential or interpreter: the mapping
+    step is secondary to the writer's own job (the JSON file), so any failure
+    to reach the database — no CARR_IMPORT_DB_URL/DATABASE_URL configured, or
+    any connection/query error — prints one SKIP line to stderr and returns
+    None. This matches the house SKIP-not-FAIL convention (bin/nightly.sh's
+    exit-78 steps: the step ran, found what it needs absent, and said so,
+    which is not a failed run). A bad slug is a programming error, not an
+    environment one, and still raises.
+
+    Returns the per-lane report dict (see map_lane) on success, or None on
+    skip.
+    """
+    if slug not in LANES:
+        raise ValueError(f"unknown lane {slug!r} — choices: {sorted(LANES)}")
+    url = url or os.environ.get("CARR_IMPORT_DB_URL") or os.environ.get("DATABASE_URL")
+    if not url:
+        print(f"[map-radar-lane SKIP] {slug}: CARR_IMPORT_DB_URL / DATABASE_URL not set "
+              f"under this interpreter — pool mapping skipped, the lane file itself was "
+              f"still written normally. Catch this lane up by hand once a credential is "
+              f"configured: .venv/bin/python -m pipelines.map_radar_lanes --lane {slug}",
+              file=sys.stderr)
+        return None
+    try:
+        rep = {}
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute("select id from actor where slug = 'system'")
+            sys_id = cur.fetchone()[0]
+            known = load_known(cur, strict)
+            by_email = {}
+            for g in known:
+                if g["email"] and g["email"] not in by_email:
+                    by_email[g["email"]] = g
+            map_lane(cur, slug, LANES[slug], known, by_email, strict, dry_run, refresh,
+                     sys_id, rep)
+            if dry_run:
+                conn.rollback()
+            else:
+                conn.commit()
+    except Exception as e:  # noqa: BLE001 — deliberately broad: see docstring
+        print(f"[map-radar-lane SKIP] {slug}: pool mapping failed ({type(e).__name__}: {e}) "
+              f"— the lane file itself was still written normally. Investigate and re-run "
+              f"by hand: .venv/bin/python -m pipelines.map_radar_lanes --lane {slug}",
+              file=sys.stderr)
+        return None
+    r = rep.get(slug, {})
+    if not quiet:
+        if "error" in r:
+            print(f"[map-radar-lane] {slug}: ERROR {r['error']}", file=sys.stderr)
+        else:
+            print(f"[map-radar-lane] {slug}: file {r['file_rows']} · inserted {r['inserted']} "
+                  f"· skipped {r['skipped_existing']} · pool {r['pool_total']}"
+                  + ("  (DRY RUN)" if dry_run else ""))
+    return r
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lane", action="append", choices=sorted(LANES),

@@ -195,4 +195,23 @@ def main():
     print(f"\nSUPPRESSOR: {len(dropped)} dropped (do-not-contact/paused), {len(flagged)} flagged (already a known lead)")
     for t,i,st,o in dropped: print(f"   DROP  {t}  ->  {i} ({o}, {st})")
     for t,i,st,o in flagged: print(f"   FLAG  {t}  ->  {i} ({o}, {st})")
+
+    # ── ORDER 26b: pool mapping, writer-side ──────────────────────────────
+    # This run just wrote Automation/renewal-radar.json above. Map it into
+    # candidate_pool NOW, in this same run, instead of leaving the pool to
+    # wait on a separate hand-run of map_radar_lanes. `pipelines` is already
+    # importable (HERE's parent went onto sys.path at module load, above) —
+    # the only thing that can be missing here is psycopg itself or the DB
+    # credential, both handled inside run_lane / the guard below, and neither
+    # may take down a renewal-feed run that already succeeded at its real job.
+    try:
+        from pipelines.map_radar_lanes import run_lane
+    except ImportError as e:
+        print(f"[map-radar-lane SKIP] renewal-radar: {e} — pool mapping needs psycopg, "
+              f"which this interpreter does not have. renewal-radar.json was still "
+              f"written normally; catch the pool up by hand with the repo venv: "
+              f".venv/bin/python -m pipelines.map_radar_lanes --lane renewal-radar",
+              file=sys.stderr)
+    else:
+        run_lane("renewal-radar")
 if __name__=="__main__": main()

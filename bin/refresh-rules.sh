@@ -19,7 +19,8 @@ cd "$REPO" || exit 1
 if CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules >> "$LOG" 2>&1; then
   echo "$(date -u +%FT%TZ) OK rules refreshed" >> "$LOG"
 else
-  echo "$(date -u +%FT%TZ) FAIL rules refresh rc=$?" >> "$LOG"
+  rc=$?  # capture BEFORE the date subshell resets $? — the old line always logged rc=0
+  echo "$(date -u +%FT%TZ) FAIL rules refresh rc=$rc" >> "$LOG"
 fi
 # keep the log from growing forever: trim to the last 500 lines
 tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"

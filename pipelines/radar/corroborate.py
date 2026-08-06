@@ -22,6 +22,12 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.pat
 UP   = os.path.join(ROOT, "Automation", "radar", "upstream")
 AUTO = os.path.join(ROOT, "Automation")
 
+# The REPO (not ROOT — ROOT is the VAULT when run.sh passes it as argv[1])
+# this script itself lives under, two directories up from pipelines/radar/.
+# Needed only to import pipelines.map_radar_lanes for the ORDER 26b pool hook
+# below; never used for anything file-facing.
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
 WEIGHTS = {"human-tip":4, "deed":3, "pecos-enroll":3, "nppes-move":2, "job-post":2, "new-license":1, "domain":1}
 POOL_FILES = {"tips.json":"human-tip","deeds.json":"deed","pecos.json":"pecos-enroll",
               "nppes-moves.json":"nppes-move","jobs.json":"job-post",
@@ -179,6 +185,27 @@ def main():
         flag = " ⚠PERSONAL" if c["sensitivity"] != "STANDARD" else ""
         print(f"  {c['score']:>2}  {c['n']} · {c['ci']} · {c['geo'].split(' (')[0]} · [{', '.join(c['signals'])}]{flag}")
     print("Nothing above enters the registry without a human. License-verify anyone not license-sourced.")
+
+    # ── ORDER 26b: pool mapping, writer-side ──────────────────────────────
+    # This script has just written Automation/pre-entity-watch.json above.
+    # Map that file's rows into candidate_pool NOW, in this same run, instead
+    # of leaving the pool to wait on a separate hand-run of map_radar_lanes.
+    # run.sh's `corroborate` target runs this under plain `python3` (no
+    # psycopg on that interpreter today), so the import itself is guarded —
+    # a missing dependency here must never take down the lane run that just
+    # succeeded at its real job.
+    try:
+        if _REPO not in sys.path:
+            sys.path.insert(0, _REPO)
+        from pipelines.map_radar_lanes import run_lane
+    except ImportError as e:
+        print(f"[map-radar-lane SKIP] upstream: {e} — pool mapping needs psycopg, which "
+              f"this interpreter does not have. pre-entity-watch.json was still written "
+              f"normally; catch the pool up by hand with the repo venv: "
+              f".venv/bin/python -m pipelines.map_radar_lanes --lane upstream",
+              file=sys.stderr)
+    else:
+        run_lane("upstream")
 
 if __name__ == "__main__":
     main()
