@@ -1422,6 +1422,42 @@ def build_decision_history(tmp_path, cur):
     return shown, canonical
 
 
+# ---------------- the write-surface registry, v0 ----------------
+# Seeded 2026-08-06 (round-table decision fc4a8144, phase 1d): every governed
+# write surface declares its canonical home and collision mechanism in ONE
+# place, so enforcement (record-home-gate parses this file live; CI checks can
+# follow) generates from a manifest instead of accreting path lists. v0 is
+# DECLARATIVE ONLY — nothing reads it yet except humans and the next builder.
+# Mechanism vocabulary: db-render (record layer owns it, file is generated) ·
+# git-doctrine (corpus flip: git canonical, seat writes, Drive is a render) ·
+# repo-config (validated config deployed with code) · owner-file (ONE human
+# writer by design; no collision exists) · claimed-ephemeral (single-owner work
+# product; durable facts promoted via verbs) · PENDING-<phase> (still
+# hand-written; migrates in the named phase of loop #213's plan).
+SURFACE_REGISTRY = {
+    "Marketing/Social Media/published-log.md":            "PENDING-phase4 (social-operations schema)",
+    "Marketing/Social Media/post-performance-log.md":     "PENDING-phase4",
+    "Marketing/Social Media/linkedin-comment-queue.md":   "PENDING-phase4 (claim/lease queue)",
+    "DNA/Marketing/Social Media/content-inspiration-bank.md": "PENDING-phase2 (sibling table)",
+    "DNA/Marketing/Social Media/content-concept-library.md":  "PENDING-phase2",
+    "DNA/Clients/prospects/":                             "PENDING-phase3 (living sections + render; notes via log-activity NOW)",
+    "DNA/Research/open-questions.md":                     "PENDING-phase1 (fold into loops; add-loop from 2026-08-06)",
+    "00_Context/idea-inbox/":                             "db-render path (add-loop kind idea; inbox is capture buffer only)",
+    "DNA/Network/deals.md":                               "superseded (link-parties + log-activity own the edges; file frozen)",
+    "DNA/Team/abilities.md":                              "PENDING-phase1 (repo manifest + doctrine stitch)",
+    "00_Context/roadmap.md":                              "owner-file (Joe)",
+    "00_Context/scale-vision.md":                         "owner-file (Joe)",
+    "DNA/Research/*-search/":                             "claimed-ephemeral (per-deal work products)",
+    "Marketing/Social Media/week-*/":                     "claimed-ephemeral (weekly draft batches)",
+    "Automation/local-tasks/":                            "repo-config candidate (thin pointers; behavior lives in SOPs)",
+    "DNA/Team/calendar-feeds.md":                         "repo-config candidate",
+    "Automation/Learning/":                               "PENDING-phase1 (job outputs -> verbs + registered renders)",
+    "Automation/npi-sweep-digest.md":                     "PENDING-phase1",
+    "DNA/Research/content-fuel/":                         "PENDING-phase1",
+    "DNA/Network/briefs/":                                "query-derived render candidate (no redundant DB write)",
+    "00_Context/decision-history-archive.md":             "retire candidate (design: wider query, never a second file — Joe's call)",
+}
+
 # ---------------- Source Material capture log ----------------
 # 0070 (Joe, 2026-08-06: record-master the capture log so the dedup check can't
 # race two writers). Header prose lives HERE, not in a block table — the one

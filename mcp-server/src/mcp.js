@@ -248,6 +248,19 @@ async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
+  // [#214 RED-4, 2026-08-06] The same payload-aware pattern, eleven lines down
+  // from its model: log-activity's links[] array runs link-parties' exact INSERT
+  // (writeLinks, tools.js), so a profile that refuses link-parties BY NAME could
+  // still assert relationships between real people through this field —
+  // relationships who-do-we-know then renders to a partner as referral chains he
+  // acts on. The charter's reasoning is about who can VOUCH for a relationship,
+  // not which verb carries it, so every narrow profile loses the field: away,
+  // probe, AND capture (the auditor's recommended scope; an interactive partner
+  // session — profile full — keeps it). Filed-not-dropped, like every block.
+  if (profile !== "full" && name === "log-activity" &&
+      Array.isArray(args?.links) && args.links.length)
+    throw new ToolError({ error: "not_in_profile", verb: "log-activity (links[])", profile,
+      hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
   if (tool.humanOnly && !actor.human)
     throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
 
