@@ -299,3 +299,24 @@ if Joe doesn't want to pursue it.
     renders into `00_Context/decision-history.md`) recording the same
     supersession fact. The handoff file's original text remains completely
     unedited — neither the old text nor a new note.
+
+## EXECUTED 2026-08-06 night — Joe's hands on the rewrite and the push, verified by the Fable seat
+
+Pre-flight: tree clean, 239 commits, origin 24 behind with nothing local lacked.
+Bundle created and verified complete; mirror clone made; both HTML baselines and
+all six dump files copied outside the repo; baseline hashes matched SHA256SUMS
+before and after. Rewrite ran in the disposable work clone: 239 -> 217 commits
+(22 emptied nightly-backup commits pruned). ~/carr-system reset to the rewritten
+history; local copies restored, hashes re-verified. Two stale July branches
+(graph-orphan-fix, graph-usability-rework) carried purged blobs and only
+superseded graph work — deleted locally, preserved in the bundle and mirror.
+Force-push by Joe: remote HEAD 43b3934 -> 3968612, recorded before and after.
+Post-push verification, all five: (1+2) all-refs log and tree scans EMPTY for
+both HTML baselines and the backups path; (3) renewal-radar.json and
+writing-lint.txt histories intact; (4) remote HEAD == local HEAD at 3968612;
+(5) check.sh pass/fail behavior unchanged. Local reflogs expired and gc'd:
+0 loose objects, 1,737 in-pack — the purged blobs are gone from the machine
+too, surviving only in the two backup artifacts, which stay until Joe deletes
+them deliberately. STILL OPEN, Joe's option: the GitHub GC support ticket
+(server-side unreachable objects until their housekeeping runs; private repo
+bounds the exposure).
