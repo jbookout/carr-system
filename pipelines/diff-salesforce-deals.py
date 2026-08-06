@@ -1,13 +1,33 @@
 #!/usr/bin/env python3
 """
-diff-salesforce-deals.py — reconcile the Salesforce capture against the Deal Room's JSON.
+diff-salesforce-deals.py — reconcile the Salesforce capture against the deal record.
 
 Salesforce report export is DISABLED on Joe's profile, so the capture step is a
 browser read (see DNA/Deal Management/salesforce-read-sop.md). That step writes
 Automation/salesforce-deals-latest.tsv. THIS script is the deterministic half:
-it diffs that capture against DNA/Deal Management/panhandle-team-deals.json and
-prints exactly what changed. It never guesses and never writes the JSON unless
---apply is passed.
+it diffs that capture against the deal record and prints exactly what changed.
+
+READ SIDE (ORDER 29b, repointed from panhandle-team-deals.json): records mode is
+the default and reads the deal record live through lib/record_sources.py's
+load_deals_doc(), the same read build-deal-room.py and graph-health.py already
+use (ORDER 29a). Records mode falls back to files, loudly on stderr, when there
+is no exporter credential or psycopg is not importable (a plain `python3`, a
+machine with no db.env) — see lib/record_sources.py's effective_mode(). Pass
+--files to force the file read on purpose; panhandle-team-deals.json is still
+generated nightly and is still the only path Dell's runtime and any machine
+without a database credential can use.
+
+WRITE SIDE: it never guesses and never writes anything unless --apply is passed.
+  --files mode   unchanged: --apply still hand-writes the phase/city/lane fields
+                 into panhandle-team-deals.json, the documented fallback path.
+  --records mode panhandle-team-deals.json is now a GENERATED EXPORT of the
+                 record layer (nightly). A hand-write to it here would be
+                 overwritten by the next export and look applied, then silently
+                 vanish. --apply therefore REFUSES to write anything in records
+                 mode: it prints the exact changes found and the record-verb
+                 calls (update-deal) a session should run instead, so a human or
+                 a session can execute them deliberately. This script does not
+                 write to the database; it never has and still does not.
 
 Lane truth: Salesforce's own "Out of Market Deal" checkbox (the `oom` column,
 N/T), NOT a city-string heuristic. A deal's lane decides the economics:
@@ -16,12 +36,21 @@ N/T), NOT a city-string heuristic. A deal's lane decides the economics:
 (verified 2026-07-25 against Salesforce Deal Splits on Trambadia and Nikki Cottis)
 
 Usage:
-  python3 diff-salesforce-deals.py [CARR_ROOT]            # report only
-  python3 diff-salesforce-deals.py [CARR_ROOT] --apply    # also update the JSON
+  python3 diff-salesforce-deals.py [CARR_ROOT]                       # report only, records mode
+  python3 diff-salesforce-deals.py [CARR_ROOT] --files                # report only, file mode
+  python3 diff-salesforce-deals.py [CARR_ROOT] --apply                # records mode: refuses, prints the update-deal calls
+  python3 diff-salesforce-deals.py [CARR_ROOT] --files --apply        # file mode: writes panhandle-team-deals.json (fallback path)
 """
 import sys, os, json, re, difflib
 
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.record_sources import MODE_RECORDS, effective_mode, load_deals_doc, resolve_mode
+
+MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
+MODE = effective_mode(MODE, "salesforce-diff")
+RECORDS_MODE = MODE == MODE_RECORDS
+
+args = [a for a in ARGS if not a.startswith("--")]
 APPLY = "--apply" in sys.argv
 ROOT = args[0] if args else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -82,8 +111,8 @@ for r in rows:
     if r.get("owner", "").startswith("Wayne"): r["owner"] = "Dell"
 rows = [r for r in rows if r.get("deal_name")]     # drops Salesforce's grand-total row
 
-# ---------- load the Deal Room JSON ----------
-data  = json.load(open(JSON, encoding="utf-8"))
+# ---------- load the deal record (ORDER 29b: records by default, --files falls back) ----------
+data  = load_deals_doc(ROOT, MODE)
 deals = data["deals"]
 by_name = {norm(d.get("name")): d for d in deals}
 
@@ -171,7 +200,45 @@ print(f"\n  CAUTION: {placeholder} of {len(rows)} rows still carry the $15,000 p
 print("  These totals are therefore an upper-bound sketch, not a forecast. Never present them as projected revenue.")
 
 # ---------- optional write-back ----------
-if APPLY:
+if APPLY and RECORDS_MODE:
+    # ORDER 29b, ORDER 28 row 17. panhandle-team-deals.json is now a GENERATED
+    # export of the record layer (nightly, CARR_EXPORT_LIVE, see lib/record_sources.py
+    # and exporters/targets.py:build_deals). A hand-write straight into that file
+    # would look applied and then be silently overwritten by the next export —
+    # worse than refusing, because it reads as done and is not. This script does
+    # not write to the database and is not growing a write path today (that is a
+    # separate, deliberate scope decision, not an oversight): field-level deal
+    # changes go through the record verbs, chiefly update-deal. So --apply in
+    # records mode REFUSES the write and prints exactly what it would have
+    # changed, so a session can run the verb calls by hand.
+    print("\nAPPLY REFUSED (records mode): panhandle-team-deals.json is a GENERATED "
+          "export now — writing to it here would be overwritten by the next nightly "
+          "export and look applied when it is not. Nothing was written, in the file "
+          "or the database.")
+    if changed:
+        print("\nThese are the changes Salesforce implies. Run them through the record "
+              "verbs instead (each needs a fresh base_version from a `find` or "
+              "`deal-board` read on the deal first):")
+        for name, diffs, r in changed:
+            for field, old, newv in diffs:
+                if field == "phase":
+                    # update-deal's `phase` field is the deal_phase SLUG
+                    # (pending/research/site_selection/negotiation/closing/closed +
+                    # imported), not the free-text label Salesforce and this legacy
+                    # JSON carry (e.g. "Legal", "Due Diligence") — map it by hand
+                    # before calling, do not paste `newv` in verbatim.
+                    print(f"  update-deal(deal={name!r}, idempotency_key=<fresh-uuid>, "
+                          f"base_version=<fresh>, fields={{\"phase\": <slug for {newv!r}>}})"
+                          f"   # {field}: {old!r} -> {newv!r}")
+                else:
+                    print(f"  NO RECORD VERB YET for deal={name!r} field={field!r}: "
+                          f"{old!r} -> {newv!r}  "
+                          f"({'city is not a deal-table column, only prose inside source_row' if field == 'city' else 'deal.lane exists (migration 0061) but no verb currently writes it'} "
+                          f"— update-deal's allowed fields are phase, segment, outcome, closed_on, "
+                          f"won_value, notes_path, salesforce_id)")
+    else:
+        print("\nNo changes were found — nothing to apply.")
+elif APPLY:
     n = 0
     for name, diffs, r in changed:
         d = by_name.get(norm(name)) or next(x for x in deals if x.get("name") == name)
@@ -187,4 +254,5 @@ if APPLY:
     print(f"\nAPPLIED: {n} deals updated in panhandle-team-deals.json.")
     print("New deals were NOT auto-added — they need a real record (owner, C-ID, detail file) per the SOP.")
 else:
-    print("\n(report only — pass --apply to write the phase/city/lane updates into the JSON)")
+    print("\n(report only — pass --apply to write the phase/city/lane updates into the JSON in "
+          "--files mode, or print the record-verb calls to run in records mode)")

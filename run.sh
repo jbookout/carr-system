@@ -43,7 +43,7 @@ graph()        { "$PY" "$REPO/pipelines/build-graph-notes.py" "$VAULT" "$@" \
 # The hub pass MUST run after it, so `graph` always runs both.
 graph_system() { python3 "$REPO/pipelines/build-system-graph.py" "$VAULT"; }
 graph_health() { shift; "$PY" "$REPO/pipelines/graph-health.py" "$VAULT" "$@"; }
-sf_diff()      { shift; python3 "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }
+sf_diff()      { shift; "$PY" "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }  # ORDER 29b flip: venv, records-mode read (parity byte-identical 2026-08-05)
 section_index(){ python3 "$REPO/pipelines/build-section-index.py" "$VAULT"; }
 registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" "$@"; }
 # ORDER 16. Both are READ-ONLY surfaces: no database write, no send, no push.
