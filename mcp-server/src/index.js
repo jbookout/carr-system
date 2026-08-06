@@ -178,6 +178,15 @@ const oauthProvider = new OAuthProvider({
   // flag (set in wrangler.toml) for SSRF protection.
   clientIdMetadataDocumentEnabled: true,
 
+  // PKCE hardening (2026-08-06, un-gated the night Dell's phone was confirmed).
+  // The library default ALLOWED plain PKCE (allowPlainPKCE !== false), and live
+  // discovery advertised ["plain","S256"]. Held from 2026-08-03 until both
+  // partners' phones were verified on the connector, because the check runs at
+  // /authorize — tightening breaks nothing live, only the NEXT reconnect of a
+  // client that uses plain. Both phones confirmed (Joe 2026-07-31 test 2,
+  // Dell 2026-08-06 per Joe): S256 only from here.
+  allowPlainPKCE: false,
+
   // The MIGRATION-ONLY resolveExternalToken option lived here until 2026-08-03.
   // It let a legacy PARTNER_TOKENS bearer authenticate while the OAuth connectors
   // were being rolled out, and it was retired on exactly the terms it was written
