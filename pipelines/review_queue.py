@@ -226,11 +226,13 @@ def resolve_subject(text: str, index: list):
         if len(hits) > 1:
             return None, "low", f"{token} matches more than one record"
 
-    # A PERSON beats a COMPANY, and the fixture is what taught this: "Jon Shaw
-    # following up..." also contains "Provide", and three vendors work at Provide.
-    # Matching both tiers at once turned a clean single match into a three-way
-    # tie. A company name is shared by everyone inside it; a person's is not, so
-    # the person tier is tried alone and the company tier only if it finds nobody.
+    # A PERSON beats a COMPANY, and the fixture is what taught this: "Alex Rivera
+    # following up..." also contains "Meridian Capital", and three vendors work at
+    # Meridian Capital. Matching both tiers at once turned a clean single match
+    # into a three-way tie. A company name is shared by everyone inside it; a
+    # person's is not, so the person tier is tried alone and the company tier
+    # only if it finds nobody. (Example sanitized 2026-08-06, ORDER 42b — the
+    # originals were tools/fixtures/ingest-rows-order16.json's real names.)
     low = text.lower()
 
     def tier(field):

@@ -321,9 +321,11 @@ def load_ref_index(mode):
         because he is the agent, not a record in his own pipeline. He is a
         legitimate node and the graph should draw him.
       · a TOMBSTONE the link still points at — party_link 4aecf3b0 points at
-        P-0365, merged into P-0384 (Dr. James Allen Tyrer). The survivor carries
+        P-0365, merged into P-0384 (one real lead). The survivor carries
         C-155 and L-208; the loser carries no role at all, hence the null. That
-        edge should resolve to the SURVIVOR, not become a second Tyrer node.
+        edge should resolve to the SURVIVOR, not become a second node for the
+        same person. (Example sanitized 2026-08-06, ORDER 42b — the original
+        named the real lead.)
 
     `v_ref_index` distinguishes the two: the party branch carries P- refs and
     the merged flag, so a live bare party is findable and a tombstone is

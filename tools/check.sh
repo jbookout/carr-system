@@ -16,7 +16,14 @@ OUT[renewal-radar.json]="$VAULT/Automation/renewal-radar.json"
 
 case "${1:-}" in
   --code) exec diff -u "$VAULT/$(grep -F "$2	" "$REPO/manifest.tsv" | cut -f2)" "$REPO/$2" ;;
-  --out)  exec diff -u "$REPO/baselines/$2" "${OUT[$2]}" ;;
+  --out)
+    if [ ! -f "$REPO/baselines/$2" ]; then
+      echo "local baseline copy missing (gitignored, hash-only tracked): baselines/$2"
+      echo "regenerate: cp \"${OUT[$2]}\" \"$REPO/baselines/$2\"  [only after confirming today's output is correct]"
+      exit 1
+    fi
+    exec diff -u "$REPO/baselines/$2" "${OUT[$2]}"
+    ;;
 esac
 
 rc=0
@@ -50,11 +57,41 @@ else
 fi
 
 echo "== Output drift (vault output vs committed baseline) =="
+# PII-bearing baselines (lead-board.html, deal-room-panhandle.html) moved to hash-only
+# tracking under ORDER 42b (2026-08-06): the full HTML stays LOCAL and untracked
+# (.gitignore); only its sha256 is committed, in baselines/SHA256SUMS. Everything else
+# (renewal-radar.json) has no PII and still tracks the full file, diffed as before.
+typeset -A BASEHASH
+if [ -f "$REPO/baselines/SHA256SUMS" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      \#*|'') continue ;;
+    esac
+    BASEHASH[${line##*  }]="${line%%  *}"
+  done < "$REPO/baselines/SHA256SUMS"
+fi
 for f in ${(k)OUT}; do
-  if diff -q "$REPO/baselines/$f" "${OUT[$f]}" >/dev/null 2>&1; then
-    echo "  OK      $f"
+  if [ -n "${BASEHASH[$f]:-}" ]; then
+    if [ ! -f "${OUT[$f]}" ]; then
+      echo "  MISSING $f   (vault output not found: ${OUT[$f]})"; rc=1
+    else
+      livehash="$(shasum -a 256 "${OUT[$f]}" | cut -d' ' -f1)"
+      if [ "$livehash" = "${BASEHASH[$f]}" ]; then
+        echo "  OK      $f"
+      elif [ -f "$REPO/baselines/$f" ]; then
+        echo "  CHANGED $f   (hash mismatch vs baselines/SHA256SUMS; diff: tools/check.sh --out $f)"; rc=1
+      else
+        echo "  CHANGED $f   (hash mismatch vs baselines/SHA256SUMS; local baseline copy missing —"
+        echo "          regenerate: cp \"${OUT[$f]}\" \"$REPO/baselines/$f\"  [only after confirming the new output is correct])"
+        rc=1
+      fi
+    fi
   else
-    echo "  CHANGED $f   (diff: tools/check.sh --out $f)"; rc=1
+    if diff -q "$REPO/baselines/$f" "${OUT[$f]}" >/dev/null 2>&1; then
+      echo "  OK      $f"
+    else
+      echo "  CHANGED $f   (diff: tools/check.sh --out $f)"; rc=1
+    fi
   fi
 done
 

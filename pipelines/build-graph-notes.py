@@ -60,8 +60,9 @@ PARTNER_NAMES = ("Joe Bookout", "Dell McCraney")
 # Which role a party's ref should come from when it carries more than one. The
 # same preference v_party_graph's own `party_ref` CTE uses (client, then vendor,
 # then lead), so a name resolved here and a ref resolved by the view never
-# disagree about which record represents a person. Dr. James Allen Tyrer is the
-# live case: party P-0384 carries BOTH C-155 and L-208.
+# disagree about which record represents a person. One real lead is the live
+# case: party P-0384 carries BOTH C-155 and L-208.
+# (Example sanitized 2026-08-06, ORDER 42b — the original named the real lead.)
 REF_PREFERENCE = ("client", "vendor", "lead", "party")
 
 MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
@@ -376,13 +377,15 @@ name_to_ref = {}
 
 if ref_index is not None:
     # ONE ENTRY PER NAME, AND ONLY WHEN THE NAME IS UNAMBIGUOUS. 30-plus names in
-    # this book belong to two different live parties (Gina Bagneris is C-006 and
-    # C-050's survivor; 'Ric' is two bankers), and the standing identity rule says
-    # a name that could mean two people links to neither. So the index counts
-    # DISTINCT PARTY, not distinct row: Dr. James Allen Tyrer holds two refs
-    # (C-155 client, L-208 lead) on ONE party and is therefore unambiguous, which
-    # is exactly the seventh dropped edge. Tombstones are excluded outright — a
-    # merged row must never be the thing a name resolves to.
+    # this book belong to two different live parties (one real client's name is
+    # C-006 and C-050's survivor; another real name is two different bankers),
+    # and the standing identity rule says a name that could mean two people links
+    # to neither. So the index counts DISTINCT PARTY, not distinct row: one real
+    # lead holds two refs (C-155 client, L-208 lead) on ONE party and is
+    # therefore unambiguous, which is exactly the seventh dropped edge.
+    # Tombstones are excluded outright — a merged row must never be the thing a
+    # name resolves to. (Examples sanitized 2026-08-06, ORDER 42b — the
+    # originals named real clients/leads/vendors.)
     _live_by_name = {}
     for r in ref_index:
         if r["merged"] or not r["party_id"]:

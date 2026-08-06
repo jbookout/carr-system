@@ -122,9 +122,10 @@ for r in rows:
     d = by_name.get(key)
     if d is None:
         # 1) exact company match, 2) close-spelling name match — before declaring it new.
-        # Spelling drift is real (Salesforce "Erik Peterson" vs the JSON's "Erik Petersen"),
+        # Spelling drift is real (Salesforce "Alicia Chen" vs the JSON's "Alecia Chen"),
         # so a near-match is surfaced for confirmation, never silently merged and never
-        # mislabelled as a brand-new deal.
+        # mislabelled as a brand-new deal. (Example sanitized 2026-08-06, ORDER 42b —
+        # the originals named a real client.)
         alt = next((x for x in deals if norm(x.get("company")) == norm(r["company"]) and norm(x.get("company"))), None)
         how = "company"
         if alt is None:
@@ -132,9 +133,10 @@ for r in rows:
             if close:
                 alt = by_name[close[0]]; how = "near-spelling"
         if alt is None:
-            # Deal names carry different amounts of suffix on each side ("Erik Peterson, DO"
-            # vs "Erik Petersen, DO – First Call DPC"), so compare only the leading
+            # Deal names carry different amounts of suffix on each side ("Alicia Chen, DO"
+            # vs "Alecia Chen, DO – Sunrise DPC"), so compare only the leading
             # person-name tokens. Still a flagged suggestion, never an automatic merge.
+            # (Example sanitized 2026-08-06, ORDER 42b — the originals named a real client.)
             lead = " ".join(key.split()[:2])
             if lead:
                 cand = [(difflib.SequenceMatcher(None, lead, " ".join(k.split()[:2])).ratio(), k)

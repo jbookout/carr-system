@@ -132,9 +132,10 @@ if a.segment:
                if any(seg in str(v).lower() for v in t[4].values() if v is not None)]
 
 # Real cells are messy. Many carry the address PLUS a hand-typed note:
-#   "shaun@techjr.net *(added Jul 6, 2026 — Dell's export)*"
-#   "mayyybe ben.clark_cpa@outlook.com"
-#   "mikep@franlift.com \ frankm@franlift.com (or possibly just frank@franlift.com)"
+#   "j.sample@example.net *(added Jul 6, 2026 — Dell's export)*"
+#   "mayyybe a.person_cpa@example.com"
+#   "person1@example.org \ person2@example.org (or possibly just person3@example.org)"
+# (examples sanitized 2026-08-06, ORDER 42b — the originals were real lead emails)
 # Splitting on punctuation shreds those and reports the fragments as malformed,
 # which is a checker inventing its own findings. Extract addresses instead, and
 # report a cell that holds text but no address as its own (real) category.

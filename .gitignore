@@ -10,3 +10,11 @@ _to_delete/
 # PII never lives in this repo (Joe ruling (a), 2026-08-01; ORDER 42)
 frozen-sources/
 exporters/templates/
+
+# PII output baselines — full HTML stays local, only sha256 tracked (ORDER 42b, 2026-08-06)
+# See baselines/SHA256SUMS. Regenerate locally: tools/check.sh --out <name> tells you how.
+baselines/lead-board.html
+baselines/deal-room-panhandle.html
+
+# Encrypted DB dumps — archived to R2 instead of git (ORDER 42b, 2026-08-06). See bin/backup-dump.sh.
+backups/*.sql.age

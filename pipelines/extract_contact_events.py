@@ -561,7 +561,7 @@ FIELD_LABEL = re.compile(r"^\s*[-*>|\s]*\**\s*(?:Status|Next step|Lead source|Ou
                          r"Key angle|Target|Situation)\b\s*:", re.I)
 
 # Patterns that only REFERENCE a touch ("on the 7/29 call…") rather than narrate
-# it ("Joe called Jon Shaw…"). Both are valid evidence that the touch happened;
+# it ("Joe called a vendor…"). Both are valid evidence that the touch happened;
 # the narrated one is the better sentence to keep as the audit record.
 WEAK_PATTERNS = {"on the call", "dated call", "N call logged", "call is logged",
                  "meeting held", "showing held"}
@@ -585,10 +585,11 @@ def overlap(a, b):
     """Overlap coefficient — |A∩B| / min(|A|,|B|) — NOT Jaccard.
 
     The pairs being compared are routinely a one-line restatement against a long
-    narrative sentence ("Dell introduced him to Jeff 7/14." against "Dell
-    introduced Jeff to Nilesh Patel (V-BNK-017, Bank of America) on 2026-07-14,
+    narrative sentence ("Dell introduced him to Sam 7/14." against "Dell
+    introduced Sam to a banker contact (V-BNK-017, a national bank) on 2026-07-14,
     which opened the current thread."). Jaccard scores that pair 0.23 purely for
     length, and it is plainly one introduction. Overlap scores it 0.75.
+    (Example sanitized 2026-08-06, ORDER 42b — the original named a real vendor.)
     """
     wa, wb = content_words(a["sentence"]), content_words(b["sentence"])
     if not wa or not wb:

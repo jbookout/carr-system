@@ -216,8 +216,9 @@ def name_parts(name):
             if len(p) > 1 and p not in TITLES]
 
 # Words that make a local part a PRACTICE inbox rather than a person's address.
-# lillianfamilydentistry@gmail.com on a row named Arielle Spivey is the practice's
-# front desk, not a stranger. Free-provider domains hide this from the domain test.
+# examplefamilydentistry@gmail.com on a row named for an individual clinician is the
+# practice's front desk, not a stranger. Free-provider domains hide this from the
+# domain test. (Example sanitized 2026-08-06, ORDER 42b — the original named a real lead.)
 PRACTICE_WORD = re.compile(
     r"dental|dentist|dds|dmd|ortho|perio|endo|smile|oral|vet|animal|paw|spay|dog|cat|"
     r"medical|medicine|clinic|health|wellness|care|surgery|surgical|derm|cardio|ophth|"
@@ -227,9 +228,10 @@ PRACTICE_WORD = re.compile(
 def _fuzzy_hit(part, local):
     """True when `part` appears in `local` with at most one character of slop.
 
-    Covers the whole spelling-variant family: bcombes/Combs, dtherdon/Herndon,
-    shaun@/Shuan, efaulkner/Falkner. These are one person with a typo on one side,
+    Covers the whole spelling-variant family: jcombs/Coombs, dtherndon/Therondon,
+    shawn@/Shaun, efaulkner/Falkiner. These are one person with a typo on one side,
     not mail going to a stranger, and calling them HIGH is what buried the real ones.
+    (Examples sanitized 2026-08-06, ORDER 42b — the originals named real leads.)
     """
     if len(part) < 4:
         return False
@@ -247,17 +249,18 @@ def email_check(label, name, email, ident, company="", notes=""):
     """Flag only when the address plausibly belongs to SOMEONE ELSE.
 
     Real addresses take many shapes and none of them are a token match:
-      nileshpatel@   (concatenated)   jholder@  (initial+surname)
+      jondoe@        (concatenated)   jholder@  (initial+surname)
       hicksc@        (surname+initial) c.busby@ (initial.surname)
     Flagging those produced 207 false positives on the first run, cut to 52. On
     2026-07-27 those 52 were read one by one and roughly six were real. The other
     four fifths were four shapes this now models, because a check that is 85% wrong
     is worse than no check: it teaches you to skim past the ones that matter.
 
-      ljd@derosierdds.com       the DOMAIN is his own name (only the local part was read)
-      mcg@3mg.com, nak07d@me    initials, sometimes with a middle initial or credential
-      bcombes@ for "Brad Combs" a one-character spelling variant, not a stranger
-      spaymobile@gmail.com      the practice's inbox on a free provider
+      abc@example-dds.com       the DOMAIN is his own name (only the local part was read)
+      mcg@3xy.com, nak07d@me    initials, sometimes with a middle initial or credential
+      bcombes@ for "Brad Coombs" a one-character spelling variant, not a stranger
+      practicemobile@gmail.com  the practice's inbox on a free provider
+    (Examples sanitized 2026-08-06, ORDER 42b — the originals were real lead emails/names.)
     """
     name, email = s(name), s(email)
     if not name or "@" not in email or PLACEHOLDER.search(name): return
@@ -298,7 +301,8 @@ def email_check(label, name, email, ident, company="", notes=""):
                               for i in initials):
             return
     # Initials-only, in name order, optionally trailed by a credential or digits:
-    # mcg@3mg.com, gwgdmd@knology.net, msidpm@footdoctors.org, nak07d@me.com.
+    # mcg@3xy.com, gwgdmd@example.net, msidpm@example-doctors.org, nak07d@me.com.
+    # (Examples sanitized 2026-08-06, ORDER 42b — the originals were real lead emails.)
     if len(parts) >= 2:
         ini = "".join(p[0] for p in parts)
         if local.startswith(ini) and len(ini) >= 2:

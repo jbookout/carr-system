@@ -4,7 +4,7 @@
     "received_at": "2026-07-31T14:10:00-05:00",
     "source": "notes_call_recording",
     "external_id": "p900",
-    "payload": {"transcript": "Call with Kaydee about C-112. She confirmed the PM application is in and asked when the draft lease lands."},
+    "payload": {"transcript": "Call with Priya about C-112. She confirmed the PM application is in and asked when the draft lease lands."},
     "status": "new"
   },
   {
@@ -12,7 +12,7 @@
     "received_at": "2026-07-31T15:02:00-05:00",
     "source": "mail",
     "external_id": "m7781",
-    "payload": {"subject": "Provide build-out lending", "body": "Jon Shaw following up on the construction lending question for the Walton County project."},
+    "payload": {"subject": "Meridian Capital build-out lending", "body": "Alex Rivera following up on the construction lending question for the Walton County project."},
     "status": "new"
   },
   {
@@ -28,7 +28,7 @@
     "received_at": "2026-07-31T15:55:00-05:00",
     "source": "calendar",
     "external_id": "c8890",
-    "payload": {"title": "Coffee with Dr. Erik Petersen, DO", "body": "First Call DPC follow up on the Club30A space question."},
+    "payload": {"title": "Coffee with Dr. Alicia Chen, DO", "body": "Sunrise DPC follow up on the Club30A space question."},
     "status": "new"
   }
 ]

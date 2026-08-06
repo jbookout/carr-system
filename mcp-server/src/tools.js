@@ -273,11 +273,12 @@ const RETIRED_REF_CAP = 10;
 
 // THE NODE KEY IS THE REF, NOT THE NAME, and that choice is load-bearing.
 // v_party_graph carries exactly one ref per party (0020's `distinct on`), so a
-// ref identifies a party. A name does not: production holds `Dr. James Allen
-// Tyrer` twice — L-208 and C-155, the same human as two un-merged records — and
+// ref identifies a party. A name does not: production holds one real lead
+// twice — L-208 and C-155, the same human as two un-merged records — and
 // joining paths on the name string would silently weld those two records into
 // one node and invent hops that do not exist. Refs keep them separate, which is
 // the truth of the book today, duplicate and all.
+// (Example sanitized 2026-08-06, ORDER 42b — the original named the real lead.)
 //
 // The cost, stated rather than hidden: an edge whose endpoint carries NO ref
 // cannot be walked. Today that is zero edges of 31. The verb counts them and
@@ -898,7 +899,7 @@ export const TOOLS = {
 
   "who-do-we-know": {
     write: false,
-    description: "\"Who gets me to X?\" — walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops (walks the party_link table), shortest first, each rendered as a readable chain (\"Dion Moniz -knows-> Jon Shaw -intro-> Dr. James Allen Tyrer\"). The first name in a chain is who Joe asks. Use it before asking for an introduction; NOT for looking a record up (that is `find`) and NOT for what happened with a record (that is `catch-me-up`). Read-only, and it never guesses: it resolves to the SURVIVOR of a merge and never offers a tombstone as a target, an ambiguous LIVE name returns needs_disambiguation with the candidates, and a target that exists but carries no walkable edges says which of those two it is rather than returning an empty list that reads like 'no such person'.",
+    description: "\"Who gets me to X?\" — walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops (walks the party_link table), shortest first, each rendered as a readable chain (\"A. Vendor -knows-> B. Referrer -intro-> Dr. Example Target\"). The first name in a chain is who Joe asks. Use it before asking for an introduction; NOT for looking a record up (that is `find`) and NOT for what happened with a record (that is `catch-me-up`). Read-only, and it never guesses: it resolves to the SURVIVOR of a merge and never offers a tombstone as a target, an ambiguous LIVE name returns needs_disambiguation with the candidates, and a target that exists but carries no walkable edges says which of those two it is rather than returning an empty list that reads like 'no such person'.",
     inputSchema: { type: "object", properties: {
       target: { type: "string", description: "who you want to reach — C-155, V-CPA-006, L-208, or a full name" },
       max_depth: { type: "integer", description: `hops to walk, 1-${WHO_MAX_DEPTH} (default ${WHO_MAX_DEPTH})` },
@@ -921,8 +922,8 @@ export const TOOLS = {
       // in_graph:true with zero paths — a live-looking answer built on a node the
       // walker cannot address. Those edges are now reported as unwalkable below,
       // by name, which is the truth. And the merged flag: a graph node can be a
-      // tombstone (C-050 Gina Bagneris is one today), so the survivor is preferred
-      // whenever both are matched, and a tombstone that resolves anyway — because
+      // tombstone (C-050 is one today, a real client name), so the survivor is
+      // preferred whenever both are matched, and a tombstone that resolves anyway — because
       // the caller named it, or because it is the only match and its edges are
       // real — comes back FLAGGED rather than silently standing in for the survivor.
       const nodes = await c.query(

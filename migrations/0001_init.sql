@@ -1025,5 +1025,6 @@ create table export_run (                           -- the legacy-file exporters
 -- No regex SQL guards anywhere; the reader ROLE is the guard.
 -- No send tool exists in the MCP server. Agreement draft→sent transitions and
 --   any future external send live on a human-gated web route only.
--- [A9] pg_dump is ENCRYPTED (age keypair) before any git commit, from the
---   FIRST dump. [A14] build sessions get Neon-branch credentials only.
+-- [A9] pg_dump is ENCRYPTED (age keypair) before archival, from the FIRST
+--   dump. CHANGED 2026-08-06 (ORDER 42b): archives to R2, not git — see
+--   bin/backup-dump.sh. [A14] build sessions get Neon-branch credentials only.
