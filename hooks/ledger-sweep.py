@@ -150,13 +150,28 @@ TRIGGERS = [
 # prefixes remain the fallback for older records or a bare fixture with no
 # `origin` field at all.
 NON_HUMAN_ORIGIN_KINDS = {"task-notification"}
-NON_HUMAN_TEXT_PREFIXES = ("<task-notification", "<system-reminder", "[SYSTEM")
+# Third shape found live 2026-08-06, minutes after the first fix shipped: the
+# autonomous-loop tick prompt ("# Autonomous loop check ... invoked on a
+# timer") is injected AS a user message — origin-stamped like a human turn —
+# so the kind=="human" early-return skipped the content check entirely and the
+# sweep quoted the harness's own loop instructions as the partner's words.
+# Content prefixes therefore run BEFORE the kind=="human" trust: a partner
+# opening a typed message with one of these exact strings is vanishingly
+# unlikely, and the observed failure (harness text wearing a human stamp) is
+# real three times over.
+NON_HUMAN_TEXT_PREFIXES = (
+    "<task-notification", "<system-reminder", "[SYSTEM",
+    "# Autonomous loop check", "<<autonomous-loop",
+)
 
 
 def is_harness_injected(rec, text):
     """True if `rec` (whose extracted text is `text`) was injected by the
-    harness rather than typed by the partner. Shape first; content is only a
-    fallback for records that carry no `origin` field."""
+    harness rather than typed by the partner. Injected-content prefixes are
+    checked first (a loop tick arrives wearing a human origin stamp); the
+    origin field decides everything else."""
+    if text and text.lstrip().startswith(NON_HUMAN_TEXT_PREFIXES):
+        return True
     origin = rec.get("origin")
     if isinstance(origin, dict):
         kind = origin.get("kind")
@@ -164,8 +179,6 @@ def is_harness_injected(rec, text):
             return True
         if kind == "human":
             return False
-    if text and text.lstrip().startswith(NON_HUMAN_TEXT_PREFIXES):
-        return True
     return False
 
 

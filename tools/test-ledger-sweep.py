@@ -84,7 +84,34 @@ def assistant(text):
                          "content": [{"type": "text", "text": text}]}}
 
 
+def loop_tick():
+    """The third false-positive shape, found live 2026-08-06 minutes after the
+    first fix shipped: the autonomous-loop tick prompt is injected AS a user
+    message wearing a human origin stamp, so shape-based detection alone
+    trusted it. Its text deliberately contains override/challenge-shaped
+    language pulled from the real prompt ('you should scale back', 'don't
+    describe what could be done')."""
+    content = ("# Autonomous loop check\n\nYou're being invoked on a timer "
+               "while the user is away. Don't describe what could be done — "
+               "you should scale back to a quick CI check and stop, not "
+               "narrate. Is that really the right approach?")
+    return {"type": "user", "origin": {"kind": "human"},
+            "message": {"role": "user", "content": content}}
+
+
 CASES = [
+    # ---- false-positive class 3: loop tick wearing a human origin stamp --
+    # The 2026-08-06 live miss: the autonomous-loop prompt arrives origin-
+    # stamped human, so the kind=="human" early-return skipped the content
+    # check and the sweep quoted the harness's own instructions as the
+    # partner's words. Content prefixes now run first; the walk-back must
+    # pass the tick and land on the genuine turn.
+    ("class-3 · autonomous-loop tick skipped, reaches real turn", QUIET, [
+        human("do them all except the app now"),
+        assistant("Executing."),
+        loop_tick(),
+        assistant("Loop stopped; nothing autonomous left."),
+    ]),
     # ---- false-positive class 1: harness turn read as partner speech -----
     # The real 2026-08-05/06 shape: Joe says "go", the assistant kicks off a
     # background agent, the agent finishes and posts a task-notification
