@@ -2,14 +2,15 @@
 # nightly.sh — the record layer's unattended chain (ORDER 2).
 #
 # Until this existed, every generated file was only as fresh as the last time a
-# human remembered to run the export by hand. Six steps, in order:
-#   1. cadence   (spawn the next_action rows the rules are owed)   [ORDER 14]
-#   2. matcher   (availability x open space searches -> digest)    [ORDER 14]
-#   3. exports   (all seven targets, LIVE -> the vault)
-#   4. consumers (renewal-feed, lead-board, deal-room — the boards built FROM
-#                 those files; they must follow the export that feeds them)
-#   5. graph     (derived from the freshly exported files, so it follows too)
-#   6. backup    (encrypted pg_dump -> git)
+# human remembered to run the export by hand. Seven steps, in order:
+#   1. cadence      (spawn the next_action rows the rules are owed)   [ORDER 14]
+#   2. matcher      (availability x open space searches -> digest)    [ORDER 14]
+#   3. exports      (all seven targets, LIVE -> the vault)
+#   4. corpus push  (doctrine tier: git -> the Drive/vault render copies) [CORPUS FLIP, 2026-08-06]
+#   5. consumers    (renewal-feed, lead-board, deal-room — the boards built FROM
+#                    those files; they must follow the export that feeds them)
+#   6. graph        (derived from the freshly exported files, so it follows too)
+#   7. backup       (encrypted pg_dump -> git)
 #
 # Steps 1 and 2 run BEFORE the exports (ORDER 14d) for one reason: they WRITE,
 # and a write that lands after the export it belongs in sits invisible for a
@@ -89,6 +90,15 @@ step "cadence engine (spawn owed next actions)"      ./.venv/bin/python pipeline
 step "availability matcher (digest, never sent)"     ./.venv/bin/python pipelines/availability_matcher.py
 
 step "exports (7 targets -> vault)"                  ./run.sh export
+
+# CORPUS FLIP (2026-08-06): the doctrine tier is git-canonical now — corpus/ under this
+# repo, not the Drive, is the source of truth. This step pushes whatever changed in git
+# out to the Drive/vault/home render copies. It refuses to clobber a source-side hand-edit
+# (a CONFLICT, printed by name) rather than silently overwriting it, and exits 78 — SKIP,
+# not FAIL, same contract as the credential-gated steps above — when the Drive mount isn't
+# up, since that is not a broken night, just an unreachable render target.
+step "corpus push (git-canonical doctrine -> vault)" ./.venv/bin/python tools/corpus-sync.py --push
+
 step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
 step "graph (derived from the exported files)"       ./run.sh graph
 step "encrypted backup -> git"                       ./bin/backup-dump.sh

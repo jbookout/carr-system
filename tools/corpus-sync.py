@@ -1,37 +1,45 @@
 #!/usr/bin/env python3
 """
-corpus-sync.py — the doctrine corpus mirror (ORDER 30, Wave 4 phase 1, 2026-07-31).
+corpus-sync.py — the doctrine corpus mirror (ORDER 30, Wave 4 phase 1, 2026-07-31;
+CORPUS FLIP 2026-08-06 — see below).
 
 WHAT THIS IS. `corpus/` holds a byte-for-byte copy of the vault's DOCTRINE tier
 so that rules and craft gain what records already have: version history, diffs,
 and a way to answer "when did we decide that, and what did it say before?"
 
-WHAT THIS IS NOT, and phase 1 depends on the distinction holding:
-**THE DRIVE IS CANONICAL.** The mirror is versioning only. Nothing reads the
-mirror, nothing writes toward the Drive, and no human workflow changes. Joe and
-Dell keep editing the Drive exactly as before; this tool copies one direction,
-Drive -> mirror, and never the other way.
+THE FLIP (2026-08-06). Both partners confirmed: the doctrine tier is now
+**GIT-CANONICAL**. corpus/ under this repo is the source of truth; the Drive
+(and drive:/home:-prefixed) copies are RENDERS, kept current by pushing git's
+content out to them. This inverts the original phase-1 design, which ran the
+other way (Drive canonical, mirror read-only). That original direction survives
+only as `--sync`, now the CONFLICT-RESOLUTION path, not the normal flow.
 
-So the two drift directions mean opposite things:
-  * source newer than the mirror  = NORMAL. Doctrine changed; re-mirror it.
-  * mirror differs from what was mirrored = SOMEONE EDITED THE MIRROR. That is
-    a loud error, because their edit is invisible to every reader (Cowork, Dell,
-    every session reads the Drive) and the next --sync would silently erase it.
+So the two drift directions now mean opposite things from phase 1:
+  * git (corpus/) differs from what was last synced = NORMAL. Doctrine changed
+    in git; push it out with `--push`.
+  * the source-side (Drive/vault/home) copy differs from what was last synced
+    = A CONFLICT. Since git is canonical, a hand-edit on the Drive side is a
+    violation — `--push` will not silently overwrite it. It prints a loud
+    CONFLICT line naming the file and skips it; a human resolves by folding
+    the edit into git (or, for the rare deliberate case, running `--sync` to
+    pull it into git first).
 
 Drift is detected by CONTENT HASH against the manifest, never by mtime alone:
 Google Drive File Stream rewrites mtimes on its own schedule, so an mtime test
 would cry wolf nightly and, worse, could miss a real edit that preserved mtime.
 
 Usage:
-  python3 tools/corpus-sync.py               # check only; exit 0 clean / 1 drift / 2 mirror edited
-  python3 tools/corpus-sync.py --sync        # re-mirror changed files (refuses to clobber an edited mirror)
-  python3 tools/corpus-sync.py --sync --force  # ...and DISCARD mirror-side edits, restoring from the Drive
+  python3 tools/corpus-sync.py               # check only; exit 0 clean / 1 to-push / 2 conflict
+  python3 tools/corpus-sync.py --push        # push git -> source-side (the normal flow, post-flip)
+  python3 tools/corpus-sync.py --sync        # CONFLICT-RESOLUTION path: pull source-side -> git
+                                              # (refuses to clobber a git-side edit; --force discards it)
+  python3 tools/corpus-sync.py --sync --force  # ...and DISCARD git-side edits, restoring from the Drive
   python3 tools/corpus-sync.py --prune       # with --sync: delete mirror files no longer in the set
   python3 tools/corpus-sync.py --json        # machine-readable status
 
 The set of files that ARE the corpus lives in corpus/corpus-set.tsv, one row per
 file with the reason it counts as doctrine. Adding doctrine = adding a row.
-Read-only against the vault. No network, no credential, no database.
+No network, no credential, no database.
 """
 import hashlib
 import json
@@ -51,6 +59,20 @@ VAULT = os.environ.get("CARR_VAULT",
 # Stop rules from the order: this is a TEXT corpus.
 MAX_BYTES = 5 * 1024 * 1024
 TEXT_EXT = {".md", ".txt", ".tsv", ".csv", ".json", ".sql", ".py", ".js", ".html", ".yml", ".yaml"}
+
+# CORPUS FLIP, 2026-08-06: git is canonical now. Stamped into every manifest this
+# tool writes (from --push AND from --sync) so the file itself states which way
+# the arrow points, no matter which command last touched it.
+CANONICAL_NOTE = ("GIT. This repo's corpus/ is the doctrine tier's source of truth; the "
+                   "Drive/vault/home copies are renders kept current by `--push`. Flipped "
+                   "2026-08-06 (was Drive-canonical under ORDER 30 phase 1). `--sync` remains "
+                   "only as the conflict-resolution path, pulling a source-side change INTO git.")
+
+
+def vault_reachable():
+    """Cheap reachability probe for the SKIP-not-FAIL contract: if the Drive mount
+    is down, VAULT (a path under it) won't resolve as a directory."""
+    return os.path.isdir(VAULT)
 
 
 def sha256(path):
@@ -241,9 +263,9 @@ def sync(force=False, prune=False):
 
     out = {
         "generated_at": now,
-        "generator": "tools/corpus-sync.py (ORDER 30, Wave 4 phase 1)",
+        "generator": "tools/corpus-sync.py --sync (conflict-resolution path, post-flip)",
         "vault_root": VAULT,
-        "canonical": "THE DRIVE. This mirror is versioning only — never edit files under corpus/.",
+        "canonical": CANONICAL_NOTE,
         "max_bytes": MAX_BYTES,
         "count": len(files),
         "files": sorted(files, key=lambda f: f["source"]),
@@ -256,46 +278,169 @@ def sync(force=False, prune=False):
             "orphans": orphans, "pruned": pruned, "count": len(files)}
 
 
-LOUD = ("MIRROR-EDITED", "BOTH-CHANGED")
+def push():
+    """Copy repo (git, canonical since the 2026-08-06 flip) -> source-side (Drive/vault/home)
+    for every row whose git copy changed. SAFETY (flag-not-clobber): before overwriting a
+    source-side file, its hash is checked against the manifest's recorded hash. If the source
+    changed since the last sync, that is a hand-edit made after git became canonical — a
+    CONFLICT. It is never overwritten silently; the row is skipped and reported so a human can
+    resolve it. Every row actually pushed gets its manifest entry rewritten so both hashes read
+    equal afterward (the same guarantee --sync gives in the other direction).
+    """
+    man = load_manifest() or {"files": [], "skipped": []}
+    recorded = {f["source"]: f for f in man.get("files", [])}
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    pushed, conflicts, refused, unchanged = [], [], [], []
+    files_by_source = dict(recorded)   # start from the manifest; only pushed rows get rewritten
+
+    for rel, klass, why in load_set():
+        src, dst = resolve(rel)   # src = source-side (Drive/vault/home); dst = git copy under corpus/
+
+        if not os.path.exists(dst):
+            refused.append((rel, "no git copy under corpus/ to push from — this row was never synced in"))
+            continue
+        try:
+            if os.path.getsize(dst) > MAX_BYTES or looks_binary(dst):
+                refused.append((rel, "git copy is over the size/binary limit for this text corpus"))
+                continue
+        except OSError as e:
+            refused.append((rel, f"git copy unreadable: {e}"))
+            continue
+
+        repo_h = sha256(dst)
+        rec = recorded.get(rel)
+        was = rec.get("sha256") if rec else None
+        source_exists = os.path.exists(src)
+        src_h = sha256(src) if source_exists else None
+
+        if source_exists and repo_h == src_h:
+            unchanged.append(rel)
+            if rec is not None and was != repo_h:
+                # Both sides already agree with each other, just not with the stale manifest
+                # entry (e.g. converged independently). Realign the record; nothing to copy.
+                files_by_source[rel] = {**rec, "sha256": repo_h, "mirrored_at": now}
+            continue
+
+        if source_exists and was is not None and src_h != was:
+            # The source-side file moved since the last sync. Post-flip that is a hand-edit on
+            # what is now a render — flag it, do not clobber it.
+            conflicts.append({"path": rel, "class": klass, "repo_sha": repo_h,
+                               "source_sha": src_h, "manifest_sha": was})
+            continue
+
+        # Safe to push: the source either never existed at this path (a brand-new doctrine
+        # file, or the mount recreating a deleted render) or still matches what was last
+        # recorded — nobody touched the Drive/vault/home side out of band.
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        shutil.copy2(dst, src)
+        pushed.append(rel)
+        mt = os.path.getmtime(dst)
+        files_by_source[rel] = {
+            "source": rel,
+            "mirror": os.path.relpath(dst, REPO),
+            "sha256": repo_h,
+            "bytes": os.path.getsize(dst),
+            "mtime": round(mt, 3),
+            "mtime_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mt)),
+            "mirrored_at": now,
+            "class": klass,
+            "why": why,
+        }
+
+    out = {
+        "generated_at": now,
+        "generator": "tools/corpus-sync.py --push (CORPUS FLIP, 2026-08-06)",
+        "vault_root": VAULT,
+        "canonical": CANONICAL_NOTE,
+        "max_bytes": MAX_BYTES,
+        "count": len(files_by_source),
+        "files": sorted(files_by_source.values(), key=lambda f: f["source"]),
+        "skipped": man.get("skipped", []),
+    }
+    with open(MANIFEST, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    return {"pushed": pushed, "conflicts": conflicts, "refused": refused, "unchanged": unchanged}
+
+
+# States that mean "the source-side copy no longer matches what git last pushed" — post-flip
+# these are the loud ones, because git is canonical and the source side should only ever move
+# because --push moved it.
+CONFLICT_STATES = ("DRIFT", "BOTH-CHANGED")
 
 
 def report(st):
+    """Status/check mode, in git-canonical language (CORPUS FLIP, 2026-08-06):
+      * git (corpus/) differing from the manifest = NORMAL, "to push" — remedy is `--push`.
+      * the source-side (Drive/vault/home) copy differing from the manifest = a CONFLICT —
+        a hand-edit landed on what is now a render. Named loudly per file; never auto-resolved.
+    """
     if not st["manifest"]:
         print("corpus: no manifest yet — run: python3 tools/corpus-sync.py --sync")
         return 1
     c = st["counts"]
     ok = c.get("OK", 0)
-    loud = sum(c.get(k, 0) for k in LOUD)
-    drift = c.get("DRIFT", 0) + c.get("NEW", 0) + c.get("MISSING-MIRROR", 0)
+    to_push = c.get("MIRROR-EDITED", 0)
+    conflict = sum(c.get(k, 0) for k in CONFLICT_STATES)
+    missing = c.get("NEW", 0) + c.get("MISSING-MIRROR", 0)
     other = c.get("SOURCE-GONE", 0) + c.get("UNREADABLE", 0)
-    print(f"corpus mirror — {ok} clean, {drift} to re-mirror, {loud} mirror-side, "
-          f"{other} unreadable/gone, {len(st['orphans'])} orphan(s)")
+    print(f"corpus mirror (git-canonical) — {ok} clean, {to_push} to push, {conflict} CONFLICT "
+          f"(source-side changed), {missing} missing git copy, {other} unreadable/gone, "
+          f"{len(st['orphans'])} orphan(s)")
     for f in st["files"]:
         s = f["state"]
         if s == "OK":
             continue
-        if s in LOUD:
-            print(f"  !! {s:<14} {f['path']}")
-            print("     THE MIRROR WAS EDITED. The Drive is canonical: nothing reads corpus/, so this")
-            print("     edit reaches no session. Move it to the Drive copy, then re-sync. To throw the")
-            print("     mirror-side change away instead: tools/corpus-sync.py --sync --force")
+        if s == "MIRROR-EDITED":
+            print(f"  ++ {'TO-PUSH':<14} {f['path']}  (git changed since the last sync; run --push)")
+        elif s in CONFLICT_STATES:
+            print(f"  !! {'CONFLICT':<14} {f['path']}")
+            print("     THE SOURCE-SIDE COPY DIFFERS FROM GIT. Git is canonical since 2026-08-06, so a")
+            print("     Drive/vault-side edit here is unexpected. Fold it into git by hand, then --push")
+            print("     will clear it — or run --push now to see the same conflict named again; it")
+            print("     refuses to overwrite the source side automatically.")
+        elif s in ("NEW", "MISSING-MIRROR"):
+            print(f"  -- {s:<14} {f['path']}  (no git copy yet — seed once with --sync, then --push going forward)")
         else:
             print(f"  -- {s:<14} {f['path']}")
     for p in st["orphans"]:
         print(f"  -- ORPHAN         {p}  (in the manifest, no longer in corpus-set.tsv; --sync --prune removes it)")
     for s in st["skipped"]:
         print(f"  -- SKIPPED        {s['source']}  ({s['reason']}, {s['bytes']:,} bytes)")
-    return 2 if loud else (1 if drift or other else 0)
+    return 2 if conflict else (1 if to_push or missing or other else 0)
 
 
 def main(argv):
     do_sync = "--sync" in argv or "--apply" in argv
+    do_push = "--push" in argv
     force = "--force" in argv
     prune = "--prune" in argv
     if "--json" in argv:
         print(json.dumps(status(), indent=2))
         return 0
+    if do_push:
+        if not vault_reachable():
+            print(f"corpus push — SKIP: vault not reachable at {VAULT}")
+            print("  The Drive mount is not up (or the path changed). Nothing pushed; safe to retry.")
+            return 78
+        r = push()
+        print(f"corpus push — {len(r['pushed'])} pushed, {len(r['unchanged'])} already in sync, "
+              f"{len(r['conflicts'])} CONFLICT, {len(r['refused'])} refused")
+        for p in r["pushed"]:
+            print(f"  >> PUSHED    {p}")
+        for cf in r["conflicts"]:
+            print(f"  !! CONFLICT     {cf['path']}")
+            print(f"     source-side hash {cf['manifest_sha'][:12]}.. -> {cf['source_sha'][:12]}.. since the")
+            print(f"     last sync (git is at {cf['repo_sha'][:12]}..). NOT overwritten — this is a")
+            print("     hand-edit on what is now a render. Fold it into git, or run --sync to pull it")
+            print("     into git deliberately, then re-run --push.")
+        for rel, why in r["refused"]:
+            print(f"  -- REFUSED   {rel}\n     {why}")
+        return 2 if (r["conflicts"] or r["refused"]) else 0
     if do_sync:
+        print("NOTE: git is canonical since 2026-08-06 — pulling source into git is the "
+              "conflict-resolution path, not the normal flow.")
         r = sync(force=force, prune=prune)
         print(f"corpus sync — {r['count']} file(s) in the manifest, {len(r['copied'])} (re)mirrored")
         for p in r["copied"]:

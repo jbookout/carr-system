@@ -3,7 +3,15 @@
 # One row per mirrored file: vault-relative path <TAB> class <TAB> why it is doctrine.
 # tools/corpus-sync.py reads this file and nothing else to decide what to mirror.
 # Adding doctrine to the corpus = adding a row. Removing one = deleting the row
-# (then --sync --prune). The Drive copy stays canonical either way.
+# (then --sync --prune).
+#
+# GIT IS CANONICAL for every row here since 2026-08-06 (the corpus flip, both
+# partners confirmed — decision 9b60a2d5). Doctrine edits land in the REPO copy
+# first; the Drive/vault copy is a RENDER pushed by `corpus-sync.py --push`
+# (nightly, or by hand after a doctrine edit). A Drive-side edit to a set file
+# is a conflict to flag, never silently kept or clobbered. Before the flip the
+# rule was the reverse ("the Drive copy stays canonical either way"); that line
+# retired with the flip.
 #
 # THE TEST APPLIED (ORDER 30's criterion, stated so the next editor applies the same one):
 #   IN  — the file teaches how the work is done or what is true about the domain,

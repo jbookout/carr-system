@@ -1,8 +1,8 @@
 {
-  "generated_at": "2026-08-06T01:31:02-0500",
-  "generator": "tools/corpus-sync.py (ORDER 30, Wave 4 phase 1)",
+  "generated_at": "2026-08-06T02:20:05-0500",
+  "generator": "tools/corpus-sync.py --push (CORPUS FLIP, 2026-08-06)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
-  "canonical": "THE DRIVE. This mirror is versioning only — never edit files under corpus/.",
+  "canonical": "GIT. This repo's corpus/ is the doctrine tier's source of truth; the Drive/vault/home copies are renders kept current by `--push`. Flipped 2026-08-06 (was Drive-canonical under ORDER 30 phase 1). `--sync` remains only as the conflict-resolution path, pulling a source-side change INTO git.",
   "max_bytes": 5242880,
   "count": 77,
   "files": [
