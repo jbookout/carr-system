@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 verify-emails.py — stage 1 of the pre-send verification workflow, the free pass.
 
@@ -72,7 +69,7 @@ TYPO = {
     "comcast.com": "comcast.net", "bellsouth.com": "bellsouth.net",
 }
 
-_dns_cache = {}
+_dns_cache: dict[str, tuple[bool, str]] = {}
 
 
 def has_mail(domain):

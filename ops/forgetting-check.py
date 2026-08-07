@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """forgetting-check.py — the health rows for loop #212 (migration 0071).
 
 Invoked by tools/health-check.py the same way ops/rules-live-check.py is (venv
@@ -57,7 +54,10 @@ def main() -> int:
         for t in TRACKED:
             try:
                 cur.execute(f"select count(*) from {t}")
-                n = cur.fetchone()[0]
+                count_row = cur.fetchone()
+                if count_row is None:
+                    raise RuntimeError(f"count query for {t} returned no row")
+                n = count_row[0]
             except Exception:
                 c.rollback()
                 continue   # a table the jobs role cannot count is skipped, not fatal
@@ -67,7 +67,7 @@ def main() -> int:
         c.commit()
 
         cur.execute("select reason, count(*) from v_expired_verification group by reason")
-        rev = dict(cur.fetchall())
+        rev: dict[str, int] = dict(cur.fetchall())
         expired, unstamped = rev.get("expired", 0), rev.get("unstamped_volatile", 0)
 
         cur.execute("select status, n, oldest_age_days from v_ingest_backlog")

@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 registry-audit.py — read-only integrity check on lead-registry.xlsx.
 
@@ -52,7 +49,8 @@ REG = os.path.join(ROOT, "DNA", "Leads", "lead-registry.xlsx")
 PROSPECTS = os.path.join(ROOT, "DNA", "Clients", "prospects")
 ROSTER = os.path.join(ROOT, "DNA", "Clients", "clients-active.md")
 
-errors, warns = [], []
+errors: list[str] = []
+warns: list[str] = []
 
 
 def err(msg):

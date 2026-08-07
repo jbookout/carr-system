@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 health-check.py — the rule-28 façade check as code (phase 3 pilot, 2026-07-24).
 
@@ -673,7 +670,11 @@ CORPUS_SYNC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corpus-s
 try:
     import importlib.util
     _spec = importlib.util.spec_from_file_location("corpus_sync", CORPUS_SYNC)
+    if _spec is None:
+        raise RuntimeError(f"cannot create import spec for {CORPUS_SYNC}")
     _cs = importlib.util.module_from_spec(_spec)
+    if _spec.loader is None:
+        raise RuntimeError(f"import spec for {CORPUS_SYNC} has no loader")
     _spec.loader.exec_module(_cs)
     _st = _cs.status()
     if not _st["manifest"]:
