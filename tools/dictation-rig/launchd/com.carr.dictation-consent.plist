@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.carr.dictation-consent</string>
+
+    <!--
+        This plist references the DURABLE main-checkout path, not the
+        dictation-rig build worktree it was authored in. tools/dictation-rig
+        merges into ~/carr-system at /Users/booko/carr-system/tools/dictation-rig/,
+        and that is the path launchd must run from, since the worktree is
+        temporary and disappears once the branch merges.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/booko/carr-system/tools/dictation-rig/bin/consent-watch.sh</string>
+    </array>
+
+    <!--
+        WatchPaths fires on directory-entry changes inside ~/Recordings
+        itself — i.e. a new session directory being created the moment quill
+        starts recording (quill has no CLI start command; this is the only
+        hook point). It may also fire again when the session directory's
+        contents change at stop (meta.json appears); that's harmless because
+        consent-watch.sh is idempotent per session via announcement.json.
+    -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/booko/Recordings</string>
+    </array>
+
+    <!--
+        Coalesce rapid-fire filesystem events (mic.caf/system.caf growing
+        during recording, meta.json + announcement.json appearing) into at
+        most one run per second, so a live recording session doesn't spawn a
+        flood of watcher invocations.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/booko/carr-system/out/dictation-consent.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/booko/carr-system/out/dictation-consent.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

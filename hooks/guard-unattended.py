@@ -87,6 +87,10 @@ KNOWN_HOSTS = (
     # shipped. All are read-only documentation/paper hosts.
     "arxiv.org", "anthropic.com", "humanlayer.dev", "mem0.ai",
     "langchain.com", "emergentmind.com",
+    # huggingface.co: whisper.cpp model downloads for the dictation rig
+    # (ggml-large-v3-turbo). Added 2026-08-07 on Joe's explicit go in the
+    # dictation-rig build session; read-only model fetches into ~/.cache.
+    "huggingface.co",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
