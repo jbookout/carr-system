@@ -1458,6 +1458,55 @@ SURFACE_REGISTRY = {
     "00_Context/decision-history-archive.md":             "retire candidate (design: wider query, never a second file — Joe's call)",
 }
 
+# ---------------- abilities.md — the stitched render ----------------
+# 2026-08-06 (round-table phase 1e, Joe: "Just do the abilities.md manifest").
+# Hand half: DNA/Team/abilities-catalog.md — the curated summons catalog +
+# tutorials, still edited by sessions per the standing rule. Machine half:
+# ops/abilities-manifest.py, scanned live from the repo (verbs, commands,
+# scheduled tasks, hooks, renders) so code-backed claims cannot drift from the
+# code. Registering this target makes record-home-gate deny hand-edits to
+# abilities.md; the catalog file is where hands go.
+
+ABILITIES_REL = "DNA/Team/abilities.md"
+ABILITIES_CATALOG = "DNA/Team/abilities-catalog.md"
+
+
+def build_abilities(tmp_path, cur):
+    import importlib.util
+    import os as _os
+    spec = importlib.util.spec_from_file_location(
+        "_am", _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                             "ops", "abilities-manifest.py"))
+    am = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(am)
+    machine = am.render_section()
+
+    catalog = (VAULT / ABILITIES_CATALOG).read_text()
+    # strip the catalog file's own redirect header down to its body: everything
+    # from the first "*The running catalog" line onward is the content.
+    idx = catalog.index("*The running catalog")
+    body = catalog[idx:]
+
+    lines = [
+        "# Abilities — everything this system can do, and how to run it",
+        "",
+        "> **GENERATED — do not hand-edit.** The catalog half lives in",
+        "> `DNA/Team/abilities-catalog.md` (edit THERE, same standing rule);",
+        "> the machine inventory is scanned live from `~/carr-system` on every",
+        "> export and cannot be edited at all — change the code and re-export.",
+        "",
+        body.rstrip(),
+        "",
+        "---",
+        "",
+        machine,
+    ]
+    text = "\n".join(lines)
+    tmp_path.write_text(text)
+    rows = text.count("\n| ")
+    return rows, [["abilities-render", str(rows)]]
+
+
 # ---------------- Source Material capture log ----------------
 # 0070 (Joe, 2026-08-06: record-master the capture log so the dedup check can't
 # race two writers). Header prose lives HERE, not in a block table — the one
@@ -1544,6 +1593,8 @@ def build_source_captures(tmp_path, cur):
 TARGETS = {
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
     "source-captures": (SOURCES_REL, build_source_captures),
+    # 2026-08-06, Joe's phone approval: "Flip it". Hand half = abilities-catalog.md.
+    "abilities": (ABILITIES_REL, build_abilities),
     # ORDER 40. A render of decision events, windowed by byte budget rather than
     # split by hand — see DECISION_BUDGET_BYTES.
     # RE-REGISTERED 2026-08-03 on Joe's instruction ("go ahead and solve decision
