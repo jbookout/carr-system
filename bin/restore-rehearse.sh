@@ -236,7 +236,40 @@ say "  ok    age header intact"
 # Freshness. NOT a failure: an old dump still deserves to be rehearsed, and in
 # fact an old dump is when you most want to know it works. But the gap in
 # backups/ (no 2026-08-01) is exactly the silent-skip this warns about.
-DUMP_AGE_H=$(( ( $(date +%s) - $(stat -f %m "$DUMP") ) / 3600 ))
+#
+# FRESHNESS IS READ FROM THE FILENAME, NOT THE MTIME (changed 2026-08-07).
+# mtime answers "when was this file last written to this disk", which is a
+# different question and stopped being a usable proxy on 2026-08-06: the ORDER
+# 42b history purge rewrote backups/ and stamped every dump from 07-30 through
+# 08-06 with the same mtime, 02:05 that morning. This check then reported the
+# 2026-07-31 dump as "28h old". An instrument that measures the last git
+# operation instead of the backup is worse than no instrument, because it still
+# prints a confident number.
+#
+# backup-dump.sh names every dump from `date -u +%Y%m%d` at the moment it runs,
+# so the STAMP IN THE NAME is the taken-on date, and it survives a copy, a
+# restore, or a history rewrite. Age is measured from midnight UTC of that date,
+# which reads up to a couple of hours young against a 2:33am run — immaterial
+# against a 26h threshold on a daily cadence, and written down here rather than
+# left for someone to rediscover.
+DUMP_STAMP="${${DUMP:t}#carr-}"; DUMP_STAMP="${DUMP_STAMP%%.*}"
+DUMP_EPOCH="$(date -j -u -f '%Y%m%d %H%M%S' "$DUMP_STAMP 000000" +%s 2>/dev/null || true)"
+if [ -z "${DUMP_EPOCH:-}" ]; then
+  say "  WARN  no date stamp readable from $(basename "$DUMP") — falling back to mtime"
+  DUMP_EPOCH="$(stat -f %m "$DUMP")"
+else
+  # The disagreement is worth one line: it is the tell that a dump was rewritten
+  # after it was taken, and it is what made this check lie in the first place.
+  MTIME_EPOCH="$(stat -f %m "$DUMP")"
+  DRIFT_H=$(( (MTIME_EPOCH - DUMP_EPOCH) / 3600 ))
+  [ "$DRIFT_H" -lt 0 ] && DRIFT_H=$(( 0 - DRIFT_H ))
+  if [ "$DRIFT_H" -gt 48 ]; then
+    say "  note  mtime sits ${DRIFT_H}h off the name's date — this file was rewritten after"
+    say "        it was taken (a checkout, a restore, or the ORDER 42b purge). Harmless;"
+    say "        noted because mtime is no longer what freshness reads."
+  fi
+fi
+DUMP_AGE_H=$(( ( $(date +%s) - DUMP_EPOCH ) / 3600 ))
 if [ -n "$WANT_DATE" ]; then
   say "  ok    dump is ${DUMP_AGE_H}h old (freshness not gated: --date asked for this one)"
 elif [ "$DUMP_AGE_H" -gt "$STALE_HOURS" ]; then
