@@ -14,7 +14,12 @@
 # lib/r2_archive.py's quota-guarded uploader (ORDER 20) rather than a second
 # implementation. See ops/order42b-history-purge.md for the git-history purge
 # of the dumps already committed under the old scheme.
-set -eu
+# pipefail ADDED 2026-08-07, and it is half of a fix for a night this script
+# reported success on a 200-byte backup. See the guard block below for the whole
+# story; the short version is that in `pg_dump | age > f` the pipeline's exit
+# status is AGE's, age encrypts an empty stream without complaint, and so a
+# pg_dump that died mid-transfer was invisible to `set -e`.
+set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/usr/local/opt/node@22/bin:/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
 PUBKEY="$(cat "$REPO/backups-public-key.txt")"
@@ -34,8 +39,45 @@ OUT="$REPO/backups/carr-$STAMP.sql.age"
 # We restore SCHEMA AND DATA, never the source cluster's permission model: roles
 # and grants are rebuilt by the migrations, which are in git. Dropping them from
 # the dump costs nothing and is what makes it portable.
-pg_dump --no-owner --no-acl "$URL" | age -r "$PUBKEY" > "$OUT.tmp"
-[ -s "$OUT.tmp" ] || { echo "EMPTY DUMP — aborting, previous backups untouched" >&2; rm -f "$OUT.tmp"; exit 1; }
+if ! pg_dump --no-owner --no-acl "$URL" | age -r "$PUBKEY" > "$OUT.tmp"; then
+  echo "DUMP FAILED (pg_dump or age exited non-zero) — aborting, previous backups untouched" >&2
+  rm -f "$OUT.tmp"
+  exit 1
+fi
+
+# SIZE FLOOR ADDED 2026-08-07. The guard here used to be `[ -s "$OUT.tmp" ]`,
+# which asks one question: is this file larger than zero bytes. On 2026-08-07
+# pg_dump lost its Neon connection mid-dump ("server closed the connection
+# unexpectedly"). age wrote its header over the empty stream, producing a
+# 200-byte file. -s passed it, mv promoted it to that day's official backup,
+# the archiver uploaded it to R2 as the durable off-Mac copy, and the dead-man
+# switch was pinged. Every signal said the backup succeeded; none of them
+# looked at the size. This is the same failure class as the --no-owner --no-acl
+# bug above: a backup that looks taken and is not restorable.
+#
+# The floor is the larger of 1 MiB and HALF the most recent previous dump. Half
+# rather than 90%: the database legitimately grows and shrinks night to night,
+# and a guard that cries wolf gets switched off. A truncated dump is not 40%
+# short, it is three orders of magnitude short — 200 bytes against 17 MB.
+SIZE="$(stat -f%z "$OUT.tmp")"
+FLOOR=1048576
+PREV="$(ls -t "$REPO/backups"/carr-*.sql.age 2>/dev/null | grep -vxF "$OUT" | head -1 || true)"
+PREV_SIZE=0
+if [ -n "${PREV:-}" ]; then
+  PREV_SIZE="$(stat -f%z "$PREV")"
+  if [ "$(( PREV_SIZE / 2 ))" -gt "$FLOOR" ]; then
+    FLOOR="$(( PREV_SIZE / 2 ))"
+  fi
+fi
+if [ "$SIZE" -lt "$FLOOR" ]; then
+  echo "SHORT DUMP — $SIZE bytes, floor is $FLOOR bytes." >&2
+  if [ -n "${PREV:-}" ]; then
+    echo "Previous dump for comparison: $PREV ($PREV_SIZE bytes)." >&2
+  fi
+  echo "Aborting: previous backups untouched, nothing archived to R2." >&2
+  rm -f "$OUT.tmp"
+  exit 1
+fi
 mv "$OUT.tmp" "$OUT"
 # keep 14 dailies in backups/ (local, gitignored); the R2 archive keeps everything forever
 ls -t "$REPO/backups"/carr-*.sql.age 2>/dev/null | tail -n +15 | xargs rm -f 2>/dev/null || true
@@ -49,9 +91,16 @@ ls -t "$REPO/backups"/carr-*.sql.age 2>/dev/null | tail -n +15 | xargs rm -f 2>/
 ARCHIVE_JSON="$(cd "$REPO" && DATABASE_URL="$URL" .venv/bin/python bin/backup-archive-r2.py "$OUT" 2>&1)" \
   || { echo "R2 archive step failed (backup itself is fine, sitting at $OUT):" >&2
        echo "$ARCHIVE_JSON" >&2; }
-R2_KEY="$(print -r -- "$ARCHIVE_JSON" | grep -m1 '"key"' | sed -E 's/.*"key": *"([^"]+)".*/\1/')"
+# `|| true` is load-bearing under pipefail (added 2026-08-07): grep exits 1 when
+# the archiver printed no key, and without it that would abort the script AFTER
+# a good backup was already taken and archived.
+R2_KEY="$(print -r -- "$ARCHIVE_JSON" | grep -m1 '"key"' | sed -E 's/.*"key": *"([^"]+)".*/\1/' || true)"
+# Size reported in EXACT BYTES, not `du -h`. du floors at the 4K block size, so
+# on 2026-08-07 the success line read "(4.0K)" for a 200-byte corrupt backup —
+# the one number that would have exposed the failure could not physically be
+# displayed small enough to look wrong.
 if [ -n "${R2_KEY:-}" ]; then
-  echo "backup ok -> $OUT ($(du -h "$OUT" | cut -f1)) -> R2 archive: $R2_KEY"
+  echo "backup ok -> $OUT ($SIZE bytes, floor was $FLOOR) -> R2 archive: $R2_KEY"
 else
-  echo "backup ok -> $OUT ($(du -h "$OUT" | cut -f1)) -> R2 archive: see stderr above"
+  echo "backup ok -> $OUT ($SIZE bytes, floor was $FLOOR) -> R2 archive: see stderr above"
 fi
