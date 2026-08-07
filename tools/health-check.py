@@ -411,7 +411,8 @@ for name, out_pat, max_age, inputs, note in WATCH:
 SCHEDULE = [
     ("nightly-record-layer", "~/carr-system/out/nightly.log", 2, 2.5,
      "cron 0 2 * * * (local CT). Landing hours late means the Mac slept through it and "
-     "the task fired on wake — step 3 of that chain is the encrypted backup, so it is "
+     "the task fired on wake — the encrypted backup is the seventh step of that chain "
+     "(it was step 3 when this note was written), so it is "
      "skipped for as long as no session opens. Fix: sudo pmset repeat wakeorpoweron "
      "MTWRFSU 01:55:00"),
 ]
