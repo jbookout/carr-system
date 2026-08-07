@@ -28,12 +28,20 @@ def main() -> int:
     if not os.path.exists(ENV):
         print("SKIP: no db.env")
         return 2
+    # EXPORTER credential, not jobs: export_run belongs to the exporter lane
+    # (0006), and information_schema only shows a role the columns it can read
+    # — the jobs role produced a false "0073 not applied" SKIP on first live
+    # run, the same role-visibility class as the vendor_category grant bug.
     url = None
-    for line in open(ENV):
-        if line.startswith("CARR_DB_JOBS_URL="):
-            url = line.split("=", 1)[1].strip().strip('"').strip("'")
+    for key in ("CARR_DB_EXPORTER_URL=", "CARR_DB_JOBS_URL="):
+        for line in open(ENV):
+            if line.startswith(key):
+                url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+        if url:
+            break
     if not url:
-        print("SKIP: no CARR_DB_JOBS_URL")
+        print("SKIP: no exporter/jobs credential in db.env")
         return 2
     try:
         import psycopg
