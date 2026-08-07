@@ -464,12 +464,71 @@ def section_monday(cur, today) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 5. Renewal decision-window shortlist — Joe reviews, nothing auto-promotes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def section_renewal(cur, today) -> str:
+    """Loop #204, Joe's ruling 2026-08-07: renewal-radar T1 candidates QUEUE FOR
+    HIS REVIEW. This renders the artifact pipelines/lead-promote.py writes
+    (out/lead-promote/renewal-t1-shortlist.json); it computes nothing itself, so
+    the brief can never disagree with the shortlist Joe sees at the gate. `cur`
+    is unused on purpose: the section reads a file, and taking the signature
+    anyway keeps every SECTIONS entry callable the same way."""
+    import json
+    src = REPO / "out" / "lead-promote" / "renewal-t1-shortlist.json"
+    out = ["# Renewal decision windows, waiting on Joe", "",
+           "_Owner: Joe. Practices whose estimated lease event sits inside 12 months. "
+           "Each one is a claim decision, and only a claim creates a lead; nothing on "
+           "this list is contacted or promoted until Joe says so._", ""]
+    if not src.exists():
+        out += ["The shortlist has not been built on this machine yet. Run "
+                "`./run.sh lead-promote` (the nightly chain also builds it) and this "
+                "section fills in.", ""]
+        return "\n".join(out)
+    art = json.loads(src.read_text(encoding="utf-8"))
+    built = art.get("built", "")[:10]
+    if built and built != today.isoformat():
+        out += [f"_Built {built}, not today. The nightly chain refreshes it; if that "
+                "date is old, the chain needs a look._", ""]
+    cands = art.get("candidates", [])
+    if not cands:
+        out += ["No candidate survived the gates today: every T1 row is either already "
+                "a known lead, waiting on contact info, or a building with no tenant "
+                "named yet. The counts below say which.", ""]
+    for i, c in enumerate(cands, 1):
+        bits = [b for b in (c.get("Profession"), c.get("City"),
+                            f"window {c['le']}" if c.get("le") else "",
+                            f"confidence {c['conf']}" if c.get("conf") else "",
+                            c.get("Phone") or c.get("Email")) if b]
+        line = f"{i}. **{plain(c.get('Name'))}**. " + " · ".join(plain(b) for b in bits)
+        if c.get("note"):
+            line += f". _{plain(c['note'])}_"
+        out.append(line)
+    if cands:
+        out.append("")
+    waiting, bldg = art.get("uncontactable", 0), art.get("building_signals", 0)
+    tail = []
+    if waiting:
+        tail.append(f"{waiting} more sit in the window with no phone or email on file; "
+                    "the licensure enrichment in the radar SOP (step 7) is the path to "
+                    "their contact info")
+    if bldg:
+        tail.append(f"{bldg} are building-level signals with no tenant named yet")
+    if tail:
+        out += ["Not shown: " + "; ".join(tail) + ".", ""]
+    out += ["To claim one: say the word and the lead gets created at the board with "
+            "Joe as owner, never before.", ""]
+    return "\n".join(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 SECTIONS = {
     "one-thing": ("one-thing.md", section_one_thing),
     "prebriefs": ("prebriefs.md", section_prebriefs),
     "capacity": ("capacity.md", section_capacity),
     "monday-agenda": ("monday-agenda.md", section_monday),
+    "renewal-shortlist": ("renewal-shortlist.md", section_renewal),
 }
 
 BANNED = ["delve", "unlock", "unleash", "harness", "elevate", "unveil", "seamless",
