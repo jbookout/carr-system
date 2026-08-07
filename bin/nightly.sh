@@ -77,6 +77,25 @@ step() {                        # step <label> <command...>
 say "===== nightly chain begin ====="
 cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
 
+# WHICH CODE RAN. Added 2026-08-07. This chain executes whatever is checked out
+# in the working tree, and on 2026-08-07 the checked-out branch moved twice in
+# one evening with nobody noticing — once leaving a committed fix stranded off
+# main, so the tree ran code that main did not have. Nothing anywhere recorded
+# which code a given night ran, which means a morning's log could not answer the
+# first question you ask when a night goes wrong: what was actually running.
+#
+# Three cheap facts, logged before any step. The uncommitted count matters as
+# much as the sha: a dirty tree means the night ran something that exists in no
+# commit and cannot be recovered by checking one out.
+GIT_BRANCH="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+GIT_SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
+GIT_DIRTY="$(git -C "$REPO" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${GIT_DIRTY:-0}" -gt 0 ] 2>/dev/null; then
+  say "code: branch $GIT_BRANCH @ $GIT_SHA — $GIT_DIRTY uncommitted path(s) in the tree"
+else
+  say "code: branch $GIT_BRANCH @ $GIT_SHA (tree clean)"
+fi
+
 # Exported explicitly, NOT as a `VAR=1 step ...` prefix: a var-prefix on a
 # function call is not reliably scoped in zsh, and if it failed to propagate the
 # export would quietly write to staging and the vault would never update — the
