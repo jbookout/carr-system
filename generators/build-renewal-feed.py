@@ -31,6 +31,7 @@ Every suppression/flag is printed, so a bad match is visible (stale beats silent
 Usage: python3 build-renewal-feed.py [--records|--files] [CARR_ROOT]
 """
 import os, glob, json, re, sys
+from datetime import date
 import openpyxl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -137,13 +138,44 @@ def latest_radar():
     if not c: raise SystemExit("no renewal-radar-*.xlsx in "+LEADS_DIR)
     return c[-1]
 
+TIER_T1 = "T1 (window <12mo)"
+TIER_T2 = "T2 (12-24mo leverage)"
+TIER_T3 = "T3 (nurture)"
+
+def tier_from_date(le, today):
+    """Recompute the tier band from EST LEASE EVENT and the RUN date (loop #204).
+
+    The spreadsheet TIER column was computed once, on the July 13 pull, and never
+    moved again: by 2026-08-07 eight of its 20 T1 windows were already behind the
+    calendar while every T2 crept a month closer to being a T1. A tier is a claim
+    about TIME REMAINING, so it has to be re-derived every run, from the date the
+    radar actually holds.
+
+    Returns (tier, note). A window already behind today's date stays T1 rather
+    than vanishing (the decision may be happening right now, or the estimate was
+    soft), but the note says so on the row. (None, None) means the date did not
+    parse and the caller keeps the spreadsheet tier, flagged, never guessed.
+    """
+    m = re.fullmatch(r"(\d{4})-(\d{2})", le or "")
+    if not m:
+        return None, None
+    months = (int(m.group(1)) - today.year) * 12 + (int(m.group(2)) - today.month)
+    if months < 0:
+        return TIER_T1, f"est window {le} already past, verify before outreach"
+    if months <= 12:
+        return TIER_T1, ""
+    if months <= 24:
+        return TIER_T2, ""
+    return TIER_T3, ""
+
 def main():
     path = latest_radar()
     reg = load_registry()
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb["Renewal Radar"]; rows = list(ws.iter_rows(values_only=True)); wb.close()
     H = {str(c):i for i,c in enumerate(rows[0])}
-    out=[]; dist={}; dropped=[]; flagged=[]
+    TODAY = date.today()
+    out=[]; dist={}; dropped=[]; flagged=[]; moved=0; unparsed=0
     for r in rows[1:]:
         tenant = val(r[H['Tenant']])
         if not tenant: continue
@@ -162,12 +194,34 @@ def main():
                 dropped.append((tenant, g["id"], g["stage"], g["owner"])); continue
             flag = f"already {g['id']} · {g['owner']} · {g['stage']}"
             flagged.append((tenant, g["id"], g["stage"], g["owner"]))
-        if tier_raw.startswith("T1"): seg, tier = SEG_LEASE, "T1 (window <12mo)"
-        elif tier_raw.startswith("T2"): seg, tier = SEG_LEASE, "T2 (12-24mo leverage)"
-        elif tier_raw.startswith("T3"): seg, tier = SEG_LEASE, "T3 (nurture)"
-        elif tier_raw.startswith("OWNER"): seg, tier = SEG_OWNER, ""
+        if tier_raw.startswith("OWNER"): seg, tier = SEG_OWNER, ""
         elif tier_raw.startswith("INSTITUTIONAL"): seg, tier = SEG_INST, ""
-        else: seg, tier = SEG_LEASE, "T3 (nurture)"
+        else:
+            # Lease-event row. The tier is RECOMPUTED from EST LEASE EVENT against
+            # the run date (loop #204) — the spreadsheet column is only a fallback
+            # for a row whose date does not parse, and that fallback is flagged on
+            # the row rather than silently trusted.
+            seg = SEG_LEASE
+            tier, note = tier_from_date(le, TODAY)
+            if tier is None:
+                if tier_raw.startswith("T1"): tier = TIER_T1
+                elif tier_raw.startswith("T2"): tier = TIER_T2
+                else: tier = TIER_T3
+                if tier_raw.startswith(("T1", "T2")):
+                    # A claimed window with no parseable date behind it is the one
+                    # combination worth a flag; a dateless T3 is already the floor.
+                    note = ("tier from the spreadsheet, "
+                            + (f"lease event {le!r} is not a parseable YYYY-MM"
+                               if le else "no lease-event date on file"))
+                else:
+                    note = ""
+                unparsed += 1
+            else:
+                spread = (TIER_T1 if tier_raw.startswith("T1") else
+                          TIER_T2 if tier_raw.startswith("T2") else TIER_T3)
+                if tier != spread: moved += 1
+            if note:
+                flag = " · ".join(x for x in (flag, note) if x)
         ad = ", ".join([x for x in [addr+(" #"+suite if suite else ""), city] if x])
         out.append({"s":seg,"n":tenant,"pr":pr,"ly":"","ab":"","na":"",
                     "ad":ad,"ci":city,"co":county_of(city),"e":"","ph":phone,"own":"",
@@ -192,6 +246,11 @@ def main():
     json.dump(out, open(os.path.join(AUTO,"renewal-radar.json"),"w"), indent=1)
     print(f"source: {os.path.basename(path)} -> {len(out)} rows on the board | registry source: {source_note(MODE)}")
     for s,n in dist.items(): print(f"   {n:>4}  {s}")
+    print(f"\nTIER RECOMPUTE (run date {TODAY.isoformat()}): {moved} CoStar rows moved band vs the "
+          f"spreadsheet column, {unparsed} kept their spreadsheet tier (no parseable date; flagged "
+          f"where they claim a window). GCCMLS rows keep their own feed's tiers: their windows are "
+          f"multi-scenario estimates, and recomputing one would mean picking a scenario, which is "
+          f"guessing.")
     print(f"\nSUPPRESSOR: {len(dropped)} dropped (do-not-contact/paused), {len(flagged)} flagged (already a known lead)")
     for t,i,st,o in dropped: print(f"   DROP  {t}  ->  {i} ({o}, {st})")
     for t,i,st,o in flagged: print(f"   FLAG  {t}  ->  {i} ({o}, {st})")

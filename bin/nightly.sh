@@ -127,6 +127,17 @@ EXPORTS_RC=$LAST_STEP_RC
 step "corpus push (git-canonical doctrine -> vault)" ./.venv/bin/python tools/corpus-sync.py --push
 
 step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
+
+# Added 2026-08-07 (loop #204, Joe's ruling): the promotion gate runs nightly so
+# the renewal T1 review shortlist is fresh each morning. READ-ONLY plus one
+# artifact: it prints the shortlist and writes out/lead-promote/
+# renewal-t1-shortlist.json (gitignored; the brief pack's renewal-shortlist
+# section reads it). It writes NO lead, NO registry row, and nothing to the
+# database — T1 candidates queue for Joe's review, and only his claim at the
+# board creates a lead. Runs after the consumers because the renewal feed it
+# reads is rebuilt by the step above.
+step "lead promote (review shortlist, writes no leads)" ./run.sh lead-promote
+
 step "graph (derived from the exported files)"       ./run.sh graph
 step "encrypted backup -> R2"                        ./bin/backup-dump.sh
 BACKUP_RC=$LAST_STEP_RC

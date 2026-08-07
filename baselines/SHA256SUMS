@@ -7,5 +7,5 @@
 #   shasum -a 256 baselines/lead-board.html baselines/deal-room-panhandle.html
 # renewal-radar.json and writing-lint.txt are NOT PII-bearing and stay full-file-tracked;
 # do not add them here.
-4e636b970c0227b977978a05b0b34114a0938fd2220c556d25de59bcf71b0bf6  lead-board.html
-7be744186a27877846c286da004516a9a0c6ca6078bf8e139a67923db49f97f4  deal-room-panhandle.html
+14b0255fb5880b310075940c5721e82434f8991ef699a3a1c428ca68ec47186d  lead-board.html
+44205d5a20db55c81a05f6f9792a97e40d0d8c39f2ceba79e481b70197b25f27  deal-room-panhandle.html
