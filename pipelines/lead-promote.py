@@ -41,6 +41,7 @@ never a silent short count.
 """
 import sys, os, re, json, glob, argparse
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 import openpyxl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -71,10 +72,16 @@ ap.add_argument("--all-segments", action="store_true",
 a = ap.parse_args(_rest)
 
 ROOT = a.root or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The renewal-radar lane (loop #204, Joe's ruling 2026-08-07). One of the
+# LANE_SOURCES in lib/record_sources.py; named here so file mode can reach the
+# same rows through the lane's own JSON when the record path is down.
+RADAR_SOURCE = "renewal-radar"
 
 MODE = _MODE
 if MODE == MODE_RECORDS:
-    _ok, _why, _, _ = pool_reach((ROUTER_SOURCE,))
+    _ok, _why, _, _ = pool_reach((ROUTER_SOURCE, RADAR_SOURCE))
     if not _ok:
         print(f"[lead-promote] records mode unavailable ({_why}) — falling back to the "
               f"generated files", file=sys.stderr)
@@ -99,12 +106,16 @@ RESERVOIR = routers[-1]                                    # latest by name; the
                                                              # still carries the router's own
                                                              # date for display, in both modes
 if MODE == MODE_RECORDS:
-    reservoir = load_pool((ROUTER_SOURCE,))[ROUTER_SOURCE]
+    _pool = load_pool((ROUTER_SOURCE, RADAR_SOURCE))
+    reservoir = _pool[ROUTER_SOURCE]
+    radar_raw = _pool.get(RADAR_SOURCE, [])
     registry  = load_leads(ROOT, MODE_RECORDS)
     clients   = load_clients(ROOT, MODE_RECORDS)
     deals     = load_deals_doc(ROOT, MODE_RECORDS).get("deals", [])
 else:
     reservoir = rows(RESERVOIR, "Lead Router")
+    radarp    = os.path.join(ROOT, "Automation/renewal-radar.json")
+    radar_raw = json.load(open(radarp)) if os.path.exists(radarp) else []
     registry  = rows(os.path.join(ROOT, "DNA/Leads/lead-registry.xlsx"), "Registry")
     clients   = rows(os.path.join(ROOT, "DNA/Clients/client-roster.xlsx"), "Clients")
     dealsp    = os.path.join(ROOT, "DNA/Deal Management/panhandle-team-deals.json")
@@ -183,9 +194,52 @@ def lane_of(seg):     return classify(seg)[0]
 def registry_segment(seg): return classify(seg)[1]
 def why(seg):         return classify(seg)[2]
 
+# ---------- the renewal-radar lane (loop #204) ----------
+# Joe's ruling, 2026-08-07: the radar's T1 rows QUEUE FOR HIS REVIEW on this
+# shortlist. Nothing here promotes, claims, or writes a lead — same law as the
+# router rows above: Joe qualifies, the system never does.
+#
+# Lane rows arrive VERBATIM in build-renewal-feed.py's short-key shape
+# (s/n/e/ph/co/ci plus le/tier/conf) in BOTH modes — records mode hands back the
+# source_row jsonb the lane mapper wrote, file mode reads the lane's own
+# Automation/renewal-radar.json — so ONE adapter onto the router's header names
+# lets every gate below (lanes, dedupe, contactability) run unchanged on both
+# sources. The reverse of this mapping lives in build-lead-board.py:load_router.
+def adapt_radar(x):
+    return {"SEGMENT": s(x.get("s")), "Name": s(x.get("n")), "Email": s(x.get("e")),
+            "Phone": s(x.get("ph")), "County": s(x.get("co")), "City": s(x.get("ci")),
+            "Profession": s(x.get("pr")), "Practice Address": s(x.get("ad")),
+            "THE PLAY": "",
+            # lease-event facts ride along to the shortlist and the review artifact
+            "le": s(x.get("le")), "tier": s(x.get("tier")), "conf": s(x.get("conf")),
+            "_radar": True, "_flag": s(x.get("flag")), "_rep": s(x.get("rep"))}
+
+radar_all = [adapt_radar(x) for x in radar_raw]
+# T1 only: a decision window inside 12 months is worth a claim conversation now;
+# T2/T3 stay on the board and age into T1 via the feed's tier recompute.
+radar_t1 = [r for r in radar_all if r["tier"].startswith("T1")]
+
+# The lane's flag field carries TWO different facts and they get opposite
+# treatment. "already L-xxx ..." is the feed's registry suppressor (fuzzier than
+# the name gate below, so it catches spelling drift first): a known lead, never
+# re-promoted. The GCCMLS rows instead carry a provenance flag ("... not yet
+# tenant-identified"): a BUILDING-level signal with no person attached yet,
+# which is not promotable but is also not a duplicate of anything.
+def radar_known(r):  return r["_flag"].startswith("already")
+def radar_building(r): return "not yet tenant-identified" in r["_flag"]
+
+radar_buildings = [r for r in radar_t1 if radar_building(r)]
+radar_uncontactable = [r for r in radar_t1
+                       if not radar_known(r) and not radar_building(r)
+                       and not (r["Email"] or r["Phone"])]
+
 # ---------- filter ----------
 cands, dropped_dupe = [], 0
-for r in reservoir:
+for r in list(reservoir) + radar_t1:
+    if r.get("_flag") and radar_known(r):
+        dropped_dupe += 1; continue
+    if r.get("_flag") and radar_building(r):
+        continue                       # counted and surfaced separately above
     seg = s(r.get("SEGMENT"))
     if not (a.all_segments or lane_of(seg) in ("PROMOTE", "DRIP", "REFER")): continue
     if a.segment and a.segment.upper() not in seg.upper(): continue
@@ -200,9 +254,10 @@ cands.sort(key=lambda r: (LANE_ORDER[lane_of(s(r.get("SEGMENT")))],
                           -len(s(r.get("Email"))), s(r.get("County")), s(r.get("Name"))))
 
 # ---------- report ----------
-print(f"\nLEAD PROMOTION — shortlist from {os.path.basename(RESERVOIR)}")
+print(f"\nLEAD PROMOTION — shortlist from {os.path.basename(RESERVOIR)} + renewal radar")
 print("=" * 78)
-print(f"reservoir {len(reservoir):,} · already known (deduped out) {dropped_dupe:,} · "
+print(f"reservoir {len(reservoir):,} · renewal radar {len(radar_all):,} "
+      f"(T1 {len(radar_t1):,}) · already known (deduped out) {dropped_dupe:,} · "
       f"eligible {len(cands):,} · showing {min(a.count, len(cands))}")
 if not a.all_segments:
     print("scope: event-driven segments only — "
@@ -226,11 +281,63 @@ for i, r in enumerate(cands[:a.count], 1):
     if s(r.get("THE PLAY")): print(f"     play: {s(r.get('THE PLAY'))[:90]}")
     bits = [b for b in (s(r.get("Email")), s(r.get("Phone"))) if b]
     print(f"     {' · '.join(bits)}")
-    print(f"     → registry Segment = {registry_segment(s(r.get('SEGMENT')))} · "
-          f"Source Type = Lead Router · Source Detail = {os.path.basename(RESERVOIR)}")
+    if r.get("_radar"):
+        facts = [b for b in (f"lease event {s(r.get('le'))}" if s(r.get("le")) else "",
+                             s(r.get("tier")),
+                             f"confidence {s(r.get('conf'))}" if s(r.get("conf")) else "",
+                             s(r.get("_rep"))) if b]
+        if facts: print(f"     {' · '.join(facts)}")
+        print(f"     → registry Segment = {registry_segment(s(r.get('SEGMENT')))} · "
+              f"Source Type = Renewal Radar · Source Detail = renewal-radar.json")
+    else:
+        print(f"     → registry Segment = {registry_segment(s(r.get('SEGMENT')))} · "
+              f"Source Type = Lead Router · Source Detail = {os.path.basename(RESERVOIR)}")
     print()
 
 print("=" * 78)
 print("NEXT: Joe or Dell claims the ones they want. Only claimed rows become L-###")
 print("rows — an unclaimed row stays in the reservoir rather than becoming an")
 print("orphan with no owner (the 37 unowned sweep leads are exactly that failure).")
+if radar_uncontactable:
+    print(f"\nRENEWAL RADAR: {len(radar_uncontactable)} T1 decision-window rows carry no email "
+          f"and no phone, so they cannot reach this shortlist yet. The fix is the DOH "
+          f"licensure enrichment (DNA/Leads/renewal-radar-sop.md, step 7), which needs a "
+          f"fresh download through Joe's authenticated browser — the raw file is never kept.")
+if radar_buildings:
+    print(f"\nRENEWAL RADAR: {len(radar_buildings)} further T1 rows are GCCMLS building-level "
+          f"signals with no tenant identified yet — not promotable until someone names the "
+          f"tenant, and listed in the review artifact so they stay visible.")
+
+# ---------- the review artifact (loop #204) ----------
+# Joe's ruling, 2026-08-07: T1 renewal candidates QUEUE FOR HIS REVIEW. This
+# writes the full surviving T1 list (never capped at --count) where the brief
+# pack reads it (pipelines/brief_pack.py, renewal-shortlist section), so the
+# Monday brief presents it with Joe named as owner. out/ is gitignored, so the
+# contact detail in here stays off git — same posture as the calendar archive.
+# NOTHING here writes a lead: promotion stays a human claim at the board.
+_shortdir = os.path.join(REPO, "out", "lead-promote")
+os.makedirs(_shortdir, exist_ok=True)
+_radar_cands = [r for r in cands if r.get("_radar")]
+_artifact = {
+    "built": datetime.now(timezone.utc).isoformat(),
+    "source_note": source_note(MODE) if _HAVE_RECORDS else "generated files",
+    "t1_total": len(radar_t1),
+    "already_known": len([r for r in radar_t1 if radar_known(r)]),
+    "uncontactable": len(radar_uncontactable),
+    "building_signals": len(radar_buildings),
+    # The feed's non-suppressor flag (a past-window or unparseable-date note) rides
+    # along as `note`, so the review surface shows WHY a row needs a careful look.
+    "candidates": [{**{k: v for k, v in r.items() if not k.startswith("_")},
+                    **({"note": r["_flag"]} if r["_flag"] else {})}
+                   for r in _radar_cands],
+    "waiting_on_contact": [{"Name": r["Name"], "City": r["City"], "le": r["le"],
+                            "tier": r["tier"], "conf": r["conf"]}
+                           for r in radar_uncontactable],
+    "buildings_no_tenant": [{"Name": r["Name"], "City": r["City"], "le": r["le"],
+                             "tier": r["tier"]} for r in radar_buildings],
+}
+_shortpath = os.path.join(_shortdir, "renewal-t1-shortlist.json")
+with open(_shortpath, "w") as fh:
+    json.dump(_artifact, fh, indent=1)
+print(f"\nreview artifact -> {_shortpath} ({len(_radar_cands)} candidates, "
+      f"{len(radar_uncontactable)} waiting on contact info)")
