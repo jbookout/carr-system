@@ -820,4 +820,31 @@ except Exception as e:
     print(f"  ⚠︎ {'forgetting':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# ── renders-verify (wave 1 C1, decision a317439f) ───────────────────────────
+# Live render bytes vs the file_sha stored at export: a mismatch means
+# something other than the exporter touched a generated file. Bound action is
+# printed by the child per rule 590b11e1.
+try:
+    _rvc = os.path.join(REPO_ROOT, "ops", "renders-verify.py")
+    if not os.path.exists(_rvc):
+        print(f"  -- {'renders-verify':<18} ops/renders-verify.py not present; skipped")
+    else:
+        _venv = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+        _py = _venv if os.path.exists(_venv) else sys.executable
+        _p = subprocess.run([_py, _rvc], capture_output=True, text=True, timeout=120)
+        _lines = (_p.stdout or "").strip().splitlines()
+        _first = _lines[0] if _lines else (
+            f"(no output; stderr: {(_p.stderr or '').strip().splitlines()[-1]})"
+            if (_p.stderr or "").strip() else "(no output, no stderr)")
+        if _first.startswith("SKIP"):
+            print(f"  -- {'renders-verify':<18} {_first.split(': ', 1)[-1]}")
+        elif _p.returncode == 0:
+            print(f"  OK {'renders-verify':<18} {_first.split('— ', 1)[-1]}")
+        else:
+            print(f"  ⚠︎ {'renders-verify':<18} {_first.split('— ', 1)[-1]}")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'renders-verify':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)

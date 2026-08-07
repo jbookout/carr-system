@@ -75,9 +75,20 @@ def last_ok_count(cur, target):
     return row[0] if row else None
 
 
-def record_run(cur, target, row_count, checksum, status):
-    cur.execute("insert into export_run (target,row_count,checksum,status) "
-                "values (%s,%s,%s,%s)", (target, row_count, checksum, status))
+def record_run(cur, target, row_count, checksum, status, file_sha=None):
+    # file_sha (0073, wave 1): sha256 of the WRITTEN FILE's bytes. The data
+    # checksum proves what the DB said; this proves what the file was, so
+    # ops/renders-verify.py can detect a render edited by anything other than
+    # the exporter (the V-BNK-050 clobber class). Nullable: failure paths and
+    # pre-0073 rows carry none. Written via a column-tolerant INSERT so this
+    # code deploys before the migration lands without breaking exports.
+    try:
+        cur.execute("insert into export_run (target,row_count,checksum,status,file_sha) "
+                    "values (%s,%s,%s,%s,%s)", (target, row_count, checksum, status, file_sha))
+    except Exception:
+        cur.connection.rollback()
+        cur.execute("insert into export_run (target,row_count,checksum,status) "
+                    "values (%s,%s,%s,%s)", (target, row_count, checksum, status))
 
 
 # ---------------- the coverage note (absence is not absence, at the render) ----------------
@@ -247,7 +258,8 @@ def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
 
         keep_generation(final_path)
         os.replace(tmp_path, final_path)
-        record_run(cur, target_key, row_count, checksum, "ok")
+        file_sha = hashlib.sha256(final_path.read_bytes()).hexdigest()
+        record_run(cur, target_key, row_count, checksum, "ok", file_sha)
         conn.commit()
         mode = "LIVE" if LIVE else "staging"
         print(f"[{target_key}] ok — {row_count} rows -> {final_path} ({mode})")

@@ -2498,13 +2498,28 @@ export const TOOLS = {
       kind: { type: "string", description: "what was looked for: verified, email, cell, social, npi, title, discrepancy..." },
       value: { type: "object", description: "the finding, structured. Omit when found:false." },
       found: { type: "boolean", default: true, description: "false records a searched-and-empty result" },
-      source: { type: "string", description: "REQUIRED. Where it came from: a URL, 'NPPES', 'Sunbiz', 'practice website'." },
+      source: { type: "string", description: "REQUIRED. Where it came from: a URL, 'NPPES', 'Sunbiz', 'practice website'. For EXTERNAL findings this must be a re-verifiable LOCATOR (a URL, a registry name + identifier, a file+section, a thread + date) — wave 1 C5, decision a317439f: the re-verify queue is only as good as the pointer it re-checks. A bare label like 'research' is refused." },
+      internal: { type: "boolean", description: "true = an internally observed finding (derived from the record layer itself, a session's own computation, or partner testimony) — exempt from the external-locator requirement, and stored flagged so readers know no outside source backs it." },
       observed_at: { type: "string", description: "when the source was read (ISO); defaults to now" },
       expires_on: { type: "string", description: "date after which this reads as unverified again (volatile fields)" },
       proposes_correction: { type: "object",
         description: "{field, current, proposed} — RECORDED ONLY. The owning partner applies it." } },
       required: ["idempotency_key","subject","kind","source"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "record-finding", args, async () => {
+      // [wave 1 C5, decision a317439f — scoped per the Codex judge: external and
+      // decision-bearing findings need a re-verifiable locator; internal
+      // observations are exempt but flagged. A universal requirement would
+      // manufacture placeholder citations, which is worse than none.]
+      if (!args.internal) {
+        const src = String(args.source || "");
+        const locator = /https?:\/\//i.test(src)
+          || /\b(nppes|sunbiz|npi|bbb|linkedin|zoominfo|rocketreach|facebook|instagram|chamber|arxiv|github)\b/i.test(src)
+          || /[\/#§@]|\bp\.?\s?\d|\bevent\b|\bthread\b|\bv_[a-z_]+/i.test(src);
+        if (!locator || src.trim().length < 12)
+          throw new ToolError({ error: "source_not_a_locator",
+            got: src.slice(0, 80),
+            hint: "an external finding's source must be re-verifiable: a URL, a registry name + identifier, a file+section, or a thread+date. If this finding was derived internally (from the record itself or partner testimony), resubmit with internal:true and it will be stored flagged as such." });
+      }
       const src = String(args.source || "").trim();
       if (!src) throw new ToolError({ error: "source_required",
         hint: "every finding carries its provenance; a finding without a source is a rumour" });
@@ -2568,6 +2583,10 @@ export const TOOLS = {
             ? { proposes_correction: { ...args.proposes_correction, applied: false,
                                        note: "proposal only — the owning partner applies identity changes" } }
             : {}),
+        // [wave 1 C5] an internally observed finding is stored FLAGGED, so a
+        // reader knows no outside source backs it — the exemption is visible,
+        // never silent.
+        ...(args.internal ? { internal: true } : {}),
       };
 
       const r = await c.query(

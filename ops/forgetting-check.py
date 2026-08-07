@@ -83,7 +83,9 @@ def main() -> int:
         tag = "WARN" if warn else "OK"
         slope_txt = ", ".join(slopes) if slopes else "first snapshot today, slope from tomorrow"
         print(f"{tag} forgetting — {expired} expired + {unstamped} unstamped re-verifies · "
-              f"ingest new={new_n} oldest={new_age}d · growth: {slope_txt}")
+              f"ingest new={new_n} oldest={new_age}d · growth: {slope_txt} · "
+              f"on breach: enrichment-weekly consumes v_expired_verification; "
+              f"intake backlog routes to loop #182's fix")
         return 1 if warn else 0
     except Exception as e:
         print(f"SKIP: query failed ({type(e).__name__}: {str(e).splitlines()[0]})")
