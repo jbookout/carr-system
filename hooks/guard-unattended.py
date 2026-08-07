@@ -81,6 +81,12 @@ KNOWN_HOSTS = (
     # the gh-api workaround for plain changelog reads. Added 2026-08-06 with the
     # WebFetch widening.
     "raw.githubusercontent.com",
+    # Research-read hosts, added 2026-08-06 night on Joe's direct order to read
+    # the architecture-research shortlist ("read each one 1 at a time") — the
+    # first legitimate tuning of the widened WebFetch gate, hours after it
+    # shipped. All are read-only documentation/paper hosts.
+    "arxiv.org", "anthropic.com", "humanlayer.dev", "mem0.ai",
+    "langchain.com", "emergentmind.com",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
