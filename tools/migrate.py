@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """carr-system migrations runner (record layer, scaffolded 2026-07-30).
 
 Applies migrations/NNNN_*.sql in filename order, each in its own transaction,
@@ -29,6 +26,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 NAME_RE = re.compile(r"^\d{4}_[a-z0-9_]+\.sql$")
@@ -77,7 +75,7 @@ create table if not exists schema_migrations (
 """
 
 
-def fail(msg: str) -> None:
+def fail(msg: str) -> NoReturn:
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -86,7 +84,7 @@ def load_migrations() -> list[tuple[str, str, str]]:
     """Return [(filename, sql, sha256)] sorted by filename."""
     if not MIGRATIONS_DIR.is_dir():
         fail(f"no migrations directory at {MIGRATIONS_DIR}")
-    out = []
+    out: list[tuple[str, str, str]] = []
     for p in sorted(MIGRATIONS_DIR.iterdir()):
         if p.suffix == ".sql":
             if not NAME_RE.match(p.name):
@@ -121,7 +119,7 @@ def main() -> None:
             cur.execute(BOOTSTRAP)
             conn.commit()
             cur.execute("select filename, sha256 from schema_migrations")
-            applied = dict(cur.fetchall())
+            applied: dict[str, str] = dict(cur.fetchall())
 
         # drift check: an applied file must not have changed on disk
         for name, _sql, digest in migrations:

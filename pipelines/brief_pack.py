@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 brief_pack.py — ORDER 16(b), wave2-design §2g. The brief generator's four
 sections, as CALLABLE UNITS.
@@ -57,6 +54,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out" / "brief-pack"
@@ -157,7 +155,7 @@ def section_one_thing(cur, today) -> str:
              ""]
 
     for partner in PARTNERS:
-        cands = []
+        cands: list[dict[str, Any]] = []
 
         for b in balls:
             if (b["owner"] or "").lower() != partner:
@@ -285,7 +283,7 @@ def section_prebriefs(cur, today) -> str:
                         from v_ref_index where merged is not true""")
     touch = {(r["subject_type"], str(r["subject_id"])): r["last_touch"]
              for r in q(cur, "select subject_type, subject_id, last_touch from v_last_touch")}
-    balls = {}
+    balls: dict[tuple[Any, str], list[dict[str, Any]]] = {}
     for b in q(cur, "select subject_type, subject_id, owner, what from v_today_triage"):
         balls.setdefault((b["subject_type"], str(b["subject_id"])), []).append(b)
 
@@ -343,7 +341,7 @@ def section_prebriefs(cur, today) -> str:
 
 def section_capacity(cur, today) -> str:
     rows = q(cur, """select owner, subject_type, due_on from v_today_triage""")
-    per = {}
+    per: dict[str, dict[str, Any]] = {}
     for r in rows:
         o = (r["owner"] or "unassigned").lower()
         p = per.setdefault(o, {"total": 0, "dated": 0, "overdue": 0, "kinds": {}})

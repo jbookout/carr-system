@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """Set the carr_jobs role password and write CARR_DB_JOBS_URL — one command, value never displayed.
 
     DATABASE_URL=<owner url> .venv/bin/python tools/set-jobs-password.py
@@ -45,6 +42,9 @@ with open(env_path, "w") as f:
 os.chmod(env_path, stat.S_IRUSR | stat.S_IWUSR)
 
 with psycopg.connect(jobs_url) as conn:
-    who = conn.execute("select current_user").fetchone()[0]
+    row = conn.execute("select current_user").fetchone()
+    if row is None:
+        raise RuntimeError("current_user verification returned no row")
+    who = row[0]
 
 print(f"password set · db.env updated · verified connection as: {who}")

@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 review_queue.py — ORDER 16(a), wave2-design §2g. THE ONE unified review queue.
 
@@ -77,6 +74,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out"
@@ -333,7 +331,7 @@ def draft_from_row(row, index) -> dict:
     future = _in_future(occurred)
 
     row_id = str(row.get("id"))
-    call = {
+    call: dict[str, Any] = {
         "verb": "log-activity",
         "args": {
             "idempotency_key": f"ingest:{row_id}",
@@ -738,7 +736,7 @@ def main() -> int:
     soc_items, soc_status = read_social()
 
     now = datetime.now(timezone.utc)
-    queue = {
+    queue: dict[str, Any] = {
         "built_at": now.isoformat(),
         "built_at_local": datetime.now().strftime("%A, %b %-d at %-I:%M %p"),
         "is_fixture": bool(a.fixture),

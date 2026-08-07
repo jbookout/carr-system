@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """Prove the partial-render contract for the CLAUDE.md gist block (PASS 1).
 
 Four properties, each one a way the block could quietly corrupt a hand-authored
@@ -33,7 +30,7 @@ BLOCK = ["", "**generated line one**", "- gist a", "- gist b", ""]
 HOST_HEAD = ["# CLAUDE.md: standing context", "", "Hand-authored paragraph one.", ""]
 HOST_TAIL = ["", "## A later hand-authored section", "", "Hand-authored paragraph two.", ""]
 
-fails = []
+fails: list[str] = []
 
 
 def check(label, ok, detail=""):

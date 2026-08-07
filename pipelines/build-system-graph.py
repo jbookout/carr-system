@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 build-system-graph.py — the CARR AI system as its own shape.
 
@@ -78,7 +75,7 @@ def resolve(ref):
             return r
     return by_base.get(os.path.basename(ref).lower())
 
-folder_edges = defaultdict(int)      # (folder A, folder B) -> reference count
+folder_edges: defaultdict[tuple[str, str], int] = defaultdict(int)  # (folder A, folder B) -> reference count
 for rel, fold in docs.items():
     if not rel.endswith(".md"):
         continue

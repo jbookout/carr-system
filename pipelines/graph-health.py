@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 graph-health.py — data-quality anomalies as a LIST, not as dots to click.
 
@@ -53,7 +50,7 @@ leads   = load_leads(ROOT, MODE)
 clients = load_clients(ROOT, MODE)
 deals   = load_deals_doc(ROOT, MODE)["deals"]
 
-findings = []          # (severity, category, detail)
+findings: list[tuple[str, str, str]] = []  # (severity, category, detail)
 def add(sev, cat, detail): findings.append((sev, cat, detail))
 
 # ---------- 1 & 7: graph-derived checks ----------
@@ -364,9 +361,9 @@ if not findings:
     print("\nNo anomalies found.\n"); sys.exit(0)
 
 CAP = 10000 if VERBOSE else 6
-for key in sorted(by_cat):
-    _, sev, cat = key
-    items = by_cat[key]
+for category_key in sorted(by_cat):
+    _, sev, cat = category_key
+    items = by_cat[category_key]
     print(f"\n[{sev}] {cat} — {len(items)}")
     for d in items[:CAP]:
         print(f"   · {d}")

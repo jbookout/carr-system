@@ -1,6 +1,3 @@
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """Wave 1 import: registry + roster + vendors + deals JSON -> the record layer.
 
 Idempotent by construction: every record carries a record_source row keyed
@@ -30,6 +27,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import openpyxl
 import psycopg
@@ -44,8 +42,8 @@ DEAL_TYPE_MAP = {  # JSON txn / roster Deal Type -> deal.deal_type check values
     "build to suit": "build_to_suit", "bts": "build_to_suit",
 }
 
-report = {"counts": {}, "vocab_added": [], "dup_candidates": [], "owners_unmapped": set(),
-          "type_fallbacks": [], "skipped": [], "notes": []}
+report: dict[str, Any] = {"counts": {}, "vocab_added": [], "dup_candidates": [], "owners_unmapped": set(),
+                          "type_fallbacks": [], "skipped": [], "notes": []}
 
 
 def norm_phone(v):

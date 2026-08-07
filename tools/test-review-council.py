@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """test-review-council.py — offline proof for the Automatic Review Council
 (pipelines/run_codex_review.py + bin/review-council-runner.sh), both the
 Codex lane and the Grok lane added the same day as a verified scope
@@ -53,7 +50,7 @@ RC_DIR = os.path.join(REPO, "out", "review-council")
 REQ_DIR = os.path.join(RC_DIR, "requests")
 FAILED_DIR = os.path.join(REQ_DIR, "failed")
 
-results = []  # (label, ok, detail)
+results: list[tuple[str, bool, str]] = []  # (label, ok, detail)
 
 
 def check(label, ok, detail=""):

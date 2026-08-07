@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """ORDER 36 step 7 — import the 23 hand-maintained dossiers' analysis prose as
 dated `kind=analysis` activity rows.
 
@@ -125,7 +122,9 @@ def parse_file(path: Path):
     file_owner = fm.group(1) if fm else None
 
     # split on H2
-    chunks, cur_title, cur_body = [], None, []
+    chunks: list[tuple[str | None, list[str]]] = []
+    cur_title: str | None = None
+    cur_body: list[str] = []
     for ln in lines:
         m2 = H2.match(ln)
         if m2:
@@ -154,6 +153,8 @@ def parse_file(path: Path):
                 flags.append(f"no date on {where} and the file carries no "
                              f"`Last updated:` stamp; fell back to file mtime")
 
+        if title is None:
+            raise RuntimeError(f"section title unexpectedly missing for {path}")
         am = AUTHOR.search(title)
         if am:
             author = am.group(1).lower()

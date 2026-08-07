@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 prepare_document.py — the LOCAL half of the document factory (ORDER 13).
 
@@ -88,6 +85,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import Any
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "fill-engine"))
@@ -383,9 +381,9 @@ def build_client_copy(working: str, plan: dict, fmap: dict, prior_drops: list[st
     """
     drops = audience_drops(fmap, "client")
     base, ext = os.path.splitext(working)
-    out = {"audience": "client", "produced": False,
-           "declared_drops": drops,
-           "docx": base + "-CLIENT-COPY" + ext, "pdf": base + "-CLIENT-COPY.pdf"}
+    out: dict[str, Any] = {"audience": "client", "produced": False,
+                           "declared_drops": drops,
+                           "docx": base + "-CLIENT-COPY" + ext, "pdf": base + "-CLIENT-COPY.pdf"}
     if fmap.get("_missing"):
         out["why_not"] = f"no field map on disk at {fmap['_missing']}, so no audience rule to apply"
         return out
@@ -622,10 +620,13 @@ def finish_records(plan: dict, out: dict, bucket: str, dry_run: bool = False) ->
     if not url:
         return {"skipped": "DATABASE_URL not set"}
     import psycopg
-    res = {"r2_bucket": bucket, "attachments": []}
+    res: dict[str, Any] = {"r2_bucket": bucket, "attachments": []}
     with psycopg.connect(url) as cn, cn.cursor() as cur:
         cur.execute("select id from actor where slug='joe'")
-        actor = cur.fetchone()[0]
+        actor_row = cur.fetchone()
+        if actor_row is None:
+            raise RuntimeError("actor target 'joe' was not found")
+        actor = actor_row[0]
 
         cap, provenance = r2.quota_bytes(cn)
         led = r2.load_ledger(bucket)
@@ -634,7 +635,8 @@ def finish_records(plan: dict, out: dict, bucket: str, dry_run: bool = False) ->
 
         files = [("working", out["working"], out["working_sha256"], out["working_bytes"]),
                  ("pdf", out["pdf"], out["pdf_sha256"], out["pdf_bytes"])]
-        att_ids, refusal = {}, None
+        att_ids: dict[str, Any] = {}
+        refusal: Any = None
         for role, path, sha, size in files:
             key = r2.object_key(plan["deal"].get("client_ref"), sha, path)
             try:
@@ -661,7 +663,10 @@ def finish_records(plan: dict, out: dict, bucket: str, dry_run: bool = False) ->
                    values (%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
                 ("deal", plan["deal"]["id"], key, os.path.basename(path),
                  r2.mime_for(path), sha, size, actor))
-            att_ids[role] = cur.fetchone()[0]
+            attachment_row = cur.fetchone()
+            if attachment_row is None:
+                raise RuntimeError(f"attachment insert for {role} returned no id")
+            att_ids[role] = attachment_row[0]
 
         if refusal is not None:
             note = (f"working: {out['working']} (sha256 {out['working_sha256'][:12]}) · "

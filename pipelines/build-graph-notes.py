@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 build-graph-notes.py — derived Obsidian graph notes for the CARR AI vault.
 
@@ -27,6 +24,7 @@ unlinked text stays visible in the note as a "(no exact match)" line.
 Usage: python3 build-graph-notes.py [--records|--files] [CARR_ROOT]
 """
 import sys, os, re, json, glob, shutil, unicodedata
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
@@ -166,8 +164,9 @@ detail_files = {os.path.splitext(f)[0].lower(): os.path.splitext(f)[0]
                 for f in os.listdir(os.path.join(ROOT, "DNA/Clients/prospects")) if f.endswith(".md")}
 
 # ---------- index for exact-match linking ----------
-taken = set()
-vend_by_id, vend_by_name = {}, {}
+taken: set[str] = set()
+vend_by_id: dict[str, str] = {}
+vend_by_name: dict[str, str] = {}
 for v in vendors:
     vid = s(v.get("ID"))
     node = slug(s(v.get("Name")) or s(v.get("Company")), taken, vid)
@@ -176,7 +175,8 @@ for v in vendors:
     for key in (s(v.get("Name")), s(v.get("Company"))):
         if key: vend_by_name.setdefault(key.lower(), node)
 
-cli_by_id, cli_by_name = {}, {}
+cli_by_id: dict[str, str] = {}
+cli_by_name: dict[str, str] = {}
 for c in clients:
     cid = s(c.get("Client ID"))
     det = s(c.get("Detail File"))
@@ -227,14 +227,14 @@ open(os.path.join(OUT, "README.txt"), "w").write(
     "Regenerate with `~/carr-system/run.sh graph`. Edits here are overwritten and never\n"
     "flow back to the data — fix the source, then regenerate.\n")
 
-counts = {"vendors":0, "leads":0, "clients":0, "deals":0}
+counts: dict[str, int] = {"vendors":0, "leads":0, "clients":0, "deals":0}
 
 # [ORDER 32] node title -> the file that node was written to, so the intro-graph
 # pass can append edges to notes this script actually owns. A node with no entry
 # here (a hand-maintained client dossier outside Graph/) is NEVER written to —
 # it is reported instead.
-node_file = {}
-lead_by_id = {}
+node_file: dict[str, str] = {}
+lead_by_id: dict[str, str] = {}
 
 for v in vendors:
     vid, node = s(v.get("ID")), v["_node"]
@@ -276,8 +276,8 @@ for c in clients:
                 "tags: [" + ", ".join(tags) + "]"])]
     body.append(f"**{s(c.get('Name')) or node}** — {s(c.get('Practice / Entity'))} · {s(c.get('Specialty / Type'))} · {s(c.get('Market / Location'))}\n")
     links = []
-    ref_node, ref_txt = find_vendor(c.get("Referral Source"))
-    if ref_node: links.append(f"- referred by [[{ref_node}]]")
+    referral_node, ref_txt = find_vendor(c.get("Referral Source"))
+    if referral_node: links.append(f"- referred by [[{referral_node}]]")
     elif ref_txt: links.append(f"- referral source: {ref_txt} (no exact match)")
     if links: body.append("## Links\n" + "\n".join(links) + "\n")
     p = os.path.join(OUT, "clients", node + ".md")
@@ -285,7 +285,7 @@ for c in clients:
     node_file[node] = p
     counts["clients"] += 1
 
-lead_taken = set()
+lead_taken: set[str] = set()
 for l in leads:
     lid = s(l.get("Lead ID"))
     det = s(l.get("Detail File"))
@@ -340,7 +340,7 @@ def deal_lane(deal):
     if not c: return None
     return "territory" if any(t in c for t in TERRITORY) else "national"
 
-deal_taken = set()
+deal_taken: set[str] = set()
 for d in deals:
     node = unique_node(s(d.get("name")) or s(d.get("company")), "deal", taken, s(d.get("txn")))
     phase = s(d.get("phase")).lower()
@@ -363,8 +363,8 @@ for d in deals:
     if not c_node: c_node, _ = find_client(d.get("contact"))
     if not c_node: c_node, _ = find_client(d.get("name"))
     if c_node: links.append(f"- client: [[{c_node}]]")
-    ref_node, ref_txt = find_vendor(d.get("referral"))
-    if ref_node: links.append(f"- referred by [[{ref_node}]]")
+    referral_node, ref_txt = find_vendor(d.get("referral"))
+    if referral_node: links.append(f"- referred by [[{referral_node}]]")
     elif ref_txt: links.append(f"- referral: {ref_txt} (no exact match)")
     own = s(d.get("owner")).lower()
     if links: body.append("## Links\n" + "\n".join(links) + "\n")
@@ -374,9 +374,9 @@ for d in deals:
 # ---------- [loop #133] the partners, and the name->ref resolver ----------
 # Built AFTER every pipeline note so the partner nodes cannot steal a title from a
 # real record, and BEFORE the intro pass so their notes exist to be written to.
-partner_stats = {"nodes": 0, "unresolved": [], "ambiguous_names": [], "recovered": 0}
-partner_ref_node = {}
-name_to_ref = {}
+partner_stats: dict[str, Any] = {"nodes": 0, "unresolved": [], "ambiguous_names": [], "recovered": 0}
+partner_ref_node: dict[str, str] = {}
+name_to_ref: dict[str, str] = {}
 
 if ref_index is not None:
     # ONE ENTRY PER NAME, AND ONLY WHEN THE NAME IS UNAMBIGUOUS. 30-plus names in
@@ -389,7 +389,7 @@ if ref_index is not None:
     # Tombstones are excluded outright — a merged row must never be the thing a
     # name resolves to. (Examples sanitized 2026-08-06, ORDER 42b — the
     # originals named real clients/leads/vendors.)
-    _live_by_name = {}
+    _live_by_name: dict[str, list[dict[str, Any]]] = {}
     for r in ref_index:
         if r["merged"] or not r["party_id"]:
             continue
@@ -443,10 +443,10 @@ else:
 #
 # The edges are appended AFTER every note exists, because an edge can point at a
 # lead or a client whose node had not been minted when its own note was written.
-intro_stats = {"edges": 0, "rendered": 0, "unmapped_from": [], "unmapped_to": [],
-               "unwritable": []}
+intro_stats: dict[str, Any] = {"edges": 0, "rendered": 0, "unmapped_from": [], "unmapped_to": [],
+                               "unwritable": []}
 if party_links is not None:
-    ref_node = {}
+    ref_node: dict[str, str] = {}
     ref_node.update({k.upper(): v for k, v in vend_by_id.items()})
     ref_node.update({k.upper(): v for k, v in cli_by_id.items()})
     ref_node.update({k.upper(): v for k, v in lead_by_id.items()})
@@ -479,7 +479,7 @@ if party_links is not None:
             return node, alt.upper()
         return None, ""
 
-    by_source = {}
+    by_source: dict[str, list[str]] = {}
     for e in party_links:
         intro_stats["edges"] += 1
         fnode, fr = endpoint(e["from_ref"], e["from_name"])

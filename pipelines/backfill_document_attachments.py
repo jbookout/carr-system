@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
-# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
-# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 backfill_document_attachments.py — ORDER 20(a). The archive rows ORDER 13 owed.
 
@@ -42,6 +39,7 @@ import os
 import re
 import sys
 import time
+from typing import Any
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
@@ -132,7 +130,7 @@ def main() -> int:
         return 2
     import psycopg
 
-    lines: list[str] = []
+    lines: Any = []
     say = lambda s: (lines.append(s), print(s))[1]                # noqa: E731
     say(f"# Document attachment backfill — {time.strftime('%Y-%m-%d %H:%M')} "
         f"({'APPLY' if a.apply else 'dry run'})")
@@ -150,7 +148,10 @@ def main() -> int:
             say(f"Reconciliation: {rec['correction']}")
 
         cur.execute("select id from actor where slug='joe'")
-        actor = cur.fetchone()[0]
+        actor_row = cur.fetchone()
+        if actor_row is None:
+            raise RuntimeError("actor target 'joe' was not found")
+        actor = actor_row[0]
 
         # The same joins buildRecordBag uses in the verb, so the reconstructed
         # basename is the one the verb actually produced rather than a lookalike.
@@ -172,6 +173,8 @@ def main() -> int:
             args.append(a.document)
         q += " order by d.prepared_at"
         cur.execute(q, args)
+        if cur.description is None:
+            raise RuntimeError("document attachment target query returned no columns")
         cols = [c.name for c in cur.description]
         docs = [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -219,7 +222,10 @@ def main() -> int:
                        values (%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
                     ("deal" if d["deal_id"] else "client", d["deal_id"] or d["client_id"],
                      key, os.path.basename(path), r2.mime_for(path), sha, size, actor))
-                att_ids[role] = cur.fetchone()[0]
+                attachment_row = cur.fetchone()
+                if attachment_row is None:
+                    raise RuntimeError(f"attachment insert for {role} returned no id")
+                att_ids[role] = attachment_row[0]
                 say(f"   {role:<8} attachment row written ({att_ids[role]})")
 
             if refused is not None:
