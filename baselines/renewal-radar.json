@@ -17,7 +17,7 @@
   "conf": "L",
   "ll": "The Melohn Group LLC",
   "rep": "unrepresented",
-  "flag": "",
+  "flag": "est window 2026-04 already past, verify before outreach",
   "newll": ""
  },
  {
@@ -59,7 +59,7 @@
   "conf": "L",
   "ll": "Pensacola Health Partners, LLC",
   "rep": "unrepresented",
-  "flag": "",
+  "flag": "est window 2026-01 already past, verify before outreach",
   "newll": ""
  },
  {
@@ -185,7 +185,7 @@
   "conf": "L",
   "ll": "",
   "rep": "unrepresented",
-  "flag": "",
+  "flag": "est window 2026-05 already past, verify before outreach",
   "newll": ""
  },
  {
@@ -227,7 +227,7 @@
   "conf": "L",
   "ll": "",
   "rep": "unrepresented",
-  "flag": "",
+  "flag": "est window 2026-05 already past, verify before outreach",
   "newll": ""
  },
  {
@@ -248,7 +248,7 @@
   "conf": "L",
   "ll": "Bordelon David J",
   "rep": "unrepresented",
-  "flag": "",
+  "flag": "est window 2026-04 already past, verify before outreach",
   "newll": ""
  },
  {
@@ -269,7 +269,7 @@
   "conf": "L",
   "ll": "",
   "rep": "unrepresented",
-  "flag": "",
+  "flag": "est window 2026-04 already past, verify before outreach",
   "newll": ""
  },
  {
@@ -332,7 +332,7 @@
   "conf": "L",
   "ll": "James L. Johnson",
   "rep": "unrepresented",
-  "flag": "",
+  "flag": "est window 2026-05 already past, verify before outreach",
   "newll": ""
  },
  {
@@ -496,7 +496,7 @@
   "ph": "",
   "own": "",
   "le": "2027-08",
-  "tier": "T2 (12-24mo leverage)",
+  "tier": "T1 (window <12mo)",
   "conf": "H",
   "ll": "City of Pensacola",
   "rep": "",
@@ -517,7 +517,7 @@
   "ph": "(850) 497-6200",
   "own": "",
   "le": "2027-08",
-  "tier": "T2 (12-24mo leverage)",
+  "tier": "T1 (window <12mo)",
   "conf": "L",
   "ll": "HCA Healthcare, Inc.",
   "rep": "unrepresented",
@@ -2008,7 +2008,7 @@
   "ph": "(850) 430-0500",
   "own": "",
   "le": "2028-08",
-  "tier": "T3 (nurture)",
+  "tier": "T2 (12-24mo leverage)",
   "conf": "L",
   "ll": "Bluegrass Health Partners",
   "rep": "unrepresented",
@@ -2260,7 +2260,7 @@
   "ph": "(850) 750-5203",
   "own": "",
   "le": "2028-08",
-  "tier": "T3 (nurture)",
+  "tier": "T2 (12-24mo leverage)",
   "conf": "L",
   "ll": "",
   "rep": "unrepresented",
