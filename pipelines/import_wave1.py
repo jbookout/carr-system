@@ -1,3 +1,6 @@
+# mypy: ignore-errors
+# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
+# Fix this file's mypy errors and delete these three lines when you next touch it.
 """Wave 1 import: registry + roster + vendors + deals JSON -> the record layer.
 
 Idempotent by construction: every record carries a record_source row keyed

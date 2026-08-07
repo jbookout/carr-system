@@ -10,3 +10,4 @@ psycopg[binary]>=3.2   # record layer: tools/migrate.py + (build day) the MCP se
 #   node         — workflows/*.workflow.js syntax checks (tools/smoke.sh); the Workflow
 #                  runtime itself is provided by Claude Code, not this repo
 #   git          — manifest/baseline discipline assumes a git checkout
+mypy>=2.3

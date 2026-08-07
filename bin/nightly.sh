@@ -112,6 +112,13 @@ step "encrypted backup -> git"                       ./bin/backup-dump.sh
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 
+# Added 2026-08-06 (Joe's go, the Python-native answer to the Rust question,
+# loop #218): mypy over the whole repo, lenient config in mypy.ini, 19 legacy
+# files grandfathered with self-removing headers. Catches shape mistakes in
+# data hand-offs the night they land. A red here is a NEW regression, never
+# legacy noise — the baseline was green the day it was wired.
+step "type-check tripwire (mypy)"                    ./bin/type-check.sh
+
 # Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
 # its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
 # writing to it, so it read stale from 7/30 onward while passing 17/17 every time anyone

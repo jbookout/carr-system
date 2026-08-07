@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# mypy: ignore-errors
+# GRANDFATHERED 2026-08-06: predates the nightly type-check tripwire and fails it.
+# Fix this file's mypy errors and delete these three lines when you next touch it.
 """
 build-lead-board.py — regenerate The Lead Board operating surface.
 Derived VIEW. Reads the two sources of truth and writes lead-board.html.
