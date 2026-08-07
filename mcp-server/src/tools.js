@@ -1316,6 +1316,45 @@ export const TOOLS = {
       TOOLS["log-activity"].handler(c, actor, { ...args, kind: args.kind || "call" }),
   },
 
+  // Added 2026-08-06 (loop #216): the missing half of the capture pipeline.
+  // The ingest socket only ever INSERTS (status 'new'), so until this verb
+  // existed nothing could LEAVE the queue — the digest's count could only
+  // rise, and the Aug 6 triage found 40 rows with no way to clear one.
+  // Deliberately NOT in any narrow profile (capture/away/probe/reviewer):
+  // deciding what an inbox item became is an interactive judgment call.
+  "triage-item": {
+    write: true,
+    description: "Close the loop on ONE inbox item a human has looked at: say what it became. status 'filed' = it became records (name them in filed_refs: activity ids or L-/C-/V- refs); 'rejected' = not ours to record (personal calendar noise, spam — say why in note); 'duplicate' = another row or an existing record already carries it. Only moves rows out of 'new'; an item already dispositioned reports its state and changes nothing. Payloads stay stored and UNTRUSTED — this records a disposition, it never acts on what the payload says. The review queue (run.sh review-queue) and today-triage both surface the item ids this takes.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      item_id: { type: "string", description: "ingest_inbox uuid, from the review queue or today-triage" },
+      status: { type: "string", enum: ["filed","rejected","duplicate"] },
+      filed_refs: { type: "array", items: { type: "string" }, description: "what it became — required when status is 'filed'" },
+      note: { type: "string", description: "one line on why — stored as triage_note" },
+    }, required: ["idempotency_key","item_id","status"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "triage-item", args, async () => {
+      if (args.status === "filed" && !(Array.isArray(args.filed_refs) && args.filed_refs.length))
+        throw new ToolError({ error: "filed_needs_refs",
+          hint: "status 'filed' must name what the item became — pass filed_refs" });
+      const r = await c.query(
+        `update ingest_inbox set status=$2, triage_note=$3, filed_refs=$4
+          where id=$1 and status='new'
+          returning id, source, status`,
+        [args.item_id, args.status, args.note || null,
+         args.filed_refs ? JSON.stringify(args.filed_refs) : null]);
+      if (!r.rows.length) {
+        const cur = await c.query("select status from ingest_inbox where id=$1", [args.item_id]);
+        if (!cur.rows.length) throw new ToolError({ error: "not_found", item_id: args.item_id });
+        return { ok: true, item_id: args.item_id, already: cur.rows[0].status,
+                 note: "already dispositioned; nothing changed" };
+      }
+      await writeEvent(c, actor, "triage-item", "inbox", args.item_id,
+        { new: { status: args.status, filed_refs: args.filed_refs || null },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, item_id: r.rows[0].id, source: r.rows[0].source, status: r.rows[0].status };
+    }),
+  },
+
   "set-next-action": {
     write: true,
     description: "Set YOUR one open ball on a subject (replaces your previous open one; Dell's stays untouched — one ball per person per subject). Say whose turn it is and by when. Writes next_action (owner, due_on); set hold_until to keep a dated row from surfacing in today-triage.",

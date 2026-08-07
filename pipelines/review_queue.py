@@ -272,8 +272,21 @@ def draft_from_row(row, index) -> dict:
     kind = payload.get("kind") if isinstance(payload, dict) else None
     kind = kind if kind in set(SOURCE_KIND.values()) else SOURCE_KIND.get(row.get("source"), "note")
 
+    # Calendar payloads nest the real fields under "event" (bin/pull-gmail-
+    # calendar.py normalize()), so the top-level key loop below never found
+    # them — before 2026-08-06 every calendar item fell through to flatten()
+    # and drafted as "calendar_event <uid> CONFIRMED ..." noise.
+    event = payload.get("event") if isinstance(payload, dict) else None
+    event = event if isinstance(event, dict) else {}
+
     summary = ""
-    if isinstance(payload, dict):
+    ev_title = event.get("summary")
+    if isinstance(ev_title, str) and ev_title.strip():
+        summary = " ".join(ev_title.split())
+        loc = event.get("location")
+        if isinstance(loc, str) and loc.strip():
+            summary += " @ " + " ".join(loc.split())
+    if not summary and isinstance(payload, dict):
         for key in ("summary", "subject", "title", "text", "body", "transcript"):
             v = payload.get(key)
             if isinstance(v, str) and v.strip():
@@ -281,10 +294,40 @@ def draft_from_row(row, index) -> dict:
                 break
     if not summary:
         summary = " ".join(text.split())
-    if len(summary) > 180:
-        summary = summary[:177].rstrip() + "..."
+    # The APPLY CALL carries the whole summary; only the display line is short.
+    # The old single 177-char truncation fed "Lunch | Caris..." INTO
+    # log-activity, so the chopped string was what the record would have held
+    # forever (2026-08-06 triage, loop #216). The 1000-char ceiling below is a
+    # guard against flatten() of a transcript-sized payload — past that point
+    # the right summary is a human's line, not the payload.
+    if len(summary) > 1000:
+        summary = summary[:997].rstrip() + "..."
     if not summary:
         summary = "(the item carried no readable text)"
+    display = summary if len(summary) <= 180 else summary[:177].rstrip() + "..."
+
+    # occurred_at is WHEN IT HAPPENED. For a calendar item that is the event's
+    # own start, never the sweep time — received_at here stamped all 40 of the
+    # Aug 3-4 drafts as happening at ingest, whatever day the meeting was
+    # (2026-08-06 triage, loop #216).
+    received = (row.get("received_at").isoformat()
+                if hasattr(row.get("received_at"), "isoformat")
+                else str(row.get("received_at")))
+    starts_at = event.get("starts_at")
+    occurred = starts_at if isinstance(starts_at, str) and starts_at.strip() else received
+
+    # A meeting that has not happened yet is not an activity. The draft still
+    # renders — the queue is where a human sees what's inbound — but it says
+    # plainly that applying it waits for the meeting.
+    def _in_future(iso_s: str) -> bool:
+        try:
+            t = datetime.fromisoformat(iso_s)
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            return t > datetime.now(timezone.utc)
+        except (ValueError, TypeError):
+            return False
+    future = _in_future(occurred)
 
     row_id = str(row.get("id"))
     call = {
@@ -294,21 +337,24 @@ def draft_from_row(row, index) -> dict:
             "ref": (subject or {}).get("ref"),
             "kind": kind,
             "summary": summary,
-            "occurred_at": (row.get("received_at").isoformat()
-                            if hasattr(row.get("received_at"), "isoformat")
-                            else str(row.get("received_at"))),
+            "occurred_at": occurred,
         },
     }
-    owed = None
+    owed_parts = []
     if not subject:
-        owed = "which record this belongs to"
+        owed_parts.append("which record this belongs to")
         call["args"]["ref"] = None
+    if future:
+        owed_parts.append(f"the meeting is in the future (starts {occurred}) — log it after it happens")
+    owed = "; ".join(owed_parts) or None
 
     return {
         "draft_id": f"ingest-{row_id}",
         "source_row": row_id,
         "arrived_from": row.get("source"),
-        "arrived_at": call["args"]["occurred_at"],
+        "arrived_at": received,
+        "event_at": starts_at or None,
+        "future": future,
         "confidence": band,
         "confidence_reason": reason,
         "subject": ({"name": subject.get("display_name") or subject.get("org_name"),
@@ -316,7 +362,7 @@ def draft_from_row(row, index) -> dict:
                      "kind": subject.get("subject_type"),
                      "status": subject.get("status"),
                      "ref": subject.get("ref")} if subject else None),
-        "proposed": {"kind": kind, "summary": summary, "owed": owed},
+        "proposed": {"kind": kind, "summary": display, "owed": owed},
         "apply": call,
         "applied": False,
         "note": ("DRAFT. Nothing in this system applies it. A human says yes and a "

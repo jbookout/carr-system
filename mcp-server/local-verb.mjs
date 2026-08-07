@@ -13,9 +13,14 @@
 // tap; this tool exists for branch rehearsal and must not become a side door.
 
 import { Pool, neonConfig } from "@neondatabase/serverless";
+import ws from "ws";
 import { TOOLS, ToolError } from "./src/tools.js";
 
-if (typeof WebSocket !== "undefined") neonConfig.webSocketConstructor = WebSocket;
+// The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
+// constructor makes the driver die with an unhandled ErrorEvent before any
+// query runs (measured 2026-08-06, first real use of this harness). `ws` is
+// already in node_modules and works.
+neonConfig.webSocketConstructor = ws;
 
 const [verb, rawArgs = "{}", slug = "joe"] = process.argv.slice(2);
 const url = process.env.DATABASE_URL;
