@@ -193,8 +193,37 @@ RULES = [
     (re.compile(r"git\s+(filter-repo|filter-branch)\b", re.I), "history rewrite"),
     (re.compile(r"git\s+clean\s+-[a-zA-Z]*f", re.I), "forced clean"),
     # 3. private key material
-    (re.compile(r"(id_rsa|id_ed25519|\.ssh/|\.age\b|age-key|identity\.txt|\.pem\b|\.p12\b)", re.I),
+    #
+    # `\.age\b` REMOVED 2026-08-07, on Joe's ruling: "loosen the gate so the work
+    # can actually be done." The extension matched every ENCRYPTED BACKUP in
+    # backups/, which is ciphertext, not key material — without the identity it
+    # is noise. What it actually blocked was ordinary custodial work on the
+    # backups: listing them, comparing sizes, quarantining a corrupt one into
+    # _to_delete/, naming an R2 object key. It fired twice on 2026-08-07 against
+    # correct operations during the recovery from a corrupt backup — including
+    # the attempt to move that corrupt backup out of restore range. A guard that
+    # blocks the cleanup of the incident it was watching is costing more than it
+    # protects.
+    #
+    # The private key itself is still covered, by name and by path: it lives at
+    # ~/.config/carr/age-key.txt, which `age-key` matches, with `identity.txt`
+    # behind it for the --identity override.
+    (re.compile(r"(id_rsa|id_ed25519|\.ssh/|age-key|identity\.txt|\.pem\b|\.p12\b)", re.I),
      "private key material"),
+    # 3b. THE REAL EXPOSURE THE EXTENSION WAS STANDING IN FOR, now named directly.
+    # Handling a .age file is harmless; DECRYPTING one spills production PII in
+    # cleartext. So the dangerous verb is blocked instead of the file type, which
+    # is both tighter and less obstructive than what it replaces.
+    # bin/restore-rehearse.sh is unaffected: it decrypts INSIDE the script, into a
+    # mode-700 mktemp outside the repo, and shreds it on every exit path including
+    # a Ctrl-C. The gate sees `./run.sh restore-rehearse ...`, never the age call.
+    # LIMIT, stated rather than pretended away: this matches the flags real usage
+    # spells out (-d, --decrypt, -i, --identity). It does not chase bundled short
+    # flags or obfuscation, same as every other rule here.
+    (re.compile(r"\bage\s+[^|;&]*(--?d\b|--decrypt\b|--?i\b|--identity\b)", re.I),
+     "raw decrypt of an encrypted backup — production data in cleartext. Use "
+     "`./run.sh restore-rehearse --verify-only [--date YYYYMMDD]`, which handles the "
+     "key and shreds the plaintext"),
     # 4. destructive SQL
     (re.compile(r"\bdrop\s+(table|schema|database|view|index)\b", re.I), "DROP"),
     (re.compile(r"\btruncate\s+(table\s+)?\w", re.I), "TRUNCATE"),
