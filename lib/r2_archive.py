@@ -356,6 +356,47 @@ def upload(path: str, key: str, sha256: str, size: int, cap: int, provenance: st
     return {"key": key, "uploaded": True, "reason": "uploaded", "bytes": size, "bucket": bucket}
 
 
+def delete_object(key: str, led: dict, bucket: str = BUCKET, dry_run: bool = False) -> dict:
+    """Remove one object from the bucket AND from the ledger. ADDED 2026-08-07.
+
+    WHY IT EXISTS. Until now this module could only ever add. On 2026-08-07 a
+    corrupt 200-byte backup was uploaded and recorded, and there was no code
+    path that could take it back out — which meant the choice was between
+    leaving a known-bad object in the durable archive claiming to be that day's
+    backup, or hand-editing the ledger, which its own note forbids. A one-way
+    ledger is not a ledger.
+
+    THE ORDER IS THE BUCKET FIRST, THE LEDGER SECOND, and it is not arbitrary.
+    If the bucket delete fails, the ledger still carries the object and the
+    quota guard keeps counting bytes that exist. If the order were reversed, a
+    failed delete would leave bytes in the bucket that the ledger has forgotten
+    — under-counting, which reconcile()'s correction rule names as the only
+    failure mode here that costs money.
+    """
+    known = led["objects"].get(key)
+    if dry_run:
+        return {"key": key, "deleted": False, "reason": "dry run; nothing sent",
+                "bytes": int(known.get("bytes", 0)) if known else 0,
+                "was_in_ledger": known is not None}
+
+    w = wrangler_bin()
+    if not w:
+        raise RuntimeError("wrangler not found; cannot delete. Looked in "
+                           + ", ".join(WRANGLER_CANDIDATES))
+    p = subprocess.run([w, "r2", "object", "delete", f"{bucket}/{key}", "--remote"],
+                       capture_output=True, text=True, timeout=120, env=_wrangler_env())
+    if p.returncode != 0:
+        raise RuntimeError(f"R2 delete failed for {key}: {(p.stderr or p.stdout).strip()[:400]}")
+
+    freed = 0
+    if known is not None:
+        freed = int(known.get("bytes", 0))
+        del led["objects"][key]
+        save_ledger(led)
+    return {"key": key, "deleted": True, "reason": "deleted from bucket and ledger",
+            "bytes": freed, "was_in_ledger": known is not None}
+
+
 def usage_summary(led: dict, cap: int, provenance: str) -> str:
     # The cap is stamped into the ledger so the health check can report a
     # percentage without a database connection or a credential of its own.

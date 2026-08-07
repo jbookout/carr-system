@@ -88,12 +88,35 @@ FLOOR_PCT="${CARR_RESTORE_FLOOR_PCT:-90}"
 # ran last night" means.
 STALE_HOURS="${CARR_BACKUP_STALE_HOURS:-26}"
 
+# Minimum size for a dump to be worth spending a branch on. Mirrors the floor in
+# backup-dump.sh, which learned on 2026-08-07 that "more than zero bytes" is not
+# a check. This script had the same weak `[ -s ]` test below and would have
+# created a Neon branch, restored a 200-byte file into it and only then
+# discovered the problem — the expensive way to learn something free.
+MIN_DUMP_BYTES="${CARR_MIN_DUMP_BYTES:-1048576}"
+
 PREFLIGHT_ONLY=0
 KEEP_BRANCH=0
+VERIFY_ONLY=0
+WANT_DATE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --preflight)   PREFLIGHT_ONLY=1; shift ;;
     --keep-branch) KEEP_BRANCH=1; shift ;;
+    # --verify-only ADDED 2026-08-07. The missing middle rung. Until now the only
+    # two things this system could say about a dump were "the file exists" (free,
+    # and worth nothing — a 200-byte file exists) and "it restored into a real
+    # database" (conclusive, but costs a Neon branch and several minutes). So in
+    # practice nobody asked. This decrypts the dump and reads its structure: a
+    # pg_dump ends with an explicit completion footer, so a truncated dump is
+    # provable in seconds, with no branch created and nothing charged for.
+    --verify-only) VERIFY_ONLY=1; shift ;;
+    # --date ADDED the same day. `ls -t` picks the newest, which is right for the
+    # nightly drill and useless for the actual question that came up: are the
+    # 2026-07-30 and 2026-07-31 dumps (138K and 1.2M, against 15-17M from 08-02
+    # onward) genuine early-buildout snapshots or truncated ones.
+    --date)        [ $# -ge 2 ] || { echo "FAIL: --date needs YYYYMMDD" >&2; exit 2; }
+                   WANT_DATE="$2"; shift 2 ;;
     --identity)    [ $# -ge 2 ] || { echo "FAIL: --identity needs a path" >&2; exit 2; }
                    IDENTITY="$2"; shift 2 ;;
     -h|--help)     sed -n '2,60p' "$0"; exit 0 ;;
@@ -175,10 +198,32 @@ esac
 
 # Newest dump. `ls -t` matches how backup-dump.sh prunes, so "newest" means the
 # same thing in both scripts.
-DUMP="$(ls -t "$REPO"/backups/carr-*.sql.age 2>/dev/null | head -1)"
-[ -n "$DUMP" ] || die "no backups/carr-*.sql.age files exist. Run ./bin/backup-dump.sh first."
-[ -s "$DUMP" ] || die "newest dump $DUMP is EMPTY"
-say "  ok    newest dump: $(basename "$DUMP") ($(du -h "$DUMP" | cut -f1))"
+if [ -n "$WANT_DATE" ]; then
+  DUMP="$REPO/backups/carr-$WANT_DATE.sql.age"
+  [ -f "$DUMP" ] || die "no dump for $WANT_DATE. Present: $(ls "$REPO"/backups/carr-*.sql.age 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+  say "  ok    selected dump: $(basename "$DUMP") (--date $WANT_DATE)"
+else
+  DUMP="$(ls -t "$REPO"/backups/carr-*.sql.age 2>/dev/null | head -1)"
+  [ -n "$DUMP" ] || die "no backups/carr-*.sql.age files exist. Run ./bin/backup-dump.sh first."
+  say "  ok    newest dump: $(basename "$DUMP")"
+fi
+
+# Size, in exact bytes. `du -h` used to report this and floors at the 4K block
+# size, so it printed "4.0K" for the 200-byte corrupt backup of 2026-08-07 — the
+# one number that would have exposed the failure, rounded up out of visibility.
+DUMP_BYTES="$(stat -f%z "$DUMP")"
+say "  ok    size: $DUMP_BYTES bytes"
+if [ "$DUMP_BYTES" -lt "$MIN_DUMP_BYTES" ]; then
+  # The floor gates the EXPENSIVE path only. --verify-only costs nothing and is
+  # precisely how you examine a suspiciously small dump, so refusing to look at
+  # one would be the check preventing its own use. It warns and proceeds; the
+  # structure test below is what actually rules.
+  if [ "$VERIFY_ONLY" -eq 1 ]; then
+    say "  WARN  $DUMP_BYTES bytes is under the $MIN_DUMP_BYTES-byte floor — verifying anyway"
+  else
+    die "$(basename "$DUMP") is $DUMP_BYTES bytes, under the $MIN_DUMP_BYTES-byte floor. This is not a usable dump; nothing was created."
+  fi
+fi
 
 # Is it actually an age file? The header is a plain ASCII line, so this is a
 # free check that catches a truncated or half-written dump before we spend a
@@ -192,11 +237,55 @@ say "  ok    age header intact"
 # fact an old dump is when you most want to know it works. But the gap in
 # backups/ (no 2026-08-01) is exactly the silent-skip this warns about.
 DUMP_AGE_H=$(( ( $(date +%s) - $(stat -f %m "$DUMP") ) / 3600 ))
-if [ "$DUMP_AGE_H" -gt "$STALE_HOURS" ]; then
+if [ -n "$WANT_DATE" ]; then
+  say "  ok    dump is ${DUMP_AGE_H}h old (freshness not gated: --date asked for this one)"
+elif [ "$DUMP_AGE_H" -gt "$STALE_HOURS" ]; then
   say "  WARN  newest dump is ${DUMP_AGE_H}h old (>${STALE_HOURS}h). The nightly chain is"
   say "        skipped whenever the Mac sleeps through 2am — check out/nightly.log."
 else
   say "  ok    dump is ${DUMP_AGE_H}h old"
+fi
+
+# ── VERIFY-ONLY: structure, not a restore. Nothing on Neon is touched, so this
+#    exits before the reachability checks below.
+#
+#    WHAT IT PROVES AND WHAT IT DOES NOT. A pg_dump writes a header line and, as
+#    its last line, an explicit completion footer. The footer is only reached if
+#    pg_dump ran to the end, so its ABSENCE is proof of truncation. Its presence
+#    proves the file is a complete pg_dump, which is not the same as proving the
+#    dump will load — only phase 3 proves that. This rung is cheap and
+#    conclusive in one direction, which is exactly what a triage check should be.
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+  step "verify: decrypt and read the dump's structure (nothing created)"
+  WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/carr-verify.XXXXXX")"
+  chmod 700 "$WORKDIR"
+  PLAIN="$WORKDIR/dump.sql"
+  if ! age --decrypt -i "$IDENTITY" "$DUMP" > "$PLAIN" 2>"$WORKDIR/verify.err"; then
+    say "$(cat "$WORKDIR/verify.err")" >&2
+    die "$(basename "$DUMP") did not decrypt. THIS IS THE FINDING."
+  fi
+  PLAIN_BYTES="$(stat -f%z "$PLAIN")"
+  say "  ok    decrypted: $PLAIN_BYTES bytes of SQL"
+
+  HEAD_OK=0; FOOT_OK=0
+  head -5 "$PLAIN" | grep -q 'PostgreSQL database dump' && HEAD_OK=1
+  tail -5 "$PLAIN" | grep -q 'PostgreSQL database dump complete' && FOOT_OK=1
+  N_TABLES="$(grep -c '^CREATE TABLE ' "$PLAIN" || true)"
+  N_COPY="$(grep -c '^COPY ' "$PLAIN" || true)"
+  say "  ok    CREATE TABLE statements: $N_TABLES"
+  say "  ok    COPY (data) blocks:      $N_COPY"
+  [ "$HEAD_OK" -eq 1 ] && say "  ok    pg_dump header present" \
+                       || say "  FAIL  pg_dump header MISSING"
+  [ "$FOOT_OK" -eq 1 ] && say "  ok    completion footer present — pg_dump ran to the end" \
+                       || say "  FAIL  completion footer MISSING — this dump is TRUNCATED"
+
+  say ""
+  if [ "$HEAD_OK" -eq 1 ] && [ "$FOOT_OK" -eq 1 ] && [ "$N_TABLES" -gt 0 ]; then
+    say "VERIFY PASS — $(basename "$DUMP") is a structurally complete pg_dump."
+    say "Complete is not the same as loadable: drop --verify-only for the real rehearsal."
+    exit 0
+  fi
+  die "$(basename "$DUMP") is NOT a complete pg_dump. Treat it as no backup at all."
 fi
 
 # Production reachability + the default branch id, which teardown checks against.

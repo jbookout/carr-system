@@ -45,13 +45,20 @@ fi
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
 rc_total=0
+# LAST_STEP_RC carries the outcome of the step that just ran (0 = OK, 78 = SKIP,
+# anything else = FAIL). Added 2026-08-07 so the dead-man pings can report on the
+# steps they are named after instead of on the mere fact that the chain reached
+# the end. See the ping block at the bottom.
+LAST_STEP_RC=0
 step() {                        # step <label> <command...>
   local label="$1"; shift
   say "START $label"
+  LAST_STEP_RC=0
   if "$@" >> "$LOG" 2>&1; then
     say "OK    $label"
   else
     local rc=$?
+    LAST_STEP_RC=$rc
     # 78 = EX_CONFIG: the step ran, found a credential or setting it needs is
     # absent, wrote nothing and said so. That is NOT a failed night. Treating it
     # as one would fire the alarm every single night until the credential lands,
@@ -90,6 +97,7 @@ step "cadence engine (spawn owed next actions)"      ./.venv/bin/python pipeline
 step "availability matcher (digest, never sent)"     ./.venv/bin/python pipelines/availability_matcher.py
 
 step "exports (7 targets -> vault)"                  ./run.sh export
+EXPORTS_RC=$LAST_STEP_RC
 
 # CORPUS FLIP (2026-08-06): the doctrine tier is git-canonical now — corpus/ under this
 # repo, not the Drive, is the source of truth. This step pushes whatever changed in git
@@ -101,7 +109,8 @@ step "corpus push (git-canonical doctrine -> vault)" ./.venv/bin/python tools/co
 
 step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
 step "graph (derived from the exported files)"       ./run.sh graph
-step "encrypted backup -> git"                       ./bin/backup-dump.sh
+step "encrypted backup -> R2"                        ./bin/backup-dump.sh
+BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
 # (~1 month back on current publish settings), so history that scrolls out is
@@ -118,6 +127,13 @@ step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 # data hand-offs the night they land. A red here is a NEW regression, never
 # legacy noise — the baseline was green the day it was wired.
 step "type-check tripwire (mypy)"                    ./bin/type-check.sh
+
+# Added 2026-08-07 (Joe's pick: "build the one-page view first"): the combined
+# open-items dashboard — every open loop, team row, idea, and action-required
+# item on one filterable page, derived read-only from v_export_loops. Runs after
+# the exports so it reflects the same night's truth. Output:
+# 00_Context/open-items.html (GENERATED — never hand-edited).
+step "open-items dashboard (one-page view)"          ./.venv/bin/python generators/build-open-items-dashboard.py
 
 # Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
 # its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
@@ -145,6 +161,21 @@ step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 step "verb probe (worker gate + view sweep)"         ./.venv/bin/python ops/nightly-verb-probe.py
 
 # ── ORDER 5: dead-man pings LAST — a ping means the whole chain above ran ────
+#
+# CHANGED 2026-08-07, and the reason is the same defect the backup guard had one
+# layer down. This step used to run unconditionally, so the exports check and the
+# backup check were pinged OK on the strength of the chain REACHING them, never
+# on what they did. On 2026-08-07 a 200-byte corrupt backup pinged the backup
+# check as healthy. A success signal that does not look at the thing it reports
+# on is worse than no signal, because it is believed.
+#
+# Each check now gets the exit code of the step it is named after. hc-ping.sh
+# pings /fail on anything non-zero, so a bad night ALARMS IMMEDIATELY instead of
+# waiting out the dead-man grace period — the same treatment the Worker health
+# check has had since ORDER 5. Exported rather than prefixed onto the call for
+# the zsh scoping reason stated at CARR_EXPORT_LIVE above.
+export HC_EXPORTS_RC="$EXPORTS_RC"
+export HC_BACKUP_RC="$BACKUP_RC"
 step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 
 if [ "$rc_total" -eq 0 ]; then

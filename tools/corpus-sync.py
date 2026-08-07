@@ -142,6 +142,44 @@ def load_manifest():
         return None
 
 
+# Keys that change on every run whether or not anything happened. Everything
+# else in the manifest is substance: the file list, their hashes, their sizes.
+VOLATILE_KEYS = ("generated_at", "generator")
+
+
+def write_manifest(out) -> bool:
+    """Write the manifest only when its SUBSTANCE changed. Returns True if written.
+
+    ADDED 2026-08-07. Both --sync and --push rewrote this file unconditionally,
+    stamping a fresh generated_at every night. corpus/manifest.json is tracked in
+    git, so the nightly chain left the repo permanently dirty: `git status` in
+    ~/carr-system showed a modified file every single morning, on a night where
+    nothing had been pushed at all.
+
+    That is not a cosmetic annoyance, it is a broken instrument. A working tree
+    that is never clean cannot tell you that something real is uncommitted — which
+    is exactly what happened on 2026-08-07, when a genuine fix sat unnoticed in
+    the same `git status` as this permanent noise. Same failure family as the
+    nightly alarm the ORDER 2 addendum killed: a signal that fires every day
+    stops being read.
+
+    The timestamp is not lost, it is made truthful. generated_at now means "when
+    the corpus last actually moved", which is the question anyone reading it is
+    asking, rather than "when this script last ran", which out/nightly.log
+    already answers.
+    """
+    old = load_manifest()
+    if old is not None:
+        a = {k: v for k, v in old.items() if k not in VOLATILE_KEYS}
+        b = {k: v for k, v in out.items() if k not in VOLATILE_KEYS}
+        if a == b:
+            return False
+    with open(MANIFEST, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    return True
+
+
 def status():
     """Classify every file in the set. Pure read; safe for the health check."""
     man = load_manifest()
@@ -271,11 +309,10 @@ def sync(force=False, prune=False):
         "files": sorted(files, key=lambda f: f["source"]),
         "skipped": sorted(skipped, key=lambda s: s["source"]),
     }
-    with open(MANIFEST, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
+    wrote = write_manifest(out)
     return {"copied": copied, "refused": refused, "skipped": skipped,
-            "orphans": orphans, "pruned": pruned, "count": len(files)}
+            "orphans": orphans, "pruned": pruned, "count": len(files),
+            "manifest_written": wrote}
 
 
 def push():
@@ -358,10 +395,9 @@ def push():
         "files": sorted(files_by_source.values(), key=lambda f: f["source"]),
         "skipped": man.get("skipped", []),
     }
-    with open(MANIFEST, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
-    return {"pushed": pushed, "conflicts": conflicts, "refused": refused, "unchanged": unchanged}
+    wrote = write_manifest(out)
+    return {"pushed": pushed, "conflicts": conflicts, "refused": refused,
+            "unchanged": unchanged, "manifest_written": wrote}
 
 
 # States that mean "the source-side copy no longer matches what git last pushed" — post-flip
@@ -427,6 +463,7 @@ def main(argv):
         r = push()
         print(f"corpus push — {len(r['pushed'])} pushed, {len(r['unchanged'])} already in sync, "
               f"{len(r['conflicts'])} CONFLICT, {len(r['refused'])} refused")
+        print(f"  manifest {'rewritten' if r['manifest_written'] else 'unchanged (nothing moved)'}")
         for p in r["pushed"]:
             print(f"  >> PUSHED    {p}")
         for cf in r["conflicts"]:
@@ -443,6 +480,7 @@ def main(argv):
               "conflict-resolution path, not the normal flow.")
         r = sync(force=force, prune=prune)
         print(f"corpus sync — {r['count']} file(s) in the manifest, {len(r['copied'])} (re)mirrored")
+        print(f"  manifest {'rewritten' if r['manifest_written'] else 'unchanged (nothing moved)'}")
         for p in r["copied"]:
             print(f"  ++ {p}")
         for p, why in r["refused"]:
