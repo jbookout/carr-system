@@ -12,7 +12,7 @@
 // There is no consent screen. Identity IS the gate (A10). A non-allow-listed
 // Google account gets a plain refusal and nothing is issued.
 
-import { slugForEmail, propsForSlug } from "./identity.js";
+import { slugForEmail, propsForSlug, agentSlugForClient } from "./identity.js";
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -307,21 +307,58 @@ export async function handleCallback(request, env) {
     return refusalPage(claims.email, "That Google account's email address is not verified by Google.");
   }
 
-  const slug = slugForEmail(claims.email);
-  if (!slug) return refusalPage(claims.email);
+  const humanSlug = slugForEmail(claims.email);
+  if (!humanSlug) return refusalPage(claims.email);
+
+  // Outside-model attribution override (loop #227). The identity check above
+  // is complete and unweakened by any of this: humanSlug is already the
+  // verified Google identity, checked against ALLOW_LIST exactly as before.
+  // What follows only decides which actor slug a WRITE lands under —
+  // ordinarily the human's own, but when the OAuth client holding this grant
+  // is a recognized outside-model CLI (Codex, Grok — identity.js's
+  // AGENT_CLIENT_NAMES), writes attribute to that tool's own actor row
+  // instead, so "who actually wrote this" survives even when Joe or Dell is
+  // the one driving the CLI. lookupClient is best-effort: if it throws (KV
+  // hiccup, client since deregistered) this silently falls back to the human
+  // slug, which is the existing, already-safe behavior — never a hard failure
+  // on sign-in for an attribution nicety.
+  const clientInfo = pending.req?.clientId
+    ? await env.OAUTH_PROVIDER.lookupClient(pending.req.clientId).catch(() => null)
+    : null;
+  const agentSlug = agentSlugForClient(clientInfo?.clientName);
+  const slug = agentSlug || humanSlug;
+
+  const props = {
+    email: claims.email, sub: claims.sub, via: "oauth-google",
+    // client_id names the SURFACE holding this grant (Claude Code, a phone connector,
+    // a script). Taken from the auth request, never from anything the caller sends.
+    client_id: pending.req?.clientId || null,
+  };
+  if (agentSlug) {
+    // Outside-model surfaces write as automation, never as a human actor —
+    // teach/retire-rule/confirm-merge/reassign-deal (mcp.js's humanOnly gate)
+    // stay Joe/Dell-only even on a session where Joe is the one driving the
+    // CLI. human_slug keeps the verified human on record (identity.js's
+    // actorFromProps carries it through) even though the write attributes
+    // to codex/grok.
+    props.human = false;
+    props.human_slug = humanSlug;
+  }
 
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: pending.req,
-    userId: slug,
+    // Grant OWNERSHIP always stays with the verified human, regardless of the
+    // attribution override above: Joe/Dell list and revoke this grant from
+    // their own account exactly as any other connector, and can find it even
+    // if the CLI's self-declared client_name ever drifts.
+    userId: humanSlug,
     // metadata is stored UNencrypted (it exists so grants can be enumerated and
     // revoked) — keep it to the label. The email rides in props, which is encrypted.
-    metadata: { label: slug, signed_in_at: new Date().toISOString() },
+    metadata: { label: agentSlug ? `${humanSlug} via ${agentSlug}` : humanSlug,
+                signed_in_at: new Date().toISOString() },
     // Grant exactly what was requested. Never widen on our own judgment.
     scope: Array.isArray(pending.req.scope) ? pending.req.scope : [],
-    // client_id names the SURFACE holding this grant (Claude Code, a phone connector,
-    // a script). Taken from the auth request, never from anything the caller sends.
-    props: propsForSlug(slug, { email: claims.email, sub: claims.sub, via: "oauth-google",
-                                client_id: pending.req?.clientId || null }),
+    props: propsForSlug(slug, props),
   });
 
   return Response.redirect(redirectTo, 302);
