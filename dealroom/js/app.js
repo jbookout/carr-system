@@ -894,6 +894,9 @@ async function boot() {
   });
   state.selfActor = state.client.selfActor;
   $('#modePill').textContent = state.client.mode === 'fixture' ? 'Fixture' : 'Live';
+  // The call simulation is a fixture-mode design demo; the live room has real
+  // calls (Joe's ruling: not on the production top bar).
+  if (state.client.mode !== 'fixture') $('#demoBtn')?.remove();
 
   wireChrome();
   await loadBoard();
