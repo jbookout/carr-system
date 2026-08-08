@@ -44,7 +44,7 @@ if [ ! -f "$CONFIG" ]; then
   "vocab_prompt_path": "~/carr-system/tools/dictation-rig/vocab-prompt.txt",
   "work_dir": "~/Library/Caches/quill-dictate",
   "log_path": "~/Library/Logs/quill-dictate.log",
-  "live_preview": true,
+  "preview_style": "inline",
   "preview_server_port": 8595,
   "preview_interval_ms": 900,
   "preview_window_seconds": 15,

@@ -17,17 +17,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     private let workQueue = DispatchQueue(label: "quill-dictate.pipeline", qos: .userInitiated)
     private var axPollTimer: Timer?
 
-    // Live-transcription preview (added 2026-08-08). Entirely separate from
-    // the recorder/transcriber/inserter pipeline above — see PreviewServer.swift
-    // and PreviewOverlay.swift for why this must never be able to block or
-    // delay a real capture.
+    // Live-transcription preview (added 2026-08-08; converted from a floating
+    // panel to inline live typing same day — Joe rejected the panel, wants
+    // words to appear IN the field like typing). Entirely separate from the
+    // recorder/transcriber/inserter pipeline above — see PreviewServer.swift,
+    // PreviewOverlay.swift, and LiveTyper.swift for why this must never be
+    // able to block or delay a real capture.
     private var previewServer: PreviewServer?
     private let previewOverlay = PreviewOverlay()
+    /// Rebuilt fresh at the start of every capture (startPreview) when
+    /// preview_style is "inline" — see LiveTyper.swift for why a fresh
+    /// instance rather than a reset() call.
+    private var liveTyper = LiveTyper()
     private var previewTimer: Timer?
     /// Bumped every capture start; tags each in-flight preview request so a
     /// slow response that lands after the NEXT capture already started (or
-    /// after capture ended) is dropped instead of showing stale text.
+    /// after capture ended) is dropped instead of showing stale text (or,
+    /// for the inline style, typing stale text into the field after
+    /// finalize already ran — see gestureCaptureEnded).
     private var previewGeneration = 0
+
+    /// The last text this app actually landed in a field — finalize() or
+    /// paste alike — so a standalone "scratch that" utterance (the whole
+    /// utterance being the command, nothing to keep) can visibly erase it.
+    /// Added 2026-08-08 per Joe: "i want to visibly see it be removed so
+    /// that i know whats been erased." Scoped to app identity + a 5-minute
+    /// staleness window so it can't reach across into an unrelated field or
+    /// an unrelated, long-past dictation.
+    private struct LastInsert { let text: String; let bundleId: String?; let timestamp: Date }
+    private var lastInsert: LastInsert?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.shared.path = config.logPath
@@ -41,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         requestMicAccess()
         startWhenTrusted()
 
-        if config.livePreview {
+        if config.previewStyle == "inline" || config.previewStyle == "panel" {
             let server = PreviewServer(config: config)
             server.start()
             previewServer = server
@@ -119,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
 
         guard let wav else {
             Log.shared.line("INFO empty capture, nothing to transcribe")
+            liveTyper.retractAll() // defensive: near-instant release, but never leave live-typed text stranded
             settle()
             return
         }
@@ -127,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         guard peak >= config.minPeakLevel, seconds >= 0.35 else {
             Log.shared.line("INFO capture gated (peak=\(String(format: "%.4f", peak)) seconds=\(String(format: "%.2f", seconds))) — discarded")
             try? FileManager.default.removeItem(at: wav)
+            liveTyper.retractAll()
             cue(config.soundGated)
             settle()
             return
@@ -149,14 +169,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                 try? FileManager.default.removeItem(at: wav)
                 guard !text.isEmpty else {
                     Log.shared.line("INFO whisper heard nothing (\(elapsed)s)")
-                    DispatchQueue.main.async { self?.cue(self?.config.soundGated ?? "Bottle") }
+                    DispatchQueue.main.async {
+                        self?.liveTyper.retractAll()
+                        self?.cue(self?.config.soundGated ?? "Bottle")
+                    }
                     return
                 }
-                Log.shared.line("INSERT \(text.count) chars in \(elapsed)s (audio \(String(format: "%.1f", seconds))s)")
-                DispatchQueue.main.async { inserter.insert(text) }
+
+                // "scratch that" (added 2026-08-08): strip everything up to
+                // and including its last occurrence before this text ever
+                // reaches a field. When the WHOLE utterance was the command
+                // (nothing left after it), this isn't a normal insert at
+                // all — it means "erase what I dictated last time," handled
+                // separately below and never through the gated-cue path.
+                let interpreted = LiveTyper.interpret(text)
+                if interpreted.scratchPrevious {
+                    Log.shared.line("INFO scratch-that command received (\(elapsed)s)")
+                    DispatchQueue.main.async { self?.handleCrossUtteranceScratch() }
+                    return
+                }
+                let kept = interpreted.kept
+
+                Log.shared.line("INSERT \(kept.count) chars in \(elapsed)s (audio \(String(format: "%.1f", seconds))s)")
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if self.config.previewStyle == "inline", !self.liveTyper.typed.isEmpty {
+                        // Something was already live-typed this capture —
+                        // reconcile it against the more-accurate final pass
+                        // instead of pasting a duplicate on top of it.
+                        self.liveTyper.finalize(with: kept)
+                    } else {
+                        // Nothing was preview-typed (server down, zero ticks
+                        // fired, or style is "panel"/"off") — fall back to
+                        // the ordinary paste path exactly as before inline
+                        // typing existed.
+                        self.liveTyper.retractAll() // no-op unless style is inline and something partial slipped through
+                        inserter.insert(kept)
+                    }
+                    self.recordLastInsert(kept)
+                }
             } catch {
                 Log.shared.line("ERROR transcription failed: \(error)")
-                DispatchQueue.main.async { self?.cue(self?.config.soundError ?? "Basso") }
+                DispatchQueue.main.async {
+                    self?.liveTyper.retractAll()
+                    self?.cue(self?.config.soundError ?? "Basso")
+                }
             }
         }
     }
@@ -164,31 +221,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     func gestureCaptureAborted() {
         stopPreview()
         recorder.abort()
+        liveTyper.retractAll()
         Log.shared.line("INFO capture aborted (shortcut or mode exit)")
         settle()
+    }
+
+    /// Records what actually landed in a field — inline finalize or plain
+    /// paste alike — as the target for a possible standalone "scratch that"
+    /// on the NEXT capture. Called once per completed insertion.
+    private func recordLastInsert(_ text: String) {
+        lastInsert = LastInsert(text: text,
+                                 bundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                                 timestamp: Date())
+    }
+
+    /// The whole utterance was "scratch that" — erase the PRIOR completed
+    /// insertion (not anything from this capture, which live-typed nothing
+    /// since the command was the entire utterance). Works regardless of
+    /// preview_style: visible removal is the point, so even "panel"/"off"
+    /// get it via LiveTyper's bare backspace primitive. Guarded by app
+    /// identity + a 5-minute staleness window so it can never reach into an
+    /// unrelated field or an unrelated, long-past dictation.
+    private func handleCrossUtteranceScratch() {
+        guard let last = lastInsert else {
+            Log.shared.line("INFO scratch-that: nothing to erase (no prior insert this session)")
+            return
+        }
+        let currentBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let ageSeconds = Date().timeIntervalSince(last.timestamp)
+        guard currentBundle == last.bundleId, ageSeconds < 300 else {
+            Log.shared.line("INFO scratch-that: not erasing (app=\(currentBundle ?? "nil") last=\(last.bundleId ?? "nil") age=\(Int(ageSeconds))s)")
+            return
+        }
+        liveTyper.backspaceCharacters(last.text.count)
+        lastInsert = nil
+        Log.shared.line("INFO scratch-that: erased previous insert (\(last.text.count) chars)")
     }
 
     // MARK: - Live preview (additive; never gates the real pipeline)
 
     private func startPreview() {
-        guard config.livePreview, let previewServer, previewServer.isSpawned else { return }
+        guard let previewServer, previewServer.isSpawned,
+              config.previewStyle == "inline" || config.previewStyle == "panel" else { return }
         previewGeneration += 1
         let generation = previewGeneration
 
-        // Caret lookup (2026-08-08) runs off-main: AX calls can stall in
-        // some apps, and this path sits downstream of the event tap, so it
-        // must never add latency to "the preview appeared." One lookup per
-        // capture start, not per tick — the caret doesn't move while Joe
-        // holds the key and talks, so re-querying every tick would just be
-        // wasted AX round-trips. The generation check on the way back
-        // guards against a slow lookup landing after this capture already
-        // ended (stopPreview bumps previewGeneration and hides the panel).
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let caretRect = CaretLocator.caretScreenRect()
-            DispatchQueue.main.async {
-                guard let self, generation == self.previewGeneration else { return }
-                self.previewOverlay.show(initial: "listening…", near: caretRect)
+        switch config.previewStyle {
+        case "inline":
+            // Fresh typing state for this capture; no overlay in this style
+            // — the words go straight into the field instead.
+            liveTyper = LiveTyper()
+        case "panel":
+            // Caret lookup (2026-08-08) runs off-main: AX calls can stall in
+            // some apps, and this path sits downstream of the event tap, so
+            // it must never add latency to "the preview appeared." One
+            // lookup per capture start, not per tick — the caret doesn't
+            // move while Joe holds the key and talks, so re-querying every
+            // tick would just be wasted AX round-trips. The generation check
+            // on the way back guards against a slow lookup landing after
+            // this capture already ended (stopPreview bumps previewGeneration
+            // and hides the panel).
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let caretRect = CaretLocator.caretScreenRect()
+                DispatchQueue.main.async {
+                    guard let self, generation == self.previewGeneration else { return }
+                    self.previewOverlay.show(initial: "listening…", near: caretRect)
+                }
             }
+        default:
+            break
         }
 
         let timer = Timer(timeInterval: Double(config.previewIntervalMs) / 1000.0, repeats: true) { [weak self] _ in
@@ -205,9 +306,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
             guard let self else { return }
             DispatchQueue.main.async {
                 // Drop late/out-of-order responses: only the request tagged
-                // with the CURRENT generation is allowed to touch the overlay.
+                // with the CURRENT generation is allowed to touch the field
+                // (inline) or the overlay (panel). This is also what stops a
+                // stale tick from typing after finalize() already ran —
+                // gestureCaptureEnded bumps the generation (via stopPreview)
+                // before the final transcription pipeline even starts.
                 guard generation == self.previewGeneration, let text, !text.isEmpty else { return }
-                self.previewOverlay.update(text: text)
+                switch self.config.previewStyle {
+                case "inline":
+                    // The server text isn't run through Transcriber.clean on
+                    // the way out of PreviewServer (only whitespace-trimmed)
+                    // — do it here so a hallucinated [BLANK_AUDIO]-style
+                    // token never gets typed into Joe's field.
+                    let cleaned = Transcriber.clean(text)
+                    guard !cleaned.isEmpty else { return }
+                    // "scratch that" (added 2026-08-08): interpret BEFORE
+                    // apply() so saying it mid-utterance visibly backspaces
+                    // what came before it, live, while the key is still held.
+                    let interpreted = LiveTyper.interpret(cleaned)
+                    self.liveTyper.apply(hypothesis: interpreted.kept)
+                case "panel":
+                    self.previewOverlay.update(text: text)
+                default:
+                    break
+                }
             }
         }
     }
