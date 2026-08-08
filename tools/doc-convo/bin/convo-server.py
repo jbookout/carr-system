@@ -52,7 +52,6 @@ class Engine:
         self.turn_number = 0
         self.timing = None
         self.mic = convo_core.pick_mic()
-        self.capture = convo_core.ResidentMic(self.mic)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -115,13 +114,25 @@ class Engine:
                 return False
             self.turn_number += 1
             utterance = self.workdir / f"utt-{self.turn_number}.wav"
-            recording = self.capture.begin()
-            if recording is None:
+            # PER-TURN CAPTURE, restored 2026-08-08 on Joe's call. The resident
+            # ring buffer was faster on paper and wrong in practice: garbled
+            # transcripts every turn ("I was just 100% on the salt"). An
+            # alignment fix did not clear it, so the whole mechanism is out —
+            # accurate and slower beats fast and deaf. Costs ~350ms of arm time
+            # and one process spawn per turn; that is the price of it working.
+            try:
+                recording = subprocess.Popen(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation",
+                     "-i", self.mic, "-ac", "1", "-ar", "16000", str(utterance)],
+                    stderr=subprocess.PIPE,
+                )
+            except OSError:
                 return False
             self.recording = recording
             self.utterance = utterance
             self.timing = timing
             self.state = "listening"
+        time.sleep(0.35)   # let avfoundation open before we say "listening"
         timing.mark("mic_open_done")
         self.emit("state", {"state": "listening"})
         return True
@@ -131,7 +142,6 @@ class Engine:
             if self.state != "idle":
                 return False
             self.mic = convo_core.pick_mic()
-            self.capture.set_mic(self.mic)
         return True
 
     def stop(self) -> bool:
@@ -146,7 +156,11 @@ class Engine:
             utterance = self.utterance
             self.state = "thinking"
         try:
-            self.capture.write_since(recording, utterance)
+            recording.send_signal(signal.SIGINT)
+            recording.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            recording.kill()
+            recording.wait()
         except OSError:
             utterance.unlink(missing_ok=True)
         if timing is not None:
@@ -325,7 +339,6 @@ class Engine:
             self.set_state("idle")
 
     def close(self) -> None:
-        self.capture.close()
         for path in self.workdir.iterdir():
             path.unlink(missing_ok=True)
         self.workdir.rmdir()
