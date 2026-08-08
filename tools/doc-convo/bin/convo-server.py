@@ -75,6 +75,12 @@ class Engine:
             self.state = state
         self.emit("state", {"state": state})
 
+    def progress(self, label: str) -> None:
+        # The thinking ticker (Joe, 2026-08-08): every label is a TRUE step the
+        # engine is on right now — the truthful-bridge law made visible. Never
+        # emit a step that isn't actually happening.
+        self.emit("progress", {"label": label})
+
     def add_turn(self, you: str, doc: str, card: object | None = None) -> None:
         turn = {"you": you, "doc": doc, "card": card, "ts": time.time()}
         with self.lock:
@@ -112,6 +118,7 @@ class Engine:
             recording.send_signal(signal.SIGINT)
             self.state = "thinking"
         self.emit("state", {"state": "thinking"})
+        self.progress("heard you")
         threading.Thread(target=self._finish_turn, args=(recording,), daemon=True).start()
         return True
 
@@ -134,6 +141,7 @@ class Engine:
             if volume is not None and volume < -45:
                 self._heard_nothing(f"· heard only silence (mic level {volume}dB)")
                 return
+            self.progress("making out your words")
             text = convo_core.transcribe(utterance)
             if not text:
                 self._heard_nothing("· heard nothing")
@@ -143,6 +151,7 @@ class Engine:
                 return
             # Truthful bridge while the brain works (dialogue law: ack + bridge,
             # then substance) — cache-only so a missing bridge never blocks.
+            self.progress("checking the record")
             subprocess.Popen(
                 [sys.executable, str(convo_core.SPEAK), "--cache-only",
                  "Checking the record."],
@@ -158,6 +167,7 @@ class Engine:
             # written answer).
             self.add_turn(text, doc, card)
             self.set_state("rendering")
+            self.progress("voice coming")
             subprocess.run([sys.executable, str(convo_core.SPEAK), doc])
         except (OSError, ValueError) as exc:
             self._heard_nothing(f"· conversation error: {exc}")
@@ -166,6 +176,7 @@ class Engine:
                 self.recording = None
                 self.recording_stderr = None
                 self.utterance = None
+            self.progress("")
             self.set_state("idle")
 
     def close(self) -> None:

@@ -83,7 +83,9 @@
   }
   #orb:focus-visible { outline: 3px solid var(--orange); outline-offset: 4px; }
   #orb.disabled { cursor: default; opacity: .45; }
-  #hint { font-size: 11px; color: var(--dim); }
+  #hint { font-size: 11px; color: var(--dim); transition: opacity .25s ease;
+          min-height: 14px; }
+  #hint.ticking { color: var(--orange); letter-spacing: .04em; }
 
   #offline {
     display: none; margin: 14px; padding: 12px 14px;
@@ -336,6 +338,18 @@
       es = new EventSource("/events");
       es.addEventListener("state", function (e) {
         setState(JSON.parse(e.data).state);
+      });
+      // The thinking ticker: each label is a real engine step (truthful
+      // bridge, made visible). Empty label = turn over, hint reverts.
+      es.addEventListener("progress", function (e) {
+        var label = JSON.parse(e.data).label;
+        if (label) {
+          hint.textContent = label + " …";
+          hint.classList.add("ticking");
+        } else {
+          hint.classList.remove("ticking");
+          hint.textContent = HINTS[state] || "";
+        }
       });
       es.addEventListener("turn", function (e) {
         var turn = JSON.parse(e.data);
