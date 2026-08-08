@@ -59,6 +59,48 @@ def main():
     if not q:
         print("retrieve: query reduced to nothing after stopwords; be more specific"); sys.exit(1)
 
+    # ---- DUAL-READ, store pass first (doctrine-store build P4, 2026-08-08;
+    # decisions 82a2fb62 + the import-door entry). Migrated doctrine lives in
+    # the record layer; its vault .md copies are frozen dual-read fallbacks
+    # until the cutoff. The store pass runs the SAME FTS the search-doctrine
+    # verb runs; a store hit prints as a verb pointer, never a file path.
+    # FAIL-SOFT: any error prints one line and the file pass still answers —
+    # a dead store must never make retrieval blind (record_sources doctrine).
+    migrated_rel = set()
+    store_hits = []
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        from lib.record_sources import _connect
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                select b.source_paths from doctrine_migration_batch b
+                 where b.state = 'verified'""")
+            for (paths,) in cur.fetchall():
+                for p in paths or []:
+                    rel = p
+                    for pref in (vault + os.sep, vault.replace(
+                            "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com",
+                            "/Users/booko") + os.sep):
+                        if rel.startswith(pref):
+                            rel = rel[len(pref):]
+                    migrated_rel.add(rel)
+            cur.execute("""
+                select d.slug, s.section_key, coalesce(s.title,''),
+                       ts_rank_cd(r.search_vector, websearch_to_tsquery('english', %s)) as rank,
+                       ts_headline('english', r.plain_text,
+                                   websearch_to_tsquery('english', %s),
+                                   'MaxWords=18, MinWords=8') as snippet
+                  from doctrine_section s
+                  join doctrine_document d on d.id = s.document_id
+                  join doctrine_revision r on r.id = s.current_revision_id
+                 where s.status = 'active' and d.visibility = 'shared'
+                   and r.search_vector @@ websearch_to_tsquery('english', %s)
+                 order by rank desc limit %s""",
+                (" ".join(words), " ".join(words), " ".join(words), top))
+            store_hits = cur.fetchall()
+    except Exception as exc:
+        print(f"retrieve: store pass skipped ({type(exc).__name__}) — file index only")
+
     index = os.path.join(vault, "Automation", "section-index.tsv")
     if not os.path.exists(index):
         print(f"retrieve: {index} missing — run ./run.sh section-index first"); sys.exit(1)
@@ -81,10 +123,23 @@ def main():
             if len(query) > 6 and (query in header.lower() or query in gist.lower()):
                 score += 4.0
             if score > 0:
+                # migrated files: the store already answered for these; a file
+                # hit would be a duplicate pointing at a frozen copy
+                if path in migrated_rel:
+                    continue
                 scored.append((score, path, int(start), int(end), int(level), header, parents))
 
-    if not scored:
+    if store_hits:
+        print(f"retrieve: STORE hits (read via verbs, these are the live copies):")
+        for slug, key, title, rank, snippet in store_hits:
+            label = f"{slug} § {key}" + (f" — {title}" if title else "")
+            print(f"  [store]  {label}")
+            print(f"           read-doctrine {{\"document\":\"{slug}\"}} · {snippet}")
+
+    if not scored and not store_hits:
         print("retrieve: no keyword hits — fall back to the INDEX.md router (do not guess paths)")
+        sys.exit(0)
+    if not scored:
         sys.exit(0)
 
     # prefer the sharpest section per file; file-level rows only win when no
