@@ -49,16 +49,24 @@ final class GestureEngine {
     private var triggerUsesDeviceBit = true
     private var activeTriggerKey: Int64?
 
-    /// Modifier signature per trigger keycode: the generic flag mask plus the
-    /// device-level bit that distinguishes left/right instances.
-    private struct ModifierSignature { let mask: CGEventFlags; let deviceBit: UInt64 }
+    /// Modifier signature per trigger keycode: the generic flag mask, the
+    /// device-level bit that identifies THIS side, and the sibling bit for
+    /// the opposite side. The sibling matters because some boards (Joe's
+    /// Logitech, live 2026-08-08) report BOTH instances of a modifier under
+    /// ONE keycode — his LEFT control arrived as keycode 62 and fired
+    /// dictation, because the press check accepted any maskControl event on
+    /// a trigger keycode and only consulted the side bit at release. Press
+    /// now requires the correct side bit whenever the board sets either bit
+    /// of the pair; the bit-less fallback (boards that omit device bits
+    /// entirely) stays.
+    private struct ModifierSignature { let mask: CGEventFlags; let deviceBit: UInt64; let siblingBit: UInt64 }
     private static let signatures: [Int64: ModifierSignature] = [
-        54: ModifierSignature(mask: .maskCommand, deviceBit: 0x10),    // right cmd
-        55: ModifierSignature(mask: .maskCommand, deviceBit: 0x8),     // left cmd
-        62: ModifierSignature(mask: .maskControl, deviceBit: 0x2000),  // right ctrl
-        59: ModifierSignature(mask: .maskControl, deviceBit: 0x1),     // left ctrl
-        61: ModifierSignature(mask: .maskAlternate, deviceBit: 0x40),  // right opt
-        58: ModifierSignature(mask: .maskAlternate, deviceBit: 0x20),  // left opt
+        54: ModifierSignature(mask: .maskCommand, deviceBit: 0x10, siblingBit: 0x8),     // right cmd (sibling: left)
+        55: ModifierSignature(mask: .maskCommand, deviceBit: 0x8, siblingBit: 0x10),     // left cmd
+        62: ModifierSignature(mask: .maskControl, deviceBit: 0x2000, siblingBit: 0x1),   // right ctrl (sibling: left)
+        59: ModifierSignature(mask: .maskControl, deviceBit: 0x1, siblingBit: 0x2000),   // left ctrl
+        61: ModifierSignature(mask: .maskAlternate, deviceBit: 0x40, siblingBit: 0x20),  // right opt
+        58: ModifierSignature(mask: .maskAlternate, deviceBit: 0x20, siblingBit: 0x40),  // left opt
     ]
     private var lastTapAt: Date?
     private var holdTimer: DispatchWorkItem?
@@ -147,33 +155,47 @@ final class GestureEngine {
 
         if type == .flagsChanged && config.triggerKeyCodes.contains(keyCode) {
             let sig = GestureEngine.signatures[keyCode]
-                ?? ModifierSignature(mask: .maskCommand, deviceBit: 0)
+                ?? ModifierSignature(mask: .maskCommand, deviceBit: 0, siblingBit: 0)
             // Trust the device-level left/right bit when the press carried
             // it; fall back to the generic modifier flag when it didn't
             // (some third-party boards omit the bit — found live 2026-08-07).
             let deviceBit = sig.deviceBit != 0 && (event.flags.rawValue & sig.deviceBit) != 0
             let maskSet = event.flags.contains(sig.mask)
-            if triggerDownAt == nil {
-                if maskSet {
-                    activeTriggerKey = keyCode
-                    triggerUsesDeviceBit = deviceBit
-                    triggerPressed()
-                }
-            } else if activeTriggerKey == keyCode {
-                let stillDown = triggerUsesDeviceBit ? deviceBit : maskSet
-                if !stillDown {
-                    activeTriggerKey = nil
-                    triggerReleased()
-                }
+            // SIDE CHECK AT PRESS (live fix 2026-08-08): when the event
+            // carries either side bit of this modifier pair, the trigger
+            // fires only on the RIGHT-side bit — Joe's Logitech sends left
+            // control as keycode 62 too, and without this his left ctrl
+            // dinged and dictated. Boards with no side bits at all keep the
+            // maskSet-only fallback.
+            let pairBits = event.flags.rawValue & (sig.deviceBit | sig.siblingBit)
+            let sideOK = pairBits == 0 || deviceBit
+
+            // Ownership is decided BEFORE any state mutation below, because
+            // consumption depends on it and triggerReleased() clears the very
+            // state that proves the release was ours.
+            let isOurPress = triggerDownAt == nil && maskSet && sideOK
+            let isOurRelease = triggerDownAt != nil && activeTriggerKey == keyCode
+                && !(triggerUsesDeviceBit ? deviceBit : maskSet)
+
+            if isOurPress {
+                activeTriggerKey = keyCode
+                triggerUsesDeviceBit = deviceBit
+                triggerPressed()
+            } else if isOurRelease {
+                activeTriggerKey = nil
+                triggerReleased()
             }
-            // CONSUMED: quill-dictate owns its trigger keys outright. Siri's
-            // "press either cmd twice" shortcut kept firing on the double-tap
-            // no matter what the Settings dropdown said (live, 2026-08-07),
-            // so the collision is removed structurally — flagsChanged events
-            // for trigger keycodes never leave the tap. Subsequent keyDowns
-            // still carry the modifier in their own flags field, so a
-            // trigger+key chord still reaches apps as a shortcut.
-            return nil
+            // CONSUMED — but only events that are OURS: a right-side press
+            // (quill-dictate owns its trigger keys outright; Siri's "press
+            // either cmd twice" kept firing no matter what Settings said,
+            // live 2026-08-07), or the release of OUR active gesture. A
+            // sibling-side press under the same keycode (Joe's Logitech
+            // reports left ctrl as keycode 62 too, live fix 2026-08-08)
+            // passes through untouched — and so does its release: eating a
+            // left-ctrl release we never owned would leave apps believing
+            // Control is still held. Subsequent keyDowns carry the modifier
+            // in their own flags either way, so chords survive.
+            return (isOurPress || isOurRelease) ? nil : Unmanaged.passUnretained(event)
         }
 
         // Another key while the trigger is held = a real shortcut. Stand down.
