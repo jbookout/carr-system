@@ -56,7 +56,66 @@ ARCHIVE_MARKERS = (".generations/", "/_processed/",
                    "00_Context/SETUP ",
                    "00_Context/ai-operating-notes",
                    "00_Context/prospects.md",
-                   "Automation/linkedin-app-use-case")
+                   "Automation/linkedin-app-use-case",
+                   "Marketing/Social Media/_archive/",
+                   "Marketing/Social Media/SOCIAL-PROJECT-HANDOFF",
+                   "Marketing/Social Media/first-batch-2026-07/",
+                   "Marketing/Brand Assets/generated/",
+                   # ledgers and dated target lists live in the record layer,
+                   # not the doctrine store; files freeze as history
+                   "DNA/Network/deals.md",
+                   "DNA/Network/attorney-targets-",
+                   # dated specs, build notes, backups, run ledgers, deal
+                   # artifacts, staged intakes — frozen history
+                   "Automation/meta-app-use-case",
+                   "Automation/scenario-1-prompt",
+                   "Automation/npi-sweep-digest",
+                   "Automation/network-debrief-SKILL-backup",
+                   "DNA/Clients/prospects-roster",
+                   "DNA/Team/carr-ai-dashboard-spec",
+                   "DNA/Team/carr-system-deepdive-script",
+                   "DNA/Team/dell-blotato-wiring",
+                   "DNA/Team/front-door-build-note",
+                   "DNA/Team/lead-board-build-note",
+                   "DNA/Team/published-searches/",
+                   "Prospects/GulfCoastPelvicFloor-dealroom/",
+                   "_asset_staging/",
+                   # live queues/logs/target-lists are ACCUMULATORS — record-
+                   # layer domain post-cutoff; the files freeze as history
+                   "Marketing/Social Media/post-performance-log",
+                   "Marketing/Social Media/published-log",
+                   "Marketing/Social Media/linkedin-comment-queue",
+                   "Marketing/Social Media/x-reply-targets",
+                   "Marketing/Social Media/x-unfollow-list",
+                   "Marketing/Social Media/content-fuel-inbox",
+                   # day-6 DM/marketing triage: dated memos, orders, audits,
+                   # week batches, one-off results — frozen history
+                   "Marketing/Social Media/x-batch-20",
+                   "Marketing/Social Media/x-following-cleanup-RESULTS",
+                   "Marketing/citation-cleanup-",
+                   "Marketing/gbp-audit-",
+                   "DNA/Deal Management/Templates/_ONEDRIVE-TEMPLATE-IMPORT",
+                   "DNA/Deal Management/record-layer/_MESSAGE-FOR-BUILD-SESSION",
+                   "DNA/Deal Management/record-layer/blueprint-",
+                   "DNA/Deal Management/record-layer/capture-problem-",
+                   "DNA/Deal Management/record-layer/design-amendments-",
+                   "DNA/Deal Management/record-layer/dr-cre-assistant-study-",
+                   "DNA/Deal Management/record-layer/exporter-specs-",
+                   "DNA/Deal Management/record-layer/fable-order",
+                   "DNA/Deal Management/record-layer/fable-orders",
+                   "DNA/Deal Management/record-layer/oauth-connector-design-",
+                   "DNA/Deal Management/record-layer/one-writer-design-",
+                   "DNA/Deal Management/record-layer/opus-work-orders-",
+                   "DNA/Deal Management/record-layer/order3",
+                   "DNA/Deal Management/record-layer/plan-v1-",
+                   "DNA/Deal Management/record-layer/stress-test-addendum-",
+                   "DNA/Deal Management/record-layer/two-writer-endgame-",
+                   "DNA/Deal Management/record-layer/wave")
+# MACHINE-REQUIRED FILES beyond the manifest: local-task thin prompts are READ
+# FROM DISK by launchd-scheduled sessions at runtime (the thin-prompt law) and
+# the abilities catalog feeds the abilities.md stitcher — they migrate only
+# WITH their consumers re-pointed (P5/P6 items), like the skill trees.
+MACHINE_HELD = ("Automation/local-tasks/", "DNA/Team/abilities-catalog.md")
 ARCHIVE_PREFIXES = ("Automation/Learning/",
                     # per-deal research work products (call sheets, search
                     # specs, handoffs) are DEAL ARTIFACTS — they belong to the
@@ -152,6 +211,8 @@ def main():
             if any(rel.startswith(p) for p in SKIP_PREFIXES):
                 continue
             if any(rel.startswith(p) for p in RENDER_PREFIXES):
+                continue
+            if any(rel.startswith(p) for p in MACHINE_HELD):
                 continue
             if (any(m in rel for m in ARCHIVE_MARKERS)
                     or any(rel.startswith(p) for p in ARCHIVE_PREFIXES)

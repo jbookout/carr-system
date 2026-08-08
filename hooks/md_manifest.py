@@ -61,6 +61,17 @@ ALLOW_PREFIX = {
     "DNA/Clients/prospects/": CUTOFF,
 }
 
+# Job-output FILENAME patterns that live in folders shared with migrated
+# doctrine (a prefix row would un-block the migrated files too). The weekly
+# social batch writes flat into Marketing/Social Media/ — caught during the
+# day-6 DM triage before Monday's batch job hit the gate. Same retirement
+# clock as the prefixes.
+import re as _re
+ALLOW_PATTERNS = {
+    _re.compile(r"^(DNA/)?Marketing/Social Media/(week-20\d\d[^/]*/)?"
+                r"(x-)?batch-20\d\d-\d\d-\d\d[^/]*\.md$"): CUTOFF,
+}
+
 
 def md_write_verdict(rel, today=None):
     """None = allowed; else the deny reason for a vault-relative .md path.
@@ -72,14 +83,16 @@ def md_write_verdict(rel, today=None):
     today = today or date.today()
     if rel in ALLOW_EXACT:
         return None
+    retired_msg = (f"'{rel}' sat on a TEMPORARY manifest row that retired at the "
+                   f"doctrine-store cutoff. Its writer should have been re-pointed "
+                   f"at the store by P5 — this write is the alarm that it was not. "
+                   f"Route the content through a verb and fix the job.")
     for prefix, retires in ALLOW_PREFIX.items():
         if rel.startswith(prefix):
-            if today <= retires:
-                return None
-            return (f"'{rel}' sat on a TEMPORARY manifest row that retired at {retires} "
-                    f"(the doctrine-store cutoff). Its writer should have been re-pointed "
-                    f"at the store by P5 — this write is the alarm that it was not. "
-                    f"Route the content through a verb and fix the job.")
+            return None if today <= retires else retired_msg
+    for pat, retires in ALLOW_PATTERNS.items():
+        if pat.match(rel):
+            return None if today <= retires else retired_msg
     return (f"'{rel}': hand-authored markdown in the vault is closed (Joe, 2026-08-07: "
             f"\"i don't want anything written into .md files... database first\" — rule "
             f"14181e60, council decision 82a2fb62). The doctrine store is being built "
