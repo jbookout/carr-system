@@ -131,7 +131,8 @@ func runCleanup(text: String) -> Never {
     // ARBITRATION FLIP (2026-08-08, same as App.resolveFinalText): heuristics
     // are PRIMARY. If the rule chain resolved something, use it and skip the
     // LLM entirely — never even spawn the server.
-    guard interpreted.heuristic == interpreted.raw else {
+    // Word-level, not string-level — same reasoning as App.resolveFinalText.
+    guard !CorrectionResolver.differsInWords(interpreted.heuristic, interpreted.raw) else {
         finish(interpreted.heuristic, engine: "heuristic")
     }
 
