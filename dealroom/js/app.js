@@ -142,9 +142,25 @@ async function pollOnce(initial = false) {
     renderConfirms();
   }
 
-  if (state.view === 'board') renderRowsOnly();
-  else if (state.view === 'deal' && state.openDealId) await openDeal(state.openDealId, true);
+  // Never rebuild the DOM out from under an active edit: a quick note, the
+  // composer, the deal-page note input, or a contenteditable cell all live
+  // inside what render replaces, and the 1s poll would erase typed text.
+  if (!userIsEditing()) {
+    if (state.view === 'board') renderRowsOnly();
+    else if (state.view === 'deal' && state.openDealId) await openDeal(state.openDealId, true);
+  }
   applyPresenceFlags();
+}
+
+function userIsEditing() {
+  const a = document.activeElement;
+  if (!a || !a.closest) return false;
+  return !!(
+    a.closest('.qnbox') ||
+    a.closest('.composer') ||
+    a.id === 'dvnote' ||
+    a.hasAttribute('contenteditable')
+  );
 }
 
 function startPolling() {
@@ -861,7 +877,15 @@ function escapeAttr(s) {
 // ── boot ─────────────────────────────────────────────────────────────
 async function boot() {
   const params = new URLSearchParams(location.search);
-  const mode = params.get('mode') === 'live' ? 'live' : 'fixture';
+  // Production serves live by default; fixture stays the default for local
+  // files and dev servers, and either can be forced with ?mode=.
+  const requested = params.get('mode');
+  const isProdHost = location.hostname === 'dealroom.doctorcre.com';
+  const mode =
+    requested === 'live' ? 'live'
+    : requested === 'fixture' ? 'fixture'
+    : isProdHost ? 'live'
+    : 'fixture';
   state.client = await createClient(mode, {
     baseUrl: params.get('api') || undefined,
   });
