@@ -140,6 +140,9 @@ step "lead promote (review shortlist, writes no leads)" ./run.sh lead-promote
 
 step "graph (derived from the exported files)"       ./run.sh graph
 step "encrypted backup -> R2"                        ./bin/backup-dump.sh
+# The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
+# md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
+step "portability mirror (md+csv, 2 locations)"      .venv/bin/python tools/db-tap.py run pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
 BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window

@@ -914,4 +914,26 @@ except Exception as e:
     print(f"  ⚠︎ doctrine store check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# --- the portability mirror (Joe's ruling 2026-08-08) ------------------------
+# Freshness only: a mirror is insurance, and stale insurance that looks valid
+# is worse than none. Bound action inline per rule 590b11e1.
+try:
+    _mp = ("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us"
+           "@gmail.com/My Drive/CARR AI/Backups/portability-mirror/MANIFEST.md")
+    if not os.path.exists(_mp):
+        print("  ⚠︎ portability-mirror  MISSING · on breach: run tools/db-tap.py run "
+              "pipelines/doctrine_mirror.py (see nightly.sh for args)")
+        rc = 1
+    else:
+        _age_h = (time.time() - os.path.getmtime(_mp)) / 3600
+        if _age_h > 30:
+            print(f"  ⚠︎ portability-mirror  STALE {int(_age_h)}h · on breach: the nightly "
+                  f"mirror step failed — check out/nightly logs, rerun the db-tap command")
+            rc = 1
+        else:
+            print(f"  OK portability-mirror  fresh ({int(_age_h)}h old, Drive + local)")
+except Exception as e:
+    print(f"  ⚠︎ portability-mirror check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
