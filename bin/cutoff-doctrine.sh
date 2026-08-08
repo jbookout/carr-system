@@ -70,6 +70,18 @@ print -r -- "$renders" | while IFS= read -r rel; do
 done
 stamp "renders staged to $STAGE"
 
+# ZERO-FILE ruling (Joe, 2026-08-08): the bootstrap stubs retire too — the
+# directive lives in the MCP server instructions, the Cowork project field,
+# and the SessionStart hook. No CLAUDE.md, no AGENTS.md.
+for stub in "CLAUDE.md" "AGENTS.md"; do
+  if [[ -f "$VAULT/$stub" ]]; then
+    mv "$VAULT/$stub" "$STAGE/$stub"
+  fi
+done
+stamp "bootstrap stubs staged (zero-file ruling)"
+print "REMINDER: commit the manifest cleanup (ALLOW_EXACT empties) + unregister"
+print "the compiled-rules-gist-index target in the same sitting."
+
 print "cutoff FIRED: flag set, renders staged. Now run:"
 print "  cd ~/carr-system && ./run.sh health   # expect the doctrine rows green, render rows to note retirement"
 print "  ./run.sh retrieve \"any question\"      # store-first, no dead file hits"
