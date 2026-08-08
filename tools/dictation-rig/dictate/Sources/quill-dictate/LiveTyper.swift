@@ -111,21 +111,64 @@ final class LiveTyper {
     /// tolerating punctuation/commas immediately around it (whisper renders
     /// it as e.g. "..., scratch that, ..." or "Scratch that."). `kept` is
     /// everything after that occurrence, with leading whitespace/punctuation
-    /// trimmed. `scratchPrevious` is true only when the phrase was found AND
-    /// nothing follows it — the whole utterance WAS the command. A
-    /// mid-utterance "X, scratch that, Y" needs no flag: `kept` == "Y" is
-    /// already the whole story, and running it through apply()/finalize()
-    /// naturally backspaces X and types Y via the normal diff.
+    /// trimmed, then run through CorrectionResolver so a natural
+    /// self-correction ("send it Tuesday, no wait, Wednesday") resolves
+    /// before it ever reaches apply()/finalize() (added 2026-08-08).
+    /// `scratchPrevious` is true only when the phrase was found AND nothing
+    /// follows it — the whole utterance WAS the command; it's computed off
+    /// the PRE-resolver `kept` since an empty string resolves to itself
+    /// either way. A mid-utterance "X, scratch that, Y" needs no flag:
+    /// `kept` == "Y" (resolved) is already the whole story, and running it
+    /// through apply()/finalize() naturally backspaces X and types Y via the
+    /// normal diff.
     static func interpret(_ text: String) -> (kept: String, scratchPrevious: Bool) {
+        let result = interpretFinal(text)
+        return (result.heuristic, result.scratchPrevious)
+    }
+
+    /// Same scratch-that stripping as interpret(_:), but surfaces BOTH the
+    /// raw post-strip text and the heuristic (CorrectionResolver) resolution
+    /// of it, instead of only the latter. Added 2026-08-08 for the local-LLM
+    /// cleanup pass (App.swift's final path / main.swift's `cleanup`
+    /// subcommand): the LLM needs the RAW text (a correction cue like "wait"
+    /// might already be gone by the time CorrectionResolver is done with it)
+    /// while the heuristic result remains the fallback when the LLM is
+    /// skipped, times out, or its output fails the deletion-only guard.
+    /// interpret(_:) above is a thin wrapper over this so the LIVE tick path
+    /// (App.swift's previewTick, which calls interpret(_:) directly) is
+    /// byte-identical in behavior to before this method existed.
+    static func interpretFinal(_ text: String) -> (raw: String, heuristic: String, scratchPrevious: Bool) {
         guard let range = text.range(of: "scratch that", options: [.caseInsensitive, .backwards]) else {
-            return (text, false)
+            return (text, CorrectionResolver.resolve(text), false)
         }
         var rest = text[range.upperBound...]
         while let first = rest.first, first.isWhitespace || first.isPunctuation {
             rest = rest.dropFirst()
         }
         let kept = String(rest)
-        return (kept, kept.isEmpty)
+        return (kept, CorrectionResolver.resolve(kept), kept.isEmpty)
+    }
+
+    // MARK: - Correction-cue detection (local-LLM cleanup gate, 2026-08-08)
+
+    /// Cues that make the raw (pre-heuristic) text worth sending to the local
+    /// cleanup LLM at all — a natural self-correction almost always contains
+    /// one of these, and gating on their presence keeps the fully-local fast
+    /// path (no cue = no network call, however loopback-local) the common
+    /// case instead of the exception. Case-insensitive substring match on the
+    /// RAW text, deliberately not tokenized: "no," needs its comma to avoid
+    /// firing on every bare "no", and substring matching is simpler and
+    /// exactly as safe here since a false-positive cue only costs one wasted
+    /// (fast, local) LLM round trip — it is the LLM's OWN output, not the
+    /// cue match, that the deletion-only guard protects.
+    private static let correctionCues = [
+        "wait", "i mean", "not that", "no,", "make that", "strike that",
+        "actually", "rather", "i meant",
+    ]
+
+    static func containsCorrectionCue(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return correctionCues.contains { lowered.contains($0) }
     }
 
     // MARK: - Synthetic input

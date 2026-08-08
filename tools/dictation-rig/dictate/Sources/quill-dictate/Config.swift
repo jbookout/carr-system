@@ -85,6 +85,18 @@ struct Config: Codable {
     var previewWindowSeconds: Int = 15
     var previewModelPath: String = NSString(string: "~/.cache/whisper-cpp/models/ggml-small.en.bin").expandingTildeInPath
 
+    /// Local-LLM self-correction cleanup pass (added 2026-08-08) — resolves
+    /// natural self-corrections ("send it Tuesday, oh wait, actually make it
+    /// Thursday") the CorrectionResolver heuristics miss. FINAL path only
+    /// (see App.swift/CleanupServer.swift); the live tick path never calls
+    /// this, so it can never add LLM latency to inline typing. "auto" (the
+    /// default) spawns the resident server and engages it only on a raw
+    /// correction cue, per CorrectionResolver's paraphrase-firewall guard;
+    /// "off" disables it entirely (no spawn, no per-utterance check).
+    var correctionLLM: String = "auto"
+    var cleanupServerPort: Int = 8596
+    var cleanupModelPath: String = NSString(string: "~/.cache/llama.cpp/models/qwen2.5-1.5b-instruct-q4_k_m.gguf").expandingTildeInPath
+
     enum CodingKeys: String, CodingKey {
         case triggerKeyCodes = "trigger_key_codes"
         case conversationKeyCode = "conversation_key_code"
@@ -111,6 +123,9 @@ struct Config: Codable {
         case previewIntervalMs = "preview_interval_ms"
         case previewWindowSeconds = "preview_window_seconds"
         case previewModelPath = "preview_model_path"
+        case correctionLLM = "correction_llm"
+        case cleanupServerPort = "cleanup_server_port"
+        case cleanupModelPath = "cleanup_model_path"
     }
 
     static var configPath: String {
@@ -173,6 +188,9 @@ private struct PartialConfig: Codable {
     var preview_interval_ms: Int?
     var preview_window_seconds: Int?
     var preview_model_path: String?
+    var correction_llm: String?
+    var cleanup_server_port: Int?
+    var cleanup_model_path: String?
 
     func overlay(onto config: inout Config) {
         // Old single-key form still honored; the list form wins when present.
@@ -209,6 +227,9 @@ private struct PartialConfig: Codable {
         if let v = preview_interval_ms { config.previewIntervalMs = v }
         if let v = preview_window_seconds { config.previewWindowSeconds = v }
         if let v = preview_model_path { config.previewModelPath = NSString(string: v).expandingTildeInPath }
+        if let v = correction_llm { config.correctionLLM = v }
+        if let v = cleanup_server_port { config.cleanupServerPort = v }
+        if let v = cleanup_model_path { config.cleanupModelPath = NSString(string: v).expandingTildeInPath }
     }
 }
 
