@@ -43,3 +43,34 @@ Knowledge lives as markdown in the Google Drive vault (`My Drive/CARR AI/`) fore
 
 - This repo is PRIVATE and stays private. It is not, however, where client PII is meant to live: prospect/client PII never lives in GitHub (Joe's ruling (a), 2026-08-01; ORDER 42). The two output baselines that used to carry it in full — `baselines/lead-board.html` (~60,687 emails / 218 phones) and `baselines/deal-room-panhandle.html` (91/49) — moved to hash-only tracking under ORDER 42b (2026-08-06): the full HTML stays LOCAL and gitignored, only its sha256 is committed (`baselines/SHA256SUMS`); see `tools/check.sh`. `backups/*.sql.age` (encrypted full DB dumps) likewise moved out of git to the R2 archive under ORDER 42b; see `bin/backup-dump.sh` and `lib/r2_archive.py`. History predating ORDER 42b's purge may still carry these — see `ops/order42b-history-purge.md` for the purge status. The partner boundary is open (Joe and Dell share all client details); the external publication firewall is absolute.
 - Nothing in this repo sends anything external. Generators write local files/artifacts only. Claude drafts, Joe sends — the permanent gate.
+
+## Working-tree hygiene (2026-08-08)
+
+Several sessions share this one checkout, so its state is shared state.
+
+- **Claim before you branch.** `git checkout -b` moves HEAD for every session
+  in this tree; commits then land on whichever branch someone else chose
+  (rule 308ef1de). Prefer `git worktree add --detach <path> origin/main` for
+  isolated work — it never moves shared HEAD, and two sessions can hold one
+  each. A worktree cannot check out a branch another worktree holds, which is
+  why detached is the reliable form.
+- **`dictation-phase-b-loop-243` is POISONED and cannot be pushed.** One
+  commit on it (6871583) carries `tools/doc-convo/.venv-qwen`, 8,244 files
+  including a 155MB binary, and GitHub's pre-receive declines any push
+  containing that blob. Nothing of value is trapped: its source was replayed
+  byte-identical onto `codex-doc-convo-clean`, everything else is on `main`
+  or on `origin/dictation-phase-b-loop-243` (which is blob-free). Whoever
+  next works in this tree should clear it:
+
+      git switch -C dictation-phase-b-loop-243 origin/dictation-phase-b-loop-243
+
+  That drops two commits, both already preserved on remotes, and deletes the
+  venv from disk — regenerable, which is why this was left for the tree's
+  next occupant rather than done across lanes.
+- **Never commit build output or environments.** `.build/` (Swift) and
+  `.venv*/` (Python) are gitignored as of today, after 274 Swift artifacts
+  and one 155MB venv were committed by broad `git add` calls. Add paths
+  deliberately; `git add <dir>` sweeps whatever is sitting in it.
+- **Untracked is not saved.** Two files lived all day as untracked local
+  copies with no commit on any ref, one `git clean -fd` from gone. If a file
+  matters, commit it the day it is written.
