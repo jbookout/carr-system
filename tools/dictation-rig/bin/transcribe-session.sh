@@ -20,6 +20,14 @@
 #
 # Never loads vendor/quill/ source, never touches ~/.config/quill, never
 # touches launchd — this script is invoked BY quill, it does not configure it.
+#
+# WO-4 capture bridge status pings (added 2026-08-08): "transcribing" right
+# before the python step, "failed" with a short detail on its non-zero
+# exit. Never "done" or "distilling" — those belong to the distiller, which
+# does not exist yet, so a session correctly sits at "transcribing" until
+# it does. Routed through capture-bridge.py, which is itself a clean no-op
+# (exit 0, one log line) whenever the rig isn't provisioned or the worker
+# is unreachable — these calls can never change this script's own exit code.
 
 set -u
 
@@ -32,6 +40,7 @@ SESSION_DIR="${1:-}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 TOOL_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 PY_ENTRY="$TOOL_DIR/bin/transcribe_session.py"
+BRIDGE_ENTRY="$TOOL_DIR/bin/capture-bridge.py"
 
 log_line() {
     # $1 = message. Falls back to stderr if the session dir is unusable, so
@@ -68,6 +77,14 @@ if [ -z "$PYTHON_BIN" ]; then
     exit 4
 fi
 
+# Best-effort status ping; see header note. Backgrounded onto capture-bridge.py's
+# own no-op/never-break contract, so a missing file or a down worker here is
+# silent and harmless — checked defensively anyway before spending a python3
+# invocation on it.
+if [ -f "$BRIDGE_ENTRY" ]; then
+    "$PYTHON_BIN" "$BRIDGE_ENTRY" status "$SESSION_DIR" transcribing >/dev/null 2>&1 || true
+fi
+
 # No exec here on purpose: we want to log FINISH/ERROR after the Python step
 # returns, which a process replacement would make impossible.
 "$PYTHON_BIN" "$PY_ENTRY" "$SESSION_DIR"
@@ -77,6 +94,9 @@ if [ "$rc" -eq 0 ]; then
     log_line "FINISH transcribe-session.sh session_dir=$SESSION_DIR"
 else
     log_line "ERROR transcribe-session.sh: transcribe_session.py exited rc=$rc session_dir=$SESSION_DIR"
+    if [ -f "$BRIDGE_ENTRY" ]; then
+        "$PYTHON_BIN" "$BRIDGE_ENTRY" status "$SESSION_DIR" failed "transcribe_session.py rc=$rc" >/dev/null 2>&1 || true
+    fi
 fi
 
 exit "$rc"
