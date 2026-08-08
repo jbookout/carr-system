@@ -28,7 +28,22 @@ r = json.load(sys.stdin)
 if "error" in r:
     sys.exit("verb error: %s" % r["error"])
 for block in r["result"]["content"]:
-    if block.get("type") == "text":
+    if block.get("type") != "text":
+        continue
+    # Compact for the voice brain (demo lesson: a 36KB dump slows every
+    # turn): drop nulls, ids, and file paths the spoken layer never uses.
+    try:
+        data = json.loads(block["text"])
+        def slim(o):
+            if isinstance(o, dict):
+                return {k: slim(v) for k, v in o.items()
+                        if v is not None and k not in
+                        ("id", "notes_path", "phase_sort", "uuid")}
+            if isinstance(o, list):
+                return [slim(x) for x in o]
+            return o
+        print(json.dumps(slim(data), separators=(",", ":")))
+    except (json.JSONDecodeError, TypeError):
         print(block["text"])
 '
 }

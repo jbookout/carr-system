@@ -149,12 +149,14 @@ class Engine:
             if self.system_prompt is None:
                 self._heard_nothing("· no hot-context snapshot")
                 return
-            # Truthful bridge while the brain works (dialogue law: ack + bridge,
-            # then substance) — cache-only so a missing bridge never blocks.
-            self.progress("checking the record")
+            # Truthful bridge while the brain works. NEUTRAL by design (demo
+            # lesson 2026-08-08: "Checking the record." on "can you hear me?"
+            # read as canned) — record language only when a record is truly
+            # in play, which v0 can't know pre-brain.
+            self.progress("thinking it over")
             subprocess.Popen(
                 [sys.executable, str(convo_core.SPEAK), "--cache-only",
-                 "Checking the record."],
+                 "One moment."],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             reply, _brain = convo_core.ask_brain(text, self.system_prompt)

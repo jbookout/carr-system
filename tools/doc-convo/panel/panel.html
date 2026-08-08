@@ -269,7 +269,8 @@
     rendering: "voice coming", speaking: "speaking"
   };
   var HINTS = {
-    idle: "tap him or press space", listening: "tap again when done",
+    idle: "tap anywhere in his space, or press space",
+    listening: "tap again when done",
     thinking: "", rendering: "", speaking: ""
   };
 
@@ -621,14 +622,18 @@
     if (state === "idle") { register = "neutral"; post("start"); }
     else if (state === "listening") post("stop");
   }
-  stage.addEventListener("click", toggle);
+  // Demo lesson (2026-08-08): the tap target must be UNMISSABLE. Any click
+  // outside the feed/switcher toggles; space toggles from anywhere, period.
+  document.addEventListener("click", function (e) {
+    if (e.target.closest("#formswitch") || e.target.closest("main") ||
+        e.target.closest("#offline")) return;
+    toggle();
+  });
   stage.addEventListener("keydown", function (e) {
     if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); toggle(); }
   });
   document.addEventListener("keydown", function (e) {
-    if (e.code === "Space" && e.target === document.body) {
-      e.preventDefault(); toggle();
-    }
+    if (e.code === "Space") { e.preventDefault(); toggle(); }
   });
 
   function setOffline(is) {
