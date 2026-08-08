@@ -43,7 +43,12 @@ if [ ! -f "$CONFIG" ]; then
   "fallback_model_path": "~/.cache/whisper-cpp/models/ggml-small.en.bin",
   "vocab_prompt_path": "~/carr-system/tools/dictation-rig/vocab-prompt.txt",
   "work_dir": "~/Library/Caches/quill-dictate",
-  "log_path": "~/Library/Logs/quill-dictate.log"
+  "log_path": "~/Library/Logs/quill-dictate.log",
+  "live_preview": true,
+  "preview_server_port": 8595,
+  "preview_interval_ms": 900,
+  "preview_window_seconds": 15,
+  "preview_model_path": "~/.cache/whisper-cpp/models/ggml-small.en.bin"
 }
 JSON
     echo "wrote $CONFIG"

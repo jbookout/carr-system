@@ -36,6 +36,16 @@ func runDoctor() -> Never {
     let triggerDetail = config.triggerKeyCodes
         .map { "\($0) (\(names[$0] ?? "custom"))" }.joined(separator: ", ")
     check("trigger keys", !config.triggerKeyCodes.isEmpty, detail: triggerDetail)
+    // Preview is additive: on/off is just reported (never a failure either
+    // way), but when it IS on, a missing binary or model means the overlay
+    // will silently never populate, which is worth a red row so that failure
+    // mode doesn't have to be discovered live.
+    check("preview", true, detail: config.livePreview ? "live_preview on" : "live_preview off")
+    if config.livePreview {
+        check("preview server binary", FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/whisper-server"),
+              detail: "/opt/homebrew/bin/whisper-server")
+        check("preview model", FileManager.default.fileExists(atPath: config.previewModelPath), detail: config.previewModelPath)
+    }
     exit(failures == 0 ? 0 : 1)
 }
 
