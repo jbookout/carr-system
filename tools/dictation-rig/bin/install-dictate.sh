@@ -48,7 +48,10 @@ if [ ! -f "$CONFIG" ]; then
   "preview_server_port": 8595,
   "preview_interval_ms": 900,
   "preview_window_seconds": 15,
-  "preview_model_path": "~/.cache/whisper-cpp/models/ggml-small.en.bin"
+  "preview_model_path": "~/.cache/whisper-cpp/models/ggml-small.en.bin",
+  "correction_llm": "auto",
+  "cleanup_server_port": 8596,
+  "cleanup_model_path": "~/.cache/llama.cpp/models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 }
 JSON
     echo "wrote $CONFIG"

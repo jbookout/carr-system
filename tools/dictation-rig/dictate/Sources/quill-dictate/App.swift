@@ -25,6 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     // able to block or delay a real capture.
     private var previewServer: PreviewServer?
     private let previewOverlay = PreviewOverlay()
+
+    /// Local-LLM self-correction cleanup pass (added 2026-08-08). A THIRD
+    /// resident process alongside recorder/whisper-cli and PreviewServer's
+    /// whisper-server, spawned only when correction_llm == "auto". Touched
+    /// only from the FINAL transcription path (gestureCaptureEnded) — the
+    /// live tick path (previewTick) never references this, so it can never
+    /// add LLM latency to inline typing. See CleanupServer.swift.
+    private var cleanupServer: CleanupServer?
     /// Rebuilt fresh at the start of every capture (startPreview) when
     /// preview_style is "inline" — see LiveTyper.swift for why a fresh
     /// instance rather than a reset() call.
@@ -64,10 +72,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
             server.start()
             previewServer = server
         }
+
+        if config.correctionLLM == "auto" {
+            let cleanup = CleanupServer(config: config)
+            cleanup.start()
+            cleanupServer = cleanup
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         previewServer?.stop()
+        cleanupServer?.stop()
     }
 
     // MARK: - Permissions
@@ -182,13 +197,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                 // (nothing left after it), this isn't a normal insert at
                 // all — it means "erase what I dictated last time," handled
                 // separately below and never through the gated-cue path.
-                let interpreted = LiveTyper.interpret(text)
+                // interpretFinal (vs. interpret, which previewTick's LIVE
+                // tick path still calls directly and unchanged) additionally
+                // surfaces the RAW post-strip text for the LLM cleanup pass
+                // below — see LiveTyper.swift.
+                let interpreted = LiveTyper.interpretFinal(text)
                 if interpreted.scratchPrevious {
                     Log.shared.line("INFO scratch-that command received (\(elapsed)s)")
                     DispatchQueue.main.async { self?.handleCrossUtteranceScratch() }
                     return
                 }
-                let kept = interpreted.kept
+
+                // Local-LLM cleanup (added 2026-08-08, FINAL path only): the
+                // heuristic resolution is always the fallback; the LLM only
+                // gets a turn when it's enabled, its server is up, and the
+                // RAW text contains a correction cue a plain heuristic might
+                // miss. No cue means no network call at all — plain
+                // dictation never pays for this. Blocking is safe here: this
+                // closure already runs on workQueue, off the main thread, so
+                // waiting up to 1.5s here never touches UI responsiveness.
+                let kept = self?.resolveFinalText(raw: interpreted.raw, heuristic: interpreted.heuristic) ?? interpreted.heuristic
 
                 Log.shared.line("INSERT \(kept.count) chars in \(elapsed)s (audio \(String(format: "%.1f", seconds))s)")
                 DispatchQueue.main.async {
@@ -256,6 +284,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         liveTyper.backspaceCharacters(last.text.count)
         lastInsert = nil
         Log.shared.line("INFO scratch-that: erased previous insert (\(last.text.count) chars)")
+    }
+
+    // MARK: - Local-LLM cleanup decision (added 2026-08-08)
+
+    /// Decide the text that should actually be inserted for the FINAL
+    /// transcription: the cleanup LLM's output when it's engaged and its
+    /// output passes CorrectionResolver's deletion-only paraphrase guard;
+    /// `heuristic` (CorrectionResolver's own result) otherwise — server not
+    /// spawned, correction_llm != "auto", no correction cue in `raw`,
+    /// timeout, empty response, or a guard rejection all fall back the same
+    /// way. BLOCKING — callers must be off the main thread (this runs from
+    /// workQueue, same as the rest of the final-transcription pipeline) —
+    /// and bounded to the LLM's own 1.5s request timeout, so it can never
+    /// hang the pipeline past that.
+    private func resolveFinalText(raw: String, heuristic: String) -> String {
+        guard config.correctionLLM == "auto",
+              let cleanupServer, cleanupServer.isSpawned,
+              LiveTyper.containsCorrectionCue(raw) else {
+            return heuristic
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var llmResult: String?
+        cleanupServer.cleanup(text: raw) { result in
+            llmResult = result
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 1.5)
+
+        guard let candidate = llmResult, !candidate.isEmpty else {
+            Log.shared.line("CLEANUP timeout, heuristic")
+            return heuristic
+        }
+        guard CorrectionResolver.isDeletionOnly(candidate: candidate, of: raw) else {
+            Log.shared.line("CLEANUP guard rejected llm (not an ordered deletion-only subsequence of the source)")
+            return heuristic
+        }
+        // An unchanged echo is the model PUNTING, not resolving — it passes
+        // the deletion-only guard trivially, and must not outrank a heuristic
+        // that actually found the correction (first live test round,
+        // 2026-08-08: the 1.5B echoed "send it Tuesday, no wait, Wednesday"
+        // back verbatim while the heuristic correctly produced "send it
+        // Wednesday").
+        if CorrectionResolver.isDeletionOnly(candidate: raw, of: candidate) {
+            Log.shared.line("CLEANUP llm no-op, heuristic")
+            return heuristic
+        }
+        Log.shared.line("CLEANUP llm won")
+        return candidate
     }
 
     // MARK: - Live preview (additive; never gates the real pipeline)
