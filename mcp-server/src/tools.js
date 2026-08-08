@@ -126,6 +126,17 @@ async function resolveSubject(client, ref) {
   // base tables, which carr_reader cannot see — views-only is deliberate — so the
   // read verbs returned permission-denied in production from build day until this
   // was found by ORDER 6's done-test. The security model wins; the verb adapts.
+  // A raw UUID resolves exactly (the Deal Room board addresses deals by id;
+  // v_ref_index carries the id, so views-only holds).
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)) {
+    const r = await client.query(
+      "select subject_type, subject_id from v_ref_index where subject_id=$1 limit 2", [ref]);
+    if (r.rows.length === 1) return { type: r.rows[0].subject_type, id: r.rows[0].subject_id };
+    if (r.rows.length > 1) {
+      const deal = r.rows.find(x => x.subject_type === "deal");
+      if (deal) return { type: "deal", id: deal.subject_id };
+    }
+  }
   if (/^L-\d+/i.test(ref)) {
     const r = await client.query(
       "select subject_id from v_ref_index where subject_type='lead' and ref ilike $1", [ref]);
