@@ -70,11 +70,16 @@ struct Config: Codable {
     var workDir: String = NSString(string: "~/Library/Caches/quill-dictate").expandingTildeInPath
     var logPath: String = NSString(string: "~/Library/Logs/quill-dictate.log").expandingTildeInPath
 
-    /// Live-transcription preview overlay (added 2026-08-08, Joe wants to SEE
-    /// words appear while he speaks). Strictly additive: a SEPARATE resident
-    /// whisper-server + a fast small.en model, never the final whisper-cli
-    /// pass — the preview must never slow down or gate the real insert.
-    var livePreview: Bool = true
+    /// Live-transcription preview (added 2026-08-08, Joe wants to SEE words
+    /// appear while he speaks; extended same day to inline live typing after
+    /// he rejected the floating panel). Strictly additive: a SEPARATE
+    /// resident whisper-server + a fast small.en model, never the final
+    /// whisper-cli pass — the preview must never slow down or gate the real
+    /// insert. Three styles: "inline" (NEW DEFAULT) types the hypothesis
+    /// directly into the focused field, revised in place as it improves;
+    /// "panel" is the original floating overlay; "off" disables the preview
+    /// server entirely.
+    var previewStyle: String = "inline"
     var previewServerPort: Int = 8595
     var previewIntervalMs: Int = 900
     var previewWindowSeconds: Int = 15
@@ -101,7 +106,7 @@ struct Config: Codable {
         case vocabPromptPath = "vocab_prompt_path"
         case workDir = "work_dir"
         case logPath = "log_path"
-        case livePreview = "live_preview"
+        case previewStyle = "preview_style"
         case previewServerPort = "preview_server_port"
         case previewIntervalMs = "preview_interval_ms"
         case previewWindowSeconds = "preview_window_seconds"
@@ -159,7 +164,11 @@ private struct PartialConfig: Codable {
     var vocab_prompt_path: String?
     var work_dir: String?
     var log_path: String?
+    /// Superseded by preview_style (2026-08-08); still parsed so an old
+    /// config.json on disk keeps working. Honored only when preview_style
+    /// is absent — see overlay() below.
     var live_preview: Bool?
+    var preview_style: String?
     var preview_server_port: Int?
     var preview_interval_ms: Int?
     var preview_window_seconds: Int?
@@ -188,7 +197,14 @@ private struct PartialConfig: Codable {
         if let v = vocab_prompt_path { config.vocabPromptPath = NSString(string: v).expandingTildeInPath }
         if let v = work_dir { config.workDir = NSString(string: v).expandingTildeInPath }
         if let v = log_path { config.logPath = NSString(string: v).expandingTildeInPath }
-        if let v = live_preview { config.livePreview = v }
+        // preview_style wins when present; otherwise the legacy boolean
+        // still honors its one meaningful case (false -> off). Legacy
+        // true is a no-op — the new default is already "inline".
+        if let v = preview_style {
+            config.previewStyle = v
+        } else if let v = live_preview, !v {
+            config.previewStyle = "off"
+        }
         if let v = preview_server_port { config.previewServerPort = v }
         if let v = preview_interval_ms { config.previewIntervalMs = v }
         if let v = preview_window_seconds { config.previewWindowSeconds = v }
