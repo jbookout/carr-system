@@ -161,12 +161,16 @@ final class GestureEngine {
             // (some third-party boards omit the bit — found live 2026-08-07).
             let deviceBit = sig.deviceBit != 0 && (event.flags.rawValue & sig.deviceBit) != 0
             let maskSet = event.flags.contains(sig.mask)
-            // SIDE CHECK AT PRESS (live fix 2026-08-08): when the event
-            // carries either side bit of this modifier pair, the trigger
-            // fires only on the RIGHT-side bit — Joe's Logitech sends left
-            // control as keycode 62 too, and without this his left ctrl
-            // dinged and dictated. Boards with no side bits at all keep the
-            // maskSet-only fallback.
+            // SIDE CHECK AT PRESS (2026-08-08): when the event carries either
+            // side bit of this modifier pair, the trigger fires only on the
+            // RIGHT-side bit. Defensive, and it did NOT fix the bug it was
+            // written for: Joe's stray trigger turned out to be his Logitech's
+            // left-Control keycap emitting keycode 54 with the genuine
+            // right-cmd device bit — indistinguishable from the real thing at
+            // this layer, and repaired at the HID layer instead (see
+            // bin/logitech-keymap.sh). Kept because a board that sets side
+            // bits honestly should still be read honestly. Boards with no side
+            // bits keep the maskSet-only fallback.
             let pairBits = event.flags.rawValue & (sig.deviceBit | sig.siblingBit)
             let sideOK = pairBits == 0 || deviceBit
 
