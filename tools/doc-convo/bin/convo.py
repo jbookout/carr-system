@@ -33,9 +33,38 @@ CONTEXT = TOOL / "assets" / "hot-context.md"
 PREAMBLE = TOOL / "prompt" / "preamble.md"
 SESSION_FILE = TOOL / "assets" / ".brain-session-id"
 SPEAK = TOOL / "bin" / "speak.py"
-MIC = os.environ.get("DOC_MIC_DEVICE", ":0")
 BRAIN_MODEL = os.environ.get("DOC_BRAIN_MODEL", "sonnet")
 MIN_BYTES = 20_000  # ~0.6s at 16kHz mono s16 — shorter is a misfire, not speech
+LISTEN_ARM = 0.8    # ignore keys this long after listen starts (space autorepeat)
+
+
+def pick_mic() -> str:
+    """Find the real microphone by name. Device :0 is NOT safe as a default —
+    on Joe's Mac it's "Microsoft Teams Audio", a virtual device that records
+    pure silence outside a call (found live, 2026-08-08, -91dB)."""
+    if "DOC_MIC_DEVICE" in os.environ:
+        return os.environ["DOC_MIC_DEVICE"]
+    out = subprocess.run(
+        ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+        capture_output=True, text=True,
+    ).stderr
+    devices = []
+    in_audio = False
+    for line in out.splitlines():
+        if "audio devices" in line:
+            in_audio = True
+            continue
+        if in_audio and "] [" in line:
+            idx = line.split("] [")[1].split("]")[0]
+            name = line.rsplit("]", 1)[1].strip()
+            devices.append((idx, name))
+    for idx, name in devices:  # the built-in mic is the desk default
+        if "MacBook" in name and "Microphone" in name:
+            return f":{idx}"
+    for idx, name in devices:  # else: any real microphone, never virtual audio
+        if "Microphone" in name and "Teams" not in name:
+            return f":{idx}"
+    return ":0"
 
 
 def drain_stdin() -> None:
@@ -56,6 +85,26 @@ def read_key(prompt: str) -> str:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
     print()
     return key
+
+
+def wait_stop_key(prompt: str) -> None:
+    """Wait for the stop tap, IGNORING the held-key autorepeat flood from the
+    start tap: every key inside LISTEN_ARM seconds is consumed and dropped, so
+    only a deliberate second tap ends the recording."""
+    print(prompt, end="", flush=True)
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    t0 = time.time()
+    try:
+        tty.setcbreak(fd)
+        while True:
+            if select.select([sys.stdin], [], [], 0.05)[0]:
+                os.read(fd, 4096)
+                if time.time() - t0 >= LISTEN_ARM:
+                    return
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        print()
 
 
 def mean_volume(wav: pathlib.Path) -> float | None:
@@ -91,8 +140,9 @@ def main() -> int:
         return 2
     system_prompt = PREAMBLE.read_text() + "\n" + CONTEXT.read_text()
 
+    mic = pick_mic()
     workdir = pathlib.Path("/tmp") / f"doc-convo.{os.getpid()}"
-    print("Doc is at the desk. SPACE to talk, SPACE when done, q to leave.")
+    print(f"Doc is at the desk (mic {mic}). Tap SPACE to talk, tap again when done, q to leave.")
     turn = 0
     try:
         while True:
@@ -105,11 +155,11 @@ def main() -> int:
 
             rec = subprocess.Popen(
                 ["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation",
-                 "-i", MIC, "-ac", "1", "-ar", "16000", str(utt)],
+                 "-i", mic, "-ac", "1", "-ar", "16000", str(utt)],
                 stderr=subprocess.PIPE,
             )
             time.sleep(0.35)  # let the device open before claiming to listen
-            read_key("· listening — [space] when done ")
+            wait_stop_key("· listening — tap [space] when done ")
             rec.send_signal(signal.SIGINT)
             try:
                 rec.wait(timeout=5)
@@ -127,7 +177,7 @@ def main() -> int:
                     print("  then rerun as: DOC_MIC_DEVICE=':1' convo.sh")
                     print(f"  ({err.strip().splitlines()[0]})")
                 else:
-                    print("· too short — hold the space press until you're done talking")
+                    print("· too short — tap space once, talk, then tap it again")
                 continue
 
             vol = mean_volume(utt)
