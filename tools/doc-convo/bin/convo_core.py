@@ -325,7 +325,14 @@ class ResidentMic:
         with self.lock:
             if self.process is None or self.process.poll() is not None:
                 return None
-            return max(0, self.position - MIC_PRE_ROLL_BYTES)
+            # ALIGN TO A SAMPLE BOUNDARY. Audio is 16-bit mono, so a start on
+            # an ODD byte splits every sample in half and everything after it
+            # decodes as noise — whisper then invents plausible words from it
+            # ("I was just 100% on the salt", live 2026-08-08). The tail is
+            # already truncated to an even length in write_since(); this is
+            # the missing other half of that guard.
+            start = max(0, self.position - MIC_PRE_ROLL_BYTES)
+            return start - (start % 2)
 
     def write_since(self, start: int, wav: pathlib.Path) -> int:
         with self.lock:
