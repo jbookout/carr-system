@@ -84,20 +84,27 @@ def main():
                         if rel.startswith(pref):
                             rel = rel[len(pref):]
                     migrated_rel.add(rel)
-            cur.execute("""
-                select d.slug, s.section_key, coalesce(s.title,''),
-                       ts_rank_cd(r.search_vector, websearch_to_tsquery('english', %s)) as rank,
-                       ts_headline('english', r.plain_text,
-                                   websearch_to_tsquery('english', %s),
-                                   'MaxWords=18, MinWords=8') as snippet
-                  from doctrine_section s
-                  join doctrine_document d on d.id = s.document_id
-                  join doctrine_revision r on r.id = s.current_revision_id
-                 where s.status = 'active' and d.visibility = 'shared'
-                   and r.search_vector @@ websearch_to_tsquery('english', %s)
-                 order by rank desc limit %s""",
-                (" ".join(words), " ".join(words), " ".join(words), top))
-            store_hits = cur.fetchall()
+            # AND first (websearch), OR fallback: long natural questions rarely
+            # land every word in one section, and the file scorer is OR-based —
+            # without the fallback the store looked blind exactly on the queries
+            # humans actually type (caught on the batch-5 sanity check).
+            def _fts(qtext):
+                cur.execute("""
+                    select d.slug, s.section_key, coalesce(s.title,''),
+                           ts_rank_cd(r.search_vector, websearch_to_tsquery('english', %s)) as rank,
+                           ts_headline('english', r.plain_text,
+                                       websearch_to_tsquery('english', %s),
+                                       'MaxWords=18, MinWords=8') as snippet
+                      from doctrine_section s
+                      join doctrine_document d on d.id = s.document_id
+                      join doctrine_revision r on r.id = s.current_revision_id
+                     where s.status = 'active' and d.visibility = 'shared'
+                       and r.search_vector @@ websearch_to_tsquery('english', %s)
+                     order by rank desc limit %s""", (qtext, qtext, qtext, top))
+                return cur.fetchall()
+            store_hits = _fts(" ".join(words))
+            if not store_hits and len(words) > 1:
+                store_hits = _fts(" OR ".join(words))
     except Exception as exc:
         print(f"retrieve: store pass skipped ({type(exc).__name__}) — file index only")
 
