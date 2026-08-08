@@ -2498,6 +2498,9 @@ export const TOOLS = {
       kind: { type: "string", description: "what was looked for: verified, email, cell, social, npi, title, discrepancy..." },
       value: { type: "object", description: "the finding, structured. Omit when found:false." },
       found: { type: "boolean", default: true, description: "false records a searched-and-empty result" },
+      epistemic_status: { type: "string",
+        enum: ["proposed","observed","reproduced","accepted","disputed","superseded","inferred","source_backed","speculative"],
+        description: "what CLASS of knowledge this row is, so a reader can tell a verified invariant from a provisional interpretation from a hypothesis (idea #57, from the repo-centric agent-stack study 2026-08-07). Defaults: source_backed when found with an external source; inferred when internal. Set disputed/superseded when filing against an earlier finding. Stored in value; query as value->>'epistemic_status'." },
       source: { type: "string", description: "REQUIRED. Where it came from: a URL, 'NPPES', 'Sunbiz', 'practice website'. For EXTERNAL findings this must be a re-verifiable LOCATOR (a URL, a registry name + identifier, a file+section, a thread + date) — wave 1 C5, decision a317439f: the re-verify queue is only as good as the pointer it re-checks. A bare label like 'research' is refused." },
       internal: { type: "boolean", description: "true = an internally observed finding (derived from the record layer itself, a session's own computation, or partner testimony) — exempt from the external-locator requirement, and stored flagged so readers know no outside source backs it." },
       observed_at: { type: "string", description: "when the source was read (ISO); defaults to now" },
@@ -2587,6 +2590,11 @@ export const TOOLS = {
         // reader knows no outside source backs it — the exemption is visible,
         // never silent.
         ...(args.internal ? { internal: true } : {}),
+        // Epistemic status (idea #57): explicit wins; otherwise internal
+        // observations are inferences and externally-sourced rows are
+        // source-backed. Never silently "known".
+        epistemic_status: args.epistemic_status
+          || (args.internal ? "inferred" : "source_backed"),
       };
 
       const r = await c.query(
