@@ -848,4 +848,69 @@ except Exception as e:
     print(f"  ⚠︎ {'renders-verify':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# --- the doctrine store (P4/P5, 2026-08-08; decisions 82a2fb62 + import door) -
+# Every row prints its bound action inline (rule 590b11e1: no metric without a
+# bound action, visible in the render itself). A failed read is never all-clear.
+print("\ndoctrine store")
+try:
+    _q = ("select "
+          " (select count(*) from doctrine_gate_run where result='fail' "
+          "   and dry_run=false and started_at > now() - interval '24 hours'),"
+          " (select count(*) from doctrine_section s join doctrine_document d "
+          "   on d.id=s.document_id where s.status='active' and d.review_policy_id "
+          "   is not null and s.review_after is null),"
+          " (select count(*) from doctrine_section where review_after < now()),"
+          " (select generation from doctrine_meta where id=1),"
+          " (select count(*) from doctrine_document);")
+    _p = subprocess.run([os.path.join(REPO_ROOT, ".venv/bin/python"),
+                         os.path.join(REPO_ROOT, "tools/db-tap.py"), "sql", "/dev/stdin"],
+                        input=_q, capture_output=True, text=True, timeout=90)
+    if _p.returncode != 0:
+        print("  ⚠︎ store UNREADABLE — cannot say whether doctrine is healthy · "
+              "on breach: check db.env / Neon, then rerun")
+        rc = 1
+    else:
+        _vals = None
+        for _line in _p.stdout.splitlines():
+            _c = [x.strip() for x in _line.split("|")]
+            if len(_c) == 5 and all(x.lstrip("-").isdigit() for x in _c):
+                _vals = [int(x) for x in _c]
+        if _vals is None:
+            print("  ⚠︎ store row unparseable · on breach: run the query by hand via db-tap")
+            rc = 1
+        else:
+            _blocks, _norev, _stale, _gen, _docs = _vals
+            print(f"  {'OK' if not _blocks else '⚠︎'} gate-blocks-24h      {_blocks} · "
+                  f"on breach: read doctrine_gate_finding for the failing runs; fix the content "
+                  f"or amend the gate row")
+            if _blocks:
+                rc = 1
+            # never_reviewed is the EMPTY-SIGNAL guard (2b889e80): imported
+            # sections carry no review_after, so a bare stale-count of 0 would
+            # read healthy while the staleness machinery is actually inert.
+            print(f"  {'OK' if not _norev else '⚠︎'} never-reviewed       {_norev} "
+                  f"policy-bearing sections with no review clock · on breach: backfill "
+                  f"review_after from each doc's policy (P5 item, import follow-up)")
+            print(f"  {'OK' if not _stale else '⚠︎'} stale-sections       {_stale} past "
+                  f"review_after · on breach: review or re-confirm via write-doctrine-section")
+            _inv = subprocess.run([os.path.join(REPO_ROOT, ".venv/bin/python"),
+                                   os.path.join(REPO_ROOT, "pipelines/doctrine_inventory.py"),
+                                   "--count"], capture_output=True, text=True, timeout=120)
+            try:
+                _j = json.loads((_inv.stdout or "").strip().splitlines()[-1])
+            except Exception:
+                _j = {"remaining": -1}
+            if _j.get("remaining", -1) < 0:
+                print("  ⚠︎ migration-coverage   UNKNOWN (inventory failed) · on breach: "
+                      "run pipelines/doctrine_inventory.py by hand")
+                rc = 1
+            else:
+                print(f"  {'OK' if _j['remaining'] == 0 else '→︎'} migration-coverage   "
+                      f"{_j['remaining']} corpus files not yet in a verified batch "
+                      f"({_docs} docs, generation {_gen}) · on breach: run the next bounded "
+                      f"batch through bin/import-doctrine.sh")
+except Exception as e:
+    print(f"  ⚠︎ doctrine store check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
