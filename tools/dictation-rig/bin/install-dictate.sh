@@ -51,7 +51,9 @@ if [ ! -f "$CONFIG" ]; then
   "preview_model_path": "~/.cache/whisper-cpp/models/ggml-small.en.bin",
   "correction_llm": "auto",
   "cleanup_server_port": 8596,
-  "cleanup_model_path": "~/.cache/llama.cpp/models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+  "cleanup_model_path": "~/.cache/llama.cpp/models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+  "final_server": "auto",
+  "final_server_port": 8597
 }
 JSON
     echo "wrote $CONFIG"

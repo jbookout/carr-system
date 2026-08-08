@@ -97,6 +97,19 @@ struct Config: Codable {
     var cleanupServerPort: Int = 8596
     var cleanupModelPath: String = NSString(string: "~/.cache/llama.cpp/models/qwen2.5-1.5b-instruct-q4_k_m.gguf").expandingTildeInPath
 
+    /// Resident FINAL-pass whisper server (added 2026-08-08) — the same
+    /// engine and model as the whisper-cli fallback (model_path,
+    /// large-v3-turbo; decision 28e35509, unchanged), just kept warm so the
+    /// ~1.6GB model load and ~14s Metal cold start are paid once per app
+    /// launch instead of once per utterance. Deliberately NO separate model
+    /// key: this is the same accuracy bar Joe signed off on, running
+    /// resident instead of spawned. "auto" (the default) spawns it at launch
+    /// and Transcriber.transcribe tries it first, falling back to whisper-cli
+    /// on ANY failure; "off" disables it entirely (no spawn, cli path only,
+    /// same as before this existed).
+    var finalServer: String = "auto"
+    var finalServerPort: Int = 8597
+
     enum CodingKeys: String, CodingKey {
         case triggerKeyCodes = "trigger_key_codes"
         case conversationKeyCode = "conversation_key_code"
@@ -126,6 +139,8 @@ struct Config: Codable {
         case correctionLLM = "correction_llm"
         case cleanupServerPort = "cleanup_server_port"
         case cleanupModelPath = "cleanup_model_path"
+        case finalServer = "final_server"
+        case finalServerPort = "final_server_port"
     }
 
     static var configPath: String {
@@ -191,6 +206,8 @@ private struct PartialConfig: Codable {
     var correction_llm: String?
     var cleanup_server_port: Int?
     var cleanup_model_path: String?
+    var final_server: String?
+    var final_server_port: Int?
 
     func overlay(onto config: inout Config) {
         // Old single-key form still honored; the list form wins when present.
@@ -230,6 +247,8 @@ private struct PartialConfig: Codable {
         if let v = correction_llm { config.correctionLLM = v }
         if let v = cleanup_server_port { config.cleanupServerPort = v }
         if let v = cleanup_model_path { config.cleanupModelPath = NSString(string: v).expandingTildeInPath }
+        if let v = final_server { config.finalServer = v }
+        if let v = final_server_port { config.finalServerPort = v }
     }
 }
 

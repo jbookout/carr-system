@@ -60,6 +60,19 @@ func runDoctor() -> Never {
         check("preview model", FileManager.default.fileExists(atPath: config.previewModelPath), detail: config.previewModelPath)
     }
     // Same additive-not-a-failure-on-its-own shape as the preview row above:
+    // final_server is just reported, but when it's not "off", a missing
+    // binary means the server-first path in Transcriber.swift will silently
+    // never engage (every final falls straight to the whisper-cli path,
+    // paying the reload/cold-start cost every time) — worth a red row rather
+    // than a silent behavior change discovered live. Model check reuses
+    // model_path — final_server has no model key of its own by design.
+    check("final server", true, detail: "final_server=\(config.finalServer)")
+    if config.finalServer != "off" {
+        check("final server binary", FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/whisper-server"),
+              detail: "/opt/homebrew/bin/whisper-server")
+        check("final server model", FileManager.default.fileExists(atPath: config.modelPath), detail: config.modelPath)
+    }
+    // Same additive-not-a-failure-on-its-own shape as the preview row above:
     // correction_llm is just reported, but when it's not "off", a missing
     // binary or model means the cleanup pass will silently never engage
     // (final path quietly falls back to heuristic-only every time) — worth a

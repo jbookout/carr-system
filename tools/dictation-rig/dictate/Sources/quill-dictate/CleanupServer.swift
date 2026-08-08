@@ -1,13 +1,15 @@
 // CleanupServer.swift — resident llama-server child process for the local
 // self-correction cleanup pass (added 2026-08-08).
 //
-// Structurally a close mirror of PreviewServer.swift (same spawn/restart-
+// Structurally a close mirror of WhisperServer.swift (same spawn/restart-
 // once/log-once-on-unreachable shape) because the two are the same kind of
 // thing — a resident local model server the app talks to over loopback HTTP
-// — but a DIFFERENT engine for a DIFFERENT job: PreviewServer runs
-// whisper-server/small.en for live speech-to-text; this runs llama-server/
-// Qwen2.5-1.5B for text-to-text cleanup of the FINAL transcription only. The
-// two never share a process, a port, or a request in flight.
+// — but a DIFFERENT engine for a DIFFERENT job: WhisperServer's preview role
+// runs whisper-server/small.en for live speech-to-text (and its final role
+// runs whisper-server/large-v3-turbo for the resident final pass); this runs
+// llama-server/Qwen2.5-1.5B for text-to-text cleanup of the FINAL
+// transcription only. None of the three ever share a process, a port, or a
+// request in flight.
 //
 // THE GOVERNING SAFETY RULE (from live testing): this model sometimes
 // paraphrases ("about" -> "regarding") instead of only deleting words — a
@@ -18,9 +20,9 @@
 // before the model's output is ever allowed to reach a field. Keeping the
 // guard out of this class is deliberate: this class's only job is "ask the
 // model, hand back what it said, fail silently" — the same narrow contract
-// PreviewServer keeps for its own engine.
+// WhisperServer keeps for its own engines.
 //
-// Everything here is best-effort, same as PreviewServer: a failure — server
+// Everything here is best-effort, same as WhisperServer: a failure — server
 // won't start, crashes, times out, returns garbage — is logged once (or, for
 // per-call failures, handled by the caller's own fallback) and never allowed
 // to block or delay insertion. The 1.5s per-request timeout exists for
@@ -83,6 +85,9 @@ final class CleanupServer {
     }
 
     private func spawn() {
+        // Same stale-listener reclaim as WhisperServer.spawn() — see the
+        // comment there (orphans from SIGKILL restarts, found live 2026-08-08).
+        WhisperServer.killStaleListener(binaryName: "llama-server", port: config.cleanupServerPort)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: CleanupServer.binaryPath)
         p.arguments = ["-m", config.cleanupModelPath, "--host", "127.0.0.1",
