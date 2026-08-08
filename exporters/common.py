@@ -258,7 +258,11 @@ def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
 
         keep_generation(final_path)
         os.replace(tmp_path, final_path)
-        file_sha = hashlib.sha256(final_path.read_bytes()).hexdigest()
+        # file_sha is a LIVE-file tamper detector; a staged run's hash describes
+        # out/exports/, not the vault, and recording it poisoned renders-verify
+        # with false "tampered" flags (caught by the doctrine health pass,
+        # 2026-08-08: three staged 03:43Z rows outranked the live 02:51Z ones).
+        file_sha = hashlib.sha256(final_path.read_bytes()).hexdigest() if LIVE else None
         record_run(cur, target_key, row_count, checksum, "ok", file_sha)
         conn.commit()
         mode = "LIVE" if LIVE else "staging"

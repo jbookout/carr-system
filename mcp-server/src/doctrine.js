@@ -765,6 +765,45 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       },
     },
 
+    "standing-context": {
+      description: "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store — the taught rules (shared + this partner's personal set, full text, with the counts to recite), pending action-required items, and the doctrine catalog pointer. This replaces file-based rule loading: a session that calls this needs no compiled-rules file, no vault read, no Drive. Call it FIRST in any session; recite the counts back to the partner.",
+      inputSchema: { type: "object", properties: {
+        partner: { type: "string", description: "joe | dell — whose personal rules to include (defaults to the calling actor)" } },
+        },
+      handler: async (c, actor, args) => {
+        await actorId(c, actor);
+        const who = (args.partner || actor.slug || "").toLowerCase();
+        // Same filter set as the compiled-rules exporter (_fetch_rules +
+        // _is_intro, ORDER 37): intro-politics rules render to their own intro
+        // file and are NOT part of the recited counts — the verb's numbers
+        // must match the files' numbers exactly or the recitation audit
+        // (rule 4f7c348f) breaks the day a session compares them.
+        const rules = (await c.query(
+          `select statement, human_quote, taught_by, personal_to, scope, id
+             from v_compiled_rules
+            where (personal_to is null or personal_to = $1)
+              and coalesce(scope->>'kind','') <> 'intro_politics'
+            order by personal_to nulls first, activated_at, statement`, [who])).rows;
+        const shared = rules.filter(r => !r.personal_to);
+        const personal = rules.filter(r => r.personal_to);
+        const actionReq = (await c.query(
+          `select number, title, body, owner
+             from loop_item
+            where kind = 'action_required' and status = 'open'
+            order by render_seq`).catch(() => ({ rows: [] }))).rows;
+        const gen = (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
+        return { ok: true,
+          recite: `Rules loaded: ${shared.length} shared, ${personal.length} ${who}-personal`,
+          shared_rules: shared.map(r => ({ id: String(r.id).slice(0, 8),
+            statement: r.statement, taught_by: r.taught_by, human_quote: r.human_quote })),
+          personal_rules: personal.map(r => ({ id: String(r.id).slice(0, 8),
+            statement: r.statement, human_quote: r.human_quote })),
+          action_required: actionReq,
+          doctrine: { generation: Number(gen.generation),
+            hint: "doctrine-index for the catalog; search-doctrine / read-doctrine to read — there are no files" } };
+      },
+    },
+
     "dry-run-doctrine-gates": {
       write: true,   // persists the run for audit — must ride the writer pool
       description: "Run the validation gates against a proposed write WITHOUT committing anything — the self-check an agent runs before spending a real write, and the shakedown harness for new gates. Persists the run (dry_run=true) for audit.",

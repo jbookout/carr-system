@@ -344,10 +344,18 @@ export async function dispatch(request, env, ctx, actor) {
           capabilities: { tools: {} },
           serverInfo: { name: "carr-record-layer", version: "0.1.0" },
           instructions:
-            "CARR's record layer. Writes need a fresh idempotency_key (UUID) per intended action; " +
-            "mutations need base_version from a fresh read. version_conflict and needs_confirm are " +
-            "questions for the human, never auto-retried. There is no send tool: drafts are produced, " +
-            "Joe sends." + (profile === "full" ? "" : ` ACTIVE PROFILE: ${profile}.` + (PROFILE_NOTICE[profile] || "")),
+            "CARR's record layer AND the doctrine store — the ONE source of truth for Joe Bookout's " +
+            "healthcare-CRE practice (partner Dell McCraney; business only, personal life is Life AI). " +
+            "OPENING ACT, every session: call standing-context FIRST — it returns the taught rules " +
+            "with the counts to recite in your first response, open action-required items, and the " +
+            "doctrine pointer. There are NO doctrine files: read via doctrine-index / search-doctrine / " +
+            "read-doctrine; state via catch-me-up / today-triage. WRITE LAW (rule 14181e60): database " +
+            "first — content goes through verbs, NEVER into a .md file. Writes need a fresh " +
+            "idempotency_key (UUID) per intended action; mutations need base_version from a fresh read. " +
+            "version_conflict and needs_confirm are questions for the human, never auto-retried. There " +
+            "is no send tool: drafts are produced, Joe sends. If this server is unreachable mid-task, " +
+            "STOP AND SAY SO — never improvise files." +
+            (profile === "full" ? "" : ` ACTIVE PROFILE: ${profile}.` + (PROFILE_NOTICE[profile] || "")),
         });
       case "notifications/initialized":
         return new Response(null, { status: 202 });
