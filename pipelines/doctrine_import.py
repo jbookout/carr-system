@@ -98,9 +98,10 @@ def apply_file(cur, actor_id, doc, content_class):
              review_policy_id)
            values (%s,%s,%s,%s,
              (select id from doctrine_review_policy where %s = any(content_classes) limit 1))
-           returning id""",
-        (doc["slug"], doc["title"], content_class, actor_id, content_class))
-    doc_id = cur.fetchone()[0]
+           returning id, (select max_age_days from doctrine_review_policy
+                           where %s = any(content_classes) limit 1)""",
+        (doc["slug"], doc["title"], content_class, actor_id, content_class, content_class))
+    doc_id, policy_days = cur.fetchone()
     cur.execute(
         """insert into doctrine_change_set (actor_id, session_key, idempotency_key, state, committed_at)
            values (%s,%s,%s,'committed',now()) returning id""",
@@ -123,7 +124,11 @@ def apply_file(cur, actor_id, doc, content_class):
         rev_id = cur.fetchone()[0]
         cur.execute(
             """update doctrine_section set current_revision_id=%s, current_version=1,
-                 body_hash=%s where id=%s""", (rev_id, h, sec_id))
+                 body_hash=%s,
+                 review_after = case when %s::int is not null
+                   then now() + (%s::int || ' days')::interval end
+               where id=%s""",
+            (rev_id, h, policy_days, policy_days, sec_id))
     cur.execute("update doctrine_meta set generation = generation + 1, updated_at = now() "
                 "where id = 1 returning generation")
     gen = cur.fetchone()[0]
