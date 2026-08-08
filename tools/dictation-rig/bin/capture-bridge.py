@@ -151,6 +151,15 @@ def http_request(
     status (4xx/5xx) is NOT raised, it's a normal return, since callers need
     the status code to distinguish e.g. 401 from 409 from 500."""
     all_headers = dict(headers or {})
+    # Identify ourselves. urllib's default User-Agent ("Python-urllib/3.x") is
+    # blocked at Cloudflare's EDGE with a 403 before the Worker ever runs —
+    # proved live 2026-08-08 against the real endpoint: an unauthenticated
+    # request returned 401 (the app answering) with a curl UA and 403 with the
+    # urllib default, same URL, same empty body. That 403 is indistinguishable
+    # from an auth failure in a log line, so it cost a real debugging detour;
+    # a named UA also makes the rig's traffic identifiable in Cloudflare
+    # analytics.
+    all_headers.setdefault("User-Agent", "carr-quill-dictate/1.0 (capture-bridge)")
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
