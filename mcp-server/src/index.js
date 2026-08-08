@@ -25,6 +25,7 @@
 //               the 'reviewer' capability profile locked in mcp.js: ALL reads
 //               + EXACTLY record-finding. Nothing about the OAuth path or the
 //               probe-token path changes because it exists.
+//   /pipeline/changes  OAuth-protected Deal Room event cursor + live presence.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
 //   /token      implemented by the provider
@@ -40,6 +41,9 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
+import { actorFromProps } from "./identity.js";
+import { pipelineChanges } from "./dealroom.js";
+import { createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -111,7 +115,31 @@ const defaultHandler = {
     if (url.pathname === "/ingest" && request.method === "POST") return ingest(request, env);
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
-    return json({ service: "carr-mcp", surfaces: ["/health", "/ingest", "/mcp", "/authorize", "/callback"] }, 404);
+    return json({ service: "carr-mcp", surfaces: ["/health", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
+  },
+};
+
+// Both protected routes receive the same provider-verified ctx.props. The
+// pipeline function itself accepts an actor and query client, so the Deal Room
+// session-cookie gate mounts it without changing its contract.
+async function pipelineApi(request, env, actor) {
+  const sql = neon(env.DATABASE_URL_READER);
+  const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
+  try {
+    return await pipelineChanges(request, client, actor);
+  } catch {
+    return json({ error: "database_unavailable" }, 503);
+  }
+}
+
+const protectedApiHandler = {
+  async fetch(request, env, ctx) {
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
+    if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
+    const actor = actorFromProps(ctx.props);
+    if (!actor) return json({ error: "unauthorized" }, 401);
+    return pipelineApi(request, env, actor);
   },
 };
 
@@ -228,8 +256,8 @@ function reviewActorFor(request, env) {
 // ---------- the provider ----------
 
 const oauthProvider = new OAuthProvider({
-  apiRoute: "/mcp",
-  apiHandler: mcpApiHandler,
+  apiRoute: ["/mcp", "/pipeline/changes"],
+  apiHandler: protectedApiHandler,
   defaultHandler,
 
   authorizeEndpoint: "/authorize",
@@ -265,11 +293,20 @@ const oauthProvider = new OAuthProvider({
   },
 });
 
+// Same verb and cursor implementations as the bearer-token surface; only the
+// authentication adapter differs. The cookie session already resolved to the
+// exact actor shape dispatch() and pipelineChanges() accept.
+const dealroomHandler = createDealroomHandler({
+  mcpHandler: (request, env, ctx, actor) => dispatch(request, env, ctx, actor),
+  pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
+});
+
 // Top-level export. Everything not /mcp-with-a-matching-probe-or-review-token
 // flows into the OAuthProvider exactly as it always has — this wrapper adds
 // two narrow short-circuits and changes nothing else about the fetch surface.
 export default {
   async fetch(request, env, ctx) {
+    if (isDealroomRequest(request)) return dealroomHandler.fetch(request, env, ctx);
     if (new URL(request.url).pathname === "/mcp") {
       const probeActor = probeActorFor(request, env);
       if (probeActor) return dispatch(request, env, ctx, probeActor);

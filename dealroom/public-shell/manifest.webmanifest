@@ -1,0 +1,25 @@
+{
+  "name": "The Deal Room",
+  "short_name": "Deal Room",
+  "description": "CARR's private partner Deal Room",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F57F29",
+  "theme_color": "#002F6C",
+  "icons": [
+    {
+      "src": "/icons/dealroom-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/dealroom-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

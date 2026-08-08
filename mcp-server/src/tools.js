@@ -7,6 +7,7 @@
 // The doctrine store's verbs (P2, decision 82a2fb62) live in doctrine.js as a
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
+import { stripDealPlaceholders } from "./dealroom.js";
 
 // ---------- envelope helpers ----------
 
@@ -744,6 +745,74 @@ async function buildRecordBag(c, dealId, clientId) {
   bag.financing = { lender: null };
   bag.tenant = { credential: null };
   return bag;
+}
+
+// ---------- Deal Room helpers (field-base concurrency, not record version) ----------
+
+const DEAL_ROOM_FIELDS = Object.freeze(["phase", "owner", "attention", "next_date"]);
+
+function assertDealRoomField(field, value) {
+  if (!DEAL_ROOM_FIELDS.includes(field))
+    throw new ToolError({ error: "field_not_patchable", field, allowed: DEAL_ROOM_FIELDS });
+  if (field === "attention" && typeof value !== "boolean")
+    throw new ToolError({ error: "invalid_field_value", field, expected: "boolean" });
+  if ((field === "phase" || field === "owner") && (typeof value !== "string" || !value.trim()))
+    throw new ToolError({ error: "invalid_field_value", field, expected: "non-empty string" });
+  if (field === "next_date" && value !== null &&
+      (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)))
+    throw new ToolError({ error: "invalid_field_value", field, expected: "YYYY-MM-DD or null" });
+}
+
+async function lockDealField(c, dealId, field) {
+  // Same-field writers serialize; different fields deliberately use different
+  // advisory keys and can commit independently on the same deal.
+  await c.query(
+    "select pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0)) /* dealroom:field-lock */",
+    [dealId, field],
+  );
+}
+
+async function latestFieldConflict(c, dealId, field, baseEventId) {
+  let base = null;
+  if (baseEventId !== null && baseEventId !== undefined) {
+    const found = await c.query(
+      `select recorded_at, id from event
+        where id=$1 and subject_type='deal' and subject_id=$2 and field=$3
+        /* dealroom:base-event */`,
+      [baseEventId, dealId, field],
+    );
+    if (!found.rows.length)
+      throw new ToolError({ error: "invalid_base_event", base_event_id: baseEventId, deal_id: dealId, field });
+    base = found.rows[0];
+  }
+
+  const newer = await c.query(
+    `select e.id as event_id, e.actor_id, a.slug as actor, e.new_value -> $2 as value
+       from event e join actor a on a.id=e.actor_id
+      where e.subject_type='deal' and e.subject_id=$1 and e.field=$2
+        and ($3::timestamptz is null or (e.recorded_at, e.id) > ($3::timestamptz, $4::uuid))
+      order by e.recorded_at desc, e.id desc limit 1
+      /* dealroom:latest-field-event */`,
+    [dealId, field, base?.recorded_at || null, base?.id || null],
+  );
+  return newer.rows[0] || null;
+}
+
+async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey, verb) {
+  assertDealRoomField(field, value);
+  const oldRow = await c.query(`select ${field} as value from deal where id=$1`, [dealId]);
+  if (!oldRow.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: dealId });
+  await c.query(
+    `update deal set ${field}=$2, updated_by=$3 where id=$1 /* dealroom:apply-field */`,
+    [dealId, value, actor.id],
+  );
+  await writeEvent(c, actor, verb, "deal", dealId, {
+    field,
+    old: { [field]: oldRow.rows[0].value },
+    new: { [field]: value },
+    idempotency_key: idempotencyKey,
+  });
+  return { old_value: oldRow.rows[0].value, new_value: value };
 }
 
 // ---------- the registry ----------
@@ -3858,6 +3927,185 @@ export const TOOLS = {
   },
 };
 
+
+// Deal Room contract. Durable writes use the same envelope and event helper as
+// the rest of this registry; the one explicit exception is the ephemeral lease.
+Object.assign(TOOLS, {
+  "get-deal-room": {
+    description: "Read one Deal Room record: board fields, append-only note/next-step thread, critical dates, and attributed event history. Placeholder Salesforce fields are structurally excluded.",
+    inputSchema: { type: "object", properties: { deal: { type: "string" } }, required: ["deal"] },
+    handler: async (c, _actor, args) => {
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      const deal = await c.query(
+        "select phase, owner, type, city, segment, attention, next_date from v_deal_room_deal where id=$1",
+        [s.id],
+      );
+      if (!deal.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
+      const thread = await c.query(
+        "select id, kind, text, actor, created_at from v_deal_room_note where deal_id=$1 order by created_at desc, id desc",
+        [s.id],
+      );
+      const criticalDates = await c.query(
+        "select id, kind, due_on, note, source, status from v_deal_room_critical_date where deal_id=$1 order by due_on, id",
+        [s.id],
+      );
+      const history = await c.query(
+        `select id, recorded_at, actor, verb, field, old_value, new_value
+           from v_deal_room_event where subject_id=$1
+          order by recorded_at desc, id desc`,
+        [s.id],
+      );
+      return stripDealPlaceholders({ deal_id: s.id, ...deal.rows[0], thread: thread.rows,
+        critical_dates: criticalDates.rows, events: history.rows });
+    },
+  },
+
+  "presence-lease": {
+    write: true,
+    description: "Acquire or refresh this actor's field-level Deal Room presence for about three seconds. Expiry is read-time only and presence never enters event history.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, deal: { type: "string" }, field: { type: "string" },
+    }, required: ["idempotency_key", "deal", "field"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "presence-lease", args, async () => {
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      if (typeof args.field !== "string" || !args.field.trim())
+        throw new ToolError({ error: "field_required" });
+      const lease = await c.query(
+        `insert into deal_presence_lease (actor_id, deal_id, field, expires_at)
+         values ($1,$2,$3,now() + interval '3 seconds')
+         on conflict (actor_id, deal_id, field)
+         do update set expires_at=excluded.expires_at
+         returning expires_at /* dealroom:presence-upsert */`,
+        [actor.id, s.id, args.field],
+      );
+      return { ok: true, deal_id: s.id, field: args.field, expires_at: lease.rows[0].expires_at };
+    }),
+  },
+
+  "patch-deal-field": {
+    write: true,
+    description: "Patch one Deal Room cell using its last-seen event as the field base. Only a newer event for this exact deal+field conflicts; other fields never block it.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, deal: { type: "string" },
+      field: { type: "string", enum: DEAL_ROOM_FIELDS }, value: {},
+      base_event_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+    }, required: ["idempotency_key", "deal", "field", "value", "base_event_id"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "patch-deal-field", args, async () => {
+      assertDealRoomField(args.field, args.value);
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      await lockDealField(c, s.id, args.field);
+      const intervening = await latestFieldConflict(c, s.id, args.field, args.base_event_id);
+      if (intervening) {
+        const made = await c.query(
+          `insert into deal_conflict
+             (deal_id, field, value_a, actor_a, event_a, value_b, actor_b)
+           values ($1,$2,$3::jsonb,$4,$5,$6::jsonb,$7)
+           returning id, status /* dealroom:create-conflict */`,
+          [s.id, args.field, JSON.stringify(intervening.value), intervening.actor_id,
+           intervening.event_id, JSON.stringify(args.value), actor.id],
+        );
+        return { ok: false, conflict: { id: made.rows[0].id, status: made.rows[0].status,
+          deal_id: s.id, field: args.field,
+          value_a: intervening.value, actor_a: intervening.actor, event_a: intervening.event_id,
+          value_b: args.value, actor_b: actor.slug } };
+      }
+      const applied = await applyDealRoomField(c, actor, s.id, args.field, args.value,
+        args.idempotency_key, "patch-deal-field");
+      return { ok: true, deal_id: s.id, field: args.field, ...applied };
+    }),
+  },
+
+  "add-deal-note": {
+    write: true,
+    description: "Append context or an answer to a deal's immutable thread. Existing rows are never edited or deleted.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, deal: { type: "string" }, text: { type: "string" },
+    }, required: ["idempotency_key", "deal", "text"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "add-deal-note", args, async () => {
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      if (typeof args.text !== "string" || !args.text.trim()) throw new ToolError({ error: "text_required" });
+      const note = await c.query(
+        "insert into deal_note (deal_id, kind, text, actor_id) values ($1,'note',$2,$3) returning id, created_at /* dealroom:add-note */",
+        [s.id, args.text.trim(), actor.id],
+      );
+      await writeEvent(c, actor, "add-deal-note", "deal", s.id, {
+        field: "note", new: { note: args.text.trim() }, idempotency_key: args.idempotency_key,
+      });
+      return { ok: true, deal_id: s.id, note_id: note.rows[0].id, created_at: note.rows[0].created_at };
+    }),
+  },
+
+  "set-next-step": {
+    write: true,
+    description: "Append a new current next step. The prior step remains unchanged as attributed history; newest next_step wins.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, deal: { type: "string" }, text: { type: "string" },
+      next_date: { anyOf: [{ type: "string" }, { type: "null" }] },
+    }, required: ["idempotency_key", "deal", "text"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "set-next-step", args, async () => {
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      if (typeof args.text !== "string" || !args.text.trim()) throw new ToolError({ error: "text_required" });
+      assertDealRoomField("next_date", args.next_date ?? null);
+      await lockDealField(c, s.id, "next_step");
+      const prior = await c.query(
+        "select id, text from deal_note where deal_id=$1 and kind='next_step' order by created_at desc, id desc limit 1 /* dealroom:current-step */",
+        [s.id],
+      );
+      const note = await c.query(
+        "insert into deal_note (deal_id, kind, text, actor_id) values ($1,'next_step',$2,$3) returning id, created_at /* dealroom:add-next-step */",
+        [s.id, args.text.trim(), actor.id],
+      );
+      await c.query(
+        "update deal set next_date=$2, updated_by=$3 where id=$1 /* dealroom:set-next-date */",
+        [s.id, args.next_date ?? null, actor.id],
+      );
+      await writeEvent(c, actor, "set-next-step", "deal", s.id, {
+        field: "next_step",
+        old: { next_step: prior.rows[0]?.text ?? null },
+        new: { next_step: args.text.trim(), next_date: args.next_date ?? null },
+        idempotency_key: args.idempotency_key,
+      });
+      return { ok: true, deal_id: s.id, next_step_id: note.rows[0].id,
+        supersedes: prior.rows[0]?.id ?? null, created_at: note.rows[0].created_at };
+    }),
+  },
+
+  "resolve-conflict": {
+    write: true,
+    description: "Resolve an open Deal Room cell conflict in one call by applying value a or b through the normal field patch/event path.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, conflict_id: { type: "string" },
+      winner: { type: "string", enum: ["a", "b"] },
+    }, required: ["idempotency_key", "conflict_id", "winner"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-conflict", args, async () => {
+      if (!['a', 'b'].includes(args.winner)) throw new ToolError({ error: "invalid_winner", allowed: ["a", "b"] });
+      const found = await c.query(
+        `select id, deal_id, field, value_a, value_b, status
+           from deal_conflict where id=$1 for update /* dealroom:get-conflict */`,
+        [args.conflict_id],
+      );
+      if (!found.rows.length) throw new ToolError({ error: "not_found", table: "deal_conflict", id: args.conflict_id });
+      const conflict = found.rows[0];
+      if (conflict.status !== "open") throw new ToolError({ error: "conflict_already_resolved", conflict_id: conflict.id });
+      await lockDealField(c, conflict.deal_id, conflict.field);
+      const value = args.winner === "a" ? conflict.value_a : conflict.value_b;
+      const applied = await applyDealRoomField(c, actor, conflict.deal_id, conflict.field,
+        value, args.idempotency_key, "resolve-conflict");
+      await c.query(
+        `update deal_conflict set status='resolved', resolved_by=$2, winner=$3,
+             resolved_at=now() where id=$1 /* dealroom:resolve-conflict */`,
+        [conflict.id, actor.id, args.winner],
+      );
+      return { ok: true, conflict_id: conflict.id, deal_id: conflict.deal_id,
+        field: conflict.field, winner: args.winner, ...applied };
+    }),
+  },
+});
 
 // The deploy-gap pair (2026-08-08, Joe's reconnect complaint). call-verb's
 // dispatch lives in mcp.js callTool (interception, so profile checks apply to

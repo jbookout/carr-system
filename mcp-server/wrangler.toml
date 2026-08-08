@@ -49,8 +49,17 @@ compatibility_flags = ["global_fetch_strictly_public"]
 # retirement is a later, unhurried decision. Same Worker answers both.
 routes = [
   { pattern = "api.practicecre.com", custom_domain = true },
-  { pattern = "api.doctorcre.com", custom_domain = true }
+  { pattern = "api.doctorcre.com", custom_domain = true },
+  { pattern = "dealroom.doctorcre.com", custom_domain = true }
 ]
+
+# One Worker + one asset binding is the smallest deployable structure. The
+# parallel Deal Room lane writes its no-build bundle directly under dealroom/;
+# src/dealroom-web.js also checks dist/ and falls back to public-shell/index.html.
+[assets]
+directory = "../dealroom"
+binding = "ASSETS"
+run_worker_first = true
 
 # OAuth grant/token storage for workers-oauth-provider. The binding name is
 # fixed by the library — it reads env.OAUTH_KV directly. Created 2026-07-31.
