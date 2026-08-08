@@ -773,11 +773,17 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       handler: async (c, actor, args) => {
         await actorId(c, actor);
         const who = (args.partner || actor.slug || "").toLowerCase();
+        // Same filter set as the compiled-rules exporter (_fetch_rules +
+        // _is_intro, ORDER 37): intro-politics rules render to their own intro
+        // file and are NOT part of the recited counts — the verb's numbers
+        // must match the files' numbers exactly or the recitation audit
+        // (rule 4f7c348f) breaks the day a session compares them.
         const rules = (await c.query(
           `select statement, human_quote, taught_by, personal_to, scope, id
              from v_compiled_rules
-            where personal_to is null or personal_to = $1
-            order by personal_to nulls first, activated_at`, [who])).rows;
+            where (personal_to is null or personal_to = $1)
+              and coalesce(scope->>'kind','') <> 'intro_politics'
+            order by personal_to nulls first, activated_at, statement`, [who])).rows;
         const shared = rules.filter(r => !r.personal_to);
         const personal = rules.filter(r => r.personal_to);
         const actionReq = (await c.query(
