@@ -13,6 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import convo_core
+import speak
 
 HOST = "127.0.0.1"
 PORT = 4680
@@ -170,7 +171,16 @@ class Engine:
             self.add_turn(text, doc, card)
             self.set_state("rendering")
             self.progress("voice coming")
-            subprocess.run([sys.executable, str(convo_core.SPEAK), doc])
+            wav = speak.prepare(doc)
+            if wav is not None:
+                self.set_state("speaking")
+                env = wav.with_suffix(".env.json")
+                if env.exists():
+                    try:
+                        self.emit("envelope", json.loads(env.read_text()))
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                speak.play(wav)
         except (OSError, ValueError) as exc:
             self._heard_nothing(f"· conversation error: {exc}")
         finally:

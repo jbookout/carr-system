@@ -20,6 +20,7 @@ the cache key uses the normalized form so both spellings hit one file.
 
 import hashlib
 import json
+import math
 import pathlib
 import socket
 import subprocess
@@ -56,6 +57,44 @@ def play(wav: pathlib.Path) -> None:
     subprocess.run(["afplay", str(wav)], check=False)
 
 
+def write_envelope(wav: pathlib.Path) -> None:
+    env = wav.with_suffix(".env.json")
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-i", str(wav), "-af",
+             "asetnsamples=n=2400:p=1,astats=metadata=1:reset=1,"
+             "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+             "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        return
+    if result.returncode != 0:
+        return
+    levels = []
+    for line in (result.stdout + result.stderr).splitlines():
+        marker = "lavfi.astats.Overall.RMS_level="
+        if marker not in line:
+            continue
+        try:
+            db = float(line.split(marker, 1)[1].strip())
+        except ValueError:
+            continue
+        levels.append(10 ** (db / 20) if math.isfinite(db) else 0.0)
+    if not levels:
+        return
+    peak = max(levels)
+    if peak > 0:
+        levels = [round(level / peak, 4) for level in levels]
+    payload = {"ms": 100, "levels": levels}
+    tmp = env.with_suffix(env.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, separators=(",", ":")))
+        tmp.replace(env)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+
+
 def render_live(spoken: str, raw: pathlib.Path) -> bool:
     if not RENDER_SOCKET.exists():
         return False
@@ -78,24 +117,18 @@ def render_live(spoken: str, raw: pathlib.Path) -> bool:
         return False
 
 
-def main() -> int:
-    args = sys.argv[1:]
-    cache_only = "--cache-only" in args
-    text = " ".join(a for a in args if a != "--cache-only").strip()
-    if not text:
-        return 0
+def prepare(text: str, cache_only: bool = False) -> pathlib.Path | None:
     spoken = normalize(text)
     PHRASES.mkdir(parents=True, exist_ok=True)
     wav = PHRASES / (hashlib.sha1(spoken.encode()).hexdigest()[:16] + ".wav")
 
     if wav.exists():
-        play(wav)
-        return 0
+        return wav
     if cache_only:
-        return 3
+        return None
     if not VENV_PY.exists():
         print("speak: no TTS env (.venv-tts) — text-only", file=sys.stderr)
-        return 3
+        return None
 
     raw = wav.with_suffix(".raw.wav")
     if not render_live(spoken, raw):
@@ -105,7 +138,7 @@ def main() -> int:
         )
         if r.returncode != 0 or not raw.exists():
             print(f"speak: render failed — text-only\n{r.stderr[-500:]}", file=sys.stderr)
-            return 3
+            return None
     m = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw),
          "-af", MASTER_CHAIN, "-ar", "24000", "-ac", "1", str(wav)],
@@ -114,6 +147,19 @@ def main() -> int:
     raw.unlink(missing_ok=True)
     if m.returncode != 0 or not wav.exists():
         print(f"speak: mastering failed — text-only\n{m.stderr[-300:]}", file=sys.stderr)
+        return None
+    write_envelope(wav)
+    return wav
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    cache_only = "--cache-only" in args
+    text = " ".join(a for a in args if a != "--cache-only").strip()
+    if not text:
+        return 0
+    wav = prepare(text, cache_only)
+    if wav is None:
         return 3
     play(wav)
     return 0
