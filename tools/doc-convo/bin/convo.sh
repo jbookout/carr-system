@@ -44,13 +44,34 @@ turn=0
 while true; do
   read -r -p "you ⏎ " _ || break
   turn=$((turn + 1))
+  mkdir -p "$WORKDIR"          # /tmp cleaners can reap it mid-session
   UTT="$WORKDIR/utt-$turn.wav"
 
-  ffmpeg -y -loglevel error -f avfoundation -i "$MIC" -ac 1 -ar 16000 "$UTT" &
+  ffmpeg -y -loglevel error -f avfoundation -i "$MIC" -ac 1 -ar 16000 "$UTT" \
+    2>"$WORKDIR/rec-err-$turn" &
   REC_PID=$!
   read -r -p "· listening — ⏎ when done " _ || { kill "$REC_PID" 2>/dev/null; break; }
   kill -INT "$REC_PID" 2>/dev/null; wait "$REC_PID" 2>/dev/null
   afplay "$EARCON" &
+
+  if [ ! -s "$UTT" ]; then
+    echo "· mic gave no audio. Check System Settings → Privacy & Security →"
+    echo "  Microphone → Terminal is ON. If it is, find your mic's index with:"
+    echo "  ffmpeg -f avfoundation -list_devices true -i \"\"   then rerun as:"
+    echo "  DOC_MIC_DEVICE=':1' $0"
+    sed -n '1,2p' "$WORKDIR/rec-err-$turn" 2>/dev/null
+    continue
+  fi
+
+  # Silence gate: whisper large-v3 famously hallucinates captions ("Sous-titrage
+  # Société Radio-Canada" class) on near-silent audio. Below -45dB mean, say so
+  # instead of transcribing noise into fiction.
+  MEANVOL=$(ffmpeg -i "$UTT" -af volumedetect -f null - 2>&1 \
+            | sed -n 's/.*mean_volume: \(-*[0-9.]*\) dB.*/\1/p')
+  if [ -n "$MEANVOL" ] && [ "$(printf '%.0f' "$MEANVOL" 2>/dev/null || echo 0)" -lt -45 ]; then
+    echo "· heard only silence (mic level ${MEANVOL}dB) — is the right mic set?"
+    continue
+  fi
 
   TEXT=$("$WHISPER" -m "$MODEL" -f "$UTT" --prompt "$(cat "$VOCAB")" \
           -nt -np 2>/dev/null | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
@@ -61,14 +82,18 @@ while true; do
   # never blocks the turn (it just stays silent until the reply).
   python3 "$TOOL_DIR/bin/speak.py" --cache-only "Checking the record." >/dev/null 2>&1 &
 
+  # No arrays: macOS ships bash 3.2, where an empty array under `set -u` is an
+  # "unbound variable" abort (bit us live, first conversation, 2026-08-08).
   if [ -f "$SESSION_FILE" ]; then
-    RESUME=(--resume "$(cat "$SESSION_FILE")")
+    BRAIN_JSON=$(claude -p "$TEXT" --model "$BRAIN_MODEL" \
+      --append-system-prompt "$SYSTEM_PROMPT" \
+      --output-format json --resume "$(cat "$SESSION_FILE")" \
+      2>"$WORKDIR/brain-err-$turn")
   else
-    RESUME=()
+    BRAIN_JSON=$(claude -p "$TEXT" --model "$BRAIN_MODEL" \
+      --append-system-prompt "$SYSTEM_PROMPT" \
+      --output-format json 2>"$WORKDIR/brain-err-$turn")
   fi
-  BRAIN_JSON=$(claude -p "$TEXT" --model "$BRAIN_MODEL" \
-    --append-system-prompt "$SYSTEM_PROMPT" \
-    --output-format json "${RESUME[@]}" 2>"$WORKDIR/brain-err-$turn")
   REPLY=$(printf '%s' "$BRAIN_JSON" | python3 -c '
 import json, sys
 try:
@@ -80,7 +105,9 @@ except Exception:
     pass
 ' "$SESSION_FILE")
   if [ -z "$REPLY" ]; then
-    echo "· brain error:"; tail -3 "$WORKDIR/brain-err-$turn"; continue
+    echo "· brain error:"
+    [ -f "$WORKDIR/brain-err-$turn" ] && tail -3 "$WORKDIR/brain-err-$turn"
+    continue
   fi
 
   echo "doc: $REPLY"
