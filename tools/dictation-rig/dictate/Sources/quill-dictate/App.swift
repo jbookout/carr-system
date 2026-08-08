@@ -78,10 +78,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         do {
             try recorder.start()
             setIcon(state: .recording)
-            cue("Pop")
+            cue(config.soundCaptureStart)
         } catch {
             Log.shared.line("ERROR mic start failed: \(error)")
-            cue("Basso")
+            cue(config.soundError)
             setIcon(state: gestures.conversationMode ? .conversation : .idle)
         }
     }
@@ -103,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         guard peak >= config.minPeakLevel, seconds >= 0.35 else {
             Log.shared.line("INFO capture gated (peak=\(String(format: "%.4f", peak)) seconds=\(String(format: "%.2f", seconds))) — discarded")
             try? FileManager.default.removeItem(at: wav)
-            cue("Bottle")
+            cue(config.soundGated)
             settle()
             return
         }
@@ -125,14 +125,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                 try? FileManager.default.removeItem(at: wav)
                 guard !text.isEmpty else {
                     Log.shared.line("INFO whisper heard nothing (\(elapsed)s)")
-                    DispatchQueue.main.async { self?.cue("Bottle") }
+                    DispatchQueue.main.async { self?.cue(self?.config.soundGated ?? "Bottle") }
                     return
                 }
                 Log.shared.line("INSERT \(text.count) chars in \(elapsed)s (audio \(String(format: "%.1f", seconds))s)")
                 DispatchQueue.main.async { inserter.insert(text) }
             } catch {
                 Log.shared.line("ERROR transcription failed: \(error)")
-                DispatchQueue.main.async { self?.cue("Basso") }
+                DispatchQueue.main.async { self?.cue(self?.config.soundError ?? "Basso") }
             }
         }
     }
@@ -145,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
 
     func gestureConversationToggled(on: Bool) {
         Log.shared.line("MODE conversation \(on ? "ON — hold space to talk" : "off")")
-        cue(on ? "Glass" : "Submarine")
+        cue(on ? config.soundModeOn : config.soundModeOff)
         settle()
         refreshMenuState()
     }

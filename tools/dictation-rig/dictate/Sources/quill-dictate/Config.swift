@@ -45,7 +45,15 @@ struct Config: Codable {
     /// Audible cues (capture start / stop / mode toggle / error). Local
     /// feedback for Joe only — NOT the meeting-mode consent announcement,
     /// which deliberately does not exist in this mode (no counterparty).
+    /// Names are macOS system sounds (/System/Library/Sounds); editable in
+    /// config + "Reload config" so taste changes need no rebuild. Capture
+    /// start is a single chime by Joe's call, 2026-08-08.
     var sounds: Bool = true
+    var soundCaptureStart: String = "Glass"
+    var soundGated: String = "Bottle"
+    var soundError: String = "Basso"
+    var soundModeOn: String = "Purr"
+    var soundModeOff: String = "Submarine"
 
     /// Discard captures whose peak level never crosses this (0..1 of full
     /// scale). Stops whisper hallucinating text onto a silent press.
@@ -71,6 +79,11 @@ struct Config: Codable {
         case spaceHoldThresholdMs = "space_hold_threshold_ms"
         case insertion
         case sounds
+        case soundCaptureStart = "sound_capture_start"
+        case soundGated = "sound_gated"
+        case soundError = "sound_error"
+        case soundModeOn = "sound_mode_on"
+        case soundModeOff = "sound_mode_off"
         case minPeakLevel = "min_peak_level"
         case whisperCli = "whisper_cli"
         case modelPath = "model_path"
@@ -119,6 +132,11 @@ private struct PartialConfig: Codable {
     var space_hold_threshold_ms: Int?
     var insertion: String?
     var sounds: Bool?
+    var sound_capture_start: String?
+    var sound_gated: String?
+    var sound_error: String?
+    var sound_mode_on: String?
+    var sound_mode_off: String?
     var min_peak_level: Double?
     var whisper_cli: String?
     var model_path: String?
@@ -138,6 +156,11 @@ private struct PartialConfig: Codable {
         if let v = space_hold_threshold_ms { config.spaceHoldThresholdMs = v }
         if let v = insertion { config.insertion = v }
         if let v = sounds { config.sounds = v }
+        if let v = sound_capture_start { config.soundCaptureStart = v }
+        if let v = sound_gated { config.soundGated = v }
+        if let v = sound_error { config.soundError = v }
+        if let v = sound_mode_on { config.soundModeOn = v }
+        if let v = sound_mode_off { config.soundModeOff = v }
         if let v = min_peak_level { config.minPeakLevel = v }
         if let v = whisper_cli { config.whisperCli = NSString(string: v).expandingTildeInPath }
         if let v = model_path { config.modelPath = NSString(string: v).expandingTildeInPath }
