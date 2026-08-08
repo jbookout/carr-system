@@ -23,6 +23,7 @@ class FakeClient {
     this.notes = [];
     this.conflicts = [];
     this.criticalDates = [];
+    this.captureSessions = [];
     this.deals = new Map([[ids.deal, {
       id: ids.deal, name: "Deal Alpha", phase: "research", owner: "joe",
       type: "renewal", city: "Mobile", segment: "healthcare",
@@ -152,6 +153,7 @@ class FakeClient {
         .sort((a, b) => a.actor.localeCompare(b.actor) || a.deal_id.localeCompare(b.deal_id) || a.field.localeCompare(b.field));
       return { rows };
     }
+    if (sql.includes("from v_capture_session_status")) return { rows: this.captureSessions.map(row => ({ ...row })) };
     if (sql.includes("from v_deal_room_deal")) {
       const deal = this.deals.get(params[0]);
       return { rows: deal ? [{ phase: deal.phase, owner: deal.owner, type: deal.type, city: deal.city,
@@ -308,4 +310,16 @@ test("cursor round-trips the pg wire timestamp format (microseconds + offset) wi
   const again = await (await pipelineChanges(new Request(`https://example.test/pipeline/changes?cursor=${first.cursor}`), db, actors.joe, { limit: 5 })).json();
   assert.deepEqual(again.events, [], "no new events after the cursor");
   assert.equal(again.cursor, first.cursor);
+});
+
+test("pipeline polling includes capture status snapshots with string timestamps", async () => {
+  const db = new FakeClient();
+  db.captureSessions.push({ session_id: "50000000-0000-0000-0000-000000000001",
+    device_id: "mac-studio", state: "distilling",
+    started_at: "2026-08-08 14:00:00+00", state_at: "2026-08-08 14:12:00+00" });
+  const result = await (await pipelineChanges(
+    new Request("https://example.test/pipeline/changes"), db, actors.joe)).json();
+  assert.equal(result.capture_sessions[0].state, "distilling");
+  assert.equal(typeof result.capture_sessions[0].started_at, "string");
+  assert.equal(typeof result.capture_sessions[0].state_at, "string");
 });

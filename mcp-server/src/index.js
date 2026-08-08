@@ -34,16 +34,18 @@
 //   /.well-known/oauth-protected-resource[/path]   provider (RFC 9728)
 //   /health     unchanged, unauthenticated dead-man probe
 //   /ingest     unchanged, INGEST_TOKENS bearer — deliberately OUTSIDE the OAuth wrap
+//   /capture/*  capture rig bridge, CAPTURE_TOKENS claim then opaque session token
 //
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { neon } from "@neondatabase/serverless";
+import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 import { actorFromProps } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
+import { createCaptureHandler } from "./capture.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -132,6 +134,27 @@ async function pipelineApi(request, env, actor) {
     // round on day one (the real fault was invisible from the client).
     return json({ error: "database_unavailable", detail: String(e && e.message || e).slice(0, 200) }, 503);
   }
+}
+
+function captureHandler(env) {
+  return createCaptureHandler({
+    withWriter: async (fn) => {
+      const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        const result = await fn(client);
+        await client.query("commit");
+        return result;
+      } catch (error) {
+        await client.query("rollback").catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+        await pool.end();
+      }
+    },
+  });
 }
 
 const protectedApiHandler = {
@@ -308,6 +331,9 @@ const dealroomHandler = createDealroomHandler({
 // two narrow short-circuits and changes nothing else about the fetch surface.
 export default {
   async fetch(request, env, ctx) {
+    if (new URL(request.url).pathname.startsWith("/capture/")) {
+      return captureHandler(env).fetch(request, env, ctx);
+    }
     if (isDealroomRequest(request)) return dealroomHandler.fetch(request, env, ctx);
     if (new URL(request.url).pathname === "/mcp") {
       const probeActor = probeActorFor(request, env);

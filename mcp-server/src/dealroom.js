@@ -86,6 +86,16 @@ export async function pipelineChanges(request, client, actor, options = {}) {
       where expires_at > now()
       order by actor, deal_id, field`,
   );
+  // Capture state is a current snapshot rather than a second event cursor.
+  // Every poll sees changes immediately, while the existing deal-event cursor
+  // remains byte-for-byte compatible and keeps its single total order.
+  const captureSessions = await client.query(
+    `select session_id, device_id, state,
+            to_jsonb(started_at)#>>'{}' as started_at,
+            to_jsonb(state_at)#>>'{}' as state_at
+       from v_capture_session_status
+      order by started_at, session_id`,
+  );
 
   const cleanEvents = events.rows
     .filter(row => !PLACEHOLDER_FIELDS.has(row.field))
@@ -99,5 +109,6 @@ export async function pipelineChanges(request, client, actor, options = {}) {
     ? encodePipelineCursor(String(last.recorded_at), String(last.id))
     : (url.searchParams.get("cursor") || "");
 
-  return json({ events: cleanEvents, presence: presence.rows.map(stripDealPlaceholders), cursor: nextCursor });
+  return json({ events: cleanEvents, presence: presence.rows.map(stripDealPlaceholders),
+    capture_sessions: captureSessions.rows, cursor: nextCursor });
 }

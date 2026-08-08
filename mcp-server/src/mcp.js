@@ -12,7 +12,7 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
-import { TOOLS, ToolError } from "./tools.js";
+import { TOOLS, ToolError, executeRegisteredTool } from "./tools.js";
 import { actorFromProps } from "./identity.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -280,13 +280,10 @@ async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.links) && args.links.length)
     throw new ToolError({ error: "not_in_profile", verb: "log-activity (links[])", profile,
       hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
-  if (tool.humanOnly && !actor.human)
-    throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
-
   if (!tool.write) {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
-    return tool.handler(client, actor, args || {});
+    return executeRegisteredTool(client, actor, name, args || {});
   }
 
   // writes: real transaction on the writer pool; actor row resolved inside it
@@ -305,7 +302,7 @@ async function callTool(env, actor, name, args, profile = "full") {
       hint: "the token authenticates as this actor but no row exists in the actor table — " +
             "provision the actor before any write verb will run" });
     const fullActor = { ...actor, id: a.rows[0].id };
-    const result = await tool.handler(client, fullActor, args || {});
+    const result = await executeRegisteredTool(client, fullActor, name, args || {});
     await client.query("commit");
     return result;
   } catch (e) {

@@ -1337,6 +1337,17 @@ export const TOOLS = {
         order by name`)).rows }),
   },
 
+  "capture-queue": {
+    write: false,
+    description: "Pending capture proposals for active sessions. These are untrusted suggestions only; no confidence score confirms one. A partner must call resolve-candidate for every disposition.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (c) => ({ candidates: (await c.query(
+      `select id, session_id, kind, payload, evidence_quote, confidence::float8 as confidence, deal_name,
+              to_jsonb(created_at)#>>'{}' as created_at
+         from v_capture_candidate_queue
+        order by confidence desc, created_at, id`)).rows }),
+  },
+
   "lead-hot": {
     write: false,
     description: "Scored, unsuppressed leads (score, lane, est_lease_event, next_action_date). ALL of them surface — qualification is the human's job, never pre-filtered.",
@@ -3949,6 +3960,17 @@ export const TOOLS = {
   },
 };
 
+// One registered-handler path for direct MCP calls and composite verbs. The
+// MCP layer applies its profile gate first; this helper owns registry lookup,
+// the human-only gate, and the handler/envelope invocation itself.
+export async function executeRegisteredTool(client, actor, name, args = {}) {
+  const tool = TOOLS[name];
+  if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  if (tool.humanOnly && !actor.human)
+    throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
+  return tool.handler(client, actor, args);
+}
+
 
 // Deal Room contract. Durable writes use the same envelope and event helper as
 // the rest of this registry; the one explicit exception is the ephemeral lease.
@@ -4079,7 +4101,7 @@ Object.assign(TOOLS, {
         [s.id],
       );
       const note = await c.query(
-        "insert into deal_note (deal_id, kind, text, actor_id) values ($1,'next_step',$2,$3) returning id, created_at /* dealroom:add-next-step */",
+        "insert into deal_note (deal_id, kind, text, actor_id) values ($1,'next_step',$2,$3) returning id, to_jsonb(created_at)#>>'{}' as created_at /* dealroom:add-next-step */",
         [s.id, args.text.trim(), actor.id],
       );
       await c.query(
@@ -4125,6 +4147,65 @@ Object.assign(TOOLS, {
       );
       return { ok: true, conflict_id: conflict.id, deal_id: conflict.deal_id,
         field: conflict.field, winner: args.winner, ...applied };
+    }),
+  },
+
+  "resolve-candidate": {
+    write: true,
+    humanOnly: true,
+    description: "Human gate for one capture proposal. Rejecting only skips it. Accepting invokes its mapped live verb as the confirming partner, then confirms the candidate only after that write returns a real record reference.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, candidate_id: { type: "string" },
+      accept: { type: "boolean" }, note: { type: "string" },
+    }, required: ["idempotency_key", "candidate_id", "accept"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-candidate", args, async () => {
+      if (typeof args.accept !== "boolean") throw new ToolError({ error: "accept_required" });
+      const found = await c.query(
+        `select id, kind, payload, status, resulting_ref
+           from capture_candidate where id=$1 for update /* capture:resolve-read */`,
+        [args.candidate_id]);
+      if (!found.rows.length)
+        throw new ToolError({ error: "not_found", table: "capture_candidate", id: args.candidate_id });
+      const candidate = found.rows[0];
+      if (candidate.status !== "pending") return { ok: true, candidate_id: candidate.id,
+        already: candidate.status, ref: candidate.resulting_ref || null,
+        note: "already dispositioned; nothing changed" };
+
+      if (!args.accept) {
+        await c.query(
+          `update capture_candidate
+              set status='skipped', resolved_by=$2, resolution_note=$3, resolved_at=now()
+            where id=$1 /* capture:resolve-skip */`,
+          [candidate.id, actor.id, args.note || null]);
+        return { ok: true, candidate_id: candidate.id, status: "skipped", ref: null };
+      }
+
+      const verbByKind = {
+        phase_move: "patch-deal-field",
+        next_step: "set-next-step",
+        new_deal: "new-deal",
+        activity: "log-activity",
+        meeting_record: "log-activity",
+      };
+      const verb = verbByKind[candidate.kind];
+      if (!verb) throw new ToolError({ error: "unknown_candidate_kind", kind: candidate.kind });
+      const innerArgs = { ...candidate.payload, idempotency_key: `capture:${candidate.id}` };
+      if (candidate.kind === "meeting_record") innerArgs.kind = "meeting";
+      const result = await executeRegisteredTool(c, actor, verb, innerArgs);
+      if (!result || result.ok === false) throw new ToolError(result || { error: "inner_write_failed" });
+      const ref = candidate.kind === "phase_move" ? result.deal_id
+        : candidate.kind === "next_step" ? result.next_step_id
+        : candidate.kind === "new_deal" ? result.deal_id
+        : result.activity_id;
+      if (!ref) throw new ToolError({ error: "inner_write_missing_ref", verb });
+      await c.query(
+        `update capture_candidate
+            set status='confirmed', resolved_by=$2, resolution_note=$3,
+                resulting_ref=$4, resolved_at=now()
+          where id=$1 /* capture:resolve-confirm */`,
+        [candidate.id, actor.id, args.note || null, String(ref)]);
+      return { ok: true, candidate_id: candidate.id, status: "confirmed", ref: String(ref),
+        verb, result };
     }),
   },
 });
