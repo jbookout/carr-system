@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dr. CRE</title>
+<style>
+  /* ══ Doc as an ENTITY (Joe, 2026-08-08): "i want Doc to feel like an
+     entity that you are interacting with. it cant be boring." The form is
+     the center of the room; everything else is his light. Recovered ruling
+     governs the species: light, motion, presence — no face, no mimicry.
+     Palette: deep space over CARR navy, teal-cyan projection light, orange
+     energy when he works. ══ */
+  :root {
+    --cyan: #3FB8C9; --cyan-hi: #9FEAF2; --orange: #F57F29;
+    --amber-hi: #FFC98A; --ink: #DDEBF7; --dim: #6E87A8;
+    --display: 'Oswald', 'Arial Narrow', 'Avenir Next Condensed', sans-serif;
+    --body: 'Montserrat', 'Helvetica Neue', Arial, sans-serif;
+    --wash: rgba(63,184,201,0);
+  }
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(130% 80% at 50% -20%, #0B3B78 0%, rgba(0,0,0,0) 55%),
+      radial-gradient(100% 60% at 50% 120%, #082E5C 0%, rgba(0,0,0,0) 60%),
+      linear-gradient(180deg, #050F24 0%, #030A1A 100%);
+    color: var(--ink); font-family: var(--body); font-size: 14px;
+    line-height: 1.5; display: flex; flex-direction: column;
+    overflow: hidden; position: relative;
+  }
+  body::before {                 /* holo grid — wakes with him */
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      repeating-linear-gradient(0deg, rgba(63,184,201,.045) 0 1px,
+        rgba(0,0,0,0) 1px 36px),
+      repeating-linear-gradient(90deg, rgba(63,184,201,.035) 0 1px,
+        rgba(0,0,0,0) 1px 36px);
+    mask-image: radial-gradient(85% 75% at 50% 42%, #000 25%, transparent 80%);
+    opacity: .45; transition: opacity 260ms ease-out;
+  }
+  body.engaged::before { opacity: 1; }
+  body::after {                  /* his light on the room */
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background: radial-gradient(80% 55% at 50% 34%, var(--wash) 0%,
+                rgba(0,0,0,0) 65%);
+    opacity: 0; transition: opacity 260ms ease-out;
+  }
+  body.engaged::after { opacity: 1; }
+
+  /* Atmosphere stack (design-refs 2026-08-08): film grain + vignette as
+     separate layers over the scene — the "stackable effects" model. */
+  #grain {
+    position: fixed; inset: 0; pointer-events: none; z-index: 3;
+    opacity: .05; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 3;
+    background: radial-gradient(120% 100% at 50% 45%, rgba(0,0,0,0) 55%,
+                rgba(2,6,16,.55) 100%);
+  }
+
+  /* Liquid glass (recovered verbatim from ref post 5, tinted to Doc's
+     light): near-invisible fill + edge-lit gradient ring via masked
+     ::before — glass that catches his light instead of a translucent box. */
+  .liquid-glass {
+    background: rgba(159,234,242,0.015);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    border: none; position: relative; overflow: hidden;
+    box-shadow: inset 0 1px 1px rgba(159,234,242,0.10);
+  }
+  .liquid-glass::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit;
+    padding: 1.4px; pointer-events: none;
+    background: linear-gradient(180deg,
+      rgba(159,234,242,0.45) 0%, rgba(159,234,242,0.15) 20%,
+      rgba(159,234,242,0) 40%, rgba(159,234,242,0) 60%,
+      rgba(159,234,242,0.15) 80%, rgba(159,234,242,0.45) 100%);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box,
+                  linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+  }
+
+  header {
+    position: relative; z-index: 2; display: flex; align-items: center;
+    padding: 16px 20px 0;
+  }
+  header h1 {
+    font-family: var(--display); font-size: 16px; font-weight: 600;
+    letter-spacing: .30em; color: var(--cyan-hi);
+    text-shadow: 0 0 16px rgba(63,184,201,.65);
+  }
+  #formswitch {
+    margin-left: auto; display: flex; gap: 2px;
+    border-radius: 999px; padding: 2px;
+  }
+  #formswitch button {
+    border: none; background: transparent; color: var(--dim);
+    font-family: var(--display); font-size: 10px; font-weight: 500;
+    letter-spacing: .16em;
+    text-transform: uppercase; padding: 3px 10px; border-radius: 999px;
+    cursor: pointer;
+    transition: color 240ms ease-out, background-color 240ms ease-out,
+                box-shadow 240ms ease-out;
+  }
+  #formswitch button.on {
+    color: #04122A; background: var(--cyan);
+    box-shadow: 0 0 12px rgba(63,184,201,.6);
+  }
+  #formswitch button:focus-visible { outline: 2px solid var(--cyan-hi); }
+
+  /* ── The stage: Doc himself. The whole stage is the talk surface. ── */
+  #stage {
+    position: relative; z-index: 1; height: 44%;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; cursor: pointer; outline: none;
+    transition: opacity 240ms ease-out;
+  }
+  #stage:focus-visible::after {
+    content: ""; position: absolute; inset: 10px; border-radius: 18px;
+    outline: 2px solid var(--cyan); outline-offset: 4px;
+  }
+  #stage.disabled { cursor: default; opacity: .5; }
+  #entity { display: block; width: 100%; height: 100%; }
+
+  /* status line — Doc's condition, spoken as light */
+  #status {
+    position: relative; z-index: 2; text-align: center;
+    font-family: var(--display); font-size: 12px; font-weight: 600;
+    letter-spacing: .32em; text-transform: uppercase; color: var(--dim);
+    text-shadow: 0 0 10px rgba(63,184,201,.0);
+    transition: color 240ms ease-out, text-shadow 240ms ease-out;
+    min-height: 16px; padding: 0 20px;
+  }
+  #status.live {
+    color: var(--amber-hi); text-shadow: 0 0 14px rgba(245,127,41,.75);
+  }
+  #hint {
+    position: relative; z-index: 2; text-align: center;
+    font-size: 10px; font-weight: 500; letter-spacing: .12em; color: var(--dim);
+    min-height: 15px; margin-top: 4px; text-transform: uppercase;
+    transition: opacity 240ms ease-out;
+  }
+  #hint.ticking {
+    color: var(--cyan-hi); text-shadow: 0 0 10px rgba(63,184,201,.6);
+  }
+
+  /* ── The exchange: words materialize as projected light ── */
+  main {
+    position: relative; z-index: 1; flex: 1; overflow-y: auto;
+    padding: 20px 24px 24px; scroll-behavior: smooth;
+    mask-image: linear-gradient(180deg, transparent 0, #000 22px);
+  }
+  @media (prefers-reduced-motion: reduce) { main { scroll-behavior: auto; } }
+  main::-webkit-scrollbar { width: 4px; }
+  main::-webkit-scrollbar-thumb {
+    background: rgba(63,184,201,.25); border-radius: 4px;
+  }
+
+  .empty {
+    text-align: center; color: var(--dim); padding: 16px 24px;
+    font-size: 12px; letter-spacing: .025em;
+  }
+  .empty b {
+    display: block; color: var(--ink); font-weight: 600; margin-bottom: 6px;
+    font-size: 14px; letter-spacing: .05em;
+  }
+
+  .turn { margin-bottom: 24px; animation: arrive 260ms ease-out both; }
+  @media (prefers-reduced-motion: reduce) { .turn { animation: none; } }
+  @keyframes arrive {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .who {
+    font-family: var(--display); font-size: 10px; font-weight: 600;
+    letter-spacing: .26em;
+    text-transform: uppercase; margin-bottom: 4px;
+  }
+  .you .who { color: var(--dim); }
+  .doc .who {
+    color: var(--cyan); text-shadow: 0 0 8px rgba(63,184,201,.55);
+  }
+  .you .bubble { color: #9FB4CE; font-size: 12px; line-height: 1.5; }
+  .doc .bubble {
+    color: var(--ink); font-size: 14px; line-height: 1.55;
+    text-shadow: 0 0 18px rgba(63,184,201,.18);
+  }
+  .doc { margin-top: 12px; }
+
+  .card {
+    margin-top: 12px; padding: 16px; border-radius: 12px;
+    box-shadow: 0 0 24px rgba(63,184,201,.12),
+                inset 0 1px 1px rgba(159,234,242,.10);
+  }
+  .card h2 {
+    font-family: var(--display); font-size: 12px; font-weight: 600;
+    letter-spacing: .18em; text-transform: uppercase; color: var(--cyan-hi);
+    text-shadow: 0 0 10px rgba(63,184,201,.6); margin-bottom: 12px;
+  }
+  .card table { width: 100%; border-collapse: collapse; }
+  .card td { padding: 6px 0; vertical-align: top; font-size: 12px; }
+  .card td:first-child { color: var(--dim); padding-right: 16px;
+                         white-space: nowrap; }
+  .card td:last-child {
+    text-align: right; font-variant-numeric: tabular-nums; color: #EAF4FF;
+    text-shadow: 0 0 10px rgba(159,234,242,.35);
+  }
+  .card tr + tr td { border-top: 1px solid rgba(63,184,201,.10); }
+
+  #offline {
+    display: none; position: relative; z-index: 2; margin: 12px 20px 0;
+    padding: 12px 16px; border-radius: 12px;
+    background: rgba(224,75,58,.06); border: 1px solid rgba(224,75,58,.35);
+    box-shadow: 0 0 22px rgba(224,75,58,.12); color: var(--dim);
+    font-size: 12.5px;
+  }
+  #offline b { color: var(--ink); }
+  #offline code {
+    display: block; margin-top: 8px; color: var(--amber-hi); font-size: 11.5px;
+    user-select: all;
+  }
+  #timing {
+    display: none; position: relative; z-index: 2; padding: 0 24px 10px;
+    color: var(--dim); font: 10px/1.4 ui-monospace, SFMono-Regular, monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  body.debug #timing { display: block; }
+</style>
+</head>
+<body>
+<div id="grain"></div>
+<div id="vignette"></div>
+<header>
+  <!-- Letters-first law: written form is DR. CRE in every UI. -->
+  <h1>DR. CRE</h1>
+  <div id="formswitch" class="liquid-glass" role="group" aria-label="Doc's form">
+    <button id="pickPresence" class="on">Presence</button>
+    <button id="pickOrb">Orb</button>
+    <button id="pickKeyline">Keyline</button>
+  </div>
+</header>
+
+<div id="offline">
+  <b>My engine isn't running.</b> Start it and I'll reconnect on my own:
+  <code>~/carr-system/tools/doc-convo/bin/convo-server.py</code>
+</div>
+
+<div id="stage" role="button" tabindex="0" aria-label="Talk to Dr. CRE">
+  <canvas id="entity"></canvas>
+</div>
+<div id="status">at the desk</div>
+<div id="hint">tap him or press space</div>
+
+<main id="feed">
+  <div class="empty" id="empty">
+    <b>At the desk.</b>
+    Tap me, say what you need, tap again. I'll keep the numbers on cards so
+    you don't have to hold them.
+  </div>
+</main>
+<div id="timing"></div>
+
+<script>
+(function () {
+  "use strict";
+  var feed = document.getElementById("feed");
+  var empty = document.getElementById("empty");
+  var stage = document.getElementById("stage");
+  var entity = document.getElementById("entity");
+  var status = document.getElementById("status");
+  var offline = document.getElementById("offline");
+  var hint = document.getElementById("hint");
+  var timing = document.getElementById("timing");
+  var pickOrb = document.getElementById("pickOrb");
+  var pickPresence = document.getElementById("pickPresence");
+  var pickKeyline = document.getElementById("pickKeyline");
+  var state = "idle";
+  var es = null;
+  var speechEnvelope = null;
+  var envelopeStarted = 0;
+  var voiceDrive = null;
+  var debug = new URLSearchParams(window.location.search).get("debug") === "1";
+  document.body.classList.toggle("debug", debug);
+
+  var LABELS = {
+    idle: "at the desk", listening: "listening", thinking: "thinking it over",
+    rendering: "voice coming", speaking: "speaking"
+  };
+  var HINTS = {
+    idle: "tap anywhere in his space, or press space",
+    listening: "tap again when done",
+    thinking: "", rendering: "", speaking: ""
+  };
+
+  /* ── The engine of moods: every state is a parameter set; frames lerp so
+     moods FLOW. Interaction states grab the room (Joe's law) — the wash,
+     the grid, the particles all rise when a human engages. ── */
+  var STATES = {
+    idle:      { colors: ["#1B4F8A", "#3FB8C9", "#123055"], speed: 0.3,
+                 amp: 0.12, core: 0.36, glow: 0.4,
+                 wash: "rgba(63,184,201,.10)" },
+    listening: { colors: ["#3FB8C9", "#9FEAF2", "#155A85"], speed: 1.0,
+                 amp: 0.36, core: 0.6, glow: 1.05,
+                 wash: "rgba(63,184,201,.22)" },
+    thinking:  { colors: ["#F57F29", "#FFC98A", "#12345F"], speed: 2.0,
+                 amp: 0.22, core: 0.42, glow: 0.9,
+                 wash: "rgba(245,127,41,.16)" },
+    rendering: { colors: ["#F57F29", "#C96A22", "#0E2A4C"], speed: 1.1,
+                 amp: 0.17, core: 0.42, glow: 0.7,
+                 wash: "rgba(245,127,41,.12)" },
+    speaking:  { colors: ["#FFB066", "#FFD9B0", "#1B4F8A"], speed: 1.3,
+                 amp: 0.42, core: 0.64, glow: 1.2,
+                 wash: "rgba(245,127,41,.22)" },
+    offline:   { colors: ["#3A4A60", "#55677F", "#1C2635"], speed: 0.12,
+                 amp: 0.05, core: 0.3, glow: 0.18,
+                 wash: "rgba(0,0,0,0)" }
+  };
+  var REGISTERS = {
+    neutral: null,
+    concern:  { colors: ["#E8A33D", "#FFD9A0", "#3A2A14"] },
+    critical: { colors: ["#E04B3A", "#FF9C8F", "#3A1410"] }
+  };
+  var register = "neutral";
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var form = localStorage.getItem("doc-form") || "presence";
+  if (["presence", "orb", "keyline"].indexOf(form) < 0) form = "presence";
+
+  var ctx = entity.getContext("2d");
+  var W = 0, H = 0, t = 0;
+  function fit() {
+    var r = stage.getBoundingClientRect();
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    entity.width = W = Math.round(r.width * dpr);
+    entity.height = H = Math.round(r.height * dpr);
+  }
+  window.addEventListener("resize", fit);
+
+  function hex(c) {
+    return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16),
+            parseInt(c.slice(5, 7), 16)];
+  }
+  function rgb(a) {
+    return "rgb(" + Math.round(a[0]) + "," + Math.round(a[1]) + "," +
+      Math.round(a[2]) + ")";
+  }
+  function rgba(a, al) {
+    return "rgba(" + Math.round(a[0]) + "," + Math.round(a[1]) + "," +
+      Math.round(a[2]) + "," + al + ")";
+  }
+  function lerp(a, b, k) { return a + (b - a) * k; }
+
+  var target = STATES.idle;
+  var cur = {
+    speed: target.speed, amp: target.amp, core: target.core,
+    glow: target.glow, colors: target.colors.map(hex)
+  };
+
+  /* particles — his energy, visible when engaged */
+  var sparks = [];
+  function spawnSpark(cx, cy, spread) {
+    sparks.push({
+      x: cx + (Math.random() - 0.5) * spread,
+      y: cy + (Math.random() - 0.5) * spread * 0.4,
+      vx: (Math.random() - 0.5) * 0.6,
+      vy: -0.25 - Math.random() * 0.55,
+      life: 1
+    });
+  }
+
+  function frame() {
+    if (!W) fit();
+    var reg = REGISTERS[register];
+    var goal = reg ? Object.assign({}, target, { colors: reg.colors }) : target;
+    var k = reduced ? 1 : 0.16;
+    cur.speed = lerp(cur.speed, goal.speed, k);
+    voiceDrive = null;
+    if (state === "speaking" && speechEnvelope) {
+      var index = Math.floor((performance.now() - envelopeStarted) /
+                             speechEnvelope.ms);
+      if (index >= 0 && index < speechEnvelope.levels.length) {
+        voiceDrive = speechEnvelope.levels[index];
+      }
+    }
+    var ampGoal = voiceDrive === null ? goal.amp : 0.12 + voiceDrive * 0.48;
+    var glowGoal = voiceDrive === null ? goal.glow : 0.45 + voiceDrive * 0.85;
+    cur.amp = lerp(cur.amp, ampGoal, k);
+    cur.core = lerp(cur.core, goal.core, k);
+    cur.glow = lerp(cur.glow, glowGoal, k);
+    for (var i = 0; i < 3; i++) {
+      var gh = hex(goal.colors[i]);
+      for (var c3 = 0; c3 < 3; c3++) {
+        cur.colors[i][c3] = lerp(cur.colors[i][c3], gh[c3], k);
+      }
+    }
+    t += reduced ? 0 : cur.speed * 0.016;
+    ctx.clearRect(0, 0, W, H);
+    drawNebula();
+    if (form === "orb") drawOrb();
+    else if (form === "keyline") drawKeyline();
+    else drawPresence();
+    drawSparks();
+    requestAnimationFrame(frame);
+  }
+
+  /* ── Galactic space dust (Joe: "smoky/swirly... like the year 8026 when
+     you summon doc"). Soft turbulent puffs drifting around him, teal-indigo,
+     denser and brighter as his energy rises. ── */
+  var INDIGO = [96, 78, 210];
+  var puffs = [];
+  (function () {
+    for (var i = 0; i < 11; i++) {
+      puffs.push({
+        ang: Math.random() * 6.283,
+        dist: 0.16 + Math.random() * 0.34,     // fraction of min(W,H)
+        size: 0.18 + Math.random() * 0.26,
+        phase: Math.random() * 6.283,
+        dir: Math.random() < 0.5 ? 1 : -1,
+        indigo: Math.random() < 0.45
+      });
+    }
+  })();
+  function drawNebula() {
+    var C = W / 2, Cy = H * (form === "orb" ? 0.52 : 0.55);
+    var base = Math.min(W, H);
+    ctx.globalCompositeOperation = "lighter";
+    for (var i = 0; i < puffs.length; i++) {
+      var p = puffs[i];
+      var swirl = p.ang + t * 0.09 * p.dir + Math.sin(t * 0.23 + p.phase) * 0.35;
+      var d = base * p.dist * (1 + 0.14 * Math.sin(t * 0.31 + p.phase));
+      var x = C + Math.cos(swirl) * d * 1.35;
+      var y = Cy + Math.sin(swirl) * d * 0.75;
+      var r = base * p.size * (1 + 0.1 * Math.sin(t * 0.5 + p.phase));
+      var col = p.indigo
+        ? [ (cur.colors[1][0] + INDIGO[0]) / 2,
+            (cur.colors[1][1] + INDIGO[1]) / 2,
+            (cur.colors[1][2] + INDIGO[2]) / 2 ]
+        : cur.colors[1];
+      var g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, rgba(col, 0.055 * (0.45 + cur.glow)));
+      g.addColorStop(0.6, rgba(col, 0.022 * (0.45 + cur.glow)));
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  /* Corona — tapered light wisps breathing off the form. */
+  function drawCorona(cx, cy, baseR) {
+    ctx.globalCompositeOperation = "lighter";
+    var rays = 22;
+    for (var i = 0; i < rays; i++) {
+      var ang = (i / rays) * 6.283 + t * 0.07;
+      var len = baseR * (0.35 + 0.4 * Math.sin(t * 0.8 + i * 1.7))
+                * (0.5 + cur.glow * 0.8);
+      if (len <= 4) continue;
+      var x1 = cx + Math.cos(ang) * baseR * 1.02;
+      var y1 = cy + Math.sin(ang) * baseR * 1.02;
+      var x2 = cx + Math.cos(ang) * (baseR * 1.02 + len);
+      var y2 = cy + Math.sin(ang) * (baseR * 1.02 + len);
+      var g = ctx.createLinearGradient(x1, y1, x2, y2);
+      g.addColorStop(0, rgba(cur.colors[1], 0.13 * cur.glow));
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.strokeStyle = g; ctx.lineWidth = 2.2; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  function drawOrb() {
+    var C = W / 2, Cy = H * 0.52, R = Math.min(W, H) * 0.30;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(C, Cy, R, 0, 7); ctx.clip();
+    var g = ctx.createRadialGradient(C, Cy, 0, C, Cy, R);
+    g.addColorStop(0, rgb(cur.colors[0])); g.addColorStop(1, rgb(cur.colors[2]));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "lighter";
+    for (var j = 0; j < 3; j++) {
+      var a = t * (0.7 + j * 0.35) + j * 2.1;
+      var rr = R * cur.amp * (1.6 + Math.sin(t * 0.9 + j) * 0.5);
+      var x = C + Math.cos(a) * R * cur.amp * 2.2;
+      var y = Cy + Math.sin(a * 0.8 + j) * R * cur.amp * 2.2;
+      var bg = ctx.createRadialGradient(x, y, 0, x, y, R * cur.core);
+      bg.addColorStop(0, rgb(cur.colors[1]));
+      bg.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.globalAlpha = 0.55; ctx.fillStyle = bg;
+      ctx.beginPath(); ctx.arc(x, y, R * cur.core + rr, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+    ctx.globalCompositeOperation = "source-over";
+    var rimPulse = voiceDrive === null ? Math.sin(t * 2) * 0.3
+                                      : voiceDrive * 0.3;
+    ctx.globalAlpha = cur.glow * (0.7 + (reduced ? 0 : rimPulse));
+    ctx.strokeStyle = rgb(cur.colors[1]); ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(C, Cy, R + 3, 0, 7); ctx.stroke();
+    // outer halo + corona
+    var halo = ctx.createRadialGradient(C, Cy, R, C, Cy, R * 2.1);
+    halo.addColorStop(0, rgba(cur.colors[1], 0.16 * cur.glow));
+    halo.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.globalAlpha = 1; ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, W, H);
+    if (!reduced) drawCorona(C, Cy, R);
+    if (!reduced && cur.glow > 0.6 && Math.random() < 0.35) {
+      spawnSpark(C, Cy - R * 0.4, R * 1.6);
+    }
+  }
+
+  function drawPresence() {
+    var midY = H * 0.55, span = W * 0.62, x0 = (W - span) / 2;
+    var breathe = reduced ? 0.5 : (Math.sin(t * 1.4) + 1) / 2;
+    var arcLift = H * (0.06 + cur.amp * 0.55 * breathe);
+    for (var pass = 0; pass < 4; pass++) {
+      ctx.beginPath();
+      ctx.moveTo(x0, midY);
+      ctx.quadraticCurveTo(W / 2, midY - arcLift, x0 + span, midY);
+      var g2 = ctx.createLinearGradient(x0, 0, x0 + span, 0);
+      g2.addColorStop(0, "rgba(0,0,0,0)");
+      g2.addColorStop(0.16, rgb(cur.colors[2]));
+      g2.addColorStop(0.5, rgb(cur.colors[1]));
+      g2.addColorStop(0.84, rgb(cur.colors[2]));
+      g2.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.strokeStyle = g2; ctx.lineCap = "round";
+      if (pass === 0) { ctx.lineWidth = 46; ctx.globalAlpha = 0.06 * (0.5 + cur.glow); }
+      else if (pass === 1) { ctx.lineWidth = 20; ctx.globalAlpha = 0.12 * (0.5 + cur.glow); }
+      else if (pass === 2) { ctx.lineWidth = 8; ctx.globalAlpha = 0.28 * (0.5 + cur.glow); }
+      else { ctx.lineWidth = 3 + breathe * 2; ctx.globalAlpha = 1; }
+      ctx.stroke();
+    }
+    if (!reduced) {
+      var p = (Math.sin(t * cur.speed * 1.15) + 1) / 2;
+      var px = x0 + span * p;
+      var qt = 4 * p * (1 - p);
+      var py = midY - arcLift * qt;
+      var pr = 10 + cur.glow * 10;
+      var pg = ctx.createRadialGradient(px, py, 0, px, py, pr);
+      pg.addColorStop(0, rgb(cur.colors[1]));
+      pg.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.globalAlpha = 0.55 + cur.glow * 0.45;
+      ctx.fillStyle = pg;
+      ctx.beginPath(); ctx.arc(px, py, pr, 0, 7); ctx.fill();
+      ctx.globalAlpha = 1;
+      drawCorona(px, py, pr * 1.4);
+      if (cur.glow > 0.6 && Math.random() < 0.5) spawnSpark(px, py, 20);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* Keyline stays one nonfigurative stroke: blueprint geometry flows into a
+     signature, never a face or eye; reduced motion freezes the Dr mark. */
+  var KEYLINE_SKETCHES = [
+    [[.16,.66],[.16,.30],[.40,.30],[.40,.48],[.62,.48],[.62,.24],
+     [.82,.24],[.82,.68],[.58,.68],[.58,.82],[.30,.82],[.30,.58],
+     [.48,.58],[.48,.38],[.72,.38]],
+    [[.15,.68],[.15,.30],[.79,.30],[.79,.68],[.15,.68],[.15,.46],
+     [.79,.46],[.31,.46],[.31,.30],[.31,.68],[.55,.68],[.55,.30],
+     [.68,.22],[.68,.76]],
+    [[.13,.64],[.24,.64],[.28,.30],[.28,.72],[.38,.72],[.43,.42],
+     [.49,.64],[.55,.38],[.60,.64],[.67,.48],[.73,.61],[.80,.47],
+     [.87,.54]],
+    [[.20,.71],[.20,.31],[.39,.31],[.46,.40],[.46,.61],[.38,.71],
+     [.20,.71],[.34,.51],[.56,.71],[.56,.43],[.66,.36],[.75,.44],
+     [.68,.53],[.58,.47],[.68,.39],[.84,.66]]
+  ];
+  function keylinePoints(sketch) {
+    if (reduced) return KEYLINE_SKETCHES[3];
+    if (state === "listening") {
+      return [[.15,.62],[.22,.45],[.36,.34],[.50,.30],[.64,.34],
+              [.78,.45],[.85,.62],[.74,.70],[.60,.73],[.40,.73],[.26,.70]];
+    }
+    return KEYLINE_SKETCHES[sketch % 3];
+  }
+  function drawKeyline() {
+    var rate = state === "thinking" ? 0.72 : state === "speaking" ? 0.45 : 0.24;
+    var cycle = reduced ? 0 : t * rate;
+    var points = keylinePoints(Math.floor(cycle));
+    var span = Math.min(W * 0.76, H * 1.45);
+    var left = (W - span) / 2, top = H * 0.08, height = H * 0.78;
+    var phase = reduced ? 1 : cycle % 1;
+    var draw = reduced ? 1 : Math.min(1, phase / 0.58);
+    var hold = reduced || phase < 0.82;
+    var fade = hold ? 1 : Math.max(0, (1 - phase) / 0.18);
+    var pulse = state === "speaking" && !reduced
+      ? 0.78 + (voiceDrive === null ? Math.sin(t * 8) : voiceDrive) * 0.22 : 1;
+    var total = 0;
+    for (var i = 1; i < points.length; i++) {
+      var dx = (points[i][0] - points[i - 1][0]) * span;
+      var dy = (points[i][1] - points[i - 1][1]) * height;
+      total += Math.sqrt(dx * dx + dy * dy);
+    }
+    function strokeGhost(width, alpha) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(left + points[0][0] * span, top + points[0][1] * height);
+      for (var g = 1; g < points.length; g++) {
+        ctx.lineTo(left + points[g][0] * span, top + points[g][1] * height);
+      }
+      ctx.lineWidth = width; ctx.lineJoin = "round"; ctx.lineCap = "round";
+      ctx.strokeStyle = rgb(cur.colors[1]);
+      ctx.globalAlpha = alpha;
+      ctx.stroke(); ctx.restore();
+    }
+    function stroke(width, alpha) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(left + points[0][0] * span, top + points[0][1] * height);
+      for (var j = 1; j < points.length; j++) {
+        ctx.lineTo(left + points[j][0] * span, top + points[j][1] * height);
+      }
+      ctx.setLineDash([total, total]);
+      ctx.lineDashOffset = total * (1 - draw);
+      ctx.lineWidth = width; ctx.lineJoin = "round"; ctx.lineCap = "round";
+      ctx.strokeStyle = rgb(cur.colors[1]);
+      ctx.globalAlpha = alpha * fade * pulse;
+      ctx.stroke(); ctx.restore();
+    }
+    ctx.globalCompositeOperation = "lighter";
+    // The blueprint underlay: the full path always faintly present, so Doc is
+    // never absent mid-cycle (caught in review 2026-08-08 — a partially drawn
+    // line left an empty stage for seconds). The bright stroke TRACES it, so
+    // drafting reads as light traveling a plan that already exists.
+    strokeGhost(2, 0.10 * (0.5 + cur.glow));
+    stroke(18, 0.035 * (0.6 + cur.glow));
+    stroke(7, 0.12 * (0.6 + cur.glow));
+    stroke(2.2, Math.min(1, 0.58 + cur.glow * 0.38));
+    ctx.globalCompositeOperation = "source-over";
+    if (!reduced && cur.glow > 0.6 && Math.random() < 0.22) {
+      var end = points[Math.min(points.length - 1, Math.floor(draw * points.length))];
+      spawnSpark(left + end[0] * span, top + end[1] * height, 12);
+    }
+  }
+
+  function drawSparks() {
+    if (reduced) { sparks.length = 0; return; }
+    ctx.globalCompositeOperation = "lighter";
+    for (var i = sparks.length - 1; i >= 0; i--) {
+      var s = sparks[i];
+      s.x += s.vx; s.y += s.vy; s.life -= 0.012;
+      if (s.life <= 0) { sparks.splice(i, 1); continue; }
+      ctx.globalAlpha = s.life * 0.6;
+      ctx.fillStyle = rgb(cur.colors[1]);
+      ctx.beginPath(); ctx.arc(s.x, s.y, 1.4, 0, 7); ctx.fill();
+    }
+    if (sparks.length > 60) sparks.splice(0, sparks.length - 60);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+  }
+  requestAnimationFrame(frame);
+
+  function setForm(f) {
+    form = f;
+    localStorage.setItem("doc-form", f);
+    pickOrb.classList.toggle("on", f === "orb");
+    pickPresence.classList.toggle("on", f === "presence");
+    pickKeyline.classList.toggle("on", f === "keyline");
+  }
+  pickOrb.addEventListener("click", function (e) {
+    e.stopPropagation(); setForm("orb");
+  });
+  pickPresence.addEventListener("click", function (e) {
+    e.stopPropagation(); setForm("presence");
+  });
+  pickKeyline.addEventListener("click", function (e) {
+    e.stopPropagation(); setForm("keyline");
+  });
+  setForm(form);
+
+  /* The summoning (ref post 3's particle portal): engaging Doc fires a
+     one-time ring of sparks from his form — the moment has a threshold. */
+  function summonBurst() {
+    if (reduced || !W) return;
+    var cx = W / 2, cy = H * (form === "orb" ? 0.52 : 0.55);
+    var r = Math.min(W, H) * 0.3;
+    for (var i = 0; i < 36; i++) {
+      var a = (i / 36) * 6.283;
+      sparks.push({
+        x: cx + Math.cos(a) * r * 0.6,
+        y: cy + Math.sin(a) * r * 0.35,
+        vx: Math.cos(a) * (0.8 + Math.random() * 0.9),
+        vy: Math.sin(a) * (0.5 + Math.random() * 0.6) - 0.3,
+        life: 1
+      });
+    }
+  }
+
+  function setState(s) {
+    if (s === "listening" && state === "idle") summonBurst();
+    state = s;
+    if (s !== "speaking") speechEnvelope = null;
+    status.textContent = LABELS[s] || s;
+    status.className = s === "idle" ? "" : "live";
+    hint.textContent = HINTS[s] !== undefined ? HINTS[s] : "";
+    hint.className = "";
+    target = STATES[s] || STATES.idle;
+    document.body.classList.toggle("engaged", s !== "idle" && s !== "offline");
+    document.body.style.setProperty("--wash", (STATES[s] || STATES.idle).wash);
+    stage.classList.toggle("disabled", !(s === "idle" || s === "listening"));
+  }
+
+  function addTurn(turn) {
+    empty.style.display = "none";
+    var div = document.createElement("div");
+    div.className = "turn";
+    if (turn.you) {
+      var y = document.createElement("div"); y.className = "you";
+      y.innerHTML = '<div class="who">You</div>';
+      var yb = document.createElement("div"); yb.className = "bubble";
+      yb.textContent = turn.you; y.appendChild(yb); div.appendChild(y);
+    }
+    if (turn.doc) {
+      var d = document.createElement("div"); d.className = "doc";
+      d.innerHTML = '<div class="who">Dr. CRE</div>';
+      var db = document.createElement("div"); db.className = "bubble";
+      db.textContent = turn.doc; d.appendChild(db);
+      if (turn.card && turn.card.rows) {
+        var c = document.createElement("div"); c.className = "card liquid-glass";
+        if (turn.card.title) {
+          var h = document.createElement("h2");
+          h.textContent = turn.card.title; c.appendChild(h);
+        }
+        var tb = document.createElement("table");
+        turn.card.rows.forEach(function (row) {
+          var tr = document.createElement("tr");
+          var a = document.createElement("td"); a.textContent = row[0];
+          var b = document.createElement("td"); b.textContent = row[1];
+          tr.appendChild(a); tr.appendChild(b); tb.appendChild(tr);
+        });
+        c.appendChild(tb); d.appendChild(c);
+      }
+      div.appendChild(d);
+    }
+    feed.appendChild(div);
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  function post(action) {
+    return fetch("/talk", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: action })
+    }).catch(function () { setOffline(true); });
+  }
+  function toggle() {
+    if (stage.classList.contains("disabled")) return;
+    if (state === "idle") { register = "neutral"; post("start"); }
+    else if (state === "listening") post("stop");
+  }
+  // Demo lesson (2026-08-08): the tap target must be UNMISSABLE. Any click
+  // outside the feed/switcher toggles; space toggles from anywhere, period.
+  document.addEventListener("click", function (e) {
+    if (e.target.closest("#formswitch") || e.target.closest("main") ||
+        e.target.closest("#offline")) return;
+    toggle();
+  });
+  stage.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); toggle(); }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.code === "Space") { e.preventDefault(); toggle(); }
+  });
+
+  function setOffline(is) {
+    offline.style.display = is ? "block" : "none";
+    stage.classList.toggle("disabled", is);
+    hint.textContent = is ? "waiting for the engine" : HINTS[state] || "";
+    if (is) {
+      status.textContent = "offline"; status.className = "";
+      target = STATES.offline;
+      document.body.classList.remove("engaged");
+    }
+  }
+
+  function connect() {
+    fetch("/state").then(function (r) { return r.json(); }).then(function (s) {
+      setOffline(false);
+      setState(s.state || "idle");
+      (s.turns || []).forEach(addTurn);
+      es = new EventSource("/events");
+      es.addEventListener("state", function (e) {
+        setState(JSON.parse(e.data).state);
+      });
+      es.addEventListener("progress", function (e) {
+        var label = JSON.parse(e.data).label;
+        if (label) {
+          hint.textContent = label + " …";
+          hint.classList.add("ticking");
+        } else {
+          hint.classList.remove("ticking");
+          hint.textContent = HINTS[state] || "";
+        }
+      });
+      es.addEventListener("turn", function (e) {
+        var turn = JSON.parse(e.data);
+        if (turn.register && REGISTERS[turn.register] !== undefined) {
+          register = turn.register;
+        }
+        addTurn(turn);
+      });
+      es.addEventListener("envelope", function (e) {
+        var env = JSON.parse(e.data);
+        if (env.ms > 0 && Array.isArray(env.levels)) {
+          speechEnvelope = env;
+          envelopeStarted = performance.now();
+        }
+      });
+      es.addEventListener("timing", function (e) {
+        if (!debug) return;
+        var data = JSON.parse(e.data);
+        var stages = Object.keys(data).filter(function (key) {
+          return key !== "total_ms";
+        }).sort(function (a, b) { return data[b] - data[a]; }).slice(0, 3);
+        timing.textContent = "last " + data.total_ms.toFixed(1) + "ms · " +
+          stages.map(function (key) {
+            return key + " " + data[key].toFixed(1) + "ms";
+          }).join(" · ");
+      });
+      es.onerror = function () {
+        es.close(); setOffline(true); setTimeout(connect, 3000);
+      };
+    }).catch(function () {
+      setOffline(true); setTimeout(connect, 3000);
+    });
+  }
+  setState("idle");
+  fit();
+  connect();
+})();
+</script>
+</body>
+</html>
