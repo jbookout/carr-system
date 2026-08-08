@@ -15,21 +15,57 @@ import AppKit
 import ApplicationServices
 
 enum CaretLocator {
+    /// Electron/Chromium apps keep their AX tree OFF until a client flips
+    /// this app-level attribute — without it, every query returns
+    /// cannotComplete and the caret can never be found (probed live against
+    /// the Claude desktop app, 2026-08-08: set returns success, and the tree
+    /// starts answering). Flipped at most once per pid; the set is harmless
+    /// on apps that don't implement the attribute (notImplemented error).
+    private static var activatedPids = Set<pid_t>()
+
+    private static func activateElectronTree(for app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard !activatedPids.contains(pid) else { return }
+        activatedPids.insert(pid)
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    }
+
     /// Screen rect of the caret (or the collapsed selection) in AppKit
     /// bottom-left-origin coordinates, or nil if it cannot be determined.
-    /// Never throws, never retries — one shot at the AX calls and back out,
-    /// since this runs ahead of showing the overlay and must not add
-    /// noticeable delay to "the panel appeared."
+    /// Never throws — one pass, with a single retry through the frontmost
+    /// app's own AX element after the Electron activation flip, since this
+    /// runs ahead of showing the overlay and must not add noticeable delay
+    /// to "the panel appeared." First capture inside a freshly-activated
+    /// Electron app may still fall back (the tree builds asynchronously);
+    /// the second one anchors.
     static func caretScreenRect() -> CGRect? {
         let systemWide = AXUIElementCreateSystemWide()
 
+        var focusedElement: AXUIElement?
         var focusedRef: CFTypeRef?
         let focusedResult = AXUIElementCopyAttributeValue(
             systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
         )
-        guard focusedResult == .success, let focusedRef,
-              CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else { return nil }
-        let focusedElement = focusedRef as! AXUIElement
+        if focusedResult == .success, let focusedRef,
+           CFGetTypeID(focusedRef) == AXUIElementGetTypeID() {
+            focusedElement = (focusedRef as! AXUIElement)
+        } else if let front = NSWorkspace.shared.frontmostApplication {
+            // System-wide lookup failed — the Electron-off-by-default case.
+            // Flip the tree on and ask the app element directly.
+            activateElectronTree(for: front)
+            usleep(150_000)
+            let appElement = AXUIElementCreateApplication(front.processIdentifier)
+            var appFocusedRef: CFTypeRef?
+            let appResult = AXUIElementCopyAttributeValue(
+                appElement, kAXFocusedUIElementAttribute as CFString, &appFocusedRef
+            )
+            guard appResult == .success, let appFocusedRef,
+                  CFGetTypeID(appFocusedRef) == AXUIElementGetTypeID() else { return nil }
+            focusedElement = (appFocusedRef as! AXUIElement)
+        }
+        guard let focusedElement else { return nil }
 
         var rangeRef: CFTypeRef?
         let rangeResult = AXUIElementCopyAttributeValue(
