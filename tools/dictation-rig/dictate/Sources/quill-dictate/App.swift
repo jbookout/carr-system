@@ -174,7 +174,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         guard config.livePreview, let previewServer, previewServer.isSpawned else { return }
         previewGeneration += 1
         let generation = previewGeneration
-        previewOverlay.show(initial: "listening…")
+
+        // Caret lookup (2026-08-08) runs off-main: AX calls can stall in
+        // some apps, and this path sits downstream of the event tap, so it
+        // must never add latency to "the preview appeared." One lookup per
+        // capture start, not per tick — the caret doesn't move while Joe
+        // holds the key and talks, so re-querying every tick would just be
+        // wasted AX round-trips. The generation check on the way back
+        // guards against a slow lookup landing after this capture already
+        // ended (stopPreview bumps previewGeneration and hides the panel).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let caretRect = CaretLocator.caretScreenRect()
+            DispatchQueue.main.async {
+                guard let self, generation == self.previewGeneration else { return }
+                self.previewOverlay.show(initial: "listening…", near: caretRect)
+            }
+        }
 
         let timer = Timer(timeInterval: Double(config.previewIntervalMs) / 1000.0, repeats: true) { [weak self] _ in
             self?.previewTick(generation: generation)

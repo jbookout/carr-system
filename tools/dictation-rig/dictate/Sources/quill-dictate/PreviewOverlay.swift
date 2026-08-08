@@ -26,13 +26,24 @@ final class PreviewOverlay {
     private let maxWidth: CGFloat = 480
     private let horizontalPadding: CGFloat = 16
     private let verticalPadding: CGFloat = 10
+    private let caretGap: CGFloat = 8
+
+    /// Caret rect (AppKit bottom-left coords) to anchor under, captured once
+    /// per `show` and reused by every `update` in the same capture — nil
+    /// means "no caret found this capture," which keeps the old fixed
+    /// under-the-menu-bar position rather than jumping around on a miss.
+    private var anchor: CGRect?
 
     /// Build (once) and show the panel with placeholder text. Cheap to call
     /// repeatedly — reuses the same panel across captures instead of
     /// rebuilding, so rapid push-to-talk taps don't churn NSWindow objects.
-    func show(initial: String) {
+    /// `near` is the caret rect from CaretLocator, already converted to
+    /// AppKit coordinates; pass nil (or omit) to keep the original
+    /// under-the-menu-bar placement, e.g. when the caret couldn't be found.
+    func show(initial: String, near anchor: CGRect? = nil) {
         DispatchQueue.main.async { [self] in
             if panel == nil { buildPanel() }
+            self.anchor = anchor
             setText(initial)
             reposition()
             panel?.orderFrontRegardless() // NOT makeKeyAndOrderFront — never steal focus
@@ -107,13 +118,16 @@ final class PreviewOverlay {
         self.panel = p
     }
 
-    /// Horizontally centered on the main screen, just below the menu bar.
-    /// Recomputed on every show/update because the label's height changes
-    /// with content (1-3 lines). NSTextField has no UIKit-style sizeThatFits,
-    /// so the wrapped height is measured directly off the string with
-    /// boundingRect and clamped to 3 lines worth of height.
+    /// Anchored under the text caret when one was found for this capture
+    /// (see `anchor`/Wispr-Flow-style placement, 2026-08-08); otherwise
+    /// horizontally centered on the main screen, just below the menu bar —
+    /// the original placement, untouched. Recomputed on every show/update
+    /// because the label's height changes with content (1-3 lines).
+    /// NSTextField has no UIKit-style sizeThatFits, so the wrapped height is
+    /// measured directly off the string with boundingRect and clamped to 3
+    /// lines worth of height.
     private func reposition() {
-        guard let panel, let screen = NSScreen.main else { return }
+        guard let panel else { return }
         let availableWidth = maxWidth - horizontalPadding * 2
         let fitHeight = PreviewOverlay.measuredHeight(
             for: label.stringValue, font: label.font ?? .systemFont(ofSize: 14),
@@ -124,16 +138,45 @@ final class PreviewOverlay {
 
         label.frame = NSRect(x: horizontalPadding, y: verticalPadding, width: availableWidth, height: fitHeight)
 
-        let screenFrame = screen.frame
-        let visibleFrame = screen.visibleFrame
-        // Just below the menu bar: menu bar occupies the gap between
-        // frame.maxY and visibleFrame.maxY on the main screen.
-        let topY = screenFrame.maxY - (screenFrame.maxY - visibleFrame.maxY) - 8
-        let originX = screenFrame.midX - panelWidth / 2
-        let originY = topY - panelHeight
+        let origin: CGPoint
+        if let anchor {
+            origin = anchoredOrigin(for: anchor, panelWidth: panelWidth, panelHeight: panelHeight)
+        } else {
+            guard let screen = NSScreen.main else { return }
+            let screenFrame = screen.frame
+            let visibleFrame = screen.visibleFrame
+            // Just below the menu bar: menu bar occupies the gap between
+            // frame.maxY and visibleFrame.maxY on the main screen.
+            let topY = screenFrame.maxY - (screenFrame.maxY - visibleFrame.maxY) - 8
+            origin = CGPoint(x: screenFrame.midX - panelWidth / 2, y: topY - panelHeight)
+        }
 
-        panel.setFrame(NSRect(x: originX, y: originY, width: panelWidth, height: panelHeight), display: true)
+        panel.setFrame(NSRect(x: origin.x, y: origin.y, width: panelWidth, height: panelHeight), display: true)
         (panel.contentView as? NSVisualEffectView)?.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
+    }
+
+    /// Panel origin for the caret-anchored case: starts at the caret's x,
+    /// top edge `caretGap` below the caret's bottom edge (AppKit y grows
+    /// upward, so "below" is the caret's minY), then clamped fully onto
+    /// whichever screen the caret sits on. Clamping matters because a caret
+    /// near a screen edge — e.g. the last line of a maximized window, or a
+    /// caret near the right edge on a narrow window — would otherwise push
+    /// the fixed-width panel partway or fully off-screen.
+    private func anchoredOrigin(for anchor: CGRect, panelWidth: CGFloat, panelHeight: CGFloat) -> CGPoint {
+        let screen = PreviewOverlay.screen(containing: anchor.origin) ?? NSScreen.main
+        let panelTop = anchor.minY - caretGap
+        var originX = anchor.minX
+        var originY = panelTop - panelHeight
+
+        if let bounds = screen?.frame {
+            originX = min(max(originX, bounds.minX), bounds.maxX - panelWidth)
+            originY = min(max(originY, bounds.minY), bounds.maxY - panelHeight)
+        }
+        return CGPoint(x: originX, y: originY)
+    }
+
+    private static func screen(containing point: CGPoint) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(point) }
     }
 
     private static func measuredHeight(for string: String, font: NSFont, width: CGFloat, maxLines: Int) -> CGFloat {
