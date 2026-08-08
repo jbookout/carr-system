@@ -43,15 +43,31 @@ final class GestureEngine {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    // Right-cmd gesture state
+    // Trigger gesture state (one gesture at a time, whichever trigger key)
     private var triggerDownAt: Date?
     private var triggerCancelled = false
+    private var triggerUsesDeviceBit = true
+    private var activeTriggerKey: Int64?
+
+    /// Modifier signature per trigger keycode: the generic flag mask plus the
+    /// device-level bit that distinguishes left/right instances.
+    private struct ModifierSignature { let mask: CGEventFlags; let deviceBit: UInt64 }
+    private static let signatures: [Int64: ModifierSignature] = [
+        54: ModifierSignature(mask: .maskCommand, deviceBit: 0x10),    // right cmd
+        55: ModifierSignature(mask: .maskCommand, deviceBit: 0x8),     // left cmd
+        62: ModifierSignature(mask: .maskControl, deviceBit: 0x2000),  // right ctrl
+        59: ModifierSignature(mask: .maskControl, deviceBit: 0x1),     // left ctrl
+        61: ModifierSignature(mask: .maskAlternate, deviceBit: 0x40),  // right opt
+        58: ModifierSignature(mask: .maskAlternate, deviceBit: 0x20),  // left opt
+    ]
     private var lastTapAt: Date?
     private var holdTimer: DispatchWorkItem?
 
     // Conversation mode
     private(set) var conversationMode = false
     private var spaceHeld = false
+    private var spaceHoldTimer: DispatchWorkItem?
+    private var spaceCapturing = false
 
     /// What is capturing right now (nil = idle).
     private(set) var activeCapture: CaptureKind?
@@ -59,7 +75,6 @@ final class GestureEngine {
     /// so utterances cannot interleave out of order.
     var busy = false
 
-    private static let rightCmdDeviceBit: UInt64 = 0x10 // NX_DEVICERCMDKEYMASK
 
     init(config: Config) {
         self.config = config
@@ -113,10 +128,35 @@ final class GestureEngine {
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
-        if type == .flagsChanged && keyCode == config.triggerKeyCode {
-            let physicallyDown = (event.flags.rawValue & GestureEngine.rightCmdDeviceBit) != 0
-            if physicallyDown { triggerPressed() } else { triggerReleased() }
-            return Unmanaged.passUnretained(event)
+        if type == .flagsChanged && config.triggerKeyCodes.contains(keyCode) {
+            let sig = GestureEngine.signatures[keyCode]
+                ?? ModifierSignature(mask: .maskCommand, deviceBit: 0)
+            // Trust the device-level left/right bit when the press carried
+            // it; fall back to the generic modifier flag when it didn't
+            // (some third-party boards omit the bit — found live 2026-08-07).
+            let deviceBit = sig.deviceBit != 0 && (event.flags.rawValue & sig.deviceBit) != 0
+            let maskSet = event.flags.contains(sig.mask)
+            if triggerDownAt == nil {
+                if maskSet {
+                    activeTriggerKey = keyCode
+                    triggerUsesDeviceBit = deviceBit
+                    triggerPressed()
+                }
+            } else if activeTriggerKey == keyCode {
+                let stillDown = triggerUsesDeviceBit ? deviceBit : maskSet
+                if !stillDown {
+                    activeTriggerKey = nil
+                    triggerReleased()
+                }
+            }
+            // CONSUMED: quill-dictate owns its trigger keys outright. Siri's
+            // "press either cmd twice" shortcut kept firing on the double-tap
+            // no matter what the Settings dropdown said (live, 2026-08-07),
+            // so the collision is removed structurally — flagsChanged events
+            // for trigger keycodes never leave the tap. Subsequent keyDowns
+            // still carry the modifier in their own flags field, so a
+            // trigger+key chord still reaches apps as a shortcut.
+            return nil
         }
 
         // Another key while the trigger is held = a real shortcut. Stand down.
@@ -124,14 +164,24 @@ final class GestureEngine {
             cancelTriggerGesture()
         }
 
-        // Conversation mode: bare space is the talk key and is consumed.
+        // Escape is the panic exit: always leaves conversation mode, and the
+        // keystroke still reaches the app underneath.
+        if conversationMode && type == .keyDown && keyCode == 53 {
+            toggleConversationMode()
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Conversation mode: HELD space is the talk key. A quick tap is
+        // replayed as a normal typed space so typing keeps working — being in
+        // the mode must never mean losing the space bar (live lesson,
+        // 2026-08-07: Joe's spaces were silently eaten mid-sentence).
         if conversationMode && keyCode == config.conversationKeyCode {
             let hasModifiers = !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
             if hasModifiers { return Unmanaged.passUnretained(event) }
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             if type == .keyDown {
                 if !isRepeat { spacePressed() }
-                return nil // consumed
+                return nil // consumed (replayed on quick release)
             }
             if type == .keyUp {
                 spaceReleased()
@@ -209,8 +259,11 @@ final class GestureEngine {
 
     private func toggleConversationMode() {
         conversationMode.toggle()
-        if !conversationMode, spaceHeld || activeCapture == .conversation {
+        if !conversationMode {
+            spaceHoldTimer?.cancel()
+            spaceHoldTimer = nil
             spaceHeld = false
+            spaceCapturing = false
             if activeCapture == .conversation {
                 activeCapture = nil
                 delegate?.gestureCaptureAborted()
@@ -222,17 +275,41 @@ final class GestureEngine {
     private func spacePressed() {
         guard !spaceHeld else { return }
         spaceHeld = true
-        guard activeCapture == nil, !busy else { return }
-        activeCapture = .conversation
-        delegate?.gestureCaptureStarted(kind: .conversation)
+        spaceCapturing = false
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.spaceHeld, self.conversationMode,
+                  self.activeCapture == nil, !self.busy else { return }
+            self.spaceCapturing = true
+            self.activeCapture = .conversation
+            self.delegate?.gestureCaptureStarted(kind: .conversation)
+        }
+        spaceHoldTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(config.spaceHoldThresholdMs), execute: work)
     }
 
     private func spaceReleased() {
         guard spaceHeld else { return }
         spaceHeld = false
-        if activeCapture == .conversation {
+        spaceHoldTimer?.cancel()
+        spaceHoldTimer = nil
+        if spaceCapturing, activeCapture == .conversation {
+            spaceCapturing = false
             activeCapture = nil
             delegate?.gestureCaptureEnded()
+        } else {
+            // Quick tap: give the app the space it asked for.
+            GestureEngine.postSyntheticSpace(keyCode: CGKeyCode(config.conversationKeyCode))
         }
+    }
+
+    /// Replay a plain space keystroke, marked so our own tap ignores it.
+    static func postSyntheticSpace(keyCode: CGKeyCode) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else { return }
+        down.setIntegerValueField(.eventSourceUserData, value: Inserter.syntheticMarker)
+        up.setIntegerValueField(.eventSourceUserData, value: Inserter.syntheticMarker)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 }

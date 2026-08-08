@@ -11,10 +11,14 @@
 import Foundation
 
 struct Config: Codable {
-    /// Virtual keycode of the push-to-talk / mode-toggle trigger.
-    /// 54 = right command — confirmed present on both of Joe's keyboards
-    /// (MacBook internal + Logitech Mac-layout universal), decision f799fd49.
-    var triggerKeyCode: Int64 = 54
+    /// Virtual keycodes of the push-to-talk / mode-toggle trigger — a SET,
+    /// one entry per keyboard, same gesture on each. 54 = right command
+    /// (MacBook internal). 62 = right control (the Logitech's key right of
+    /// space — live capture 2026-08-07 showed that board emits NO true
+    /// right-cmd: its right side sends rctrl/ropt/LEFT-cmd, so decision
+    /// f799fd49's "right-cmd on both" premise failed at the emission level
+    /// and the config absorbed it, exactly as the ruling intended).
+    var triggerKeyCodes: [Int64] = [54, 62]
 
     /// Keycode that speaks while held inside conversation mode. 49 = space.
     var conversationKeyCode: Int64 = 49
@@ -27,6 +31,12 @@ struct Config: Codable {
 
     /// Two taps within this window toggle conversation mode.
     var doubleTapGapMs: Int = 400
+
+    /// Inside conversation mode: a space held at least this long talks; a
+    /// quicker tap is passed through as a normal typed space, so typing
+    /// still works while the mode is on (added after the 2026-08-07 live
+    /// test where Joe's spaces were silently eaten).
+    var spaceHoldThresholdMs: Int = 200
 
     /// "paste" (clipboard + synthetic cmd-V, default) or "type" (synthetic
     /// keystrokes; slower, but leaves the clipboard alone).
@@ -53,11 +63,12 @@ struct Config: Codable {
     var logPath: String = NSString(string: "~/Library/Logs/quill-dictate.log").expandingTildeInPath
 
     enum CodingKeys: String, CodingKey {
-        case triggerKeyCode = "trigger_key_code"
+        case triggerKeyCodes = "trigger_key_codes"
         case conversationKeyCode = "conversation_key_code"
         case holdThresholdMs = "hold_threshold_ms"
         case tapMaxMs = "tap_max_ms"
         case doubleTapGapMs = "double_tap_gap_ms"
+        case spaceHoldThresholdMs = "space_hold_threshold_ms"
         case insertion
         case sounds
         case minPeakLevel = "min_peak_level"
@@ -100,10 +111,12 @@ struct Config: Codable {
 /// Every field optional so a config file may set only what it changes.
 private struct PartialConfig: Codable {
     var trigger_key_code: Int64?
+    var trigger_key_codes: [Int64]?
     var conversation_key_code: Int64?
     var hold_threshold_ms: Int?
     var tap_max_ms: Int?
     var double_tap_gap_ms: Int?
+    var space_hold_threshold_ms: Int?
     var insertion: String?
     var sounds: Bool?
     var min_peak_level: Double?
@@ -115,11 +128,14 @@ private struct PartialConfig: Codable {
     var log_path: String?
 
     func overlay(onto config: inout Config) {
-        if let v = trigger_key_code { config.triggerKeyCode = v }
+        // Old single-key form still honored; the list form wins when present.
+        if let v = trigger_key_code { config.triggerKeyCodes = [v] }
+        if let v = trigger_key_codes, !v.isEmpty { config.triggerKeyCodes = v }
         if let v = conversation_key_code { config.conversationKeyCode = v }
         if let v = hold_threshold_ms { config.holdThresholdMs = v }
         if let v = tap_max_ms { config.tapMaxMs = v }
         if let v = double_tap_gap_ms { config.doubleTapGapMs = v }
+        if let v = space_hold_threshold_ms { config.spaceHoldThresholdMs = v }
         if let v = insertion { config.insertion = v }
         if let v = sounds { config.sounds = v }
         if let v = min_peak_level { config.minPeakLevel = v }

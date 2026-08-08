@@ -23,22 +23,30 @@ ggml-large-v3-turbo, `vocab-prompt.txt`. Never a second engine.
 ## Phase B — quill-dictate (system-wide dictation to the active text box)
 
 `dictate/` — own Swift package (menu-bar agent, no dependency on vendor/quill).
-One trigger key, both keyboards (MacBook + Logitech Mac-layout; decision
-f799fd49):
+One gesture set, both keyboards (decision f799fd49; trigger emissions
+live-corrected 2026-08-07):
 
-- **HOLD right-cmd** = push-to-talk: speak while held, release, text lands at
-  the cursor of whatever app has focus.
-- **DOUBLE-TAP right-cmd** = toggle conversation mode; inside it, **hold
-  space** speaks, release disengages. Bare space is consumed while the mode is
-  on (that is what makes it a talk key), so the menu-bar icon changes and an
-  audible cue marks entry/exit. Space with modifiers (cmd-space etc.) passes
-  through.
-- Any other key pressed while right-cmd is held = ordinary shortcut; capture
-  aborts, nothing is consumed. Normal typing and left-hand shortcuts are
-  untouched.
+- **HOLD the trigger key** = push-to-talk: speak while held, release, text
+  lands at the cursor of whatever app has focus. Trigger keys: **right-cmd
+  (54)** on the MacBook, **right-ctrl (62)** on the Logitech — live capture
+  showed the Logitech emits NO true right-cmd (its right side sends
+  rctrl/ropt/left-cmd), so the ruling's "one key" became one *position* (the
+  key right of space), absorbed by the config exactly as the ruling intended.
+- **DOUBLE-TAP the trigger** = toggle conversation mode; inside it, **hold
+  space** speaks, release disengages. A QUICK space tap types a normal space
+  (replayed synthetically), so typing keeps working inside the mode; **Esc
+  always exits it**. The menu-bar icon changes and an audible cue marks
+  entry/exit. Space with modifiers passes through.
+- Trigger flagsChanged events are CONSUMED — the agent owns those keys.
+  Required because Siri's "press either cmd twice" shortcut kept firing on
+  the double-tap regardless of the Settings dropdown (live, 2026-08-07).
+  Trigger+key chords still reach apps (keyDowns carry their own flags), and
+  any other key pressed during a hold aborts capture into an ordinary
+  shortcut. Normal typing and left-hand shortcuts are untouched.
 
-The trigger key lives in `~/.config/quill-dictate/config.json`
-(`trigger_key_code`, 54 = right-cmd) — a future keyboard is a one-line change.
+Trigger keys live in `~/.config/quill-dictate/config.json`
+(`trigger_key_codes`, a list — one entry per keyboard; a future keyboard is a
+one-line change).
 Insertion is clipboard-paste (saved string restored 2s later; a non-string
 clipboard — image, file — is not resurrected, known v1 limit) or `"type"` mode
 for synthetic keystrokes. A silence gate (`min_peak_level`, min 0.35s) stops

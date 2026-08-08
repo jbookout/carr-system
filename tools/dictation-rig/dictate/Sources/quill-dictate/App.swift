@@ -19,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.shared.path = config.logPath
-        Log.shared.line("START quill-dictate pid=\(ProcessInfo.processInfo.processIdentifier) trigger_key=\(config.triggerKeyCode)")
+        Log.shared.line("START quill-dictate pid=\(ProcessInfo.processInfo.processIdentifier) trigger_keys=\(config.triggerKeyCodes)")
 
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

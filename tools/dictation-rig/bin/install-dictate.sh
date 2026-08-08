@@ -24,11 +24,12 @@ mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG" ]; then
     cat > "$CONFIG" <<'JSON'
 {
-  "trigger_key_code": 54,
+  "trigger_key_codes": [54, 62],
   "conversation_key_code": 49,
   "hold_threshold_ms": 200,
   "tap_max_ms": 350,
   "double_tap_gap_ms": 400,
+  "space_hold_threshold_ms": 200,
   "insertion": "paste",
   "sounds": true,
   "min_peak_level": 0.015,

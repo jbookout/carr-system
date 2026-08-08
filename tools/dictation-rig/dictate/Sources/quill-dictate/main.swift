@@ -31,8 +31,11 @@ func runDoctor() -> Never {
           detail: String(describing: AVCaptureDevice.authorizationStatus(for: .audio).rawValue))
     check("accessibility", AXIsProcessTrusted(),
           detail: AXIsProcessTrusted() ? "trusted" : "not granted — System Settings > Privacy & Security > Accessibility")
-    check("trigger key", config.triggerKeyCode == 54,
-          detail: "keycode \(config.triggerKeyCode)\(config.triggerKeyCode == 54 ? " (right-cmd)" : " (custom)")")
+    let names: [Int64: String] = [54: "right-cmd", 55: "left-cmd", 62: "right-ctrl",
+                                  59: "left-ctrl", 61: "right-opt", 58: "left-opt"]
+    let triggerDetail = config.triggerKeyCodes
+        .map { "\($0) (\(names[$0] ?? "custom"))" }.joined(separator: ", ")
+    check("trigger keys", !config.triggerKeyCodes.isEmpty, detail: triggerDetail)
     exit(failures == 0 ? 0 : 1)
 }
 
