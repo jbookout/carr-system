@@ -61,7 +61,15 @@ def parse_file(path):
     if m:
         title = m.group(1).strip()
     stem = Path(path).stem
-    slug = kebab(stem)
+    # Generic stems (INDEX.md lives in half the folders) take their parent
+    # folder into the slug, or every index after the first dies on the unique
+    # constraint — caught by the batch-2 dry run, 2026-08-08.
+    if stem.lower() in ("index", "readme"):
+        parent = Path(path).parent.name
+        slug = kebab(f"{parent}-{stem}") if parent and parent != "CARR AI" \
+            else kebab(f"root-{stem}")
+    else:
+        slug = kebab(stem)
     parts = re.split(r"^##\s+(.+)$", text, flags=re.M)
     sections = []
     seen = {}
