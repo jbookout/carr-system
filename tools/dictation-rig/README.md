@@ -1,10 +1,61 @@
 # dictation-rig — local meeting capture + transcription on our own whisper
 
-The CARR dictation rig, Phase A: meeting mode. Spec and rulings:
+The CARR dictation rig. Phase A: meeting mode. Phase B: desk dictation
+(quill-dictate). Spec and rulings:
 `CARR AI/00_Context/idea-inbox/2026-07-30-local-dictation-tool-note.md` (five addenda);
-build plan: `specs/dictation-rig-build-plan-2026-08-07.md`.
+build plan: `specs/dictation-rig-build-plan-2026-08-07.md`; Phase B ruled design:
+loop #243 / decision f799fd49.
 
-## Shape
+## Two modes, one hard boundary
+
+- **Meeting mode** (quill, Phase A): a counterparty exists, so the consent
+  announcement is structural and non-negotiable.
+- **Desk dictation** (quill-dictate, Phase B): Joe speaking to his own machine,
+  no counterparty, so there is NO consent announcement — and the two modes stay
+  visibly distinct (separate binaries, separate menu-bar icons, separate
+  launchd labels) precisely so that boundary stays true. The privacy property
+  of dictation mode is structural too: the mic is live only while a key is
+  physically held.
+
+Both modes share ONE transcription engine: `/opt/homebrew/bin/whisper-cli`,
+ggml-large-v3-turbo, `vocab-prompt.txt`. Never a second engine.
+
+## Phase B — quill-dictate (system-wide dictation to the active text box)
+
+`dictate/` — own Swift package (menu-bar agent, no dependency on vendor/quill).
+One trigger key, both keyboards (MacBook + Logitech Mac-layout; decision
+f799fd49):
+
+- **HOLD right-cmd** = push-to-talk: speak while held, release, text lands at
+  the cursor of whatever app has focus.
+- **DOUBLE-TAP right-cmd** = toggle conversation mode; inside it, **hold
+  space** speaks, release disengages. Bare space is consumed while the mode is
+  on (that is what makes it a talk key), so the menu-bar icon changes and an
+  audible cue marks entry/exit. Space with modifiers (cmd-space etc.) passes
+  through.
+- Any other key pressed while right-cmd is held = ordinary shortcut; capture
+  aborts, nothing is consumed. Normal typing and left-hand shortcuts are
+  untouched.
+
+The trigger key lives in `~/.config/quill-dictate/config.json`
+(`trigger_key_code`, 54 = right-cmd) — a future keyboard is a one-line change.
+Insertion is clipboard-paste (saved string restored 2s later; a non-string
+clipboard — image, file — is not resurrected, known v1 limit) or `"type"` mode
+for synthetic keystrokes. A silence gate (`min_peak_level`, min 0.35s) stops
+whisper hallucinating text onto an empty press. Apple's built-in dictation was
+verified never-enabled on this Mac (no `Dictation Enabled` key), so nothing
+collides with the trigger.
+
+Build: `bin/build-dictate.sh` (same toolchain guard as quill — see Build).
+Deploy: `bin/install-dictate.sh` (config + launchd agent
+`com.carr.quill-dictate`; `--config-only` skips launchd). Diagnostics:
+`quill-dictate doctor` (headless health check) and
+`quill-dictate transcribe <wav>` (engine test without keyboard or permissions).
+Permissions, one-time, per binary identity: Accessibility (event tap + paste)
+and Microphone — a rebuild changes the code hash and macOS may re-ask; that is
+TCC working, not a defect. Logs: `~/Library/Logs/quill-dictate.log`.
+
+## Shape (Phase A: meeting mode)
 
 - `vendor/quill/` — digimata/quill, pinned submodule (commit 855869e, MIT, evaluated
   2026-08-07). Does the capture: one menu-bar click records mic + all system audio as
