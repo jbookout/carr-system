@@ -15,15 +15,22 @@ SPEAK="$TOOL_DIR/bin/speak.py"
 VENV="$TOOL_DIR/.venv-tts/bin/python"
 [ -x "$VENV" ] || { echo "no .venv-tts — run bin/setup-tts-env.sh first"; exit 2; }
 
-BRIDGES=(
-  "Checking the record."
-  "One moment."
-  "Let me pull that up."
-  "Working on it."
-  "That write needs your confirm at the keyboard."
-  "I'd need the desk for that one."
-  "Say again? I lost part of that."
+# THE LIST LIVES IN bridges.py, not here. It used to be duplicated in this
+# array, and the duplication is exactly how the kit came to hold seven screened
+# phrases while the loop played only one of them: nothing tied the rendered set
+# to the spoken set. bridges.all_phrases() is now the single source of truth —
+# add a phrase there and this script renders it on the next run.
+#
+# The situational phrases this array used to carry ("Checking the record.",
+# "Let me pull that up.", and the three desk/confirm lines) are deliberately NOT
+# in the rotation and are listed in bridges.py with the reason. They stay
+# rendered if already cached; nothing here deletes them.
+IFS=$'\n' read -r -d '' -a BRIDGES < <(
+  python3 -c "import sys; sys.path.insert(0, '$TOOL_DIR/bin'); import bridges; print('\n'.join(bridges.all_phrases()))"
+  printf '\0'
 )
+[ ${#BRIDGES[@]} -gt 0 ] || { echo "bridges.py returned no phrases"; exit 2; }
+echo "bridge kit: ${#BRIDGES[@]} phrase(s) from bridges.py"
 
 # Render via speak.py's live tier (which caches), but with 4-take screening:
 # temporarily route render_phrase through --takes by rendering directly here,

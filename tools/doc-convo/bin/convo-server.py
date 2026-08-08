@@ -13,6 +13,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import bridges
 import convo_core
 import reflexes
 import speak
@@ -22,6 +23,12 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "4680"))
 PANEL = convo_core.TOOL / "panel" / "panel.html"
 TIMINGS = convo_core.TOOL / "assets" / "turn-timings.jsonl"
+# How long the brain gets to answer before Doc bridges. Measured brain floor is
+# 3.3s (n=5, turn-timings.jsonl 2026-08-08), so this opens on every real turn
+# today — it is here so a faster transport does not produce a stutter.
+BRIDGE_GATE_S = float(os.environ.get("DOC_BRIDGE_GATE_S", "0.6"))
+# Deadlock rail only: the longest substance will ever wait on a bridge phrase.
+BRIDGE_MAX_WAIT_S = 6.0
 
 
 def split_card(reply: str) -> tuple[str, object | None]:
@@ -230,11 +237,49 @@ class Engine:
             # read as canned) — record language only when a record is truly
             # in play, which v0 can't know pre-brain.
             self.progress("thinking it over")
-            subprocess.Popen(
-                [sys.executable, str(convo_core.SPEAK), "--cache-only",
-                 "One moment."],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            # The bridge rotates (bridges.py) instead of saying "One moment."
+            # every single turn — the seven-phrase kit render-bridges.sh screens
+            # into the cache was being spent one phrase deep. It is GATED: if
+            # the brain produces a sentence inside BRIDGE_GATE_S there is
+            # nothing to cover, and speaking over a fast answer would be a
+            # stutter we would then have to engineer back out. Today the brain's
+            # floor is ~3.3s so the gate effectively always opens; it exists so
+            # this stays correct as the transport gets faster.
+            bridge_done = threading.Event()
+
+            def _say_cached(phrase: str) -> bool:
+                """Play a pre-rendered phrase. True if it was actually cached.
+
+                Never falls through to a live render: a 30-second render of a
+                holding phrase would arrive long after the answer it covers.
+                """
+                return subprocess.run(
+                    [sys.executable, str(convo_core.SPEAK),
+                     "--cache-only", phrase],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                ).returncode == 0
+
+            def play_bridge() -> None:
+                try:
+                    if bridge_done.wait(BRIDGE_GATE_S):
+                        return          # brain beat us; stay quiet
+                    spoke = False
+                    for phrase in bridges.choose():
+                        if bridge_done.is_set():
+                            return      # first sentence landed mid-bridge
+                        spoke |= _say_cached(phrase)
+                    # SAFE DEGRADE: --cache-only plays nothing on a miss, so a
+                    # partially rendered kit would leave Doc SILENT where he
+                    # used to bridge — worse than the repetition this replaces.
+                    # If nothing in the rotation was cached, fall back to the
+                    # phrase that has always been there.
+                    if not spoke and not bridge_done.is_set():
+                        _say_cached(bridges.FALLBACK)
+                finally:
+                    bridge_finished.set()
+
+            bridge_finished = threading.Event()
+            threading.Thread(target=play_bridge, daemon=True).start()
             speaking = False
             streamed_turn = None
             streamed_doc = ""
@@ -260,15 +305,25 @@ class Engine:
                     self.set_state("speaking")
 
             def speak_sentences() -> None:
+                first = True
                 while True:
                     sentence = speech_queue.get()
                     if sentence is speech_done:
                         return
+                    if first:
+                        # Never talk over our own bridge. A phrase already
+                        # playing runs to its end; nothing new starts. The
+                        # timeout is a deadlock rail, not a schedule — if the
+                        # bridge thread somehow never finishes, substance still
+                        # wins.
+                        bridge_finished.wait(BRIDGE_MAX_WAIT_S)
+                        first = False
                     speak.stream(sentence, before_play=emit_envelope,
                                  on_first_play=start_speaking)
 
             def on_sentence(sentence: str) -> None:
                 nonlocal streamed_doc, streamed_turn
+                bridge_done.set()       # substance is here; stop bridging
                 if timing is not None:
                     timing.mark("brain_first_sentence")
                     timing.mark("tts_start")
