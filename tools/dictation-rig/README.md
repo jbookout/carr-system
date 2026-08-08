@@ -74,9 +74,16 @@ Deploy: `bin/install-dictate.sh` (config + launchd agent
 `com.carr.quill-dictate`; `--config-only` skips launchd). Diagnostics:
 `quill-dictate doctor` (headless health check) and
 `quill-dictate transcribe <wav>` (engine test without keyboard or permissions).
-Permissions, one-time, per binary identity: Accessibility (event tap + paste)
-and Microphone — a rebuild changes the code hash and macOS may re-ask; that is
-TCC working, not a defect. Logs: `~/Library/Logs/quill-dictate.log`.
+Permissions, one-time: Accessibility (event tap + paste) and Microphone.
+SIGNING (2026-08-08): the build signs the binary with a self-signed keychain
+identity ("CARR Quill Dictate"), pinning the Designated Requirement to
+`identifier "com.carr.quill-dictate" and certificate leaf = H"..."`. Neither
+half changes when the code does, so the Accessibility grant now SURVIVES
+rebuilds — before this, every rebuild produced a cdhash-based DR and cost a
+remove-and-re-add in System Settings. A machine without that identity (Dell's,
+a fresh checkout) still builds fine, just unsigned and back to re-granting per
+rebuild; recreate it in Keychain Access > Certificate Assistant > Create a
+Certificate, type Code Signing, named exactly "CARR Quill Dictate". Logs: `~/Library/Logs/quill-dictate.log`.
 
 ## Shape (Phase A: meeting mode)
 
