@@ -77,6 +77,30 @@ func runDoctor() -> Never {
     // binary or model means the cleanup pass will silently never engage
     // (final path quietly falls back to heuristic-only every time) — worth a
     // red row rather than a silent behavior change discovered live.
+    // Signing row (added 2026-08-08): an unsigned binary gets a cdhash-based
+    // Designated Requirement, so EVERY rebuild silently invalidates the
+    // Accessibility grant and dictation goes dead until someone re-adds it in
+    // System Settings. Signed with the stable identity, the DR is
+    // identity-based and survives. Reported here because "why did dictation
+    // stop after a rebuild" is otherwise invisible until it bites.
+    let ownPath = Bundle.main.executablePath ?? CommandLine.arguments[0]
+    let drProcess = Process()
+    drProcess.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+    drProcess.arguments = ["-d", "-r-", ownPath]
+    let drPipe = Pipe()
+    drProcess.standardOutput = drPipe
+    drProcess.standardError = drPipe
+    var drText = ""
+    if (try? drProcess.run()) != nil {
+        drProcess.waitUntilExit()
+        drText = String(data: drPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+    let stableDR = drText.contains("certificate leaf")
+    check("signing", stableDR,
+          detail: stableDR
+              ? "stable identity — the accessibility grant survives rebuilds"
+              : "UNSIGNED (cdhash DR) — every rebuild will need the grant re-added")
+
     check("correction llm", true, detail: "correction_llm=\(config.correctionLLM)")
     if config.correctionLLM != "off" {
         check("cleanup server binary", FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/llama-server"),
