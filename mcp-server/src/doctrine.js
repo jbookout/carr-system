@@ -1,0 +1,589 @@
+// doctrine.js — the doctrine store's verb surface + gate framework (P2 of the
+// doctrine-store build; design/doctrine-store-build-2026-08-07.md, council
+// decision 82a2fb62 amended by 20dfdfcc; schema: migrations/0075).
+//
+// SHAPE. A factory, not a module of free verbs: tools.js calls doctrineTools()
+// with its own envelope machinery so this file runs the SAME idempotency,
+// event-log and error contracts as every other verb, with no circular import.
+//
+// THE GATE FRAMEWORK. Validation is a REGISTRY, never verb code: each check is
+// a row in doctrine_gate_check (severity, applies_to, config) plus a function
+// in GATE_IMPLS below. A new gate ships as a function + an INSERT — no verb
+// rewrite (council verdict, unanimous). Every run persists to doctrine_gate_run
+// + findings, dry or real; any failed `block` finding aborts the transaction
+// with the findings in the error payload, precise enough to self-repair.
+//
+// P2 HONESTY NOTES, each with its named completion point:
+//   * body model is {text} — plain prose sections. Structured per-class JSON
+//     schemas (index entries as edges, dossier fields) land with P4's forced
+//     batch, where the first structured class (index) migrates.
+//   * banned_phrases seeds from the gate row's config; the code fallback list
+//     is the writing-rules hard core (em-dash + the flagged-vocab shortlist).
+//     The full linter stays lint-gate.py; this gate is the DB-side floor.
+//   * claims exist as a table + gate since 0075; the claim/renew/release verbs
+//     are P3 scope. Until then no claim rows exist, so the gate passes clean.
+//   * search is the FTS floor (websearch_to_tsquery over current revisions).
+//     Ranking polish and telemetry are P3 acceptance items.
+
+export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
+
+  // ---------------------------------------------------------------- helpers
+
+  async function resolveDoc(c, ref) {
+    // by id, live slug, or alias — aliases keep old links resolving (0075)
+    let r = await c.query(
+      `select * from doctrine_document where id::text = $1 or slug = $1`, [ref]);
+    if (!r.rows.length) {
+      r = await c.query(
+        `select d.* from doctrine_slug_alias a
+           join doctrine_document d on d.id = a.document_id
+          where a.alias_slug = $1`, [ref]);
+    }
+    if (!r.rows.length)
+      throw new ToolError({ error: "doctrine_doc_not_found", ref,
+        hint: "pass a document id or slug; see doctrine-index for the catalog" });
+    return r.rows[0];
+  }
+
+  async function lockSection(c, sectionId) {
+    const r = await c.query(
+      `select s.*, d.content_class, d.visibility, d.owner_actor_id, d.slug as doc_slug
+         from doctrine_section s join doctrine_document d on d.id = s.document_id
+        where s.id = $1 for update of s`, [sectionId]);
+    if (!r.rows.length)
+      throw new ToolError({ error: "doctrine_section_not_found", section_id: sectionId });
+    return r.rows[0];
+  }
+
+  function versionConflict(c, section) {
+    // The machine-readable conflict contract (council P2 acceptance): who wrote
+    // last, when, from which session — never a bare "conflict" string.
+    return c.query(
+      `select r.version, r.created_at, r.session_key, a.slug as actor
+         from doctrine_revision r join actor a on a.id = r.actor_id
+        where r.section_id = $1 order by r.version desc limit 1`, [section.id]
+    ).then(last => new ToolError({
+      error: "version_conflict",
+      section_id: section.id, section_key: section.section_key,
+      current_version: Number(section.current_version),
+      last_writer: last.rows[0] || null,
+      resolution: "re-read the section (read-doctrine), re-plan against the current body, retry with base_version=current_version. Never overwrite blind.",
+    }));
+  }
+
+  async function bumpGeneration(c) {
+    const g = await c.query(
+      `update doctrine_meta set generation = generation + 1, updated_at = now()
+        where id = 1 returning generation`);
+    return Number(g.rows[0].generation);
+  }
+
+  async function rebuildSnapshot(c, docId, generation) {
+    await c.query(
+      `insert into doctrine_snapshot (document_id, generation, snapshot_json, content_hash, built_at)
+       select d.id, $2,
+              jsonb_build_object(
+                'document', jsonb_build_object('id', d.id, 'slug', d.slug, 'title', d.title,
+                  'content_class', d.content_class, 'visibility', d.visibility),
+                'sections', coalesce((
+                  select jsonb_agg(jsonb_build_object(
+                           'section_id', s.id, 'section_key', s.section_key, 'title', s.title,
+                           'ordinal', s.ordinal, 'version', s.current_version,
+                           'status', s.status, 'review_after', s.review_after,
+                           'body', r.body, 'content_hash', r.content_hash)
+                         order by s.ordinal)
+                    from doctrine_section s
+                    left join doctrine_revision r on r.id = s.current_revision_id
+                   where s.document_id = d.id and s.status = 'active'), '[]'::jsonb),
+                'edges_out', coalesce((
+                  select jsonb_agg(jsonb_build_object('edge_type', e.edge_type,
+                           'source_section_id', e.source_section_id,
+                           'target_section_id', e.target_section_id, 'scope', e.scope))
+                    from doctrine_edge e
+                    join doctrine_section s on s.id = e.source_section_id
+                   where s.document_id = d.id and e.retired_by_revision_id is null), '[]'::jsonb)),
+              md5((select coalesce(string_agg(s.body_hash, '' order by s.ordinal), '')
+                     from doctrine_section s where s.document_id = d.id)),
+              now()
+         from doctrine_document d where d.id = $1
+       on conflict (document_id) do update
+         set generation = excluded.generation, snapshot_json = excluded.snapshot_json,
+             content_hash = excluded.content_hash, built_at = excluded.built_at`,
+      [docId, generation]);
+  }
+
+  // ------------------------------------------------------------ gate runner
+
+  // The writing-rules hard core as a code FALLBACK; the gate row's config
+  // ({"phrases": [...]}) overrides it without a deploy. Em-dash is the first
+  // citizen of the ban list by standing rule.
+  const BANNED_FALLBACK = ["—", "delve", "tapestry", "furthermore,", "in conclusion,"];
+
+  const GATE_IMPLS = {
+    "gates.base_version_match": async () => [],   // enforced structurally in the verb; row exists for audit completeness
+    "gates.body_schema": async (c, ctx) => {
+      if (ctx.op !== "write") return [];
+      const t = ctx.body && ctx.body.text;
+      if (typeof t !== "string" || !t.trim())
+        return [{ message: "body.text must be a non-empty string (P2 body model)", path: "body.text" }];
+      return [];
+    },
+    "gates.banned_phrases": async (c, ctx, cfg) => {
+      if (ctx.op !== "write") return [];
+      const phrases = (cfg && cfg.phrases) || BANNED_FALLBACK;
+      const text = ((ctx.body && ctx.body.text) || "").toLowerCase();
+      return phrases.filter(p => text.includes(p.toLowerCase()))
+        .map(p => ({ message: `banned phrase present: ${JSON.stringify(p)} (writing-rules hard ban)`,
+                     path: "body.text" }));
+    },
+    "gates.slug_unique": async (c, ctx) => {
+      if (ctx.op !== "create") return [];
+      const dup = await c.query(
+        `select 1 from doctrine_document where slug=$1
+         union all select 1 from doctrine_slug_alias where alias_slug=$1`, [ctx.slug]);
+      return dup.rows.length ? [{ message: `slug '${ctx.slug}' already taken (document or alias)`,
+                                  path: "slug" }] : [];
+    },
+    "gates.personal_owner_required": async (c, ctx) => {
+      if (ctx.visibility === "personal" && !ctx.owner_actor_id)
+        return [{ message: "visibility=personal requires owner_actor_id", path: "visibility" }];
+      return [];
+    },
+    "gates.claim_holder_or_free": async (c, ctx) => {
+      if (!ctx.section_id) return [];
+      const cl = await c.query(
+        `select holder_actor_id, holder_session_key, expires_at from doctrine_claim
+          where section_id = $1 and expires_at > now()`, [ctx.section_id]);
+      if (cl.rows.length && cl.rows[0].holder_actor_id !== ctx.actor.id)
+        return [{ message: `section claimed by another writer until ${cl.rows[0].expires_at.toISOString()} — wait for expiry or pick other work`, path: "claim" }];
+      return [];
+    },
+    "gates.no_md_escape": async (c, ctx) => {
+      if (ctx.op !== "write") return [];
+      const text = (ctx.body && ctx.body.text) || "";
+      // Narrow on purpose: an INSTRUCTION to write vault markdown, not a mere
+      // mention of a filename. Over-firing burns a gate's credibility.
+      if (/\b(write|create|save|append)\b[^.\n]{0,80}CARR AI\/[^\s]*\.md/i.test(text))
+        return [{ message: "body instructs writing vault .md — the store IS the destination (rule 14181e60)", path: "body.text" }];
+      return [];
+    },
+    "gates.target_exists": async (c, ctx) => {
+      const out = [];
+      for (const l of ctx.links || []) {
+        const table = { doctrine_document: "doctrine_document", doctrine_section: "doctrine_section",
+                        party: "party", deal: "deal", decision: "event", rule: "rule",
+                        loop: "loop_item", capture: "source_capture" }[l.target_kind];
+        if (!table) { out.push({ message: `unknown link target_kind '${l.target_kind}'`, path: "links" }); continue; }
+        const r = await c.query(`select 1 from ${table} where id = $1`, [l.target_id]);
+        if (!r.rows.length) out.push({ message: `link target ${l.target_kind}/${l.target_id} does not exist`, path: "links" });
+      }
+      for (const e of ctx.edges || []) {
+        const r = await c.query(`select 1 from doctrine_section where id = $1 and status='active'`, [e.target_section_id]);
+        if (!r.rows.length) out.push({ message: `edge target section ${e.target_section_id} not found or retired`, path: "edges" });
+      }
+      return out;
+    },
+    "gates.edge_class_allowed": async (c, ctx) => {
+      const out = [];
+      for (const e of ctx.edges || []) {
+        const r = await c.query(`select 1 from doctrine_edge_type where edge_type = $1`, [e.edge_type]);
+        if (!r.rows.length) out.push({ message: `unknown edge_type '${e.edge_type}'`, path: "edges" });
+      }
+      return out;
+    },
+    "gates.edge_acyclic": async (c, ctx) => {
+      // Proposed acyclic edges must not close a cycle over the LIVE edge set.
+      const out = [];
+      for (const e of ctx.edges || []) {
+        const et = await c.query(`select acyclic from doctrine_edge_type where edge_type=$1`, [e.edge_type]);
+        if (!et.rows.length || !et.rows[0].acyclic) continue;
+        const cyc = await c.query(
+          `with recursive walk(id) as (
+             select $2::uuid
+             union
+             select de.target_section_id from doctrine_edge de
+               join walk w on w.id = de.source_section_id
+              where de.edge_type = $3 and de.retired_by_revision_id is null)
+           select 1 from walk where id = $1::uuid`,
+          [ctx.section_id, e.target_section_id, e.edge_type]);
+        if (cyc.rows.length)
+          out.push({ message: `${e.edge_type} edge to ${e.target_section_id} closes a cycle`, path: "edges" });
+      }
+      return out;
+    },
+    "gates.unresolved_conflict": async (c, ctx) => {
+      const out = [];
+      for (const e of ctx.edges || []) {
+        if (e.edge_type !== "CONFLICTS_WITH") continue;
+        const resolver = (ctx.edges || []).some(o =>
+          ["OVERRIDES", "SUPERSEDES"].includes(o.edge_type) &&
+          o.target_section_id === e.target_section_id);
+        const existing = await c.query(
+          `select 1 from doctrine_edge
+            where edge_type in ('OVERRIDES','SUPERSEDES') and retired_by_revision_id is null
+              and ((source_section_id=$1 and target_section_id=$2)
+                or (source_section_id=$2 and target_section_id=$1))`,
+          [ctx.section_id, e.target_section_id]);
+        if (!resolver && !existing.rows.length)
+          out.push({ message: `CONFLICTS_WITH ${e.target_section_id} has no resolving OVERRIDES/SUPERSEDES edge — a conflict without a winner blocks commit`, path: "edges" });
+      }
+      return out;
+    },
+  };
+
+  async function runGates(c, actor, op, ctx, { dryRun = false, changeSetId = null } = {}) {
+    const checks = (await c.query(
+      `select check_key, severity, applies_to, impl_key, config
+         from doctrine_gate_check where enabled order by check_key`)).rows
+      .filter(ch => {
+        const ops = (ch.applies_to && ch.applies_to.ops) || null;
+        if (ops && !ops.includes(op)) return false;
+        const classes = ch.applies_to && ch.applies_to.content_classes;
+        if (classes && ctx.content_class && !classes.includes(ctx.content_class)) return false;
+        return true;
+      });
+    const findings = [];
+    for (const ch of checks) {
+      const impl = GATE_IMPLS[ch.impl_key];
+      if (!impl) {                       // unknown impl = the registry drifted from the deploy
+        findings.push({ check_key: ch.check_key, severity: "block", passed: false,
+          message: `gate impl '${ch.impl_key}' missing from deploy — registry/deploy drift`, path: "" });
+        continue;
+      }
+      const fails = await impl(c, { ...ctx, op, actor }, ch.config);
+      for (const f of fails)
+        findings.push({ check_key: ch.check_key, severity: ch.severity, passed: false, ...f });
+      if (!fails.length)
+        findings.push({ check_key: ch.check_key, severity: ch.severity, passed: true,
+          message: "ok", path: "" });
+    }
+    const failed = findings.filter(f => !f.passed);
+    const blocked = failed.some(f => f.severity === "block");
+    const run = await c.query(
+      `insert into doctrine_gate_run (change_set_id, dry_run, actor_id, finished_at, result, report)
+       values ($1,$2,$3,now(),$4,$5) returning id`,
+      [changeSetId, dryRun, actor.id, blocked ? "fail" : "pass", JSON.stringify(findings)]);
+    for (const f of findings.filter(x => !x.passed))
+      await c.query(
+        `insert into doctrine_gate_finding (run_id, check_key, severity, passed, message, path)
+         values ($1,$2,$3,$4,$5,$6) on conflict do nothing`,
+        [run.rows[0].id, f.check_key, f.severity, f.passed, f.message, f.path || ""]);
+    if (blocked && !dryRun)
+      throw new ToolError({ error: "gate_blocked", gate_run_id: run.rows[0].id,
+        findings: failed,
+        hint: "each finding names its fix; repair and retry with a NEW idempotency key" });
+    return { gate_run_id: run.rows[0].id, result: blocked ? "fail" : "pass", findings };
+  }
+
+  async function sha256hex(text) {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // ------------------------------------------------------------------ verbs
+
+  return {
+
+    "new-doctrine-doc": {
+      write: true,
+      description: "Create a doctrine document in the store — the database-first home for prose that used to live as vault markdown (rule 14181e60). content_class: playbook | sop | index | reference | dossier_narrative | distillation ('rule' is reserved until the P7 rule-store ruling). Sections are added with write-doctrine-section.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        slug: { type: "string", description: "kebab-case, permanent-ish; renames keep an alias" },
+        title: { type: "string" },
+        content_class: { type: "string" },
+        visibility: { type: "string", description: "shared (default) | personal" },
+        review_policy: { type: "string", description: "policy name; defaults by content_class" } },
+        required: ["idempotency_key", "slug", "title", "content_class"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "new-doctrine-doc", args, async () => {
+        if (args.content_class === "rule")
+          throw new ToolError({ error: "content_class_reserved",
+            hint: "'rule' waits for the P7 rule-store study (decision 82a2fb62)" });
+        await runGates(c, actor, "create", { slug: args.slug,
+          visibility: args.visibility || "shared",
+          owner_actor_id: args.visibility === "personal" ? actor.id : null });
+        const pol = await c.query(
+          `select id from doctrine_review_policy
+            where ($1::text is not null and name = $1)
+               or ($1::text is null and $2 = any(content_classes)) limit 1`,
+          [args.review_policy || null, args.content_class]);
+        const r = await c.query(
+          `insert into doctrine_document (slug, title, content_class, visibility,
+             owner_actor_id, review_policy_id, created_by)
+           values ($1,$2,$3,$4,$5,$6,$7) returning id`,
+          [args.slug, args.title, args.content_class, args.visibility || "shared",
+           args.visibility === "personal" ? actor.id : null,
+           pol.rows.length ? pol.rows[0].id : null, actor.id]);
+        await writeEvent(c, actor, "new-doctrine-doc", "doctrine_document", r.rows[0].id,
+          { new: { slug: args.slug, content_class: args.content_class },
+            idempotency_key: args.idempotency_key });
+        return { ok: true, document_id: r.rows[0].id, slug: args.slug };
+      }),
+    },
+
+    "write-doctrine-section": {
+      write: true,
+      description: "Write ONE section of a doctrine document — create it (base_version 0) or replace its body (base_version = current_version from a fresh read). Validation gates run as hard preconditions (body shape, banned phrases, claims); a block finding aborts with the findings, each naming its fix. Every write is an append-only revision; the section's history is never lost. Bumps the store generation and rebuilds the document snapshot.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        document: { type: "string", description: "document id or slug" },
+        section_key: { type: "string", description: "stable key within the document" },
+        title: { type: "string" },
+        body_text: { type: "string", description: "the section's prose (P2 body model)" },
+        base_version: { type: "integer", description: "0 to create; else current_version from a fresh read" },
+        ordinal: { type: "integer" },
+        commit_message: { type: "string" } },
+        required: ["idempotency_key", "document", "section_key", "body_text", "base_version"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "write-doctrine-section", args, async () => {
+        const doc = await resolveDoc(c, args.document);
+        let sec = (await c.query(
+          `select * from doctrine_section where document_id=$1 and section_key=$2 for update`,
+          [doc.id, args.section_key])).rows[0];
+        if (sec && Number(sec.current_version) !== args.base_version)
+          throw await versionConflict(c, sec);
+        if (!sec && args.base_version !== 0)
+          throw new ToolError({ error: "section_not_found_base_nonzero",
+            hint: "creating a section takes base_version 0" });
+        const body = { text: args.body_text };
+        await runGates(c, actor, "write", { section_id: sec ? sec.id : null, body,
+          content_class: doc.content_class, visibility: doc.visibility,
+          owner_actor_id: doc.owner_actor_id });
+        if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
+          throw new ToolError({ error: "personal_doc_not_owner" });
+        if (!sec) {
+          const ord = args.ordinal ?? (await c.query(
+            `select coalesce(max(ordinal),0)+10 as o from doctrine_section where document_id=$1`,
+            [doc.id])).rows[0].o;
+          sec = (await c.query(
+            `insert into doctrine_section (document_id, section_key, title, ordinal)
+             values ($1,$2,$3,$4) returning *`,
+            [doc.id, args.section_key, args.title || null, ord])).rows[0];
+        } else if (args.title) {
+          await c.query(`update doctrine_section set title=$2 where id=$1`, [sec.id, args.title]);
+        }
+        const cs = await c.query(
+          `insert into doctrine_change_set (actor_id, session_key, idempotency_key, state, committed_at)
+           values ($1,$2,$3,'committed',now()) returning id`,
+          [actor.id, actor.client_id || null, args.idempotency_key]);
+        const hash = await sha256hex(args.body_text);
+        const newVersion = Number(sec.current_version) + 1;
+        const rev = await c.query(
+          `insert into doctrine_revision (section_id, version, parent_revision_id, change_set_id,
+             actor_id, session_key, body, plain_text, content_hash, commit_message)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning id`,
+          [sec.id, newVersion, sec.current_revision_id, cs.rows[0].id, actor.id,
+           actor.client_id || null, JSON.stringify(body), args.body_text, hash,
+           args.commit_message || null]);
+        await c.query(
+          `update doctrine_section
+              set current_revision_id=$2, current_version=$3, body_hash=$4, updated_at=now(),
+                  review_after = case when $5::int is not null then now() + ($5::int || ' days')::interval else review_after end
+            where id=$1`,
+          [sec.id, rev.rows[0].id, newVersion, hash,
+           (await c.query(`select p.max_age_days from doctrine_document d
+                             left join doctrine_review_policy p on p.id = d.review_policy_id
+                            where d.id=$1`, [doc.id])).rows[0].max_age_days]);
+        const generation = await bumpGeneration(c);
+        await rebuildSnapshot(c, doc.id, generation);
+        await writeEvent(c, actor, "write-doctrine-section", "doctrine_section", sec.id,
+          { new: { doc: doc.slug, section_key: args.section_key, version: newVersion },
+            idempotency_key: args.idempotency_key });
+        return { ok: true, section_id: sec.id, version: newVersion,
+                 revision_id: rev.rows[0].id, generation };
+      }),
+    },
+
+    "set-doctrine-refs": {
+      write: true,
+      description: "Replace a section's outbound links and typed edges in one atomic act. Links are citations (may target parties, deals, decisions, loops, captures); edges carry doctrine semantics (OVERRIDES / SUPERSEDES / EXCEPTION_TO / DEPENDS_ON / APPLIES_TO / CONFLICTS_WITH). Gates enforce: targets exist, edge types legal, acyclic types stay acyclic, and a CONFLICTS_WITH without a resolving edge blocks — a conflict without a winner never commits.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        section_id: { type: "string" },
+        base_version: { type: "integer" },
+        links: { type: "array", items: { type: "object", properties: {
+          target_kind: { type: "string" }, target_id: { type: "string" },
+          role: { type: "string" } }, required: ["target_kind", "target_id"] } },
+        edges: { type: "array", items: { type: "object", properties: {
+          edge_type: { type: "string" }, target_section_id: { type: "string" },
+          scope: { type: "object" } }, required: ["edge_type", "target_section_id"] } } },
+        required: ["idempotency_key", "section_id", "base_version"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "set-doctrine-refs", args, async () => {
+        const sec = await lockSection(c, args.section_id);
+        if (Number(sec.current_version) !== args.base_version)
+          throw await versionConflict(c, sec);
+        await runGates(c, actor, "refs_set", { section_id: sec.id,
+          content_class: sec.content_class,
+          links: args.links || [], edges: args.edges || [] });
+        await c.query(`delete from doctrine_link where source_section_id=$1`, [sec.id]);
+        for (const l of args.links || [])
+          await c.query(
+            `insert into doctrine_link (source_section_id, target_kind, target_id, role)
+             values ($1,$2,$3,$4)`, [sec.id, l.target_kind, l.target_id, l.role || "citation"]);
+        await c.query(
+          `update doctrine_edge set retired_by_revision_id = $2
+            where source_section_id = $1 and retired_by_revision_id is null`,
+          [sec.id, sec.current_revision_id]);
+        for (const e of args.edges || [])
+          await c.query(
+            `insert into doctrine_edge (source_section_id, target_section_id, edge_type, scope,
+               introduced_by_revision_id)
+             values ($1,$2,$3,$4,$5)`,
+            [sec.id, e.target_section_id, e.edge_type, JSON.stringify(e.scope || {}),
+             sec.current_revision_id]);
+        const generation = await bumpGeneration(c);
+        await rebuildSnapshot(c, sec.document_id, generation);
+        await writeEvent(c, actor, "set-doctrine-refs", "doctrine_section", sec.id,
+          { new: { links: (args.links || []).length, edges: (args.edges || []).length },
+            idempotency_key: args.idempotency_key });
+        return { ok: true, section_id: sec.id,
+                 links: (args.links || []).length, edges: (args.edges || []).length, generation };
+      }),
+    },
+
+    "retire-doctrine-section": {
+      write: true,
+      description: "Retire a section (status='retired'): it leaves snapshots and search but its history stays queryable forever. Requires base_version. DEPENDS_ON gates elsewhere treat a retired target as missing, so retiring a depended-on section will surface in the next write against the dependent.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        section_id: { type: "string" },
+        base_version: { type: "integer" },
+        reason: { type: "string" } },
+        required: ["idempotency_key", "section_id", "base_version", "reason"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "retire-doctrine-section", args, async () => {
+        const sec = await lockSection(c, args.section_id);
+        if (Number(sec.current_version) !== args.base_version)
+          throw await versionConflict(c, sec);
+        await runGates(c, actor, "retire", { section_id: sec.id, content_class: sec.content_class });
+        await c.query(
+          `update doctrine_section set status='retired', updated_at=now(),
+                  current_version = current_version + 1 where id=$1`, [sec.id]);
+        const generation = await bumpGeneration(c);
+        await rebuildSnapshot(c, sec.document_id, generation);
+        await writeEvent(c, actor, "retire-doctrine-section", "doctrine_section", sec.id,
+          { new: { reason: args.reason }, idempotency_key: args.idempotency_key });
+        return { ok: true, section_id: sec.id, status: "retired", generation };
+      }),
+    },
+
+    "read-doctrine": {
+      description: "Read a whole doctrine document — one round trip, snapshot-served. Pass if_generation_match to short-circuit when nothing changed (returns not_modified). This is THE doctrine read path on every surface; there is no file to read (decision 20dfdfcc).",
+      inputSchema: { type: "object", properties: {
+        document: { type: "string", description: "id, slug, or old slug (aliases resolve)" },
+        if_generation_match: { type: "integer" } },
+        required: ["document"] },
+      handler: async (c, actor, args) => {
+        const doc = await resolveDoc(c, args.document);
+        if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
+          throw new ToolError({ error: "personal_doc_not_owner" });
+        const snap = await c.query(
+          `select generation, snapshot_json, content_hash, built_at
+             from doctrine_snapshot where document_id = $1`, [doc.id]);
+        const gen = (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
+        if (args.if_generation_match !== undefined && snap.rows.length
+            && Number(snap.rows[0].generation) === args.if_generation_match)
+          return { ok: true, not_modified: true, generation: Number(snap.rows[0].generation) };
+        if (snap.rows.length)
+          return { ok: true, generation: Number(snap.rows[0].generation),
+                   store_generation: Number(gen.generation),
+                   built_at: snap.rows[0].built_at, ...snap.rows[0].snapshot_json };
+        // no snapshot yet (doc with no sections): serve live
+        return { ok: true, generation: Number(gen.generation),
+                 document: { id: doc.id, slug: doc.slug, title: doc.title,
+                             content_class: doc.content_class, visibility: doc.visibility },
+                 sections: [], edges_out: [] };
+      },
+    },
+
+    "doctrine-sections": {
+      description: "Batch-read up to 50 sections by id — current body, version, review state — in one round trip. The fleet read path; never loop read-doctrine per section.",
+      inputSchema: { type: "object", properties: {
+        section_ids: { type: "array", items: { type: "string" }, maxItems: 50 } },
+        required: ["section_ids"] },
+      handler: async (c, actor, args) => {
+        if ((args.section_ids || []).length > 50)
+          throw new ToolError({ error: "batch_too_large", max: 50 });
+        const r = await c.query(
+          `select s.id, s.section_key, s.title, s.ordinal, s.status, s.current_version,
+                  s.review_after, d.slug as doc_slug, d.content_class, d.visibility,
+                  d.owner_actor_id, rev.body, rev.content_hash
+             from doctrine_section s
+             join doctrine_document d on d.id = s.document_id
+             left join doctrine_revision rev on rev.id = s.current_revision_id
+            where s.id = any($1::uuid[])`, [args.section_ids]);
+        const visible = r.rows.filter(x =>
+          x.visibility !== "personal" || x.owner_actor_id === actor.id);
+        const found = new Set(visible.map(x => x.id));
+        return { ok: true, sections: visible.map(({ owner_actor_id, ...x }) => x),
+                 missing: args.section_ids.filter(id => !found.has(id)) };
+      },
+    },
+
+    "search-doctrine": {
+      description: "Full-text search over current doctrine revisions (Postgres FTS, websearch syntax: quoted phrases, OR, -exclusions). Returns section hits with snippets. The P3 acceptance bar tunes ranking; this is the working floor.",
+      inputSchema: { type: "object", properties: {
+        q: { type: "string" },
+        content_classes: { type: "array", items: { type: "string" } },
+        limit: { type: "integer" } },
+        required: ["q"] },
+      handler: async (c, actor, args) => {
+        const r = await c.query(
+          `select s.id as section_id, s.section_key, s.title, d.slug as doc_slug,
+                  d.content_class,
+                  ts_rank_cd(rev.search_vector, websearch_to_tsquery('english', $1)) as rank,
+                  ts_headline('english', rev.plain_text, websearch_to_tsquery('english', $1),
+                              'MaxWords=25, MinWords=10') as snippet
+             from doctrine_section s
+             join doctrine_document d on d.id = s.document_id
+             join doctrine_revision rev on rev.id = s.current_revision_id
+            where s.status = 'active'
+              and (d.visibility <> 'personal' or d.owner_actor_id = $2)
+              and ($3::text[] is null or d.content_class = any($3))
+              and rev.search_vector @@ websearch_to_tsquery('english', $1)
+            order by rank desc limit $4`,
+          [args.q, actor.id, args.content_classes || null, args.limit || 20]);
+        return { ok: true, hits: r.rows, total: r.rows.length };
+      },
+    },
+
+    "doctrine-index": {
+      description: "The document catalog: every doctrine document with its class, section count, staleness. The store's answer to the old INDEX.md files — derived, never authored.",
+      inputSchema: { type: "object", properties: {
+        content_classes: { type: "array", items: { type: "string" } } } },
+      handler: async (c, actor, args) => {
+        const r = await c.query(
+          `select d.id, d.slug, d.title, d.content_class, d.visibility, d.updated_at,
+                  count(s.id) filter (where s.status='active') as sections,
+                  bool_or(s.review_after < now()) as any_stale
+             from doctrine_document d
+             left join doctrine_section s on s.document_id = d.id
+            where (d.visibility <> 'personal' or d.owner_actor_id = $1)
+              and ($2::text[] is null or d.content_class = any($2))
+            group by d.id order by d.content_class, d.slug`,
+          [actor.id, args.content_classes || null]);
+        return { ok: true, documents: r.rows };
+      },
+    },
+
+    "dry-run-doctrine-gates": {
+      description: "Run the validation gates against a proposed write WITHOUT committing anything — the self-check an agent runs before spending a real write, and the shakedown harness for new gates. Persists the run (dry_run=true) for audit.",
+      inputSchema: { type: "object", properties: {
+        op: { type: "string", description: "create | write | refs_set | retire" },
+        document: { type: "string" }, section_id: { type: "string" },
+        slug: { type: "string" }, body_text: { type: "string" },
+        content_class: { type: "string" },
+        links: { type: "array" }, edges: { type: "array" } },
+        required: ["op"] },
+      handler: async (c, actor, args) => {
+        let content_class = args.content_class;
+        if (args.document && !content_class)
+          content_class = (await resolveDoc(c, args.document)).content_class;
+        const res = await runGates(c, actor, args.op, {
+          section_id: args.section_id || null, slug: args.slug,
+          body: args.body_text !== undefined ? { text: args.body_text } : undefined,
+          content_class, links: args.links || [], edges: args.edges || [] },
+          { dryRun: true });
+        return { ok: true, ...res };
+      },
+    },
+  };
+}

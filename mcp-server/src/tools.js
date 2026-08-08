@@ -4,6 +4,9 @@
 // auto-retry, every accepted write lands its event row, plausibility bands
 // confirm instead of block. NO SEND VERB EXISTS.
 // Descriptions are poka-yoke docstrings (contracts §5): what, when, edge cases.
+// The doctrine store's verbs (P2, decision 82a2fb62) live in doctrine.js as a
+// factory over this file's envelope machinery, merged at the bottom.
+import { doctrineTools } from "./doctrine.js";
 
 // ---------- envelope helpers ----------
 
@@ -3854,3 +3857,6 @@ export const TOOLS = {
     }),
   },
 };
+
+// Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
+Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
