@@ -703,30 +703,28 @@ async function runDemo() {
   for (const s of steps) {
     setTimeout(async () => {
       s.run();
+      // Pull fixture mutations through the same poll path the UI always uses.
+      await pollOnce();
       if (s.at === 400) {
         say('<b>Dell</b> joined the room');
-        $('#partnerAv')?.classList.add('here');
       }
       if (s.at === 1500) {
-        // scroll Cottis into view
         const tr = rowsEl()?.querySelector('tr[data-id="d05"]');
-        tr?.scrollIntoView({ block: 'center', behavior: prefersReduced() ? 'auto' : 'smooth' });
+        tr?.scrollIntoView({
+          block: 'center',
+          behavior: prefersReduced() ? 'auto' : 'smooth',
+        });
       }
       if (s.at === 3300) {
-        // force poll to pick up the write
-        await pollOnce();
         say('<b>Dell</b> updated Nikki Cottis - landlord signed');
       }
       if (s.at === 5000) {
-        await pollOnce();
         say('<b>Dell</b> is on Petersen - his name rides the cell, Excel-style');
       }
       if (s.at === 7200) {
-        await pollOnce();
         say('Call ended - the distiller heard three things · nothing writes without a tap');
       }
       if (s.at === 12500) {
-        await pollOnce();
         btn.classList.remove('live');
         btn.textContent = '▶ Simulate the call';
         state.demoPlaying = false;
