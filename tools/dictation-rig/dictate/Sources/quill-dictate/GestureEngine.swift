@@ -75,6 +75,16 @@ final class GestureEngine {
     /// so utterances cannot interleave out of order.
     var busy = false
 
+    /// Monotonically increasing count of REAL (non-synthetic) keyDown events
+    /// this engine has observed. FIX 3 (2026-08-08 live failure round): App
+    /// snapshots this at gestureCaptureEnded, before dispatching the final
+    /// transcription to workQueue, then compares again right before the
+    /// result would land in the field — if Joe typed for real in between, a
+    /// late final pass is stale and must not overwrite what he already
+    /// typed. Incremented inline in the tap callback (O(1), no allocation),
+    /// so this never adds latency to the live tick path.
+    private(set) var userKeystrokes = 0
+
 
     init(config: Config) {
         self.config = config
@@ -124,6 +134,13 @@ final class GestureEngine {
         // Never react to our own synthetic events.
         if event.getIntegerValueField(.eventSourceUserData) == Inserter.syntheticMarker {
             return Unmanaged.passUnretained(event)
+        }
+
+        // FIX 3: count every REAL keyDown Joe produces, trigger chords and
+        // ordinary typing alike — App only needs to know SOMETHING was
+        // typed, not what.
+        if type == .keyDown {
+            userKeystrokes += 1
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)

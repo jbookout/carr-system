@@ -37,10 +37,18 @@ enum CorrectionResolver {
     /// Replacement cues for RULE B — each a fixed two-word phrase, matched
     /// case-insensitively against adjacent word tokens (punctuation touching
     /// either side is tolerated because it lives in separate punct tokens).
+    /// "make it" added 2026-08-08 (live failure round) alongside the comma
+    /// gate below — see applyRuleB.
     private static let replacementCues: Set<[String]> = [
         ["i", "mean"], ["no", "wait"], ["oh", "wait"], ["wait", "no"],
-        ["no", "no"], ["make", "that"], ["strike", "that"],
+        ["no", "no"], ["make", "that"], ["strike", "that"], ["make", "it"],
     ]
+
+    /// FILLER ABSORPTION words (added 2026-08-08) — when one of these sits
+    /// directly before a matched RULE B cue, it's folded into the cue's own
+    /// span instead of being mistaken for part of the tail being replaced.
+    /// See applyRuleB.
+    private static let fillerWords: Set<String> = ["actually", "oh", "no", "wait", "sorry"]
 
     // MARK: - Public API
 
@@ -152,7 +160,7 @@ enum CorrectionResolver {
         return nil
     }
 
-    // MARK: - RULE B: replacement cues ("i mean", "no wait", ...)
+    // MARK: - RULE B: replacement cues ("i mean", "no wait", "make it", ...)
     //
     // ≤4 words after the cue: it's a correction — replace the same stretch
     // before the cue (anchored on a shared first word when one exists, per
@@ -160,7 +168,31 @@ enum CorrectionResolver {
     // after the cue: it's a new thought, not a correction of the tail — the
     // cue phrase itself still must never survive into typed text, but
     // nothing else moves.
-
+    //
+    // Three refinements added 2026-08-08 after a live failure round (Joe:
+    // "send the packet Tuesday, oh wait, actually make it Thursday" resolved
+    // to "actually make it Thursday" instead of "send the packet Thursday"):
+    //
+    //   FILLER ABSORPTION — a contiguous run of up to 3 filler words
+    //   (fillerWords) directly before the cue is folded into the cue's own
+    //   span: it gets deleted with the cue, and the tail search below
+    //   anchors on `anchorWP` (before the filler run) instead of
+    //   `cueStartWP` (the cue itself). Without this, "actually" reads as
+    //   part of the value being replaced instead of noise before the cue.
+    //
+    //   COMMA GATE, "make"-cues only ("make it", "make that") — fires only
+    //   when the nearest non-space token before the (filler-adjusted) cue is
+    //   a comma. A correction follows a spoken pause, which whisper renders
+    //   as a comma ("Tuesday, make it Thursday"); ordinary usage doesn't
+    //   ("we can make it work" must never fire). Other cues ("i mean", "no
+    //   wait", ...) don't need this — their own wording is unambiguous.
+    //
+    //   CUE DEFERENCE — when what follows the cue itself starts a new
+    //   correction (begins with "actually", or its own first two words are
+    //   themselves a replacement cue), this cue is not yet the final word.
+    //   Resolving now would consume the wrong span, so this pass strips only
+    //   the cue phrase and returns, letting resolve()'s loop re-run RULE B
+    //   on the remainder — where the inner cue gets its own, correct pass.
     private static func applyRuleB(_ tokens: [Token]) -> [Token]? {
         let wordIdxs = tokens.indices.filter { tokens[$0].kind == .word }
         guard wordIdxs.count >= 2 else { return nil }
@@ -170,20 +202,49 @@ enum CorrectionResolver {
             let cueStartWP = wp
             let cueEndWP = wp + 1
 
+            // FILLER ABSORPTION: walk back over up to 3 contiguous filler
+            // words; anchorWP is where the cue's span REALLY starts for tail
+            // search and the comma gate alike.
+            var anchorWP = cueStartWP
+            var fillerCount = 0
+            while fillerCount < 3, anchorWP > 0,
+                  fillerWords.contains(tokens[wordIdxs[anchorWP - 1]].text.lowercased()) {
+                anchorWP -= 1
+                fillerCount += 1
+            }
+
+            // COMMA GATE: make-cues only.
+            if pair[0] == "make", !hasPrecedingComma(tokens: tokens, beforeTokenIdx: wordIdxs[anchorWP]) {
+                continue // ordinary usage ("we can make it work") — keep scanning
+            }
+
             guard let afterResult = collectBoundedPhrase(startWP: cueEndWP + 1, maxWords: 999, wordIdxs: wordIdxs, tokens: tokens) else { continue }
             let afterCount = afterResult.wordPositions.count
+
+            // CUE DEFERENCE: let an inner correction resolve on its own pass.
+            if afterCount >= 1 {
+                let afterFirstWord = tokens[wordIdxs[afterResult.wordPositions[0]]].text.lowercased()
+                var afterStartsWithCue = false
+                if afterCount >= 2 {
+                    let afterFirstTwo = [afterFirstWord, tokens[wordIdxs[afterResult.wordPositions[1]]].text.lowercased()]
+                    afterStartsWithCue = replacementCues.contains(afterFirstTwo)
+                }
+                if afterFirstWord == "actually" || afterStartsWithCue {
+                    return stripCuePhrase(tokens: tokens, cueStartWP: cueStartWP, cueEndWP: cueEndWP, wordIdxs: wordIdxs)
+                }
+            }
 
             if afterCount >= 1, afterCount <= 4 {
                 let afterFirstCore = tokens[wordIdxs[afterResult.wordPositions[0]]].text.lowercased()
                 var tailStartWP: Int?
-                let lookbackFloor = max(0, cueStartWP - 10)
-                var s = cueStartWP - 1
+                let lookbackFloor = max(0, anchorWP - 10)
+                var s = anchorWP - 1
                 while s >= lookbackFloor {
                     if tokens[wordIdxs[s]].text.lowercased() == afterFirstCore { tailStartWP = s; break }
                     s -= 1
                 }
                 if tailStartWP == nil {
-                    let defaultStart = cueStartWP - afterCount
+                    let defaultStart = anchorWP - afterCount
                     if defaultStart >= 0 { tailStartWP = defaultStart }
                 }
                 guard let tStartWP = tailStartWP else { continue }
@@ -193,25 +254,47 @@ enum CorrectionResolver {
                 let replacement = replacementTokens(words: afterResult.wordPositions.map { tokens[wordIdxs[$0]].text }, capitalize: capitalize)
                 return spliceReplacement(tokens: tokens, deleteFrom: tailStartTokenIdx, replacement: replacement, boundaryTokenIdx: afterResult.boundaryTokenIdx)
             } else if afterCount > 4 {
-                let cueStartTokenIdx = wordIdxs[cueStartWP]
-                let cueEndTokenIdx = wordIdxs[cueEndWP]
-                var deleteStart = cueStartTokenIdx
-                if deleteStart > 0, tokens[deleteStart - 1].kind == .punct {
-                    deleteStart -= 1
-                }
-                var deleteEndExclusive = cueEndTokenIdx + 1
-                if deleteEndExclusive < tokens.count, tokens[deleteEndExclusive].kind == .punct {
-                    deleteEndExclusive += 1
-                }
-                var newTokens = Array(tokens[0..<deleteStart])
-                newTokens.append(Token(text: " ", kind: .space))
-                if deleteEndExclusive < tokens.count { newTokens.append(contentsOf: tokens[deleteEndExclusive...]) }
-                return newTokens
+                return stripCuePhrase(tokens: tokens, cueStartWP: cueStartWP, cueEndWP: cueEndWP, wordIdxs: wordIdxs)
             }
             // afterCount == 0 (cue with nothing following it, e.g. a capture
             // cut off mid-thought): unknown intent — leave it, keep scanning.
         }
         return nil
+    }
+
+    /// Deletes just the cue phrase (cueStartWP...cueEndWP), absorbing one
+    /// touching punct token on either side (typically the trailing comma —
+    /// whisper attaches punctuation directly to the preceding word, so a
+    /// leading comma usually sits behind a space token and is left alone,
+    /// which is what keeps a pause-comma before the cue intact for a later
+    /// pass — see CUE DEFERENCE above). Shared by the >4-words "new thought"
+    /// case and CUE DEFERENCE, which both want the same "cue vanishes,
+    /// nothing else moves" behavior.
+    private static func stripCuePhrase(tokens: [Token], cueStartWP: Int, cueEndWP: Int, wordIdxs: [Int]) -> [Token] {
+        let cueStartTokenIdx = wordIdxs[cueStartWP]
+        let cueEndTokenIdx = wordIdxs[cueEndWP]
+        var deleteStart = cueStartTokenIdx
+        if deleteStart > 0, tokens[deleteStart - 1].kind == .punct {
+            deleteStart -= 1
+        }
+        var deleteEndExclusive = cueEndTokenIdx + 1
+        if deleteEndExclusive < tokens.count, tokens[deleteEndExclusive].kind == .punct {
+            deleteEndExclusive += 1
+        }
+        var newTokens = Array(tokens[0..<deleteStart])
+        newTokens.append(Token(text: " ", kind: .space))
+        if deleteEndExclusive < tokens.count { newTokens.append(contentsOf: tokens[deleteEndExclusive...]) }
+        return newTokens
+    }
+
+    /// True when the nearest non-space token before `beforeTokenIdx` is a
+    /// comma — the COMMA GATE test for make-cues. Mirrors isSentenceStart's
+    /// "skip spaces, then look at the one token that matters" shape.
+    private static func hasPrecedingComma(tokens: [Token], beforeTokenIdx: Int) -> Bool {
+        var i = beforeTokenIdx - 1
+        while i >= 0, tokens[i].kind == .space { i -= 1 }
+        guard i >= 0, tokens[i].kind == .punct else { return false }
+        return tokens[i].text.contains(",")
     }
 
     // MARK: - RULE C: stutter / restart dedup
