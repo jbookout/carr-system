@@ -77,6 +77,16 @@ enum CorrectionResolver {
     // spirit as the rules above: candidate must be non-empty (an LLM that
     // "corrects" everything away is a bug, not a save) and every one of its
     // words must be found, in order, in source.
+    /// Word-level difference test for arbitration. The renderer can make
+    /// cosmetic spacing/punctuation changes without resolving anything, and a
+    /// string-!= comparison read one of those as "the heuristic resolved
+    /// something" — which then SKIPPED the LLM that would have caught the
+    /// real correction (live, 2026-08-08). Same tokenization as the
+    /// deletion-only guard, so "different" always means different WORDS.
+    static func differsInWords(_ a: String, _ b: String) -> Bool {
+        wordsOnly(a) != wordsOnly(b)
+    }
+
     static func isDeletionOnly(candidate: String, of source: String) -> Bool {
         let candidateWords = wordsOnly(candidate)
         guard !candidateWords.isEmpty else { return false }
@@ -288,13 +298,20 @@ enum CorrectionResolver {
     }
 
     /// True when the nearest non-space token before `beforeTokenIdx` is a
-    /// comma — the COMMA GATE test for make-cues. Mirrors isSentenceStart's
+    /// PAUSE mark — comma, period, question/exclamation mark, dash, ellipsis
+    /// — the gate for make-cues. Whisper renders the spoken pause before a
+    /// correction as whatever punctuation its language model prefers: live
+    /// 2026-08-08, "Send the packet Tuesday. actually, make it Thursday."
+    /// arrived with a PERIOD, and a comma-only gate silently declined the
+    /// correction. A sentence break is stronger pause evidence than a comma,
+    /// not weaker. Ordinary mid-clause "make it" ("we can make it work") has
+    /// NO punctuation there and still never fires. Mirrors isSentenceStart's
     /// "skip spaces, then look at the one token that matters" shape.
     private static func hasPrecedingComma(tokens: [Token], beforeTokenIdx: Int) -> Bool {
         var i = beforeTokenIdx - 1
         while i >= 0, tokens[i].kind == .space { i -= 1 }
         guard i >= 0, tokens[i].kind == .punct else { return false }
-        return tokens[i].text.contains(",")
+        return tokens[i].text.rangeOfCharacter(from: CharacterSet(charactersIn: ",.?!—–…;:")) != nil
     }
 
     // MARK: - RULE C: stutter / restart dedup

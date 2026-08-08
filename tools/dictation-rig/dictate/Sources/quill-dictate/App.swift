@@ -341,7 +341,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     /// own 1.5s request timeout, so it can never hang the pipeline past
     /// that.
     private func resolveFinalText(raw: String, heuristic: String) -> String {
-        guard heuristic == raw else {
+        // Word-level, not string-level: cosmetic re-rendering must not count
+        // as "resolved" and block the LLM (live failure, 2026-08-08).
+        guard !CorrectionResolver.differsInWords(heuristic, raw) else {
             Log.shared.line("CLEANUP heuristic resolved")
             return heuristic
         }
