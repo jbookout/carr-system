@@ -1,24 +1,32 @@
 #!/bin/sh
 # purge-recordings.sh — the retention law for ~/Recordings (decision db7b0231,
 # Joe 2026-08-08: "no we dont want to keep recordings forever. we want the
-# context of the recording only. thatas way too much storage." — amending
-# 28e35509's indefinite retention).
+# context of the recording only. thatas way too much storage.") as AMENDED the
+# same day by his second ruling: "only purge transcripts if claude has
+# processed them and ingested the data."
 #
-# INTERIM SHAPE, until the WO-4 distiller exists: the transcript IS the
-# distilled context, so what purges is the RAW AUDIO (mic.caf / system.caf,
-# the actual storage burden), 72 hours after the session's transcript was
-# written. 72h and not less: Sat/Sun are not workdays (rule 236ca227), so a
-# Friday call's audio survives past Monday morning in case a transcript came
-# out wrong and needs a re-run (re-running needs the audio). What SURVIVES,
-# per the ruling: transcript.json/md (the context), announcement.json (the
-# consent proof — must outlive the audio), meta.json (clock offsets). When
-# WO-4's distiller lands, transcripts join the post-distill purge and this
-# script gets amended — that is a planned second step, not scope creep here.
+# THE GATE IS INGESTION, NOT TIME. The first cut of this script purged audio
+# purely on elapsed time, which would have destroyed the audio of a meeting
+# nobody ever distilled — the exact case where the raw capture is the ONLY
+# copy of what was said. A session is now purged only when BOTH hold:
+#   1. an ingestion marker exists (ingested.json, contract below), meaning the
+#      distilled context is safely in the record layer, AND
+#   2. the grace period has elapsed since that ingestion.
+# No marker, no purge — forever, however old. That is deliberate: unprocessed
+# audio accumulating is a visible, recoverable problem; audio deleted before
+# anyone read it is not.
 #
-# Scope guard: touches ONLY ~/Recordings/<yyyy.MM.dd-HHmm>/{mic,system}.caf,
-# and only when a transcript exists beside them. A session with audio but NO
-# transcript is never purged (the pipeline may have failed; deleting the
-# audio would destroy the only copy of the meeting).
+# THE MARKER CONTRACT — whatever ingests a session writes, into the session
+# directory, ingested.json:
+#   {"ingested_at": "<ISO-8601 UTC>", "by": "<who>", "records": ["<ref>", ...]}
+# `ingested_at` is what the grace period is measured from. The WO-4 capture
+# bridge (Deal Room lane) is the intended writer; until it ships NOTHING is
+# written, so this job will correctly purge NOTHING and simply report the
+# backlog. That is the safe failure direction, not a bug.
+#
+# WHAT SURVIVES A PURGE, always: transcript.json/md (the distilled context),
+# announcement.json (the consent proof — it must outlive the audio it
+# documents), meta.json, ingested.json. Only mic.caf/system.caf go.
 set -eu
 
 RECORDINGS="$HOME/Recordings"
@@ -32,27 +40,39 @@ log_line() {
 [ -d "$RECORDINGS" ] || exit 0
 
 purged=0
+waiting=0
 for dir in "$RECORDINGS"/*/; do
     [ -d "$dir" ] || continue
     case "$(basename "$dir")" in
         [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-[0-9][0-9][0-9][0-9]) ;;
         *) continue ;;
     esac
-    transcript="$dir/transcript.json"
-    [ -f "$transcript" ] || continue
-    # -mmin on the transcript: age since the pipeline FINISHED, not since the
-    # meeting started.
-    aged=$(find "$transcript" -mmin +$((GRACE_HOURS * 60)) 2>/dev/null | wc -l | tr -d ' ')
-    [ "$aged" = "1" ] || continue
+    # Nothing to reclaim if the audio is already gone.
+    [ -f "$dir/mic.caf" ] || [ -f "$dir/system.caf" ] || continue
+
+    marker="$dir/ingested.json"
+    if [ ! -f "$marker" ]; then
+        waiting=$((waiting + 1))
+        continue
+    fi
+    # Grace measured from the MARKER's mtime — time since the data was
+    # ingested, not since the meeting happened. 72h and not less because
+    # weekends are not workdays (rule 236ca227): a Friday ingestion still
+    # leaves the audio re-runnable on Monday morning.
+    aged=$(find "$marker" -mmin +$((GRACE_HOURS * 60)) 2>/dev/null | wc -l | tr -d ' ')
+    [ "$aged" = "1" ] || { waiting=$((waiting + 1)); continue; }
+
     for caf in "$dir/mic.caf" "$dir/system.caf"; do
         if [ -f "$caf" ]; then
             size=$(du -h "$caf" | cut -f1)
             rm "$caf"
             purged=$((purged + 1))
-            log_line "PURGED $caf ($size) — transcript retained, grace ${GRACE_HOURS}h elapsed"
+            log_line "PURGED $caf ($size) — ingested + ${GRACE_HOURS}h grace elapsed"
         fi
     done
 done
 
-[ "$purged" -gt 0 ] && log_line "RUN complete: $purged audio file(s) purged" || true
+if [ "$purged" -gt 0 ] || [ "$waiting" -gt 0 ]; then
+    log_line "RUN complete: $purged audio file(s) purged, $waiting session(s) holding audio (not yet ingested, or inside grace)"
+fi
 exit 0
