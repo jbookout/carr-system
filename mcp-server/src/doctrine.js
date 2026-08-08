@@ -766,13 +766,17 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     },
 
     "standing-context": {
-      description: "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store — the taught rules (shared + this partner's personal set, full text, with the counts to recite), pending action-required items, and the doctrine catalog pointer. This replaces file-based rule loading: a session that calls this needs no compiled-rules file, no vault read, no Drive. Call it FIRST in any session; recite the counts back to the partner.",
+      description: "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store — the taught rules (shared + this partner's personal set, with the counts to recite), pending action-required items, and the doctrine catalog pointer. This replaces file-based rule loading: a session that calls this needs no compiled-rules file, no vault read, no Drive. Call it FIRST in any session; recite the counts back to the partner. DEFAULT detail is `gist` — one line per rule, which is what a boot call can actually hold. Pull full text for the handful you need with rule_ids, or everything with detail=full (large; see the payload note in the handler).",
       inputSchema: { type: "object", properties: {
-        partner: { type: "string", description: "joe | dell — whose personal rules to include (defaults to the calling actor)" } },
+        partner: { type: "string", description: "joe | dell — whose personal rules to include (defaults to the calling actor)" },
+        detail: { type: "string", enum: ["gist", "full"], description: "gist (DEFAULT) = one line per rule, no human_quote. full = every rule's complete text; ~180KB at 147 rules, which overflows a tool result on most clients. Prefer gist + rule_ids." },
+        rule_ids: { type: "array", items: { type: "string" }, description: "Short ids (the 8-char form the gist prints, e.g. '4e104d4c'). These rules come back in FULL regardless of detail — the lookup path for 'read the binding text before acting on a gist'." } },
         },
       handler: async (c, actor, args) => {
         await actorId(c, actor);
         const who = (args.partner || actor.slug || "").toLowerCase();
+        const detail = args.detail === "full" ? "full" : "gist";
+        const wanted = new Set((args.rule_ids || []).map(s => String(s).trim().toLowerCase()));
         // Same filter set as the compiled-rules exporter (_fetch_rules +
         // _is_intro, ORDER 37): intro-politics rules render to their own intro
         // file and are NOT part of the recited counts — the verb's numbers
@@ -792,12 +796,54 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             where kind = 'action_required' and status = 'open'
             order by render_seq`).catch(() => ({ rows: [] }))).rows;
         const gen = (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
+        // PAYLOAD NOTE (2026-08-08, Joe's yes): detail=full returned ~183KB at
+        // 147 rules and overflowed the tool-result limit on the very first live
+        // call — the verb that is the OPENING ACT of every session could not be
+        // read by a session. Gist is therefore the default.
+        //
+        // The cut below is a PAYLOAD CAP, not a second source of truth for gist
+        // wording. exporters/targets.py `_gist` remains the authority for the
+        // rendered files; this shares its constants and was verified character-
+        // identical against it across all 147 live rules on 2026-08-08 (0
+        // mismatches) — re-run that comparison if either side changes. And
+        // the counts contract above (rule 4f7c348f) is about the NUMBERS, which
+        // are unaffected by detail mode. If the file gist ever moves into the
+        // store as a derived column, delete this and read that column instead.
+        const GIST_STOPS = [". ", "; ", ": "], MIN_GIST = 40, MAX_GIST = 110;
+        const gist = (statement) => {
+          const s0 = String(statement || "").split(/\s+/).join(" ");
+          const stripped = s0.replace(/\s*\([^()]*\)/g, "").split(/\s+/).join(" ");
+          const s = stripped.length >= MIN_GIST ? stripped : s0;
+          let cut = s.length;
+          for (const stop of GIST_STOPS) {
+            const i = s.indexOf(stop, MIN_GIST);
+            if (i !== -1) cut = Math.min(cut, i);
+          }
+          let g = s.slice(0, cut).replace(/[ ,;:.]+$/, "");
+          if (g.length > MAX_GIST) {
+            g = g.slice(0, MAX_GIST).replace(/\s+\S*$/, "").replace(/[ ,;:.—-]+$/, "") + "…";
+          }
+          return g;
+        };
+        const shape = (r, withQuote) => {
+          const id = String(r.id).slice(0, 8);
+          if (detail === "full" || wanted.has(id.toLowerCase())) {
+            return withQuote
+              ? { id, statement: r.statement, taught_by: r.taught_by, human_quote: r.human_quote }
+              : { id, statement: r.statement, human_quote: r.human_quote };
+          }
+          return { id, gist: gist(r.statement) };
+        };
+        const missing = [...wanted].filter(
+          w => !rules.some(r => String(r.id).slice(0, 8).toLowerCase() === w));
         return { ok: true,
           recite: `Rules loaded: ${shared.length} shared, ${personal.length} ${who}-personal`,
-          shared_rules: shared.map(r => ({ id: String(r.id).slice(0, 8),
-            statement: r.statement, taught_by: r.taught_by, human_quote: r.human_quote })),
-          personal_rules: personal.map(r => ({ id: String(r.id).slice(0, 8),
-            statement: r.statement, human_quote: r.human_quote })),
+          detail,
+          ...(missing.length ? { rule_ids_not_found: missing } : {}),
+          ...(detail === "gist" ? { hint_full_text:
+            "One line per rule. NEVER quote a gist as the rule — call standing-context again with rule_ids:['<id>',…] for the binding text before acting on one." } : {}),
+          shared_rules: shared.map(r => shape(r, true)),
+          personal_rules: personal.map(r => shape(r, false)),
           action_required: actionReq,
           doctrine: { generation: Number(gen.generation),
             hint: "doctrine-index for the catalog; search-doctrine / read-doctrine to read — there are no files" } };
