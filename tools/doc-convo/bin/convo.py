@@ -221,7 +221,17 @@ def main() -> int:
                 continue
 
             print(f"doc: {reply}")
-            subprocess.run([sys.executable, str(SPEAK), reply])
+            # Cache hit speaks instantly; a fresh sentence is a ~70s render on
+            # this Mac (measured 2026-08-08: model reload dominates). Say so,
+            # or the silence reads as failure — it did on the first night.
+            hit = subprocess.run(
+                [sys.executable, str(SPEAK), "--cache-only", reply],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode == 0
+            if not hit:
+                print("· rendering his voice — about a minute on this Mac "
+                      "(spacebar still works meanwhile; q to skip out)")
+                subprocess.run([sys.executable, str(SPEAK), reply])
     except KeyboardInterrupt:
         print()
     finally:
