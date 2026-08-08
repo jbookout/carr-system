@@ -9,6 +9,10 @@ import socket as socketlib
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
+import uuid
+import wave
 from collections import deque
 from collections.abc import Callable
 
@@ -17,6 +21,7 @@ import speak
 TOOL = pathlib.Path(__file__).resolve().parent.parent
 RIG = TOOL.parent / "dictation-rig"
 WHISPER = "/opt/homebrew/bin/whisper-cli"
+WHISPER_SERVER = "/opt/homebrew/bin/whisper-server"
 MODEL = pathlib.Path.home() / ".cache/whisper-cpp/models/ggml-large-v3-turbo.bin"
 VOCAB = RIG / "vocab-prompt.txt"
 EARCON = TOOL / "assets" / "earcon-ack.wav"
@@ -28,8 +33,16 @@ VENV_PY = TOOL / ".venv-tts" / "bin" / "python"
 RENDER_DAEMON = TOOL / "bin" / "render-daemon.py"
 RENDER_SOCKET = TOOL / "assets" / ".render.sock"
 RENDER_LOG = TOOL / "assets" / "render-daemon.log"
+WHISPER_LOG = TOOL / "assets" / "whisper-server.log"
+WHISPER_HOST = "127.0.0.1"
+WHISPER_PORT = int(os.environ.get("DOC_WHISPER_PORT", "4681"))
+WHISPER_URL = f"http://{WHISPER_HOST}:{WHISPER_PORT}"
 BRAIN_MODEL = os.environ.get("DOC_BRAIN_MODEL", "sonnet")
 MIN_BYTES = 20_000  # ~0.6s at 16kHz mono s16 — shorter is a misfire, not speech
+MIC_RATE = 16_000
+MIC_BYTES_PER_SECOND = MIC_RATE * 2
+MIC_RING_BYTES = MIC_BYTES_PER_SECOND * 10
+MIC_PRE_ROLL_BYTES = int(MIC_BYTES_PER_SECOND * 0.3)
 
 
 class BrainProcess:
@@ -206,6 +219,8 @@ class SentenceStream:
 
 _BRAIN = BrainProcess()
 atexit.register(_BRAIN.close)
+_WHISPER_PROCESS = None
+_WHISPER_LOCK = threading.Lock()
 
 
 def pick_mic() -> str:
@@ -235,6 +250,119 @@ def pick_mic() -> str:
         if "Microphone" in name and "Teams" not in name:
             return f":{idx}"
     return ":0"
+
+
+class ResidentMic:
+    def __init__(self, mic: str) -> None:
+        self.mic = mic
+        self.chunks = deque()
+        self.buffered = 0
+        self.position = 0
+        self.process = None
+        self.stderr = deque(maxlen=100)
+        self.lock = threading.Lock()
+        self.stopping = threading.Event()
+        self.restart = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _append(self, data: bytes) -> None:
+        if not data:
+            return
+        with self.lock:
+            start = self.position
+            self.position += len(data)
+            self.chunks.append((start, data))
+            self.buffered += len(data)
+            while self.buffered > MIC_RING_BYTES and self.chunks:
+                _offset, old = self.chunks.popleft()
+                self.buffered -= len(old)
+
+    def _drain_stderr(self, process: subprocess.Popen) -> None:
+        for line in process.stderr:
+            self.stderr.append(line.decode(errors="replace").rstrip())
+
+    def _run(self) -> None:
+        retry_delay = 0.25
+        while not self.stopping.is_set():
+            with self.lock:
+                mic = self.mic
+            try:
+                process = subprocess.Popen(
+                    ["ffmpeg", "-loglevel", "error", "-f", "avfoundation",
+                     "-i", mic, "-ac", "1", "-ar", str(MIC_RATE),
+                     "-f", "s16le", "pipe:1"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                )
+            except OSError:
+                self.restart.wait(retry_delay)
+                self.restart.clear()
+                retry_delay = min(retry_delay * 2, 5)
+                continue
+            with self.lock:
+                self.process = process
+            threading.Thread(
+                target=self._drain_stderr, args=(process,), daemon=True,
+            ).start()
+            captured = False
+            while not self.stopping.is_set():
+                data = process.stdout.read(4096)
+                if not data:
+                    break
+                captured = True
+                self._append(data)
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            with self.lock:
+                if self.process is process:
+                    self.process = None
+            retry_delay = 0.25 if captured else min(retry_delay * 2, 5)
+            self.restart.wait(retry_delay)
+            self.restart.clear()
+
+    def begin(self) -> int | None:
+        with self.lock:
+            if self.process is None or self.process.poll() is not None:
+                return None
+            return max(0, self.position - MIC_PRE_ROLL_BYTES)
+
+    def write_since(self, start: int, wav: pathlib.Path) -> int:
+        with self.lock:
+            end = self.position
+            pieces = []
+            for offset, chunk in self.chunks:
+                chunk_end = offset + len(chunk)
+                if chunk_end <= start or offset >= end:
+                    continue
+                left = max(0, start - offset)
+                right = min(len(chunk), end - offset)
+                pieces.append(chunk[left:right])
+        audio = b"".join(pieces)
+        audio = audio[:len(audio) - len(audio) % 2]
+        with wave.open(str(wav), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(MIC_RATE)
+            output.writeframes(audio)
+        return len(audio)
+
+    def set_mic(self, mic: str) -> None:
+        with self.lock:
+            self.mic = mic
+            process = self.process
+        self.restart.set()
+        if process is not None and process.poll() is None:
+            process.kill()
+
+    def close(self) -> None:
+        self.stopping.set()
+        self.restart.set()
+        with self.lock:
+            process = self.process
+        if process is not None and process.poll() is None:
+            process.kill()
+        self.thread.join(timeout=2)
 
 
 def mean_volume(wav: pathlib.Path) -> float | None:
@@ -274,6 +402,81 @@ def warm_voice() -> None:
     print("· warming Doc's voice (background)")
 
 
+def _whisper_ready() -> bool:
+    try:
+        with urllib.request.urlopen(f"{WHISPER_URL}/health", timeout=0.3) as reply:
+            return reply.status == 200
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def warm_whisper() -> None:
+    global _WHISPER_PROCESS
+    if not pathlib.Path(WHISPER_SERVER).exists() or not MODEL.exists():
+        return
+    if _whisper_ready():
+        return
+    with _WHISPER_LOCK:
+        if _whisper_ready():
+            return
+        if _WHISPER_PROCESS is not None and _WHISPER_PROCESS.poll() is None:
+            return
+        WHISPER_LOG.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with WHISPER_LOG.open("a") as log:
+                _WHISPER_PROCESS = subprocess.Popen(
+                    [WHISPER_SERVER, "-m", str(MODEL), "--host", WHISPER_HOST,
+                     "--port", str(WHISPER_PORT), "-nt"],
+                    stdin=subprocess.DEVNULL, stdout=log,
+                    stderr=subprocess.STDOUT, start_new_session=True,
+                )
+        except OSError:
+            _WHISPER_PROCESS = None
+            return
+        print("· warming Doc's ears (background)")
+
+
+def _multipart(wav: pathlib.Path, prompt: str) -> tuple[bytes, str]:
+    boundary = f"doc-{uuid.uuid4().hex}"
+    body = bytearray()
+    for name, value in (("prompt", prompt), ("response_format", "json")):
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        )
+        body.extend(value.encode())
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(
+        b'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+        b"Content-Type: audio/wav\r\n\r\n"
+    )
+    body.extend(wav.read_bytes())
+    body.extend(f"\r\n--{boundary}--\r\n".encode())
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _transcribe_server(wav: pathlib.Path, prompt: str) -> str:
+    warm_whisper()
+    deadline = time.monotonic() + 20
+    while not _whisper_ready():
+        if (_WHISPER_PROCESS is None or
+                _WHISPER_PROCESS.poll() is not None or
+                time.monotonic() >= deadline):
+            raise ConnectionError("whisper-server did not become ready")
+        time.sleep(0.05)
+    body, content_type = _multipart(wav, prompt)
+    request = urllib.request.Request(
+        f"{WHISPER_URL}/inference", data=body, method="POST",
+        headers={"Content-Type": content_type},
+    )
+    with urllib.request.urlopen(request, timeout=120) as reply:
+        payload = json.loads(reply.read())
+    if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+        raise ValueError("whisper-server returned no text")
+    return payload["text"].replace("\n", " ").strip()
+
+
 def refresh_hot_context() -> str | None:
     age = time.time() - CONTEXT.stat().st_mtime if CONTEXT.exists() else 1e9
     if age > 1800:
@@ -287,9 +490,14 @@ def refresh_hot_context() -> str | None:
 
 
 def transcribe(wav: pathlib.Path) -> str:
+    prompt = VOCAB.read_text()
+    try:
+        return _transcribe_server(wav, prompt)
+    except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+        pass
     return subprocess.run(
         [WHISPER, "-m", str(MODEL), "-f", str(wav),
-         "--prompt", VOCAB.read_text(), "-nt", "-np"],
+         "--prompt", prompt, "-nt", "-np"],
         capture_output=True, text=True,
     ).stdout.replace("\n", " ").strip()
 

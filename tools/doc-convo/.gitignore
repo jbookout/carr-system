@@ -3,6 +3,8 @@
 # Live client data — never in git
 assets/hot-context.md
 assets/.brain-session-id
+assets/turn-timings.jsonl
+assets/whisper-server.log
 # Rendered audio — regenerable from the frozen reference + RECIPE
 assets/phrases/
 assets/earcon-ack.wav

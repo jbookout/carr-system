@@ -9,7 +9,8 @@ dialogue-mode Ten Laws. Build loop: #250.
     convo.sh (front end: terminal push-to-talk)
       ├─ mic capture        ffmpeg avfoundation, 16kHz mono
       ├─ ack                assets/earcon-ack.wav, plays at release (<300ms law)
-      ├─ ears               whisper-cli large-v3-turbo + dictation-rig vocab prompt
+      ├─ ears               resident whisper-server large-v3-turbo + CARR vocab
+      │                     (whisper-cli fallback if the server fails)
       ├─ bridge             cached frozen-voice phrase while the brain works
       ├─ brain              claude -p (resumed session) + prompt/preamble.md
       │                     + assets/hot-context.md snapshot — NO live tools in v0;
@@ -40,6 +41,11 @@ dialogue-mode Ten Laws. Build loop: #250.
 
 First run needs mic permission for the terminal app (macOS prompts once).
 Headphones-first per the council (desk-speaker echo cancellation is v2).
+The panel engine resolves its microphone once at startup. After hot-plugging a
+device, re-resolve it while idle with:
+
+    curl -X POST -H 'Content-Type: application/json' \
+      -d '{"action":"refresh_mic"}' http://127.0.0.1:4680/talk
 
 ## Honest limits (v0, by design)
 
