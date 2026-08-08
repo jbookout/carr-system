@@ -8,9 +8,9 @@ loop; only rendering NEW audio needs the heavy .venv-tts.
 
 Tiers:
   1. cache  assets/phrases/<sha1>.wav — pre-rendered frozen voice, instant.
-  2. live   .venv-tts present: render via render_phrase.py (Chatterbox clone,
-            RECIPE settings), master, cache, play. ~0.25x realtime on the
-            M1 Pro — tens of seconds. The caller prints text BEFORE this.
+  2. live   .venv-tts present: prefer the warm daemon, fall back to
+            render_phrase.py, then master, cache, play. The caller prints text
+            BEFORE this.
   3. none   no venv: print-only marker on stderr, exit 3. Conversation
             continues in text; nothing pretends to have spoken.
 
@@ -19,7 +19,9 @@ the cache key uses the normalized form so both spellings hit one file.
 """
 
 import hashlib
+import json
 import pathlib
+import socket
 import subprocess
 import sys
 
@@ -27,6 +29,7 @@ TOOL = pathlib.Path(__file__).resolve().parent.parent
 PHRASES = TOOL / "assets" / "phrases"
 VENV_PY = TOOL / ".venv-tts" / "bin" / "python"
 RENDERER = pathlib.Path(__file__).resolve().parent / "render_phrase.py"
+RENDER_SOCKET = TOOL / "assets" / ".render.sock"
 
 # doc-voice/RECIPE.md — the frozen mastering chain, verbatim. Runs at render
 # time; the cached wav is already mastered.
@@ -53,6 +56,28 @@ def play(wav: pathlib.Path) -> None:
     subprocess.run(["afplay", str(wav)], check=False)
 
 
+def render_live(spoken: str, raw: pathlib.Path) -> bool:
+    if not RENDER_SOCKET.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(120)
+            client.connect(str(RENDER_SOCKET))
+            request = {"text": spoken, "out": str(raw.resolve())}
+            client.sendall(json.dumps(request).encode("utf-8"))
+            client.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        reply = json.loads(b"".join(chunks).decode("utf-8"))
+        return reply.get("ok") is True and raw.exists()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def main() -> int:
     args = sys.argv[1:]
     cache_only = "--cache-only" in args
@@ -73,13 +98,14 @@ def main() -> int:
         return 3
 
     raw = wav.with_suffix(".raw.wav")
-    r = subprocess.run(
-        [str(VENV_PY), str(RENDERER), spoken, str(raw)],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0 or not raw.exists():
-        print(f"speak: render failed — text-only\n{r.stderr[-500:]}", file=sys.stderr)
-        return 3
+    if not render_live(spoken, raw):
+        r = subprocess.run(
+            [str(VENV_PY), str(RENDERER), spoken, str(raw)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0 or not raw.exists():
+            print(f"speak: render failed — text-only\n{r.stderr[-500:]}", file=sys.stderr)
+            return 3
     m = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw),
          "-af", MASTER_CHAIN, "-ar", "24000", "-ac", "1", str(wav)],

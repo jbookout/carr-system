@@ -17,6 +17,7 @@ import os
 import pathlib
 import select
 import signal
+import socket as socketlib
 import subprocess
 import sys
 import termios
@@ -33,6 +34,10 @@ CONTEXT = TOOL / "assets" / "hot-context.md"
 PREAMBLE = TOOL / "prompt" / "preamble.md"
 SESSION_FILE = TOOL / "assets" / ".brain-session-id"
 SPEAK = TOOL / "bin" / "speak.py"
+VENV_PY = TOOL / ".venv-tts" / "bin" / "python"
+RENDER_DAEMON = TOOL / "bin" / "render-daemon.py"
+RENDER_SOCKET = TOOL / "assets" / ".render.sock"
+RENDER_LOG = TOOL / "assets" / "render-daemon.log"
 BRAIN_MODEL = os.environ.get("DOC_BRAIN_MODEL", "sonnet")
 MIN_BYTES = 20_000  # ~0.6s at 16kHz mono s16 — shorter is a misfire, not speech
 LISTEN_ARM = 0.8    # ignore keys this long after listen starts (space autorepeat)
@@ -121,7 +126,31 @@ def mean_volume(wav: pathlib.Path) -> float | None:
     return None
 
 
+def warm_voice() -> None:
+    if not VENV_PY.exists():
+        return
+    if RENDER_SOCKET.exists():
+        # A socket FILE is not a live daemon (crash leaves it behind, and then
+        # nothing would ever respawn). Probe; unlink the corpse on refusal.
+        try:
+            with socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM) as s:
+                s.settimeout(1)
+                s.connect(str(RENDER_SOCKET))
+            return  # alive — nothing to do
+        except OSError:
+            RENDER_SOCKET.unlink(missing_ok=True)
+    RENDER_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with RENDER_LOG.open("a") as log:
+        subprocess.Popen(
+            [str(VENV_PY), str(RENDER_DAEMON)],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    print("· warming Doc's voice (background)")
+
+
 def main() -> int:
+    warm_voice()
     for path, msg in [(pathlib.Path(WHISPER), "whisper-cli missing"),
                       (MODEL, "whisper model missing")]:
         if not path.exists():
@@ -221,15 +250,12 @@ def main() -> int:
                 continue
 
             print(f"doc: {reply}")
-            # Cache hit speaks instantly; a fresh sentence is a ~70s render on
-            # this Mac (measured 2026-08-08: model reload dominates). Say so,
-            # or the silence reads as failure — it did on the first night.
             hit = subprocess.run(
                 [sys.executable, str(SPEAK), "--cache-only", reply],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             ).returncode == 0
             if not hit:
-                print("· rendering his voice — about a minute on this Mac "
+                print("· rendering his voice — this can take a moment "
                       "(spacebar still works meanwhile; q to skip out)")
                 subprocess.run([sys.executable, str(SPEAK), reply])
     except KeyboardInterrupt:
