@@ -74,15 +74,28 @@
     align-items: center; gap: 6px; background: var(--navy);
     border-top: 1px solid var(--line);
   }
-  /* The orb IS the control (Siri pattern, Joe's spec 2026-08-08): alive while
-     thinking and talking, color and intensity carrying state and emotion.
-     Rendered live on canvas — a generated image can't react; code can. */
+  /* LOOK-OFF (Joe, 2026-08-08): two candidate forms for Doc's living
+     presence, side by side, same engine state driving both. Left: the orb
+     (today's from-memory build). Right: "The Presence" from the recovered
+     2026-08-01 ruling — a calm line/arc that breathes ("not an orb, a line").
+     Both are talk controls; the loser gets deleted after Joe's ruling. */
+  #forms { display: flex; align-items: center; gap: 26px; }
+  .form-slot { display: flex; flex-direction: column; align-items: center;
+               gap: 2px; }
+  .form-label { font-size: 9px; letter-spacing: .12em; text-transform:
+                uppercase; color: var(--dim); }
   #orb {
-    width: 118px; height: 118px; border-radius: 50%; cursor: pointer;
+    width: 96px; height: 96px; border-radius: 50%; cursor: pointer;
     display: block; background: transparent;
   }
-  #orb:focus-visible { outline: 3px solid var(--orange); outline-offset: 4px; }
-  #orb.disabled { cursor: default; opacity: .45; }
+  #presence {
+    width: 170px; height: 96px; cursor: pointer; display: block;
+    background: transparent;
+  }
+  #orb:focus-visible, #presence:focus-visible {
+    outline: 3px solid var(--orange); outline-offset: 4px;
+  }
+  #orb.disabled, #presence.disabled { cursor: default; opacity: .45; }
   #hint { font-size: 11px; color: var(--dim); transition: opacity .25s ease;
           min-height: 14px; }
   #hint.ticking { color: var(--orange); letter-spacing: .04em; }
@@ -122,9 +135,19 @@
 </main>
 
 <footer>
-  <canvas id="orb" width="236" height="236" role="button" tabindex="0"
-          aria-label="Talk to Dr. CRE"></canvas>
-  <span id="hint">tap the orb or press space</span>
+  <div id="forms">
+    <div class="form-slot">
+      <canvas id="orb" width="192" height="192" role="button" tabindex="0"
+              aria-label="Talk to Dr. CRE (orb form)"></canvas>
+      <span class="form-label">orb</span>
+    </div>
+    <div class="form-slot">
+      <canvas id="presence" width="340" height="192" role="button" tabindex="0"
+              aria-label="Talk to Dr. CRE (line form)"></canvas>
+      <span class="form-label">the presence</span>
+    </div>
+  </div>
+  <span id="hint">tap either form or press space</span>
 </footer>
 
 <script>
@@ -133,6 +156,7 @@
   var feed = document.getElementById("feed");
   var empty = document.getElementById("empty");
   var orb = document.getElementById("orb");
+  var presence = document.getElementById("presence");
   var status = document.getElementById("status");
   var offline = document.getElementById("offline");
   var hint = document.getElementById("hint");
@@ -248,7 +272,57 @@
     ctx.beginPath(); ctx.arc(C, C, R + 2, 0, 7); ctx.stroke();
     ctx.globalAlpha = 1;
 
+    drawPresence();
     requestAnimationFrame(frame);
+  }
+
+  /* "The Presence" (recovered 2026-08-01 ruling): a calm horizontal arc that
+     BREATHES — light and motion, no face, no orb. Same live params as the
+     orb: amp opens it when listening, speed quickens it thinking, glow
+     carries speech; a single traveling point of light nods to the Glyph. */
+  var pctx = presence.getContext("2d");
+  var PW = presence.width, PH = presence.height;
+  function drawPresence() {
+    pctx.clearRect(0, 0, PW, PH);
+    var midY = PH * 0.55;
+    var span = PW * 0.78;
+    var x0 = (PW - span) / 2;
+    var breathe = reduced ? 0.5 : (Math.sin(t * 1.4) + 1) / 2;   // 0..1
+    var arcLift = PH * (0.10 + cur.amp * 0.9 * breathe);         // opens with amp
+
+    // layered strokes: wide soft halo -> core line, all breathing
+    for (var pass = 0; pass < 3; pass++) {
+      pctx.beginPath();
+      pctx.moveTo(x0, midY);
+      pctx.quadraticCurveTo(PW / 2, midY - arcLift, x0 + span, midY);
+      var g2 = pctx.createLinearGradient(x0, 0, x0 + span, 0);
+      g2.addColorStop(0, "rgba(0,0,0,0)");
+      g2.addColorStop(0.18, rgb(cur.colors[2]));
+      g2.addColorStop(0.5, rgb(cur.colors[1]));
+      g2.addColorStop(0.82, rgb(cur.colors[2]));
+      g2.addColorStop(1, "rgba(0,0,0,0)");
+      pctx.strokeStyle = g2;
+      if (pass === 0) { pctx.lineWidth = 22; pctx.globalAlpha = 0.10 * (0.6 + cur.glow); }
+      else if (pass === 1) { pctx.lineWidth = 9; pctx.globalAlpha = 0.22 * (0.6 + cur.glow); }
+      else { pctx.lineWidth = 3.5 + breathe * 1.5; pctx.globalAlpha = 0.95; }
+      pctx.lineCap = "round";
+      pctx.stroke();
+    }
+
+    // the point of light, traveling with the working tempo
+    if (!reduced) {
+      var p = (Math.sin(t * cur.speed * 1.2) + 1) / 2;           // 0..1 sweep
+      var px = x0 + span * p;
+      var qt = 1 - Math.abs(2 * p - 1);                          // arc height at p
+      var py = midY - arcLift * 2 * qt * (1 - qt) * 2;
+      var pg = pctx.createRadialGradient(px, py, 0, px, py, 14);
+      pg.addColorStop(0, rgb(cur.colors[1]));
+      pg.addColorStop(1, "rgba(0,0,0,0)");
+      pctx.globalAlpha = 0.5 + cur.glow * 0.5;
+      pctx.fillStyle = pg;
+      pctx.beginPath(); pctx.arc(px, py, 14, 0, 7); pctx.fill();
+    }
+    pctx.globalAlpha = 1;
   }
   requestAnimationFrame(frame);
 
@@ -258,7 +332,9 @@
     status.className = s === "idle" ? "" : "live";
     hint.textContent = HINTS[s] !== undefined ? HINTS[s] : "";
     target = STATES[s] || STATES.idle;
-    orb.classList.toggle("disabled", !(s === "idle" || s === "listening"));
+    var off = !(s === "idle" || s === "listening");
+    orb.classList.toggle("disabled", off);
+    presence.classList.toggle("disabled", off);
   }
 
   function addTurn(turn) {
@@ -310,9 +386,11 @@
     if (state === "idle") { register = "neutral"; post("start"); }
     else if (state === "listening") post("stop");
   }
-  orb.addEventListener("click", toggle);
-  orb.addEventListener("keydown", function (e) {
-    if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); toggle(); }
+  [orb, presence].forEach(function (el) {
+    el.addEventListener("click", toggle);
+    el.addEventListener("keydown", function (e) {
+      if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); toggle(); }
+    });
   });
   document.addEventListener("keydown", function (e) {
     if (e.code === "Space" && e.target === document.body) {
@@ -323,6 +401,7 @@
   function setOffline(is) {
     offline.style.display = is ? "block" : "none";
     orb.classList.toggle("disabled", is);
+    presence.classList.toggle("disabled", is);
     hint.textContent = is ? "waiting for the engine" : HINTS[state] || "";
     if (is) {
       status.textContent = "offline"; status.className = "";
