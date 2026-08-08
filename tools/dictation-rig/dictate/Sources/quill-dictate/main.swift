@@ -128,8 +128,15 @@ func runCleanup(text: String) -> Never {
         finish(interpreted.raw, engine: "passthrough")
     }
 
-    // No cue in the raw text (or the LLM is turned off) — fully local fast
-    // path, no server spawn, no network call at all.
+    // ARBITRATION FLIP (2026-08-08, same as App.resolveFinalText): heuristics
+    // are PRIMARY. If the rule chain resolved something, use it and skip the
+    // LLM entirely — never even spawn the server.
+    guard interpreted.heuristic == interpreted.raw else {
+        finish(interpreted.heuristic, engine: "heuristic")
+    }
+
+    // Heuristic found NOTHING. No cue in the raw text (or the LLM is turned
+    // off) — fully local fast path, no server spawn, no network call at all.
     guard config.correctionLLM == "auto", LiveTyper.containsCorrectionCue(interpreted.raw) else {
         finish(interpreted.heuristic, engine: "passthrough")
     }

@@ -170,6 +170,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         gestures.busy = true
         let transcriber = Transcriber(config: config)
         let inserter = Inserter(config: config)
+        // FIX 3 (2026-08-08 live failure round): snapshot BEFORE dispatching
+        // to workQueue — this is "how many real keystrokes had landed as of
+        // the moment the trigger key was released," the baseline the final
+        // insert compares itself against down below.
+        let keystrokesAtRelease = gestures.userKeystrokes
         workQueue.async { [weak self] in
             defer {
                 DispatchQueue.main.async {
@@ -180,7 +185,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
             do {
                 let started = Date()
                 let text = try transcriber.transcribe(wav: wav)
-                let elapsed = String(format: "%.1f", Date().timeIntervalSince(started))
+                let elapsedSeconds = Date().timeIntervalSince(started)
+                let elapsed = String(format: "%.1f", elapsedSeconds)
                 try? FileManager.default.removeItem(at: wav)
                 guard !text.isEmpty else {
                     Log.shared.line("INFO whisper heard nothing (\(elapsed)s)")
@@ -221,6 +227,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                 Log.shared.line("INSERT \(kept.count) chars in \(elapsed)s (audio \(String(format: "%.1f", seconds))s)")
                 DispatchQueue.main.async {
                     guard let self else { return }
+
+                    // FIX 3 (2026-08-08 live failure round): if Joe has
+                    // typed for real since the trigger key was released, the
+                    // final pass arrived too late to trust — the caret may
+                    // have moved, and finalizing/pasting now would splice
+                    // stale or duplicated text into wherever it sits now.
+                    // The live-typed text (if any) stands untouched;
+                    // retractAll must NOT run here — there is nothing wrong
+                    // with what's already in the field.
+                    let keystrokesSince = self.gestures.userKeystrokes - keystrokesAtRelease
+                    guard keystrokesSince == 0 else {
+                        Log.shared.line("INSERT skipped (\(keystrokesSince) user keystrokes since release) — live text stands")
+                        self.recordLastInsert(self.liveTyper.typed)
+                        return
+                    }
+
+                    // FIX 4 (2026-08-08, same live failure round): a
+                    // cold-start final pass arriving this late has likely
+                    // landed well after Joe read and moved on from the
+                    // live-typed text — rewriting the field now would
+                    // overwrite text he's already acted on. Only guards the
+                    // inline-with-live-text case; the plain paste path (no
+                    // live text was ever typed) has nothing to protect and
+                    // always inserts, regardless of elapsed time.
+                    if self.config.previewStyle == "inline", !self.liveTyper.typed.isEmpty, elapsedSeconds > 10.0 {
+                        Log.shared.line("INSERT slow final (\(elapsed)s) — live text stands")
+                        self.recordLastInsert(self.liveTyper.typed)
+                        return
+                    }
+
                     if self.config.previewStyle == "inline", !self.liveTyper.typed.isEmpty {
                         // Something was already live-typed this capture —
                         // reconcile it against the more-accurate final pass
@@ -289,16 +325,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     // MARK: - Local-LLM cleanup decision (added 2026-08-08)
 
     /// Decide the text that should actually be inserted for the FINAL
-    /// transcription: the cleanup LLM's output when it's engaged and its
-    /// output passes CorrectionResolver's deletion-only paraphrase guard;
-    /// `heuristic` (CorrectionResolver's own result) otherwise — server not
-    /// spawned, correction_llm != "auto", no correction cue in `raw`,
-    /// timeout, empty response, or a guard rejection all fall back the same
-    /// way. BLOCKING — callers must be off the main thread (this runs from
-    /// workQueue, same as the rest of the final-transcription pipeline) —
-    /// and bounded to the LLM's own 1.5s request timeout, so it can never
-    /// hang the pipeline past that.
+    /// transcription. ARBITRATION FLIP (2026-08-08, live failure round):
+    /// heuristics are now PRIMARY. If CorrectionResolver's rule chain
+    /// resolved something (`heuristic != raw`), that result wins outright
+    /// and the LLM is never consulted — live testing showed the LLM can
+    /// delete the wrong half of a legal (guard-passing) correction ("send
+    /// the packet Tuesday, oh wait, actually make it Thursday" -> "actually
+    /// make it Thursday") while the heuristic gets it right. Only when the
+    /// heuristic found NOTHING (`heuristic == raw`) and a correction cue is
+    /// present in `raw` does the LLM get a turn — same deletion-only guard,
+    /// same no-op demotion as before, except an LLM echo now falls back to
+    /// `raw` (which, in this branch, IS `heuristic`). BLOCKING — callers
+    /// must be off the main thread (this runs from workQueue, same as the
+    /// rest of the final-transcription pipeline) — and bounded to the LLM's
+    /// own 1.5s request timeout, so it can never hang the pipeline past
+    /// that.
     private func resolveFinalText(raw: String, heuristic: String) -> String {
+        guard heuristic == raw else {
+            Log.shared.line("CLEANUP heuristic resolved")
+            return heuristic
+        }
+
         guard config.correctionLLM == "auto",
               let cleanupServer, cleanupServer.isSpawned,
               LiveTyper.containsCorrectionCue(raw) else {
@@ -314,7 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         _ = semaphore.wait(timeout: .now() + 1.5)
 
         guard let candidate = llmResult, !candidate.isEmpty else {
-            Log.shared.line("CLEANUP timeout, heuristic")
+            Log.shared.line("CLEANUP timeout")
             return heuristic
         }
         guard CorrectionResolver.isDeletionOnly(candidate: candidate, of: raw) else {
@@ -322,13 +369,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
             return heuristic
         }
         // An unchanged echo is the model PUNTING, not resolving — it passes
-        // the deletion-only guard trivially, and must not outrank a heuristic
-        // that actually found the correction (first live test round,
-        // 2026-08-08: the 1.5B echoed "send it Tuesday, no wait, Wednesday"
-        // back verbatim while the heuristic correctly produced "send it
-        // Wednesday").
+        // the deletion-only guard trivially, and must not outrank raw (the
+        // heuristic already found nothing in this branch, so raw IS the
+        // heuristic result here). First live test round, 2026-08-08: the
+        // 1.5B echoed "send it Tuesday, no wait, Wednesday" back verbatim.
         if CorrectionResolver.isDeletionOnly(candidate: raw, of: candidate) {
-            Log.shared.line("CLEANUP llm no-op, heuristic")
+            Log.shared.line("CLEANUP llm no-op")
             return heuristic
         }
         Log.shared.line("CLEANUP llm won")
