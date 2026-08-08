@@ -1,6 +1,6 @@
 // Deal Room polling surface. Authentication stays outside this module: callers
 // pass the already-resolved actor and an injected query client. That keeps the
-// contract mountable behind OAuth today and a session-cookie gate later.
+// contract mountable behind both OAuth and the Deal Room session-cookie gate.
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const PLACEHOLDER_FIELDS = new Set([

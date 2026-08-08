@@ -32,7 +32,7 @@ const IAT_SKEW = 300; // seconds tolerated on a future iat
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-function randomString(bytes) {
+export function randomString(bytes) {
   const buf = new Uint8Array(bytes);
   crypto.getRandomValues(buf);
   return [...buf].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -52,7 +52,7 @@ function bytesToB64url(bytes) {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function s256(verifier) {
+export async function s256(verifier) {
   const digest = await crypto.subtle.digest("SHA-256", enc.encode(verifier));
   return bytesToB64url(new Uint8Array(digest));
 }
@@ -65,6 +65,39 @@ function callbackUri(request) {
   const u = new URL("/callback", request.url);
   if (u.hostname !== "localhost" && u.hostname !== "127.0.0.1") u.protocol = "https:";
   return u.toString();
+}
+
+/** Build the shared Google OIDC authorization request used by both surfaces. */
+export async function googleAuthorizationUrl({ clientId, redirectUri, state, verifier }) {
+  const u = new URL(GOOGLE_AUTH_URL);
+  u.searchParams.set("client_id", clientId);
+  u.searchParams.set("redirect_uri", redirectUri);
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("scope", "openid email");
+  u.searchParams.set("state", state);
+  u.searchParams.set("code_challenge", await s256(verifier));
+  u.searchParams.set("code_challenge_method", "S256");
+  u.searchParams.set("access_type", "online");
+  u.searchParams.set("prompt", "select_account");
+  return u;
+}
+
+/** Exchange one Google authorization code using the same PKCE contract. */
+export async function exchangeGoogleCode({ code, clientId, clientSecret, redirectUri, verifier }, fetchImpl = fetch) {
+  const res = await fetchImpl(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
+      grant_type: "authorization_code",
+      code_verifier: verifier,
+    }),
+  });
+  if (!res.ok) throw new Error(`google token endpoint returned ${res.status}`);
+  return res.json();
 }
 
 // ---------- pages (plain, no theater) ----------
@@ -227,18 +260,10 @@ export async function handleAuthorize(request, env) {
     { expirationTtl: PENDING_TTL },
   );
 
-  const u = new URL(GOOGLE_AUTH_URL);
-  u.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
-  u.searchParams.set("redirect_uri", callbackUri(request));
-  u.searchParams.set("response_type", "code");
-  u.searchParams.set("scope", "openid email");
-  u.searchParams.set("state", state);
-  u.searchParams.set("code_challenge", await s256(verifier));
-  u.searchParams.set("code_challenge_method", "S256");
-  u.searchParams.set("access_type", "online");
   // Always offer the account chooser: the allow-list is per-identity, so the
   // human has to be able to see and pick which identity they are using.
-  u.searchParams.set("prompt", "select_account");
+  const u = await googleAuthorizationUrl({ clientId: env.GOOGLE_CLIENT_ID,
+    redirectUri: callbackUri(request), state, verifier });
 
   return Response.redirect(u.toString(), 302);
 }
@@ -277,20 +302,9 @@ export async function handleCallback(request, env) {
 
   let tok;
   try {
-    const res = await fetch(GOOGLE_TOKEN_URL, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: env.GOOGLE_CLIENT_ID,
-        client_secret: env.GOOGLE_CLIENT_SECRET,
-        redirect_uri: callbackUri(request),
-        grant_type: "authorization_code",
-        code_verifier: pending.verifier,
-      }),
-    });
-    if (!res.ok) throw new Error(`google token endpoint returned ${res.status}`);
-    tok = await res.json();
+    tok = await exchangeGoogleCode({ code, clientId: env.GOOGLE_CLIENT_ID,
+      clientSecret: env.GOOGLE_CLIENT_SECRET, redirectUri: callbackUri(request),
+      verifier: pending.verifier });
   } catch (e) {
     return page("Could not complete Google sign-in", [escapeHtml(String(e.message || e)), "Nothing was issued."], 502);
   }

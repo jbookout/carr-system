@@ -1,22 +1,78 @@
-# WO-1 Deal Room API
+# WO-3 — Deal Room route, browser gate, and PWA shell
 
-## Contract built
+## Contract
 
-- `GET /pipeline/changes?cursor=<opaque>` is OAuth-protected and returns `{ events, presence, cursor }`. Events are deal-only, ordered by `(recorded_at,id)`, paged by an opaque keyset cursor, and recursively stripped of both Salesforce placeholder fields. Presence includes only unexpired field leases.
-- `presence-lease` accepts `{ idempotency_key, deal, field }` and upserts an approximately three-second lease without writing an event.
-- `patch-deal-field` accepts `{ idempotency_key, deal, field, value, base_event_id }` for `phase`, `owner`, `attention`, and `next_date`. Same-field writes serialize and compare against the field event base; different fields do not conflict. Conflicts retain both values and actors.
-- `resolve-conflict` accepts `{ idempotency_key, conflict_id, winner }`, applies the winner through the normal field update/event path, and records the resolver.
-- `add-deal-note` and `set-next-step` append attributed thread rows. Next-step rows are never overwritten; the newest row is current and prior rows remain the archive.
-- `get-deal-room` is the single-deal read surface, returning board fields, newest-first attributed thread, critical dates, and newest-first attributed history. It is a verb so it reuses the existing authenticated MCP read path and reader connection.
+- `dealroom.doctorcre.com` is a third custom domain on the existing `carr-mcp`
+  Worker. Host dispatch happens before the existing `OAuthProvider`, so the API
+  custom domains and their provider-issued bearer-token behavior are unchanged.
+- Static assets use one Workers Assets binding rooted at the config constant
+  `../dealroom`. The Worker checks the no-build bundle at the root, also accepts
+  a `dist/` bundle, and serves `public-shell/index.html` when neither exists.
+- `/auth/login` and `/auth/callback` reuse the existing Google PKCE URL builder,
+  code exchange, signed ID-token verifier, and `identity.js` allow-list. The
+  required Google redirect URI is
+  `https://dealroom.doctorcre.com/auth/callback`.
+- Only the two emails already present in `identity.js` can create a session.
+  Refused identities receive the static 403 page; it contains no email, actor,
+  pipeline, or deal bytes.
+- The session cookie is `__Host-dealroom_session`: opaque random value, Secure,
+  HttpOnly, SameSite=Lax, and Path=/. The server stores only its SHA-256 lookup
+  key in the existing `OAUTH_KV`. Sessions have a 12-hour idle lifetime, refresh
+  inside the last hour of that window, and an unextendable seven-day maximum.
+  `/auth/signout` deletes the KV session and expires both browser cookies.
+- Cookie-authenticated `/pipeline/changes` calls the existing
+  `pipelineChanges(request, client, actor)`. Cookie-authenticated `/mcp` calls
+  the existing `dispatch(request, env, ctx, actor)`, including every existing
+  verb and capability check. Both receive the same `actorFromProps` actor shape
+  as provider bearer auth. Cookie-authenticated MCP POSTs additionally require
+  the exact Deal Room origin to prevent same-site sibling-subdomain CSRF.
+- Manifest, service worker, offline page, and icons are public shell resources.
+  Deal data endpoints are network-only in the service worker; network failure
+  returns an explicit 503 `{ state: "reconnecting", live: false }`. No cached
+  deal response is used. Navigations fall back to a page that explicitly says
+  no deal data is available offline.
 
-## Migration
+## Structure decision
 
-`migrations/0079_deal_room_api.sql` adds Deal Room fields, presence leases, append-only notes, conflict records, reader-safe views, writer grants, and the partial `(recorded_at,id)` deal-event cursor index.
+One Worker with one Assets binding is smaller than a second Worker and keeps the
+actor-producing adapter adjacent to the unchanged API handlers. Host dispatch
+fully separates browser-cookie auth from the existing API-host OAuthProvider.
+No auth library, Worker, secret, database surface, or deployment unit was added.
 
-## Verification
+## Human provisioning (not executed)
 
-`cd mcp-server && npm test` runs five self-contained `node:test` cases using an in-memory query client and fake clock. No database or network is used.
+1. In Google Cloud Console, open the existing web OAuth client whose ID is in
+   `GOOGLE_CLIENT_ID`. Add this exact authorized redirect URI without removing
+   the existing API callback URI:
+   `https://dealroom.doctorcre.com/auth/callback`.
+2. Confirm the existing Worker secrets `GOOGLE_CLIENT_ID` and
+   `GOOGLE_CLIENT_SECRET` are present. No new secret is required. If either is
+   absent, the authorized operator should run, from `mcp-server/`,
+   `npx wrangler secret put GOOGLE_CLIENT_ID` and/or
+   `npx wrangler secret put GOOGLE_CLIENT_SECRET`, entering values only at the
+   prompt.
+3. Confirm `doctorcre.com` remains an active Cloudflare zone and that no
+   conflicting DNS record/custom hostname already claims
+   `dealroom.doctorcre.com`. The orchestrating session can then run its normal
+   `npx wrangler deploy`; the `custom_domain = true` route provisions the Worker
+   custom domain. Do not create a separate proxied CNAME on top of it.
+4. After deployment, open `https://dealroom.doctorcre.com/manifest.webmanifest`,
+   complete sign-in once as each partner, verify a non-partner gets the 403
+   refusal page, exercise sign-out, and install the PWA from each phone.
 
-## Deviations
+## Evidence
 
-None from the API behavior brief. Commit creation is environment-blocked because the shared worktree Git index is read-only to this sandbox; source and test changes remain unstaged in the worktree.
+- `cd mcp-server && npm test`: 9 tests, 9 passed, 0 failed.
+- `cd mcp-server && WRANGLER_LOG_PATH=/tmp/dealroom-wo3-wrangler.log npx wrangler deploy --dry-run --outdir /tmp/dealroom-wo3-dry-run`: passed; 10 static files read; `ASSETS`, `OAUTH_KV`, and `carr_documents` bindings resolved.
+- `git diff --check`: passed.
+
+No DNS change, secret write, database access, push, merge, or deployment was
+performed.
+
+## Deviation
+
+The requested granular commits could not be created in this managed session.
+`git add` failed before staging with:
+`Unable to create '/Users/booko/carr-system/.git/worktrees/dealroom-wo3-route/index.lock': Operation not permitted`.
+The patch and evidence are complete, but the orchestrating session must stage
+and commit the files after it regains write access to the worktree Git metadata.
