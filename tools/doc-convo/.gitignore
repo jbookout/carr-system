@@ -1,5 +1,8 @@
 # Heavy env, rebuilt by bin/setup-tts-env.sh
 .venv-tts/
+# Isolated eval-only env for the Chatterbox-Flash benchmark (2026-08-08).
+# Never touches .venv-tts; safe to delete once the bake-off is decided.
+.venv-flash/
 # Live client data — never in git
 assets/hot-context.md
 assets/.brain-session-id
@@ -8,3 +11,27 @@ assets/whisper-server.log
 # Rendered audio — regenerable from the frozen reference + RECIPE
 assets/phrases/
 assets/earcon-ack.wav
+
+# Voice harvest (bin/harvest-voice.py) — Joe's real question/answer content,
+# client names, deal specifics. Never in git (PII rule, ORDER 42). The seed
+# file, mined questions, replies, sentence splits, and training corpus are
+# all local-only and regenerable/re-mineable from Joe's own account export.
+assets/harvest-curated-seed.json
+assets/harvest-questions.json
+assets/harvest-questions-curated.json
+assets/harvest-replies.jsonl
+assets/harvest-sentences.jsonl
+assets/harvest-frames.txt
+assets/harvest-factual.txt
+assets/harvest-corpus/
+assets/harvest-render-progress.json
+# Sensitive-tier: Joe's raw Claude export is INPUT to the harvest, never an
+# artifact of it. A subagent copied it in here once (2026-08-08, flagged by
+# the security layer); this makes a repeat un-committable.
+assets/source-exports/
+**/conversations.json
+assets/harvest-*.json
+assets/harvest-*.jsonl
+assets/harvest-*.txt
+assets/harvest-corpus/
+assets/.harvest-brain-session-id
