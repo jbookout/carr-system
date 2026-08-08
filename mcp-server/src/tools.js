@@ -1315,6 +1315,21 @@ export const TOOLS = {
     handler: async (c) => ({ deals: (await c.query("select * from v_deal_board where outcome is null order by phase_sort, name")).rows }),
   },
 
+  "deal-room-board": {
+    write: false,
+    description: "The Deal Room's board read: every open deal with the live-board fields (owner, attention, next_date, current next step from the note thread). deal-board predates these columns and serves the pipeline render; this serves the board UI. Same placeholder rule: the two Salesforce placeholder columns never appear.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (c) => ({ deals: (await c.query(
+      `select d.id, d.name, d.deal_type as type, d.phase, d.owner, d.attention,
+              to_jsonb(d.next_date)#>>'{}' as next_date,
+              (select n.text from deal_note n
+                where n.deal_id = d.id and n.kind = 'next_step'
+                order by n.created_at desc, n.id desc limit 1) as next_step
+         from deal d
+        where d.outcome is null
+        order by d.name`)).rows }),
+  },
+
   "lead-hot": {
     write: false,
     description: "Scored, unsuppressed leads (score, lane, est_lease_event, next_action_date). ALL of them surface — qualification is the human's job, never pre-filtered.",
@@ -3938,20 +3953,20 @@ Object.assign(TOOLS, {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       const deal = await c.query(
-        "select phase, owner, type, city, segment, attention, next_date from v_deal_room_deal where id=$1",
+        "select d.name, v.phase, v.owner, v.type, v.city, v.segment, v.attention, to_jsonb(v.next_date)#>>'{}' as next_date from v_deal_room_deal v join deal d on d.id = v.id where v.id=$1",
         [s.id],
       );
       if (!deal.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
       const thread = await c.query(
-        "select id, kind, text, actor, created_at from v_deal_room_note where deal_id=$1 order by created_at desc, id desc",
+        "select id, kind, text, actor, to_jsonb(created_at)#>>'{}' as created_at from v_deal_room_note where deal_id=$1 order by created_at desc, id desc",
         [s.id],
       );
       const criticalDates = await c.query(
-        "select id, kind, due_on, note, source, status from v_deal_room_critical_date where deal_id=$1 order by due_on, id",
+        "select id, kind, to_jsonb(due_on)#>>'{}' as due_on, note, source, status from v_deal_room_critical_date where deal_id=$1 order by due_on, id",
         [s.id],
       );
       const history = await c.query(
-        `select id, recorded_at, actor, verb, field, old_value, new_value
+        `select id, to_jsonb(recorded_at)#>>'{}' as recorded_at, actor, verb, field, old_value, new_value
            from v_deal_room_event where subject_id=$1
           order by recorded_at desc, id desc`,
         [s.id],

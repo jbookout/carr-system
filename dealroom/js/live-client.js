@@ -50,23 +50,93 @@ export function createLiveClient(opts = {}) {
     return rpc(verb, { ...args, idempotency_key: args.idempotency_key || uuidv4() });
   }
 
+  // The record layer speaks phase SLUGS (deal_phase table); the board speaks
+  // the display names the mockup ruled. Translate at the client boundary in
+  // both directions so neither side ever sees the other's vocabulary.
+  const PHASE_TO_UI = {
+    pending: 'On Deck', research: 'Research', site_selection: 'Research',
+    negotiation: 'Negotiation', legal: 'Legal', due_diligence: 'Diligence',
+    closing: 'Closing', closed: 'Closed',
+  };
+  const UI_TO_PHASE = {
+    'On Deck': 'pending', 'Research': 'research', 'Negotiation': 'negotiation',
+    'Legal': 'legal', 'Diligence': 'due_diligence', 'Closing': 'closing',
+    'Closed': 'closed',
+  };
+  const TYPE_TO_UI = {
+    startup: 'Startup', relocation: 'Relocation', additional_office: '2nd Office',
+    renewal: 'Renewal', expansion: 'Expansion', purchase: 'Purchase', other: 'Other',
+  };
+  const dealToUi = (d) => ({
+    ...d,
+    phase: PHASE_TO_UI[d.phase] || d.phase,
+    type: TYPE_TO_UI[d.type] || d.type,
+    next_step: d.next_step || '',
+  });
+
   return {
     mode: /** @type {const} */ ('live'),
     selfActor,
 
     async getBoard() {
-      return rpc('deal-board', {});
+      const board = await rpc('deal-room-board', {});
+      return { ...board, deals: (board.deals || []).map(dealToUi) };
     },
 
     async getDeal(dealId) {
-      return rpc('get-deal-room', { deal: dealId });
+      const page = await rpc('get-deal-room', { deal: dealId });
+      const { thread = [], critical_dates = [], events = [], deal_id, ...fields } = page;
+      // Thread: the newest next_step IS the cell's current step; older
+      // next_step rows are the archive the ruling requires ("supersede,
+      // never erase"). Notes pass through.
+      let currentSeen = false;
+      const uiThread = [];
+      let currentStep = null;
+      for (const n of thread) {
+        if (n.kind === 'next_step') {
+          if (!currentSeen) { currentSeen = true; currentStep = n.text; continue; }
+          uiThread.push({ ...n, kind: 'archived_step' });
+        } else {
+          uiThread.push(n);
+        }
+      }
+      const history = events.map((e) => {
+        for (const side of ['old_value', 'new_value']) {
+          const v = e[side];
+          if (v && typeof v === 'object' && e.field && e.field in v) e[side] = v[e.field];
+        }
+        const val = e.field === 'phase' && typeof e.new_value === 'string'
+          ? (PHASE_TO_UI[e.new_value] || e.new_value) : e.new_value;
+        const summary = e.field
+          ? `${e.verb.replace(/-/g, ' ')} · ${e.field} → ${typeof val === 'string' ? val : JSON.stringify(val)}`
+          : e.verb.replace(/-/g, ' ');
+        return { ...e, summary };
+      });
+      return {
+        deal: dealToUi({ id: deal_id, ...fields, next_step: currentStep || fields.next_step || '' }),
+        thread: uiThread,
+        critical_dates: critical_dates.map((cd) => ({ ...cd, label: cd.note || cd.kind, date: cd.due_on })),
+        history,
+      };
     },
 
     async getChanges(cursor) {
       const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
       const res = await fetchImpl(`/pipeline/changes${q}`, { credentials: 'same-origin' });
       if (!res.ok) throw new Error(`live changes -> ${res.status}`);
-      return res.json();
+      const data = await res.json();
+      for (const e of data.events || []) {
+        // The event log stores values wrapped as {field: value}; the app (and
+        // the fixture) speak bare values. Unwrap, then translate phase slugs.
+        for (const side of ['old_value', 'new_value']) {
+          const v = e[side];
+          if (v && typeof v === 'object' && e.field && e.field in v) e[side] = v[e.field];
+        }
+        if (e.field === 'phase' && typeof e.new_value === 'string') {
+          e.new_value = PHASE_TO_UI[e.new_value] || e.new_value;
+        }
+      }
+      return data;
     },
 
     async presenceLease({ deal, field, idempotency_key }) {
@@ -74,6 +144,9 @@ export function createLiveClient(opts = {}) {
     },
 
     async patchDealField(args) {
+      if (args.field === 'phase' && UI_TO_PHASE[args.value]) {
+        args = { ...args, value: UI_TO_PHASE[args.value] };
+      }
       return write('patch-deal-field', args);
     },
 

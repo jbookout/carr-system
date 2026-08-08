@@ -73,7 +73,7 @@ export async function pipelineChanges(request, client, actor, options = {}) {
 
   const limit = options.limit || 200;
   const events = await client.query(
-    `select id, recorded_at, actor, verb, subject_type, subject_id, field, old_value, new_value
+    `select id, to_jsonb(recorded_at)#>>'{}' as recorded_at, actor, verb, subject_type, subject_id, field, old_value, new_value
        from v_deal_room_event
       where ($1::timestamptz is null or (recorded_at, id) > ($1::timestamptz, $2::uuid))
       order by recorded_at asc, id asc
@@ -81,7 +81,7 @@ export async function pipelineChanges(request, client, actor, options = {}) {
     [cursor?.recorded_at || null, cursor?.id || null, limit],
   );
   const presence = await client.query(
-    `select actor, deal_id, field, expires_at
+    `select actor, deal_id, field, to_jsonb(expires_at)#>>'{}' as expires_at
        from v_deal_room_presence
       where expires_at > now()
       order by actor, deal_id, field`,
