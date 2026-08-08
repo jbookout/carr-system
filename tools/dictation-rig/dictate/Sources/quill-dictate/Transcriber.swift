@@ -1,10 +1,28 @@
 // Transcriber.swift — one utterance through the SHARED engine.
 //
 // Same whisper-cli, same ggml-large-v3-turbo, same CARR vocab prompt as
-// meeting mode's transcribe_session.py. This file is deliberately a thin
-// Process wrapper — the engine choice was ruled once (decision 28e35509 /
-// Joe's "most effective" model call) and this mode inherits it wholesale.
-
+// meeting mode's transcribe_session.py. The engine choice was ruled once
+// (decision 28e35509 / Joe's "most effective" model call) and this mode
+// inherits it wholesale — that has NOT changed with the resident final
+// server below, which runs the identical model, just kept warm.
+//
+// SERVER-FIRST PATH (added 2026-08-08): whisper-cli reloads the 1.6GB model
+// on every spawn — a ~14s Metal cold start on the first call after any
+// restart, repeatable every call after that too since whisper-cli never
+// stays resident. WhisperServer's FINAL role (see that file) keeps the same
+// model loaded in a resident process instead. transcribe(wav:) tries that
+// server first when final_server=="auto", and falls back to the whisper-cli
+// path below on ANY failure — server not running, timeout, unparseable
+// response (see WhisperServer.postFinalInference's own header for how it
+// handles a still-loading server without either failing fast or hanging
+// forever). This function intentionally does NOT check any in-process "is
+// the server spawned" flag: it has none to check. It must also work
+// standalone from the CLI (`quill-dictate transcribe`, main.swift) with no
+// App-owned WhisperServer in the process at all, so the presence or absence
+// of a listening server on final_server_port — discovered by just trying
+// the request — IS the spawned/not-spawned signal for this function's
+// purposes, exactly as it would be for anyone else talking to it over
+// loopback HTTP.
 import Foundation
 
 struct Transcriber {
@@ -15,6 +33,40 @@ struct Transcriber {
     /// Blocking; run on a background queue. Returns cleaned text ("" when
     /// whisper heard nothing worth keeping).
     func transcribe(wav: URL) throws -> String {
+        if config.finalServer == "auto" {
+            if let serverText = tryServerTranscribe(wav: wav) {
+                return Transcriber.clean(serverText)
+            }
+            Log.shared.line("FINAL server unavailable, cli fallback")
+        }
+        return try transcribeViaCli(wav: wav)
+    }
+
+    /// Reads the WAV and POSTs it to the resident final-pass server. Returns
+    /// nil on ANY failure (unreadable file, connection refused, timeout,
+    /// unparseable JSON) — the caller's only reaction to nil is the existing
+    /// whisper-cli path, unchanged.
+    ///
+    /// FAST-FAIL PRE-CHECK: postFinalInference's connect phase deliberately
+    /// waits out a real cold start rather than failing fast (see its own
+    /// header) — correct for "the server is starting" but wrong for "the
+    /// server was never going to start," which would otherwise pay that same
+    /// wait on EVERY utterance. Checking the same binary/model existence
+    /// WhisperServer.start() already gates on catches that case for free —
+    /// if the resident server could never have launched, nothing is
+    /// listening now or later, so skip straight to whisper-cli instead of
+    /// waiting to discover that the hard way.
+    private func tryServerTranscribe(wav: URL) -> String? {
+        guard FileManager.default.isExecutableFile(atPath: WhisperServer.binaryPath),
+              FileManager.default.fileExists(atPath: config.modelPath) else { return nil }
+        guard let wavData = try? Data(contentsOf: wav) else { return nil }
+        return WhisperServer.postFinalInference(port: config.finalServerPort,
+                                                  wavData: wavData,
+                                                  prompt: vocabPrompt,
+                                                  timeoutSeconds: 30.0)
+    }
+
+    private func transcribeViaCli(wav: URL) throws -> String {
         let model = FileManager.default.fileExists(atPath: config.modelPath)
             ? config.modelPath : config.fallbackModelPath
         guard FileManager.default.fileExists(atPath: model) else {
@@ -27,9 +79,8 @@ struct Transcriber {
         let outBase = wav.deletingPathExtension().path
         var args = ["-m", model, "-f", wav.path,
                     "-l", "en", "-nt", "-np", "-otxt", "-of", outBase]
-        if let prompt = try? String(contentsOfFile: config.vocabPromptPath, encoding: .utf8),
-           !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["--prompt", prompt.trimmingCharacters(in: .whitespacesAndNewlines)]
+        if let prompt = vocabPrompt {
+            args += ["--prompt", prompt]
         }
 
         let process = Process()
@@ -50,6 +101,16 @@ struct Transcriber {
         defer { try? FileManager.default.removeItem(atPath: txtPath) }
         let raw = (try? String(contentsOfFile: txtPath, encoding: .utf8)) ?? ""
         return Transcriber.clean(raw)
+    }
+
+    /// The CARR vocab prompt, trimmed, or nil when missing/blank — read the
+    /// same way for both the cli path's --prompt flag and the server path's
+    /// "prompt" form field, so a degraded vocab bias on one path can never
+    /// silently diverge from the other.
+    private var vocabPrompt: String? {
+        guard let prompt = try? String(contentsOfFile: config.vocabPromptPath, encoding: .utf8) else { return nil }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Collapse whisper's line breaks into a single utterance and drop the

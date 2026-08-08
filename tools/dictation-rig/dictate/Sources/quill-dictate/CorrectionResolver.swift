@@ -126,6 +126,15 @@ enum CorrectionResolver {
     // whatever sits between the earlier X and the cue (there's normally
     // nothing there; Joe's corrections land right after the value), rather
     // than trying to thread a needle the spec's own example doesn't need.
+    //
+    // SHARED-FIRST-WORD ANCHORING (fixed 2026-08-08, the same anchoring
+    // Rule B already does for its own tail search): when Y's first word is
+    // the same word sitting immediately before the earlier X occurrence,
+    // deleting only from X forward leaves that shared word standing on both
+    // sides of the splice — "send it at 3, not 3, at 4." resolved to "send
+    // it at at 4." instead of "send it at 4." because "at" (Y's first word)
+    // also immediately precedes the earlier "3" (X). Fixed below by
+    // absorbing that shared word into the deleted span when it matches.
 
     private static func applyRuleA(_ tokens: [Token]) -> [Token]? {
         let wordIdxs = tokens.indices.filter { tokens[$0].kind == .word }
@@ -162,10 +171,23 @@ enum CorrectionResolver {
             }
             guard let earlyWP = matchStartWP else { continue } // X never said earlier — leave the sentence alone
 
-            let earlyStartTokenIdx = wordIdxs[earlyWP]
-            let capitalize = isSentenceStart(tokens: tokens, beforeTokenIdx: earlyStartTokenIdx)
+            // SHARED-FIRST-WORD ANCHORING: if the word right before the
+            // earlier X is the same word Y starts with, absorb it into the
+            // deleted span too — otherwise it survives as the tail of the
+            // untouched prefix AND reappears as the head of the inserted Y,
+            // duplicating it ("send it at 3, not 3, at 4." -> "send it at
+            // at 4." without this check).
+            var deleteStartWP = earlyWP
+            if deleteStartWP > 0,
+               let yFirstWord = yResult.wordPositions.first.map({ tokens[wordIdxs[$0]].text.lowercased() }),
+               tokens[wordIdxs[deleteStartWP - 1]].text.lowercased() == yFirstWord {
+                deleteStartWP -= 1
+            }
+
+            let deleteStartTokenIdx = wordIdxs[deleteStartWP]
+            let capitalize = isSentenceStart(tokens: tokens, beforeTokenIdx: deleteStartTokenIdx)
             let replacement = replacementTokens(words: yResult.wordPositions.map { tokens[wordIdxs[$0]].text }, capitalize: capitalize)
-            return spliceReplacement(tokens: tokens, deleteFrom: earlyStartTokenIdx, replacement: replacement, boundaryTokenIdx: yResult.boundaryTokenIdx)
+            return spliceReplacement(tokens: tokens, deleteFrom: deleteStartTokenIdx, replacement: replacement, boundaryTokenIdx: yResult.boundaryTokenIdx)
         }
         return nil
     }

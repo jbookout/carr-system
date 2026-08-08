@@ -20,11 +20,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     // Live-transcription preview (added 2026-08-08; converted from a floating
     // panel to inline live typing same day — Joe rejected the panel, wants
     // words to appear IN the field like typing). Entirely separate from the
-    // recorder/transcriber/inserter pipeline above — see PreviewServer.swift,
+    // recorder/transcriber/inserter pipeline above — see WhisperServer.swift,
     // PreviewOverlay.swift, and LiveTyper.swift for why this must never be
     // able to block or delay a real capture.
-    private var previewServer: PreviewServer?
+    private var previewServer: WhisperServer?
     private let previewOverlay = PreviewOverlay()
+
+    /// Resident FINAL-pass whisper server (added 2026-08-08), spawned only
+    /// when final_server == "auto". A FOURTH resident process alongside
+    /// recorder/whisper-cli, previewServer's whisper-server, and
+    /// cleanupServer's llama-server — same lifecycle shape (spawn at
+    /// launch, stop at terminate), different port and model (the existing
+    /// model_path, large-v3-turbo). Transcriber.swift talks to it directly
+    /// over HTTP rather than through this instance — see that file's header
+    /// — so this property exists purely to own the child process's
+    /// lifecycle, exactly like previewServer and cleanupServer do for theirs.
+    private var finalServer: WhisperServer?
 
     /// Local-LLM self-correction cleanup pass (added 2026-08-08). A THIRD
     /// resident process alongside recorder/whisper-cli and PreviewServer's
@@ -68,7 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         startWhenTrusted()
 
         if config.previewStyle == "inline" || config.previewStyle == "panel" {
-            let server = PreviewServer(config: config)
+            let server = WhisperServer(role: .preview, config: config)
             server.start()
             previewServer = server
         }
@@ -78,11 +89,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
             cleanup.start()
             cleanupServer = cleanup
         }
+
+        if config.finalServer == "auto" {
+            let final = WhisperServer(role: .final, config: config)
+            final.start()
+            finalServer = final
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         previewServer?.stop()
         cleanupServer?.stop()
+        finalServer?.stop()
     }
 
     // MARK: - Permissions

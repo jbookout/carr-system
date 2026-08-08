@@ -1,0 +1,447 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.quill-dictate-arm64-apple-macosx-release.module" : {
+      "executable" : "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "fileList" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/sources",
+      "importPath" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/App.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CaretLocator.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CleanupServer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Config.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CorrectionResolver.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/GestureEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Inserter.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/LiveTyper.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/PreviewOverlay.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Recorder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Transcriber.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/WhisperServer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "quill_dictate",
+      "moduleOutputPath" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/Modules/quill_dictate.swiftmodule",
+      "objects" : [
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/App.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CaretLocator.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CleanupServer.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Config.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CorrectionResolver.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/GestureEngine.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Inserter.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/LiveTyper.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/PreviewOverlay.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Recorder.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Transcriber.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/WhisperServer.swift.o",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/main.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-whole-module-optimization",
+        "-num-threads",
+        "8",
+        "-serialize-diagnostics",
+        "-O",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "quill_dictate_main",
+        "-swift-version",
+        "5",
+        "-I",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-L",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-plugin-path",
+        "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "dictate"
+      ],
+      "outputFileMapPath" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/App.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CaretLocator.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CleanupServer.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Config.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CorrectionResolver.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/GestureEngine.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Inserter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/LiveTyper.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/PreviewOverlay.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Recorder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Transcriber.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/WhisperServer.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/main.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/Modules/quill_dictate.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/App.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CaretLocator.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CleanupServer.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Config.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CorrectionResolver.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/GestureEngine.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Inserter.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/LiveTyper.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/PreviewOverlay.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Recorder.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Transcriber.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/WhisperServer.swift",
+        "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/main.swift"
+      ],
+      "tempsPath" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build",
+      "wholeModuleOptimization" : true
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "quill_dictate" : [
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "-module-name",
+      "quill_dictate",
+      "-package-name",
+      "dictate",
+      "-c",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/App.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CaretLocator.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CleanupServer.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Config.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CorrectionResolver.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/GestureEngine.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Inserter.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/LiveTyper.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/PreviewOverlay.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Recorder.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Transcriber.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/WhisperServer.swift",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/main.swift",
+      "-I",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-whole-module-optimization",
+      "-num-threads",
+      "8",
+      "-serialize-diagnostics",
+      "-O",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "quill_dictate_main",
+      "-swift-version",
+      "5",
+      "-I",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-L",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-plugin-path",
+      "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "dictate",
+      "-driver-use-frontend-path",
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "quill_dictate" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill-dictate.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/App.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CaretLocator.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CleanupServer.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Config.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/CorrectionResolver.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/GestureEngine.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Inserter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/LiveTyper.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/PreviewOverlay.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Recorder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/Transcriber.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/WhisperServer.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/main.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill-dictate.product/Objects.LinkFileList"
+    },
+    "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/App.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CaretLocator.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CleanupServer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Config.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/CorrectionResolver.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/GestureEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Inserter.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/LiveTyper.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/PreviewOverlay.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Recorder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/Transcriber.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/WhisperServer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/booko/carr-system/tools/dictation-rig/dictate/Sources/quill-dictate/main.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/quill_dictate.build/sources"
+    },
+    "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/booko/carr-system/tools/dictation-rig/dictate/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt"
+    }
+  }
+}
