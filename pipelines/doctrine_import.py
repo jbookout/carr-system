@@ -93,6 +93,15 @@ def parse_file(path):
 
 
 def apply_file(cur, actor_id, doc, content_class):
+    # Slug collision across folders (session-operating-style lives in both
+    # DNA/Team and 00_Context): disambiguate with the parent folder rather
+    # than aborting the batch. The title keeps the human name.
+    cur.execute("select 1 from doctrine_document where slug=%s "
+                "union all select 1 from doctrine_slug_alias where alias_slug=%s",
+                (doc["slug"], doc["slug"]))
+    if cur.fetchone():
+        parent = kebab(Path(doc["path"]).parent.name)
+        doc["slug"] = f"{parent}-{doc['slug']}"
     cur.execute(
         """insert into doctrine_document (slug, title, content_class, created_by,
              review_policy_id)

@@ -44,12 +44,33 @@ SKIP_PREFIXES = ("DNA/Network/briefs/",)
 #   Automation/Learning    job-output snapshots, latest-N files
 ARCHIVE_MARKERS = (".generations/", "/_processed/",
                    "Marketing/Source Material/",
-                   "DNA/Marketing/Source Material/")
-ARCHIVE_PREFIXES = ("Automation/Learning/",)
+                   "DNA/Marketing/Source Material/",
+                   # frozen 00_Context history: handoffs (write-denied since
+                   # the Aug-3 gate), cold storage, dated audits/sprints,
+                   # retired stubs and superseded setup docs
+                   "00_Context/handoffs/",
+                   "00_Context/decision-history-archive",
+                   "00_Context/open-loops-closed",
+                   "00_Context/independent-audit-",
+                   "00_Context/fable-sprint-",
+                   "00_Context/SETUP ",
+                   "00_Context/ai-operating-notes",
+                   "00_Context/prospects.md",
+                   "Automation/linkedin-app-use-case")
+ARCHIVE_PREFIXES = ("Automation/Learning/",
+                    # per-deal research work products (call sheets, search
+                    # specs, handoffs) are DEAL ARTIFACTS — they belong to the
+                    # deal record, not the doctrine store; content-fuel and
+                    # team-dropbox are job-output/kit trees
+                    "DNA/Research/content-fuel/",
+                    "DNA/Marketing/Social Media/team-dropbox/",
+                    "DNA/Team/dell-starter-kit/")
+import re as _re2
+ARCHIVE_DIR_PATTERNS = (_re2.compile(r"DNA/Research/[^/]+-search/"),)
 # RENDER TREES built by repo pipelines OUTSIDE exporters/targets.py (the graph
 # pages and radar feeds are run.sh graph / renewal-feed output) — renders
 # retire with their generators at cutoff; they never migrate:
-RENDER_PREFIXES = ("Graph/", "Automation/radar/")
+RENDER_PREFIXES = ("Graph/", "Graph-System/", "Automation/radar/")
 import re as _re
 ARCHIVE_PATTERNS = (_re.compile(r"(^|/)(batch|week)-20\d\d-"),
                     _re.compile(r"/week-20\d\d-\d\d-\d\d/"),
@@ -134,6 +155,7 @@ def main():
                 continue
             if (any(m in rel for m in ARCHIVE_MARKERS)
                     or any(rel.startswith(p) for p in ARCHIVE_PREFIXES)
+                    or any(p.search(rel) for p in ARCHIVE_DIR_PATTERNS)
                     or any(p.search(rel) for p in ARCHIVE_PATTERNS)):
                 archive.append(rel)
                 continue
