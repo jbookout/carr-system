@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Doc</title>
+<title>Dr. CRE</title>
 <style>
   /* CARR tokens (ux-doctrine law 11a) — consume, never invent */
   :root {
@@ -108,20 +108,23 @@
 </head>
 <body>
 <header>
-  <h1>DOC</h1>
+  <!-- Letters-first law (dr-cre-concept v2): written form is DR. CRE in every
+       UI. The mark's spot is reserved beside the wordmark until Joe's register
+       pick lands (eight candidates, Canva, open since 2026-08-01). -->
+  <h1>DR. CRE</h1>
   <span id="status">at the desk</span>
 </header>
 
 <div id="offline">
-  <b>Doc's engine isn't running.</b> Start it, then this panel reconnects on
-  its own:
+  <b>My engine isn't running.</b> Start it and I'll reconnect on my own:
   <code>~/carr-system/tools/doc-convo/bin/convo-server.py</code>
 </div>
 
 <main id="feed">
   <div class="empty" id="empty">
-    <b>Doc is at the desk.</b><br>
-    Tap the button or press space, say what you need, tap again.
+    <b>At the desk.</b><br>
+    Tap the button, say what you need, tap again. I'll keep the numbers on
+    cards so you don't have to hold them.
   </div>
 </main>
 
@@ -171,7 +174,7 @@
     }
     if (turn.doc) {
       var d = document.createElement("div"); d.className = "doc";
-      d.innerHTML = '<div class="who">Doc</div>';
+      d.innerHTML = '<div class="who">Dr. CRE</div>';
       var db = document.createElement("div"); db.className = "bubble";
       db.textContent = turn.doc; d.appendChild(db);
       if (turn.card && turn.card.rows) {
