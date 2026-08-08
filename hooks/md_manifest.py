@@ -48,6 +48,15 @@ ALLOW_EXACT = {
     "AGENTS.md",
 }
 
+# PERMANENT machine-required prefixes (no retirement): launchd-scheduled runs
+# read these thin task prompts FROM DISK at fire time (the thin-prompt law,
+# rule f04a05aa) — they are consumers' files the way SKILL.md is the
+# harness's, and they migrate only WITH a re-pointed consumer (P6+, same
+# class as skills). Ruled during the day-6/7 triage.
+ALLOW_MACHINE_PREFIX = (
+    "Automation/local-tasks/",
+)
+
 # Renderer/job-owned output directories, all retiring at cutoff. After CUTOFF
 # these return DENY like everything else — the jobs writing here must be
 # re-pointed at the store by P5 (loop #242 acceptance).
@@ -83,6 +92,9 @@ def md_write_verdict(rel, today=None):
     today = today or date.today()
     if rel in ALLOW_EXACT:
         return None
+    for prefix in ALLOW_MACHINE_PREFIX:
+        if rel.startswith(prefix):
+            return None
     retired_msg = (f"'{rel}' sat on a TEMPORARY manifest row that retired at the "
                    f"doctrine-store cutoff. Its writer should have been re-pointed "
                    f"at the store by P5 — this write is the alarm that it was not. "
