@@ -26,3 +26,7 @@ tools/dictation-rig/dictate/.build/
 .venv/
 .venv-*/
 **/.venv-*/
+
+# A bare .venv is usually a symlink into the primary checkout; the trailing-slash
+# patterns above match directories only, so name it explicitly too.
+.venv
