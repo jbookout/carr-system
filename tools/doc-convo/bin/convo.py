@@ -14,18 +14,20 @@ resumed session on the hot-context snapshot -> speak.py tiers.
 
 import os
 import pathlib
+import queue
 import select
 import signal
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 
 import speak
 from convo_core import (EARCON, MIN_BYTES, MODEL, SPEAK, TOOL, WHISPER,
-                        ask_brain, mean_volume, pick_mic, refresh_hot_context,
-                        transcribe, warm_voice)
+                        ask_brain_streaming, mean_volume, pick_mic,
+                        refresh_hot_context, transcribe, warm_voice)
 
 LISTEN_ARM = 0.8    # ignore keys this long after listen starts (space autorepeat)
 
@@ -140,15 +142,39 @@ def main() -> int:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 
-            reply, brain = ask_brain(text, system_prompt)
-            if not reply:
+            speech_queue = queue.Queue()
+            speech_done = object()
+            printed = False
+
+            def speak_sentences() -> None:
+                while True:
+                    sentence = speech_queue.get()
+                    if sentence is speech_done:
+                        return
+                    speak.stream(sentence)
+
+            def on_sentence(sentence: str) -> None:
+                nonlocal printed
+                print(f"{'doc:' if not printed else '    '} {sentence}")
+                if not printed:
+                    print("· voice coming")
+                    printed = True
+                speech_queue.put(sentence)
+
+            speech_thread = threading.Thread(target=speak_sentences, daemon=True)
+            speech_thread.start()
+            reply, brain = ask_brain_streaming(
+                text, system_prompt, on_sentence=on_sentence,
+            )
+            speech_queue.put(speech_done)
+            speech_thread.join()
+            if brain.returncode != 0:
                 print("· brain error:")
                 print("\n".join(brain.stderr.strip().splitlines()[-3:]))
                 continue
-
-            print(f"doc: {reply}")
-            print("· voice coming")
-            speak.stream(reply)
+            for line in reply.splitlines():
+                if line.startswith("CARD: "):
+                    print(line)
     except KeyboardInterrupt:
         print()
     finally:

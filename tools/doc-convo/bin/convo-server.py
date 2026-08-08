@@ -84,12 +84,24 @@ class Engine:
         # emit a step that isn't actually happening.
         self.emit("progress", {"label": label})
 
-    def add_turn(self, you: str, doc: str, card: object | None = None) -> None:
+    def add_turn(self, you: str, doc: str,
+                 card: object | None = None) -> dict:
         turn = {"you": you, "doc": doc, "card": card, "ts": time.time()}
         with self.lock:
             self.turns.append(turn)
             self.turns = self.turns[-20:]
         self.emit("turn", {"you": you, "doc": doc, "card": card})
+        return turn
+
+    def update_turn(self, turn: dict, doc: str,
+                    card: object | None = None) -> None:
+        with self.lock:
+            turn["doc"] = doc
+            turn["card"] = card
+        self.emit("turn", {
+            "you": turn["you"], "doc": doc, "card": card,
+            "replace": True, "ts": turn["ts"],
+        })
 
     def start(self) -> bool:
         with self.lock:
@@ -173,18 +185,11 @@ class Engine:
                  "One moment."],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            reply, _brain = convo_core.ask_brain(text, self.system_prompt)
-            if not reply:
-                self._heard_nothing("· brain error")
-                return
-            doc, card = split_card(reply)
-            # Text reaches the panel NOW; the voice follows on its own clock —
-            # same contract as the terminal (a 15s render must never delay the
-            # written answer).
-            self.add_turn(text, doc, card)
-            self.set_state("rendering")
-            self.progress("voice coming")
             speaking = False
+            streamed_turn = None
+            streamed_doc = ""
+            speech_queue = queue.Queue()
+            speech_done = object()
 
             def emit_envelope(wav: pathlib.Path) -> None:
                 env = wav.with_suffix(".env.json")
@@ -202,8 +207,53 @@ class Engine:
                     speaking = True
                     self.set_state("speaking")
 
-            speak.stream(doc, before_play=emit_envelope,
-                         on_first_play=start_speaking)
+            def speak_sentences() -> None:
+                while True:
+                    sentence = speech_queue.get()
+                    if sentence is speech_done:
+                        return
+                    speak.stream(sentence, before_play=emit_envelope,
+                                 on_first_play=start_speaking)
+
+            def on_sentence(sentence: str) -> None:
+                nonlocal streamed_doc, streamed_turn
+                streamed_doc = f"{streamed_doc} {sentence}".strip()
+                if streamed_turn is None:
+                    streamed_turn = self.add_turn(text, streamed_doc)
+                    self.set_state("rendering")
+                    self.progress("voice coming")
+                else:
+                    self.update_turn(streamed_turn, streamed_doc)
+                speech_queue.put(sentence)
+
+            speech_thread = threading.Thread(target=speak_sentences, daemon=True)
+            speech_thread.start()
+            reply, brain = convo_core.ask_brain_streaming(
+                text, self.system_prompt, on_sentence=on_sentence,
+            )
+            doc, card = split_card(reply)
+            if brain.returncode != 0:
+                speech_queue.put(speech_done)
+                speech_thread.join()
+                if streamed_turn is None:
+                    self._heard_nothing("· brain error")
+                else:
+                    self.update_turn(
+                        streamed_turn,
+                        f"{streamed_doc}\n· brain stopped mid-reply",
+                    )
+                return
+            if streamed_turn is None:
+                if not doc:
+                    speech_queue.put(speech_done)
+                    speech_thread.join()
+                    self._heard_nothing("· brain returned no answer")
+                    return
+                streamed_turn = self.add_turn(text, doc, card)
+            elif doc != streamed_doc or card is not None:
+                self.update_turn(streamed_turn, doc, card)
+            speech_queue.put(speech_done)
+            speech_thread.join()
         except (OSError, ValueError) as exc:
             self._heard_nothing(f"· conversation error: {exc}")
         finally:

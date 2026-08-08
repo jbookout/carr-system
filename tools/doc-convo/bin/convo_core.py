@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Shared conversation pipeline for the terminal loop and panel engine."""
 
+import atexit
 import json
 import os
 import pathlib
 import socket as socketlib
 import subprocess
+import threading
 import time
+from collections import deque
+from collections.abc import Callable
+
+import speak
 
 TOOL = pathlib.Path(__file__).resolve().parent.parent
 RIG = TOOL.parent / "dictation-rig"
@@ -24,6 +30,182 @@ RENDER_SOCKET = TOOL / "assets" / ".render.sock"
 RENDER_LOG = TOOL / "assets" / "render-daemon.log"
 BRAIN_MODEL = os.environ.get("DOC_BRAIN_MODEL", "sonnet")
 MIN_BYTES = 20_000  # ~0.6s at 16kHz mono s16 — shorter is a misfire, not speech
+
+
+class BrainProcess:
+    def __init__(self) -> None:
+        self.process = None
+        self.system_prompt = None
+        self.stderr = deque(maxlen=100)
+        self.lock = threading.Lock()
+
+    def _stop(self) -> None:
+        process = self.process
+        self.process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.stdin.close()
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+            process.wait()
+
+    def _drain_stderr(self, process: subprocess.Popen) -> None:
+        for line in process.stderr:
+            self.stderr.append(line.rstrip())
+
+    def _start(self, system_prompt: str) -> subprocess.Popen:
+        self._stop()
+        cmd = [
+            "claude", "-p", "--verbose", "--model", BRAIN_MODEL,
+            "--tools", "", "--permission-mode", "dontAsk",
+            "--append-system-prompt", system_prompt,
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--include-partial-messages",
+        ]
+        if SESSION_FILE.exists():
+            cmd += ["--resume", SESSION_FILE.read_text().strip()]
+        process = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1,
+        )
+        self.process = process
+        self.system_prompt = system_prompt
+        self.stderr.clear()
+        threading.Thread(
+            target=self._drain_stderr, args=(process,), daemon=True,
+        ).start()
+        return process
+
+    def _ensure(self, system_prompt: str) -> subprocess.Popen:
+        if (self.process is None or self.process.poll() is not None or
+                self.system_prompt != system_prompt):
+            return self._start(system_prompt)
+        return self.process
+
+    def ask(self, text: str, system_prompt: str,
+            on_text: Callable[[str], None]) -> subprocess.CompletedProcess:
+        with self.lock:
+            try:
+                process = self._ensure(system_prompt)
+            except OSError as exc:
+                return subprocess.CompletedProcess([], 1, "", str(exc))
+            payload = {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}],
+                },
+            }
+            try:
+                process.stdin.write(json.dumps(payload) + "\n")
+                process.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                self._stop()
+                return subprocess.CompletedProcess([], 1, "", str(exc))
+
+            streamed = False
+            result = ""
+            is_error = False
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    try:
+                        code = process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        code = process.wait()
+                    self.process = None
+                    error = "\n".join(self.stderr) or "brain process ended mid-turn"
+                    return subprocess.CompletedProcess([], code or 1, result, error)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                sid = event.get("session_id") or ""
+                if sid:
+                    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    SESSION_FILE.write_text(sid)
+                if event.get("type") == "stream_event":
+                    inner = event.get("event") or {}
+                    delta = inner.get("delta") or {}
+                    if (inner.get("type") == "content_block_delta" and
+                            delta.get("type") == "text_delta"):
+                        chunk = delta.get("text") or ""
+                        if chunk:
+                            streamed = True
+                            result += chunk
+                            on_text(chunk)
+                elif event.get("type") == "result":
+                    final = event.get("result") or result
+                    is_error = bool(event.get("is_error"))
+                    if not streamed and final and not is_error:
+                        result = final
+                        on_text(final)
+                    elif not streamed:
+                        result = final
+                    error = "\n".join(self.stderr)
+                    return subprocess.CompletedProcess(
+                        [], 1 if is_error else 0, result, error,
+                    )
+
+    def close(self) -> None:
+        with self.lock:
+            self._stop()
+
+
+class SentenceStream:
+    def __init__(self, callback: Callable[[str], None]) -> None:
+        self.callback = callback
+        self.pending = ""
+        self.card = False
+
+    def feed(self, chunk: str) -> None:
+        if self.card:
+            return
+        self.pending += chunk
+        card_at = self.pending.find("\nCARD: ")
+        if card_at >= 0:
+            self.pending = self.pending[:card_at]
+            self._emit_complete()
+            self.finish()
+            self.card = True
+            return
+        self._emit_complete()
+
+    def _emit_complete(self) -> None:
+        while True:
+            if ("CARD: ".startswith(self.pending) or
+                    self.pending.startswith("CARD: ")):
+                return
+            boundary = None
+            for index in range(1, len(self.pending)):
+                if (self.pending[index - 1] in ".!?" and
+                        self.pending[index].isspace()):
+                    boundary = index
+                    break
+            if boundary is None:
+                return
+            complete = self.pending[:boundary].strip()
+            self.pending = self.pending[boundary:].lstrip()
+            if complete.startswith("CARD: "):
+                continue
+            for sentence in speak.split_sentences(complete):
+                self.callback(sentence)
+
+    def finish(self) -> None:
+        complete = self.pending.strip()
+        self.pending = ""
+        if not complete or complete.startswith("CARD: "):
+            return
+        for sentence in speak.split_sentences(complete):
+            self.callback(sentence)
+
+
+_BRAIN = BrainProcess()
+atexit.register(_BRAIN.close)
 
 
 def pick_mic() -> str:
@@ -112,20 +294,20 @@ def transcribe(wav: pathlib.Path) -> str:
     ).stdout.replace("\n", " ").strip()
 
 
-def ask_brain(text: str, system_prompt: str) -> tuple[str, subprocess.CompletedProcess]:
-    cmd = ["claude", "-p", text, "--model", BRAIN_MODEL,
-           "--append-system-prompt", system_prompt,
-           "--output-format", "json"]
-    if SESSION_FILE.exists():
-        cmd += ["--resume", SESSION_FILE.read_text().strip()]
-    brain = subprocess.run(cmd, capture_output=True, text=True)
-    reply, sid = "", ""
-    try:
-        data = json.loads(brain.stdout)
-        reply = (data.get("result") or "").strip()
-        sid = data.get("session_id") or ""
-    except json.JSONDecodeError:
-        pass
-    if sid:
-        SESSION_FILE.write_text(sid)
+def ask_brain_streaming(
+        text: str, system_prompt: str,
+        on_sentence: Callable[[str], None] | None = None,
+        on_complete: Callable[[str], None] | None = None,
+) -> tuple[str, subprocess.CompletedProcess]:
+    sentences = SentenceStream(on_sentence or (lambda _sentence: None))
+    brain = _BRAIN.ask(text, system_prompt, sentences.feed)
+    if brain.returncode == 0:
+        sentences.finish()
+    reply = brain.stdout.strip()
+    if on_complete is not None:
+        on_complete(reply)
     return reply, brain
+
+
+def ask_brain(text: str, system_prompt: str) -> tuple[str, subprocess.CompletedProcess]:
+    return ask_brain_streaming(text, system_prompt)
