@@ -52,6 +52,7 @@ RECORDS_MODE = MODE == MODE_RECORDS
 
 args = [a for a in ARGS if not a.startswith("--")]
 APPLY = "--apply" in sys.argv
+SF_IDS = "--sf-ids" in sys.argv     # print the Opportunity-id backfill, then stop
 ROOT = args[0] if args else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 TSV  = os.path.join(ROOT, "Automation", "salesforce-deals-latest.tsv")
@@ -116,21 +117,61 @@ data  = load_deals_doc(ROOT, MODE)
 deals = data["deals"]
 by_name = {norm(d.get("name")): d for d in deals}
 
-new, changed, unmatched = [], [], []
+# ---------- the id index: the match that cannot be wrong ----------
+# `deal.salesforce_id` is the Opportunity id, and it is exact where every name test below
+# is a guess. load_deals_doc() does not carry it (its merged dict mirrors the exporter's
+# field list, and adding to that would change exporter parity), so it is read here, in the
+# one script that needs it. A deal matched on id skips the name logic entirely.
+by_sfid = {}
+if RECORDS_MODE:
+    try:
+        from lib.record_sources import _connect
+        with _connect() as _c, _c.cursor() as _cur:
+            _cur.execute("select name, salesforce_id from v_export_deals "
+                         "where salesforce_id is not null")
+            _sf = dict(_cur.fetchall())
+        by_sfid = {sid: by_name[norm(nm)] for nm, sid in _sf.items() if norm(nm) in by_name}
+    except Exception as e:                      # never let the index break the reconciliation
+        print(f"(salesforce_id index unavailable, falling back to name matching: {e})\n")
+
+# A deal in one of these is DONE. Salesforce showing it earlier is back-office invoicing
+# state, never a reopening — see the guard in the match loop.
+CLOSED_PHASES = {"closed", "closed won", "closed lost", "won", "lost"}
+
+new, changed, unmatched, sf_pairs, held = [], [], [], [], []
+
+# A Deal Room record that some Salesforce row already matches BY NAME is spoken for, and
+# must not be handed to a different row by one of the weaker fallbacks below. Claim them
+# all up front, before any fallback runs, so the outcome cannot depend on row order.
+# (Added 2026-08-07, after the company fallback matched Salesforce's "Trambadia - Marrietta
+# Smyrna GA" onto the JSON's "Chee Yap – Charlotte NC" — both carry company Musicologie,
+# which 13 Deal Room records share — and reported Trambadia's city as a change to Chee Yap.)
+claimed = {id(by_name[norm(r["deal_name"])]) for r in rows if norm(r["deal_name"]) in by_name}
+claimed |= {id(by_sfid[r["sf_id"]]) for r in rows if r.get("sf_id") in by_sfid}
+
 for r in rows:
     key = norm(r["deal_name"])
-    d = by_name.get(key)
+    # Id first. An id match is authoritative and is NOT reported as a name to confirm —
+    # that list exists for guesses, and this is not one.
+    d = by_sfid.get(r.get("sf_id")) or by_name.get(key)
     if d is None:
         # 1) exact company match, 2) close-spelling name match — before declaring it new.
         # Spelling drift is real (Salesforce "Alicia Chen" vs the JSON's "Alecia Chen"),
         # so a near-match is surfaced for confirmation, never silently merged and never
         # mislabelled as a brand-new deal. (Example sanitized 2026-08-06, ORDER 42b —
         # the originals named a real client.)
-        alt = next((x for x in deals if norm(x.get("company")) == norm(r["company"]) and norm(x.get("company"))), None)
+        #
+        # A company only identifies a record when it identifies it UNIQUELY. A company
+        # shared by several still-unclaimed records identifies none of them, so it falls
+        # through to the spelling matches instead of taking whichever happens to be first.
+        cands = [x for x in deals
+                 if norm(x.get("company")) and norm(x.get("company")) == norm(r["company"])
+                 and id(x) not in claimed]
+        alt = cands[0] if len(cands) == 1 else None
         how = "company"
         if alt is None:
             close = difflib.get_close_matches(key, list(by_name.keys()), n=1, cutoff=0.82)
-            if close:
+            if close and id(by_name[close[0]]) not in claimed:
                 alt = by_name[close[0]]; how = "near-spelling"
         if alt is None:
             # Deal names carry different amounts of suffix on each side ("Alicia Chen, DO"
@@ -141,15 +182,32 @@ for r in rows:
             if lead:
                 cand = [(difflib.SequenceMatcher(None, lead, " ".join(k.split()[:2])).ratio(), k)
                         for k in by_name if k]
+                cand = [c for c in cand if id(by_name[c[1]]) not in claimed]
                 best = max(cand, default=(0, None))
                 if best[0] >= 0.85:
                     alt = by_name[best[1]]; how = f"leading name {best[0]:.0%}"
         if alt is None:
             new.append(r); continue
         d = alt
+        claimed.add(id(d))          # one Deal Room record answers to at most one SF row
         unmatched.append((r["deal_name"], d.get("name"), how))
+    # The Salesforce Opportunity id for every row that resolved to a Deal Room record.
+    # This is the reconciliation key that makes all the name-matching above unnecessary
+    # once it is filled in, so it is collected on EVERY run and printed by --sf-ids.
+    if r.get("sf_id"):
+        sf_pairs.append((d.get("name"), r["sf_id"], r["deal_name"]))
     diffs = []
-    if r["phase"] and r["phase"] != (d.get("phase") or ""):
+    # A CLOSED deal that Salesforce shows in an earlier phase is an INVOICING ARTIFACT,
+    # not a reopening: CARR back-office moves a closed deal back to "Legal" while it is
+    # still awaiting invoicing. Joe, 2026-08-07, on the second occurrence: "bhate is
+    # closed. we just havn'et invoiced yet. i think our backoffice moves it to legal when
+    # they havne't invoiced yet." Applying one of these reopened Bhate and had to be
+    # reverted, so the guard lives here rather than in a session's memory. Forward moves
+    # are untouched. Held rows are PRINTED — a fired guard must be visible in the output.
+    if (d.get("phase") or "").strip().lower() in CLOSED_PHASES \
+       and r["phase"] and r["phase"].strip().lower() not in CLOSED_PHASES:
+        held.append((d.get("name"), d.get("phase"), r["phase"]))
+    elif r["phase"] and r["phase"] != (d.get("phase") or ""):
         diffs.append(("phase", d.get("phase") or "(blank)", r["phase"]))
     if r["city"] not in ("", "-") and r["city"] != (d.get("city") or ""):
         diffs.append(("city", d.get("city") or "(blank)", r["city"]))
@@ -159,6 +217,34 @@ for r in rows:
         diffs.append(("lane", lane_now or "(unset)", lane_sf))
     if diffs:
         changed.append((d.get("name"), diffs, r))
+
+# ---------- the Opportunity-id backfill ----------
+# `deal.salesforce_id` was NULL on every deal, which is the ONLY reason any of the
+# name-matching above has to exist. Filling it retires that guesswork permanently:
+# a later run keys on the id and never has to ask whether "Marrietta" is "Marietta".
+# Printed, never written from here — the record layer owns its own writes.
+if SF_IDS:
+    if not sf_pairs:
+        print("No sf_id column in the capture. Re-run the capture with Opportunity ids "
+              "(see 'The upgrade path' in DNA/Deal Management/salesforce-read-sop.md).")
+        sys.exit(3)
+    seen = {}
+    for deal_name, sf_id, sf_name in sf_pairs:
+        seen.setdefault(sf_id, []).append(deal_name)
+    dupes = {k: v for k, v in seen.items() if len(set(v)) > 1}
+    print(f"SALESFORCE ID BACKFILL — {len(sf_pairs)} matched deal(s)\n")
+    for deal_name, sf_id, sf_name in sf_pairs:
+        note = "" if norm(deal_name) == norm(sf_name) else f"   # SF name: {sf_name}"
+        print(f"  update-deal(deal={deal_name!r}, salesforce_id={sf_id!r}){note}")
+    if dupes:
+        # salesforce_id is `text unique`; two deals sharing one id would fail on write.
+        print("\nREFUSING TO RECOMMEND — one Opportunity id maps to several Deal Room records:")
+        for k, v in dupes.items():
+            print(f"  {k} -> {sorted(set(v))}")
+        sys.exit(1)
+    print(f"\n{len(new)} Salesforce row(s) matched no Deal Room record and are skipped "
+          f"(they need a real record first, never an id alone).")
+    sys.exit(0)
 
 # ---------- report ----------
 print(f"Salesforce capture: {len(rows)} deals   |   Deal Room JSON: {len(deals)} deals\n")
@@ -176,6 +262,14 @@ if changed:
         for field, old, newv in diffs:
             print(f"      {field}: {old}  ->  {newv}")
     print()
+
+if held:
+    print(f"HELD — backwards from closed ({len(held)}), NOT applied:")
+    for name, was, sf in held:
+        print(f"  = {name}   Deal Room {was!r}  <-  Salesforce {sf!r}")
+    print("  Back-office moves a closed deal back while it awaits invoicing. These are")
+    print("  invoicing state, not reopenings. If one is a genuine reopening, say so and")
+    print("  it goes through update-deal by hand.\n")
 
 if unmatched:
     print("SAME DEAL, DIFFERENT NAME — confirm before trusting (never auto-merged):")

@@ -258,6 +258,13 @@ def load_deals_doc(root, mode):
             "carr": legacy.get("carr") if legacy.get("carr") is not None
                     else row["PLACEHOLDER_sf_commission_never_sum"],
         })
+        # 0074: city/lane are real columns; the DB owns them. Mirrors
+        # exporters/targets.py:build_deals exactly — targets.py is the authority
+        # and this block must not drift from it. Correct on both sides of the
+        # migration (column absent -> legacy passthrough still answers).
+        for _f in ("city", "lane"):
+            if row.get(_f) is not None:
+                legacy[_f] = row[_f]
         deals.append(legacy)
     # The file goes through json.dumps(default=str); a records-mode consumer must
     # see the same scalars (no date, no Decimal) or its output differs on type alone.

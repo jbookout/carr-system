@@ -139,6 +139,18 @@ def main() -> None:
             print("dry run — pass --apply to run these")
             return
         if not args.yes:
+            # END THE READ TRANSACTION BEFORE ASKING A HUMAN ANYTHING.
+            # Reading schema_migrations above opened a transaction (psycopg is
+            # not autocommit), and the prompt below asks the operator to type a
+            # ~58-character hostname. That leaves the session idle IN a
+            # transaction for however long they take, and Neon enforces
+            # idle_in_transaction_session_timeout. On 2026-08-07 the first
+            # production run of 0074 died with IdleInTransactionSessionTimeout
+            # on the very first `set local` after the confirmation, having
+            # applied nothing. An idle session is fine; idle-in-transaction is
+            # not. A rehearsal cannot catch this, because rehearsals pass --yes
+            # and --yes is precisely the path that never waits.
+            conn.rollback()
             answer = input(f"Apply {len(pending)} migration(s) to host '{host}'? "
                            "Type the host name to confirm: ").strip()
             if answer != host:

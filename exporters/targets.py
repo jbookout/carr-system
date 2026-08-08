@@ -220,6 +220,15 @@ def build_deals(tmp_path, cur):
             "carr": legacy.get("carr") if legacy.get("carr") is not None
                     else row["PLACEHOLDER_sf_commission_never_sum"],
         })
+        # 0074: city and lane are real columns now, so the DB owns them the way
+        # it owns name/phase/owner. `.get` plus the None test keeps this correct
+        # on BOTH sides of the migration — before it the view has no such
+        # columns and the legacy passthrough still answers; after it, the column
+        # wins. lib/record_sources.py:load_deals_doc carries the same block, and
+        # that parity is what proves the two copies still agree.
+        for _f in ("city", "lane"):
+            if row.get(_f) is not None:
+                legacy[_f] = row[_f]
         deals.append(legacy)
     doc = {
         "source": "GENERATED from the CARR record layer — do not hand-edit; regenerated nightly",

@@ -1444,13 +1444,17 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
-      fields: { type: "object", description: "subset of: phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id" } },
+      fields: { type: "object", description: "subset of: phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
       required: ["idempotency_key","deal","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       await versionGuard(c, "deal", s.id, args.base_version);
-      const allowed = ["phase","segment","outcome","closed_on","won_value","notes_path","salesforce_id"];
+      // city and lane joined the list in 0074, when they stopped being source_row
+      // passthrough and became real columns. Before that they were unsettable,
+      // which is why salesforce-diff could only ever REPORT a city move.
+      const allowed = ["phase","segment","outcome","closed_on","won_value","notes_path",
+                       "salesforce_id","city","lane"];
       if ("client_id" in args.fields) throw new ToolError({ error: "use_reassign_deal",
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
@@ -1463,6 +1467,81 @@ export const TOOLS = {
         await writeEvent(c, actor, "update-deal", "deal", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys };
+    }),
+  },
+
+  "new-deal": {
+    write: true, humanOnly: true,
+    description: "Create a deal on an existing client. THE GAP THIS CLOSES: until 2026-08-07 nothing in the record layer could create a deal — new-client makes only a client row, reassign-deal and set-lead both need a deal that already exists, and the ONLY insert into `deal` in the whole repo was pipelines/import_wave1.py, the one-time bulk import. So every deal in the book traced back to that import, and the six deals the 2026-08-07 Salesforce read found had nowhere to land. The client must exist first (new-client over a party): a deal hangs off a client, never free-floating, and this verb will not invent one. humanOnly on purpose — a new deal is a real commitment in a partner's book, and salesforce-diff deliberately never auto-adds one. deal_type and phase are validated by the database against deal_type_ref and deal_phase, so a bad slug is refused with the live list rather than guessed at. Refuses a duplicate name and a salesforce_id already in use, naming the deal that holds it. Commission and close date from Salesforce are PLACEHOLDERS and land in the two labelled placeholder columns, never in won_value.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      client: { type: "string", description: "C-ref or exact name of the client this deal belongs to" },
+      name: { type: "string", description: "deal name; keep it the Salesforce Deal Name where one exists" },
+      deal_type: { type: "string", description: "slug from deal_type_ref, e.g. startup / relocation / additional_office / renewal / expansion / other" },
+      phase: { type: "string", description: "slug from deal_phase, e.g. pending / research / negotiation / legal / due_diligence / closing / closed" },
+      segment: { type: "string" },
+      city: { type: "string", description: "city of transaction" },
+      lane: { type: "string", description: "slug from deal_lane: territory (CARR represents) or national (out-of-market referral). Salesforce's Out of Market Deal checkbox is the truth here — never infer it from the city." },
+      salesforce_id: { type: "string", description: "Opportunity id (006...), the reconciliation key back to the system of record" },
+      notes_path: { type: "string" },
+      sf_commission_placeholder: { type: "number", description: "Salesforce commission figure — a PLACEHOLDER, never summed and never shown as pipeline value" },
+      sf_close_date_placeholder: { type: "string", description: "Salesforce close date (YYYY-MM-DD) — a PLACEHOLDER, never a forecast" },
+      reason: { type: "string", description: "why this deal is being opened; lands on the event as agent_rationale" },
+      human_quote: { type: "string", description: "the partner's verbatim words, when they directed it" } },
+      required: ["idempotency_key","client","name","deal_type","phase"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "new-deal", args, async () => {
+      const s = await resolveSubject(c, args.client);
+      if (s.type !== "client") throw new ToolError({ error: "not_a_client", resolved: s,
+        hint: "a deal hangs off a client. Create the client first with new-client over a party." });
+
+      // A second deal with the same name is nearly always a double-add, and the damage
+      // (two records drifting apart, each half-updated) is worse than the inconvenience.
+      const dupe = await c.query(
+        "select subject_id, display_name from v_ref_index where subject_type='deal' and lower(display_name)=lower($1)",
+        [args.name]);
+      if (dupe.rows.length) throw new ToolError({ error: "deal_name_exists",
+        existing: dupe.rows.map(r => ({ id: r.subject_id, name: r.display_name })),
+        hint: "if this is genuinely a second deal for the same client, give it a distinguishing name" });
+
+      let r;
+      try {
+        r = await c.query(
+          `insert into deal (client_id, name, deal_type, phase, segment, city, lane, salesforce_id,
+             notes_path, sf_commission_placeholder, sf_close_date_placeholder, created_by, updated_by)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12) returning id`,
+          [s.id, args.name, args.deal_type, args.phase, args.segment || null,
+           args.city || null, args.lane || null,
+           args.salesforce_id || null, args.notes_path || null,
+           args.sf_commission_placeholder ?? null, args.sf_close_date_placeholder || null, actor.id]);
+      } catch (e) {
+        // Map the database's own guards to answers a caller can act on, rather than
+        // leaking a raw driver error. The DB stays the authority on both vocabularies.
+        if (e.code === "23505") {
+          const held = await c.query("select name from deal where salesforce_id=$1", [args.salesforce_id]);
+          throw new ToolError({ error: "salesforce_id_in_use", salesforce_id: args.salesforce_id,
+            held_by: held.rows[0]?.name ?? null,
+            hint: "one Opportunity maps to exactly one deal; check whether this deal already exists under another name" });
+        }
+        if (e.code === "23503") {
+          // deal has three closed vocabularies behind FKs: deal_type_ref,
+          // deal_phase and (since 0074) deal_lane. Name the right one.
+          const con = e.constraint || "";
+          const which = /deal_type/.test(con) ? "deal_type" : /lane/.test(con) ? "lane" : "phase";
+          const table = { deal_type: "deal_type_ref", lane: "deal_lane", phase: "deal_phase" }[which];
+          let valid = [];
+          try { valid = (await c.query(`select slug from ${table} order by slug`)).rows.map(x => x.slug); }
+          catch { /* the role may not read the ref table; the error below still names the field */ }
+          throw new ToolError({ error: `unknown_${which}`, given: args[which], valid });
+        }
+        throw e;
+      }
+
+      await writeEvent(c, actor, "new-deal", "deal", r.rows[0].id,
+        { new: { name: args.name, client: args.client, deal_type: args.deal_type, phase: args.phase,
+                 salesforce_id: args.salesforce_id || null },
+          human_quote: args.human_quote, agent_rationale: args.reason,
+          idempotency_key: args.idempotency_key });
+      return { ok: true, deal_id: r.rows[0].id, name: args.name, client_ref: args.client };
     }),
   },
 
