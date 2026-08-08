@@ -54,6 +54,7 @@ def main():
             words.append(args[i]); i += 1
     if not words:
         print(__doc__); sys.exit(2)
+    words = " ".join(words).split()   # a quoted question is one argv entry; re-split
     query = " ".join(words).lower()
     q = set(toks(query))
     if not q:
