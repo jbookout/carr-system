@@ -391,8 +391,11 @@ function openComposer(dealId, cell) {
   };
   inp.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') finish();
-    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
-      box.querySelector('[data-act="step"]').click();
+    // Enter saves (Joe's ruling, day 9 live proof): plain Enter commits the
+    // next step. Shift+Enter adds a note instead of superseding the step.
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      box.querySelector(ev.shiftKey ? '[data-act="note"]' : '[data-act="step"]').click();
     }
   });
 }
