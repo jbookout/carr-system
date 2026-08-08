@@ -128,3 +128,34 @@ Two-party attribution comes free from the channel split (mic = me, system = them
 There is no speaker-enrollment feature for anyone but Joe/Dell (self-consented,
 Phase B if built at all), and no persistent voiceprint of any client or third
 party, ever.
+
+## Dell setup (both modes, from his existing clone)
+
+Dell already has `jbookout/carr-system` cloned; the whole rollout is local.
+In order, on his Mac:
+
+1. `git pull` on main, then `git submodule update --init tools/dictation-rig/vendor/quill`
+   (the submodule is a pointer; a plain pull does not fetch quill's source).
+2. Pre-flight: `sw_vers` must show macOS 15+ (quill's system-audio tap API),
+   and `brew install whisper-cpp` for `whisper-cli`.
+3. Model: download `ggml-large-v3-turbo.bin` into `~/.cache/whisper-cpp/models/`
+   (~1.6 GB, from the whisper.cpp models repo — same full-model choice Joe
+   ruled; `ggml-small.en.bin` works as the fallback slot).
+4. **Vocab prompt is per-partner**: regenerate `vocab-prompt.txt` from DELL'S
+   live book (deal-board verb), do not inherit Joe's client surnames. Same
+   file path, his names.
+5. Build both: `bin/build-quill.sh`, then `bin/build-dictate.sh` (each carries
+   the CPLUS_INCLUDE_PATH toolchain guard — never bare `swift build`).
+6. Deploy: `bin/install-config.sh` (meeting mode), `bin/install-consent.sh`
+   (consent watcher), `bin/install-dictate.sh` (dictation agent + launchd).
+7. His one-time permission clicks: mic + Screen & System Audio Recording
+   (quill), mic + Accessibility (quill-dictate).
+8. **Trigger keys are per-keyboard**: hold-to-talk defaults to right-cmd (54)
+   and right-ctrl (62). If a key doesn't respond, his keyboard likely emits a
+   different keycode — capture what it sends and edit `trigger_key_codes` in
+   `~/.config/quill-dictate/config.json` (that config line exists exactly for
+   this). If his Mac binds Siri to a command double-press, the agent's
+   event consumption already suppresses it.
+9. Consent still ships: Alabama is one-party consent but Florida is
+   all-party, the territory spans both, and the announcement layer plus the
+   ask-first habit are non-negotiable either way (Addendum 5).
