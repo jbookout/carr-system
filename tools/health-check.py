@@ -857,8 +857,9 @@ try:
           " (select count(*) from doctrine_gate_run where result='fail' "
           "   and dry_run=false and started_at > now() - interval '24 hours'),"
           " (select count(*) from doctrine_section s join doctrine_document d "
-          "   on d.id=s.document_id where s.status='active' and d.review_policy_id "
-          "   is not null and s.review_after is null),"
+          "   on d.id=s.document_id join doctrine_review_policy p on p.id=d.review_policy_id "
+          "   where s.status='active' and p.max_age_days is not null "
+          "   and s.review_after is null),"
           " (select count(*) from doctrine_section where review_after < now()),"
           " (select generation from doctrine_meta where id=1),"
           " (select count(*) from doctrine_document);")
