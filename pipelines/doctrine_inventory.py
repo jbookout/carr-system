@@ -30,7 +30,11 @@ VAULT = os.path.expanduser(
     "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SKIP_DIRS = {"_to_delete", ".archived", "Output", "out"}
+SKIP_DIRS = {"_to_delete", ".archived", "Output", "out",
+             # the portability mirror IS the store's own projection — counting
+             # it as unmigrated corpus was the first thing its first nightly
+             # run did (caught 2026-08-08, minutes after the mirror shipped)
+             "Backups"}
 SKIP_PREFIXES = ("DNA/Network/briefs/",)
 
 # ARCHIVE, not corpus (council exemption: immutable history keeps its
