@@ -47,6 +47,33 @@ device, re-resolve it while idle with:
     curl -X POST -H 'Content-Type: application/json' \
       -d '{"action":"refresh_mic"}' http://127.0.0.1:4680/talk
 
+## Voice harvest (bin/harvest-voice.py)
+
+Grows the phrase cache from Joe's own real questions instead of hand-picked
+bridge phrases. Mines question-shaped human messages out of a claude.ai
+account export (plus a curated 40-question bank of Joe's real workflows —
+deal status, critical dates, negotiation, clients, vendors, comps, judgment
+calls, daily planning), asks Doc each one in character
+(`convo_core.ask_brain_streaming`, real preamble + hot-context), splits every
+reply into sentences, and classifies each FACT-BEARING or FACT-FREE.
+
+Hard rule: only FACT-FREE sentences ever reach `assets/phrases/` (the live
+cache). A sentence with a digit, currency symbol, month, weekday, or a
+probable proper noun never gets cached — Doc always says a name or number
+fresh, never replays one. `bin/test-harvest.sh` proves this. FACT-BEARING
+sentences render only with `--corpus`, into `assets/harvest-corpus/`, a
+directory the live engine never reads — future voice-training material, kept
+separate on purpose.
+
+    bin/harvest-voice.py --dry-run            mine + generate + classify only
+    bin/harvest-voice.py                      + render frames to the cache
+    bin/harvest-voice.py --corpus             + also render facts to corpus/
+    bin/test-harvest.sh                       classifier safety test
+
+All harvest inputs and outputs (Joe's real questions, Doc's real replies,
+sentence splits) are local-only — see `.gitignore` — never committed; only
+the pipeline code is tracked.
+
 ## Honest limits (v0, by design)
 
 - Push-to-talk only: no wake word, no VAD endpointing, no barge-in.
