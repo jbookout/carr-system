@@ -221,6 +221,12 @@
     display: block; margin-top: 8px; color: var(--amber-hi); font-size: 11.5px;
     user-select: all;
   }
+  #timing {
+    display: none; position: relative; z-index: 2; padding: 0 24px 10px;
+    color: var(--dim); font: 10px/1.4 ui-monospace, SFMono-Regular, monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  body.debug #timing { display: block; }
 </style>
 </head>
 <body>
@@ -254,6 +260,7 @@
     you don't have to hold them.
   </div>
 </main>
+<div id="timing"></div>
 
 <script>
 (function () {
@@ -265,6 +272,7 @@
   var status = document.getElementById("status");
   var offline = document.getElementById("offline");
   var hint = document.getElementById("hint");
+  var timing = document.getElementById("timing");
   var pickOrb = document.getElementById("pickOrb");
   var pickPresence = document.getElementById("pickPresence");
   var pickKeyline = document.getElementById("pickKeyline");
@@ -273,6 +281,8 @@
   var speechEnvelope = null;
   var envelopeStarted = 0;
   var voiceDrive = null;
+  var debug = new URLSearchParams(window.location.search).get("debug") === "1";
+  document.body.classList.toggle("debug", debug);
 
   var LABELS = {
     idle: "at the desk", listening: "listening", thinking: "thinking it over",
@@ -793,6 +803,17 @@
           speechEnvelope = env;
           envelopeStarted = performance.now();
         }
+      });
+      es.addEventListener("timing", function (e) {
+        if (!debug) return;
+        var data = JSON.parse(e.data);
+        var stages = Object.keys(data).filter(function (key) {
+          return key !== "total_ms";
+        }).sort(function (a, b) { return data[b] - data[a]; }).slice(0, 3);
+        timing.textContent = "last " + data.total_ms.toFixed(1) + "ms · " +
+          stages.map(function (key) {
+            return key + " " + data[key].toFixed(1) + "ms";
+          }).join(" · ");
       });
       es.onerror = function () {
         es.close(); setOffline(true); setTimeout(connect, 3000);

@@ -27,7 +27,8 @@ import tty
 import speak
 from convo_core import (EARCON, MIN_BYTES, MODEL, SPEAK, TOOL, WHISPER,
                         ask_brain_streaming, mean_volume, pick_mic,
-                        refresh_hot_context, transcribe, warm_voice)
+                        refresh_hot_context, transcribe, warm_voice,
+                        warm_whisper)
 
 LISTEN_ARM = 0.8    # ignore keys this long after listen starts (space autorepeat)
 
@@ -81,6 +82,7 @@ def main() -> int:
             return 2
     if not EARCON.exists():
         subprocess.run([str(TOOL / "bin" / "make-earcon.sh")], check=True)
+    warm_whisper()
 
     system_prompt = refresh_hot_context()
     if system_prompt is None:

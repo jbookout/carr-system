@@ -55,7 +55,7 @@ PY
 # GET / serves the panel when present, a designed 503 when not — both valid.
 STATUS=$(curl -sS -o "$TMP/panel" -w '%{http_code}' http://127.0.0.1:4680/)
 if [[ "$STATUS" == 200 ]]; then
-  grep -q '<title>Doc</title>' "$TMP/panel"
+  grep -q '<title>Dr. CRE</title>' "$TMP/panel"
 else
   [[ "$STATUS" == 503 ]]
   grep -q 'panel missing:' "$TMP/panel"
@@ -68,7 +68,9 @@ curl -fsS -X POST -H 'Content-Type: application/json' -d '{"action":"start"}' ht
 sleep 0.2
 curl -fsS -X POST -H 'Content-Type: application/json' -d '{"action":"stop"}' http://127.0.0.1:4680/talk >/dev/null
 for _ in {1..50}; do
-  grep -q 'data: {"state": "idle"}' "$TMP/events" && grep -q 'event: turn' "$TMP/events" && break
+  grep -q 'data: {"state": "idle"}' "$TMP/events" && \
+    grep -q 'event: turn' "$TMP/events" && \
+    grep -q 'event: timing' "$TMP/events" && break
   sleep 0.1
 done
 kill "$EVENTS_PID" 2>/dev/null || true
@@ -80,4 +82,15 @@ for state in listening thinking idle; do
   grep -q "data: {\"state\": \"$state\"}" "$TMP/events"
 done
 grep -q 'event: turn' "$TMP/events"
+grep -q 'event: timing' "$TMP/events"
+python3 - "$BIN/../assets/turn-timings.jsonl" <<'PY'
+import json, sys
+timing = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+expected = {
+    "mic_open", "record_stop", "volume_check", "stt", "reflex_check",
+    "brain_ttfs", "brain_total", "tts_first_audio", "tts_total", "total_ms",
+}
+assert set(timing) == expected
+assert all(isinstance(value, (int, float)) for value in timing.values())
+PY
 echo "convo-server smoke test passed"

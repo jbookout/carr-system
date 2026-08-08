@@ -16,10 +16,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import convo_core
 import reflexes
 import speak
+from timings import Turn
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "4680"))
 PANEL = convo_core.TOOL / "panel" / "panel.html"
+TIMINGS = convo_core.TOOL / "assets" / "turn-timings.jsonl"
 
 
 def split_card(reply: str) -> tuple[str, object | None]:
@@ -43,12 +45,14 @@ class Engine:
         self.turns = []
         self.system_prompt = system_prompt
         self.recording = None
-        self.recording_stderr = None
         self.utterance = None
         self.listeners = []
         self.lock = threading.Lock()
         self.workdir = pathlib.Path(tempfile.mkdtemp(prefix="doc-convo-server."))
         self.turn_number = 0
+        self.timing = None
+        self.mic = convo_core.pick_mic()
+        self.capture = convo_core.ResidentMic(self.mic)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -104,60 +108,80 @@ class Engine:
         })
 
     def start(self) -> bool:
+        timing = Turn()
+        timing.mark("mic_open_start")
         with self.lock:
             if self.state != "idle":
                 return False
             self.turn_number += 1
             utterance = self.workdir / f"utt-{self.turn_number}.wav"
-            try:
-                recording = subprocess.Popen(
-                    ["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation",
-                     "-i", convo_core.pick_mic(), "-ac", "1", "-ar", "16000",
-                     str(utterance)],
-                    stderr=subprocess.PIPE,
-                )
-            except OSError:
+            recording = self.capture.begin()
+            if recording is None:
                 return False
             self.recording = recording
-            self.recording_stderr = recording.stderr
             self.utterance = utterance
+            self.timing = timing
             self.state = "listening"
+        timing.mark("mic_open_done")
         self.emit("state", {"state": "listening"})
+        return True
+
+    def refresh_mic(self) -> bool:
+        with self.lock:
+            if self.state != "idle":
+                return False
+            self.mic = convo_core.pick_mic()
+            self.capture.set_mic(self.mic)
         return True
 
     def stop(self) -> bool:
         with self.lock:
-            if self.state != "listening" or self.recording is None:
+            if (self.state != "listening" or self.recording is None or
+                    self.utterance is None):
                 return False
             recording = self.recording
-            recording.send_signal(signal.SIGINT)
+            timing = self.timing
+            if timing is not None:
+                timing.mark("record_stop_start")
+            utterance = self.utterance
             self.state = "thinking"
+        try:
+            self.capture.write_since(recording, utterance)
+        except OSError:
+            utterance.unlink(missing_ok=True)
+        if timing is not None:
+            timing.mark("record_stop_done")
         self.emit("state", {"state": "thinking"})
         self.progress("heard you")
-        threading.Thread(target=self._finish_turn, args=(recording,), daemon=True).start()
+        threading.Thread(
+            target=self._finish_turn, args=(timing,), daemon=True,
+        ).start()
         return True
 
     def _heard_nothing(self, message: str) -> None:
         self.add_turn("", message)
 
-    def _finish_turn(self, recording: subprocess.Popen) -> None:
+    def _finish_turn(self, timing: Turn | None) -> None:
         try:
-            try:
-                recording.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                recording.kill()
-                recording.wait()
             subprocess.Popen(["afplay", str(convo_core.EARCON)])
             utterance = self.utterance
             if utterance is None or not utterance.exists() or utterance.stat().st_size < convo_core.MIN_BYTES:
                 self._heard_nothing("· heard nothing")
                 return
+            if timing is not None:
+                timing.mark("volume_check_start")
             volume = convo_core.mean_volume(utterance)
+            if timing is not None:
+                timing.mark("volume_check_done")
             if volume is not None and volume < -45:
                 self._heard_nothing(f"· heard only silence (mic level {volume}dB)")
                 return
             self.progress("making out your words")
+            if timing is not None:
+                timing.mark("stt_start")
             text = convo_core.transcribe(utterance)
+            if timing is not None:
+                timing.mark("stt_done")
             if not text:
                 self._heard_nothing("· heard nothing")
                 return
@@ -165,11 +189,23 @@ class Engine:
             # answered instantly from cache — no brain call, no render wait.
             # Falls through on anything that isn't an exact conversational
             # phrase, so a question about the book can never be intercepted.
+            if timing is not None:
+                timing.mark("reflex_check_start")
             reflex = reflexes.match(text)
+            if timing is not None:
+                timing.mark("reflex_check_done")
             if reflex:
                 self.add_turn(text, reflex)
                 self.set_state("speaking")
-                speak.stream(reflex)
+                if timing is not None:
+                    timing.mark("tts_start")
+                speak.stream(
+                    reflex,
+                    on_first_play=(lambda: timing.mark("tts_first_audio"))
+                    if timing is not None else None,
+                )
+                if timing is not None:
+                    timing.mark("tts_done")
                 return
 
             if self.system_prompt is None:
@@ -205,6 +241,8 @@ class Engine:
                 nonlocal speaking
                 if not speaking:
                     speaking = True
+                    if timing is not None:
+                        timing.mark("tts_first_audio")
                     self.set_state("speaking")
 
             def speak_sentences() -> None:
@@ -217,6 +255,9 @@ class Engine:
 
             def on_sentence(sentence: str) -> None:
                 nonlocal streamed_doc, streamed_turn
+                if timing is not None:
+                    timing.mark("brain_first_sentence")
+                    timing.mark("tts_start")
                 streamed_doc = f"{streamed_doc} {sentence}".strip()
                 if streamed_turn is None:
                     streamed_turn = self.add_turn(text, streamed_doc)
@@ -228,13 +269,23 @@ class Engine:
 
             speech_thread = threading.Thread(target=speak_sentences, daemon=True)
             speech_thread.start()
+
+            def finish_speech() -> None:
+                speech_queue.put(speech_done)
+                speech_thread.join()
+                if timing is not None:
+                    timing.mark("tts_done")
+
+            if timing is not None:
+                timing.mark("brain_start")
             reply, brain = convo_core.ask_brain_streaming(
                 text, self.system_prompt, on_sentence=on_sentence,
             )
+            if timing is not None:
+                timing.mark("brain_done")
             doc, card = split_card(reply)
             if brain.returncode != 0:
-                speech_queue.put(speech_done)
-                speech_thread.join()
+                finish_speech()
                 if streamed_turn is None:
                     self._heard_nothing("· brain error")
                 else:
@@ -245,34 +296,36 @@ class Engine:
                 return
             if streamed_turn is None:
                 if not doc:
-                    speech_queue.put(speech_done)
-                    speech_thread.join()
+                    finish_speech()
                     self._heard_nothing("· brain returned no answer")
                     return
                 streamed_turn = self.add_turn(text, doc, card)
             elif doc != streamed_doc or card is not None:
                 self.update_turn(streamed_turn, doc, card)
-            speech_queue.put(speech_done)
-            speech_thread.join()
+            finish_speech()
         except (OSError, ValueError) as exc:
             self._heard_nothing(f"· conversation error: {exc}")
         finally:
+            if timing is not None:
+                report = timing.report()
+                try:
+                    TIMINGS.parent.mkdir(parents=True, exist_ok=True)
+                    with TIMINGS.open("a") as timing_log:
+                        timing_log.write(
+                            json.dumps(report, separators=(",", ":")) + "\n"
+                        )
+                except OSError:
+                    pass
+                self.emit("timing", report)
             with self.lock:
                 self.recording = None
-                self.recording_stderr = None
                 self.utterance = None
+                self.timing = None
             self.progress("")
             self.set_state("idle")
 
     def close(self) -> None:
-        with self.lock:
-            recording = self.recording
-        if recording is not None and recording.poll() is None:
-            recording.kill()
-            try:
-                recording.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
+        self.capture.close()
         for path in self.workdir.iterdir():
             path.unlink(missing_ok=True)
         self.workdir.rmdir()
@@ -349,8 +402,12 @@ class Handler(BaseHTTPRequestHandler):
             ok = self.engine.start()
         elif action == "stop":
             ok = self.engine.stop()
+        elif action == "refresh_mic":
+            ok = self.engine.refresh_mic()
         else:
-            self.json_response(400, {"error": "action must be start or stop"})
+            self.json_response(
+                400, {"error": "action must be start, stop, or refresh_mic"},
+            )
             return
         if not ok:
             self.json_response(409, {"ok": False})
@@ -363,6 +420,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     convo_core.warm_voice()
+    convo_core.warm_whisper()
     system_prompt = convo_core.refresh_hot_context()
     engine = Engine(system_prompt)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
