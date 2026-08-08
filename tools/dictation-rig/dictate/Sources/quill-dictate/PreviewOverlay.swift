@@ -164,11 +164,18 @@ final class PreviewOverlay {
     /// the fixed-width panel partway or fully off-screen.
     private func anchoredOrigin(for anchor: CGRect, panelWidth: CGFloat, panelHeight: CGFloat) -> CGPoint {
         let screen = PreviewOverlay.screen(containing: anchor.origin) ?? NSScreen.main
-        let panelTop = anchor.minY - caretGap
         var originX = anchor.minX
-        var originY = panelTop - panelHeight
+        var originY = anchor.minY - caretGap - panelHeight
 
         if let bounds = screen?.frame {
+            // No room below the anchor -> flip ABOVE it. This is the normal
+            // case when the anchor is a prompt box at the bottom of a window
+            // (the Claude app's, notably): clamping alone would drop the
+            // panel ON TOP of the box instead of beside it (found live
+            // 2026-08-08).
+            if originY < bounds.minY {
+                originY = anchor.maxY + caretGap
+            }
             originX = min(max(originX, bounds.minX), bounds.maxX - panelWidth)
             originY = min(max(originY, bounds.minY), bounds.maxY - panelHeight)
         }

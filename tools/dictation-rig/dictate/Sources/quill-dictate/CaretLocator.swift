@@ -92,20 +92,46 @@ enum CaretLocator {
         var axRect = CGRect.zero
         guard AXValueGetValue(boundsValue, .cgRect, &axRect) else { return nil }
 
-        // An empty field with no real caret position sometimes reports
-        // exactly (0,0,0,0) instead of a real zero-width rect at the caret —
-        // that combination is the failure signature, not a valid answer. A
-        // genuine collapsed-selection caret still has a nonzero origin (it
-        // sits somewhere in the field, not at the screen corner) even when
-        // its width is zero, so width/height alone can't be the test.
-        if axRect.origin == .zero && axRect.size == .zero { return nil }
+        // A real caret always has line height. A ZERO-SIZE rect is a
+        // degenerate answer, not a caret: measured live in the Claude app
+        // 2026-08-08, its contenteditable AXGroup returns (0, windowBottom,
+        // 0, 0) for the selection bounds — which passed the old
+        // origin==(0,0) check, flipped to y=0, and pinned the overlay to the
+        // screen's bottom-left corner. When the caret is degenerate, fall
+        // back to the FOCUSED ELEMENT'S FRAME (the prompt box itself), which
+        // is what the user actually points at when they say "where the text
+        // will land."
+        if axRect.size.width == 0 && axRect.size.height == 0 {
+            guard let frame = elementFrame(focusedElement) else { return nil }
+            axRect = frame
+        }
 
-        // AX bounds are top-left-origin (y grows downward from the primary
-        // screen's top); AppKit is bottom-left-origin. Only the PRIMARY
-        // screen's height anchors this conversion — NSScreen.main is
-        // whichever screen has key focus, which is not the same thing and
-        // gives a wrong flip on a multi-monitor setup where the primary
-        // isn't frontmost.
+        return flippedToAppKit(axRect)
+    }
+
+    /// The focused element's own screen frame (top-left AX coords), or nil.
+    private static func elementFrame(_ element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posRef, CFGetTypeID(posRef) == AXValueGetTypeID(),
+              let sizeRef, CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
+        var pos = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
+              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size),
+              size.width > 0, size.height > 0 else { return nil }
+        return CGRect(origin: pos, size: size)
+    }
+
+    /// AX bounds are top-left-origin (y grows downward from the primary
+    /// screen's top); AppKit is bottom-left-origin. Only the PRIMARY
+    /// screen's height anchors this conversion — NSScreen.main is
+    /// whichever screen has key focus, which is not the same thing and
+    /// gives a wrong flip on a multi-monitor setup where the primary
+    /// isn't frontmost.
+    private static func flippedToAppKit(_ axRect: CGRect) -> CGRect? {
         guard let primaryHeight = NSScreen.screens.first?.frame.height else { return nil }
         let nsY = primaryHeight - axRect.origin.y - axRect.size.height
         return CGRect(x: axRect.origin.x, y: nsY, width: axRect.size.width, height: axRect.size.height)
