@@ -17,6 +17,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     private let workQueue = DispatchQueue(label: "quill-dictate.pipeline", qos: .userInitiated)
     private var axPollTimer: Timer?
 
+    // Live-transcription preview (added 2026-08-08). Entirely separate from
+    // the recorder/transcriber/inserter pipeline above — see PreviewServer.swift
+    // and PreviewOverlay.swift for why this must never be able to block or
+    // delay a real capture.
+    private var previewServer: PreviewServer?
+    private let previewOverlay = PreviewOverlay()
+    private var previewTimer: Timer?
+    /// Bumped every capture start; tags each in-flight preview request so a
+    /// slow response that lands after the NEXT capture already started (or
+    /// after capture ended) is dropped instead of showing stale text.
+    private var previewGeneration = 0
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.shared.path = config.logPath
         Log.shared.line("START quill-dictate pid=\(ProcessInfo.processInfo.processIdentifier) trigger_keys=\(config.triggerKeyCodes)")
@@ -28,6 +40,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
 
         requestMicAccess()
         startWhenTrusted()
+
+        if config.livePreview {
+            let server = PreviewServer(config: config)
+            server.start()
+            previewServer = server
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        previewServer?.stop()
     }
 
     // MARK: - Permissions
@@ -79,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
             try recorder.start()
             setIcon(state: .recording)
             cue(config.soundCaptureStart)
+            startPreview()
         } catch {
             Log.shared.line("ERROR mic start failed: \(error)")
             cue(config.soundError)
@@ -87,6 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     }
 
     func gestureCaptureEnded() {
+        stopPreview()
         guard recorder.isRecording else { return }
         let peak = recorder.peakLevel
         let seconds = recorder.capturedSeconds
@@ -138,9 +162,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     }
 
     func gestureCaptureAborted() {
+        stopPreview()
         recorder.abort()
         Log.shared.line("INFO capture aborted (shortcut or mode exit)")
         settle()
+    }
+
+    // MARK: - Live preview (additive; never gates the real pipeline)
+
+    private func startPreview() {
+        guard config.livePreview, let previewServer, previewServer.isSpawned else { return }
+        previewGeneration += 1
+        let generation = previewGeneration
+        previewOverlay.show(initial: "listening…")
+
+        let timer = Timer(timeInterval: Double(config.previewIntervalMs) / 1000.0, repeats: true) { [weak self] _ in
+            self?.previewTick(generation: generation)
+        }
+        previewTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func previewTick(generation: Int) {
+        guard generation == previewGeneration, let previewServer else { return }
+        guard let wav = recorder.snapshotWav(lastSeconds: Double(config.previewWindowSeconds)) else { return }
+        previewServer.transcribe(wavData: wav) { [weak self] text in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                // Drop late/out-of-order responses: only the request tagged
+                // with the CURRENT generation is allowed to touch the overlay.
+                guard generation == self.previewGeneration, let text, !text.isEmpty else { return }
+                self.previewOverlay.update(text: text)
+            }
+        }
+    }
+
+    private func stopPreview() {
+        previewGeneration += 1 // invalidates any in-flight preview response
+        previewTimer?.invalidate()
+        previewTimer = nil
+        previewOverlay.hide()
     }
 
     func gestureConversationToggled(on: Bool) {

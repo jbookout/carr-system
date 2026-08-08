@@ -90,6 +90,25 @@ final class Recorder {
         }
     }
 
+    /// Non-destructive snapshot of the tail of the in-progress capture, for
+    /// the live-preview overlay (added 2026-08-08). Reads `samples` on the
+    /// SAME serial `queue` the recording tap writes to, so the snapshot never
+    /// races a live append — queue.sync blocks the caller only as long as
+    /// whatever conversion work is already in flight. Returns nil when not
+    /// recording or when nothing has been captured yet, so the caller can
+    /// skip the network round-trip entirely.
+    func snapshotWav(lastSeconds: Double) -> Data? {
+        guard isRecording else { return nil }
+        var wav: Data?
+        queue.sync {
+            guard !samples.isEmpty else { return }
+            let maxBytes = Int(lastSeconds * targetRate) * 2 // Int16 mono = 2 bytes/sample
+            let tail = samples.count > maxBytes ? samples.suffix(maxBytes) : samples
+            wav = Recorder.wavData(fromInt16Mono: Data(tail), sampleRate: Int(targetRate))
+        }
+        return wav
+    }
+
     /// Abort without producing a file (gesture turned out to be a shortcut).
     func abort() {
         guard isRecording, let engine else { return }

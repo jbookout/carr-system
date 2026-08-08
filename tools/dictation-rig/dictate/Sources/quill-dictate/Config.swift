@@ -70,6 +70,16 @@ struct Config: Codable {
     var workDir: String = NSString(string: "~/Library/Caches/quill-dictate").expandingTildeInPath
     var logPath: String = NSString(string: "~/Library/Logs/quill-dictate.log").expandingTildeInPath
 
+    /// Live-transcription preview overlay (added 2026-08-08, Joe wants to SEE
+    /// words appear while he speaks). Strictly additive: a SEPARATE resident
+    /// whisper-server + a fast small.en model, never the final whisper-cli
+    /// pass — the preview must never slow down or gate the real insert.
+    var livePreview: Bool = true
+    var previewServerPort: Int = 8595
+    var previewIntervalMs: Int = 900
+    var previewWindowSeconds: Int = 15
+    var previewModelPath: String = NSString(string: "~/.cache/whisper-cpp/models/ggml-small.en.bin").expandingTildeInPath
+
     enum CodingKeys: String, CodingKey {
         case triggerKeyCodes = "trigger_key_codes"
         case conversationKeyCode = "conversation_key_code"
@@ -91,6 +101,11 @@ struct Config: Codable {
         case vocabPromptPath = "vocab_prompt_path"
         case workDir = "work_dir"
         case logPath = "log_path"
+        case livePreview = "live_preview"
+        case previewServerPort = "preview_server_port"
+        case previewIntervalMs = "preview_interval_ms"
+        case previewWindowSeconds = "preview_window_seconds"
+        case previewModelPath = "preview_model_path"
     }
 
     static var configPath: String {
@@ -144,6 +159,11 @@ private struct PartialConfig: Codable {
     var vocab_prompt_path: String?
     var work_dir: String?
     var log_path: String?
+    var live_preview: Bool?
+    var preview_server_port: Int?
+    var preview_interval_ms: Int?
+    var preview_window_seconds: Int?
+    var preview_model_path: String?
 
     func overlay(onto config: inout Config) {
         // Old single-key form still honored; the list form wins when present.
@@ -168,6 +188,11 @@ private struct PartialConfig: Codable {
         if let v = vocab_prompt_path { config.vocabPromptPath = NSString(string: v).expandingTildeInPath }
         if let v = work_dir { config.workDir = NSString(string: v).expandingTildeInPath }
         if let v = log_path { config.logPath = NSString(string: v).expandingTildeInPath }
+        if let v = live_preview { config.livePreview = v }
+        if let v = preview_server_port { config.previewServerPort = v }
+        if let v = preview_interval_ms { config.previewIntervalMs = v }
+        if let v = preview_window_seconds { config.previewWindowSeconds = v }
+        if let v = preview_model_path { config.previewModelPath = NSString(string: v).expandingTildeInPath }
     }
 }
 
