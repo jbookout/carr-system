@@ -107,6 +107,13 @@ KNOWN_HOSTS = (
     # (ggml-large-v3-turbo). Added 2026-08-07 on Joe's explicit go in the
     # dictation-rig build session; read-only model fetches into ~/.cache.
     "huggingface.co",
+    # x.com / twitter.com: X retrieval is standing doctrine (rule 57d13061,
+    # Grok-first as of 2026-08-07) and Joe hands sessions x.com links directly.
+    # The guard was blocking the Grok CLI invocation itself because the link
+    # appears in the command text. Read-only retrieval; Claude still writes all
+    # content and nothing posts to X from a session. Added 2026-08-07 while Joe
+    # was live in-session ("study this article for our system").
+    "x.com", "twitter.com",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
@@ -201,6 +208,53 @@ def render_write_target(cmd):
                     f"use the record verb instead (blocked by the CARR guard)")
     return None
 
+# Vault .md paths in a shell command: vault spelling + relative tail up to a
+# shell metachar/quote. Case-insensitive match would be wrong (APFS is
+# case-insensitive but the manifest compares normalized real paths; the Write
+# hook is the primary door — this door catches the shell walk-around).
+_VAULT_MD_RE = None
+
+
+def vault_md_write_target(cmd):
+    """PHASE 0 (doctrine-store build, decision 82a2fb62): the Bash door of the
+    vault-wide .md deny-by-default. Same manifest as record-home-gate — one
+    module, hooks/md_manifest.py — so the two doors cannot drift (rule a8c55a47).
+    Renders are caught earlier by render_write_target with a sharper message."""
+    global _VAULT_MD_RE
+    try:
+        if _VAULT_MD_RE is None:
+            alts = "|".join(re.escape(v) for v in _VAULT_SPELLINGS)
+            _VAULT_MD_RE = re.compile(r"(" + alts + r")([^\"'|;&<>]+?\.md)\b")
+        hits = [(m.start(), m.group(2)) for m in _VAULT_MD_RE.finditer(cmd)]
+        if not hits:
+            return None
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from md_manifest import md_write_verdict
+        for idx, rel in hits:
+            verdict = md_write_verdict(rel.strip())
+            if not verdict:
+                continue
+            before = cmd[max(0, idx - 60):idx]
+            written = bool(_WRITE_BEFORE_CTX.search(before))
+            if not written:
+                # cp/mv/rsync destination, or a python open(..., "w"/"a")
+                for clause in re.split(r"[;&|]", cmd):
+                    toks = clause.strip().split()
+                    if toks and toks[0] in ("cp", "mv", "rsync") \
+                            and clause.rstrip("\"' ").endswith(rel):
+                        written = True
+                        break
+                if re.search(r"open\(\s*[\"'][^\"']*" + re.escape(rel) + r"[\"']\s*,\s*[\"'][wa]",
+                             cmd):
+                    written = True
+            if written:
+                return (f"shell write onto vault markdown — {verdict} "
+                        f"(blocked by the CARR guard, Bash door of the Phase 0 .md write-block)")
+        return None
+    except Exception:
+        return None                                   # fail open, same as siblings
+
+
 RULES = [
     # 1. destructive filesystem
     (re.compile(r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+", re.I), "recursive/forced delete"),
@@ -294,6 +348,9 @@ def check(cmd):
                         f"CARR unattended guard. Add it to KNOWN_HOSTS if it is legitimate.")
 
     reason = render_write_target(cmd)
+    if reason:
+        return reason
+    reason = vault_md_write_target(cmd)
     if reason:
         return reason
     return None

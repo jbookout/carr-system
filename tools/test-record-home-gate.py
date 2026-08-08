@@ -63,13 +63,27 @@ CASES = [
      {"file_path": f"{VAULT}/CLAUDE.md",
       "new_string": "activate-rule on 3bc574d9-f672-4619-9624-13ffef436a3f"}),
 
-    # ---- the allow half: ordinary narrative work must stay unblocked --------
-    ("allow · doctrine edit under DNA/", ALLOW, "Edit",
+    # ---- PHASE 0 (2026-08-07, decision 82a2fb62): deny-by-default flips the
+    # old "doctrine editing stays open" posture. Doctrine edits are now DENIED —
+    # content routes through verbs until the store's write verbs land (P2) and
+    # the corpus migrates (P4/P5). The allow set is the exact-path manifest
+    # (hooks/md_manifest.py) plus the retiring job-output prefixes.
+    ("P0 · doctrine edit under DNA/ now DENIED", DENY, "Edit",
      {"file_path": f"{VAULT}/DNA/writing-rules.md", "new_string": "no em-dashes"}),
-    ("allow · CLAUDE.md ordinary edit", ALLOW, "Edit",
-     {"file_path": f"{VAULT}/CLAUDE.md", "new_string": "rev 11: weekends are off"}),
-    ("allow · NEW doctrine file under DNA/", ALLOW, "Write",
+    ("P0 · NEW doctrine file under DNA/ now DENIED", DENY, "Write",
      {"file_path": f"{VAULT}/DNA/Marketing/new-playbook.md", "content": "playbook"}),
+    ("P0 · idea-inbox distillation now DENIED", DENY, "Write",
+     {"file_path": f"{VAULT}/00_Context/idea-inbox/2026-08-08-some-study.md", "content": "x"}),
+    ("P0 · INDEX.md edit now DENIED (migrates in P4)", DENY, "Edit",
+     {"file_path": f"{VAULT}/INDEX.md", "new_string": "x"}),
+    ("P0 · uppercase extension does not slip through", DENY, "Write",
+     {"file_path": f"{VAULT}/DNA/Team/notes.MD", "content": "x"}),
+    ("allow · CLAUDE.md ordinary edit (manifest exact)", ALLOW, "Edit",
+     {"file_path": f"{VAULT}/CLAUDE.md", "new_string": "rev 11: weekends are off"}),
+    ("allow · AGENTS.md edit (manifest exact)", ALLOW, "Edit",
+     {"file_path": f"{VAULT}/AGENTS.md", "new_string": "x"}),
+    ("allow · weekly brief output (retiring prefix)", ALLOW, "Write",
+     {"file_path": f"{VAULT}/DNA/Network/briefs/2026-08-10-network-brief.md", "content": "x"}),
     ("allow · repo file, outside the vault", ALLOW, "Write",
      {"file_path": os.path.expanduser("~/carr-system/specs/some-spec.md"), "content": "spec"}),
     ("allow · scratchpad", ALLOW, "Write",
@@ -91,8 +105,34 @@ def run(tool, ti):
     return p.returncode, (p.stderr or "").strip()
 
 
+def manifest_unit_cases():
+    """Direct md_manifest checks the subprocess harness cannot reach: the
+    retirement clock is injectable only in-process."""
+    sys.path.insert(0, os.path.expanduser("~/carr-system/hooks"))
+    from datetime import date, timedelta
+    from md_manifest import md_write_verdict, CUTOFF
+    cases = [
+        ("unit · brief prefix allowed before cutoff",
+         md_write_verdict("DNA/Network/briefs/x.md", today=CUTOFF) is None),
+        ("unit · brief prefix DENIED after cutoff",
+         md_write_verdict("DNA/Network/briefs/x.md",
+                          today=CUTOFF + timedelta(days=1)) is not None),
+        ("unit · prospects prefix DENIED after cutoff",
+         md_write_verdict("DNA/Clients/prospects/Beasley-intake.md",
+                          today=CUTOFF + timedelta(days=1)) is not None),
+        ("unit · deny message names the verbs",
+         "log-decision" in (md_write_verdict("DNA/writing-rules.md") or "")),
+        ("unit · exact allow is not a prefix (CLAUDE.md.bak-style)",
+         md_write_verdict("CLAUDE.md.old.md") is not None),
+    ]
+    return cases
+
+
 def main():
     failed = 0
+    for label, ok in manifest_unit_cases():
+        failed += 0 if ok else 1
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label}")
     for label, expected, tool, ti in CASES:
         rc, err = run(tool, ti)
         got = DENY if rc == 2 else ALLOW

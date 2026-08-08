@@ -59,15 +59,18 @@ this varied would misfire constantly and burn the gate's credibility in a day.
      amend/supersede). That combination is never narrative — it is a record. This
      is the one content check, kept deliberately narrow.
 
-WHAT IT DOES NOT TOUCH. Anything outside the CARR vault (the repo, scratchpads,
-Life AI). Non-markdown files. Edits to doctrine and playbooks under DNA/, to
-CLAUDE.md, INDEX.md, skills and agents — all of which are genuine narrative that
-is edited in place, which is why rule B keys on CREATION rather than on writing.
+PHASE 0 UPGRADE (2026-08-07, doctrine-store build — council decision 82a2fb62,
+rules 14181e60 + 20dfdfcc): the per-class rules B (new .md in 00_Context/root)
+and C (handoffs) are SUPERSEDED by vault-wide DENY BY DEFAULT on every .md
+write, create and edit alike, governed by the exact-path manifest in
+hooks/md_manifest.py. The old known-limit paragraph ("a session determined to
+write records into an EXISTING narrative file under DNA/ can still do it") is
+CLOSED — that was the residual hole Joe's database-first ruling eliminated.
 
-KNOWN LIMIT, STATED PLAINLY. A session determined to write records into an
-EXISTING narrative file under DNA/ can still do it. Rules A-D catch where the
-defect has actually occurred, not everywhere it could. Tightening beyond this
-needs Joe's call, because the cost lands on his own writing surface.
+WHAT IT DOES NOT TOUCH. Anything outside the CARR vault: the repo (git-owned),
+scratchpads (the ungoverned annex), Life AI, and the ~/.claude / My Drive/.claude
+skill trees (harness-required; repo-canonical from P6). Non-markdown files,
+except generated renders which are denied at any extension.
 
 FAILS CLOSED ON DENY, OPEN ON ERROR. Exit 2 + stderr is the deny path, matching
 guard-unattended.py and for the same reason: the structured JSON contract needs
@@ -232,17 +235,12 @@ GENERATED_FALLBACK = {
     "DNA/compiled-rules-shared.md",
 }
 
-# --- B. directories where a NEW .md is a record masquerading as a note -------
-# "out/" was here in the first cut and COULD NEVER FIRE: rel_to_vault returns
-# None for anything outside the vault, and the vault has no out/ directory at all
-# (the one that matters is ~/carr-system/out/, which is gitignored). The IT sweep
-# caught it. A rule that cannot fire is worse than no rule, because it reads as
-# coverage. The repo's out/ problem is real but belongs to the jobs writing there,
-# not to a gate scoped to the vault.
-NEW_MD_DENIED_DIRS = ("00_Context/", "")           # "" = the vault root itself
-
-# --- C. the handoff shape ----------------------------------------------------
-HANDOFF_DIR = "00_Context/handoffs/"
+# --- B. the vault-wide .md deny-by-default (Phase 0, 2026-08-07) -------------
+# The manifest is a sibling module so guard-unattended.py's Bash door uses the
+# SAME code (rule a8c55a47). The old NEW_MD_DENIED_DIRS / HANDOFF_DIR class
+# rules are superseded: both are strict subsets of deny-by-default.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from md_manifest import md_write_verdict  # noqa: E402
 
 # --- D. the one content check ------------------------------------------------
 RULE_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
@@ -314,23 +312,15 @@ def check(tool, ti):
     if not rel.lower().endswith(".md"):
         return None                                   # B-D are markdown-only
 
-    # C. the handoff shape, new or existing
-    if rel.startswith(HANDOFF_DIR):
-        return (f"'{rel}' is a HANDOFF — the shape that broke this rule on 2026-08-03. A handoff "
-                f"is records (findings, decisions, open items) wearing narrative clothing, and "
-                f"markdown strands every one of them: undetectable to the system, invisible to "
-                f"Dell's sessions, findable only if someone remembers to point at the file. The "
-                f"record layer already has the receiving end — catch-me-up and today-triage brief "
-                f"a cold session straight from the DB. {USE_INSTEAD}")
-
-    # B. creating a NEW .md where records masquerade as notes
-    if tool == "Write" and not os.path.exists(os.path.expanduser(path)):
-        parent = rel.rsplit("/", 1)[0] + "/" if "/" in rel else ""
-        if parent in NEW_MD_DENIED_DIRS:
-            return (f"creating a NEW markdown file at '{rel}'. New-file creation is the tell: "
-                    f"narrative and doctrine files already exist and get edited, while RECORDS "
-                    f"arrive as brand-new files. If this genuinely is new doctrine rather than a "
-                    f"record, it belongs under DNA/ and Joe decides that. {USE_INSTEAD}")
+    # B (PHASE 0 of the doctrine-store build, 2026-08-07, superseding the old
+    # per-class rules B and C). DENY BY DEFAULT: any vault .md write — create OR
+    # edit — is closed unless the exact-path manifest allows it. The old B
+    # (new-file-in-00_Context) and C (handoffs) are strict subsets of this and
+    # their history lives in git. Manifest and rationale: hooks/md_manifest.py,
+    # design/doctrine-store-build-2026-08-07.md, council decision 82a2fb62.
+    reason = md_write_verdict(rel)
+    if reason:
+        return reason
 
     # D. a rule id next to a rule verb is a record, never narrative
     body = ti.get("content") or ti.get("new_string") or ""
