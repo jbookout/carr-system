@@ -29,9 +29,15 @@ live-corrected 2026-08-07):
 - **HOLD the trigger key** = push-to-talk: speak while held, release, text
   lands at the cursor of whatever app has focus. Trigger keys: **right-cmd
   (54)** on the MacBook, **right-ctrl (62)** on the Logitech — live capture
-  showed the Logitech emits NO true right-cmd (its right side sends
-  rctrl/ropt/left-cmd), so the ruling's "one key" became one *position* (the
-  key right of space), absorbed by the config exactly as the ruling intended.
+  measurement (2026-08-08) showed the Logitech has its two bottom-row
+  modifiers SWAPPED in firmware: the key right of space reports right-CONTROL
+  (62), and the key labeled Control left of space reported right-COMMAND (54)
+  — the latter indistinguishable from the MacBook's real trigger, so it fired
+  dictation on every press. Repaired at the HID layer, not in the app:
+  `bin/logitech-keymap.sh` + launchd `com.carr.logitech-keymap` remap that
+  keycap to a genuine left Control for that vendor/product only. The ruling's
+  "one key" therefore holds as one *position* (the key right of space) on both
+  boards, absorbed by the config exactly as intended.
 - **DOUBLE-TAP the trigger** = toggle conversation mode; inside it, **hold
   space** speaks, release disengages. A QUICK space tap types a normal space
   (replayed synthetically), so typing keeps working inside the mode; **Esc
