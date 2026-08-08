@@ -1,0 +1,8 @@
+# Heavy env, rebuilt by bin/setup-tts-env.sh
+.venv-tts/
+# Live client data — never in git
+assets/hot-context.md
+assets/.brain-session-id
+# Rendered audio — regenerable from the frozen reference + RECIPE
+assets/phrases/
+assets/earcon-ack.wav
