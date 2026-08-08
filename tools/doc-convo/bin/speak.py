@@ -22,9 +22,13 @@ import hashlib
 import json
 import math
 import pathlib
+import queue
+import re
 import socket
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 
 TOOL = pathlib.Path(__file__).resolve().parent.parent
 PHRASES = TOOL / "assets" / "phrases"
@@ -44,6 +48,7 @@ MASTER_CHAIN = (
 )
 
 SPEAKABLE = [("real estate", "realestate"), ("CARR", "car")]
+MIN_UNIT_CHARS = 25
 
 
 def normalize(text: str) -> str:
@@ -53,8 +58,45 @@ def normalize(text: str) -> str:
     return out
 
 
-def play(wav: pathlib.Path) -> None:
-    subprocess.run(["afplay", str(wav)], check=False)
+def split_sentences(text: str) -> list[str]:
+    units = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip())
+             if part.strip()]
+    if len(units) < 2:
+        return units
+
+    merged = []
+    pending = ""
+    for unit in units:
+        if len(unit) < MIN_UNIT_CHARS:
+            if merged:
+                merged[-1] = f"{merged[-1]} {unit}"
+            else:
+                pending = f"{pending} {unit}".strip()
+            continue
+        if pending:
+            unit = f"{pending} {unit}"
+            pending = ""
+        merged.append(unit)
+    if pending:
+        if merged:
+            merged[-1] = f"{merged[-1]} {pending}"
+        else:
+            merged.append(pending)
+    return merged
+
+
+def play(wav: pathlib.Path, on_start: Callable[[], None] | None = None) -> bool:
+    try:
+        player = subprocess.Popen(["afplay", str(wav)])
+    except OSError:
+        return False
+    if on_start is not None:
+        try:
+            on_start()
+        except Exception:
+            player.wait()
+            raise
+    return player.wait() == 0
 
 
 def write_envelope(wav: pathlib.Path) -> None:
@@ -152,17 +194,63 @@ def prepare(text: str, cache_only: bool = False) -> pathlib.Path | None:
     return wav
 
 
+def stream(text: str, before_play: Callable[[pathlib.Path], None] | None = None,
+           on_first_play: Callable[[], None] | None = None) -> int:
+    units = split_sentences(text)
+    ready = queue.Queue()
+    done = object()
+
+    def produce() -> None:
+        for unit in units:
+            try:
+                wav = prepare(unit)
+                ready.put((unit, wav, None))
+            except Exception as exc:
+                ready.put((unit, None, exc))
+        ready.put(done)
+
+    threading.Thread(target=produce, daemon=True).start()
+    played = 0
+    while True:
+        item = ready.get()
+        if item is done:
+            break
+        unit, wav, error = item
+        if error is not None:
+            print(f"speak: unit render failed — {unit!r}: {error}", file=sys.stderr)
+            continue
+        if wav is None:
+            print(f"speak: unit unavailable — {unit!r}", file=sys.stderr)
+            continue
+        if before_play is not None:
+            try:
+                before_play(wav)
+            except Exception as exc:
+                print(f"speak: unit envelope failed — {unit!r}: {exc}",
+                      file=sys.stderr)
+        try:
+            started = (on_first_play if played == 0 else None)
+            if not play(wav, started):
+                print(f"speak: unit play failed — {unit!r}", file=sys.stderr)
+                continue
+            played += 1
+        except Exception as exc:
+            print(f"speak: unit play failed — {unit!r}: {exc}", file=sys.stderr)
+    return played
+
+
 def main() -> int:
     args = sys.argv[1:]
     cache_only = "--cache-only" in args
     text = " ".join(a for a in args if a != "--cache-only").strip()
     if not text:
         return 0
-    wav = prepare(text, cache_only)
-    if wav is None:
-        return 3
-    play(wav)
-    return 0
+    if cache_only:
+        wav = prepare(text, True)
+        if wav is None:
+            return 3
+        return 0 if play(wav) else 3
+    return 0 if stream(text) else 3
 
 
 if __name__ == "__main__":

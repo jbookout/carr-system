@@ -2,6 +2,7 @@
 """Local HTTP engine for the Doc conversation panel."""
 
 import json
+import os
 import pathlib
 import queue
 import signal
@@ -13,10 +14,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import convo_core
+import reflexes
 import speak
 
 HOST = "127.0.0.1"
-PORT = 4680
+PORT = int(os.environ.get("PORT", "4680"))
 PANEL = convo_core.TOOL / "panel" / "panel.html"
 
 
@@ -147,6 +149,17 @@ class Engine:
             if not text:
                 self._heard_nothing("· heard nothing")
                 return
+            # REFLEX: whole-utterance turns that carry no business content are
+            # answered instantly from cache — no brain call, no render wait.
+            # Falls through on anything that isn't an exact conversational
+            # phrase, so a question about the book can never be intercepted.
+            reflex = reflexes.match(text)
+            if reflex:
+                self.add_turn(text, reflex)
+                self.set_state("speaking")
+                speak.stream(reflex)
+                return
+
             if self.system_prompt is None:
                 self._heard_nothing("· no hot-context snapshot")
                 return
@@ -171,16 +184,26 @@ class Engine:
             self.add_turn(text, doc, card)
             self.set_state("rendering")
             self.progress("voice coming")
-            wav = speak.prepare(doc)
-            if wav is not None:
-                self.set_state("speaking")
+            speaking = False
+
+            def emit_envelope(wav: pathlib.Path) -> None:
                 env = wav.with_suffix(".env.json")
+                payload = {"ms": 100, "levels": []}
                 if env.exists():
                     try:
-                        self.emit("envelope", json.loads(env.read_text()))
+                        payload = json.loads(env.read_text())
                     except (OSError, json.JSONDecodeError):
                         pass
-                speak.play(wav)
+                self.emit("envelope", payload)
+
+            def start_speaking() -> None:
+                nonlocal speaking
+                if not speaking:
+                    speaking = True
+                    self.set_state("speaking")
+
+            speak.stream(doc, before_play=emit_envelope,
+                         on_first_play=start_speaking)
         except (OSError, ValueError) as exc:
             self._heard_nothing(f"· conversation error: {exc}")
         finally:

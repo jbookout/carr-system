@@ -22,6 +22,7 @@ import termios
 import time
 import tty
 
+import speak
 from convo_core import (EARCON, MIN_BYTES, MODEL, SPEAK, TOOL, WHISPER,
                         ask_brain, mean_volume, pick_mic, refresh_hot_context,
                         transcribe, warm_voice)
@@ -146,14 +147,8 @@ def main() -> int:
                 continue
 
             print(f"doc: {reply}")
-            hit = subprocess.run(
-                [sys.executable, str(SPEAK), "--cache-only", reply],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            ).returncode == 0
-            if not hit:
-                print("· rendering his voice — this can take a moment "
-                      "(spacebar still works meanwhile; q to skip out)")
-                subprocess.run([sys.executable, str(SPEAK), reply])
+            print("· voice coming")
+            speak.stream(reply)
     except KeyboardInterrupt:
         print()
     finally:
