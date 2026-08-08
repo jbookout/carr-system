@@ -127,8 +127,10 @@ async function pipelineApi(request, env, actor) {
   const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
   try {
     return await pipelineChanges(request, client, actor);
-  } catch {
-    return json({ error: "database_unavailable" }, 503);
+  } catch (e) {
+    // Surface the error class, not data: a blind 503 cost a live debugging
+    // round on day one (the real fault was invisible from the client).
+    return json({ error: "database_unavailable", detail: String(e && e.message || e).slice(0, 200) }, 503);
   }
 }
 

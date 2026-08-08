@@ -292,3 +292,20 @@ test("next-step supersede leaves old rows intact and deal thread is stably newes
   assert.equal(JSON.stringify(page).includes("sf_commission_placeholder"), false);
   assert.equal(JSON.stringify(page).includes("sf_close_date_placeholder"), false);
 });
+
+test("cursor round-trips the pg wire timestamp format (microseconds + offset) without JS Date", async () => {
+  const db = new FakeClient();
+  // Exactly what @neondatabase/serverless hands back for a timestamptz —
+  // NOT JS-Date-parseable; the first live poll threw "Invalid time value".
+  const pgWire = "2026-08-07 21:44:19.123456+00";
+  db.addEvent({ id: "40000000-0000-0000-0000-000000000001", recorded_at: pgWire, field: "phase", new_value: { phase: "legal" } });
+
+  const first = await (await pipelineChanges(new Request("https://example.test/pipeline/changes"), db, actors.joe, { limit: 5 })).json();
+  assert.equal(first.events.length, 1);
+  assert.ok(first.cursor, "cursor must be produced from a pg-format timestamp");
+
+  // and the produced cursor must be accepted back on the next poll
+  const again = await (await pipelineChanges(new Request(`https://example.test/pipeline/changes?cursor=${first.cursor}`), db, actors.joe, { limit: 5 })).json();
+  assert.deepEqual(again.events, [], "no new events after the cursor");
+  assert.equal(again.cursor, first.cursor);
+});

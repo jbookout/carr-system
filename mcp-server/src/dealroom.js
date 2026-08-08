@@ -34,7 +34,11 @@ export function decodePipelineCursor(cursor) {
     const decoded = JSON.parse(base64UrlDecode(cursor));
     if (!decoded || typeof decoded.recorded_at !== "string" || typeof decoded.id !== "string")
       throw new Error("bad cursor shape");
-    if (Number.isNaN(Date.parse(decoded.recorded_at))) throw new Error("bad cursor time");
+    // Validate shape only — pg timestamp wire format ("2026-08-07
+    // 21:44:19.123456+00") is not JS-Date-parseable, and Postgres itself is
+    // the real validator when this value hits the ::timestamptz cast.
+    if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?([+-]\d{2}(:?\d{2})?|Z)?$/.test(decoded.recorded_at))
+      throw new Error("bad cursor time");
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(decoded.id))
       throw new Error("bad cursor id");
     return decoded;
@@ -87,8 +91,12 @@ export async function pipelineChanges(request, client, actor, options = {}) {
     .filter(row => !PLACEHOLDER_FIELDS.has(row.field))
     .map(stripDealPlaceholders);
   const last = cleanEvents.at(-1);
+  // recorded_at rides the cursor verbatim: it round-trips back into a
+  // $::timestamptz cast, and Postgres always parses its own wire format.
+  // JS Date cannot (microsecond precision + offset threw "Invalid time
+  // value" on the first live poll), so no Date ever touches it.
   const nextCursor = last
-    ? encodePipelineCursor(new Date(last.recorded_at).toISOString(), String(last.id))
+    ? encodePipelineCursor(String(last.recorded_at), String(last.id))
     : (url.searchParams.get("cursor") || "");
 
   return json({ events: cleanEvents, presence: presence.rows.map(stripDealPlaceholders), cursor: nextCursor });
