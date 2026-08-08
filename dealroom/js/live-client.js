@@ -67,6 +67,19 @@ export function createLiveClient(opts = {}) {
     startup: 'Startup', relocation: 'Relocation', additional_office: '2nd Office',
     renewal: 'Renewal', expansion: 'Expansion', purchase: 'Purchase', other: 'Other',
   };
+  // Chip text, built from the candidate's own fields. A proposal must read as
+  // a question about a specific deal, and it must never look like something
+  // that already happened.
+  function confirmLabel(c) {
+    const who = c.deal_name || c.payload?.deal || 'this deal';
+    const p = c.payload || {};
+    if (c.kind === 'phase_move') return `${who} → phase ${PHASE_TO_UI[p.value] || p.value}?`;
+    if (c.kind === 'next_step') return `${who} → next step "${p.text || ''}"?`;
+    if (c.kind === 'new_deal') return `New deal "${p.name || 'untitled'}" — create?`;
+    if (c.kind === 'meeting_record') return 'File the meeting summary?';
+    return `${who} — log ${p.kind || 'activity'}?`;
+  }
+
   const dealToUi = (d) => ({
     ...d,
     phase: PHASE_TO_UI[d.phase] || d.phase,
@@ -118,6 +131,30 @@ export function createLiveClient(opts = {}) {
         critical_dates: critical_dates.map((cd) => ({ ...cd, label: cd.note || cd.kind, date: cd.due_on })),
         history,
       };
+    },
+
+    // The confirm strip, live: proposals distilled from a recorded call. The
+    // label is built here from the candidate's own shape, never from a
+    // server-supplied string, and every disposition goes through
+    // resolve-candidate, which is the only thing that writes.
+    async getPendingConfirms() {
+      const { candidates = [] } = await rpc('capture-queue', {});
+      return {
+        proposals: candidates.map((c) => ({
+          id: c.id,
+          deal_id: c.payload?.deal || null,
+          label: confirmLabel(c),
+        })),
+      };
+    },
+
+    async resolveConfirm({ proposal_id, accept, idempotency_key }) {
+      const res = await write('resolve-candidate', {
+        candidate_id: proposal_id,
+        accept,
+        idempotency_key,
+      });
+      return { status: 'ok', event: null, ref: res?.ref || null };
     },
 
     async getChanges(cursor) {
