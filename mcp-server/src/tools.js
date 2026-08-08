@@ -1320,14 +1320,10 @@ export const TOOLS = {
     description: "The Deal Room's board read: every open deal with the live-board fields (owner, attention, next_date, current next step from the note thread). deal-board predates these columns and serves the pipeline render; this serves the board UI. Same placeholder rule: the two Salesforce placeholder columns never appear.",
     inputSchema: { type: "object", properties: {} },
     handler: async (c) => ({ deals: (await c.query(
-      `select d.id, d.name, d.deal_type as type, d.phase, d.owner, d.attention,
-              to_jsonb(d.next_date)#>>'{}' as next_date,
-              (select n.text from deal_note n
-                where n.deal_id = d.id and n.kind = 'next_step'
-                order by n.created_at desc, n.id desc limit 1) as next_step
-         from deal d
-        where d.outcome is null
-        order by d.name`)).rows }),
+      `select id, name, type, phase, owner, attention,
+              to_jsonb(next_date)#>>'{}' as next_date, next_step
+         from v_deal_room_board
+        order by name`)).rows }),
   },
 
   "lead-hot": {
@@ -3953,7 +3949,7 @@ Object.assign(TOOLS, {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       const deal = await c.query(
-        "select d.name, v.phase, v.owner, v.type, v.city, v.segment, v.attention, to_jsonb(v.next_date)#>>'{}' as next_date from v_deal_room_deal v join deal d on d.id = v.id where v.id=$1",
+        "select name, phase, owner, type, city, segment, attention, to_jsonb(next_date)#>>'{}' as next_date from v_deal_room_deal where id=$1",
         [s.id],
       );
       if (!deal.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
