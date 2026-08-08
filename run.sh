@@ -76,7 +76,9 @@ case "${1:-}" in
   brief-pack)   brief_pack "$@" ;;
   verify-emails) verify_emails "$@" ;;
   restore-rehearse) restore_rehearse "$@" ;;
-  retrieve)     shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" "$@" ;;
+  # retrieve runs on the repo venv since the store pass (P4 dual-read) needs psycopg;
+  # fails soft to file-index-only on any machine without it.
+  retrieve)     shift; CARR_VAULT="$VAULT" "$PY" "$REPO/tools/retrieve.py" "$@" ;;
   health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
   config)       shift; python3 "$REPO/ops/config-as-code.py" "$@" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;

@@ -230,6 +230,25 @@ function toolList(profile = "full") {
 }
 
 async function callTool(env, actor, name, args, profile = "full") {
+  // call-verb: the deploy-gap passthrough (Joe, 2026-08-08: "theres got to be
+  // a way to fix the need for having to reconnect the connector to ship
+  // things"). Connectors cache tools/list at connect time, so a freshly
+  // deployed verb is invisible until a reconnect — but the REGISTRY is live
+  // the moment the Worker deploys. This one stable tool dispatches by name to
+  // the live registry, so new verbs are callable immediately; their first-class
+  // schemas surface at the next natural session start. Enforcement is BY
+  // RECURSION: the inner name re-enters callTool and hits every profile,
+  // payload, and humanOnly check exactly as a direct call would — the
+  // passthrough grants reach, never permission.
+  if (name === "call-verb") {
+    const inner = args && args.verb;
+    if (!inner || typeof inner !== "string")
+      throw new ToolError({ error: "missing_verb",
+        hint: "call-verb takes {verb, args}; list live verbs with list-verbs" });
+    if (inner === "call-verb" || inner === "list-verbs")
+      throw new ToolError({ error: "no_recursion" });
+    return callTool(env, actor, inner, (args && args.args) || {}, profile);
+  }
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   // ENFORCED AT CALL TIME, not just filtered out of tools/list. Removing a verb

@@ -29,6 +29,18 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
 
   // ---------------------------------------------------------------- helpers
 
+  async function actorId(c, actor) {
+    // The READER path hands verbs an actor without a row id (mcp.js resolves
+    // ids only inside writer transactions). Personal-visibility filters need
+    // the id, so read verbs resolve it here — one select, cached on the actor
+    // object for the call. Found live 2026-08-08: without this, a partner's
+    // own personal docs were invisible to him on every read verb.
+    if (actor.id) return actor.id;
+    const r = await c.query(`select id from actor where slug=$1`, [actor.slug]);
+    actor.id = r.rows.length ? r.rows[0].id : null;
+    return actor.id;
+  }
+
   async function resolveDoc(c, ref) {
     // by id, live slug, or alias — aliases keep old links resolving (0075)
     let r = await c.query(
@@ -130,6 +142,9 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     },
     "gates.banned_phrases": async (c, ctx, cfg) => {
       if (ctx.op !== "write") return [];
+      // exempt_slugs (gate config): the documents that DEFINE the bans quote
+      // them as examples — writing-rules cannot be blocked by itself. P3 add.
+      if (cfg && (cfg.exempt_slugs || []).includes(ctx.doc_slug)) return [];
       const phrases = (cfg && cfg.phrases) || BANNED_FALLBACK;
       const text = ((ctx.body && ctx.body.text) || "").toLowerCase();
       return phrases.filter(p => text.includes(p.toLowerCase()))
@@ -347,7 +362,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         const body = { text: args.body_text };
         await runGates(c, actor, "write", { section_id: sec ? sec.id : null, body,
           content_class: doc.content_class, visibility: doc.visibility,
-          owner_actor_id: doc.owner_actor_id });
+          owner_actor_id: doc.owner_actor_id, doc_slug: doc.slug });
         if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
           throw new ToolError({ error: "personal_doc_not_owner" });
         if (!sec) {
@@ -472,6 +487,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         if_generation_match: { type: "integer" } },
         required: ["document"] },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         const doc = await resolveDoc(c, args.document);
         if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
           throw new ToolError({ error: "personal_doc_not_owner" });
@@ -500,6 +516,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         section_ids: { type: "array", items: { type: "string" }, maxItems: 50 } },
         required: ["section_ids"] },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         if ((args.section_ids || []).length > 50)
           throw new ToolError({ error: "batch_too_large", max: 50 });
         const r = await c.query(
@@ -526,6 +543,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         limit: { type: "integer" } },
         required: ["q"] },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         const r = await c.query(
           `select s.id as section_id, s.section_key, s.title, d.slug as doc_slug,
                   d.content_class,
@@ -550,6 +568,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       inputSchema: { type: "object", properties: {
         content_classes: { type: "array", items: { type: "string" } } } },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         const r = await c.query(
           `select d.id, d.slug, d.title, d.content_class, d.visibility, d.updated_at,
                   count(s.id) filter (where s.status='active') as sections,
@@ -564,7 +583,190 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       },
     },
 
+    "claim-doctrine-sections": {
+      write: true,
+      description: "Claim sections before a long edit (P3): a cooperative, expiring hint that warns other writers off before they spend tokens on overlapping work. TTL default 300s, max 1800s; a foreign unexpired claim blocks writes via the claim gate; expired claims are free automatically. NEVER a correctness mechanism — base_version is. Renew by claiming again; release when done.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        section_ids: { type: "array", items: { type: "string" } },
+        purpose: { type: "string" },
+        ttl_seconds: { type: "integer" } },
+        required: ["idempotency_key", "section_ids", "purpose"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "claim-doctrine-sections", args, async () => {
+        const ttl = Math.min(Math.max(args.ttl_seconds || 300, 30), 1800);
+        const claims = [], denied = [];
+        for (const id of args.section_ids) {
+          const cur = await c.query(
+            `select holder_actor_id, holder_session_key, expires_at from doctrine_claim
+              where section_id=$1 and expires_at > now()`, [id]);
+          if (cur.rows.length && cur.rows[0].holder_actor_id !== actor.id) {
+            denied.push({ section_id: id, expires_at: cur.rows[0].expires_at });
+            continue;
+          }
+          await c.query(
+            `insert into doctrine_claim (section_id, holder_actor_id, holder_session_key, purpose, expires_at)
+             values ($1,$2,$3,$4, now() + ($5 || ' seconds')::interval)
+             on conflict (section_id) do update
+               set holder_actor_id=$2, holder_session_key=$3, purpose=$4,
+                   expires_at = now() + ($5 || ' seconds')::interval, created_at=now()`,
+            [id, actor.id, actor.client_id || "unkeyed", args.purpose, String(ttl)]);
+          claims.push({ section_id: id, ttl_seconds: ttl });
+        }
+        return { ok: true, claims, denied };
+      }),
+    },
+
+    "release-doctrine-claims": {
+      write: true,
+      description: "Release claims you hold — the done-editing half of claim-doctrine-sections. Releasing a claim you don't hold is a no-op, reported honestly.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        section_ids: { type: "array", items: { type: "string" } } },
+        required: ["idempotency_key", "section_ids"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "release-doctrine-claims", args, async () => {
+        const r = await c.query(
+          `delete from doctrine_claim where section_id = any($1::uuid[]) and holder_actor_id = $2
+           returning section_id`, [args.section_ids, actor.id]);
+        const released = r.rows.map(x => x.section_id);
+        return { ok: true, released,
+                 not_held: args.section_ids.filter(id => !released.includes(id)) };
+      }),
+    },
+
+    "change-doctrine-sections": {
+      write: true,
+      description: "Write SEVERAL sections of one document atomically — all commit or none do (the half-applied-rename preventer; P2's known gap, closed in P3). Each item carries its own base_version; any stale version or blocked gate aborts the whole set. One generation bump, one snapshot rebuild.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        document: { type: "string" },
+        commit_message: { type: "string" },
+        items: { type: "array", items: { type: "object", properties: {
+          section_key: { type: "string" }, title: { type: "string" },
+          body_text: { type: "string" }, base_version: { type: "integer" },
+          ordinal: { type: "integer" } },
+          required: ["section_key", "body_text", "base_version"] } } },
+        required: ["idempotency_key", "document", "items"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "change-doctrine-sections", args, async () => {
+        if (!args.items.length) throw new ToolError({ error: "empty_change_set" });
+        const doc = await resolveDoc(c, args.document);
+        if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
+          throw new ToolError({ error: "personal_doc_not_owner" });
+        const cs = await c.query(
+          `insert into doctrine_change_set (actor_id, session_key, idempotency_key, state)
+           values ($1,$2,$3,'prepared') returning id`,
+          [actor.id, actor.client_id || null, args.idempotency_key]);
+        const results = [];
+        // Lock in stable section_key order — the deadlock-prevention rule from
+        // the council's commit protocol.
+        const items = [...args.items].sort((a, b) => a.section_key.localeCompare(b.section_key));
+        for (const it of items) {
+          let sec = (await c.query(
+            `select * from doctrine_section where document_id=$1 and section_key=$2 for update`,
+            [doc.id, it.section_key])).rows[0];
+          if (sec && Number(sec.current_version) !== it.base_version)
+            throw await versionConflict(c, sec);
+          if (!sec && it.base_version !== 0)
+            throw new ToolError({ error: "section_not_found_base_nonzero",
+              section_key: it.section_key });
+          const body = { text: it.body_text };
+          await runGates(c, actor, "write", { section_id: sec ? sec.id : null, body,
+            content_class: doc.content_class, visibility: doc.visibility,
+            owner_actor_id: doc.owner_actor_id, doc_slug: doc.slug },
+            { changeSetId: cs.rows[0].id });
+          if (!sec) {
+            const ord = it.ordinal ?? (await c.query(
+              `select coalesce(max(ordinal),0)+10 as o from doctrine_section where document_id=$1`,
+              [doc.id])).rows[0].o;
+            sec = (await c.query(
+              `insert into doctrine_section (document_id, section_key, title, ordinal)
+               values ($1,$2,$3,$4) returning *`,
+              [doc.id, it.section_key, it.title || null, ord])).rows[0];
+          } else if (it.title) {
+            await c.query(`update doctrine_section set title=$2 where id=$1`, [sec.id, it.title]);
+          }
+          const hash = await sha256hex(it.body_text);
+          const newVersion = Number(sec.current_version) + 1;
+          await c.query(
+            `insert into doctrine_change_item (change_set_id, section_id, op, expected_version, proposed_body)
+             values ($1,$2,'write',$3,$4)`,
+            [cs.rows[0].id, sec.id, it.base_version, JSON.stringify(body)]);
+          const rev = await c.query(
+            `insert into doctrine_revision (section_id, version, parent_revision_id, change_set_id,
+               actor_id, session_key, body, plain_text, content_hash, commit_message)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning id`,
+            [sec.id, newVersion, sec.current_revision_id, cs.rows[0].id, actor.id,
+             actor.client_id || null, JSON.stringify(body), it.body_text, hash,
+             args.commit_message || null]);
+          await c.query(
+            `update doctrine_section set current_revision_id=$2, current_version=$3,
+                    body_hash=$4, updated_at=now() where id=$1`,
+            [sec.id, rev.rows[0].id, newVersion, hash]);
+          results.push({ section_key: it.section_key, section_id: sec.id, version: newVersion });
+        }
+        await c.query(
+          `update doctrine_change_set set state='committed', committed_at=now() where id=$1`,
+          [cs.rows[0].id]);
+        const generation = await bumpGeneration(c);
+        await rebuildSnapshot(c, doc.id, generation);
+        await writeEvent(c, actor, "change-doctrine-sections", "doctrine_document", doc.id,
+          { new: { sections: results.length, keys: results.map(r => r.section_key) },
+            idempotency_key: args.idempotency_key });
+        return { ok: true, change_set_id: cs.rows[0].id, sections: results, generation };
+      }),
+    },
+
+    "resolve-doctrine-rules": {
+      description: "Resolve which doctrine sections are OPERATIVE given the live edge graph (P3): live OVERRIDES/SUPERSEDES suppress their targets, EXCEPTION_TO reports as a scoped carve-out on its target, and the trace names why each suppressed section lost. Fail-closed posture: a cycle in the walked set errors rather than guessing. Scope with content_classes or seed_section_ids.",
+      inputSchema: { type: "object", properties: {
+        content_classes: { type: "array", items: { type: "string" } },
+        seed_section_ids: { type: "array", items: { type: "string" } } },
+        },
+      handler: async (c, actor, args) => {
+        await actorId(c, actor);
+        const cands = (await c.query(
+          `select s.id, s.section_key, s.title, s.current_version, d.slug as doc_slug,
+                  d.content_class
+             from doctrine_section s join doctrine_document d on d.id = s.document_id
+            where s.status = 'active'
+              and (d.visibility <> 'personal' or d.owner_actor_id = $1)
+              and ($2::text[] is null or d.content_class = any($2))
+              and ($3::uuid[] is null or s.id = any($3))`,
+          [actor.id, args.content_classes || null, args.seed_section_ids || null])).rows;
+        const ids = cands.map(x => x.id);
+        if (!ids.length) return { ok: true, operative: [], suppressed: [], exceptions: [] };
+        const edges = (await c.query(
+          `select source_section_id, target_section_id, edge_type, scope
+             from doctrine_edge
+            where retired_by_revision_id is null
+              and edge_type in ('OVERRIDES','SUPERSEDES','EXCEPTION_TO')
+              and target_section_id = any($1::uuid[])`, [ids])).rows;
+        const byId = Object.fromEntries(cands.map(x => [x.id, x]));
+        const suppressed = [], exceptions = [];
+        const suppressedIds = new Set();
+        for (const e of edges) {
+          if (e.edge_type === "EXCEPTION_TO") {
+            exceptions.push({ target: byId[e.target_section_id],
+              exception_section_id: e.source_section_id, scope: e.scope });
+            continue;
+          }
+          // a suppressor only counts while it is itself active
+          const srcActive = (await c.query(
+            `select 1 from doctrine_section where id=$1 and status='active'`,
+            [e.source_section_id])).rows.length;
+          if (srcActive && !suppressedIds.has(e.target_section_id)) {
+            suppressedIds.add(e.target_section_id);
+            suppressed.push({ ...byId[e.target_section_id],
+              lost_to: e.source_section_id, via: e.edge_type });
+          }
+        }
+        return { ok: true,
+          operative: cands.filter(x => !suppressedIds.has(x.id)),
+          suppressed, exceptions };
+      },
+    },
+
     "dry-run-doctrine-gates": {
+      write: true,   // persists the run for audit — must ride the writer pool
       description: "Run the validation gates against a proposed write WITHOUT committing anything — the self-check an agent runs before spending a real write, and the shakedown harness for new gates. Persists the run (dry_run=true) for audit.",
       inputSchema: { type: "object", properties: {
         op: { type: "string", description: "create | write | refs_set | retire" },

@@ -3858,5 +3858,40 @@ export const TOOLS = {
   },
 };
 
+
+// The deploy-gap pair (2026-08-08, Joe's reconnect complaint). call-verb's
+// dispatch lives in mcp.js callTool (interception, so profile checks apply to
+// the INNER verb by recursion); these registry entries exist so both tools are
+// listed with schemas. list-verbs is the discovery half: a session whose
+// cached tool list predates a deploy asks the live registry what exists now.
+Object.assign(TOOLS, {
+  "list-verbs": {
+    description: "The LIVE verb registry — names, descriptions, write flags, input schemas — straight from the deployed Worker, bypassing the connector's cached tool list. Use when a verb you expect is missing from your tool list (a deploy since this session connected): find it here, then invoke it through call-verb without any reconnect.",
+    inputSchema: { type: "object", properties: {
+      filter: { type: "string", description: "substring match on verb name" } } },
+    handler: async (c, actor, args) => {
+      const names = Object.keys(TOOLS).sort()
+        .filter(n => !args.filter || n.includes(args.filter));
+      return { ok: true, count: names.length,
+               verbs: names.map(n => ({ name: n, write: !!TOOLS[n].write,
+                 description: (TOOLS[n].description || "").slice(0, 200),
+                 inputSchema: TOOLS[n].inputSchema || null })) };
+    },
+  },
+  "call-verb": {
+    write: true,   // rides the writer path so inner writes work; inner reads work there too
+    description: "Invoke ANY live verb by name — the deploy-gap passthrough. A freshly deployed verb is callable here the moment the Worker ships, no connector reconnect needed; its first-class tool appears at your next session start. Takes {verb, args} where args is the inner verb's own argument object (including its idempotency_key for writes). All profile and permission checks apply to the inner verb exactly as a direct call.",
+    inputSchema: { type: "object", properties: {
+      verb: { type: "string" },
+      args: { type: "object" } },
+      required: ["verb"] },
+    handler: async () => {
+      // Reachable only if a caller bypasses mcp.js dispatch (local-verb.mjs).
+      throw new ToolError({ error: "dispatcher_only",
+        hint: "call-verb is intercepted in mcp.js callTool; invoke the inner verb directly here" });
+    },
+  },
+});
+
 // Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
 Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
