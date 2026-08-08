@@ -29,6 +29,18 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
 
   // ---------------------------------------------------------------- helpers
 
+  async function actorId(c, actor) {
+    // The READER path hands verbs an actor without a row id (mcp.js resolves
+    // ids only inside writer transactions). Personal-visibility filters need
+    // the id, so read verbs resolve it here — one select, cached on the actor
+    // object for the call. Found live 2026-08-08: without this, a partner's
+    // own personal docs were invisible to him on every read verb.
+    if (actor.id) return actor.id;
+    const r = await c.query(`select id from actor where slug=$1`, [actor.slug]);
+    actor.id = r.rows.length ? r.rows[0].id : null;
+    return actor.id;
+  }
+
   async function resolveDoc(c, ref) {
     // by id, live slug, or alias — aliases keep old links resolving (0075)
     let r = await c.query(
@@ -475,6 +487,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         if_generation_match: { type: "integer" } },
         required: ["document"] },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         const doc = await resolveDoc(c, args.document);
         if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
           throw new ToolError({ error: "personal_doc_not_owner" });
@@ -503,6 +516,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         section_ids: { type: "array", items: { type: "string" }, maxItems: 50 } },
         required: ["section_ids"] },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         if ((args.section_ids || []).length > 50)
           throw new ToolError({ error: "batch_too_large", max: 50 });
         const r = await c.query(
@@ -529,6 +543,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         limit: { type: "integer" } },
         required: ["q"] },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         const r = await c.query(
           `select s.id as section_id, s.section_key, s.title, d.slug as doc_slug,
                   d.content_class,
@@ -553,6 +568,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       inputSchema: { type: "object", properties: {
         content_classes: { type: "array", items: { type: "string" } } } },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         const r = await c.query(
           `select d.id, d.slug, d.title, d.content_class, d.visibility, d.updated_at,
                   count(s.id) filter (where s.status='active') as sections,
@@ -706,6 +722,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         seed_section_ids: { type: "array", items: { type: "string" } } },
         },
       handler: async (c, actor, args) => {
+        await actorId(c, actor);
         const cands = (await c.query(
           `select s.id, s.section_key, s.title, s.current_version, d.slug as doc_slug,
                   d.content_class
@@ -749,6 +766,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     },
 
     "dry-run-doctrine-gates": {
+      write: true,   // persists the run for audit — must ride the writer pool
       description: "Run the validation gates against a proposed write WITHOUT committing anything — the self-check an agent runs before spending a real write, and the shakedown harness for new gates. Persists the run (dry_run=true) for audit.",
       inputSchema: { type: "object", properties: {
         op: { type: "string", description: "create | write | refs_set | retire" },
