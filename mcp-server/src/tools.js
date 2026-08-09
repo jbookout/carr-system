@@ -3254,6 +3254,7 @@ export const TOOLS = {
       marker: { type: "string", enum: ["bell", "dated", "decision", "none"] },
       due_on: { type: "string", description: "YYYY-MM-DD" },
       drift_critical: { type: "boolean" },
+      last_surfaced: { type: "string", description: "IDEA ROWS ONLY: stamp the idea bank's 'Last surfaced' column, YYYY-MM-DD. This is what the monthly resurface writes when a parked idea is presented and KEPT — the column its own rotation reads to pick the oldest ideas next month. Blank or '—' means never surfaced, so leaving it unwritten is not neutral: it keeps re-presenting the same rows." },
       section: { type: "string", enum: ["hot", "backlog", "open"], description: "move the row to this section of its file" } },
       required: ["idempotency_key"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-loop", args, async () => {
@@ -3268,6 +3269,27 @@ export const TOOLS = {
       for (const f of ["title", "body", "owner", "unblocks", "source_note", "domain"])
         if (args[f] !== undefined) set(f, args[f]);
       if (args.drift_critical !== undefined) set("drift_critical", args.drift_critical === true);
+
+      // 'Last surfaced' is an extra_cells key, not a column — the idea bank's two
+      // bank-specific columns (Status, Last surfaced) ride in that jsonb because
+      // loop_item is generic over four kinds. Until 2026-08-09 no verb could write
+      // it, so the monthly resurface stamped source_note instead and the column it
+      // rotates on stayed "—" forever (loop #273, the half that outlived the
+      // close-loop fix above). MERGE rather than replace: #42 and #44-#47 carry a
+      // `domain` and a `status` key in the same object, and a bare assignment would
+      // silently drop both.
+      if (args.last_surfaced !== undefined) {
+        if (cur.kind !== "idea")
+          throw new ToolError({ error: "last_surfaced_is_idea_only", kind: cur.kind,
+            hint: "only the idea bank renders a 'Last surfaced' column; other kinds have no such cell" });
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(args.last_surfaced))
+          throw new ToolError({ error: "bad_last_surfaced", got: args.last_surfaced,
+            hint: "YYYY-MM-DD. The rotation sorts on this text, so a free-form date " +
+                  "silently sorts wrong and the same ideas keep coming back." });
+        vals.push(args.last_surfaced);
+        sets.push("extra_cells=coalesce(extra_cells,'{}'::jsonb) || " +
+                  `jsonb_build_object('last_surfaced', $${vals.length}::text)`);
+      }
 
       if (args.marker !== undefined || args.due_on !== undefined) {
         const marker = args.marker !== undefined ? args.marker : cur.marker;
@@ -3311,7 +3333,7 @@ export const TOOLS = {
 
   "close-loop": {
     write: true,
-    description: "Close a loop — done, or deliberately dropped. AN OUTCOME IS REQUIRED and the verb refuses without one: team-loops states the reason in its own words, 'outcomes are how the asker finds out without asking twice.' Say what actually came of it, not that it is closed. A team_loop or action_required row moves to its file's Done table carrying the outcome; an open_loop leaves the hot/backlog render, the same thing closing a row has always done. Use resolution 'dropped' when it is being abandoned rather than finished — recording an abandonment as done inflates every completion measure built on this.",
+    description: "Close a loop — done, or deliberately dropped. AN OUTCOME IS REQUIRED and the verb refuses without one: team-loops states the reason in its own words, 'outcomes are how the asker finds out without asking twice.' Say what actually came of it, not that it is closed. Where the row goes depends on whether its file keeps closed rows visible: a team_loop or action_required row moves to its Done table carrying the outcome, and an idea moves to the idea bank's Retired table the same way (its rule 4 is 'move, don't delete — the reasoning stays visible so we don't re-litigate it later'); an open_loop simply leaves the hot/backlog render, the same thing closing a row has always done. Use resolution 'dropped' when it is being abandoned rather than finished — recording an abandonment as done inflates every completion measure built on this.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       loop_id: { type: "string" },
@@ -3343,16 +3365,37 @@ export const TOOLS = {
       // A file with a Done table keeps its closed rows visible in the render; that
       // is the file's own convention, not a new one. open_loop has no Done table
       // in either of its two files, so a closed one simply leaves the list.
+      //
+      // FOUND BY block_key='done' UNTIL 2026-08-09, WHICH SILENTLY BROKE THE IDEA
+      // BANK (loop #273). Ideas call their Done table "Retired", so the lookup
+      // matched nothing, the row kept its `parked` block_id, and because `parked`
+      // has renders_closed=false the join in v_export_loops dropped it from the
+      // file entirely — neither Parked nor Retired. The outcome was never lost
+      // (close_outcome is required) but it was UNRENDERED, which broke the bank's
+      // founding rule 4, "move, don't delete — the reasoning stays visible so we
+      // don't re-litigate it later", and blinded the monthly resurface gate that
+      // reads the file to decide whether the round already ran.
+      //
+      // Match on renders_closed instead of on a hardcoded name. That column IS the
+      // property being asked about — "the block that keeps closed rows visible" —
+      // so the lookup can no longer be defeated by a file calling its Done table
+      // something else, and a future kind gets the behaviour by setting one flag.
+      // Exactly one block per kind carries it today (team_loop/done,
+      // action_required/done, idea/retired; open_loop has none, so those rows keep
+      // leaving the render as they always have). `order by seq` makes the pick
+      // deterministic rather than dependent on row order if that ever stops being true.
       const done = await c.query(
-        "select id, rel_path from loop_block where kind=$1 and block_key='done'", [cur.kind]);
+        "select id, rel_path, block_key from loop_block " +
+        " where kind=$1 and renders_closed order by seq limit 1", [cur.kind]);
       const sets = ["status=$1", "close_outcome=$2", "closed_by=$3", "closed_at=now()",
                     "outcome=$2", "closed_text=to_char(now(),'YYYY-MM-DD')", "updated_by=$3"];
       const vals = [resolution, outcome, actor.id];
-      let movedTo = null;
+      let movedTo = null, movedToBlock = null;
       if (done.rows.length) {
         vals.push(done.rows[0].id); sets.push(`block_id=$${vals.length}`);
         vals.push(await nextRenderSeq(c, done.rows[0].id)); sets.push(`render_seq=$${vals.length}`);
         movedTo = done.rows[0].rel_path;
+        movedToBlock = done.rows[0].block_key;
       }
       vals.push(cur.id);
       await c.query(`update loop_item set ${sets.join(", ")} where id=$${vals.length}`, vals);
@@ -3361,8 +3404,12 @@ export const TOOLS = {
         { field: "status", old: { status: "open" },
           new: { status: resolution, outcome }, human_quote: outcome,
           idempotency_key: args.idempotency_key });
+      // Name the destination BLOCK, not just the file. `ok:true` proves the call
+      // parsed, never that the row landed where a reader will find it (rule
+      // c53beeaa) — and a null here is now the caller's signal that this kind
+      // keeps no closed table, rather than something having gone wrong.
       return { ok: true, loop_id: cur.id, number: cur.number, status: resolution,
-               moved_to_done_table_in: movedTo };
+               moved_to_done_table_in: movedTo, closed_rows_render_in: movedToBlock };
     }),
   },
 
