@@ -758,6 +758,31 @@ async function buildRecordBag(c, dealId, clientId) {
   return bag;
 }
 
+// ---------- the deferral gate (add-loop; migration 0081, Joe 2026-08-09) ----------
+//
+// Every class below is a state of the world OUTSIDE the session. That is the
+// whole design: there is no cell to write "later" into, so a session either
+// names something real or discovers it can do the work. Kept in one place
+// because the migration's check constraint and this list are the same contract
+// (rule a8c55a47 — a manual path and an automated path that do the same job must
+// be the same code); the DB is the backstop, this is the surface that explains.
+const BLOCKER_CLASSES = Object.freeze([
+  "human_only",     // needs Joe or Dell in person: a call, a signature, a site visit, a login only he holds
+  "counterparty",   // waiting on someone outside: landlord, broker, client, vendor — named
+  "ruling",         // needs Joe's decision, and the question is stated
+  "external_event", // a dated event must arrive first, and the date is named
+  "other_lane",     // depends on another lane's in-flight deliverable, named
+  "capability",     // a credential, gate or verb this session cannot hold, named (rule 1b8e7f43)
+]);
+
+// The detail field is where a determined session would smuggle the deferral back
+// in, so the phrases that mean "not now, no reason" are refused by name. This is
+// not a quality bar on writing; it is a check that the sentence names a WHO or a
+// WHAT rather than a mood about time. Anchored loosely because the failure mode
+// is a whole detail that reads "revisit later", not a passing mention of a word.
+const VAGUE_BLOCKER_RE =
+  /\b(?:later|someday|some day|eventually|when (?:there(?:'s| is) )?(?:more )?time|when time (?:permits|allows)|time permitting|revisit|circle back|down the (?:road|line)|at some point|in (?:the )?future|future session|next session|tbd|to be determined|n\/?a|low priority|nice to have|opportunistically|as time allows|no rush|whenever)\b/i;
+
 // ---------- Deal Room helpers (field-base concurrency, not record version) ----------
 
 const DEAL_ROOM_FIELDS = Object.freeze(["phase", "owner", "attention", "next_date"]);
@@ -3198,7 +3223,7 @@ export const TOOLS = {
 
   "add-loop": {
     write: true,
-    description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), a cross-brain interrupt (action_required), or a parked idea (kind idea, which renders into 00_Context/idea-bank.md and is personal, never shared). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 3 PER DOMAIN — more than 3 means re-tier, not stack; read v_loop_bell_cap for breaches. The old cap was 5 across the whole hot list, written before domains existed: with six lanes that was under one bell each, so everything drifted to 'none' until the hot list held 21 items against a cap of 5), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is.",
+    description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), a cross-brain interrupt (action_required), or a parked idea (kind idea, which renders into 00_Context/idea-bank.md and is personal, never shared). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 3 PER DOMAIN — more than 3 means re-tier, not stack; read v_loop_bell_cap for breaches. The old cap was 5 across the whole hot list, written before domains existed: with six lanes that was under one bell each, so everything drifted to 'none' until the hot list held 21 items against a cap of 5), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is. THE DEFERRAL GATE: an open_loop is REFUSED unless it names `blocker` (a closed list of states of the world outside this session) and `blocker_detail` (the specific person, ruling, date or credential). There is no value meaning 'later'. Before filing one, ask whether this session could just do the work — if it could, do it and file nothing, because a session with the context already loaded is the cheapest builder this item will ever get.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"] },
@@ -3213,7 +3238,11 @@ export const TOOLS = {
       due_on: { type: "string", description: "YYYY-MM-DD; required when marker is 'dated'" },
       drift_critical: { type: "boolean", description: "the ⚡ — leaving it undone causes system drift; BOTH brains' heartbeats surface it daily" },
       number: { type: "string", description: "override the auto-assigned ref. Only pass this to reproduce a number that already exists somewhere; the files already contain collisions." },
-      since: { type: "string", description: "YYYY-MM-DD; defaults to today" } },
+      since: { type: "string", description: "YYYY-MM-DD; defaults to today" },
+      blocker: { type: "string", enum: BLOCKER_CLASSES,
+        description: "REQUIRED on kind open_loop: why THIS session cannot do the work now. Every value is a state of the world outside the session, and the list is closed on purpose — there is no value meaning 'later'. human_only = needs Joe or Dell in person (a call, a signature, a site visit, a login only he holds) · counterparty = waiting on someone outside (name the landlord, broker, client or vendor) · ruling = needs Joe's decision (state the question) · external_event = a dated event must arrive first (name the date) · other_lane = depends on another lane's in-flight deliverable (name it) · capability = a credential, gate or verb this session cannot hold (name it). IF NONE OF THESE FIT, DO NOT FILE THE LOOP — do the work. Not asked for team_loop or action_required (the blocker is the other partner by construction) or for idea (parked by design)." },
+      blocker_detail: { type: "string",
+        description: "REQUIRED whenever `blocker` is set: the SPECIFIC thing, named. 'the landlord' is not a counterparty; 'Sanders, the listing broker on C-112' is. 'a ruling' is not a ruling; 'whether the 3% escalation cap applies to renewal years' is." } },
       required: ["idempotency_key", "kind", "owner"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "add-loop", args, async () => {
       if (!args.title && !args.body)
@@ -3222,6 +3251,35 @@ export const TOOLS = {
       if (args.marker === "dated" && !args.due_on)
         throw new ToolError({ error: "dated_marker_needs_date",
           hint: "a 🗓 row is silent until its day — without a date it would be silent forever" });
+
+      // ── THE DEFERRAL GATE (migration 0081, Joe 2026-08-09) ──────────────────
+      // Joe taught rule 179be4b8 on 2026-08-08 — "why would you put them off?
+      // thats the exact reason we have a giant growing list of loops" — and one
+      // day later the list stood at 189 open rows. That rule binds at BUILD
+      // WRAP-UP; nothing ever bound at the moment a session decides to file
+      // instead of finish. This is that moment, and it is the only place the
+      // question can be asked while the session still has the context to answer
+      // it. A session that cannot name a blocker has just demonstrated it could
+      // have done the work.
+      const blockerGated = args.kind === "open_loop";
+      if (blockerGated) {
+        if (!args.blocker)
+          throw new ToolError({ error: "blocker_required",
+            classes: BLOCKER_CLASSES,
+            hint: "an open_loop must name why THIS session cannot do the work now, from the closed list in `blocker`. There is no value meaning 'later' on purpose. If none of them fits, the answer is not a better loop — it is to do the work now and file nothing." });
+        if (!BLOCKER_CLASSES.includes(args.blocker))
+          throw new ToolError({ error: "unknown_blocker_class",
+            got: args.blocker, classes: BLOCKER_CLASSES,
+            hint: "the list is closed — every entry is a state of the world outside this session" });
+        const detail = (args.blocker_detail || "").trim();
+        if (detail.length < 12)
+          throw new ToolError({ error: "blocker_detail_required", got: detail || null,
+            hint: "name the SPECIFIC thing: which person, which ruling, which date, which credential. A class with no specific thing is the vague deferral wearing a label." });
+        const vague = VAGUE_BLOCKER_RE.exec(detail);
+        if (vague)
+          throw new ToolError({ error: "blocker_detail_vague", matched: vague[0],
+            hint: `"${vague[0]}" names a feeling about time, not a blocker. Say who or what has to happen first — and if nothing has to, do the work now instead of filing this.` });
+      }
 
       const marker = args.marker || (args.due_on ? "dated" : "none");
       const literal = marker === "bell" ? "🔔"
@@ -3252,20 +3310,30 @@ export const TOOLS = {
       const r = await c.query(
         `insert into loop_item (kind, number, block_id, render_seq, title, body, owner,
            since_text, unblocks, source_note, marker, marker_literal, due_on,
-           drift_critical, status, tier, personal_to, created_by, updated_by, domain)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'open',$15,$16,$17,$17,$18)
+           drift_critical, status, tier, personal_to, created_by, updated_by, domain,
+           blocker_class, blocker_detail)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'open',$15,$16,$17,$17,$18,$19,$20)
          returning id`,
         [args.kind, num, block.id, seq, args.title || null, args.body || null, args.owner,
          args.since || new Date().toISOString().slice(0, 10), args.unblocks || null,
          args.source_note || null, marker, literal, args.due_on || null,
-         args.drift_critical === true, tier, personal, actor.id, args.domain || null]);
+         args.drift_critical === true, tier, personal, actor.id, args.domain || null,
+         blockerGated ? args.blocker : null,
+         blockerGated ? args.blocker_detail.trim() : null]);
 
+      // The blocker goes on the EVENT as well as the row: an open_loop that was
+      // filed under a blocker which later turns out to be false is a thing Joe
+      // should be able to find, and events are the only surface that keeps the
+      // claim as it was made on the day it was made.
       await writeEvent(c, actor, "add-loop", "loop", r.rows[0].id,
         { new: { number: num, kind: args.kind, section: wantKey, marker,
-                 due_on: args.due_on || null, owner: args.owner, domain: args.domain || null },
+                 due_on: args.due_on || null, owner: args.owner, domain: args.domain || null,
+                 blocker_class: blockerGated ? args.blocker : null,
+                 blocker_detail: blockerGated ? args.blocker_detail.trim() : null },
           idempotency_key: args.idempotency_key });
       return { ok: true, loop_id: r.rows[0].id, number: num, kind: args.kind,
-               section: wantKey, renders_into: block.rel_path };
+               section: wantKey, renders_into: block.rel_path,
+               blocker: blockerGated ? args.blocker : null };
     }),
   },
 
