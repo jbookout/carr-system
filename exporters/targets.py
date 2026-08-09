@@ -1618,8 +1618,115 @@ def build_source_captures(tmp_path, cur):
     return len(rows), canonical
 
 
+RADAR_DIGEST_REL = "Automation/radar/radar-digest-latest.md"
+
+
+def build_radar_digest(tmp_path, cur):
+    """The weekly radar read, RENDERED instead of hand-written.
+
+    WHY THIS TARGET EXISTS (2026-08-09, Joe's go). The digest used to be a
+    markdown file a session typed at the end of each radar run, and the
+    record-home gate now refuses exactly that (rule 14181e60). That left the
+    lane's own SOP done-condition impossible to satisfy and the `Radar digest`
+    health row permanently amber — a detector that can never go green is a
+    detector everyone learns to skip, which is the failure loops #128/#178/#182
+    already cost this system three times.
+
+    So the digest becomes a render, same pattern as clients-active.md: the
+    candidates, their licences and their gate verdicts are already rows in
+    candidate_pool, and the reasoning behind a run is already decision events.
+    Nothing here is typed; every line is a query.
+
+    NOTE ON THE HEALTH ROW, so nobody re-points it here by mistake: this file
+    regenerates NIGHTLY, so its mtime says nothing about whether the weekly
+    radar sweep actually ran. The freshness detector belongs on the mapper's own
+    run report (out/radar-lane-map-*.md), which code writes on every run whether
+    or not the run found anything. This file is for READING; that file is the
+    proof of life.
+    """
+    # v_export_pool_all, NOT candidate_pool: the exporter runs as a restricted
+    # reader with no grant on the base tables, which is the point of the role.
+    cur.execute(
+        'select "Name", source_row->>\'ad\', "City", "County", '
+        "       source_row->>'license', source_row->>'reg', source_row->>'gate', "
+        "       coalesce(source_row->>'in_territory','true'), \"Profession\", "
+        "       source_row->>'entity' "
+        "  from v_export_pool_all "
+        " where source = 'corp-filings' "
+        " order by (source_row->>'reg') desc nulls last, \"Name\"")
+    rows = cur.fetchall()
+
+    in_terr = [r for r in rows if r[7] == "true"]
+    out_terr = [r for r in rows if r[7] != "true"]
+    licensed = [r for r in rows if r[4]]
+
+    lines = [
+        "# Radar digest — corp-filings lane",
+        "",
+        "> **GENERATED from the CARR record layer — do not hand-edit.**",
+        "> Candidates are `candidate_pool` rows where `source = 'corp-filings'`.",
+        "> A new candidate arrives through the lane's own append + "
+        "`map_radar_lanes`, never by typing a row here. The reasoning behind a",
+        "> run lives in decision-history, not in this file.",
+        "",
+        "*Entity formation is the pre-space moment: a practice that has just "
+        "filed its PLLC has a licence, a plan and no premises. Every row below "
+        "cleared the licence gate — a name-token hit is not a candidate until a "
+        "licence or NPI confirms a real clinical practitioner behind it (the "
+        "Core Wellness rule). Nobody here has been contacted; the doctor-cadence "
+        "rule governs any approach.*",
+        "",
+        f"**{len(rows)} candidate(s) on record · {len(in_terr)} in territory · "
+        f"{len(licensed)} carrying a verified licence number.**",
+        "",
+        "## In territory",
+        "",
+        "| Practice | Practitioner | Profession | Licence | City | County | Filed |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    canonical = [[org or "", name or "", prof or "", lic or "", city or "",
+                  county or "", reg or "", terr, gate or ""]
+                 for name, org, city, county, lic, reg, gate, terr, prof, _ in rows]
+    for name, org, city, county, lic, reg, gate, terr, prof, _created in in_terr:
+        lic_cell = f"**{lic}**" if lic else "—"
+        lines.append(f"| {org or ''} | {name or ''} | {prof or ''} | {lic_cell} "
+                     f"| {city or ''} | {county or ''} | {reg or ''} |")
+
+    if out_terr:
+        lines += [
+            "",
+            "## Out of territory — kept for the record, hidden from the board",
+            "",
+            "| Practice | Practitioner | Profession | Licence | City | County |",
+            "|---|---|---|---|---|---|",
+        ]
+        for name, org, city, county, lic, reg, gate, terr, prof, _created in out_terr:
+            lic_cell = f"**{lic}**" if lic else "—"
+            lines.append(f"| {org or ''} | {name or ''} | {prof or ''} | "
+                         f"{lic_cell} | {city or ''} | {county or ''} |")
+
+    lines += ["", "## Gate verdicts", "",
+              "*Why each candidate survived, in the words the run recorded. A "
+              "verdict naming MQA outranks one naming NPPES alone: NPPES is a "
+              "corroborator, never the gate (decision 2845184a).*", ""]
+    for name, org, city, county, lic, reg, gate, terr, prof, _created in rows:
+        if gate:
+            lines.append(f"- **{org or name}** — {gate}")
+
+    from datetime import datetime, timezone
+    lines += ["",
+              f"*Exported: {datetime.now(timezone.utc).isoformat()} · "
+              f"{len(rows)} candidate(s)*", ""]
+    tmp_path.write_text("\n".join(lines))
+    return len(rows), canonical
+
+
 TARGETS = {
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
+    # 2026-08-09 (Joe's go). Replaces the hand-typed weekly digest the
+    # record-home gate now refuses. See build_radar_digest for why the health
+    # row must NOT watch this file.
+    "radar-digest": (RADAR_DIGEST_REL, build_radar_digest),
     "source-captures": (SOURCES_REL, build_source_captures),
     # 2026-08-06, Joe's phone approval: "Flip it". Hand half = abilities-catalog.md.
     "abilities": (ABILITIES_REL, build_abilities),

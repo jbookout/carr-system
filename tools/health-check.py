@@ -203,8 +203,28 @@ WATCH = [
      "FL DOR x out-of-state DOH join, quarterly-ish; board ingests it (corrective 2026-07-25)"),
     ("National accounts", "DNA/Team/national-accounts.json", None,  [],
      "curated shared feed, human-review cadence — existence/readability watch only (corrective 2026-07-25)"),
-    ("Radar digest",      "Automation/radar/radar-digest-2*.md", 9, [],
-     "Monday radar run (radar-digest-sop.md)"),
+    # RE-POINTED 2026-08-09 (Joe's go). This row used to watch
+    # Automation/radar/radar-digest-2*.md — a digest a session TYPED at the end
+    # of each run. The record-home gate now refuses hand-authored vault markdown
+    # (rule 14181e60), so that file could never be written again and this row
+    # could never go green: a detector that is permanently amber is one every
+    # reader learns to skip, which is the loops #128/#178/#182 failure a fourth
+    # time.
+    #
+    # The digest itself is now a RENDER (exporters target `radar-digest` ->
+    # Automation/radar/radar-digest-latest.md). Do NOT point this row there: that
+    # file regenerates nightly with every other export, so its mtime proves only
+    # that the exporter ran, never that the weekly radar sweep did.
+    #
+    # What proves the sweep ran is the MAPPER'S OWN RUN REPORT, written by
+    # pipelines/map_radar_lanes.py on every invocation whether or not the run
+    # found anything — which is exactly the property a zero-result week needs,
+    # and the AL lane has now had four of those in a row. Cadence 8, not 9: the
+    # lane is weekly, so 9 let a run slip two days late unnoticed.
+    ("Radar digest",      os.path.expanduser("~/carr-system/out/radar-lane-map-*.md"), 8, [],
+     "weekly radar sweep — proof of life is the mapper's run report, not the "
+     "digest render (radar-digest-sop.md; digest reads at "
+     "Automation/radar/radar-digest-latest.md)"),
     ("PECOS pool",        "Automation/radar/upstream/pecos.json", 100, [],
      "quarterly (Jan/Apr/Jul/Oct; next diff vs the Q1 baseline in Oct)"),
     ("Section index",     "Automation/section-index.tsv", 9, [],
@@ -358,6 +378,37 @@ def newest(pattern):
 def age_days(path):
     return (time.time() - os.path.getmtime(path)) / 86400
 
+
+# --- weekday-only outputs (loop #275, fixed 2026-08-09) ----------------------
+# These three are written by bin/local-briefs.sh under launchd
+# com.carr.local-briefs, which fires WEEKDAYS at 06:45 to match Joe's weekend
+# stand-down. Measured against a flat 26-hour cadence they went STALE every
+# Saturday and Sunday on a job that was working perfectly — Friday's run is
+# 2.0 days old by Sunday. That is an alarm firing on healthy state, which this
+# same file's scheduler register already warns is how a dashboard loses its
+# readers.
+#
+# The register got this right by evaluating the real cron. Do the same here:
+# compare against the most recent weekday firing that has actually passed,
+# rather than against wall-clock age. No separate weekend heuristic is added —
+# the schedule itself carries the rule, exactly as the register argues.
+WEEKDAY_ONLY = {
+    "JOB brief-pack": (6, 45),
+    "JOB monday-agenda": (6, 45),
+    "JOB review-queue": (6, 45),
+}
+
+
+def last_weekday_window(hour, minute):
+    """Most recent Mon-Fri hour:minute that has already passed, as epoch."""
+    now = datetime.now()
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate > now:
+        candidate -= timedelta(days=1)
+    while candidate.weekday() >= 5:          # 5=Sat, 6=Sun
+        candidate -= timedelta(days=1)
+    return candidate.timestamp()
+
 rc = 0
 print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — outputs, not schedules")
 for name, out_pat, max_age, inputs, note in WATCH:
@@ -377,7 +428,15 @@ for name, out_pat, max_age, inputs, note in WATCH:
         continue
     a = age_days(out)
     problems = []
-    if max_age is not None and a > max_age:
+    if name in WEEKDAY_ONLY:
+        # Weekday-only job: did it run at its last ACTUAL firing window?
+        window = last_weekday_window(*WEEKDAY_ONLY[name])
+        if os.path.getmtime(out) < window:
+            missed = (time.time() - window) / 86400
+            problems.append(
+                f"MISSED its {time.strftime('%a %H:%M', time.localtime(window))} "
+                f"window ({missed:.1f}d ago), output {a:.1f}d old")
+    elif max_age is not None and a > max_age:
         problems.append(f"STALE {a:.1f}d old (cadence {max_age}d)")
     behind = [os.path.basename(i) for pat in inputs
               if (i := newest(pat)) and os.path.getmtime(i) > os.path.getmtime(out) + 60]
