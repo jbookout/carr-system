@@ -136,7 +136,15 @@ final class WhisperServer {
         WhisperServer.killStaleListener(binaryName: "whisper-server", port: port)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: WhisperServer.binaryPath)
-        p.arguments = ["-m", modelPath, "--host", "127.0.0.1", "--port", String(port)]
+        // -nt matches the whisper-cli fallback's own flags (Transcriber.swift's
+        // args). Without it whisper-server returns one line PER SEGMENT joined
+        // by newlines, and a segment boundary can land mid-word — "Pensacola"
+        // came back as "Pensac\nola" on 2026-08-09, which Transcriber.clean()
+        // then joins with a space into "Pensac ola". The vocab prompt was
+        // already kept identical across both paths (see Transcriber's
+        // vocabPrompt); this flag had diverged since the server path shipped
+        // 2026-08-08. Also the precondition for doc-convo sharing this server.
+        p.arguments = ["-m", modelPath, "--host", "127.0.0.1", "--port", String(port), "-nt"]
         // Discard stdout/stderr into a pipe rather than inheriting the app's —
         // whisper-server is chatty per-request and none of it belongs in the
         // menu-bar app's own log.
