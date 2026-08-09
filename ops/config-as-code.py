@@ -43,6 +43,7 @@ the config we think we have", which is the question nobody could answer tonight.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -104,6 +105,67 @@ def read(path):
             return fh.read()
     except FileNotFoundError:
         return None
+
+
+def hook_scripts_untracked():
+    """Hook scripts that settings.json points at but git does not track.
+
+    THE GAP THIS CLOSES, found 2026-08-09. This tool verifies that the hooks
+    BLOCK inside settings.json matches the repo. It never checked whether the
+    SCRIPTS that block points at are committed. Those are different failures and
+    only one of them was covered: on this machine the live settings referenced
+    hooks/conduct-stop-gate.py, hooks/conduct_patterns.py and
+    hooks/escalation-gate.py, all created the same afternoon and none of them in
+    git. The check reported "OK — repo matches machine" the whole time, and it
+    was telling the truth about the only thing it was looking at.
+
+    WHY IT MATTERS RATHER THAN BEING TIDINESS. A hook that exists only in one
+    working tree is one `git clean`, one disk failure or one fresh clone from
+    being gone, and the settings block that survives will then point at files
+    that are not there. It also cannot reach Dell: he pulls the repo, so an
+    untracked gate binds Joe's sessions and silently binds nothing of his, which
+    is the twin-parity failure rule 61c64d91 exists to prevent. The 2026-08-08
+    wipe proved the settings block is worth versioning; the scripts it invokes
+    are the other half of the same control.
+
+    Returns a list of (path, why) — repo-relative where possible.
+    """
+    block = live_hooks_block()
+    if not block:
+        return []
+    paths = set()
+    for groups in block.values():
+        if not isinstance(groups, list):
+            continue
+        for grp in groups:
+            for hook in (grp or {}).get("hooks", []) or []:
+                for tok in re.findall(r"(/[^\s'\"]+\.py)", hook.get("command", "") or ""):
+                    paths.add(os.path.realpath(concrete(tok)))
+    out = []
+    for p in sorted(paths):
+        if not os.path.exists(p):
+            out.append((p, "settings.json invokes it and IT DOES NOT EXIST"))
+            continue
+        # Ask git about the file IN ITS OWN checkout, not in this script's.
+        # The live settings point at the primary checkout (~/carr-system), while
+        # this script may be running from a worktree — comparing against the
+        # script's own REPO made every hook look "outside the repo" and the
+        # check silently found nothing, which is worse than not having it.
+        d = os.path.dirname(p)
+        inside = subprocess.run(["git", "-C", d, "rev-parse", "--is-inside-work-tree"],
+                                capture_output=True, text=True)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            continue                       # not in any git checkout: not ours to version
+        # `git ls-files --error-unmatch` is the exact question: is this path in
+        # the index? A file that is merely present is not a file that survives.
+        rc = subprocess.run(["git", "-C", d, "ls-files", "--error-unmatch", p],
+                            capture_output=True).returncode
+        if rc != 0:
+            top = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"],
+                                 capture_output=True, text=True).stdout.strip()
+            rel = os.path.relpath(p, top) if top else p
+            out.append((rel, "settings.json invokes it but git DOES NOT TRACK it"))
+    return out
 
 
 def carr_plists():
@@ -180,10 +242,25 @@ def cmd_check():
             untracked.append((label, "on disk: present; in repo: NOT TRACKED"))
         elif have != live:
             different.append((label, "TRACKED BUT DIFFERENT from the live copy"))
+    # A hook script the settings block invokes but git does not track is a
+    # separate failure from a settings mismatch, and it used to be invisible
+    # because this tool only ever compared the block itself. It is reported as
+    # UNVERSIONED rather than folded into `untracked`, because the remedy is a
+    # commit rather than a `pull`.
+    unversioned = hook_scripts_untracked()
     drift = missing + untracked + different
-    if not drift:
+    if not drift and not unversioned:
         print(f"config-as-code: OK — {len(pairs())} items, repo matches machine")
         return 0
+    if not drift and unversioned:
+        print(f"config-as-code: UNVERSIONED HOOKS — {len(unversioned)} script(s) the live "
+              f"settings invoke are not in git: " + ", ".join(p for p, _ in unversioned))
+        for p, why in unversioned:
+            print(f"  {p}\n      {why}")
+        print("\n  A gate that exists in one working tree only is one `git clean` or one\n"
+              "  fresh clone from gone, and it can never reach Dell. Commit them:\n"
+              "      git -C ~/carr-system add " + " ".join(p for p, _ in unversioned))
+        return 1
     # The headline carries the severity, because callers that summarise this
     # tool (tools/health-check.py) read the FIRST LINE ONLY.
     headline = f"config-as-code: DRIFT — {len(drift)} of {len(pairs())} items"
@@ -201,6 +278,13 @@ def cmd_check():
               "  host outside KNOWN_HOSTS.")
     if untracked or different:
         print("\n  `ops/config-as-code.py pull` to capture the machine into the repo.")
+    # Reported even when settings drift is also present: the two have different
+    # remedies (a pull versus a commit), so folding them together would hide one.
+    if unversioned:
+        print(f"\n  ALSO — {len(unversioned)} hook script(s) the live settings invoke are not in git:")
+        for p, why in unversioned:
+            print(f"  {p}\n      {why}")
+        print("      git -C ~/carr-system add " + " ".join(p for p, _ in unversioned))
     return 1
 
 

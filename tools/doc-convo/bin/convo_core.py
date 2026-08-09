@@ -47,9 +47,9 @@ MIC_PRE_ROLL_BYTES = int(MIC_BYTES_PER_SECOND * 0.3)
 
 class BrainProcess:
     def __init__(self) -> None:
-        self.process = None
-        self.system_prompt = None
-        self.stderr = deque(maxlen=100)
+        self.process: subprocess.Popen[str] | None = None
+        self.system_prompt: str | None = None
+        self.stderr: deque[str] = deque(maxlen=100)
         self.lock = threading.Lock()
 
     def _stop(self) -> None:
@@ -58,17 +58,20 @@ class BrainProcess:
         if process is None or process.poll() is not None:
             return
         try:
-            process.stdin.close()
+            if process.stdin is not None:
+                process.stdin.close()
             process.wait(timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             process.kill()
             process.wait()
 
-    def _drain_stderr(self, process: subprocess.Popen) -> None:
+    def _drain_stderr(self, process: subprocess.Popen[str]) -> None:
+        if process.stderr is None:
+            return
         for line in process.stderr:
             self.stderr.append(line.rstrip())
 
-    def _start(self, system_prompt: str) -> subprocess.Popen:
+    def _start(self, system_prompt: str) -> subprocess.Popen[str]:
         self._stop()
         cmd = [
             "claude", "-p", "--verbose", "--model", BRAIN_MODEL,
@@ -92,7 +95,7 @@ class BrainProcess:
         ).start()
         return process
 
-    def _ensure(self, system_prompt: str) -> subprocess.Popen:
+    def _ensure(self, system_prompt: str) -> subprocess.Popen[str]:
         if (self.process is None or self.process.poll() is not None or
                 self.system_prompt != system_prompt):
             return self._start(system_prompt)
@@ -105,6 +108,14 @@ class BrainProcess:
                 process = self._ensure(system_prompt)
             except OSError as exc:
                 return subprocess.CompletedProcess([], 1, "", str(exc))
+            # _start always opens both with PIPE; bound as locals so the reads
+            # and writes below are on a pipe that is known to exist.
+            stdin, stdout = process.stdin, process.stdout
+            if stdin is None or stdout is None:
+                self._stop()
+                return subprocess.CompletedProcess(
+                    [], 1, "", "brain process has no stdin/stdout pipe",
+                )
             payload = {
                 "type": "user",
                 "message": {
@@ -113,8 +124,8 @@ class BrainProcess:
                 },
             }
             try:
-                process.stdin.write(json.dumps(payload) + "\n")
-                process.stdin.flush()
+                stdin.write(json.dumps(payload) + "\n")
+                stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 self._stop()
                 return subprocess.CompletedProcess([], 1, "", str(exc))
@@ -123,7 +134,7 @@ class BrainProcess:
             result = ""
             is_error = False
             while True:
-                line = process.stdout.readline()
+                line = stdout.readline()
                 if not line:
                     try:
                         code = process.wait(timeout=1)
@@ -255,11 +266,11 @@ def pick_mic() -> str:
 class ResidentMic:
     def __init__(self, mic: str) -> None:
         self.mic = mic
-        self.chunks = deque()
+        self.chunks: deque[tuple[int, bytes]] = deque()
         self.buffered = 0
         self.position = 0
-        self.process = None
-        self.stderr = deque(maxlen=100)
+        self.process: subprocess.Popen[bytes] | None = None
+        self.stderr: deque[str] = deque(maxlen=100)
         self.lock = threading.Lock()
         self.stopping = threading.Event()
         self.restart = threading.Event()
@@ -278,7 +289,9 @@ class ResidentMic:
                 _offset, old = self.chunks.popleft()
                 self.buffered -= len(old)
 
-    def _drain_stderr(self, process: subprocess.Popen) -> None:
+    def _drain_stderr(self, process: subprocess.Popen[bytes]) -> None:
+        if process.stderr is None:
+            return
         for line in process.stderr:
             self.stderr.append(line.decode(errors="replace").rstrip())
 
@@ -305,8 +318,9 @@ class ResidentMic:
                 target=self._drain_stderr, args=(process,), daemon=True,
             ).start()
             captured = False
+            stdout = process.stdout  # PIPE above; None here means nothing to read
             while not self.stopping.is_set():
-                data = process.stdout.read(4096)
+                data = stdout.read(4096) if stdout is not None else b""
                 if not data:
                     break
                 captured = True
@@ -325,7 +339,14 @@ class ResidentMic:
         with self.lock:
             if self.process is None or self.process.poll() is not None:
                 return None
-            return max(0, self.position - MIC_PRE_ROLL_BYTES)
+            # ALIGN TO A SAMPLE BOUNDARY. Audio is 16-bit mono, so a start on
+            # an ODD byte splits every sample in half and everything after it
+            # decodes as noise — whisper then invents plausible words from it
+            # ("I was just 100% on the salt", live 2026-08-08). The tail is
+            # already truncated to an even length in write_since(); this is
+            # the missing other half of that guard.
+            start = max(0, self.position - MIC_PRE_ROLL_BYTES)
+            return start - (start % 2)
 
     def write_since(self, start: int, wav: pathlib.Path) -> int:
         with self.lock:

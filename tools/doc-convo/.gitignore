@@ -3,6 +3,16 @@
 # Isolated eval-only env for the Chatterbox-Flash benchmark (2026-08-08).
 # Never touches .venv-tts; safe to delete once the bake-off is decided.
 .venv-flash/
+# Isolated eval-only env for the CosyVoice2 FULL JARVIS capability test (2026-08-08).
+# Never touches .venv-tts, .venv-flash, or .venv-qwen; safe to delete once decided.
+# DECIDED 2026-08-08 (decision c8291ab5): CosyVoice2 rejected on identity by Joe's
+# ear — Engine A (current Chatterbox) still sounds more like Doc. Safe to delete.
+.venv-cosy/
+# Isolated eval-only env for the Higgs Audio v2 FULL JARVIS capability test
+# (2026-08-08), the next candidate after CosyVoice2 was rejected. Python 3.12 to
+# match .venv-tts; Higgs pins transformers<4.47 against CosyVoice's 4.51.3, which
+# is exactly why it gets its own env. Never touches .venv-tts.
+.venv-higgs/
 # Live client data — never in git
 assets/hot-context.md
 assets/.brain-session-id
@@ -35,8 +45,4 @@ assets/harvest-*.jsonl
 assets/harvest-*.txt
 assets/harvest-corpus/
 assets/.harvest-brain-session-id
-# The qwen eval env. Every sibling venv above has a rule; this one was named
-# only in a COMMENT on line 7, so 8,244 files / 663MB landed in git on
-# 2026-08-09 (commit 6871583) and made the branch unpushable — one blob,
-# mlx.metallib, is 155MB against GitHub's 100MB hard limit.
 .venv-qwen/

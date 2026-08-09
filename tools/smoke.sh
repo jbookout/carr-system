@@ -14,12 +14,40 @@ import sys, os, py_compile
 repo = sys.argv[1]
 n = 0
 for dp, dn, fn in os.walk(repo):
-    dn[:] = [d for d in dn if d not in (".git", "__pycache__", "baselines")]
+    # Never descend into virtualenvs or vendored trees: their contents are
+    # third-party, gitignored, and not ours to compile. Before this, a Python-2
+    # file inside tools/doc-convo/.venv-higgs (langid/train/scanner.py) failed
+    # the sweep, so `smoke.sh` exited red for every run on any machine that had
+    # built that venv — a safety net that always fails is a safety net people
+    # learn to skip, which is the exact decay rule 590b11e1 names.
+    dn[:] = [d for d in dn
+             if d not in (".git", "__pycache__", "baselines", "vendor", "node_modules")
+             and not d.startswith(".venv")]
     for f in fn:
         if f.endswith(".py"):
             py_compile.compile(os.path.join(dp, f), doraise=True); n += 1
 print(f"  OK  {n} files compile")
 EOF
+
+# THE REPORT-CARD RUBRIC'S OWN STRUCTURAL CHECK (loop #220, added 2026-08-09).
+#
+# This one line is the answer to the red team's sharpest structural finding. The
+# rubric argued that instrument drift becomes "a signal on the very next run" —
+# but nothing ran it. Not this file, not check.sh, not health, not pre-push, not
+# any of the 16 scheduled tasks, not any launchd plist. The only invocation path
+# in the whole estate was a human typing `run.sh report-card`, which is precisely
+# what v1 died of: a rubric that only drifts loudly when somebody remembers to
+# look at it drifts silently.
+#
+# --validate runs no commands, needs no database, and takes milliseconds, so it
+# is free to run on every smoke. It exits non-zero on any structural breach.
+echo "== smoke: report-card rubric (structural) =="
+if python3 "$REPO/tools/report-card.py" --validate >/dev/null 2>&1; then
+  echo "  OK  rubric validates"
+else
+  echo "  FAIL rubric — run: ./run.sh report-card --validate"
+  rc=1
+fi
 
 echo "== smoke: workflow scripts parse (node; top-level return is valid in the runtime) =="
 for f in "$REPO"/workflows/*.workflow.js; do

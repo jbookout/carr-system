@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import cast
 
 import convo_core
 import reflexes
@@ -42,31 +43,30 @@ def split_card(reply: str) -> tuple[str, object | None]:
 class Engine:
     def __init__(self, system_prompt: str | None) -> None:
         self.state = "idle"
-        self.turns = []
+        self.turns: list[dict] = []
         self.system_prompt = system_prompt
-        self.recording = None
-        self.utterance = None
-        self.listeners = []
+        self.recording: subprocess.Popen[bytes] | None = None
+        self.utterance: pathlib.Path | None = None
+        self.listeners: list[queue.Queue[tuple[str, dict]]] = []
         self.lock = threading.Lock()
         self.workdir = pathlib.Path(tempfile.mkdtemp(prefix="doc-convo-server."))
         self.turn_number = 0
-        self.timing = None
+        self.timing: Turn | None = None
         self.mic = convo_core.pick_mic()
-        self.capture = convo_core.ResidentMic(self.mic)
 
     def snapshot(self) -> dict:
         with self.lock:
             return {"state": self.state, "turns": list(self.turns[-20:])}
 
-    def subscribe(self) -> queue.Queue:
-        listener = queue.Queue()
+    def subscribe(self) -> queue.Queue[tuple[str, dict]]:
+        listener: queue.Queue[tuple[str, dict]] = queue.Queue()
         with self.lock:
             self.listeners.append(listener)
             state = self.state
         listener.put(("state", {"state": state}))
         return listener
 
-    def unsubscribe(self, listener: queue.Queue) -> None:
+    def unsubscribe(self, listener: queue.Queue[tuple[str, dict]]) -> None:
         with self.lock:
             if listener in self.listeners:
                 self.listeners.remove(listener)
@@ -115,13 +115,25 @@ class Engine:
                 return False
             self.turn_number += 1
             utterance = self.workdir / f"utt-{self.turn_number}.wav"
-            recording = self.capture.begin()
-            if recording is None:
+            # PER-TURN CAPTURE, restored 2026-08-08 on Joe's call. The resident
+            # ring buffer was faster on paper and wrong in practice: garbled
+            # transcripts every turn ("I was just 100% on the salt"). An
+            # alignment fix did not clear it, so the whole mechanism is out —
+            # accurate and slower beats fast and deaf. Costs ~350ms of arm time
+            # and one process spawn per turn; that is the price of it working.
+            try:
+                recording = subprocess.Popen(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation",
+                     "-i", self.mic, "-ac", "1", "-ar", "16000", str(utterance)],
+                    stderr=subprocess.PIPE,
+                )
+            except OSError:
                 return False
             self.recording = recording
             self.utterance = utterance
             self.timing = timing
             self.state = "listening"
+        time.sleep(0.35)   # let avfoundation open before we say "listening"
         timing.mark("mic_open_done")
         self.emit("state", {"state": "listening"})
         return True
@@ -131,7 +143,6 @@ class Engine:
             if self.state != "idle":
                 return False
             self.mic = convo_core.pick_mic()
-            self.capture.set_mic(self.mic)
         return True
 
     def stop(self) -> bool:
@@ -146,7 +157,11 @@ class Engine:
             utterance = self.utterance
             self.state = "thinking"
         try:
-            self.capture.write_since(recording, utterance)
+            recording.send_signal(signal.SIGINT)
+            recording.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            recording.kill()
+            recording.wait()
         except OSError:
             utterance.unlink(missing_ok=True)
         if timing is not None:
@@ -224,8 +239,8 @@ class Engine:
             speaking = False
             streamed_turn = None
             streamed_doc = ""
-            speech_queue = queue.Queue()
-            speech_done = object()
+            # None is the end-of-stream sentinel; only sentences go in otherwise.
+            speech_queue: queue.Queue[str | None] = queue.Queue()
 
             def emit_envelope(wav: pathlib.Path) -> None:
                 env = wav.with_suffix(".env.json")
@@ -248,7 +263,7 @@ class Engine:
             def speak_sentences() -> None:
                 while True:
                     sentence = speech_queue.get()
-                    if sentence is speech_done:
+                    if sentence is None:
                         return
                     speak.stream(sentence, before_play=emit_envelope,
                                  on_first_play=start_speaking)
@@ -271,7 +286,7 @@ class Engine:
             speech_thread.start()
 
             def finish_speech() -> None:
-                speech_queue.put(speech_done)
+                speech_queue.put(None)
                 speech_thread.join()
                 if timing is not None:
                     timing.mark("tts_done")
@@ -325,10 +340,17 @@ class Engine:
             self.set_state("idle")
 
     def close(self) -> None:
-        self.capture.close()
         for path in self.workdir.iterdir():
             path.unlink(missing_ok=True)
         self.workdir.rmdir()
+
+
+class ConvoServer(ThreadingHTTPServer):
+    """Carries the engine as a DECLARED attribute. Hanging it on a plain
+    ThreadingHTTPServer works at runtime but is invisible to the type checker,
+    so nothing catches a handler reaching for a field the server never got."""
+
+    engine: Engine
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -336,7 +358,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @property
     def engine(self) -> Engine:
-        return self.server.engine
+        return cast(ConvoServer, self.server).engine
 
     def json_response(self, status: int, body: dict) -> None:
         payload = json.dumps(body).encode("utf-8")
@@ -423,7 +445,7 @@ def main() -> int:
     convo_core.warm_whisper()
     system_prompt = convo_core.refresh_hot_context()
     engine = Engine(system_prompt)
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server = ConvoServer((HOST, PORT), Handler)
     server.engine = engine
 
     def stop(_signum: int, _frame: object) -> None:

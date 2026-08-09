@@ -3,6 +3,8 @@ name: x-reply-run-daily
 description: X Reply Engine scheduled push (@joebookout), twice-daily weekdays (8:30 + 1:30): Radar + Grok source fresh in-lane posts, Claude reads each actual post and drafts 5-10 replies in voice; Joe posts. Draft-only, never posts.
 ---
 
+STORE-FIRST (added 2026-08-09, loop #289): the doctrine STORE is the source of truth for every governing doc named below. Before reading any `.md` path in the vault, try `read-doctrine` with that file's stem as the document slug; if a store doc exists, IT WINS and the vault file may be a stale duplicate. Two such duplicates were found on 2026-08-09 and this routine's sibling had been reading a three-week-old SOP because its pointer named the file instead of the slug. Do not edit the vault copy either way: hand-authored vault markdown is closed by record-home-gate.py (rule 14181e60).
+
 DAY/FRESHNESS GATE (Joe, Aug 9, 2026) — HARD GATE, CHECK BEFORE ANYTHING ELSE: run `date` and read the real day and hour, never infer them. Two stop conditions, and in both cases report the stand-down and draft nothing:
   - SATURDAY or SUNDAY → STOP. Weekends are off for Joe and Dell (rule 236ca227).
   - Local hour outside roughly 07:00-15:00 CT → STOP. The cron is `30 8,13 * * 1-5`, so a fire outside those windows is a catch-up replay of a missed run, not a live push (the app replays missed runs on next launch). The engine needs posts from the last 60-90 minutes still climbing, so a replayed shortlist is hours cold before Joe could act on it and spends a full sourcing pass producing output he should not use.

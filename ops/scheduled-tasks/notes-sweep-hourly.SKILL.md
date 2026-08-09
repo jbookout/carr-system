@@ -3,6 +3,8 @@ name: notes-sweep-hourly
 description: Hourly business-hours sweep of the iPhone call-recording notes into the record layer's ingest socket (ORDER 12 lane a). One command; verified by an ingest row, never by lastRunAt.
 ---
 
+STORE-FIRST (added 2026-08-09, loop #289): the doctrine STORE is the source of truth for every governing doc named below. Before reading any `.md` path in the vault, try `read-doctrine` with that file's stem as the document slug; if a store doc exists, IT WINS and the vault file may be a stale duplicate. Two such duplicates were found on 2026-08-09 and this routine's sibling had been reading a three-week-old SOP because its pointer named the file instead of the slug. Do not edit the vault copy either way: hand-authored vault markdown is closed by record-home-gate.py (rule 14181e60).
+
 Sweep Joe's iPhone call recordings out of Apple Notes and into the record layer.
 
 iOS files every recorded call into an Apple Notes folder called **Call Recordings** — audio plus, usually, a transcript. This task moves the new ones to the ingest socket so the record layer learns what was said without Joe narrating it afterward. Zero human acts is the point; if this task ever needs a human, say so plainly rather than working around it.
