@@ -3057,17 +3057,23 @@ export const TOOLS = {
 
   "log-decision": {
     write: true,
-    description: "Record a SETTLED decision and its rationale — the thing that stops it being relitigated next session. Writes a decision event (subject_type='decision', verb='log-decision') that v_decision_entry reads and decision-history.md renders; never hand-edit that file. NOT the same as add-loop marker:'decision', which is an OPEN question awaiting a ruling, and not the same as teach, which stores a standing rule that binds future sessions. Use this when a fork has been closed: what was decided, why, what lost. human_quote is Joe's or Dell's literal words when he said them — omit it and the entry is flagged quote_absent rather than paraphrase being passed off as a quote.",
+    description: "Record a SETTLED decision and its rationale — the thing that stops it being relitigated next session. Writes a decision event (subject_type='decision', verb='log-decision') that v_decision_entry reads and decision-history.md renders; never hand-edit that file. NOT the same as add-loop marker:'decision', which is an OPEN question awaiting a ruling, and not the same as teach, which stores a standing rule that binds future sessions. Use this when a fork has been closed: what was decided, why, what lost. human_quote is Joe's or Dell's literal words when he said them — omit it and the entry is flagged quote_absent rather than paraphrase being passed off as a quote. PASS `about` WHENEVER THE RULING CONCERNS ONE RECORD: a decision without it is filed in decision-history and reachable from nothing, which is how 363 rulings ended up invisible to catch-me-up on the very deals they governed.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       title: { type: "string", description: "the decision itself, in one line, stated as settled" },
       rationale: { type: "string", description: "why — including alternatives considered and why they lost, and any condition that would reopen it" },
+      about: { type: "string", description: "the record this ruling is ABOUT — C-127 / L-204 / V-CPA-006 / a deal name. Mirrors the decision onto that record's timeline so catch-me-up on it shows what was decided. Omit only for a genuinely system-wide ruling that belongs to no one record; a bad ref is refused and NOTHING is written, so a mistyped ref never leaves a decision behind." },
       human_quote: { type: "string", description: "the partner's literal words, when he said them. Never paraphrase into this field." },
       session_key: { type: "string", description: "groups entries per session (rule 29). Defaults to <date>-<actor>." },
       provenance: { type: "string", description: "where this came from — a session, a call, a document" },
       occurred_at: { type: "string", description: "when it was decided; defaults now" } },
       required: ["idempotency_key","title","rationale"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "log-decision", args, async () => {
+      // [loop #278] Resolve `about` BEFORE the decision is inserted. resolveSubject
+      // throws not_found / needs_disambiguation, and a throw here must leave no
+      // decision behind — an orphaned ruling written by a mistyped ref is exactly the
+      // record this loop exists to stop creating.
+      const about = args.about ? await resolveSubject(c, args.about) : null;
       const decisionId = (await c.query("select gen_random_uuid() as id")).rows[0].id;
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
@@ -3103,9 +3109,34 @@ export const TOOLS = {
          on conflict (source_system, external_key) do nothing`,
         [ev.id, `live#${sessionKey}#${ev.id}`]);
 
+      // [loop #278] Mirror the ruling onto the record it governs. A SECOND event row,
+      // not a rewrite of the first: v_decision_entry keys off subject_type='decision'
+      // and decision-history.md must keep rendering exactly as it did, so the decision
+      // row is left untouched and the record gets its own pointer at it.
+      //
+      // event.idempotency_key is NON-unique by design (0001, [A1]: "one tool call may
+      // write several event rows; replay is tool_call's job"), so both rows carry the
+      // same key and the tool_call replay table still guards the call as one unit.
+      //
+      // new_value.summary is the 0082 hook: v_subject_timeline reads it as the row's
+      // summary, so catch-me-up on the record shows WHAT was decided instead of the
+      // bare verb. decision_id and event_id ride along so the full entry is one hop away.
+      if (about) {
+        await writeEvent(c, actor, "log-decision", about.type, about.id, {
+          occurred_at: args.occurred_at || null,
+          field: "decision",
+          new: { summary: args.title, decision_id: decisionId, decision_event_id: ev.id },
+          human_quote: args.human_quote || null,
+          agent_rationale: args.rationale,
+          idempotency_key: args.idempotency_key,
+        });
+      }
+
       return { ok: true, decision_id: decisionId, event_id: ev.id,
                session_key: sessionKey, quote_absent: !args.human_quote,
-               renders_into: "00_Context/decision-history.md" };
+               about: about ? { type: about.type, id: about.id, ref: args.about } : null,
+               renders_into: "00_Context/decision-history.md",
+               ...(about ? {} : { hint: "no `about` ref given — this ruling is reachable from decision-history only, not from any record's timeline. Pass `about` unless it is genuinely system-wide." }) };
     }),
   },
 
