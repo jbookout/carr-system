@@ -102,8 +102,15 @@ test("Deal Room gate admits exactly both partner identities with their existing 
     const api = await identityHandler(email).fetch(new Request("https://dealroom.doctorcre.com/mcp",
       { method: "POST", headers: { cookie: session, origin: "https://dealroom.doctorcre.com" } }), environment, {});
     assert.equal(api.status, 200);
+    // human_slug (loop #227) is null on this path by design: the Deal Room cookie
+    // authenticates a partner directly, so the actor already IS the human and there
+    // is no outside-model grant standing in front of them. Asserted explicitly
+    // rather than dropped from the comparison — the point of this test is that the
+    // cookie path mints an ordinary partner identity, and "no agent behind it" is
+    // part of that claim, not an incidental field.
     assert.deepEqual((await api.json()).actor,
-      { slug, display, human: true, via: "dealroom-cookie", client_id: "dealroom-pwa" });
+      { slug, display, human: true, via: "dealroom-cookie", client_id: "dealroom-pwa",
+        human_slug: null });
   }
 });
 
