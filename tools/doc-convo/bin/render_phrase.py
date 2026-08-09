@@ -73,6 +73,9 @@ def main() -> int:
         if slope < best_slope:
             best, best_slope = audio, slope
 
+    if best is None:  # takes < 1 — nothing was ever generated
+        print("render_phrase: no audio generated", file=sys.stderr)
+        return 1
     torchaudio.save(out_path, best.cpu(), model.sr)
     return 0
 

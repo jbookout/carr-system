@@ -21,7 +21,7 @@ STAGES = {
 class Turn:
     def __init__(self) -> None:
         self.started = time.monotonic_ns()
-        self.marks = {}
+        self.marks: dict[str, int] = {}
         self.lock = threading.Lock()
 
     def mark(self, name: str) -> None:

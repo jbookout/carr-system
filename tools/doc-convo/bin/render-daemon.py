@@ -80,7 +80,7 @@ def main() -> int:
                         exaggeration=0.40, cfg_weight=0.60,
                     )
                     torchaudio.save(out, audio.cpu(), model.sr)
-                    reply = {"ok": True}
+                    reply: dict[str, object] = {"ok": True}
                 except Exception as exc:
                     reply = {"ok": False, "error": str(exc)}
                 try:

@@ -144,14 +144,14 @@ def main() -> int:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 
-            speech_queue = queue.Queue()
-            speech_done = object()
+            # None is the end-of-stream sentinel; only sentences go in otherwise.
+            speech_queue: queue.Queue[str | None] = queue.Queue()
             printed = False
 
             def speak_sentences() -> None:
                 while True:
                     sentence = speech_queue.get()
-                    if sentence is speech_done:
+                    if sentence is None:
                         return
                     speak.stream(sentence)
 
@@ -168,7 +168,7 @@ def main() -> int:
             reply, brain = ask_brain_streaming(
                 text, system_prompt, on_sentence=on_sentence,
             )
-            speech_queue.put(speech_done)
+            speech_queue.put(None)
             speech_thread.join()
             if brain.returncode != 0:
                 print("· brain error:")

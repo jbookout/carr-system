@@ -228,7 +228,7 @@ if SF_IDS:
         print("No sf_id column in the capture. Re-run the capture with Opportunity ids "
               "(see 'The upgrade path' in DNA/Deal Management/salesforce-read-sop.md).")
         sys.exit(3)
-    seen = {}
+    seen: dict[str, list[str]] = {}
     for deal_name, sf_id, sf_name in sf_pairs:
         seen.setdefault(sf_id, []).append(deal_name)
     dupes = {k: v for k, v in seen.items() if len(set(v)) > 1}
