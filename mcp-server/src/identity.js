@@ -120,3 +120,41 @@ export function actorFromProps(props) {
 // 2026-08-03, on the schedule set when it was written: both partners' OAuth
 // connectors are live and the bearer path had no traffic left. /mcp now
 // authenticates one way only, through a provider-issued token.
+//
+// ...with ONE later exception, added for outside-model CLIs (loop #227/#239,
+// 2026-08-09): agentActorForToken below. Read the note in index.js's
+// agentActorFor for why it is not a PARTNER_TOKENS revival — the short version
+// is that PARTNER_TOKENS authenticated as a HUMAN (and so carried the humanOnly
+// verbs on a credential in a config file), while this resolves to the tool's own
+// actor with human:false, which mcp.js's humanOnly gate refuses by construction.
+
+/**
+ * AGENT_TOKENS bearer -> outside-model agent actor, or null.
+ *
+ * The pure half of index.js's agentActorFor, split out so it is testable: the
+ * Worker entrypoint imports from `cloudflare:` and cannot be loaded by node
+ * --test, so any logic left in there is logic nothing can prove before a
+ * deploy. Takes the raw Authorization header and the raw AGENT_TOKENS string
+ * rather than a Request and an env, for the same reason.
+ *
+ * Fails closed on every path: no header, unparseable JSON, empty map, a token
+ * that matches nothing, or a slug that is not a known actor.
+ */
+export function agentActorForToken(authorizationHeader, agentTokensRaw) {
+  const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  let tokens;
+  try {
+    tokens = JSON.parse(agentTokensRaw || "{}");
+  } catch {
+    return null;
+  }
+  if (!tokens || typeof tokens !== "object") return null;
+  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
+  if (!slug) return null;
+  // DISPLAY is the same hard stop the OAuth path answers to: a typo'd or
+  // renamed slug must never mint an identity this Worker does not recognise.
+  if (!isKnownActor(slug)) return null;
+  return { slug, display: `Agent (${slug})`, human: false, agent: true,
+           via: "agent-token", client_id: null };
+}

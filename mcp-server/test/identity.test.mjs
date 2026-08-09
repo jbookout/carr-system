@@ -19,6 +19,7 @@ import {
   propsForSlug,
   actorFromProps,
   isKnownActor,
+  agentActorForToken,
 } from "../src/identity.js";
 
 // ---------- slugForEmail: unchanged behavior, regression-guarded ----------
@@ -175,4 +176,65 @@ test("derivation: Joe in Grok Build CLI still writes as joe today (grok not yet 
 test("derivation: a missing/unregistered client_name degrades to the human, never throws", () => {
   const actor = deriveWriteActor("joe", undefined);
   assert.equal(actor.slug, "joe");
+});
+
+// ---------- agentActorForToken: the AGENT_TOKENS door (loop #227/#239) ----------
+// Grok cannot authenticate over OAuth at all (no per-server login command, no
+// dynamic client registration, TUI reports "not authenticated" — verified live
+// three ways 2026-08-09), so it reaches /mcp with a bearer instead. These tests
+// pin the two properties that make that safe: the actor is the TOOL's own, and
+// human is false, which is what makes mcp.js's humanOnly gate refuse teach /
+// retire-rule / confirm-merge / new-deal / reassign-deal by construction rather
+// than by a list anyone has to maintain.
+
+const AGENT_TOKENS = JSON.stringify({ grok: "grok-secret-fixture", codex: "codex-secret-fixture" });
+
+test("agent token resolves to the tool's own actor, never a human", () => {
+  const actor = agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS);
+  assert.deepEqual(actor, {
+    slug: "grok", display: "Agent (grok)", human: false, agent: true,
+    via: "agent-token", client_id: null,
+  });
+  // The whole security claim in one line: humanOnly verbs key off actor.human.
+  assert.equal(actor.human, false);
+  // And it must NOT carry probe/review, which would pin it to a narrow profile.
+  assert.equal(actor.probe, undefined);
+  assert.equal(actor.review, undefined);
+});
+
+test("agent token matches per-slug, so one tool's secret is not another's", () => {
+  assert.equal(agentActorForToken("Bearer codex-secret-fixture", AGENT_TOKENS).slug, "codex");
+  assert.equal(agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS).slug, "grok");
+});
+
+test("agent token accepts the bare token as well as the Bearer form", () => {
+  assert.equal(agentActorForToken("grok-secret-fixture", AGENT_TOKENS).slug, "grok");
+});
+
+test("agent token fails closed on every bad input", () => {
+  for (const [label, header, raw] of [
+    ["no header", "", AGENT_TOKENS],
+    ["null header", null, AGENT_TOKENS],
+    ["unknown token", "Bearer nope", AGENT_TOKENS],
+    ["empty map", "Bearer grok-secret-fixture", "{}"],
+    ["absent secret", "Bearer grok-secret-fixture", undefined],
+    ["unparseable json", "Bearer grok-secret-fixture", "{not json"],
+    ["json that is not an object", "Bearer grok-secret-fixture", '"a string"'],
+  ]) {
+    assert.equal(agentActorForToken(header, raw), null, label);
+  }
+});
+
+test("agent token refuses a slug that is not a known actor", () => {
+  // A typo'd or renamed map key must not mint an identity: DISPLAY is the stop.
+  const rogue = JSON.stringify({ "grok-typo": "s3cret", attacker: "s3cret2" });
+  assert.equal(agentActorForToken("Bearer s3cret", rogue), null);
+  assert.equal(agentActorForToken("Bearer s3cret2", rogue), null);
+});
+
+test("an empty-string secret in the map never authenticates", () => {
+  // Guards the shape where a slug is provisioned but its secret was never set.
+  const blank = JSON.stringify({ grok: "" });
+  assert.equal(agentActorForToken("Bearer ", blank), null);
+  assert.equal(agentActorForToken("Bearer anything", blank), null);
 });

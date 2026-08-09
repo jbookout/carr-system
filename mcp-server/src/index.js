@@ -42,7 +42,7 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps } from "./identity.js";
+import { actorFromProps, agentActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
 import { createCaptureHandler } from "./capture.js";
@@ -278,6 +278,50 @@ function reviewActorFor(request, env) {
   return { slug, display: `Reviewer (${slug})`, human: false, review: true, via: "review-token", client_id: null };
 }
 
+// ---------- agent tokens (outside-model CLIs at full scope, loop #227/#239) ----------
+//
+// WHY A THIRD DOOR. Codex reaches this Worker over OAuth and, since the loop
+// #227 deploy, attributes correctly to its own actor (grant metadata reads
+// "joe via codex"). Grok cannot: its CLI has no per-MCP-server login command,
+// its headless path performs no dynamic client registration, and its TUI
+// reports "not authenticated" against an OAuth server. Verified live
+// 2026-08-09, three ways. There is no client_name to add to
+// AGENT_CLIENT_NAMES because Grok never registers a client at all.
+//
+// So Grok authenticates the only way it can — `grok mcp add --header
+// "Authorization: Bearer ..."` — and this map is the door that bearer opens.
+//
+// WHAT THIS IS NOT: it is NOT a revival of PARTNER_TOKENS, retired 2026-08-03.
+// That secret authenticated as a full HUMAN actor (joe or dell), which meant it
+// carried the humanOnly verbs — teach, retire-rule, confirm-merge, new-deal,
+// reassign-deal — on a credential sitting in a config file. This one resolves
+// to the tool's OWN actor with human:false, so mcp.js's humanOnly gate refuses
+// every one of those by construction, not by a list someone has to maintain.
+// That is exactly the parity decision 5dd21310 asked for: every verb EXCEPT
+// humanOnly.
+//
+// WHY NO PROFILE LOCK, unlike probe and reviewer. Those two exist to pin a
+// narrow surface (probe: reads; reviewer: reads + record-finding) and they set
+// actor.probe / actor.review precisely so ?profile= cannot widen them. An agent
+// token is the opposite case: full parity IS the grant, so it takes
+// profileFor(request) like any other caller. A session that wants to run itself
+// narrower can still pass ?profile=capture; it can never run wider, because
+// human:false is set here and nothing on the wire can change it.
+//
+// The slug must be a known actor (identity.js DISPLAY) AND must exist as an
+// `actor` row before any write runs — mcp.js's callTool() refuses
+// actor_not_provisioned otherwise, same as every other path. codex and grok
+// were provisioned by migration 0074_outside_model_actors.
+//
+// Checked AFTER probe and reviewer so a token colliding across maps resolves
+// to the narrowest door first. In practice a caller holds exactly one.
+// The lookup itself lives in identity.js (agentActorForToken) so node --test can
+// prove it: this file imports from `cloudflare:` and cannot be loaded outside the
+// Worker runtime, so anything implemented here is unprovable before a deploy.
+function agentActorFor(request, env) {
+  return agentActorForToken(request.headers.get("authorization"), env.AGENT_TOKENS);
+}
+
 // ---------- the provider ----------
 
 const oauthProvider = new OAuthProvider({
@@ -340,6 +384,8 @@ export default {
       if (probeActor) return dispatch(request, env, ctx, probeActor);
       const reviewActor = reviewActorFor(request, env);
       if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+      const agentActor = agentActorFor(request, env);
+      if (agentActor) return dispatch(request, env, ctx, agentActor);
     }
     return oauthProvider.fetch(request, env, ctx);
   },
