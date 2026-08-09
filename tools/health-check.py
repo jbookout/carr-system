@@ -731,12 +731,68 @@ try:
         _first = _lines[0] if _lines else "(no output)"
         if _p.returncode == 0:
             print(f"  OK {'machine config':<18} {_first.split('— ', 1)[-1]}")
+        elif "MISSING FROM MACHINE" in _first:
+            # The 2026-08-08 case: a plugin install deleted the hooks block from
+            # ~/.claude/settings.json and all five gates stopped running. The old
+            # row printed the same "DRIFT — N of 28" it had been printing since a
+            # benign matcher change two days earlier, so nothing distinguished
+            # "baseline lagged" from "every protection is off". Missing gets its
+            # own louder row, and the bound action prints INLINE (rule 590b11e1)
+            # rather than sending the reader to another command to find out.
+            print(f"  ✗✗ {'machine config':<18} {_first.split(': ', 1)[-1]}")
+            print(f"     {'':<18} on breach: config-as-code.py install --apply, "
+                  f"then prove a denial fires")
+            rc = 1
         else:
             print(f"  ⚠︎ {'machine config':<18} {_first.split(': ', 1)[-1]}  · "
-                  f"run python3 ops/config-as-code.py check")
+                  f"on breach: config-as-code.py pull --apply (baseline lagged a live change)")
             rc = 1
 except Exception as e:
     print(f"  ⚠︎ {'machine config':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
+# ── the egress guard: is its LOGIC right, and is its DATA fresh (2026-08-09) ──
+# Two rows, because they fail independently and the 2026-08-08 incident turned on
+# exactly that distinction. `machine config` above answers "is the guard
+# REGISTERED". These answer "does it still deny what it claims to" and "does it
+# know about the clients added this week". A green on any one of the three says
+# nothing about the other two.
+try:
+    _gst = os.path.join(REPO_ROOT, "ops", "guard-selftest.py")
+    if os.path.exists(_gst):
+        _p = subprocess.run([sys.executable, _gst], capture_output=True, text=True, timeout=120)
+        _sum = next((l for l in (_p.stdout or "").splitlines() if "guard-selftest:" in l), "")
+        _sum = _sum.split(": ", 1)[-1] if _sum else "(no output)"
+        if _p.returncode == 0:
+            print(f"  OK {'egress guard':<18} {_sum} · on breach: a denial the guard "
+                  f"promises is not firing; read the FAILED list before any research run")
+        else:
+            print(f"  ✗✗ {'egress guard':<18} {_sum} · on breach: a denial the guard "
+                  f"promises is NOT firing; python3 ops/guard-selftest.py -v")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'egress guard':<18} selftest failed ({type(e).__name__}: {e})")
+    rc = 1
+
+try:
+    _fal = os.path.join(REPO_ROOT, "ops", "fetch-allowlist.py")
+    if os.path.exists(_fal):
+        _p = subprocess.run([sys.executable, _fal, "--check"],
+                            capture_output=True, text=True, timeout=60)
+        _line = (_p.stdout or "").strip().splitlines()
+        _line = _line[0].split(": ", 1)[-1] if _line else "(no output)"
+        # The tool's own line reads "fetch-allowlist: OK — 30 hosts…" because it
+        # is also run by hand. The row already carries the glyph, so strip the
+        # repeated status token rather than printing "OK fetch allowlist OK —".
+        for _tok in ("OK — ", "STALE — ", "MISSING — "):
+            if _line.startswith(_tok):
+                _line = _line[len(_tok):]
+                break
+        print(f"  {'OK' if _p.returncode == 0 else '⚠︎'} {'fetch allowlist':<18} {_line}")
+        if _p.returncode != 0:
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'fetch allowlist':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
 # ── taught rules: store vs the file that actually binds (added 2026-08-04) ────

@@ -115,6 +115,15 @@ export CARR_EXPORT_LIVE=1
 step "cadence engine (spawn owed next actions)"      ./.venv/bin/python pipelines/cadence_engine.py --apply
 step "availability matcher (digest, never sent)"     ./.venv/bin/python pipelines/availability_matcher.py
 
+# FETCH ALLOWLIST (2026-08-09): regenerate the record-derived practice domains
+# the egress guard unions with its KNOWN_HOSTS. Runs AFTER the writing steps so a
+# client added tonight is fetchable tomorrow, and BEFORE the exports because it
+# reads the same views and a stale list silently costs the weekly research slice
+# a whole client. Cheap (one query pair); failing it must never stop the chain,
+# and it does not — the guard falls back to KNOWN_HOSTS alone when the file is
+# missing, which tightens the gate rather than loosening it.
+step "fetch allowlist (client domains -> guard)"     ./.venv/bin/python ops/fetch-allowlist.py
+
 step "exports (7 targets -> vault)"                  ./run.sh export
 EXPORTS_RC=$LAST_STEP_RC
 

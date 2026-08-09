@@ -152,22 +152,55 @@ def pairs():
 
 
 def cmd_check():
-    drift = []
+    # SEVERITY IS NOT COSMETIC HERE, and the 2026-08-08 incident is why.
+    # A tracked item MISSING from the machine means a protection that was
+    # supposed to be running is not running. A tracked item merely DIFFERENT
+    # usually means the repo baseline lagged a deliberate live change. Those are
+    # not the same event and must not print the same line.
+    #
+    # WHAT ACTUALLY FAILED. On 2026-08-06 the guard's matcher was widened to
+    # "Bash|WebFetch" on the machine and nobody pulled, so this check went red
+    # for a benign reason and STAYED red. On 2026-08-08 15:46 a plugin install
+    # rewrote ~/.claude/settings.json and deleted the entire hooks block — all
+    # five gates off. The headline both days: "DRIFT — 2 of 28 items". Identical
+    # string, and the health row prints only that first line, so the difference
+    # between a matcher tweak and total gate annihilation was invisible. It went
+    # unnoticed for a day and was found by accident.
+    #
+    # The lesson is rule 590b11e1's, arriving the other way round: a check that
+    # is chronically red detects nothing, because a reader who has learned to
+    # skip a red row will skip the one that matters. Keeping this row green when
+    # nothing is wrong is therefore part of the control, not tidiness.
+    missing, untracked, different = [], [], []
     for label, live, repo_path in pairs():
         have = read(repo_path)
         if live is None:
-            drift.append((label, "on disk: MISSING; in repo: present"))
+            missing.append((label, "on disk: MISSING; in repo: present"))
         elif have is None:
-            drift.append((label, "on disk: present; in repo: NOT TRACKED"))
+            untracked.append((label, "on disk: present; in repo: NOT TRACKED"))
         elif have != live:
-            drift.append((label, "TRACKED BUT DIFFERENT from the live copy"))
+            different.append((label, "TRACKED BUT DIFFERENT from the live copy"))
+    drift = missing + untracked + different
     if not drift:
         print(f"config-as-code: OK — {len(pairs())} items, repo matches machine")
         return 0
-    print(f"config-as-code: DRIFT — {len(drift)} of {len(pairs())} items")
+    # The headline carries the severity, because callers that summarise this
+    # tool (tools/health-check.py) read the FIRST LINE ONLY.
+    headline = f"config-as-code: DRIFT — {len(drift)} of {len(pairs())} items"
+    if missing:
+        headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
+            label for label, _ in missing)
+    print(headline)
     for label, why in drift:
         print(f"  {label}\n      {why}")
-    print("\n  `ops/config-as-code.py pull` to capture the machine into the repo.")
+    if missing:
+        print("\n  MISSING means a tracked config is NOT ON THE MACHINE. If it is the\n"
+              "  hooks block, every gate is currently off — restore it FIRST:\n"
+              "      python3 ops/config-as-code.py install --apply\n"
+              "  then prove it with a denial that should fail, e.g. a WebFetch to a\n"
+              "  host outside KNOWN_HOSTS.")
+    if untracked or different:
+        print("\n  `ops/config-as-code.py pull` to capture the machine into the repo.")
     return 1
 
 
