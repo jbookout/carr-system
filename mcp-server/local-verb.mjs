@@ -8,12 +8,11 @@
 //
 //   DATABASE_URL=<branch url> node local-verb.mjs <verb> '<json args>' [actor-slug]
 //
-// SAFETY RAIL: a WRITE verb refuses to run against the production branch unless
-// CARR_LOCAL_VERB_ALLOW_PRODUCTION=1 is set. Production writes are a human's
-// tap; this tool exists for branch rehearsal and must not become a side door.
-// READ verbs against production pass freely (narrowed 2026-08-08, loop #258) —
-// the rail used to refuse them too, which protected nothing and made the
-// override a habit rather than a decision.
+// PRODUCTION IS REACHABLE, reads and writes alike (Joe's ruling 2026-08-09,
+// loop #258 — the old CARR_LOCAL_VERB_ALLOW_PRODUCTION rail is retired and the
+// variable is no longer read anywhere). A production write prints a warning
+// naming the verb and the host; it is not blocked. The full reasoning sits at
+// the check itself, below the TOOLS lookup.
 
 import { Pool, neonConfig } from "@neondatabase/serverless";
 import ws from "ws";
@@ -46,20 +45,29 @@ console.error(`local-verb -> ${host}`);
 const tool = TOOLS[verb];
 if (!tool) { console.error(`unknown verb ${verb}; known: ${Object.keys(TOOLS).join(", ")}`); process.exit(2); }
 
-// THE PRODUCTION RAIL, narrowed to WRITES on 2026-08-08 (loop #258, Joe's call).
-// It used to sit above the TOOLS lookup and refuse every verb, which meant a
-// read as harmless as `list-verbs` was blocked against production while
-// protecting nothing — the MCP connector performs those same reads constantly.
-// A guard that fires where there is no danger is not extra safety; it teaches
-// the human to reach for the override out of habit, and an override reached for
-// by habit is exactly the side door the rail exists to prevent.
+// THE PRODUCTION RAIL WAS RETIRED 2026-08-09 BY JOE'S RULING (loop #258).
+// Its history, kept because the reasoning is the useful part: it originally
+// refused EVERY verb against production, which blocked reads as harmless as
+// `list-verbs` while protecting nothing. Narrowing it to writes (2026-08-08)
+// fixed that half. Joe then ruled the write half open as well: a terminal may
+// write production through `run.sh call`.
 //
-// The WRITE posture is deliberately unchanged: production writes remain a
-// human's tap, and this tool remains a rehearsal harness for them. Reads now
-// pass; writes still refuse unless CARR_LOCAL_VERB_ALLOW_PRODUCTION=1.
-if (tool.write && !process.env.CARR_LOCAL_VERB_ALLOW_PRODUCTION && url.includes(PRODUCTION_ENDPOINT)) {
-  console.error(`refusing: ${verb} WRITES and that is the production endpoint. This tool is for branch rehearsal; production writes are a human's deliberate tap (set CARR_LOCAL_VERB_ALLOW_PRODUCTION=1 if you mean it).`);
-  process.exit(2);
+// The argument he ruled on, recorded so nobody reinstates the rail by reflex:
+// the actor plumbing is IDENTICAL either way — local-verb resolves the actor
+// slug against the actor table, refuses a human_only verb to a non-human, and
+// every write still carries its idempotency key and tool_call row. The rail was
+// never the thing making a write traceable; the verb layer is. What the rail
+// actually bought was a pause before a mistyped verb at a prompt reached live
+// records, and Joe judged that cost higher than its benefit for a solo operator
+// who hits it while doing ordinary work.
+//
+// WHAT REPLACES IT is visibility, not obstruction. The target host is printed
+// on every run, and a production WRITE announces itself with the verb named, so
+// the human always knows which database is about to change and why. A warning
+// that cannot block is honest about what it is; a guard that is always
+// overridden is theatre, and theatre teaches people to stop reading.
+if (tool.write && url.includes(PRODUCTION_ENDPOINT)) {
+  console.error(`⚠ PRODUCTION WRITE — ${verb} is about to change live records on ${host}.`);
 }
 
 const args = JSON.parse(rawArgs);

@@ -60,9 +60,9 @@ restore_rehearse(){ shift; "$REPO/bin/restore-rehearse.sh" "$@"; }
 # `call` (2026-08-08): fire ONE record verb from a terminal. Wraps
 # mcp-server/local-verb.mjs, which runs the REAL src/tools.js registry, and feeds
 # it the DSN from tools/db-tap.py so a human does not have to produce one by
-# hand. The production rail inside local-verb.mjs is untouched: it still refuses
-# the production endpoint unless CARR_LOCAL_VERB_ALLOW_PRODUCTION=1, and this
-# path never sets that for you.
+# hand. Production is reachable for reads AND writes (Joe's ruling 2026-08-09,
+# loop #258): a production write prints a warning naming the verb and the host,
+# and is not blocked. Use --branch to rehearse against a Neon branch instead.
 call_verb()    { shift; python3 "$REPO/tools/call-verb.py" "$@"; }
 
 case "${1:-}" in
@@ -93,5 +93,10 @@ case "${1:-}" in
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>' [actor]|check"; exit 2 ;;
+  # The report-card rubric (loop #220, DRAFT). One entry point for both paths:
+  # a human runs this, and the monthly audit runs this. Rule a8c55a47 — the
+  # manual path and the automated path that do the same job must be the SAME
+  # code, which under v1 they were not.
+  report-card)  shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/report-card.py" "$@" ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>' [actor]|check|report-card [--validate|--run] [--skip-evidence]"; exit 2 ;;
 esac
