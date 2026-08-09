@@ -8,9 +8,12 @@
 //
 //   DATABASE_URL=<branch url> node local-verb.mjs <verb> '<json args>' [actor-slug]
 //
-// SAFETY RAIL: it refuses to run against the production branch unless
+// SAFETY RAIL: a WRITE verb refuses to run against the production branch unless
 // CARR_LOCAL_VERB_ALLOW_PRODUCTION=1 is set. Production writes are a human's
 // tap; this tool exists for branch rehearsal and must not become a side door.
+// READ verbs against production pass freely (narrowed 2026-08-08, loop #258) —
+// the rail used to refuse them too, which protected nothing and made the
+// override a habit rather than a decision.
 
 import { Pool, neonConfig } from "@neondatabase/serverless";
 import ws from "ws";
@@ -39,13 +42,25 @@ if (!/ep-|neon\.tech/.test(url)) { console.error("DATABASE_URL does not look lik
 const PRODUCTION_ENDPOINT = "ep-restless-resonance-awbp35k3";
 const host = (url.match(/@([^/?]+)/) || [])[1] || "(unparsed)";
 console.error(`local-verb -> ${host}`);
-if (!process.env.CARR_LOCAL_VERB_ALLOW_PRODUCTION && url.includes(PRODUCTION_ENDPOINT)) {
-  console.error("refusing: that is the production endpoint. This tool is for branch rehearsal.");
-  process.exit(2);
-}
 
 const tool = TOOLS[verb];
 if (!tool) { console.error(`unknown verb ${verb}; known: ${Object.keys(TOOLS).join(", ")}`); process.exit(2); }
+
+// THE PRODUCTION RAIL, narrowed to WRITES on 2026-08-08 (loop #258, Joe's call).
+// It used to sit above the TOOLS lookup and refuse every verb, which meant a
+// read as harmless as `list-verbs` was blocked against production while
+// protecting nothing — the MCP connector performs those same reads constantly.
+// A guard that fires where there is no danger is not extra safety; it teaches
+// the human to reach for the override out of habit, and an override reached for
+// by habit is exactly the side door the rail exists to prevent.
+//
+// The WRITE posture is deliberately unchanged: production writes remain a
+// human's tap, and this tool remains a rehearsal harness for them. Reads now
+// pass; writes still refuse unless CARR_LOCAL_VERB_ALLOW_PRODUCTION=1.
+if (tool.write && !process.env.CARR_LOCAL_VERB_ALLOW_PRODUCTION && url.includes(PRODUCTION_ENDPOINT)) {
+  console.error(`refusing: ${verb} WRITES and that is the production endpoint. This tool is for branch rehearsal; production writes are a human's deliberate tap (set CARR_LOCAL_VERB_ALLOW_PRODUCTION=1 if you mean it).`);
+  process.exit(2);
+}
 
 const args = JSON.parse(rawArgs);
 const pool = new Pool({ connectionString: url });

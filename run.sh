@@ -57,6 +57,13 @@ verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" 
 # does not carry — pass --identity or set CARR_AGE_IDENTITY. --preflight runs the
 # checks alone and creates nothing.
 restore_rehearse(){ shift; "$REPO/bin/restore-rehearse.sh" "$@"; }
+# `call` (2026-08-08): fire ONE record verb from a terminal. Wraps
+# mcp-server/local-verb.mjs, which runs the REAL src/tools.js registry, and feeds
+# it the DSN from tools/db-tap.py so a human does not have to produce one by
+# hand. The production rail inside local-verb.mjs is untouched: it still refuses
+# the production endpoint unless CARR_LOCAL_VERB_ALLOW_PRODUCTION=1, and this
+# path never sets that for you.
+call_verb()    { shift; python3 "$REPO/tools/call-verb.py" "$@"; }
 
 case "${1:-}" in
   deal-room)    shift; deal_room "$@" ;;
@@ -76,6 +83,7 @@ case "${1:-}" in
   brief-pack)   brief_pack "$@" ;;
   verify-emails) verify_emails "$@" ;;
   restore-rehearse) restore_rehearse "$@" ;;
+  call)         call_verb "$@" ;;
   # retrieve runs on the repo venv since the store pass (P4 dual-read) needs psycopg;
   # fails soft to file-index-only on any machine without it.
   retrieve)     shift; CARR_VAULT="$VAULT" "$PY" "$REPO/tools/retrieve.py" "$@" ;;
@@ -85,5 +93,5 @@ case "${1:-}" in
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|check"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>' [actor]|check"; exit 2 ;;
 esac
