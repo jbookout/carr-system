@@ -557,7 +557,20 @@ else:
                             capture_output=True, text=True)
         _out = []
         for _f in _h.stdout.splitlines():
+            # A GIT WORKTREE IS THE SAME CODE, NOT ANOTHER CALLER. .claude/worktrees/
+            # holds transient checkouts of this repo, so every reference was being
+            # counted once per worktree and the register reported roughly 3x the
+            # real number — entity-formation-leads.json read "24 file(s)" against 6
+            # actual callers on 2026-08-09. An inflated count is not a harmless
+            # cosmetic: this register exists to answer "is it safe to drop yet",
+            # and a number nobody trusts cannot answer it. _to_delete/ is excluded
+            # for the same reason — a file staged for deletion is not a live caller.
+            # Match "/worktrees/" ANYWHERE, not just under .claude/: worktrees live
+            # in at least three places (.claude/worktrees/ for agent isolation and
+            # out/review-council/worktrees/ for panel runs), and excluding only the
+            # first still left the count at 2x.
             if ("/migrations/" in _f or "node_modules" in _f or "/corpus/" in _f
+                    or "/worktrees/" in _f or "/_to_delete/" in _f
                     or f"import_{_n}" in _f):
                 continue
             try:
