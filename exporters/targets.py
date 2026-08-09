@@ -1027,14 +1027,14 @@ def build_loop_file(rel_path):
 
     def build(tmp_path, cur):
         cur.execute(
-            "select seq, block_key, prose_md, header_cols, col_order "
+            "select seq, block_key, prose_md, header_cols, col_order, renders_closed "
             "from loop_block where rel_path = %s order by seq", (rel_path,))
         blocks = cur.fetchall()
         if not blocks:
             raise ValueError(f"no loop_block rows for {rel_path} — the importer has not run")
 
         lines, canonical = [], []
-        for seq, block_key, prose_md, header_cols, col_order in blocks:
+        for seq, block_key, prose_md, header_cols, col_order, renders_closed in blocks:
             # A prose-only block is emitted even when EMPTY: the last block of
             # open-loops-backlog.md is exactly that, and it is what carries the
             # file's trailing newline. Dropping it as falsy cost a byte and the
@@ -1052,7 +1052,15 @@ def build_loop_file(rel_path):
                 "       marker_literal, extra_cells, domain, domain_label "
                 "  from v_export_loops "
                 " where rel_path = %s and block_key = %s and loop_id is not null "
-                " order by domain_sort, render_seq", (rel_path, block_key))
+                # Same rule as group_by_domain below, and it has to be applied to the
+                # SORT as well as to the headings or the fix is only half done. With
+                # `order by domain_sort` a closed table still comes out in domain
+                # order wearing a single header — ideas #57 and #58 (domain 'system')
+                # jumped ahead of #39, #34, R1 and R2 (domain NULL, so sort 999),
+                # which reads as a corrupted history rather than a grouped one.
+                # A Done or Retired table is ordered by when things closed, full stop.
+                + (" order by render_seq" if renders_closed
+                   else " order by domain_sort, render_seq"), (rel_path, block_key))
             rows = cur.fetchall()
             # Domain is an OPEN_LOOP axis. team_loop and action_required rows are partner
             # handoffs and cross-brain interrupts — a different question entirely — and
@@ -1060,7 +1068,18 @@ def build_loop_file(rel_path):
             # domain set" heading on team-loops.md and action-required.md, which is not a
             # gap to fix but a category error. If no row in this block is classified, the
             # block renders exactly as it did before domains existed.
-            group_by_domain = any(r[12] is not None for r in rows)
+            # A CLOSED TABLE IS CHRONOLOGICAL HISTORY, NEVER A WORK BOARD, so it is
+            # never grouped by domain — stated as a rule here since 2026-08-09
+            # instead of being left to luck. It used to hold only because every
+            # closed row happened to carry domain=NULL, and loop #273's backfill
+            # broke it the moment it moved ideas #57 and #58 (both domain='system',
+            # classified after domains existed) into the bank's Retired table: the
+            # flat list grew a "System — record layer…" heading and an "Unsorted —
+            # no domain set" heading, splitting eleven retired ideas across two
+            # sections ordered by domain rather than by when they were retired.
+            # Grouping answers "what should I work on next", which is not a question
+            # a Retired or Done table is ever asked.
+            group_by_domain = (not renders_closed) and any(r[12] is not None for r in rows)
             current_domain = _NO_DOMAIN_YET
             if not group_by_domain and header_cols:
                 lines.append("| " + " | ".join(header_cols) + " |")
