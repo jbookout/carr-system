@@ -170,7 +170,8 @@ def main():
     # file, never against another take — otherwise the corpus can drift as a
     # whole while every neighbouring pair still looks similar.
     anchor_wav, _ = librosa.load(str(anchor), sr=S3_SR)
-    anchor_embed = model.ve.embeds_from_wavs([anchor_wav], sample_rate=S3_SR)
+    with torch.no_grad():
+        anchor_embed = model.ve.embeds_from_wavs([anchor_wav], sample_rate=S3_SR)
 
     report, kept_seconds = [], 0.0
     for idx, text in enumerate(texts):
@@ -183,14 +184,41 @@ def main():
         started, scored = time.monotonic(), []
         for take in range(args.takes):
             exag = EXAGGERATION_SWEEP[take % len(EXAGGERATION_SWEEP)]
-            wav = model.generate(text, audio_prompt_path=str(anchor),
-                                 exaggeration=exag, cfg_weight=CFG_WEIGHT)
-            tmp = out / "takes" / f"line-{idx:03d}-take-{take:03d}.wav"
-            torchaudio.save(str(tmp), wav, model.sr)
+            # WHY THIS LOOP IS WRAPPED AND DRAINED (added 2026-08-09 after this
+            # script kernel-panicked the machine overnight). Two leaks stack
+            # here, and neither is visible in `ps`:
+            #
+            #   1. Without no_grad, every generate() and embeds_from_wavs()
+            #      builds an autograd graph nothing ever backprops through, and
+            #      the activations behind it stay alive.
+            #   2. MPS's caching allocator does not return freed blocks to the
+            #      OS on its own, so across hundreds of renders the cache only
+            #      grows.
+            #
+            # Measured: ~306 renders reached a 25GB phys_footprint, about 80MB
+            # per render. Overnight it hit 33.9GB, took seven jetsam kills with
+            # it, and the userspace watchdog panicked the kernel when
+            # WindowServer could not get memory. At 195 lines x 6 takes this
+            # loop would leak roughly 94GB on a 16GB machine, so it could never
+            # have finished.
+            #
+            # RSS stays near 200MB throughout, because the growth is compressed
+            # and swapped rather than resident — SIZE THIS LOOP WITH
+            # phys_footprint (`footprint -p <pid>`), NEVER with RSS or `ps`.
+            with torch.no_grad():
+                wav = model.generate(text, audio_prompt_path=str(anchor),
+                                     exaggeration=exag, cfg_weight=CFG_WEIGHT)
+                tmp = out / "takes" / f"line-{idx:03d}-take-{take:03d}.wav"
+                torchaudio.save(str(tmp), wav, model.sr)
 
-            y16, _ = librosa.load(str(tmp), sr=S3_SR)
-            sim = float(VoiceEncoder.voice_similarity(
-                model.ve.embeds_from_wavs([y16], sample_rate=S3_SR), anchor_embed))
+                y16, _ = librosa.load(str(tmp), sr=S3_SR)
+                sim = float(VoiceEncoder.voice_similarity(
+                    model.ve.embeds_from_wavs([y16], sample_rate=S3_SR), anchor_embed))
+            # sim is already a plain float and tmp is on disk, so nothing below
+            # needs the tensors. Drop them before the next take allocates.
+            del wav, y16
+            if device == "mps":
+                torch.mps.empty_cache()
             slope = terminal_slope_score(str(tmp), librosa, np)
             # Identity always gates. Prosody gates only when it was actually
             # measured — an unmeasurable take is not thereby a good one, so it
