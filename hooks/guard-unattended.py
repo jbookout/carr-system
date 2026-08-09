@@ -114,6 +114,65 @@ KNOWN_HOSTS = (
     # content and nothing posts to X from a session. Added 2026-08-07 while Joe
     # was live in-session ("study this article for our system").
     "x.com", "twitter.com",
+    # ── Client-verification sources, added 2026-08-07 on Joe's order after the
+    # weekly deal-history research slice ran half-blind. That run could reach
+    # NPPES and nothing else: no entity filing, no licence status, no primary
+    # source of any kind. Four of fifteen records were filed found:false partly
+    # because the registry that would have settled them was unreachable, and
+    # every website fact in the run rests on a search-engine summary — which is
+    # precisely what rule 94806da2 says not to let stand.
+    #
+    # All read-only public-record lookups. Each hostname was verified live
+    # before being added rather than recalled: a guessed host in an allowlist is
+    # dead weight at best, and at worst names a domain someone else can register.
+    #
+    # State entity registries — the "is this a real company and what is its
+    # legal name" question that every client identity check runs through.
+    "sunbiz.org",              # FL Division of Corporations (search.sunbiz.org)
+    "dos.fl.gov",              # FL Dept of State, the Sunbiz parent
+    "arc-sos.state.al.us",     # AL SOS entity search (legacy CGI, NOT under alabama.gov)
+    # Licensing boards. alabama.gov is deliberately the whole domain rather than
+    # one host per board: every AL board lives on it (chiro., optometry.,
+    # asbvme., sos., licensesearch., inform.) and CARR's verticals will want
+    # boards nobody has needed yet. One entry beats a dozen that drift apart.
+    "alabama.gov",
+    "dentalboard.org",         # Board of Dental Examiners of Alabama (a .org, not a .gov)
+    # The AL dental board hosts its actual licensee lookup on a third-party
+    # vendor, so dentalboard.org alone does NOT make dental licence checks work.
+    # Scoped to the board's own host rather than igovsolution.net, which serves
+    # many states' boards — this grant buys Alabama and nothing else. Widen only
+    # if another state's board is ever needed. Joe's go, 2026-08-07.
+    "bdeal.igovsolution.net",
+    "albme.gov",               # AL Board of Medical Examiners
+    # Alabama's official e-government portal (state contract, Tyler/NIC). Added
+    # 2026-08-07 on Joe's go, one exchange after the rest of this block, because
+    # verifying the block found the gap: the AL CHIROPRACTIC board publishes no
+    # lookup on chiro.alabama.gov and routes to this portal instead, and it is
+    # the one AL board absent from the unified licensesearch.alabama.gov (that
+    # path returns HTTP 500). Without this entry a chiropractor's licence cannot
+    # be verified in Alabama at all — the live gap behind the C-130 Nikki Cottis
+    # npi:found=false row of 2026-08-07.
+    #
+    # UNLIKE the igovsolution entry above, this one CANNOT be narrowed: the
+    # boards sit on PATHS of the apex domain (/asbce/, /sos/) rather than on
+    # per-board subdomains, and this matcher tests hosts, not paths. So the
+    # grant is the whole portal or nothing. Accepted as the same trust class as
+    # alabama.gov — it is the state's own contracted portal — and noted here
+    # plainly rather than left to look like a deliberately loose entry.
+    "alabamainteractive.org",
+    "doh.state.fl.us",         # FL DOH MQA licence search (appsmqa./mqa-internet./mqa-vo.)
+    "flhealthsource.gov",      # FL DOH consumer-facing licence portal
+    # Professional directories, ranked BELOW the registries above: ada.org is an
+    # association roster and healthgrades.com is a commercial aggregator
+    # carrying stale and advertised entries. Corroboration only, never the sole
+    # source for an identity claim.
+    "ada.org",
+    "healthgrades.com",
+    # NOT added, and deliberately: individual practice websites. They are the
+    # largest remaining gap in client verification and an allowlist cannot close
+    # it — every client has a different domain, so the list would have to grow
+    # by one entry per client forever. linkedin.com is also omitted: it blocks
+    # automated fetches behind a login wall, so listing it would buy nothing.
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
