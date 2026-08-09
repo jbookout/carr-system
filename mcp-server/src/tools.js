@@ -199,6 +199,17 @@ async function resolveSubject(client, ref) {
       "select subject_id from v_ref_index where subject_type='vendor' and ref ilike $1", [ref]);
     if (r.rows.length) return { type: "vendor", id: r.rows[0].subject_id };
   }
+  // P- party refs. Added 2026-08-09 after update-decision refused about:'P-0948' during
+  // the loop #278 backfill: party was the one record class whose OWN printed ref form
+  // this resolver could not take back, so every verb built on it — catch-me-up, find,
+  // update-decision, record-finding, all of them — pushed party work onto name matching
+  // instead. record-finding's description had been advertising 'P-0301' as a valid
+  // subject the whole time, so the documented contract and the resolver disagreed.
+  if (/^P-\d+/i.test(ref)) {
+    const r = await client.query(
+      "select subject_id from v_ref_index where subject_type='party' and ref ilike $1", [ref]);
+    if (r.rows.length) return { type: "party", id: r.rows[0].subject_id };
+  }
   // [amendment 7] Both name fallbacks used to take the single newest/closest match.
   // On an ambiguous name that silently wrote to the WRONG record, with no signal —
   // exactly the failure tool-contracts §5 says a verb must never produce. Fetch up
@@ -245,7 +256,7 @@ async function resolveSubject(client, ref) {
       hint: "more than one party carries this name — often duplicate org rows for one company; pass the exact P-ref" });
   }
   throw new ToolError({ error: "subject_not_found", ref,
-    hint: "use find first; refs look like L-204 / C-127 / V-CPA-006 or a deal name" });
+    hint: "use find first; refs look like L-204 / C-127 / V-CPA-006 / P-0948 or a deal name" });
 }
 
 // ---------- loop helpers (one-writer Phase A, ORDER 31) ----------
