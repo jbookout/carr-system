@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-08-06T18:57:56-0500",
+  "generated_at": "2026-08-09T18:05:44-0500",
   "generator": "tools/corpus-sync.py --sync (conflict-resolution path, post-flip)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "GIT. This repo's corpus/ is the doctrine tier's source of truth; the Drive/vault/home copies are renders kept current by `--push`. Flipped 2026-08-06 (was Drive-canonical under ORDER 30 phase 1). `--sync` remains only as the conflict-resolution path, pulling a source-side change INTO git.",
   "max_bytes": 5242880,
-  "count": 78,
+  "count": 77,
   "files": [
     {
       "source": "00_Context/model-tiering.md",
@@ -445,17 +445,6 @@
       "mirrored_at": "2026-08-06T02:24:06-0500",
       "class": "doctrine-root",
       "why": "the master orientation file + task router; the hand-authored half of the always-read core"
-    },
-    {
-      "source": "Marketing/Social Media/social-media-workflow.md",
-      "mirror": "corpus/Marketing/Social Media/social-media-workflow.md",
-      "sha256": "effd613aeee72aaa342ac4fc9cd4af09e617ab80584338beaf9bc3edb98df8bd",
-      "bytes": 47982,
-      "mtime": 1785600368.992,
-      "mtime_iso": "2026-08-01T11:06:08",
-      "mirrored_at": "2026-08-01T11:07:10-0500",
-      "class": "playbook",
-      "why": "the posting lanes and the video lane's standing state (ORDER 30 phase 2)"
     },
     {
       "source": "Marketing/Social Media/x-article-playbook.md",

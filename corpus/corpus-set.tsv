@@ -70,7 +70,18 @@ DNA/Marketing/Social Media/community-group-playbook-2026.md	playbook	purpose, me
 # Dell's tier is never mirrored in Joe's repo.
 00_Context/model-tiering.md	doctrine	which model tier does which work; Joe-personal operating doctrine (ORDER 30 phase 2)
 Marketing/Social Media/x-article-playbook.md	playbook	X article craft: research-first rule, batch-improvement law (ORDER 30 phase 2)
-Marketing/Social Media/social-media-workflow.md	playbook	the posting lanes and the video lane's standing state (ORDER 30 phase 2)
+# RETIRED 2026-08-09: this doc now lives in the DOCTRINE STORE, and its vault
+# copy was staged to _to_delete/social-media-workflow-store-duplicate-2026-08-09
+# earlier the same day. Leaving the row here made corpus-sync report SOURCE-GONE
+# every run — a permanent amber on a file that was deliberately moved, which is
+# the alarm-on-healthy-state failure this repo keeps paying for. Verified before
+# retiring: the store copy renders at 48,165 bytes against the mirror's 47,982,
+# i.e. the same document plus a generated header, so no content is at risk.
+# The git mirror at corpus/Marketing/Social Media/social-media-workflow.md is
+# LEFT IN PLACE on purpose — it becomes a manifest orphan, which `--sync --prune`
+# will remove once someone confirms the store copy is authoritative. Deleting
+# 48KB of doctrine to silence a warning is not a trade this repo should make.
+#Marketing/Social Media/social-media-workflow.md	playbook	the posting lanes and the video lane's standing state (ORDER 30 phase 2)
 drive:.claude/skills/network-debrief/SKILL.md	skill	network-debrief skill: operating instructions, canonical copy read by both harnesses
 drive:.claude/skills/social-media-manager/SKILL.md	skill	social-media-manager skill: operating instructions, canonical copy read by both harnesses
 drive:.claude/skills/watch-video/SKILL.md	skill	watch-video skill: operating instructions, canonical copy read by both harnesses
