@@ -9,16 +9,25 @@ You are running the CARR system's Claude Code update audit. This is an unattende
 
 Run exactly this:
 
+**There are TWO Claude Code binaries on this Mac and they are usually on different versions.** The PATH binary (`/opt/homebrew/bin/claude`, npm-global, self-updating) is what `claude --version` reports. The desktop app ships and updates its OWN runtime under `~/Library/Application Support/Claude/claude-code/<version>/`, and THAT is what actually executes Joe's sessions. On 2026-08-09 they were 2.1.226 and 2.1.222 respectively. Watching only the PATH binary blinds this audit to the runtime that matters, so the gate tracks both and fires when EITHER moves.
+
+Run exactly this:
+
 ```
 SENTINEL=~/.claude/scheduled-tasks/cc-update-audit/last-audited-version.txt
-CUR=$(claude --version 2>/dev/null | awk '{print $1}')
+CLI=$(claude --version 2>/dev/null | awk '{print $1}')
+APP=$(ls -1 ~/Library/Application\ Support/Claude/claude-code/ 2>/dev/null | sort -V | tail -1)
+CUR="cli=${CLI:-none} app=${APP:-none}"
 LAST=$(cat "$SENTINEL" 2>/dev/null || echo "none")
-echo "current=$CUR last_audited=$LAST"
+echo "current:      $CUR"
+echo "last_audited: $LAST"
 ```
 
-**If `current` equals `last_audited`, STOP IMMEDIATELY.** Reply with one line: "No Claude Code update since $LAST. No audit needed." Do nothing else. Do not read files, do not spawn agents, do not call verbs. This is the normal outcome on most days and it must cost almost nothing.
+**If `current` equals `last_audited` exactly, STOP IMMEDIATELY.** Reply with one line: "No Claude Code update since $LAST. No audit needed." Do nothing else. Do not read files, do not spawn agents, do not call verbs. This is the normal outcome on most days and it must cost almost nothing.
 
-**Only if the versions differ** do you continue to Step 1. Every version between `last_audited` and `current` is in scope, not just the newest, because weekends and closed-app days can stack several releases.
+**Only if the strings differ** do you continue to Step 1. Say in your report WHICH binary moved, because it changes what the findings mean: a change in `app=` is present tense and affects Joe's sessions now, while a change in `cli=` is only what headless or PATH-invoked work would pick up.
+
+Every version between the old and new numbers is in scope, not just the newest, because weekends and closed-app days stack several releases. When the two binaries sit at different versions, scope runs from the LOWER of the two audited numbers to the HIGHER of the two current ones, so nothing falls in the gap between them.
 
 ## STEP 1 — Get the actual release notes
 
@@ -60,10 +69,12 @@ If the record layer is unreachable, do not drop the findings: say so explicitly 
 
 ## STEP 4 — Close the sentinel
 
-Only after Steps 1 through 3 have actually completed, write the audited version to the sentinel so the next run does not repeat this audit:
+Only after Steps 1 through 3 have actually completed, write BOTH audited versions to the sentinel so the next run does not repeat this audit. The format must match Step 0's `CUR` string exactly, or the gate compares unlike strings and re-audits forever:
 
 ```
-claude --version 2>/dev/null | awk '{print $1}' > ~/.claude/scheduled-tasks/cc-update-audit/last-audited-version.txt
+CLI=$(claude --version 2>/dev/null | awk '{print $1}')
+APP=$(ls -1 ~/Library/Application\ Support/Claude/claude-code/ 2>/dev/null | sort -V | tail -1)
+echo "cli=${CLI:-none} app=${APP:-none}" > ~/.claude/scheduled-tasks/cc-update-audit/last-audited-version.txt
 ```
 
 If the audit failed partway, leave the sentinel alone.
