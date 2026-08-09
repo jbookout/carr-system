@@ -67,6 +67,53 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
      actor.via || null, actor.client_id || null]);
 }
 
+// [loop #278] The ONE place a decision gets mirrored onto the record it governs.
+// log-decision calls it at creation and update-decision calls it after the fact, so
+// attaching late and attaching at the time produce byte-identical rows — a manual path
+// and an automated path that do the same job must be the same code (rule a8c55a47).
+//
+// `about` takes a single ref or several. Several is not a nicety: the real population
+// includes rulings like the 2026-08-06 vendor merges, one ruling settling V-GC-001,
+// V-MSC-024 and T-004 together, which a single-ref parameter can only record a third of.
+//
+// Re-attaching is safe. A mirror already written for the same (subject, decision) pair
+// is skipped, not duplicated, so calling update-decision twice does not stack pointers
+// on a timeline.
+async function mirrorDecision(client, actor, d) {
+  const refs = (Array.isArray(d.about) ? d.about : [d.about])
+    .map(r => String(r || "").trim()).filter(Boolean);
+  if (!refs.length) return [];
+
+  // Resolve EVERY ref before writing anything: a bad ref in position three must not
+  // leave two pointers behind from positions one and two.
+  const seen = new Map();
+  for (const ref of refs) {
+    const s = await resolveSubject(client, ref);
+    seen.set(`${s.type}:${s.id}`, { ...s, ref });   // dedupe refs naming one record
+  }
+
+  const attached = [];
+  for (const s of seen.values()) {
+    const dup = await client.query(
+      `select 1 from event
+        where subject_type = $1 and subject_id = $2 and field = 'decision'
+          and new_value->>'decision_id' = $3 limit 1`,
+      [s.type, s.id, d.decision_id]);
+    if (dup.rows.length) { attached.push({ ...s, already: true }); continue; }
+
+    await writeEvent(client, actor, "log-decision", s.type, s.id, {
+      occurred_at: d.occurred_at || null,
+      field: "decision",
+      new: { summary: d.title, decision_id: d.decision_id, decision_event_id: d.decision_event_id },
+      human_quote: d.human_quote || null,
+      agent_rationale: d.rationale || null,
+      idempotency_key: d.idempotency_key,
+    });
+    attached.push({ ...s, already: false });
+  }
+  return attached;
+}
+
 async function versionGuard(client, table, id, baseVersion) {
   const r = await client.query(`select version from ${table} where id=$1`, [id]);
   if (!r.rows.length) throw new ToolError({ error: "not_found", table, id });
@@ -3087,7 +3134,8 @@ export const TOOLS = {
       idempotency_key: { type: "string" },
       title: { type: "string", description: "the decision itself, in one line, stated as settled" },
       rationale: { type: "string", description: "why — including alternatives considered and why they lost, and any condition that would reopen it" },
-      about: { type: "string", description: "the record this ruling is ABOUT — C-127 / L-204 / V-CPA-006 / a deal name. Mirrors the decision onto that record's timeline so catch-me-up on it shows what was decided. Omit only for a genuinely system-wide ruling that belongs to no one record; a bad ref is refused and NOTHING is written, so a mistyped ref never leaves a decision behind." },
+      about: { description: "the record(s) this ruling is ABOUT — one ref or several: \"C-127\" or [\"V-GC-001\",\"V-MSC-024\",\"T-004\"]. Mirrors the decision onto each record's timeline so catch-me-up on it shows what was decided. Omit only for a genuinely system-wide ruling that belongs to no one record, which most build and doctrine rulings are; a bad ref is refused and NOTHING is written, so a mistyped ref never leaves a decision behind. Forgot it? update-decision takes `about` too.",
+        oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
       human_quote: { type: "string", description: "the partner's literal words, when he said them. Never paraphrase into this field." },
       session_key: { type: "string", description: "groups entries per session (rule 29). Defaults to <date>-<actor>." },
       provenance: { type: "string", description: "where this came from — a session, a call, a document" },
@@ -3097,8 +3145,13 @@ export const TOOLS = {
       // [loop #278] Resolve `about` BEFORE the decision is inserted. resolveSubject
       // throws not_found / needs_disambiguation, and a throw here must leave no
       // decision behind — an orphaned ruling written by a mistyped ref is exactly the
-      // record this loop exists to stop creating.
-      const about = args.about ? await resolveSubject(c, args.about) : null;
+      // record this loop exists to stop creating. Resolution happens twice on the happy
+      // path (here to validate, again inside mirrorDecision to write); that is a couple
+      // of indexed reads against correctness, which is not a trade worth making.
+      const aboutRefs = args.about
+        ? (Array.isArray(args.about) ? args.about : [args.about]).map(r => String(r || "").trim()).filter(Boolean)
+        : [];
+      for (const ref of aboutRefs) await resolveSubject(c, ref);
       const decisionId = (await c.query("select gen_random_uuid() as id")).rows[0].id;
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
@@ -3146,22 +3199,16 @@ export const TOOLS = {
       // new_value.summary is the 0082 hook: v_subject_timeline reads it as the row's
       // summary, so catch-me-up on the record shows WHAT was decided instead of the
       // bare verb. decision_id and event_id ride along so the full entry is one hop away.
-      if (about) {
-        await writeEvent(c, actor, "log-decision", about.type, about.id, {
-          occurred_at: args.occurred_at || null,
-          field: "decision",
-          new: { summary: args.title, decision_id: decisionId, decision_event_id: ev.id },
-          human_quote: args.human_quote || null,
-          agent_rationale: args.rationale,
-          idempotency_key: args.idempotency_key,
-        });
-      }
+      const attached = await mirrorDecision(c, actor, {
+        about: aboutRefs, decision_id: decisionId, decision_event_id: ev.id,
+        title: args.title, human_quote: args.human_quote, rationale: args.rationale,
+        occurred_at: args.occurred_at, idempotency_key: args.idempotency_key });
 
       return { ok: true, decision_id: decisionId, event_id: ev.id,
                session_key: sessionKey, quote_absent: !args.human_quote,
-               about: about ? { type: about.type, id: about.id, ref: args.about } : null,
+               about: attached.map(a => ({ type: a.type, id: a.id, ref: a.ref })),
                renders_into: "00_Context/decision-history.md",
-               ...(about ? {} : { hint: "no `about` ref given — this ruling is reachable from decision-history only, not from any record's timeline. Pass `about` unless it is genuinely system-wide." }) };
+               ...(attached.length ? {} : { hint: "no `about` ref given — this ruling is reachable from decision-history only, not from any record's timeline. That is correct for a build or doctrine ruling and wrong for anything about a client, lead, vendor or deal. update-decision takes `about` if you want to attach it later." }) };
     }),
   },
 
@@ -3177,11 +3224,13 @@ export const TOOLS = {
   // trace would be the worse half of both options.
   "update-decision": {
     write: true,
-    description: "Correct a decision entry already recorded by log-decision — a wrong or missing title, rationale, human_quote or provenance. Use for a DEFECTIVE record (a quote that was lost, a rationale that stated something untrue), never to rewrite what was actually decided: a decision that CHANGED is a new log-decision, because the old one really was the call at the time. Pass only the fields you are correcting. Re-derives quote_absent from whether a quote is present afterwards, and appends an amend-decision event recording the change.",
+    description: "Correct a decision entry already recorded by log-decision — a wrong or missing title, rationale, human_quote or provenance — or ATTACH it to the record(s) it governs after the fact with `about`. Use for a DEFECTIVE record (a quote that was lost, a rationale that stated something untrue), never to rewrite what was actually decided: a decision that CHANGED is a new log-decision, because the old one really was the call at the time. Attaching is different from correcting and is always safe: it adds a pointer on the record's timeline, changes nothing about the entry itself, and re-attaching the same record is a no-op rather than a second pointer. Pass only the fields you are correcting. Re-derives quote_absent from whether a quote is present afterwards, and appends an amend-decision event recording the change.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       decision_id: { type: "string", description: "the decision_id returned by log-decision" },
       title: { type: "string" }, rationale: { type: "string" },
+      about: { description: "attach this ruling to the record(s) it is ABOUT, now — one ref or several: \"C-063\" or [\"V-GC-001\",\"V-MSC-024\",\"T-004\"]. This is how a decision logged without `about` gets connected later. Only pass records the ruling is genuinely ABOUT: a session-level build decision that merely MENTIONS a ref in its rationale is not about that record, and attaching it there puts noise on a timeline a human reads before a client conversation.",
+        oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
       human_quote: { type: "string", description: "the partner's literal words. Never paraphrase into this field." },
       provenance: { type: "string" },
       reason: { type: "string", description: "why the entry needed correcting — recorded on the amendment" } },
@@ -3205,12 +3254,25 @@ export const TOOLS = {
         [JSON.stringify(next), quote || null,
          args.rationale !== undefined ? args.rationale : cur.agent_rationale, cur.id]);
 
+      // [loop #278] Attach after the fact, through the SAME helper log-decision uses, so
+      // a late attachment is indistinguishable from one made at the time. The mirror
+      // carries the CURRENT title, which is right: an entry corrected here should not
+      // leave the old wording sitting on a record's timeline.
+      const attached = await mirrorDecision(c, actor, {
+        about: args.about, decision_id: args.decision_id, decision_event_id: cur.id,
+        title: next.title, human_quote: quote,
+        rationale: args.rationale !== undefined ? args.rationale : cur.agent_rationale,
+        idempotency_key: args.idempotency_key });
+
       const changed = ["title","rationale","human_quote","provenance"].filter(f => args[f] !== undefined);
       await writeEvent(c, actor, "amend-decision", "decision", args.decision_id,
-        { old: { quote_absent: nv.quote_absent }, new: { fields: changed, quote_absent: !quote },
+        { old: { quote_absent: nv.quote_absent },
+          new: { fields: changed, quote_absent: !quote,
+                 ...(attached.length ? { attached_to: attached.map(a => a.ref) } : {}) },
           agent_rationale: args.reason || null, idempotency_key: args.idempotency_key });
 
-      return { ok: true, decision_id: args.decision_id, amended: changed, quote_absent: !quote };
+      return { ok: true, decision_id: args.decision_id, amended: changed, quote_absent: !quote,
+               about: attached.map(a => ({ type: a.type, id: a.id, ref: a.ref, already_attached: a.already })) };
     }),
   },
 
