@@ -221,6 +221,85 @@ def is_pure_question(text):
     return bool(t) and t.endswith("?") and bool(INTERROGATIVE_LEAD.match(t))
 
 
+# --- Scope gate (2026-08-09, Joe: "tighten the ledger triggers") -----------
+# The hook fired twice inside a keyboard-repair thread that carried no CARR
+# content whatever: once on "i want it to be fully apple keyboard" (trigger 4's
+# bare `i want`) and once on "okay i think it worked" (trigger 2's bare
+# `i think`). Both are ordinary conversation. Neither is a call about the work.
+#
+# WHY THAT MATTERS MORE THAN IT LOOKS. This hook's own docstring says patterns
+# are tuned toward missing real events "because a hook that fires on every turn
+# trains the eye to skip it". That is exactly what was starting to happen: the
+# honest answer on a non-CARR turn is "no entry", and answering "no" turn after
+# turn is how a gate becomes a rubber stamp. A ledger that cries wolf fails the
+# same way the silent one did — it just fails while looking busy.
+#
+# THE GATE IS SCOPE, NOT SENSITIVITY, and that distinction is the whole design.
+# Not one trigger regex is touched here. Every one of them was added to close a
+# real, named miss, and tightening the lexical side is how the zero-entry
+# disease comes back. Instead the exchange must be ABOUT THE WORK at all: the
+# ledger is Joe's development kit, for calibrating his judgment on the business
+# and the system, and a keyboard is neither.
+#
+# Either side of the exchange satisfies it, deliberately:
+#   - his words carry a record ref, a CARR noun, or a system noun; OR
+#   - the session's response for that turn touched the record layer, the repo,
+#     or the vault.
+# One or the other, never both, because a ruling can arrive in bare words while
+# the session is elbow-deep in carr-system ("lets always rehearse on a branch
+# first"), and it can also arrive with a client named while the session does
+# nothing but listen. Requiring both would re-open the misses.
+CARR_REF = re.compile(
+    r"\b(C-\d{2,4}|L-\d{2,4}|V-[A-Z]{2,4}-\d{2,4}|T-\d{2,4}|P-\d{3,4}|B-\d{2,4})\b")
+
+# Word-boundary anchored on purpose: an unanchored "comp" matches "comfortable",
+# which is a word that appears in the very keyboard turn this gate must silence.
+CARR_NOUN = re.compile(
+    r"\b(carr|deal|deals|client|clients|lead|leads|vendor|vendors|prospect|"
+    r"prospects|landlord|tenant|broker|listing|loi|lease|renewal|comp|comps|"
+    r"commission|practice|practices|doctor|doctors|dentist|patient|"
+    r"costar|salesforce|sunbiz|npi|nppes|crexi|loopnet|blotato|canva|"
+    r"dell|joe|partner|pipeline|outreach|territory|submarket|"
+    r"record|records|registry|roster|dossier|brief|ledger|doctrine|rule|rules|"
+    r"loop|loops|verb|verbs|schema|migration|migrations|hook|hooks|worktree|"
+    r"deploy|repo|vault|council|chair|skill|skills|agent|agents|"
+    r"decision|decisions|calibration|override|framing)\b", re.I)
+
+# What the session DID this turn. Paths and tool names only — these are strings
+# that cannot plausibly appear in a response about a keyboard.
+CARR_WORK = re.compile(
+    r"(carr-system|CARR AI|mcp__[0-9a-f]|log-decision|catch-me-up|record-finding|"
+    r"add-loop|update-loop|close-loop|standing-context|read-doctrine|"
+    r"search-doctrine|write-doctrine-section|new-lead|new-client|update-deal|"
+    r"deal-board|who-do-we-know|stamp-touch|log-activity)", re.I)
+
+
+def exchange_touches_carr(text, response_blob=""):
+    """True when this exchange is about the work at all. See the block above."""
+    if CARR_REF.search(text) or CARR_NOUN.search(text):
+        return True
+    return bool(response_blob and CARR_WORK.search(response_blob))
+
+
+# A past-tense report of an outcome is not a prediction. Rule bbffc139's own
+# trigger 2 is about "how something WILL behave, what WILL work, or how long
+# something WILL take", captured AT DECISION TIME "because a prediction logged
+# after the fact is worthless for calibration". "okay i think it worked" is the
+# after-the-fact end of exactly that sentence, so it is the one shape trigger 2
+# should never claim. Narrow by construction: it must be a SHORT turn that is
+# nothing but the outcome report, so "i think it worked, which means the whole
+# cutover plan is wrong" keeps firing on its second clause.
+PAST_OUTCOME = re.compile(
+    r"^\W*(ok(ay)?|yeah|yep|yes|nice|great|perfect|cool)?\W*"
+    r"(i think|i believe|looks like|seems like)?\W*"
+    r"(it|that|this)?\s*(worked|works|did it|is working|looks good|"
+    r"fixed it|is fixed|went through|is good)\W*$", re.I)
+
+
+def is_past_outcome_report(text):
+    return bool(PAST_OUTCOME.match(text.strip())) and len(text.split()) <= 12
+
+
 def log(msg):
     """Timestamped and self-identifying. Before 2026-08-03 no hook stamped its
     lines, so out/hook-guard.log could not answer "when did this fire" or even
@@ -311,7 +390,20 @@ def main():
             # embedded ruling inside a question (trailing "right?") still has
             # a declarative lead and was never suppressed here.
             hits = [h for h in hits if h not in SUPPRESSIBLE_ON_QUESTION]
+        if is_past_outcome_report(last_human):
+            hits = [h for h in hits if not h.startswith("2 ")]
         if not hits:
+            sys.exit(0)
+
+        # SCOPE GATE. Everything after the last human turn is what the session
+        # actually did in response; it is the second of the two signals that can
+        # put this exchange inside the work. Serialised whole rather than walked,
+        # because tool names and paths land in several shapes across record
+        # formats and a substring test reads all of them.
+        response_blob = json.dumps(recs[last_human_idx + 1:])
+        if not exchange_touches_carr(last_human, response_blob):
+            log(f"SILENT(out-of-scope) {hits} :: "
+                f"{' '.join(last_human.split())[:100]}")
             sys.exit(0)
 
         quote = " ".join(last_human.split())[:220]
