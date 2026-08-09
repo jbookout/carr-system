@@ -233,7 +233,35 @@ def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
         # truncates. Both limits are DB-tunable; the growth key falls back to its
         # default when absent, so no migration is owed.
         tol_grow = float(config(cur, "export.row_tolerance_growth_pct", 30))
-        if prev is not None and prev > 0 and not bootstrap:
+
+        # BYTE-BUDGETED RENDERS SHRINK IN ROWS BY DESIGN, so the row guard is the
+        # wrong instrument for them. decision-history.md carries the newest
+        # entries up to DECISION_BUDGET_BYTES and stops; a day of long entries
+        # pushes older ones out of the WINDOW without losing anything from the
+        # record. On 2026-08-09 that read as "SHRANK to 31 rows from 43 (27.9%)"
+        # and FAILED THE WHOLE NIGHTLY CHAIN — twice in one day, because seven
+        # decisions were logged. A guard that fails the chain on normal use is
+        # one people learn to --bootstrap past without reading, which is the
+        # exact failure the asymmetric-direction note above was written about.
+        #
+        # Guard on BYTES instead, which is what a window actually promises: it
+        # sits near its budget. A truncated or half-built render loses SIZE, and
+        # that still fails. Rows are free to move.
+        windowed = target_key in {"decision-history.md"}
+        if windowed and not bootstrap and final_path.exists():
+            prev_bytes = final_path.stat().st_size
+            new_bytes = tmp_path.stat().st_size
+            if prev_bytes > 0 and new_bytes < prev_bytes * 0.6:
+                record_run(cur, target_key, row_count, checksum, "validation_failed")
+                conn.commit()
+                tmp_path.unlink()
+                print(f"[{target_key}] VALIDATION FAILED: byte-budgeted render "
+                      f"SHRANK to {new_bytes} bytes from {prev_bytes} "
+                      f"(>40% of the window lost — rows are exempt here, size is not). "
+                      f"Previous good file untouched. If the change is real, rerun "
+                      f"with --bootstrap.", file=sys.stderr)
+                return False
+        elif prev is not None and prev > 0 and not bootstrap:
             delta = row_count - prev
             drift = abs(delta) / prev * 100
             limit = tol_grow if delta > 0 else tol

@@ -851,8 +851,8 @@ try:
     if os.path.exists(_fal):
         _p = subprocess.run([sys.executable, _fal, "--check"],
                             capture_output=True, text=True, timeout=60)
-        _line = (_p.stdout or "").strip().splitlines()
-        _line = _line[0].split(": ", 1)[-1] if _line else "(no output)"
+        _out_lines = (_p.stdout or "").strip().splitlines()
+        _line = _out_lines[0].split(": ", 1)[-1] if _out_lines else "(no output)"
         # The tool's own line reads "fetch-allowlist: OK — 30 hosts…" because it
         # is also run by hand. The row already carries the glyph, so strip the
         # repeated status token rather than printing "OK fetch allowlist OK —".

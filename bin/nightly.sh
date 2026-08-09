@@ -37,6 +37,31 @@ export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/l
 LOG="$REPO/out/nightly.log"
 mkdir -p "$REPO/out"
 
+# ---- ONE COMPLETED RUN PER DAY, whoever gets there first --------------------
+# Added 2026-08-09 so the chain can have TWO runners without running twice.
+#
+# WHY TWO. The Claude Code scheduled task fires at 02:05 only if the app is open
+# in a logged-in session. On 2026-08-09 the Mac booted at 02:16 — after the
+# window, sitting at the login screen — so the chain did not run until Joe
+# logged in at 06:59. `pmset wakepoweron 1:55AM` was already set and could not
+# help: powering a Mac on is not the same as having a session to run in.
+# com.carr.nightly-record-layer (launchd) now covers the ordinary case, where
+# the Mac is asleep with Joe still logged in, and does not care whether the app
+# is running. The scheduled task stays as the cold-boot fallback.
+#
+# THE GUARD IS ON COMPLETION, NOT ON STARTING, and that is the whole design: the
+# stamp is written at the END, so a run that FAILED leaves no stamp and the
+# fallback still runs. A skip is never silent — it logs its own line, because a
+# chain that quietly does nothing is indistinguishable from a broken one, which
+# is the defect this repo has paid for repeatedly (loops #128/#178/#182).
+STAMP="$REPO/out/.nightly-completed-$(date +%Y%m%d)"
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+if [ -f "$STAMP" ] && [ "$FORCE" -eq 0 ]; then
+  print -r -- "$(date -u +%Y-%m-%dT%H:%M:%SZ)  SKIP  chain already completed today ($(basename "$STAMP")); ./bin/nightly.sh --force overrides" >> "$LOG"
+  exit 0
+fi
+
 # Exporter credential. Same file the manual runs use; never inlined here.
 if [ -f "$HOME/.config/carr/db.env" ]; then
   set -a; . "$HOME/.config/carr/db.env"; set +a
@@ -224,6 +249,13 @@ if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="
 else
   say "===== nightly chain FINISHED WITH FAILURES — see above ====="
+fi
+
+# Stamp AFTER the steps, and only on a clean run. A failed night leaves no stamp
+# so the other runner gets its turn — see the guard at the top.
+if [ "$rc_total" -eq 0 ]; then
+  : > "$STAMP"
+  find "$REPO/out" -maxdepth 1 -name '.nightly-completed-*' -mtime +7 -delete 2>/dev/null
 fi
 
 # Keep the log from growing without bound: last 2000 lines is several months.
