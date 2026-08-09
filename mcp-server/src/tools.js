@@ -816,6 +816,52 @@ async function buildRecordBag(c, dealId, clientId) {
   return bag;
 }
 
+// ---------- rule id resolution (loop #261) ----------
+//
+// THE DEFECT THIS CLOSES. Every rule verb took `rule_id` and passed it straight
+// into SQL as a uuid. But the ONLY rule id a session can see is the 8-character
+// short form: that is what the gist index prints, what standing-context returns,
+// and what every rule cross-reference in the doctrine is written in. Passing the
+// form the system itself publishes made Postgres reject it as a malformed uuid,
+// which surfaced as a bare "internal error" — a validation failure wearing the
+// costume of an outage. Measured 2026-08-09 by hitting it live: `teach` with
+// supersedes:'179be4b8' died that way, and the fix cost a database tap to find
+// the full uuid by hand.
+//
+// WHY IT MATTERS MORE FOR DELL THAN FOR JOE. Joe has a db-tap habit and can
+// resolve a short id himself. Dell does not, so following a rule pointer — the
+// thing the whole gist index exists to enable — is not awkward for him, it is
+// impossible. A pointer nobody can follow is not a pointer.
+//
+// AMBIGUITY IS REPORTED, NEVER GUESSED. A prefix that matches two rules returns
+// the candidates rather than picking one, because silently activating or
+// retiring the wrong binding rule is worse than any error message.
+async function resolveRuleId(c, value, field = "rule_id") {
+  const raw = String(value || "").trim();
+  if (!raw) throw new ToolError({ error: "rule_id_required", field });
+
+  // A full uuid is used as-is: the fast path stays exactly what it was.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) return raw;
+
+  // Anything else must look like a hex prefix before it reaches SQL. This is the
+  // check whose absence turned a typo into "internal error".
+  if (!/^[0-9a-f]{4,}$/i.test(raw))
+    throw new ToolError({ error: "rule_id_malformed", field, got: raw,
+      hint: "a rule id is either the full 36-character uuid or the 8-character short form the gist index prints, e.g. '179be4b8'" });
+
+  const m = await c.query(
+    "select id, status, left(statement, 70) as gist from rule where id::text like $1 || '%' order by id",
+    [raw.toLowerCase()]);
+  if (!m.rows.length)
+    throw new ToolError({ error: "rule_not_found", field, got: raw,
+      hint: "no rule id begins with that prefix — check the gist index, and note a RETIRED rule still resolves" });
+  if (m.rows.length > 1)
+    throw new ToolError({ error: "ambiguous_rule_id", field, got: raw,
+      candidates: m.rows.map(r => ({ rule_id: r.id, status: r.status, gist: r.gist })),
+      hint: "that prefix matches more than one rule; pass more characters or the full uuid" });
+  return m.rows[0].id;
+}
+
 // ---------- the deferral gate (add-loop; migration 0081, Joe 2026-08-09) ----------
 //
 // Every class below is a state of the world OUTSIDE the session. That is the
@@ -2897,6 +2943,9 @@ export const TOOLS = {
       // A supersedes pointer at a rule that does not exist is a silent lie in the
       // audit trail, so it is checked rather than trusted.
       if (args.supersedes) {
+        // Short form accepted (loop #261): the gist index prints 8 characters and
+        // that is the only id a session can quote back.
+        args.supersedes = await resolveRuleId(c, args.supersedes, "supersedes");
         const prior = await c.query("select id, status from rule where id=$1", [args.supersedes]);
         if (!prior.rows.length) throw new ToolError({ error: "supersedes_not_found",
           rule_id: args.supersedes, hint: "pass the id of a real rule, or omit supersedes" });
@@ -2936,13 +2985,25 @@ export const TOOLS = {
     write: true, humanOnly: true,
     description: "Set a rule's status proposed -> active. The context compiler (compiled-rules exports) reads ACTIVE rules only; activation is a human decision by design.",
     inputSchema: { type: "object", properties: {
-      idempotency_key: { type: "string" }, rule_id: { type: "string" } },
+      idempotency_key: { type: "string" },
+      rule_id: { type: "string", description: "Accepts either the full 36-character uuid or the 8-character SHORT FORM the gist index and standing-context print (e.g. '179be4b8'); an ambiguous prefix returns the candidates rather than guessing." } },
       required: ["idempotency_key","rule_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "activate-rule", args, async () => {
+      args.rule_id = await resolveRuleId(c, args.rule_id);          // loop #261
       const r = await c.query(
         `update rule set status='active', activated_by=$1, activated_at=now()
          where id=$2 and status='proposed' returning id`, [actor.id, args.rule_id]);
-      if (!r.rows.length) throw new ToolError({ error: "not_proposed_or_missing" });
+      // The id resolved, so a miss here means the STATUS was wrong, not the id —
+      // say which, because "not_proposed_or_missing" sent readers hunting for a
+      // typo that was never there.
+      if (!r.rows.length) {
+        const cur = await c.query("select status from rule where id=$1", [args.rule_id]);
+        throw new ToolError({ error: "not_proposed", rule_id: args.rule_id,
+          current_status: cur.rows[0]?.status ?? null,
+          hint: cur.rows.length
+            ? "only a PROPOSED rule can be activated; this one is already past that point"
+            : "no rule carries that id" });
+      }
       await writeEvent(c, actor, "activate-rule", "rule", args.rule_id,
         { new: { status: "active" }, idempotency_key: args.idempotency_key });
       return { ok: true };
@@ -2953,7 +3014,8 @@ export const TOOLS = {
     write: true, humanOnly: true,
     description: "Withdraw a rule — proposed OR active — by setting status='retired'. THE PRESSURE VALVE THE RULE STORE WAS MISSING: until 2026-08-02 a rule could only go proposed -> active, so a rule taught in a wrong scope, a duplicate, or a draft the partner never wanted could never be taken back. 56 proposed rules had piled up by then, including two that stated Joe's own start date differently and no way to kill the wrong one. Retiring is NOT deleting: the row stays, the statement stays readable, and the compiled-rules exports simply stop carrying it (they read active only). A reason is REQUIRED — an unexplained retirement is indistinguishable from a mistake six months later, and the reason is the only thing that stops the same rule being re-taught. Pass superseded_by when a replacement already exists, so the pair reads as one decision rather than two unrelated events. Retiring an ACTIVE rule changes what binds every session, so it is human-gated like teach and activate-rule.",
     inputSchema: { type: "object", properties: {
-      idempotency_key: { type: "string" }, rule_id: { type: "string" },
+      idempotency_key: { type: "string" },
+      rule_id: { type: "string", description: "Accepts either the full 36-character uuid or the 8-character SHORT FORM the gist index and standing-context print (e.g. '179be4b8'); an ambiguous prefix returns the candidates rather than guessing." },
       reason: { type: "string", description: "REQUIRED. Why it is being withdrawn — wrong scope, duplicate, superseded, never wanted." },
       superseded_by: { type: "string", description: "rule_id of the replacement, when there is one" } },
       required: ["idempotency_key","rule_id","reason"] },
@@ -2962,12 +3024,14 @@ export const TOOLS = {
       if (!reason) throw new ToolError({ error: "reason_required",
         hint: "an unexplained retirement reads as a mistake later; say why in one line" });
 
+      args.rule_id = await resolveRuleId(c, args.rule_id);          // loop #261
       const cur = await c.query("select status, statement, personal_to from rule where id=$1", [args.rule_id]);
       if (!cur.rows.length) throw new ToolError({ error: "rule_not_found", rule_id: args.rule_id });
       if (cur.rows[0].status === "retired") throw new ToolError({ error: "already_retired",
         rule_id: args.rule_id, hint: "nothing was written; the rule is already withdrawn" });
 
       if (args.superseded_by) {
+        args.superseded_by = await resolveRuleId(c, args.superseded_by, "superseded_by"); // loop #261
         const rep = await c.query("select id from rule where id=$1", [args.superseded_by]);
         if (!rep.rows.length) throw new ToolError({ error: "superseded_by_not_found",
           rule_id: args.superseded_by, hint: "pass the id of a real replacement rule, or omit it" });
@@ -3018,6 +3082,7 @@ export const TOOLS = {
       if (!reason) throw new ToolError({ error: "reason_required",
         hint: "say in one line why the wording is wrong; a silent edit to a binding rule reads as drift later" });
 
+      args.rule_id = await resolveRuleId(c, args.rule_id);          // loop #261
       const cur = await c.query(
         "select status, statement, human_quote, scope, version from rule where id=$1", [args.rule_id]);
       if (!cur.rows.length) throw new ToolError({ error: "rule_not_found", rule_id: args.rule_id });
