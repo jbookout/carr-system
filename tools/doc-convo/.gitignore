@@ -35,3 +35,8 @@ assets/harvest-*.jsonl
 assets/harvest-*.txt
 assets/harvest-corpus/
 assets/.harvest-brain-session-id
+# The qwen eval env. Every sibling venv above has a rule; this one was named
+# only in a COMMENT on line 7, so 8,244 files / 663MB landed in git on
+# 2026-08-09 (commit 6871583) and made the branch unpushable — one blob,
+# mlx.metallib, is 155MB against GitHub's 100MB hard limit.
+.venv-qwen/
