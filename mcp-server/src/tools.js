@@ -94,10 +94,15 @@ async function mirrorDecision(client, actor, d) {
 
   const attached = [];
   for (const s of seen.values()) {
+    // A RETRACTED pointer does not count as already-attached. Re-attaching after a
+    // detach-decision writes a fresh live pointer and leaves the retracted one standing,
+    // so the timeline shows the whole history — attached, retracted, attached again —
+    // rather than quietly resurrecting a row somebody deliberately struck through.
     const dup = await client.query(
       `select 1 from event
         where subject_type = $1 and subject_id = $2 and field = 'decision'
-          and new_value->>'decision_id' = $3 limit 1`,
+          and new_value->>'decision_id' = $3
+          and coalesce((new_value->>'retracted')::boolean, false) = false limit 1`,
       [s.type, s.id, d.decision_id]);
     if (dup.rows.length) { attached.push({ ...s, already: true }); continue; }
 
@@ -3349,6 +3354,76 @@ export const TOOLS = {
 
       return { ok: true, decision_id: args.decision_id, amended: changed, quote_absent: !quote,
                about: attached.map(a => ({ type: a.type, id: a.id, ref: a.ref, already_attached: a.already })) };
+    }),
+  },
+
+  // ---------- taking a decision back off a record ----------
+  // Joe, 2026-08-09, on whether a wrong pointer should be deletable: "okay then keep it
+  // for the audit log but just make sure its clear".
+  //
+  // So this does NOT delete. The pointer row stays exactly where it is, because someone
+  // attaching a ruling to the wrong client is a thing that happened and the event log is
+  // where things that happened live. What changes is that the row now SAYS SO, in the one
+  // field a human reads: its timeline summary is struck through with RETRACTED and the
+  // reason, so the ruling can never be mistaken for a live one at a glance.
+  //
+  // Same mutate-in-place-plus-append-the-amendment shape update-decision already uses:
+  // the pointer is corrected where it is read, and a separate detach-decision event
+  // records who retracted it and why.
+  "detach-decision": {
+    write: true,
+    description: "Take a decision back off a record it was wrongly attached to. NOTHING IS DELETED: the pointer stays on the timeline as a permanent audit row, restated so a reader sees at a glance that it was retracted and why — a wrong attachment is a thing that happened, and hiding it would be the worse record. Use when a ruling was attached to a client, lead, vendor or party it is not actually about. NOT for a decision that has CHANGED (that is a new log-decision) and NOT for fixing the entry's own wording (that is update-decision). Re-attaching afterwards is allowed and writes a fresh live pointer beside the retracted one, so the timeline shows attached → retracted → attached rather than a row quietly coming back to life.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      decision_id: { type: "string", description: "the decision_id the pointer carries" },
+      from: { type: "string", description: "the record to take it off — C-127 / L-204 / V-CPA-006 / P-0948 / a deal name" },
+      reason: { type: "string", description: "why it does not belong there. REQUIRED — this is what the retracted row shows a future reader, and 'wrong' with no cause is how the same mistake gets made again." } },
+      required: ["idempotency_key","decision_id","from","reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "detach-decision", args, async () => {
+      if (!String(args.reason || "").trim())
+        throw new ToolError({ error: "missing_reason",
+          hint: "say why the ruling does not belong on this record; the retracted row carries it forward" });
+
+      const s = await resolveSubject(c, args.from);
+      const ptr = (await c.query(
+        `select id, new_value from event
+          where subject_type = $1 and subject_id = $2 and field = 'decision'
+            and new_value->>'decision_id' = $3
+          order by coalesce((new_value->>'retracted')::boolean, false), recorded_at desc
+          limit 1`,
+        [s.type, s.id, args.decision_id])).rows[0];
+      if (!ptr) throw new ToolError({ error: "not_attached", decision_id: args.decision_id, from: args.from,
+        hint: "this decision has no pointer on that record — check catch-me-up on it first" });
+
+      const nv = ptr.new_value || {};
+      if (nv.retracted)
+        return { ok: true, decision_id: args.decision_id, from: args.from,
+                 already_retracted: true, reason: nv.retracted_reason || null,
+                 hint: "this pointer was already retracted; nothing changed" };
+
+      // The summary is the ONLY field v_subject_timeline surfaces, so the retraction has
+      // to live there or a reader never sees it. The original text is kept verbatim
+      // behind the marker and preserved whole in summary_before_retraction.
+      const original = nv.summary || "";
+      const next = { ...nv,
+        retracted: true,
+        retracted_reason: args.reason,
+        retracted_by: actor.slug,
+        summary_before_retraction: original,
+        summary: `RETRACTED — not about this record (${args.reason}) — was: ${original}` };
+
+      await c.query("update event set new_value = $1 where id = $2",
+        [JSON.stringify(next), ptr.id]);
+
+      await writeEvent(c, actor, "detach-decision", s.type, s.id, {
+        field: "decision_retracted",
+        old: { summary: original, decision_id: args.decision_id },
+        new: { summary: `retracted a decision pointer: ${args.reason}`, decision_id: args.decision_id },
+        agent_rationale: args.reason, idempotency_key: args.idempotency_key });
+
+      return { ok: true, decision_id: args.decision_id,
+               from: { type: s.type, id: s.id, ref: args.from },
+               retracted: true, retained_as_audit_row: true, pointer_event_id: ptr.id };
     }),
   },
 
