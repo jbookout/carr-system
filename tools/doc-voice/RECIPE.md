@@ -55,6 +55,26 @@ dial: desk can run softer, truck/phone punchier — the chain runs at render tim
   THE LESSON UNDER IT: the two halves need BINDING, not JOINING. A space leaves
   a gap, full joining re-stresses the syllables; the hyphen binds them without
   a pause. "ElOeye" (camel, no separator) was also tested and lost.
+  IT IS HIGH-VARIANCE MID-SENTENCE, and that is a working constraint, not a
+  reason to re-pick it. Chosen on a 4-second fragment where the acronym was the
+  FINAL word and carried the phrase-ending fall; in a full sentence it sits
+  mid-utterance with no such support. Across three takes of one sentence Joe
+  rated take1 good, take2 "landed but wasn't as good ... still pretty good",
+  and an earlier roll bad outright — so roughly two in three land.
+  THE ENDING SCREEN CANNOT SEE THIS. terminal_slope() reads the last ~0.8s;
+  the acronym is in the middle. All three takes above passed the gate at
+  -38/-46/-74 Hz/s while differing audibly on the word. So: ROLL TAKES on any
+  line containing L.O.I. and let the ear pick — the gate protects the ending
+  and nothing else.
+  THE DURABLE FIX, UNTESTED: ElevenLabs pronunciation dictionaries would pin the
+  pronunciation deterministically instead of relying on the speller guessing
+  right two times in three. Two things block it and both are cheap to resolve
+  when someone picks this up: the render key is scoped Pronunciation
+  Dictionaries = No Access, and the docs pages read on 2026-08-10 did not state
+  whether PHONEME (IPA/CMU) rules work on eleven_multilingual_v2 or only ALIAS
+  rules — and an alias just re-spells it, which is the problem we already have.
+  Settle it by live test, per the taught rule that a capability claim becomes
+  doctrine only after a test from the surface itself.
 - "close" in the transaction sense → "closing". Joe, 2026-08-10: "this should be
   the version that is 'close the door' not 'we are close to finishing'". In
   "close by September thirtieth" the engine picks the adjective (nearby) rather
