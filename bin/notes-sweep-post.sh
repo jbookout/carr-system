@@ -14,8 +14,10 @@
 # moved into bin/notes-sweep.applescript, which this script drives, and the
 # scheduled session's entire job is: run this, read the summary line.
 #
-#   ./bin/notes-sweep-post.sh --status   what has been swept, what is queued
-#   ./bin/notes-sweep-post.sh            scan Notes, queue new, POST, report
+#   ./bin/notes-sweep-post.sh --status     what has been swept, what is queued
+#   ./bin/notes-sweep-post.sh --scheduled  launchd entry point: weekdays,
+#                                           8am–6pm local only
+#   ./bin/notes-sweep-post.sh              scan Notes, queue new, POST, report
 #
 # The token stays in ~/.config/carr/ingest.env and is read here, inside the
 # script — never composed into a command by a session, so it cannot reach a
@@ -55,6 +57,20 @@ mkdir -p "$PENDING" "$SENT" "$FAILED" "$REPO/out"
 [ -f "$AUDIO_ONLY" ] || : > "$AUDIO_ONLY"
 
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  notes-sweep  $*" >> "$LOG"; }
+
+# launchd starts once an hour, including while the Mac is awake outside the
+# working window. Put the business-hours rule HERE rather than in the plist:
+# the same script remains both the manual and automated path, and the log has
+# a single, unambiguous explanation for a quiet run. `date +%u` is ISO weekday
+# (1=Monday … 7=Sunday), so Saturday and Sunday never touch Apple Notes.
+if [ "${1:-}" = "--scheduled" ]; then
+  local_weekday="$(/bin/date '+%u')"
+  local_hour="$(/bin/date '+%H')"
+  if [ "$local_weekday" -gt 5 ] || [ "$local_hour" -lt 8 ] || [ "$local_hour" -gt 18 ]; then
+    say "SKIP outside weekday business window (weekday=$local_weekday hour=$local_hour local)"
+    exit 0
+  fi
+fi
 
 if [ "${1:-}" = "--status" ]; then
   print -r -- "folder-to-sweep: $FOLDER_NAME"
