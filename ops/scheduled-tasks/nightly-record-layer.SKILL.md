@@ -23,8 +23,17 @@ cd ~/carr-system && ./run.sh health
 
 Every row beginning "GEN " must read OK. Those seven rows are the generated files on a 26-hour cadence; a STALE one means the export step did not actually reach the vault regardless of what the exit code said.
 
+ALSO REPORT THE AMBER ROWS, not only the GEN ones (added 2026-08-10). Until today this routine ran the full health check and was told to read seven rows out of forty-odd, so every other finding was printed and discarded. That is how the mypy tripwire stayed red from 08-08 to 08-10 with nobody told, and how nine finished scheduled-task edits sat uncommitted for thirteen hours until a human happened to read a row carefully. A check nobody reports on is a check nobody is running.
+
+Report every `⚠︎` row EXCEPT the Deprecation register block, which is permanently amber by design (it lists shims kept alive on purpose and prompts rather than enforces). Reporting those nightly would train the reader to skip the whole section, which is the disease, not the cure. Two rows deserve naming in particular because they are new and they are about work in flight:
+
+  * `nightly chain result` — whether the LAST run exited clean, and how many runs in a row have been red. A first failure and a week-long failure need different responses and the row says which it is.
+  * `uncommitted work` — tracked files sitting outside git, with the oldest one's age. Past twelve hours it means work crossed a night unlanded; name the paths so whoever wrote them can land them by NAMING PATHS, never a sweep, because this machine runs several sessions against one working tree.
+
+Keep it to one line per amber row. If nothing is amber outside the deprecation register, say so in four words and stop.
+
 REPORT:
-- If the chain exited 0 and all seven GEN rows are OK: report success in one line with the row counts from the log. Nothing else needed.
+- If the chain exited 0 and all seven GEN rows are OK: report success in one line with the row counts from the log, then the amber rows per the section above. Nothing else needed.
 - If anything failed: quote the actual FAIL line from out/nightly.log and the STALE/BEHIND rows from the health check. Do not retry more than once. Do NOT modify the script, the exporters, or any generated file, and do NOT hand-edit a vault file to make a check pass — the seven generated files are never hand-edited, ever. If the Worker or Neon is unreachable, say so plainly and stop; the runbook is DNA/Deal Management/record-layer/runbook.md.
 
 (Historical note, resolved: the chain originally omitted the consumer rebuilds, leaving Lead Board / Deal Room reading BEHIND each morning. The ORDER 2 ADDENDUM added `./run.sh all` to the chain on 2026-07-31, so ALL 20 health rows — GEN files and boards alike — should now read OK after a good run. A BEHIND board row is therefore a real finding again, not an expected artifact.)
