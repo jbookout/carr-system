@@ -2936,10 +2936,12 @@ export const TOOLS = {
 
   "link-parties": {
     write: true,
-    description: "Record an intro-graph edge (a party_link row): who can introduce whom, who referred whom. Feeds who-do-we-know (find returns these) and the reciprocity ledger. kind comes from the party_link_kind table — today knows, intro, intro_received, can_introduce, works_with, referral — and the same edge recorded twice returns the first one, never a duplicate.",
+    description: "Record an intro-graph edge (a party_link row): who knows whom, who can introduce whom, who REFERRED whom. Feeds who-do-we-know (find returns these) and the reciprocity ledger. kind comes from the party_link_kind table — knows, works_with, can_introduce, intro_requested, introduced, referred (plus the legacy intro / intro_received) — and the same edge recorded twice returns the first one, never a duplicate. AN INTRODUCTION IS TERNARY: A introduced B to C, so pass via_party for the BROKER whenever one exists. from/to are the two people connected; via_party is who connected them. That is the whole basis of the reciprocity ledger — 'count where via = us' against 'count where via = them' — so an edge recorded with the broker left out is counted as nobody's referral and earns that vendor nothing.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, from_party: { type: "string" }, to_party: { type: "string" },
-      kind: { type: "string", description: "a slug from party_link_kind: knows, intro, intro_received, can_introduce, works_with, referral" },
+      kind: { type: "string", description: "a slug from party_link_kind: knows, works_with, can_introduce, intro_requested, introduced, referred" },
+      via_party: { type: "string", description: "WHO made the connection — the broker in the middle. A ref (V-/C-/L-/T-/P-) or a party uuid. Omit ONLY for a genuinely direct edge with no third party; for 'a vendor sent us this client' the vendor goes HERE, not on an end. Refused if it resolves to either end, because a broker cannot be one of the two people being connected." },
+      occurred_on: { type: "string", description: "YYYY-MM-DD — when it happened. An offer and a completed introduction are different events and the gap between them is the follow-up." },
       note: { type: "string" } }, required: ["idempotency_key","from_party","to_party","kind"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "link-parties", args, async () => {
       // [ORDER 18] The old hard-coded enum (can_introduce/intro_sent/intro_received/
@@ -2956,8 +2958,12 @@ export const TOOLS = {
       // failure class as loop #261 — a validation failure wearing the costume of
       // an outage.
       const ends = {};
-      for (const side of ["from_party", "to_party"]) {
+      for (const side of ["from_party", "to_party", "via_party"]) {
         const raw = String(args[side] || "").trim();
+        // via_party is optional — a direct edge has no broker. from/to are required
+        // by the schema, so an empty string there still falls through to the
+        // resolver and surfaces as a named subject_not_found rather than a null.
+        if (!raw && side === "via_party") { ends[side] = null; continue; }
         if (UUID_RE.test(raw)) { ends[side] = raw; continue; }
         const s = await resolveSubject(c, raw);          // throws subject_not_found, named
         let pid = s.type === "party" ? s.id : null;
@@ -2976,28 +2982,69 @@ export const TOOLS = {
       if (ends.from_party === ends.to_party)
         throw new ToolError({ error: "self_link", got: args.from_party,
           hint: "both ends resolve to the same person — an intro graph edge needs two parties" });
+      // A broker sits BETWEEN the two ends. If via resolves to one of them the edge
+      // is malformed, and it fails silently rather than loudly: the reciprocity
+      // ledger counts "via = them", so a vendor recorded as both the broker and an
+      // end double-counts on one side of the exact comparison this shape exists for.
+      if (ends.via_party && (ends.via_party === ends.from_party || ends.via_party === ends.to_party))
+        throw new ToolError({ error: "via_is_an_end", got: args.via_party,
+          hint: "via_party is who CONNECTED the two ends, so it cannot also be one of them — " +
+                "for 'this vendor sent us this client', from = us, to = the client, via = the vendor" });
+
+      let occurredOn = null;
+      if (args.occurred_on != null && String(args.occurred_on).trim() !== "") {
+        occurredOn = String(args.occurred_on).trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(occurredOn))
+          throw new ToolError({ error: "bad_occurred_on", got: args.occurred_on,
+            hint: "occurred_on is a calendar date, YYYY-MM-DD" });
+      }
 
       // Upsert against 0020's unique index. Before it, two taps wrote two identical
       // edges and nothing complained. `do nothing` returns no row on conflict, so
       // the existing edge is read back and returned — the caller gets the edge it
       // asked for either way, and learns which case it was.
       const ins = await c.query(
-        `insert into party_link (from_party, to_party, kind, note, source, created_by)
-         values ($1,$2,$3,$4,'stated',$5)
+        `insert into party_link (from_party, to_party, kind, note, via_party, occurred_on, source, created_by)
+         values ($1,$2,$3,$4,$5,$6,'stated',$7)
          on conflict (from_party, to_party, kind) do nothing
          returning id`,
-        [ends.from_party, ends.to_party, kind, args.note || null, actor.id]);
+        [ends.from_party, ends.to_party, kind, args.note || null,
+         ends.via_party, occurredOn, actor.id]);
       if (!ins.rows.length) {
         const cur = await c.query(
-          "select id from party_link where from_party=$1 and to_party=$2 and kind=$3",
+          "select id, via_party, occurred_on from party_link where from_party=$1 and to_party=$2 and kind=$3",
           [ends.from_party, ends.to_party, kind]);
+        const row = cur.rows[0];
+        // BACKFILL, not overwrite. Every edge written between 0051 and 2026-08-10
+        // carries a null broker, because this verb had no via_party to pass — the
+        // schema was ternary and the only writer was binary. Those edges are the
+        // reciprocity ledger's missing half, so a later call that DOES name the
+        // broker must be able to fill the hole. It fills nulls only: a stored
+        // broker or date is evidence already recorded and is never silently
+        // replaced by a second caller's guess.
+        const fills = {};
+        if (ends.via_party && !row.via_party) fills.via_party = ends.via_party;
+        if (occurredOn && !row.occurred_on) fills.occurred_on = occurredOn;
+        if (Object.keys(fills).length) {
+          await c.query(
+            `update party_link set via_party = coalesce(via_party,$2),
+                                   occurred_on = coalesce(occurred_on,$3)
+              where id = $1`,
+            [row.id, ends.via_party, occurredOn]);
+          await writeEvent(c, actor, "link-parties", "party", ends.from_party,
+            { old: { via_party: row.via_party, occurred_on: row.occurred_on },
+              new: { kind, to: ends.to_party, ...fills, backfilled: true },
+              idempotency_key: args.idempotency_key });
+          return { ok: true, link_id: row.id, existing: true, backfilled: Object.keys(fills) };
+        }
         // No event row: nothing changed in the record, and an event that says a
         // link was made when none was is the kind of fiction the ledger exists to
         // prevent. The tool_call row (envelope) still records that it was asked.
-        return { ok: true, link_id: cur.rows[0].id, existing: true };
+        return { ok: true, link_id: row.id, existing: true };
       }
       await writeEvent(c, actor, "link-parties", "party", ends.from_party,
-        { new: { kind, to: ends.to_party, from_input: args.from_party, to_input: args.to_party },
+        { new: { kind, to: ends.to_party, via: ends.via_party, occurred_on: occurredOn,
+                 from_input: args.from_party, to_input: args.to_party },
           idempotency_key: args.idempotency_key });
       return { ok: true, link_id: ins.rows[0].id, existing: false };
     }),
