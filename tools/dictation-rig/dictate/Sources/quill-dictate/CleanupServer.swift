@@ -92,12 +92,12 @@ final class CleanupServer {
         p.executableURL = URL(fileURLWithPath: CleanupServer.binaryPath)
         p.arguments = ["-m", config.cleanupModelPath, "--host", "127.0.0.1",
                        "--port", String(config.cleanupServerPort), "-c", "1024"]
-        // Discard stdout/stderr into a pipe rather than inheriting the app's —
-        // llama-server is chatty per-request and none of it belongs in the
-        // menu-bar app's own log.
-        let sink = Pipe()
-        p.standardOutput = sink
-        p.standardError = sink
+        // A long-lived server must never write to an unread Pipe: once the
+        // 16 KiB buffer fills, the child blocks forever while its listener
+        // still appears healthy. Lifecycle/request failures are logged by
+        // Quill, so server chatter goes to the actual null sink.
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
         p.terminationHandler = { [weak self] proc in
             guard let self else { return }
             Log.shared.line("WARN cleanup: llama-server exited (status \(proc.terminationStatus))")

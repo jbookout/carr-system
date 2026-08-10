@@ -85,6 +85,16 @@ a fresh checkout) still builds fine, just unsigned and back to re-granting per
 rebuild; recreate it in Keychain Access > Certificate Assistant > Create a
 Certificate, type Code Signing, named exactly "CARR Quill Dictate". Logs: `~/Library/Logs/quill-dictate.log`.
 
+Resident-server reliability (repaired 2026-08-10): preview whisper, final
+whisper, and correction cleanup send their chatty stdout/stderr to `/dev/null`,
+never to an unread pipe (the old 16 KiB pipes filled and deadlocked all three
+servers while their ports still looked live). Preview recycles its server after
+three consecutive request failures. If the final server stops answering, Quill
+stops it before the CLI fallback loads the same Metal model, then starts a clean
+resident server after that utterance.
+`quill-dictate doctor` probes HTTP responsiveness, not just open ports, so a
+blocked-but-listening server now reports as failed.
+
 ## Shape (Phase A: meeting mode)
 
 - `vendor/quill/` — digimata/quill, pinned submodule (commit 855869e, MIT, evaluated

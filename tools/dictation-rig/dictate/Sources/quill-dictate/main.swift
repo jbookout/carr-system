@@ -58,6 +58,8 @@ func runDoctor() -> Never {
         check("preview server binary", FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/whisper-server"),
               detail: "/opt/homebrew/bin/whisper-server")
         check("preview model", FileManager.default.fileExists(atPath: config.previewModelPath), detail: config.previewModelPath)
+        check("preview server responsive", WhisperServer.portResponds(port: config.previewServerPort),
+              detail: "http://127.0.0.1:\(config.previewServerPort)")
     }
     // Same additive-not-a-failure-on-its-own shape as the preview row above:
     // final_server is just reported, but when it's not "off", a missing
@@ -71,6 +73,8 @@ func runDoctor() -> Never {
         check("final server binary", FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/whisper-server"),
               detail: "/opt/homebrew/bin/whisper-server")
         check("final server model", FileManager.default.fileExists(atPath: config.modelPath), detail: config.modelPath)
+        check("final server responsive", WhisperServer.portResponds(port: config.finalServerPort),
+              detail: "http://127.0.0.1:\(config.finalServerPort)")
     }
     // Same additive-not-a-failure-on-its-own shape as the preview row above:
     // correction_llm is just reported, but when it's not "off", a missing
@@ -106,6 +110,8 @@ func runDoctor() -> Never {
         check("cleanup server binary", FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/llama-server"),
               detail: "/opt/homebrew/bin/llama-server")
         check("cleanup model", FileManager.default.fileExists(atPath: config.cleanupModelPath), detail: config.cleanupModelPath)
+        check("cleanup server responsive", WhisperServer.portResponds(port: config.cleanupServerPort),
+              detail: "http://127.0.0.1:\(config.cleanupServerPort)")
     }
     exit(failures == 0 ? 0 : 1)
 }

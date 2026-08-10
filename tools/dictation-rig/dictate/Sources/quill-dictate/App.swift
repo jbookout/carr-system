@@ -186,7 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         }
 
         gestures.busy = true
-        let transcriber = Transcriber(config: config)
+        let transcriber = Transcriber(config: config, finalServer: finalServer)
         let inserter = Inserter(config: config)
         // FIX 3 (2026-08-08 live failure round): snapshot BEFORE dispatching
         // to workQueue — this is "how many real keystrokes had landed as of

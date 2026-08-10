@@ -51,6 +51,9 @@ final class WhisperServer {
     private var process: Process?
     private var hasRestartedOnCrash = false
     private var loggedUnreachable = false
+    private var consecutivePreviewFailures = 0
+    private var restartInProgress = false
+    private var generation = 0
     private let stateQueue: DispatchQueue
 
     /// Not `private` — Transcriber.swift's tryServerTranscribe checks this
@@ -137,12 +140,14 @@ final class WhisperServer {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: WhisperServer.binaryPath)
         p.arguments = ["-m", modelPath, "--host", "127.0.0.1", "--port", String(port)]
-        // Discard stdout/stderr into a pipe rather than inheriting the app's —
-        // whisper-server is chatty per-request and none of it belongs in the
-        // menu-bar app's own log.
-        let sink = Pipe()
-        p.standardOutput = sink
-        p.standardError = sink
+        // These are long-lived, chatty servers. An unread Pipe is NOT a sink:
+        // macOS fills its 16 KiB buffer, then blocks the child on its next
+        // write while the listener misleadingly stays alive. That exact
+        // failure wedged all three resident Quill servers on 2026-08-10.
+        // /dev/null is the real discard target; Quill logs lifecycle and
+        // request failures itself below.
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
         p.terminationHandler = { [weak self] proc in
             guard let self else { return }
             Log.shared.line("WARN \(self.role.tag): whisper-server exited (status \(proc.terminationStatus))")
@@ -152,7 +157,10 @@ final class WhisperServer {
 
         do {
             try p.run()
-            stateQueue.sync { self.process = p }
+            stateQueue.sync {
+                self.process = p
+                self.generation += 1
+            }
             Log.shared.line("INFO \(role.tag): whisper-server spawned pid=\(p.processIdentifier) port=\(port) model=\(modelPath)")
         } catch {
             Log.shared.line("WARN \(role.tag): failed to spawn whisper-server: \(error)")
@@ -191,6 +199,7 @@ final class WhisperServer {
     /// spam the log every preview tick.
     func transcribe(wavData: Data, completion: @escaping (String?) -> Void) {
         guard isSpawned else { completion(nil); return }
+        let requestGeneration = stateQueue.sync { generation }
 
         let url = URL(string: "http://127.0.0.1:\(port)/inference")!
         var request = URLRequest(url: url)
@@ -204,27 +213,125 @@ final class WhisperServer {
         let task = session.dataTask(with: request) { [weak self] data, _, error in
             guard let self else { completion(nil); return }
             if let error {
-                self.logUnreachableOnce("request failed: \(error)")
+                self.notePreviewFailure("request failed: \(error)", generation: requestGeneration)
                 completion(nil)
                 return
             }
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let text = json["text"] as? String else {
-                self.logUnreachableOnce("unparseable response")
+                self.notePreviewFailure("unparseable response", generation: requestGeneration)
                 completion(nil)
                 return
             }
+            self.notePreviewSuccess(generation: requestGeneration)
             completion(text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         task.resume()
     }
 
-    private func logUnreachableOnce(_ detail: String) {
+    /// A single 2s preview miss can be ordinary page-in pressure, especially
+    /// on the first utterance after sleep. Three consecutive misses mean the
+    /// resident process is not serving useful work; recycle it even though
+    /// it may still own a listening socket.
+    private func notePreviewFailure(_ detail: String, generation requestGeneration: Int) {
+        var shouldLog = false
+        var shouldRestart = false
+        var failureCount = 0
         stateQueue.sync {
-            guard !loggedUnreachable else { return }
-            loggedUnreachable = true
-            Log.shared.line("WARN \(role.tag): server unreachable (\(detail)) — \(role.tag) will stay blank until it recovers")
+            guard requestGeneration == generation else { return }
+            consecutivePreviewFailures += 1
+            failureCount = consecutivePreviewFailures
+            if !loggedUnreachable {
+                loggedUnreachable = true
+                shouldLog = true
+            }
+            if consecutivePreviewFailures >= 3, !restartInProgress {
+                restartInProgress = true
+                shouldRestart = true
+            }
+        }
+        if shouldLog {
+            Log.shared.line("WARN \(role.tag): server unreachable (\(detail)) — retrying; health restart after 3 consecutive failures")
+        }
+        if shouldRestart {
+            restartUnresponsive(reason: "\(failureCount) consecutive preview failures")
+        }
+    }
+
+    private func notePreviewSuccess(generation requestGeneration: Int) {
+        var recovered = false
+        stateQueue.sync {
+            guard requestGeneration == generation else { return }
+            recovered = consecutivePreviewFailures > 0 || loggedUnreachable
+            consecutivePreviewFailures = 0
+            loggedUnreachable = false
+        }
+        if recovered {
+            Log.shared.line("INFO \(role.tag): server responding again")
+        }
+    }
+
+    /// Stop an unresponsive FINAL listener before running whisper-cli, then
+    /// start a clean resident server after the fallback finishes. Keeping the
+    /// wedged large model alive while the CLI loads the same model can exhaust
+    /// Metal resources and made the fallback itself crash with signal 11 in
+    /// the 2026-08-10 failure.
+    func withFinalServerStoppedForRecovery<T>(
+        reason: String,
+        fallback: () throws -> T
+    ) rethrows -> T {
+        switch role {
+        case .preview: return try fallback()
+        case .final: break
+        }
+
+        let recovery: (started: Bool, process: Process?) = stateQueue.sync {
+            guard !restartInProgress else { return (false, nil) }
+            restartInProgress = true
+            let old = process
+            process = nil
+            return (true, old)
+        }
+        guard recovery.started else { return try fallback() }
+
+        if let oldProcess = recovery.process {
+            oldProcess.terminationHandler = nil
+            if oldProcess.isRunning { oldProcess.terminate() }
+        }
+        Log.shared.line("WARN final: recycling unresponsive resident server (\(reason)); cli fallback owns this utterance")
+
+        defer {
+            // spawn() first reclaims any listener that ignored terminate(),
+            // so the new process can never lose a race for the fixed port.
+            spawn()
+            stateQueue.sync {
+                restartInProgress = false
+                loggedUnreachable = false
+            }
+        }
+        return try fallback()
+    }
+
+    /// Preview has no alternate engine to own the utterance, so recycle the
+    /// server immediately after the threshold instead of waiting for another
+    /// capture. Called from URLSession's callback queue, never the event tap.
+    private func restartUnresponsive(reason: String) {
+        let oldProcess: Process? = stateQueue.sync {
+            let old = process
+            process = nil
+            return old
+        }
+        if let oldProcess {
+            oldProcess.terminationHandler = nil
+            if oldProcess.isRunning { oldProcess.terminate() }
+        }
+        Log.shared.line("WARN \(role.tag): recycling unresponsive resident server (\(reason))")
+        spawn()
+        stateQueue.sync {
+            consecutivePreviewFailures = 0
+            loggedUnreachable = false
+            restartInProgress = false
         }
     }
 
@@ -294,6 +401,13 @@ final class WhisperServer {
 
         let remaining = max(5.0, deadline.timeIntervalSinceNow)
         return performInferenceRequest(port: port, wavData: wavData, prompt: prompt, timeoutSeconds: remaining)
+    }
+
+    /// Headless diagnostics use the same HTTP-response test as the final
+    /// path. A listening socket alone is insufficient: the unread-pipe bug
+    /// left ports open while their server threads were permanently blocked.
+    static func portResponds(port: Int, timeoutSeconds: TimeInterval = 2.0) -> Bool {
+        waitForPort(port: port, deadline: Date().addingTimeInterval(timeoutSeconds))
     }
 
     /// Retries a cheap connection probe against the server's root until it

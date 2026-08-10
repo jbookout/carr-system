@@ -27,8 +27,14 @@ import Foundation
 
 struct Transcriber {
     let config: Config
+    let finalServer: WhisperServer?
 
     struct Failure: Error { let message: String }
+
+    init(config: Config, finalServer: WhisperServer? = nil) {
+        self.config = config
+        self.finalServer = finalServer
+    }
 
     /// Blocking; run on a background queue. Returns cleaned text ("" when
     /// whisper heard nothing worth keeping).
@@ -38,6 +44,13 @@ struct Transcriber {
                 return Transcriber.clean(serverText)
             }
             Log.shared.line("FINAL server unavailable, cli fallback")
+            if let finalServer {
+                return try finalServer.withFinalServerStoppedForRecovery(
+                    reason: "inference request failed"
+                ) {
+                    try transcribeViaCli(wav: wav)
+                }
+            }
         }
         return try transcribeViaCli(wav: wav)
     }
@@ -86,13 +99,22 @@ struct Transcriber {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.whisperCli)
         process.arguments = args
-        let sink = Pipe()
-        process.standardOutput = sink
-        process.standardError = sink
+        // Capture diagnostics in a real file. Waiting for a chatty process to
+        // exit before reading an attached Pipe can deadlock on the same 16 KiB
+        // back-pressure that wedged the resident servers.
+        let diagnosticURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quill-whisper-cli-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: diagnosticURL.path, contents: nil)
+        guard let diagnosticHandle = FileHandle(forWritingAtPath: diagnosticURL.path) else {
+            throw Failure(message: "could not create whisper-cli diagnostic log")
+        }
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        process.standardOutput = diagnosticHandle
+        process.standardError = diagnosticHandle
         try process.run()
         process.waitUntilExit()
-        let noise = String(data: sink.fileHandleForReading.readDataToEndOfFile(),
-                           encoding: .utf8) ?? ""
+        try? diagnosticHandle.close()
+        let noise = (try? String(contentsOf: diagnosticURL, encoding: .utf8)) ?? ""
         guard process.terminationStatus == 0 else {
             throw Failure(message: "whisper-cli rc=\(process.terminationStatus): \(noise.suffix(300))")
         }
