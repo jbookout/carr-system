@@ -111,4 +111,5 @@ test("parking separates Salesforce record existence from active work", async () 
   assert.match(app, /Salesforce link, phase, history, and participants stay intact/);
   assert.match(tools, /"operating_state"/);
   assert.match(tools, /dealroom:apply-operating-state/);
+  assert.match(tools, /parked_by=case when \$2='parked' then \$5::uuid else null end/);
 });

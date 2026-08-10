@@ -1044,8 +1044,8 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
       `update deal
           set operating_state=$2, parking_reason=$3, parking_note=$4,
               parked_at=case when $2='parked' then now() else null end,
-              parked_by=case when $2='parked' then $5 else null end,
-              updated_by=$5
+              parked_by=case when $2='parked' then $5::uuid else null end,
+              updated_by=$5::uuid
         where id=$1 /* dealroom:apply-operating-state */`,
       [dealId, value.state, value.state === "parked" ? value.reason : null,
        value.state === "parked" ? value.note : null, actor.id],
