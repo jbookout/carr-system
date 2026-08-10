@@ -59,6 +59,19 @@ command -v $PY  >/dev/null && good "python ($PY)" || bad "python3 missing"
 [ -f "$HOME/.claude/settings.json" ] && good "Claude settings present" \
   || note "no ~/.claude/settings.json yet — install will create the hooks block"
 
+# THE CLONE PATH IS LOAD-BEARING, which was not obvious until the 2026-08-10
+# fresh-machine audit measured it. hooks/git-writer-gate.py:59 resolves
+# ~/carr-system to decide whether the tree is dirty, and gate_paths' protected
+# patterns match on /carr-system/. A clone at ~/dev/carr-system installs, passes
+# its own selftests, and then guards nothing — the green-but-guarding-zero-paths
+# failure this audit found twice. Refuse it here rather than let it pass.
+if [ "$REPO" != "$HOME/carr-system" ]; then
+  bad "repo is at $REPO but the gates resolve ~/carr-system — move the clone:"
+  say "          mv \"$REPO\" \"$HOME/carr-system\" && \"$HOME/carr-system/bin/migrate-dell.sh\" --apply"
+else
+  good "clone is at ~/carr-system (the path the gates resolve)"
+fi
+
 # A dirty tree can silently lose the other writer's work when we pull — the
 # 2026-08-09 incident, and the reason for the two-writer rule on the git tree.
 # But refusing on ANY dirty file is too blunt: this machine had 9 unrelated

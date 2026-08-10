@@ -86,8 +86,25 @@ import os
 import re
 import sys
 
-VAULT = os.path.expanduser(
-    "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+def _vault():
+    """This machine's vault. The literal below is one Drive ACCOUNT's mount, so
+    on a second machine it resolved to a path that does not exist and every
+    vault protection in this gate silently matched nothing (2026-08-10 audit).
+    Keep it as the first candidate — the primary machine resolves identically,
+    so nothing changes there — and fall back to whatever vault is really here."""
+    pinned = os.path.expanduser(
+        "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+    if os.path.isdir(pinned):
+        return pinned
+    try:
+        from gate_paths import vault_roots
+        roots = vault_roots()
+    except Exception:
+        roots = ()
+    return roots[0].rstrip("/") if roots else pinned
+
+
+VAULT = _vault()
 LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 
 # --- A. generated renders ----------------------------------------------------

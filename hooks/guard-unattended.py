@@ -188,10 +188,23 @@ KNOWN_HOSTS = (
 # It does not chase adversarial obfuscation; the gate degrades open on its own
 # errors like the rest of this file.
 
-_VAULT_SPELLINGS = (
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/",
-    "/Users/booko/My Drive/CARR AI/",
-)
+def _vault_spellings():
+    """The primary machine's two literal spellings, PLUS whatever vault actually
+    exists here. Additive on purpose (2026-08-10 audit): the hardcodedは
+    pair is kept verbatim so this machine's matching cannot regress, while a second
+    machine stops running a vault guard that matches no path it owns."""
+    fixed = (
+        "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/",
+        "/Users/booko/My Drive/CARR AI/",
+    )
+    try:
+        from gate_paths import vault_roots
+        return tuple(dict.fromkeys(fixed + vault_roots()))
+    except Exception:
+        return fixed          # degrade open, like the rest of this file
+
+
+_VAULT_SPELLINGS = _vault_spellings()
 
 _render_paths_cache = None
 

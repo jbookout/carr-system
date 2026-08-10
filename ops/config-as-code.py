@@ -43,6 +43,7 @@ the config we think we have", which is the question nobody could answer tonight.
 
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -82,9 +83,92 @@ HOOKS_REPO = os.path.join(REPO, "ops", "config", "hooks.json")
 TOKENS = [(tok, real) for tok, real in
           (("{{VAULT}}", VAULT), ("{{REPO}}", REPO), ("{{HOME}}", HOME)) if real]
 
-# Joe-only by nature; Dell has no video pipeline. Tracked so it is recoverable,
-# never installed on another machine.
-JOE_ONLY = {"com.carr.videopipeline.plist"}
+# RUNS ON EXACTLY ONE MACHINE. Not a statement about Joe; a statement about what
+# the job writes. Each of these mutates state that is SHARED between the two
+# machines, so a second copy is either duplicated work or a two-writer conflict.
+# Widened 2026-08-10 during the Dell migration audit, when the set held only the
+# video pipeline and the other five would have been installed on his Mac:
+#
+#   videopipeline       — Joe's Movies folder; Dell has no video pipeline.
+#   nightly-record-layer— pushes the corpus to the shared vault and mirrors
+#                         doctrine to a path hardcoded to Joe's Google Drive
+#                         (bin/nightly.sh:154), which cannot resolve on another
+#                         machine. The cadence engine inside it IS idempotent,
+#                         so the risk is the vault writes, not double-spawning.
+#   rules-refresh       — writes the shared compiled-rules renders, and the cost
+#                         ruling in its own plist is decisive: Neon free is
+#                         100 CU-h/month at ~5 min per wake, so a second Mac
+#                         waking it hourly doubles the burn and can SUSPEND the
+#                         database for the rest of the month.
+#   local-briefs        — writes today.md into Joe's vault path; on another
+#                         machine it correctly SKIPs, so it is pure noise.
+#   partner-ping        — writes the shared record. One pinger is the point.
+#
+# What the second machine still needs from the nightly is the record-derived
+# fetch allowlist, which is per-machine and gitignored. That is why
+# com.carr.fetch-allowlist.plist exists as its own job rather than being
+# inherited from the nightly chain.
+PRIMARY_ONLY = {
+    "com.carr.videopipeline.plist",
+    "com.carr.nightly-record-layer.plist",
+    "com.carr.rules-refresh.plist",
+    "com.carr.local-briefs.plist",
+    "com.carr.partner-ping.plist",
+}
+
+
+# The mirror image: jobs only the SECOND machine needs, because the primary
+# already gets the same effect from a chain the second machine must not run.
+SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
+
+
+def _owner_email():
+    """The repo owner's git identity, read from the ONE place it is written.
+
+    ops/githooks/pre-push has decided since 2026-08-03 who may push to main, and
+    duplicating its constant here would create the two-copies problem this file
+    exists to prevent. Parsed rather than re-declared; the shell hook is left
+    untouched so the push path cannot regress. Missing or unreadable returns ""
+    which makes IS_PRIMARY false, and false is the safe direction: a machine
+    that cannot prove it is primary installs only the per-machine jobs.
+    """
+    try:
+        with open(os.path.join(REPO, "ops", "githooks", "pre-push"),
+                  encoding="utf-8") as fh:
+            m = re.search(r'^OWNER_EMAIL="([^"]+)"', fh.read(), re.M)
+        return m.group(1) if m else ""
+    except OSError:
+        return ""
+
+
+def _is_primary():
+    owner = _owner_email()
+    if not owner:
+        return False
+    me = subprocess.run(["git", "-C", REPO, "config", "user.email"],
+                        capture_output=True, text=True).stdout.strip()
+    return me == owner
+
+
+IS_PRIMARY = _is_primary()
+
+
+def missing_targets(body):
+    """Absolute paths a plist needs that do not exist on THIS machine.
+
+    A launchd job whose program was never built loads fine and then fails on
+    every fire, throttling and filling the log — the failure mode the dictation
+    and doc-engine jobs would have hit on a fresh clone, where the Swift binary
+    and the doc-convo tree are not built. Skipping is the safe direction: the
+    job installs later, on the next run, once the thing it runs exists.
+    """
+    try:
+        d = plistlib.loads(body.encode())
+    except Exception:
+        return []          # unparseable is the drift check's problem, not ours
+    args = d.get("ProgramArguments") or ([d["Program"]] if d.get("Program") else [])
+    return [a for a in args
+            if isinstance(a, str) and a.startswith("/") and not os.path.exists(a)]
 
 
 def portable(text):
@@ -336,12 +420,19 @@ def cmd_install(apply):
         cfg["hooks"] = planned
 
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
-        if f in JOE_ONLY:
-            print(f"  SKIP  {f} (Joe-only; never installed elsewhere)")
+        if f in PRIMARY_ONLY and not IS_PRIMARY:
+            print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
+            continue
+        if f in SECONDARY_ONLY and IS_PRIMARY:
+            print(f"  SKIP  {f} (the nightly chain already does this here)")
             continue
         dest = os.path.join(LAUNCHD_SRC, f)
         body = concrete(read(os.path.join(LAUNCHD_REPO, f)))
         if read(dest) == body:
+            continue
+        gone = missing_targets(body)
+        if gone:
+            print(f"  SKIP  {f} (not built on this machine: {gone[0]})")
             continue
         print(f"  {'WRITE' if apply else 'would write'}  {dest}")
         if apply:

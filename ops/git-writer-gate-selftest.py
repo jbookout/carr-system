@@ -26,7 +26,10 @@ import os
 import subprocess
 import sys
 
-REPO = os.path.expanduser("~/carr-system")
+# The repo this file lives in, not a guess at where it is checked out. The old
+# expanduser("~/carr-system") assumed one clone location on one machine and
+# reported "hook not found" anywhere else (2026-08-10 fresh-machine audit).
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "git-writer-gate.py")
 
 _H = "-" * 2 + "hard"                     # --hard  (was mis-assembled as -hard,

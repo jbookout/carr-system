@@ -43,7 +43,9 @@ import os
 import subprocess
 import sys
 
-REPO = os.path.expanduser("~/carr-system")
+# See the note in git-writer-gate-selftest.py: derive the repo from this file's
+# own location so the selftest works at any clone path, not just ~/carr-system.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOME = os.path.expanduser("~")
 EDIT_HOOK = os.path.join(REPO, "hooks", "gate-edit-gate.py")
 BASH_HOOK = os.path.join(REPO, "hooks", "guard-unattended.py")
