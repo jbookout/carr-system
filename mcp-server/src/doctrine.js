@@ -795,6 +795,27 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
              from loop_item
             where kind = 'action_required' and status = 'open'
             order by render_seq`).catch(() => ({ rows: [] }))).rows;
+        // PROPOSED RULES, surfaced here because nowhere else surfaces them.
+        // Loop #149, Joe 2026-08-03: "I had no idea they were even proposed
+        // which is a problem." teach() writes a rule as PROPOSED and activation
+        // is a human decision by design — a good design with one hole: the human
+        // who has to decide is never told there is anything to decide. The
+        // compiled-rules exports read ACTIVE only, so a proposed rule is
+        // invisible on every surface a partner reads, and sits there until
+        // someone happens to look.
+        //
+        // It belongs in THIS payload rather than a health row because this verb
+        // is the opening act of every session, so the question reaches whoever
+        // is working on the day it is asked. Kept to id, gist and who taught it:
+        // the binding text is one standing-context call away with rule_ids, and
+        // a wall of unapproved prose at session start would be skimmed like
+        // every other wall.
+        const proposedRules = (await c.query(
+          `select id, statement, taught_by, personal_to, created_at
+             from rule
+            where status = 'proposed'
+              and (personal_to is null or personal_to = $1)
+            order by created_at`, [who]).catch(() => ({ rows: [] }))).rows;
         const gen = (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
         // PAYLOAD NOTE (2026-08-08, Joe's yes): detail=full returned ~183KB at
         // 147 rules and overflowed the tool-result limit on the very first live
@@ -844,6 +865,19 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             "One line per rule. NEVER quote a gist as the rule — call standing-context again with rule_ids:['<id>',…] for the binding text before acting on one." } : {}),
           shared_rules: shared.map(r => shape(r, true)),
           personal_rules: personal.map(r => shape(r, false)),
+          ...(proposedRules.length ? { awaiting_activation: {
+            count: proposedRules.length,
+            say: `${proposedRules.length} rule(s) are written and waiting on a yes — they bind nobody until activated`,
+            rules: proposedRules.map(r => ({
+              id: String(r.id).slice(0, 8),
+              gist: gist(r.statement),
+              scope: r.personal_to ? `${r.personal_to}-personal` : "shared",
+              taught_by: r.taught_by,
+              proposed_on: r.created_at ? String(r.created_at).slice(0, 10) : null })),
+            hint: "read the full text with rule_ids, then activate-rule or retire-rule. "
+                + "Surfacing these is loop #149: a rule nobody knows is proposed is a "
+                + "rule nobody can approve.",
+          } } : {}),
           action_required: actionReq,
           doctrine: { generation: Number(gen.generation),
             hint: "doctrine-index for the catalog; search-doctrine / read-doctrine to read — there are no files" } };
