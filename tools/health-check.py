@@ -501,6 +501,74 @@ try:
 except OSError as _exc:
     print(f"  -- {'nightly chain result':<22} cannot read {_nightly_log} ({_exc})")
 
+# --- work sitting outside git (added 2026-08-10) -----------------------------
+# Joe asked whether a routine should force every session to commit on a timer.
+# The answer was no: `git commit -a` on a schedule is the operation
+# git-writer-gate.py was built to block on 2026-08-09, after a sweep took another
+# session's in-flight files and cost an hour of rebuilding. A timer cannot tell
+# whose file is whose, cannot tell finished code from a half-applied edit, and
+# replaces the commit message — which on that very incident was the most
+# valuable part of the change — with "auto-commit".
+#
+# REPORT, NEVER ENFORCE, which is the house posture for exactly this shape
+# (v_drip_conflict, v_loop_bell_cap and the deprecation register all detect and
+# prompt rather than act). The real fix for concurrent writers is worktree
+# isolation, already accepted in loop #195; this row is the cheap half that makes
+# loose work visible in the meantime.
+#
+# THE CLOCK RUNS ON TRACKED-MODIFIED FILES ONLY, and that is the whole design.
+# Untracked files here are mostly generated assets from the voice lane; putting
+# them on the clock would leave this row permanently amber, and a chronically
+# amber row detects nothing — the precise failure that let the mypy tripwire stay
+# red for three days and hid a five-gate wipe behind an already-red config row.
+# Untracked is reported as a plain figure with no glyph, so it informs without
+# crying wolf.
+#
+# 12 HOURS, because it crosses a night. A session running four or six hours is
+# ordinary here and must not nag; work still loose the next morning is the thing
+# actually worth seeing.
+_STALE_H = 12
+try:
+    _gs = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=20)
+    if _gs.returncode != 0:
+        print(f"  -- {'uncommitted work':<22} git status failed — cannot tell what is loose")
+    else:
+        _tracked: list[tuple[float, str]] = []
+        _untracked = 0
+        for _row in _gs.stdout.splitlines():
+            if not _row.strip():
+                continue
+            _gpath = _row[3:].strip().strip('"')
+            if _row.startswith("??"):
+                _untracked += 1
+                continue
+            _full = os.path.join(REPO_ROOT, _gpath.split(" -> ")[-1])
+            try:
+                _tracked.append((os.path.getmtime(_full), _gpath))
+            except OSError:
+                continue                  # deleted or renamed away; not loose work
+        _extra = f" · {_untracked} untracked" if _untracked else ""
+        if not _tracked:
+            print(f"  OK {'uncommitted work':<22} nothing tracked is loose{_extra}")
+        else:
+            _tracked.sort()
+            _oldest_h = (time.time() - _tracked[0][0]) / 3600.0
+            _names = ", ".join(p for _, p in _tracked[:3])
+            _more = f" (+{len(_tracked) - 3} more)" if len(_tracked) > 3 else ""
+            if _oldest_h >= _STALE_H:
+                print(f"  ⚠︎ {'uncommitted work':<22} {len(_tracked)} tracked file(s) loose, "
+                      f"oldest {_oldest_h:.0f}h — {_names}{_more}{_extra}  · past a night "
+                      f"outside git. Commit by NAMING PATHS (never -a, which sweeps another "
+                      f"writer), or say why it is deliberately held")
+                rc = 1
+            else:
+                print(f"  -- {'uncommitted work':<22} {len(_tracked)} tracked file(s) loose, "
+                      f"oldest {_oldest_h:.1f}h — {_names}{_more}{_extra}  · under {_STALE_H}h, "
+                      f"so this reads as a live session rather than abandoned work")
+except Exception as _exc:
+    print(f"  -- {'uncommitted work':<22} not checked ({_exc})")
+
 # The scheduler's own store is not readable from a script (see the scheduler register at
 # the top of this file), so this run cannot judge the other 14 tasks. It says so instead
 # of staying quiet, because silence here reads as "all clear" for tasks nobody checked.

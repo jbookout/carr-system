@@ -140,6 +140,50 @@ def nightly_verdict():
     return ""
 
 
+def loose_work():
+    """One line when tracked work has sat outside git past a night, else nothing.
+
+    Added 2026-08-10, when Joe asked whether a routine should force every session
+    to commit every two hours. It should not: a scheduled `git commit -a` is the
+    exact operation git-writer-gate.py was built to block on 2026-08-09, after a
+    sweep took another session's in-flight files and cost an hour of rebuilding.
+    A timer cannot tell whose file is whose, cannot tell finished work from a
+    half-applied edit, and would replace the commit message with 'auto-commit'.
+
+    So this reports and never acts. TRACKED FILES ONLY and a 12-hour clock, for
+    the same reason the health row uses them: untracked generated assets would
+    make this speak every single session, and a line that always prints is a line
+    nobody reads by the end of the week."""
+    import subprocess
+    repo = os.path.expanduser("~/carr-system")
+    out = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                         capture_output=True, text=True, timeout=15)
+    if out.returncode != 0:
+        return ""
+    oldest = None
+    count = 0
+    for row in out.stdout.splitlines():
+        if not row.strip() or row.startswith("??"):
+            continue
+        rel = row[3:].strip().strip('"').split(" -> ")[-1]
+        try:
+            mt = os.path.getmtime(os.path.join(repo, rel))
+        except OSError:
+            continue
+        count += 1
+        if oldest is None or mt < oldest:
+            oldest = mt
+    if not count or oldest is None:
+        return ""
+    import time
+    hours = (time.time() - oldest) / 3600.0
+    if hours < 12:
+        return ""
+    return (f" ⚠ {count} tracked file(s) in ~/carr-system have sat uncommitted for "
+            f"{hours:.0f}h. Mention it; commit by NAMING PATHS, never -a — the tree "
+            f"may hold another session's work.")
+
+
 def main():
     try:
         json.load(sys.stdin)          # hook payload; nothing needed from it
@@ -156,6 +200,10 @@ def main():
         extra += nightly_verdict()
     except Exception:
         pass                          # the brief must never fail on this
+    try:
+        extra += loose_work()
+    except Exception:
+        pass
     print(STATIC_RAIL + extra)
     sys.exit(0)
 
