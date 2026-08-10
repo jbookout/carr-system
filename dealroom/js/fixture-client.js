@@ -25,6 +25,24 @@ export async function createFixtureClient(opts = {}) {
 
   /** @type {Map<string, any>} */
   const deals = new Map(seed.deals.map((d) => [d.id, { ...d }]));
+  // Keep the local demo representative of the production information model:
+  // one national-account portfolio, many market deals, no duplicate deal rows.
+  const fixtureAccountId = 'acct-musicologie';
+  let fixtureAccountOwner = 'dell';
+  [...deals.values()].slice(0, 5).forEach((d, index) => Object.assign(d, {
+    workspace_kind: 'national_account',
+    account_client_id: fixtureAccountId,
+    account_client_ref: 'C-161',
+    account_name: 'Musicologie',
+    account_owner: fixtureAccountOwner,
+    client_ref: `C-${131 + index}`,
+    client_name: d.name,
+    market_agent: index < 3 ? ['Alex Morgan','Taylor Reed','Jordan Lee'][index] : null,
+  }));
+  [...deals.values()].slice(5).forEach((d) => Object.assign(d, {
+    workspace_kind: 'team', account_client_id: null, account_name: null,
+    client_ref: d.client_ref || null, client_name: d.client_name || d.name,
+  }));
   /** @type {Map<string, any[]>} */
   const threads = new Map(
     Object.entries(seed.threads || {}).map(([k, v]) => [k, v.map((x) => ({ ...x }))]),
@@ -63,6 +81,8 @@ export async function createFixtureClient(opts = {}) {
   let noteSeq = 1;
   let histSeq = 1;
   let confirmSeq = 1;
+  let reviewSeq = 1;
+  const reviewSessions = new Map();
 
   function nowIso() {
     return new Date().toISOString();
@@ -203,8 +223,15 @@ export async function createFixtureClient(opts = {}) {
     selfActor,
 
     async getBoard() {
+      const national = [...deals.values()].filter((d) => d.account_client_id === fixtureAccountId);
       return {
+        actor: selfActor,
         deals: [...deals.values()].map((d) => ({ ...d })),
+        accounts: [{ account_client_id: fixtureAccountId, account_client_ref: 'C-161',
+          account_name: 'Musicologie', account_owner: fixtureAccountOwner, open_deals: national.length,
+          attention_deals: national.filter((d) => d.attention).length,
+          overdue_deals: 0, stale_deals: 2, last_review_at: lastCallAt }],
+        open_session: [...reviewSessions.values()].find((s) => s.status === 'open') || null,
         as_of: asOf,
         last_call_at: lastCallAt,
       };
@@ -225,7 +252,13 @@ export async function createFixtureClient(opts = {}) {
           date: deal.next_date,
         });
       }
-      return { deal, thread, critical_dates, history: hist };
+      return { deal, thread, critical_dates, history: hist,
+        next_actions: deal.next_step ? [{ id: `a-${deal.id}`, owner: deal.owner,
+          description: deal.next_step, due_on: deal.next_date, status: 'open' }] : [],
+        activities: hist.slice(0, 4).map((h) => ({ id: h.id, actor: h.actor,
+          occurred_at: h.recorded_at, kind: 'note', summary: h.summary })),
+        participants: [{ role: 'lead', name: actorLabel(deal.owner), actor: deal.owner }],
+        premises: [], negotiation_rounds: [], documents: [] };
     },
 
     async getChanges(cursor) {
@@ -234,6 +267,7 @@ export async function createFixtureClient(opts = {}) {
       return {
         events: fresh.map((e) => ({ ...e })),
         presence: [...leases.values()].map((p) => ({ ...p })),
+        capture_sessions: [],
         cursor: cursorOf(events),
       };
     },
@@ -354,7 +388,7 @@ export async function createFixtureClient(opts = {}) {
       });
     },
 
-    async createDeal({ name, idempotency_key }) {
+    async createDeal({ name, client, deal_type, phase, segment, market, lane, idempotency_key }) {
       return withIdem(idempotency_key, () => {
         const n = String(name || '').trim();
         if (!n) throw new Error('empty name');
@@ -362,15 +396,20 @@ export async function createFixtureClient(opts = {}) {
         const d = {
           id,
           name: n,
-          type: 'Startup',
-          phase: 'On Deck',
+          type: deal_type || 'Other',
+          phase: phase || 'On Deck',
           owner: selfActor,
           attention: false,
           last_touch: nowIso().slice(0, 10),
           next_step: '',
           next_date: null,
-          segment: null,
-          market: null,
+          segment: segment || null,
+          market: market || null,
+          client_ref: client || 'C-demo',
+          client_name: client || n,
+          workspace_kind: lane === 'national' ? 'national_account' : 'team',
+          account_client_id: lane === 'national' ? fixtureAccountId : null,
+          account_name: lane === 'national' ? 'Musicologie' : null,
         };
         deals.set(id, d);
         const e = pushEvent({
@@ -383,6 +422,74 @@ export async function createFixtureClient(opts = {}) {
         });
         pushHistory(id, selfActor, 'created from the board', e.recorded_at);
         return { status: 'ok', event: e, deal: { ...d } };
+      });
+    },
+
+    async startReview({ workspace_kind, account_client_id, idempotency_key }) {
+      return withIdem(idempotency_key, () => {
+        const session = { session_id: `review-${reviewSeq++}`, workspace_kind,
+          account_client_id: account_client_id || null, started_at: nowIso(), status: 'open', items: [] };
+        reviewSessions.set(session.session_id, session);
+        return { ok: true, ...session };
+      });
+    },
+
+    async reviewDeal({ session_id, deal, disposition, note, idempotency_key }) {
+      return withIdem(idempotency_key, () => {
+        const session = reviewSessions.get(session_id);
+        if (!session || session.status !== 'open') throw new Error('review session is not open');
+        session.items = session.items.filter((i) => i.deal !== deal);
+        session.items.push({ deal, disposition, note: note || null });
+        return { ok: true, session_id, deal_id: deal, disposition };
+      });
+    },
+
+    async endReview({ session_id, status = 'completed', idempotency_key }) {
+      return withIdem(idempotency_key, () => {
+        const session = reviewSessions.get(session_id);
+        session.status = status;
+        session.ended_at = nowIso();
+        lastCallAt = session.ended_at;
+        return { ok: true, session_id, status,
+          reviewed: session.items.filter((i) => i.disposition === 'reviewed').length,
+          skipped: session.items.filter((i) => i.disposition === 'skipped').length };
+      });
+    },
+
+    async setMarketAgent({ deal, agent_name, market, idempotency_key }) {
+      return withIdem(idempotency_key, () => {
+        const d = getDealOrThrow(deal); d.market_agent = agent_name; if (market) d.market = market;
+        return { ok: true, deal_id: deal, market_agent: agent_name };
+      });
+    },
+
+    async setNationalAccountOwner({ account_client_id, owner, idempotency_key }) {
+      return withIdem(idempotency_key, () => {
+        fixtureAccountOwner = owner;
+        for (const d of deals.values()) if (d.account_client_id === account_client_id) d.account_owner = owner;
+        return { ok: true, account_client_id, owner };
+      });
+    },
+
+    async createNationalAccount({ name, owner, idempotency_key }) {
+      return withIdem(idempotency_key, () => ({ ok: true,
+        account_client_id: `acct-${name.toLowerCase().replace(/\W+/g,'-')}`,
+        account_client_ref: 'C-demo', name, owner }));
+    },
+
+    async createNationalMarketDeal(args) {
+      return client.createDeal({ name: args.deal_name, client: args.client_name,
+        deal_type: args.deal_type || 'Startup', phase: args.phase || 'On Deck',
+        segment: args.segment, market: args.market, lane: 'national',
+        idempotency_key: args.idempotency_key });
+    },
+
+    async revertDealField({ event_id, idempotency_key }) {
+      return withIdem(idempotency_key, () => {
+        const event = events.find((e) => e.id === event_id);
+        if (!event) throw new Error('event not found');
+        const d = getDealOrThrow(event.subject_id); d[event.field] = event.old_value;
+        return { ok: true, deal_id: d.id, field: event.field, new_value: event.old_value };
       });
     },
 

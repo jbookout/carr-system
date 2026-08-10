@@ -1,69 +1,116 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#002F6C">
-<meta name="description" content="The Deal Room - Joe and Dell's shared pipeline board">
-<title>The Deal Room</title>
-<link rel="stylesheet" href="css/app.css">
-<link rel="manifest" href="manifest.webmanifest">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#002f6c">
+  <meta name="description" content="The Deal Room — Joe and Dell's shared transaction workspace">
+  <title>The Deal Room</title>
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
-<div class="top">
-  <span class="brand">The Deal Room<small>doctorcre.com</small></span>
-  <span class="vibes" title="Layout - what the room is">
-    <button type="button" class="vibe lay on" data-lay="">Ledger</button>
-    <button type="button" class="vibe lay" data-lay="dense">Dense</button>
-  </span>
-  <span class="vibes" style="margin-left:4px" title="Color - how it is lit; works in either layout">
-    <button type="button" class="vibe col ic on" data-col="" title="Light" aria-label="Light scheme">☀️</button>
-    <button type="button" class="vibe col ic" data-col="night" title="Dark" aria-label="Dark scheme">🌙</button>
-    <button type="button" class="vibe cvd ic" data-col="cvd" title="Color assist - higher-distinction palette and patterns; works with light or dark" aria-label="Color assist">◐</button>
-  </span>
-  <span class="sp"></span>
-  <span class="mode-pill" id="modePill" title="Client mode">Fixture</span>
-  <div class="presence">
-    <span class="av joe" title="Joe" id="selfAv">J</span>
-    <span class="av dell" id="partnerAv" title="Dell">D</span>
-    <button type="button" class="mic" id="mic" title="Quill - tap, or hold right-cmd anywhere" aria-label="Quill mic">🎤</button>
-  </div>
-  <button type="button" class="demo" id="demoBtn">▶ Simulate the call</button>
-</div>
-
-<div class="wrap">
-  <div id="boardview">
-    <div class="stats" id="stats"></div>
-    <div class="bar">
-      <button type="button" class="chip on" data-f="all">All deals</button>
-      <button type="button" class="chip" data-f="joe">Mine</button>
-      <button type="button" class="chip" data-f="dell">Dell's</button>
-      <button type="button" class="chip" data-f="active">In motion</button>
-      <button type="button" class="chip delta" data-f="delta" title="Everything that moved since your last pipeline call - read straight off the event log">Δ Since last call</button>
-      <input class="search" id="q" placeholder="Find a deal…" aria-label="Find a deal">
+  <a class="skip" href="#main">Skip to deals</a>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="The Deal Room home">
+      <span>The Deal Room</span><small>doctorcre.com</small>
+    </a>
+    <nav class="workspaces" aria-label="Deal workspaces">
+      <button type="button" class="workspace on" data-workspace="team">Team Book</button>
+      <button type="button" class="workspace" data-workspace="national_account">National Accounts</button>
+    </nav>
+    <div class="top-actions">
+      <span class="sync" id="syncStatus" role="status">Live</span>
+      <span class="capture" id="captureStatus" hidden>Capture inactive</span>
+      <span class="avatar" id="selfAvatar" aria-label="Signed-in partner">?</span>
+      <button type="button" class="icon-button" id="themeButton" aria-label="Toggle dark theme" title="Toggle dark theme">☾</button>
     </div>
-    <div class="tframe">
-      <table aria-label="Deal pipeline">
-        <thead>
-          <tr>
-            <th style="width:27%">Deal</th>
-            <th>Phase</th>
-            <th>Type</th>
-            <th style="width:26%">Next step</th>
-            <th>Next date</th>
-            <th>Who</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </div>
-  </div>
-  <div id="dealview"></div>
-</div>
+  </header>
 
-<div class="whisper" id="whisper" role="status" aria-live="polite"></div>
-<div class="confirms" id="confirms" aria-label="Confirm proposed writes"></div>
+  <div class="offline" id="offlineBanner" role="status" hidden>You’re offline. Your current view is still readable; editing will resume when the connection returns.</div>
 
-<script type="module" src="js/app.js"></script>
+  <main id="main" class="shell">
+    <section class="hero" aria-labelledby="workspaceTitle">
+      <div>
+        <button type="button" class="back-link" id="accountBack" hidden>← All national accounts</button>
+        <p class="eyebrow" id="workspaceEyebrow">Shared territory pipeline</p>
+        <h1 id="workspaceTitle">Team Book</h1>
+        <p class="subhead" id="workspaceSubtitle">The live agenda Joe and Dell work together.</p>
+      </div>
+      <div class="hero-actions">
+        <button type="button" class="secondary" id="ownerButton" hidden>Change owner</button>
+        <button type="button" class="secondary" id="addButton">Add deal</button>
+        <button type="button" class="primary" id="agendaButton">Start agenda</button>
+      </div>
+    </section>
+
+    <section class="account-grid" id="accountGrid" aria-label="National accounts" hidden></section>
+
+    <section id="boardSection">
+      <div class="stats" id="stats" aria-label="Workspace summary"></div>
+      <aside class="focus" id="focusStrip" aria-label="Suggested focus"></aside>
+
+      <div class="toolbar">
+        <div class="filters" role="group" aria-label="Filter deals">
+          <button type="button" class="filter on" data-filter="all">All</button>
+          <button type="button" class="filter" data-filter="mine">Mine</button>
+          <button type="button" class="filter" data-filter="attention">Needs attention</button>
+          <button type="button" class="filter" data-filter="stale">Gone quiet</button>
+          <button type="button" class="filter" data-filter="missing">Missing next step</button>
+          <button type="button" class="filter" data-filter="delta">Changed since review</button>
+        </div>
+        <label class="search-wrap">
+          <span class="sr-only">Search every deal</span>
+          <input id="search" type="search" autocomplete="off" placeholder="Search every deal…">
+          <kbd>/</kbd>
+        </label>
+      </div>
+
+      <div class="table-frame" id="tableFrame">
+        <table aria-label="Open deals">
+          <thead>
+            <tr>
+              <th>Deal</th><th>Phase</th><th>Next step</th><th>Next date</th>
+              <th id="agentHeading">Owner</th><th><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="empty" id="emptyState" hidden></div>
+      </div>
+    </section>
+  </main>
+
+  <aside class="agenda-panel" id="agendaPanel" aria-label="Review agenda" aria-live="polite" hidden>
+    <header>
+      <div><p class="eyebrow">Review agenda</p><h2 id="agendaTitle">Team Book</h2></div>
+      <button type="button" class="icon-button" id="agendaClose" aria-label="Close agenda">×</button>
+    </header>
+    <div class="agenda-progress"><span id="agendaProgress">0 of 0</span><progress id="agendaMeter" value="0" max="1"></progress></div>
+    <div id="agendaCard"></div>
+    <footer>
+      <button type="button" class="secondary" id="agendaSkip">Skip</button>
+      <button type="button" class="primary" id="agendaReviewed">Reviewed — next</button>
+      <button type="button" class="text-button" id="agendaEnd">Finish agenda</button>
+    </footer>
+  </aside>
+
+  <div class="confirm-dock" id="confirmDock" aria-label="Call capture suggestions" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <dialog id="formDialog" class="dialog">
+    <form method="dialog" id="dialogForm">
+      <header><div><p class="eyebrow" id="dialogEyebrow">Deal Room</p><h2 id="dialogTitle">Edit</h2></div><button type="button" data-dialog-cancel class="icon-button" aria-label="Close">×</button></header>
+      <div id="dialogBody" class="dialog-body"></div>
+      <p class="form-error" id="formError" role="alert" hidden></p>
+      <footer><button type="button" data-dialog-cancel class="secondary">Cancel</button><button type="submit" class="primary" id="dialogSubmit">Save</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="dealDialog" class="dialog deal-dialog">
+    <article id="dealDetail"></article>
+  </dialog>
+
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

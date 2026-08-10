@@ -950,8 +950,10 @@ function assertDealRoomField(field, value) {
     throw new ToolError({ error: "field_not_patchable", field, allowed: DEAL_ROOM_FIELDS });
   if (field === "attention" && typeof value !== "boolean")
     throw new ToolError({ error: "invalid_field_value", field, expected: "boolean" });
-  if ((field === "phase" || field === "owner") && (typeof value !== "string" || !value.trim()))
+  if (field === "phase" && (typeof value !== "string" || !value.trim()))
     throw new ToolError({ error: "invalid_field_value", field, expected: "non-empty string" });
+  if (field === "owner" && value !== null && !["joe", "dell"].includes(value))
+    throw new ToolError({ error: "invalid_field_value", field, expected: "joe, dell, or null" });
   if (field === "next_date" && value !== null &&
       (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)))
     throw new ToolError({ error: "invalid_field_value", field, expected: "YYYY-MM-DD or null" });
@@ -996,6 +998,22 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
   assertDealRoomField(field, value);
   const oldRow = await c.query(`select ${field} as value from deal where id=$1`, [dealId]);
   if (!oldRow.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: dealId });
+  if (field === "owner") {
+    // deal.owner is the board cache; deal_participant(role=lead) remains the
+    // canonical operating assignment used by documents and the rest of the
+    // record layer. A Deal Room change moves both in the same transaction.
+    await c.query(
+      `update deal_participant set to_at=now()
+        where deal_id=$1 and role='lead' and to_at is null
+        /* dealroom:close-lead */`, [dealId]);
+    if (value) {
+      const next = (await c.query("select id from actor where slug=$1 and active", [value])).rows[0];
+      if (!next) throw new ToolError({ error: "unknown_owner", owner: value });
+      await c.query(
+        `insert into deal_participant (deal_id,actor_id,role,set_by)
+         values ($1,$2,'lead',$3) /* dealroom:open-lead */`, [dealId, next.id, actor.id]);
+    }
+  }
   await c.query(
     `update deal set ${field}=$2, updated_by=$3 where id=$1 /* dealroom:apply-field */`,
     [dealId, value, actor.id],
@@ -1511,13 +1529,42 @@ export const TOOLS = {
 
   "deal-room-board": {
     write: false,
-    description: "The Deal Room's board read: every open deal with the live-board fields (owner, attention, next_date, current next step from the note thread). deal-board predates these columns and serves the pipeline render; this serves the board UI. Same placeholder rule: the two Salesforce placeholder columns never appear.",
-    inputSchema: { type: "object", properties: {} },
-    handler: async (c) => ({ deals: (await c.query(
-      `select id, name, type, phase, owner, attention,
-              to_jsonb(next_date)#>>'{}' as next_date, next_step
-         from v_deal_room_board
-        order by name`)).rows }),
+    description: "The Deal Room home read: open deals plus national-account portfolio summaries, current partner identity, review clocks, market-agent assignments, and one open review session. workspace may be team, national_account, or all; no deal is duplicated between workspaces.",
+    inputSchema: { type: "object", properties: {
+      workspace: { type: "string", enum: ["team","national_account","all"], default: "all" },
+      account_client_id: { type: "string", description: "optional national-account client uuid" },
+    } },
+    handler: async (c, actor, args) => {
+      const workspace = args.workspace || "all";
+      const deals = await c.query(
+        `select id, name, type, phase, owner, attention,
+                to_jsonb(next_date)#>>'{}' as next_date, next_step, market, segment,
+                client_id, client_ref, client_name, account_client_id, account_client_ref,
+                account_name, account_owner, market_agent,
+                to_jsonb(last_touch)#>>'{}' as last_touch,
+                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind
+           from v_deal_room_board
+          where ($1 = 'all' or workspace_kind = $1)
+            and ($2::uuid is null or account_client_id = $2::uuid)
+          order by attention desc, next_date nulls last, name`,
+        [workspace, args.account_client_id || null]);
+      const accounts = await c.query(
+        `select account_client_id, account_client_ref, account_name, account_owner,
+                open_deals, attention_deals, overdue_deals, stale_deals,
+                to_jsonb(last_review_at)#>>'{}' as last_review_at
+           from v_deal_room_account order by account_name`);
+      const session = await c.query(
+        `select session_id, workspace_kind, account_client_id,
+                to_jsonb(started_at)#>>'{}' as started_at
+           from v_deal_room_session
+          where started_by=$1 and status='open'
+            and ($2 = 'all' or workspace_kind=$2)
+            and ($3::uuid is null or account_client_id=$3::uuid)
+          order by started_at desc limit 1`,
+        [actor.slug, workspace, args.account_client_id || null]);
+      return { actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
+        open_session: session.rows[0] || null };
+    },
   },
 
   "capture-queue": {
@@ -1994,6 +2041,7 @@ export const TOOLS = {
       await c.query(
         "insert into deal_participant (deal_id, actor_id, role, set_by) values ($1,$2,'lead',$3)",
         [s.id, na.rows[0].id, actor.id]);
+      await c.query("update deal set owner=$1, updated_by=$2 where id=$3", [args.new_lead, actor.id, s.id]);
       await writeEvent(c, actor, "set-lead", "deal", s.id,
         { old: { lead: prev.rows[0]?.actor_id || null }, new: { lead: args.new_lead }, idempotency_key: args.idempotency_key });
       return { ok: true, new_lead: args.new_lead };
@@ -4811,15 +4859,18 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
 // the rest of this registry; the one explicit exception is the ephemeral lease.
 Object.assign(TOOLS, {
   "get-deal-room": {
-    description: "Read one Deal Room record: board fields, append-only note/next-step thread, critical dates, and attributed event history. Placeholder Salesforce fields are structurally excluded.",
+    description: "Read one complete Deal Room record: board/workspace fields, next actions, notes, critical dates, activity, parties, premises, current economics, documents, and attributed history. Placeholder Salesforce fields are structurally excluded.",
     inputSchema: { type: "object", properties: { deal: { type: "string" } }, required: ["deal"] },
     handler: async (c, _actor, args) => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       const deal = await c.query(
-        "select name, phase, owner, type, city, segment, attention, to_jsonb(next_date)#>>'{}' as next_date from v_deal_room_deal where id=$1",
-        [s.id],
-      );
+        `select id, name, phase, owner, type, market as city, segment, attention,
+                to_jsonb(next_date)#>>'{}' as next_date, next_step, client_ref, client_name,
+                account_client_id, account_client_ref, account_name, account_owner,
+                market_agent, to_jsonb(last_touch)#>>'{}' as last_touch,
+                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind
+           from v_deal_room_board where id=$1`, [s.id]);
       if (!deal.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
       const thread = await c.query(
         "select id, kind, text, actor, to_jsonb(created_at)#>>'{}' as created_at from v_deal_room_note where deal_id=$1 order by created_at desc, id desc",
@@ -4835,8 +4886,43 @@ Object.assign(TOOLS, {
           order by recorded_at desc, id desc`,
         [s.id],
       );
+      const actions = await c.query(
+        `select n.id, n.owner, n.description,
+                to_jsonb(n.due_on)#>>'{}' as due_on, n.status,
+                to_jsonb(n.updated_at)#>>'{}' as updated_at
+           from v_deal_room_action n
+          where n.deal_id=$1
+          order by (n.status='open') desc, n.updated_at desc, n.id desc`, [s.id]);
+      const activities = await c.query(
+        `select a.id, to_jsonb(a.occurred_at)#>>'{}' as occurred_at, a.actor,
+                a.kind, a.summary, a.detail, a.source
+           from v_deal_room_activity a
+          where a.deal_id=$1 order by a.occurred_at desc, a.id desc limit 50`, [s.id]);
+      const participants = await c.query(
+        `select dp.role, dp.name, dp.actor, dp.party_id
+           from v_deal_room_participant dp
+          where dp.deal_id=$1 order by dp.role, name`, [s.id]);
+      const premises = await c.query(
+        `select pr.id, pr.label, pr.building_name, pr.address, pr.city, pr.state,
+                pr.suite, pr.area_amount, pr.area_basis
+           from v_deal_room_premises pr
+          where pr.deal_id=$1 order by pr.created_at, pr.suite`, [s.id]);
+      const negotiation = await c.query(
+        `select round_no, side, to_jsonb(proposed_on)#>>'{}' as proposed_on,
+                rate_amount, rate_basis, rate_norm_sf_yr, ti_amount, ti_basis,
+                free_rent_months, term_months, escalator, opex_note,
+                to_jsonb(expires_on)#>>'{}' as expires_on, note, source
+           from v_deal_room_negotiation where deal_id=$1
+          order by round_no desc, proposed_on desc limit 6`, [s.id]);
+      const documents = await c.query(
+        `select d.id, d.sent_status, d.lint_passed, d.leak_check_passed,
+                to_jsonb(d.prepared_at)#>>'{}' as prepared_at, d.note
+           from v_deal_room_document d where d.deal_id=$1 order by d.prepared_at desc limit 20`, [s.id]);
       return stripDealPlaceholders({ deal_id: s.id, ...deal.rows[0], thread: thread.rows,
-        critical_dates: criticalDates.rows, events: history.rows });
+        critical_dates: criticalDates.rows, next_actions: actions.rows,
+        activities: activities.rows, participants: participants.rows,
+        premises: premises.rows, negotiation_rounds: negotiation.rows,
+        documents: documents.rows, events: history.rows });
     },
   },
 
@@ -4943,6 +5029,19 @@ Object.assign(TOOLS, {
         "update deal set next_date=$2, updated_by=$3 where id=$1 /* dealroom:set-next-date */",
         [s.id, args.next_date ?? null, actor.id],
       );
+      // The Deal Room's next step and the operating system's next action are
+      // one fact, not parallel lists. Each partner still keeps one ball of
+      // their own on the deal; replacing yours drops (does not complete) it.
+      await c.query(
+        `update next_action set status='dropped', updated_by=$1
+          where subject_type='deal' and subject_id=$2 and owner_id=$1 and status='open'
+          /* dealroom:drop-prior-action */`, [actor.id, s.id]);
+      const action = await c.query(
+        `insert into next_action (subject_type, subject_id, owner_id, due_on,
+                                  description, created_by, updated_by)
+         values ('deal',$1,$2,$3,$4,$2,$2) returning id
+         /* dealroom:add-next-action */`,
+        [s.id, actor.id, args.next_date ?? null, args.text.trim()]);
       await writeEvent(c, actor, "set-next-step", "deal", s.id, {
         field: "next_step",
         old: { next_step: prior.rows[0]?.text ?? null },
@@ -4950,7 +5049,270 @@ Object.assign(TOOLS, {
         idempotency_key: args.idempotency_key,
       });
       return { ok: true, deal_id: s.id, next_step_id: note.rows[0].id,
+        next_action_id: action.rows[0].id,
         supersedes: prior.rows[0]?.id ?? null, created_at: note.rows[0].created_at };
+    }),
+  },
+
+  "start-deal-review": {
+    write: true,
+    description: "Start a Team Book or national-account agenda. One partner may have one open session per workspace/account; the other partner can run their own independently.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      workspace_kind: { type: "string", enum: ["team","national_account"] },
+      account_client_id: { type: "string" },
+    }, required: ["idempotency_key","workspace_kind"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "start-deal-review", args, async () => {
+      const accountId = args.account_client_id || null;
+      if (args.workspace_kind === "national_account" && !accountId)
+        throw new ToolError({ error: "account_required" });
+      if (args.workspace_kind === "team" && accountId)
+        throw new ToolError({ error: "team_review_has_no_account" });
+      if (accountId) {
+        const valid = await c.query("select 1 from client where id=$1 and client_type='national_account'", [accountId]);
+        if (!valid.rows.length) throw new ToolError({ error: "not_a_national_account", account_client_id: accountId });
+      }
+      const existing = await c.query(
+        `select id from deal_review_session where started_by=$1 and workspace_kind=$2
+          and account_client_id is not distinct from $3::uuid and status='open'`,
+        [actor.id, args.workspace_kind, accountId]);
+      if (existing.rows.length) return { ok: true, session_id: existing.rows[0].id, already_open: true };
+      const made = await c.query(
+        `insert into deal_review_session (workspace_kind,account_client_id,started_by)
+         values ($1,$2,$3) returning id,to_jsonb(started_at)#>>'{}' as started_at`,
+        [args.workspace_kind, accountId, actor.id]);
+      await writeEvent(c, actor, "start-deal-review", "actor", actor.id, {
+        new: { session_id: made.rows[0].id, workspace_kind: args.workspace_kind,
+          account_client_id: accountId }, idempotency_key: args.idempotency_key });
+      return { ok: true, session_id: made.rows[0].id, started_at: made.rows[0].started_at };
+    }),
+  },
+
+  "review-deal": {
+    write: true,
+    description: "Mark one deal reviewed or skipped in an open agenda. Repeating the action updates the disposition instead of double-counting it.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, session_id: { type: "string" },
+      deal: { type: "string" }, disposition: { type: "string", enum: ["reviewed","skipped"] },
+      note: { type: "string" },
+    }, required: ["idempotency_key","session_id","deal","disposition"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "review-deal", args, async () => {
+      const session = (await c.query(
+        "select * from deal_review_session where id=$1 and started_by=$2 and status='open' for update",
+        [args.session_id, actor.id])).rows[0];
+      if (!session) throw new ToolError({ error: "review_session_not_open" });
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      const membership = await c.query(
+        `select workspace_kind,account_client_id from v_deal_room_board where id=$1`, [s.id]);
+      const row = membership.rows[0];
+      if (!row || row.workspace_kind !== session.workspace_kind ||
+          String(row.account_client_id || '') !== String(session.account_client_id || ''))
+        throw new ToolError({ error: "deal_outside_review_workspace", deal_id: s.id });
+      await c.query(
+        `insert into deal_review_item (session_id,deal_id,disposition,note)
+         values ($1,$2,$3,$4)
+         on conflict (session_id,deal_id) do update
+         set disposition=excluded.disposition,note=excluded.note,reviewed_at=now()`,
+        [session.id, s.id, args.disposition, args.note || null]);
+      return { ok: true, session_id: session.id, deal_id: s.id, disposition: args.disposition };
+    }),
+  },
+
+  "end-deal-review": {
+    write: true,
+    description: "Complete or abandon an open agenda and return its reviewed/skipped counts. Completed sessions become the workspace's last-review clock.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, session_id: { type: "string" },
+      status: { type: "string", enum: ["completed","abandoned"], default: "completed" },
+      summary: { type: "string" },
+    }, required: ["idempotency_key","session_id"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "end-deal-review", args, async () => {
+      const status = args.status || "completed";
+      const closed = await c.query(
+        `update deal_review_session set status=$3,summary=$4,ended_at=now()
+          where id=$1 and started_by=$2 and status='open'
+          returning id,workspace_kind,account_client_id,to_jsonb(ended_at)#>>'{}' as ended_at`,
+        [args.session_id, actor.id, status, args.summary || null]);
+      if (!closed.rows.length) throw new ToolError({ error: "review_session_not_open" });
+      const counts = (await c.query(
+        `select count(*) filter (where disposition='reviewed')::int as reviewed,
+                count(*) filter (where disposition='skipped')::int as skipped
+           from deal_review_item where session_id=$1`, [args.session_id])).rows[0];
+      await writeEvent(c, actor, "end-deal-review", "actor", actor.id, {
+        new: { session_id: args.session_id, status, ...counts },
+        idempotency_key: args.idempotency_key });
+      return { ok: true, ...closed.rows[0], ...counts, status };
+    }),
+  },
+
+  "set-market-agent": {
+    write: true,
+    description: "Set the stated local-market agent on a national-account deal. The readable name is stored as stated; an optional party id is linked only when already verified.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, deal: { type: "string" },
+      agent_name: { type: "string" }, agent_party_id: { type: "string" },
+      market: { type: "string" }, source: { type: "string" },
+    }, required: ["idempotency_key","deal","agent_name","source"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "set-market-agent", args, async () => {
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      const account = await c.query("select account_client_id from v_deal_room_board where id=$1", [s.id]);
+      if (!account.rows[0]?.account_client_id)
+        throw new ToolError({ error: "not_a_national_account_deal" });
+      const old = (await c.query("select agent_name,market from deal_market_assignment where deal_id=$1", [s.id])).rows[0] || null;
+      await c.query(
+        `insert into deal_market_assignment (deal_id,agent_name,agent_party_id,market,source,set_by)
+         values ($1,$2,$3,$4,$5,$6)
+         on conflict (deal_id) do update set agent_name=excluded.agent_name,
+           agent_party_id=excluded.agent_party_id,market=excluded.market,
+           source=excluded.source,set_by=excluded.set_by,set_at=now()`,
+        [s.id, args.agent_name.trim(), args.agent_party_id || null,
+         args.market || null, args.source, actor.id]);
+      await writeEvent(c, actor, "set-market-agent", "deal", s.id, {
+        field: "market_agent", old, new: { market_agent: args.agent_name.trim(), market: args.market || null },
+        idempotency_key: args.idempotency_key });
+      return { ok: true, deal_id: s.id, market_agent: args.agent_name.trim() };
+    }),
+  },
+
+  "set-national-account-owner": {
+    write: true,
+    description: "Assign Joe or Dell as the accountable partner for a national-account portfolio without changing individual deal owners.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, account_client_id: { type: "string" },
+      owner: { type: "string", enum: ["joe","dell"] },
+    }, required: ["idempotency_key","account_client_id","owner"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "set-national-account-owner", args, async () => {
+      const account = await c.query("select id from client where id=$1 and client_type='national_account'", [args.account_client_id]);
+      if (!account.rows.length) throw new ToolError({ error: "not_a_national_account" });
+      const owner = (await c.query("select id from actor where slug=$1 and active", [args.owner])).rows[0];
+      if (!owner) throw new ToolError({ error: "unknown_owner" });
+      await c.query(
+        `insert into national_account_owner (account_client_id,owner_actor_id,set_by)
+         values ($1,$2,$3) on conflict (account_client_id) do update
+         set owner_actor_id=excluded.owner_actor_id,set_by=excluded.set_by,set_at=now()`,
+        [args.account_client_id, owner.id, actor.id]);
+      return { ok: true, account_client_id: args.account_client_id, owner: args.owner };
+    }),
+  },
+
+  "create-national-account": {
+    write: true,
+    humanOnly: true,
+    description: "Create one national-account parent org/client and assign its accountable partner. It does not create market deals or duplicate a brand that already exists.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, name: { type: "string" },
+      owner: { type: "string", enum: ["joe","dell"] }, vertical: { type: "string" },
+      force_new: { type: "boolean" },
+    }, required: ["idempotency_key","name","owner"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "create-national-account", args, async () => {
+      const matches = await c.query(
+        "select id,name from party where kind='org' and merged_into is null and lower(name)=lower($1)", [args.name.trim()]);
+      if (matches.rows.length && !args.force_new)
+        return { needs_confirm: true, candidates: matches.rows,
+          hint: "An org with this exact name exists. Use its client or explicitly confirm a genuinely separate brand." };
+      const org = await c.query(
+        `insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id`,
+        [args.name.trim(), actor.id]);
+      const ref = (await c.query("select 'C-' || lpad(nextval('ref_client_seq')::text,3,'0') as ref")).rows[0].ref;
+      const client = await c.query(
+        `insert into client (roster_ref,party_id,client_type,vertical,status,
+                             acquisition_source,owner_id,owner_label,created_by,updated_by)
+         values ($1,$2,'national_account',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+        [ref, org.rows[0].id, args.vertical || null, actor.id, actor.display]);
+      const owner = (await c.query("select id from actor where slug=$1", [args.owner])).rows[0];
+      await c.query(
+        "insert into national_account_owner (account_client_id,owner_actor_id,set_by) values ($1,$2,$3)",
+        [client.rows[0].id, owner.id, actor.id]);
+      await writeEvent(c, actor, "create-national-account", "client", client.rows[0].id, {
+        new: { ref, name: args.name.trim(), owner: args.owner, client_type: "national_account" },
+        idempotency_key: args.idempotency_key });
+      return { ok: true, account_client_id: client.rows[0].id, account_client_ref: ref,
+        name: args.name.trim(), owner: args.owner };
+    }),
+  },
+
+  "create-national-market-deal": {
+    write: true,
+    humanOnly: true,
+    description: "Create one market transaction under a national account: reuse or create the named franchisee sub-client under the parent org, then create exactly one deal and optional stated market-agent assignment.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, account_client_id: { type: "string" },
+      client_name: { type: "string" }, deal_name: { type: "string" }, market: { type: "string" },
+      state: { type: "string" }, segment: { type: "string" }, agent_name: { type: "string" },
+      deal_type: { type: "string", default: "startup" },
+      phase: { type: "string", default: "pending" },
+    }, required: ["idempotency_key","account_client_id","client_name","deal_name","market"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "create-national-market-deal", args, async () => {
+      const account = (await c.query(
+        `select c.id,c.party_id,p.name from client c join party p on p.id=c.party_id
+          where c.id=$1 and c.client_type='national_account' and c.merged_into is null`,
+        [args.account_client_id])).rows[0];
+      if (!account) throw new ToolError({ error: "not_a_national_account" });
+      const duplicate = await c.query(
+        "select id,name from deal where outcome is null and lower(name)=lower($1)", [args.deal_name.trim()]);
+      if (duplicate.rows.length) throw new ToolError({ error: "deal_name_exists", existing: duplicate.rows });
+      let sub = (await c.query(
+        `select c.id,c.roster_ref from client c join party p on p.id=c.party_id
+          where p.org_id=$1 and p.merged_into is null and c.merged_into is null
+            and lower(p.name)=lower($2) limit 1`, [account.party_id, args.client_name.trim()])).rows[0];
+      if (!sub) {
+        const person = await c.query(
+          `insert into party (kind,name,org_id,city,state,created_by,updated_by)
+           values ('person',$1,$2,$3,$4,$5,$5) returning id`,
+          [args.client_name.trim(), account.party_id, args.market.trim(), args.state || null, actor.id]);
+        const ref = (await c.query("select 'C-' || lpad(nextval('ref_client_seq')::text,3,'0') as ref")).rows[0].ref;
+        const made = await c.query(
+          `insert into client (roster_ref,party_id,client_type,vertical,status,
+                               acquisition_source,owner_id,owner_label,created_by,updated_by)
+           values ($1,$2,'franchise',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+          [ref, person.rows[0].id, args.segment || null, actor.id, actor.display]);
+        sub = { id: made.rows[0].id, roster_ref: ref };
+      }
+      const deal = await c.query(
+        `insert into deal (client_id,name,deal_type,phase,segment,city,lane,owner,created_by,updated_by)
+         values ($1,$2,$3,$4,$5,$6,'national',$7,$8,$8) returning id`,
+        [sub.id, args.deal_name.trim(), args.deal_type || 'startup', args.phase || 'pending',
+         args.segment || null, args.market.trim(), actor.slug, actor.id]);
+      await c.query(
+        `insert into deal_participant (deal_id,actor_id,role,set_by)
+         values ($1,$2,'lead',$2)`, [deal.rows[0].id, actor.id]);
+      if (args.agent_name?.trim()) await c.query(
+        `insert into deal_market_assignment (deal_id,agent_name,market,source,set_by)
+         values ($1,$2,$3,'partner stated in Deal Room',$4)`,
+        [deal.rows[0].id, args.agent_name.trim(), args.market.trim(), actor.id]);
+      await writeEvent(c, actor, "create-national-market-deal", "deal", deal.rows[0].id, {
+        new: { name: args.deal_name.trim(), client_ref: sub.roster_ref,
+          account_client_id: account.id, market: args.market.trim(), agent_name: args.agent_name || null },
+        idempotency_key: args.idempotency_key });
+      return { ok: true, deal_id: deal.rows[0].id, client_ref: sub.roster_ref,
+        account_client_id: account.id };
+    }),
+  },
+
+  "revert-deal-field": {
+    write: true,
+    description: "Undo one Deal Room field change only when it is still the latest change to that exact field. Newer partner work is never overwritten by undo.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, event_id: { type: "string" },
+    }, required: ["idempotency_key","event_id"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "revert-deal-field", args, async () => {
+      const row = (await c.query(
+        `select id,subject_id,field,old_value,new_value from event
+          where id=$1 and subject_type='deal' for update`, [args.event_id])).rows[0];
+      if (!row || !DEAL_ROOM_FIELDS.includes(row.field))
+        throw new ToolError({ error: "event_not_revertible" });
+      const latest = (await c.query(
+        `select id from event where subject_type='deal' and subject_id=$1 and field=$2
+          order by recorded_at desc,id desc limit 1`, [row.subject_id,row.field])).rows[0];
+      if (latest?.id !== row.id)
+        throw new ToolError({ error: "newer_change_exists", hint: "Open the deal and review the newer value before changing it." });
+      const oldValue = row.old_value?.[row.field] ?? null;
+      const applied = await applyDealRoomField(c, actor, row.subject_id, row.field, oldValue,
+        args.idempotency_key, "revert-deal-field");
+      return { ok: true, deal_id: row.subject_id, field: row.field,
+        reverted_event_id: row.id, ...applied };
     }),
   },
 

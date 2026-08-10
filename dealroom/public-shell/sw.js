@@ -1,4 +1,4 @@
-const SHELL_CACHE = "dealroom-shell-v1";
+const SHELL_CACHE = "dealroom-shell-v3";
 const SHELL = [
   "/offline.html",
   "/manifest.webmanifest",
@@ -50,14 +50,16 @@ async function navigation(request) {
 }
 
 async function shellAsset(request) {
-  const cached = await caches.match(request);
-  if (cached) return cached;
-  const response = await fetch(request);
-  if (response.ok) {
-    const cache = await caches.open(SHELL_CACHE);
-    await cache.put(request, response.clone());
+  try {
+    const response = await fetch(request);
+    if (response.ok) {
+      const cache = await caches.open(SHELL_CACHE);
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    return (await caches.match(request)) || new Response("Offline", { status: 503 });
   }
-  return response;
 }
 
 self.addEventListener("fetch", (event) => {

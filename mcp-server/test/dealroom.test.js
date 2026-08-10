@@ -21,6 +21,7 @@ class FakeClient {
     this.events = [];
     this.leases = new Map();
     this.notes = [];
+    this.nextActions = [];
     this.conflicts = [];
     this.criticalDates = [];
     this.captureSessions = [];
@@ -63,6 +64,11 @@ class FakeClient {
       return { rows };
     }
     if (sql.includes("dealroom:field-lock")) return { rows: [{}] };
+    if (sql.includes("dealroom:close-lead") || sql.includes("dealroom:open-lead")) return { rows: [] };
+    if (sql === "select id from actor where slug=$1 and active") {
+      const actor = actors[params[0]];
+      return { rows: actor ? [{ id: actor.id }] : [] };
+    }
     if (sql.includes("dealroom:base-event")) {
       return { rows: this.events.filter(e => e.id === params[0] && e.subject_type === "deal" &&
         e.subject_id === params[1] && e.field === params[2]).map(e => ({ recorded_at: e.recorded_at, id: e.id })) };
@@ -138,6 +144,20 @@ class FakeClient {
       deal.version += 1;
       return { rows: [] };
     }
+    if (sql.includes("dealroom:drop-prior-action")) {
+      for (const action of this.nextActions) {
+        if (action.subject_id === params[1] && action.owner_id === params[0] && action.status === "open")
+          action.status = "dropped";
+      }
+      return { rows: [] };
+    }
+    if (sql.includes("dealroom:add-next-action")) {
+      const action = { id: this.uuid(), subject_id: params[0], owner_id: params[1],
+        owner: this.actorSlug(params[1]), due_on: params[2], description: params[3],
+        status: "open", updated_at: this.now.toISOString() };
+      this.nextActions.push(action);
+      return { rows: [{ id: action.id }] };
+    }
     if (sql.includes("from v_deal_room_event") && sql.includes("limit $3")) {
       const [cursorTime, cursorId, limit] = params;
       const rows = this.events.filter(e => e.subject_type === "deal")
@@ -154,10 +174,12 @@ class FakeClient {
       return { rows };
     }
     if (sql.includes("from v_capture_session_status")) return { rows: this.captureSessions.map(row => ({ ...row })) };
-    if (sql.includes("from v_deal_room_deal")) {
+    if (sql.includes("from v_deal_room_board") && sql.includes("where id=$1")) {
       const deal = this.deals.get(params[0]);
-      return { rows: deal ? [{ phase: deal.phase, owner: deal.owner, type: deal.type, city: deal.city,
-        segment: deal.segment, attention: deal.attention, next_date: deal.next_date }] : [] };
+      return { rows: deal ? [{ id: deal.id, name: deal.name, phase: deal.phase, owner: deal.owner,
+        type: deal.type, city: deal.city, segment: deal.segment, attention: deal.attention,
+        next_date: deal.next_date, next_step: this.nextActions.find(a => a.subject_id === deal.id && a.status === "open")?.description || null,
+        workspace_kind: "team" }] : [] };
     }
     if (sql.includes("from v_deal_room_note")) {
       const rows = this.notes.filter(n => n.deal_id === params[0])
@@ -174,6 +196,12 @@ class FakeClient {
           ({ id, recorded_at, actor, verb, field, old_value, new_value }));
       return { rows };
     }
+    if (sql.includes("from v_deal_room_action")) {
+      return { rows: this.nextActions.filter(a => a.subject_id === params[0]).map(a => ({ ...a })) };
+    }
+    if (sql.includes("from v_deal_room_activity") || sql.includes("from v_deal_room_participant") ||
+        sql.includes("from v_deal_room_premises") || sql.includes("from v_deal_room_negotiation") ||
+        sql.includes("from v_deal_room_document")) return { rows: [] };
     throw new Error(`unhandled fake query: ${sql}`);
   }
 }

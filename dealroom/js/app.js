@@ -1,915 +1,515 @@
-/**
- * Deal Room front-end — live wiring against the WO-1 client interface.
- * Design authority: design/mockups/dealroom-v2.html
- */
-import { createClient, PHICON, PHASES, ACTOR_LABEL } from './client.js';
+import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { uuidv4 } from './uuid.js';
 
-const POLL_MS = 1000;
-const TODAY = new Date('2026-08-08T12:00:00'); // demo clock matches seed as_of
-
-// ── state ────────────────────────────────────────────────────────────
+const POLL_MS = 1400;
 const state = {
-  client: null,
-  deals: /** @type {Map<string, any>} */ (new Map()),
-  lastCallAt: null,
-  /** deal ids that have events after lastCallAt (Δ filter) */
-  changedSinceCall: /** @type {Set<string>} */ (new Set()),
-  /** deal|field -> last event id we saw */
-  fieldBase: /** @type {Map<string, string>} */ (new Map()),
-  cursor: null,
-  presence: /** @type {any[]} */ ([]),
-  filter: 'all',
-  query: '',
-  view: 'board', // board | deal
-  openDealId: null,
-  composerDealId: null,
-  conflict: null, // {conflict, anchorEl}
-  confirms: [],
-  selfActor: 'joe',
-  partnerHere: false,
-  demoPlaying: false,
-  openPhaseMenu: null,
+  client: null, selfActor: null, deals: new Map(), accounts: [], cursor: null,
+  workspace: 'team', accountId: null, filter: 'all', query: '',
+  changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
+  confirms: [], review: null, pollTimer: null, undoEventId: null,
 };
 
-// ── DOM refs ─────────────────────────────────────────────────────────
-const $ = (sel, root = document) => root.querySelector(sel);
-const rowsEl = () => $('#rows');
-const whisperEl = () => $('#whisper');
-const confirmsEl = () => $('#confirms');
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const today = () => new Date(new Date().toDateString());
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;',
+}[char]));
+const actorName = (slug) => ACTOR_LABEL[slug] || slug || 'Unassigned';
+const account = () => state.accounts.find((item) => item.account_client_id === state.accountId) || null;
 
-function say(html) {
-  const w = whisperEl();
-  w.innerHTML = html;
-  w.classList.add('show');
-  clearTimeout(say._t);
-  say._t = setTimeout(() => w.classList.remove('show'), 2600);
+function daysFromNow(value) {
+  if (!value) return null;
+  return Math.round((new Date(`${value}T12:00:00`) - today()) / 864e5);
 }
 
-// ── dates / icons ────────────────────────────────────────────────────
-function dueInfo(d) {
-  if (!d) return null;
-  const days = Math.round((new Date(d + 'T12:00:00') - TODAY) / 864e5);
-  const label = new Date(d + 'T12:00:00').toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-  });
-  if (days < 0) return { cls: 'over', txt: `OVERDUE ${-days}d` };
-  if (days === 0) return { cls: 'today', txt: 'TODAY' };
-  if (days <= 2) return { cls: 'd2', txt: `${label} · ${days}d` };
-  if (days <= 7) return { cls: 'd7', txt: `${label} · ${days}d` };
-  if (days <= 14) return { cls: 'd14', txt: `${label} · ${days}d` };
-  return { cls: '', txt: label };
+function dateLabel(value) {
+  if (!value) return 'Not set';
+  const days = daysFromNow(value);
+  const date = new Date(`${value}T12:00:00`).toLocaleDateString('en-US', { month:'short', day:'numeric' });
+  if (days < 0) return `${date} · ${Math.abs(days)}d overdue`;
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Tomorrow';
+  return `${date} · ${days}d`;
 }
 
-function rowIcon(r) {
-  const d = r.next_date
-    ? Math.round((new Date(r.next_date + 'T12:00:00') - TODAY) / 864e5)
-    : 99;
-  if (r.attention || d < 0) return '⚠️';
-  return PHICON[r.phase] || '○';
+function relative(value) {
+  if (!value) return 'not captured';
+  const days = Math.round((Date.now() - new Date(value).getTime()) / 864e5);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  return `${days} days ago`;
 }
 
-function ownerLetter(own) {
-  if (own === 'joe') return 'J';
-  if (own === 'dell') return 'D';
-  return '–';
+function isStale(deal) {
+  if (!deal.last_touch) return true;
+  return (Date.now() - new Date(`${deal.last_touch}T12:00:00`).getTime()) / 864e5 >= 14;
 }
 
-function actorName(a) {
-  return ACTOR_LABEL[a] || a || 'someone';
+function reasonFor(deal) {
+  const days = daysFromNow(deal.next_date);
+  if (deal.attention) return 'Flagged for attention';
+  if (days !== null && days < 0) return `Next date is ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} overdue`;
+  if (!deal.next_step) return 'No next step';
+  if (isStale(deal)) return deal.last_touch ? `Gone quiet ${relative(deal.last_touch)}` : 'No recent touch captured';
+  if (!deal.market_agent && deal.workspace_kind === 'national_account') return 'Market agent unassigned';
+  return `Ready for review · ${deal.phase}`;
 }
 
-// ── board load / poll ────────────────────────────────────────────────
-async function loadBoard() {
-  const board = await state.client.getBoard();
-  state.deals = new Map(board.deals.map((d) => [d.id, d]));
-  state.lastCallAt = board.last_call_at;
-  // seed Δ from any events already after last call
+function priority(deal) {
+  const days = daysFromNow(deal.next_date);
+  return (deal.attention ? 10000 : 0) + (days !== null && days < 0 ? 7000 + Math.abs(days) : 0)
+    + (!deal.next_step ? 4000 : 0) + (isStale(deal) ? 2000 : 0)
+    + (deal.workspace_kind === 'national_account' && !deal.market_agent ? 1000 : 0);
+}
+
+function showToast(message, undoEventId = null) {
+  const el = $('#toast');
+  state.undoEventId = undoEventId;
+  el.innerHTML = `${esc(message)}${undoEventId ? '<button type="button" data-undo>Undo</button>' : ''}`;
+  el.classList.add('show');
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => el.classList.remove('show'), undoEventId ? 7000 : 3200);
+}
+
+function setSync(ok, label = null) {
+  const el = $('#syncStatus');
+  el.classList.toggle('offline', !ok);
+  el.textContent = label || (ok ? 'Live' : 'Reconnecting');
+}
+
+async function loadHome() {
+  const home = await state.client.getBoard({ workspace:'all' });
+  state.selfActor = home.actor || state.client.selfActor || state.selfActor;
+  state.deals = new Map((home.deals || []).map((deal) => [deal.id, {
+    workspace_kind: deal.account_client_id ? 'national_account' : 'team', ...deal,
+  }]));
+  state.accounts = home.accounts || [];
+  for (const deal of state.deals.values()) if (!deal.last_review_at) state.changed.add(deal.id);
+  $('#selfAvatar').textContent = state.selfActor === 'dell' ? 'D' : state.selfActor === 'joe' ? 'J' : '?';
+  $('#selfAvatar').setAttribute('aria-label', `Signed in as ${actorName(state.selfActor)}`);
   await pollOnce(true);
   render();
 }
 
 async function pollOnce(initial = false) {
-  const res = await state.client.getChanges(state.cursor);
-  state.cursor = res.cursor;
-  state.presence = res.presence || [];
-
-  // partner presence avatar
-  const partner = state.selfActor === 'joe' ? 'dell' : 'joe';
-  state.partnerHere = state.presence.some(
-    (p) => p.actor === partner && new Date(p.expires_at) > new Date(),
-  );
-  const av = $('#partnerAv');
-  if (av) av.classList.toggle('here', state.partnerHere);
-
-  for (const e of res.events || []) {
-    if (e.field) state.fieldBase.set(`${e.subject_id}|${e.field}`, e.id);
-    if (e.subject_type === 'deal' && e.subject_id) {
-      if (state.lastCallAt && e.recorded_at > state.lastCallAt) {
-        state.changedSinceCall.add(e.subject_id);
-      }
-      // apply event to local deal map when we know the field
-      const d = state.deals.get(e.subject_id);
-      if (d && e.field && e.verb !== 'add-deal-note') {
-        if (e.field === 'attention') d.attention = !!e.new_value;
-        else if (e.field === 'owner') d.owner = e.new_value;
-        else if (e.field === 'phase') d.phase = e.new_value;
-        else if (e.field === 'next_date') d.next_date = e.new_value;
-        else if (e.field === 'next_step') d.next_step = e.new_value;
-      }
-      if (e.verb === 'create-deal' && !state.deals.has(e.subject_id)) {
-        // refresh board for new deals
-        const board = await state.client.getBoard();
-        state.deals = new Map(board.deals.map((x) => [x.id, x]));
-      }
-      // partner write whispers (not on initial replay of seed)
-      if (!initial && e.actor !== state.selfActor && e.field === 'next_step') {
-        const deal = state.deals.get(e.subject_id);
-        say(
-          `<b>${actorName(e.actor)}</b> updated ${deal ? deal.name : e.subject_id}${
-            e.new_value ? '' : ''
-          }`,
-        );
+  try {
+    const result = await state.client.getChanges(state.cursor);
+    state.cursor = result.cursor;
+    state.presence = result.presence || [];
+    state.captureSessions = result.capture_sessions || [];
+    renderCaptureStatus();
+    for (const event of result.events || []) {
+      if (event.field) state.fieldBase.set(`${event.subject_id}|${event.field}`, event.id);
+      const deal = state.deals.get(event.subject_id);
+      if (!deal) continue;
+      if (!deal.last_review_at || String(event.recorded_at) > String(deal.last_review_at)) state.changed.add(deal.id);
+      if (event.field === 'attention') deal.attention = Boolean(event.new_value);
+      if (event.field === 'phase') deal.phase = event.new_value;
+      if (event.field === 'owner') deal.owner = event.new_value;
+      if (event.field === 'next_date') deal.next_date = event.new_value;
+      if (event.field === 'next_step') deal.next_step = event.new_value;
+      if (!initial && event.actor === state.selfActor && ['phase','owner','attention','next_date'].includes(event.field)) {
+        showToast(`${deal.name} updated`, event.id);
+      } else if (!initial && event.actor !== state.selfActor && event.field) {
+        showToast(`${actorName(event.actor)} updated ${deal.name}`);
       }
     }
+    if (state.client.getPendingConfirms) {
+      const pending = await state.client.getPendingConfirms();
+      state.confirms = pending.proposals || [];
+      renderConfirms();
+    }
+    setSync(true);
+    if (!userIsEditing()) renderBoardOnly();
+  } catch (error) {
+    console.warn('Deal Room poll failed', error);
+    setSync(false);
   }
-
-  // refresh confirms if fixture exposes them
-  if (state.client.getPendingConfirms) {
-    const { proposals } = await state.client.getPendingConfirms();
-    state.confirms = proposals;
-    renderConfirms();
-  }
-
-  // Never rebuild the DOM out from under an active edit: a quick note, the
-  // composer, the deal-page note input, or a contenteditable cell all live
-  // inside what render replaces, and the 1s poll would erase typed text.
-  if (!userIsEditing()) {
-    if (state.view === 'board') renderRowsOnly();
-    else if (state.view === 'deal' && state.openDealId) await openDeal(state.openDealId, true);
-  }
-  applyPresenceFlags();
 }
 
 function userIsEditing() {
-  const a = document.activeElement;
-  if (!a || !a.closest) return false;
-  return !!(
-    a.closest('.qnbox') ||
-    a.closest('.composer') ||
-    a.id === 'dvnote' ||
-    a.hasAttribute('contenteditable')
-  );
+  return Boolean(document.querySelector('dialog[open]') || document.activeElement?.matches('input,textarea,select'));
 }
 
-function startPolling() {
-  setInterval(() => {
-    pollOnce().catch((err) => console.warn('poll failed', err));
-  }, POLL_MS);
-}
-
-// ── render board ─────────────────────────────────────────────────────
-function filteredDeals() {
-  const q = state.query;
-  return [...state.deals.values()].filter((r) => {
-    if (state.filter === 'joe' && r.owner !== 'joe') return false;
-    if (state.filter === 'dell' && r.owner !== 'dell') return false;
-    if (state.filter === 'active' && ['Closed', 'On Deck'].includes(r.phase)) return false;
-    if (state.filter === 'delta' && !state.changedSinceCall.has(r.id)) return false;
-    if (q && !r.name.toLowerCase().includes(q)) return false;
-    return true;
-  });
-}
-
-function renderStats() {
-  const all = [...state.deals.values()];
-  const act = all.filter((r) => !['Closed', 'On Deck'].includes(r.phase)).length;
-  const soon = all.filter((r) => {
-    if (!r.next_date) return false;
-    const d = Math.round((new Date(r.next_date + 'T12:00:00') - TODAY) / 864e5);
-    return d >= 0 && d <= 7;
-  }).length;
-  const over = all.filter((r) => {
-    if (!r.next_date) return false;
-    return new Date(r.next_date + 'T12:00:00') < TODAY;
-  }).length;
-  const closing = all.filter((r) => r.phase === 'Closing').length;
-  $('#stats').innerHTML = `
-    <div class="tile"><b>${act}</b><span>Deals in motion</span></div>
-    <div class="tile"><b>${closing}</b><span>At the key 🔑</span></div>
-    <div class="tile"><b>${soon}</b><span>Dates this week</span></div>
-    <div class="tile"><b>${over}</b><span>Overdue <em>· needs eyes</em></span></div>`;
-}
-
-function renderRowsOnly() {
-  const el = rowsEl();
-  if (!el) return;
-  // preserve open composer focus if any
-  const composerOpen = state.composerDealId;
-  el.innerHTML = '';
-  for (const r of filteredDeals()) {
-    el.appendChild(buildRow(r));
+function workspaceDeals() {
+  let deals = [...state.deals.values()];
+  if (state.query) {
+    const query = state.query.toLowerCase();
+    deals = deals.filter((deal) => [deal.name,deal.client_name,deal.account_name,deal.market,
+      deal.market_agent,deal.next_step,deal.segment].some((value) => String(value || '').toLowerCase().includes(query)));
+  } else if (state.workspace === 'team') {
+    deals = deals.filter((deal) => deal.workspace_kind === 'team');
+  } else if (state.accountId) {
+    deals = deals.filter((deal) => deal.account_client_id === state.accountId);
+  } else {
+    deals = [];
   }
-  if (state.filter !== 'delta') {
-    el.appendChild(buildJotRow());
-  }
-  if (composerOpen) {
-    const cell = el.querySelector(`tr[data-id="${composerOpen}"] .nextcell`);
-    if (cell) openComposer(composerOpen, cell);
-  }
-  if (state.conflict) {
-    // re-attach conflict UI if still open
-    const { conflict } = state.conflict;
-    const cell = el.querySelector(
-      `tr[data-id="${conflict.deal}"] td[data-field="${conflict.field}"], tr[data-id="${conflict.deal}"] .nextcell`,
-    );
-    if (cell) showConflict(conflict, cell);
-  }
-  applyPresenceFlags();
-  renderStats();
+  if (state.filter === 'mine') deals = deals.filter((deal) => deal.owner === state.selfActor);
+  if (state.filter === 'attention') deals = deals.filter((deal) => deal.attention || (daysFromNow(deal.next_date) ?? 0) < 0);
+  if (state.filter === 'stale') deals = deals.filter(isStale);
+  if (state.filter === 'missing') deals = deals.filter((deal) => !deal.next_step);
+  if (state.filter === 'delta') deals = deals.filter((deal) => state.changed.has(deal.id));
+  return deals.sort((a,b) => priority(b) - priority(a) || a.name.localeCompare(b.name));
 }
 
 function render() {
-  if (state.view === 'board') {
-    $('#boardview').style.display = 'block';
-    $('#dealview').style.display = 'none';
-    renderRowsOnly();
+  renderChrome();
+  renderAccounts();
+  renderBoardOnly();
+}
+
+function renderChrome() {
+  $$('.workspace').forEach((button) => button.classList.toggle('on', button.dataset.workspace === state.workspace));
+  const selected = account();
+  const isAccountHome = state.workspace === 'national_account' && !state.accountId && !state.query;
+  $('#accountBack').hidden = !state.accountId;
+  $('#workspaceEyebrow').textContent = state.query ? 'Global Deal Room search'
+    : state.workspace === 'team' ? 'Shared territory pipeline' : selected ? 'National account agenda' : 'Partner-owned portfolios';
+  $('#workspaceTitle').textContent = state.query ? 'Search results' : state.workspace === 'team' ? 'Team Book'
+    : selected?.account_name || 'National Accounts';
+  $('#workspaceSubtitle').textContent = state.query ? 'Searching territory and every national account.'
+    : state.workspace === 'team' ? 'The live agenda Joe and Dell work together.'
+    : selected ? `${actorName(selected.account_owner)} owns the account; each market deal keeps its assigned agent and owner.`
+    : 'One account can hold dozens of market-level transactions without crowding the territory agenda.';
+  $('#addButton').textContent = state.workspace === 'national_account' ? (selected ? 'Add market deal' : 'Add national account') : 'Add deal';
+  $('#ownerButton').hidden = !selected;
+  $('#agendaButton').hidden = isAccountHome;
+  $('#agentHeading').textContent = state.workspace === 'national_account' ? 'Market agent' : 'Owner';
+  $('#accountGrid').hidden = !isAccountHome;
+  $('#boardSection').hidden = isAccountHome;
+}
+
+function renderAccounts() {
+  const grid = $('#accountGrid');
+  grid.innerHTML = state.accounts.length ? state.accounts.map((item) => `
+    <button type="button" class="account-card" data-account="${esc(item.account_client_id)}">
+      <header><div><p class="eyebrow">${esc(item.account_client_ref || 'National account')}</p><h2>${esc(item.account_name)}</h2></div>
+        <span class="account-owner" title="Owned by ${esc(actorName(item.account_owner))}">${item.account_owner === 'dell' ? 'D' : item.account_owner === 'joe' ? 'J' : '?'}</span></header>
+      <div class="account-metrics"><div><b>${Number(item.open_deals || 0)}</b><span>Open deals</span></div>
+        <div><b>${Number(item.attention_deals || 0)}</b><span>Attention</span></div>
+        <div><b>${Number(item.stale_deals || 0)}</b><span>Gone quiet</span></div></div>
+      <footer>Last account review: ${esc(relative(item.last_review_at))} · Open agenda →</footer>
+    </button>`).join('') : '<div class="empty">No national accounts yet. Add the first portfolio when it is won.</div>';
+}
+
+function renderBoardOnly() {
+  if ($('#boardSection').hidden) return;
+  const deals = workspaceDeals();
+  renderStats(deals);
+  renderFocus(deals);
+  const rows = $('#rows');
+  rows.innerHTML = deals.map(rowHtml).join('');
+  $('#emptyState').hidden = deals.length > 0;
+  $('#emptyState').textContent = state.query ? 'No deal matches this search.' : 'No deals match this filter.';
+  applyPresence();
+}
+
+function renderStats(deals) {
+  const overdue = deals.filter((deal) => (daysFromNow(deal.next_date) ?? 0) < 0).length;
+  const clarity = deals.filter((deal) => !deal.next_step || isStale(deal)).length;
+  $('#stats').innerHTML = `
+    <div class="stat"><strong>${deals.length}</strong><span>Open deals</span></div>
+    <div class="stat"><strong>${deals.filter((deal) => deal.phase === 'Closing').length}</strong><span>At closing</span></div>
+    <div class="stat risk"><strong>${overdue}</strong><span>Overdue dates</span></div>
+    <div class="stat"><strong>${clarity}</strong><span>Need clarity</span></div>`;
+}
+
+function renderFocus(deals) {
+  const items = deals.filter((deal) => priority(deal) > 0).slice(0, 4);
+  $('#focusStrip').innerHTML = items.length ? '<span class="focus-label">Focus first</span>' + items.map((deal) => `
+    <button type="button" class="focus-item" data-open-deal="${esc(deal.id)}"><b>${esc(deal.name)}</b><span>${esc(reasonFor(deal))}</span></button>`).join('') : '';
+}
+
+function phaseOptions(current) {
+  return PHASES.map((phase) => `<option${phase === current ? ' selected' : ''}>${esc(phase)}</option>`).join('');
+}
+
+function rowHtml(deal) {
+  const days = daysFromNow(deal.next_date);
+  const classes = [deal.attention ? 'attention' : '', days !== null && days < 0 ? 'overdue' : ''].join(' ');
+  const partnerPresence = state.presence.find((lease) => lease.deal_id === deal.id && lease.actor !== state.selfActor && new Date(lease.expires_at) > new Date());
+  const meta = [deal.market, deal.type, state.query && deal.account_name ? deal.account_name : null,
+    partnerPresence ? `${actorName(partnerPresence.actor)} is editing` : null].filter(Boolean);
+  return `<tr class="${classes}" data-deal-id="${esc(deal.id)}">
+    <td><div class="deal-cell"><button type="button" class="attention-button" data-attention="${esc(deal.id)}" aria-pressed="${Boolean(deal.attention)}" aria-label="${deal.attention ? 'Clear attention flag' : 'Flag for attention'} on ${esc(deal.name)}">${deal.attention ? '⚠' : (PHICON[deal.phase] || '○')}</button>
+      <div><button type="button" class="deal-link" data-open-deal="${esc(deal.id)}">${esc(deal.name)}</button>
+      <div class="deal-meta">${meta.map((item) => `<span>${esc(item)}</span>`).join('<span>·</span>')}</div></div></div></td>
+    <td><select class="cell-select" data-phase="${esc(deal.id)}" aria-label="Phase for ${esc(deal.name)}">${phaseOptions(deal.phase)}</select></td>
+    <td><button type="button" class="step-button ${deal.next_step ? '' : 'empty'}" data-next-step="${esc(deal.id)}">${esc(deal.next_step || 'Set the next step…')}</button></td>
+    <td><span class="due ${days !== null && days < 0 ? 'over' : days !== null && days <= 3 ? 'soon' : ''}">${esc(dateLabel(deal.next_date))}</span></td>
+    <td>${deal.workspace_kind === 'national_account'
+      ? `<button type="button" class="agent-button" data-market-agent="${esc(deal.id)}">${esc(deal.market_agent || 'Assign agent…')}</button>`
+      : `<select class="cell-select" data-owner="${esc(deal.id)}" aria-label="Owner for ${esc(deal.name)}"><option value="">Unassigned</option><option value="joe"${deal.owner === 'joe' ? ' selected' : ''}>Joe</option><option value="dell"${deal.owner === 'dell' ? ' selected' : ''}>Dell</option></select>`}</td>
+    <td class="row-actions"><button type="button" class="row-menu" data-open-deal="${esc(deal.id)}" aria-label="Open ${esc(deal.name)} details">•••</button></td>
+  </tr>`;
+}
+
+function applyPresence() {
+  for (const lease of state.presence) {
+    if (lease.actor === state.selfActor || new Date(lease.expires_at) <= new Date()) continue;
+    const row = document.querySelector(`[data-deal-id="${CSS.escape(lease.deal_id)}"]`);
+    if (row) row.title = `${actorName(lease.actor)} is editing ${lease.field}`;
   }
 }
 
-function buildRow(r) {
-  const tr = document.createElement('tr');
-  tr.dataset.id = r.id;
-  const d = r.next_date
-    ? Math.round((new Date(r.next_date + 'T12:00:00') - TODAY) / 864e5)
-    : 99;
-  if (r.attention) tr.classList.add('attn');
-  if (d < 0) tr.classList.add('overdue');
-  const di = dueInfo(r.next_date);
-  tr.innerHTML = `
-    <td class="deal">
-      <span class="pic" data-attn="${r.id}" title="${r.phase}${r.attention ? ' · needs attention' : ''}">${rowIcon(r)}</span>
-      <a data-open="${r.id}" href="#deal/${r.id}">${escapeHtml(r.name)}</a>
-    </td>
-    <td data-field="phase"><span class="ph" data-p="${escapeAttr(r.phase)}" data-phase="${r.id}">${escapeHtml(r.phase)}</span></td>
-    <td style="color:var(--ink-2)">${escapeHtml(r.type)}</td>
-    <td class="nextcell" data-field="next_step" data-deal="${r.id}">
-      <span class="nexttext">${escapeHtml(r.next_step || '')}</span>
-      <button type="button" class="qn" data-note="${r.id}" title="Quick note on ${escapeAttr(r.name)}" aria-label="Quick note">📝</button>
-    </td>
-    <td data-field="next_date">${di ? `<span class="due ${di.cls}">${di.txt}</span>` : `<span class="due">-</span>`}</td>
-    <td data-field="owner"><span class="own ${r.owner || 'none'}" data-own="${r.id}">${ownerLetter(r.owner)}</span></td>`;
-  return tr;
+function renderCaptureStatus() {
+  const active = state.captureSessions.find((session) => !['completed','failed','cancelled'].includes(session.state));
+  const badge = $('#captureStatus');
+  badge.hidden = !active;
+  if (active) badge.textContent = `Capture: ${String(active.state).replaceAll('_',' ')}`;
 }
 
-function buildJotRow() {
-  const jot = document.createElement('tr');
-  jot.className = 'jot';
-  jot.innerHTML = `
-    <td style="color:var(--ink-3)">
-      <span class="pic" style="color:var(--orange)">+</span>
-      <span class="jot-name" contenteditable="true" spellcheck="false" data-ghost>Jot a deal - name, and go</span>
-    </td>
-    <td><span class="ph" data-p="On Deck">On Deck</span></td>
-    <td></td>
-    <td style="color:var(--ink-3)">next step…</td>
-    <td></td>
-    <td><span class="own joe">J</span></td>`;
-  const name = jot.querySelector('.jot-name');
-  name.addEventListener('focus', () => {
-    if (name.dataset.ghost !== undefined) {
-      name.textContent = '';
-      delete name.dataset.ghost;
-    }
-  });
-  name.addEventListener('keydown', async (ev) => {
-    if (ev.key === 'Enter') {
-      ev.preventDefault();
-      const n = name.textContent.trim();
-      if (!n) return;
-      const res = await state.client.createDeal({ name: n, idempotency_key: uuidv4() });
-      if (res.deal) state.deals.set(res.deal.id, res.deal);
-      else {
-        const board = await state.client.getBoard();
-        state.deals = new Map(board.deals.map((d) => [d.id, d]));
-      }
-      if (res.event) state.changedSinceCall.add(res.event.subject_id);
-      say(`Created <b>${escapeHtml(n)}</b> on deck`);
-      renderRowsOnly();
-    }
-  });
-  return jot;
-}
-
-// ── presence flags on cells ──────────────────────────────────────────
-function applyPresenceFlags() {
-  document.querySelectorAll('.flagged').forEach((el) => {
-    el.classList.remove('flagged', 'actor-joe', 'actor-dell');
-    el.removeAttribute('data-flag');
-  });
-  const now = Date.now();
-  for (const p of state.presence) {
-    if (new Date(p.expires_at).getTime() <= now) continue;
-    if (p.actor === state.selfActor) continue; // only show the other person
-    const sel =
-      state.view === 'deal'
-        ? `#dealview .f[data-field="${cssEscape(p.field)}"]`
-        : `tr[data-id="${cssEscape(p.deal_id)}"] td[data-field="${cssEscape(p.field)}"], tr[data-id="${cssEscape(p.deal_id)}"] .nextcell`;
-    const cell = document.querySelector(sel);
-    if (!cell) continue;
-    cell.classList.add('flagged', `actor-${p.actor}`);
-    cell.dataset.flag = actorName(p.actor);
-  }
-}
-
-function cssEscape(s) {
-  return String(s).replace(/"/g, '\\"');
-}
-
-// ── next-step composer (append-only; never overwrite-edit) ───────────
-function openComposer(dealId, cell) {
-  closeComposer();
-  const r = state.deals.get(dealId);
-  if (!r || !cell) return;
-  state.composerDealId = dealId;
-  cell.querySelector('.nexttext')?.classList.add('open');
-
-  const box = document.createElement('div');
-  box.className = 'composer';
-  box.innerHTML = `
-    <div class="cur">Current next step: <b>${escapeHtml(r.next_step || '(none)')}</b></div>
-    <input type="text" aria-label="Next step or note" placeholder="Write the next step, or a note about it">
-    <div class="acts">
-      <button type="button" class="secondary" data-act="note">Add note</button>
-      <button type="button" class="primary" data-act="step">Set as next step</button>
-      <button type="button" class="ghost" data-act="cancel">Cancel</button>
-    </div>`;
-  cell.appendChild(box);
-  const inp = box.querySelector('input');
-  inp.focus();
-
-  // presence lease while composer is open
-  const lease = () =>
-    state.client.presenceLease({
-      deal: dealId,
-      field: 'next_step',
-      idempotency_key: uuidv4(),
-    });
-  lease();
-  const leaseTimer = setInterval(lease, POLL_MS);
-  box._leaseTimer = leaseTimer;
-
-  const finish = () => {
-    clearInterval(leaseTimer);
-    closeComposer();
-  };
-
-  box.querySelector('[data-act="cancel"]').onclick = finish;
-  box.querySelector('[data-act="note"]').onclick = async () => {
-    const text = inp.value.trim();
-    if (!text) return;
-    await state.client.addDealNote({ deal: dealId, text, idempotency_key: uuidv4() });
-    state.changedSinceCall.add(dealId);
-    say(`Note on <b>${escapeHtml(r.name)}</b> - in the record, visible on the deal page`);
-    finish();
-  };
-  box.querySelector('[data-act="step"]').onclick = async () => {
-    const text = inp.value.trim();
-    if (!text) return;
-    const res = await state.client.setNextStep({
-      deal: dealId,
-      text,
-      idempotency_key: uuidv4(),
-    });
-    r.next_step = text;
-    state.changedSinceCall.add(dealId);
-    if (res.event) state.fieldBase.set(`${dealId}|next_step`, res.event.id);
-    say(`Next step set on <b>${escapeHtml(r.name)}</b> - prior step archived to the thread`);
-    finish();
-    renderRowsOnly();
-  };
-  inp.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') finish();
-    // Enter saves (Joe's ruling, day 9 live proof): plain Enter commits the
-    // next step. Shift+Enter adds a note instead of superseding the step.
-    if (ev.key === 'Enter') {
-      ev.preventDefault();
-      box.querySelector(ev.shiftKey ? '[data-act="note"]' : '[data-act="step"]').click();
-    }
-  });
-}
-
-function closeComposer() {
-  document.querySelectorAll('.composer').forEach((c) => {
-    if (c._leaseTimer) clearInterval(c._leaseTimer);
-    c.remove();
-  });
-  document.querySelectorAll('.nexttext.open').forEach((n) => n.classList.remove('open'));
-  state.composerDealId = null;
-}
-
-// ── quick note (📝 inside next-step cell) ────────────────────────────
-function quickNote(dealId, btn) {
-  const r = state.deals.get(dealId);
-  if (!r) return;
-  const cell = btn.closest('.nextcell');
-  // remove existing
-  cell.querySelector('.qnbox')?.remove();
-  const box = document.createElement('div');
-  box.className = 'qnbox';
-  box.innerHTML = `<input placeholder="Quick note on ${escapeAttr(r.name)} - Enter saves" aria-label="Quick note">`;
-  cell.appendChild(box);
-  const inp = box.querySelector('input');
-  inp.focus();
-  state.client.presenceLease({
-    deal: dealId,
-    field: 'next_step',
-    idempotency_key: uuidv4(),
-  });
-  const close = () => box.remove();
-  inp.addEventListener('keydown', async (ev) => {
-    if (ev.key === 'Enter' && inp.value.trim()) {
-      await state.client.addDealNote({
-        deal: dealId,
-        text: inp.value.trim(),
-        idempotency_key: uuidv4(),
-      });
-      state.changedSinceCall.add(dealId);
-      close();
-      say(`Note on <b>${escapeHtml(r.name)}</b> - in the record, visible on the deal page`);
-    }
-    if (ev.key === 'Escape') close();
-  });
-  inp.addEventListener('blur', () => setTimeout(close, 150));
-}
-
-// ── field patches (phase, owner, attention) ──────────────────────────
-async function patchField(dealId, field, value) {
-  const base = state.fieldBase.get(`${dealId}|${field}`) || null;
-  const res = await state.client.patchDealField({
-    deal: dealId,
-    field,
-    value,
-    base_event_id: base,
-    idempotency_key: uuidv4(),
-  });
-  if (res.status === 'conflict') {
-    const cell = document.querySelector(
-      `tr[data-id="${dealId}"] td[data-field="${field}"], tr[data-id="${dealId}"] .nextcell`,
-    );
-    showConflict(res.conflict, cell);
-    return;
-  }
-  if (res.event) {
-    state.fieldBase.set(`${dealId}|${field}`, res.event.id);
-    state.changedSinceCall.add(dealId);
-  }
-  const d = state.deals.get(dealId);
-  if (d) {
-    if (field === 'attention') d.attention = !!value;
-    else d[field] = value;
-  }
-  renderRowsOnly();
-}
-
-function showConflict(conflict, anchor) {
-  document.querySelectorAll('.conflict').forEach((c) => c.remove());
-  state.conflict = { conflict, anchor };
-  if (!anchor) return;
-  const box = document.createElement('div');
-  box.className = 'conflict';
-  const labelA = formatVal(conflict.a.value);
-  const labelB = formatVal(conflict.b.value);
-  box.innerHTML = `
-    <h4>Conflict on ${escapeHtml(conflict.field)}</h4>
-    <div class="opts">
-      <div class="opt"><span>A · ${escapeHtml(String(conflict.a.actor))}: <b>${escapeHtml(labelA)}</b></span>
-        <button type="button" data-w="a">Keep A</button></div>
-      <div class="opt"><span>B · ${escapeHtml(String(conflict.b.actor))}: <b>${escapeHtml(labelB)}</b></span>
-        <button type="button" data-w="b">Keep B</button></div>
-    </div>`;
-  anchor.style.position = 'relative';
-  anchor.appendChild(box);
-  box.querySelectorAll('button').forEach((btn) => {
-    btn.onclick = async () => {
-      const winner = btn.dataset.w;
-      const res = await state.client.resolveConflict({
-        conflict_id: conflict.conflict_id,
-        winner,
-        idempotency_key: uuidv4(),
-      });
-      if (res.event) {
-        state.fieldBase.set(`${conflict.deal}|${conflict.field}`, res.event.id);
-        const d = state.deals.get(conflict.deal);
-        if (d) {
-          const v = winner === 'a' ? conflict.a.value : conflict.b.value;
-          if (conflict.field === 'attention') d.attention = !!v;
-          else d[conflict.field] = v;
-        }
-        state.changedSinceCall.add(conflict.deal);
-      }
-      state.conflict = null;
-      box.remove();
-      say('Conflict resolved - written as you');
-      renderRowsOnly();
-    };
-  });
-}
-
-function formatVal(v) {
-  if (v === null || v === undefined || v === '') return '(empty)';
-  if (typeof v === 'boolean') return v ? 'true' : 'false';
-  return String(v);
-}
-
-// ── phase cycle / owner cycle ────────────────────────────────────────
-function cyclePhase(dealId) {
-  const d = state.deals.get(dealId);
-  if (!d) return;
-  const i = PHASES.indexOf(d.phase);
-  const next = PHASES[(i + 1) % PHASES.length];
-  patchField(dealId, 'phase', next).then(() =>
-    say(`Phase to <b>${escapeHtml(next)}</b> on ${escapeHtml(d.name)}`),
-  );
-}
-
-function cycleOwner(dealId) {
-  const d = state.deals.get(dealId);
-  if (!d) return;
-  const order = ['joe', 'dell', null];
-  const i = order.indexOf(d.owner);
-  const next = order[(i + 1) % order.length];
-  patchField(dealId, 'owner', next).then(() =>
-    say(`Owner set on <b>${escapeHtml(d.name)}</b>`),
-  );
-}
-
-// ── deal page ────────────────────────────────────────────────────────
-async function openDeal(id, soft = false) {
-  state.view = 'deal';
-  state.openDealId = id;
-  closeComposer();
-  const detail = await state.client.getDeal(id);
-  const r = detail.deal;
-  state.deals.set(id, r);
-  $('#boardview').style.display = 'none';
-  const v = $('#dealview');
-  v.style.display = 'block';
-  const d = dueInfo(r.next_date);
-  const threadHtml =
-    detail.thread.length === 0
-      ? '<div class="thread-empty">nothing yet</div>'
-      : detail.thread
-          .map(
-            (n) =>
-              `<div class="noterow"><span class="who">${escapeHtml(actorName(n.actor))}</span>${escapeHtml(n.text)}${
-                n.kind === 'archived_step'
-                  ? '<span class="kind">prior next step</span>'
-                  : ''
-              }</div>`,
-          )
-          .join('');
-  const histHtml =
-    detail.history.length === 0
-      ? '<li>created from the board</li>'
-      : detail.history
-          .map(
-            (h) =>
-              `<li><b>${escapeHtml(actorName(h.actor))}</b> ${escapeHtml(h.summary)} <span style="color:var(--ink-3)">· ${escapeHtml(relTime(h.recorded_at))}</span></li>`,
-          )
-          .join('');
-  const datesHtml =
-    detail.critical_dates.length === 0
-      ? '<div class="sub">none set</div>'
-      : detail.critical_dates
-          .map((cd) => {
-            const di = dueInfo(cd.date);
-            return `<div class="daterow"><span>${escapeHtml(cd.label)}</span><span class="due ${di ? di.cls : ''}">${di ? di.txt : cd.date || '-'}</span></div>`;
-          })
-          .join('');
-
-  v.innerHTML = `
-    <button type="button" class="back">← Back to the room</button>
-    <div class="dv-id">
-      <span class="big">${rowIcon(r)}</span>
-      <h1>${escapeHtml(r.name)}</h1>
-      <span class="ph" data-p="${escapeAttr(r.phase)}">${escapeHtml(r.phase)}</span>
-      <span class="own ${r.owner || 'none'}">${ownerLetter(r.owner)}</span>
-      ${d ? `<span class="due ${d.cls}">${d.txt}</span>` : ''}
-    </div>
-    <div class="brief">
-      <div class="bcard">
-        <h3>Next step</h3>
-        <div class="main">${escapeHtml(r.next_step || '-')}</div>
-        <div class="sub">owner: ${r.owner ? actorName(r.owner) : 'unassigned'} · last touch: ${escapeHtml(r.last_touch || '-')}</div>
-      </div>
-      <div class="bcard"><h3>Critical dates</h3>${datesHtml}</div>
-      <div class="bcard"><h3>Latest notes</h3>
-        ${
-          detail.thread.filter((t) => t.kind === 'note').length
-            ? detail.thread
-                .filter((t) => t.kind === 'note')
-                .slice(0, 2)
-                .map(
-                  (n) =>
-                    `<div class="noterow"><span class="who">${escapeHtml(actorName(n.actor))}</span>${escapeHtml(n.text)}</div>`,
-                )
-                .join('')
-            : '<div class="sub">no notes yet</div>'
-        }
-      </div>
-    </div>
-    <h2 class="sec">The facts</h2>
-    <div class="fields">
-      <div class="f" data-field="type"><label>Deal type</label><div>${escapeHtml(r.type)}</div></div>
-      <div class="f" data-field="phase"><label>Phase</label><div>${escapeHtml(r.phase)}</div></div>
-      <div class="f" data-field="segment"><label>Segment</label><div>${escapeHtml(r.segment || '-')}</div></div>
-      <div class="f" data-field="market"><label>Market</label><div>${escapeHtml(r.market || '-')}</div></div>
-    </div>
-    <h2 class="sec">Next-step thread</h2>
-    <p class="sub" style="font-size:12px;color:var(--ink-2);margin-bottom:6px">Append-only. Notes and superseded next steps live here; nothing is overwritten.</p>
-    ${threadHtml}
-    <div class="addnote">
-      <input id="dvnote" placeholder="Add a note - or open the board cell to set the next step">
-      <button type="button" id="dvsave">Save</button>
-    </div>
-    <h2 class="sec">History - every change, attributed</h2>
-    <ul class="hist">${histHtml}</ul>`;
-
-  v.querySelector('.back').onclick = () => {
-    state.view = 'board';
-    state.openDealId = null;
-    v.style.display = 'none';
-    $('#boardview').style.display = 'block';
-    render();
-    history.replaceState(null, '', '#');
-  };
-  v.querySelector('#dvsave').onclick = async () => {
-    const i = v.querySelector('#dvnote');
-    if (!i.value.trim()) return;
-    await state.client.addDealNote({
-      deal: id,
-      text: i.value.trim(),
-      idempotency_key: uuidv4(),
-    });
-    state.changedSinceCall.add(id);
-    say(`Note saved on <b>${escapeHtml(r.name)}</b>`);
-    await openDeal(id);
-  };
-  if (!soft) history.replaceState(null, '', `#deal/${id}`);
-  applyPresenceFlags();
-}
-
-function relTime(iso) {
-  if (!iso) return '';
-  const ms = Date.now() - new Date(iso).getTime();
-  const d = Math.round(ms / 864e5);
-  if (Math.abs(d) < 1) {
-    const h = Math.round(ms / 3600e3);
-    if (Math.abs(h) < 1) return 'just now';
-    return `${Math.abs(h)}h ago`;
-  }
-  return `${Math.abs(d)}d ago`;
-}
-
-// ── confirm strip ────────────────────────────────────────────────────
 function renderConfirms() {
-  const el = confirmsEl();
-  if (!state.confirms.length) {
-    el.classList.remove('show');
-    el.innerHTML = '';
-    return;
-  }
-  el.classList.add('show');
-  el.innerHTML =
-    `<span class="lbl">From your call · confirm or skip - nothing writes itself</span>` +
-    state.confirms
-      .map(
-        (p) =>
-          `<span class="cchip" data-pid="${escapeAttr(p.id)}">${escapeHtml(p.label)}<button type="button" class="y">Yes</button><button type="button" class="n">Skip</button></span>`,
-      )
-      .join('');
-  el.querySelectorAll('.cchip button').forEach((btn) => {
-    btn.onclick = async () => {
-      const chip = btn.closest('.cchip');
-      const pid = chip.dataset.pid;
-      const yes = btn.classList.contains('y');
-      await state.client.resolveConfirm({
-        proposal_id: pid,
-        accept: yes,
-        idempotency_key: uuidv4(),
-      });
-      // refresh deals after accept
-      const board = await state.client.getBoard();
-      state.deals = new Map(board.deals.map((d) => [d.id, d]));
-      state.confirms = state.confirms.filter((p) => p.id !== pid);
-      say(yes ? 'Confirmed - written as you, reversible' : 'Skipped - nothing written');
-      renderConfirms();
-      renderRowsOnly();
-    };
+  const dock = $('#confirmDock');
+  dock.hidden = !state.confirms.length;
+  dock.innerHTML = state.confirms.map((proposal) => `<span class="confirm-chip" data-proposal="${esc(proposal.id)}">${esc(proposal.label)}
+    <button type="button" class="yes" data-confirm="yes">Confirm</button><button type="button" class="skip-confirm" data-confirm="no">Skip</button></span>`).join('');
+}
+
+async function patchField(dealId, field, value) {
+  const result = await state.client.patchDealField({ deal:dealId, field, value,
+    base_event_id:state.fieldBase.get(`${dealId}|${field}`) || null, idempotency_key:uuidv4() });
+  if (result.status === 'conflict') return showConflict(result.conflict);
+  const deal = state.deals.get(dealId);
+  if (deal) deal[field] = value;
+  state.changed.add(dealId);
+  renderBoardOnly();
+  showToast(`${deal?.name || 'Deal'} updated`);
+}
+
+function openForm({ eyebrow='Deal Room', title, submit='Save', body, onSubmit }) {
+  const dialog = $('#formDialog');
+  $('#dialogEyebrow').textContent = eyebrow;
+  $('#dialogTitle').textContent = title;
+  $('#dialogSubmit').textContent = submit;
+  $('#dialogBody').innerHTML = body;
+  $('#formError').hidden = true;
+  $('#dialogForm').onsubmit = async (event) => {
+    event.preventDefault();
+    const button = $('#dialogSubmit');
+    button.disabled = true;
+    $('#formError').hidden = true;
+    try {
+      await onSubmit(new FormData(event.currentTarget));
+      dialog.close();
+    } catch (error) {
+      const detail = error.payload?.hint || error.payload?.error || error.message;
+      $('#formError').textContent = detail;
+      $('#formError').hidden = false;
+    } finally { button.disabled = false; }
+  };
+  dialog.showModal();
+  setTimeout(() => $('input,textarea,select', dialog)?.focus(), 0);
+}
+
+function nextStepForm(dealId) {
+  const deal = state.deals.get(dealId);
+  openForm({ title:`Next step — ${deal.name}`, submit:'Set next step', body:`
+    <div class="field"><label for="stepText">What happens next?</label><textarea id="stepText" name="text" required>${esc(deal.next_step || '')}</textarea><small>This becomes a real next action in today’s triage; the prior step stays in history.</small></div>
+    <div class="field"><label for="stepDate">When?</label><input id="stepDate" name="next_date" type="date" value="${esc(deal.next_date || '')}"></div>`,
+    onSubmit:async (data) => {
+      const text = String(data.get('text') || '').trim();
+      await state.client.setNextStep({ deal:dealId, text, next_date:data.get('next_date') || null, idempotency_key:uuidv4() });
+      deal.next_step = text; deal.next_date = data.get('next_date') || null; state.changed.add(dealId);
+      showToast(`Next step set on ${deal.name}`); renderBoardOnly();
+    } });
+}
+
+function marketAgentForm(dealId) {
+  const deal = state.deals.get(dealId);
+  openForm({ title:`Market assignment — ${deal.name}`, submit:'Save assignment', body:`
+    <div class="field"><label for="agentName">Assigned local agent</label><input id="agentName" name="agent_name" required value="${esc(deal.market_agent || '')}" placeholder="Agent’s full name"></div>
+    <div class="field"><label for="agentMarket">Market</label><input id="agentMarket" name="market" value="${esc(deal.market || '')}" placeholder="City, state"></div>`,
+    onSubmit:async (data) => {
+      await state.client.setMarketAgent({ deal:dealId, agent_name:data.get('agent_name'), market:data.get('market') || null,
+        source:'partner stated in Deal Room', idempotency_key:uuidv4() });
+      deal.market_agent = data.get('agent_name'); if (data.get('market')) deal.market = data.get('market');
+      renderBoardOnly(); showToast(`Market agent saved on ${deal.name}`);
+    } });
+}
+
+function addTeamDealForm() {
+  openForm({ title:'Add territory deal', submit:'Create deal', body:`
+    <div class="field"><label for="clientRef">Existing client</label><input id="clientRef" name="client" required placeholder="C-127 or exact client name"><small>A deal always belongs to a client. This prevents free-floating or duplicate records.</small></div>
+    <div class="field"><label for="dealName">Deal name</label><input id="dealName" name="name" required></div>
+    <div class="field-row"><div class="field"><label for="dealType">Type</label><select id="dealType" name="deal_type"><option value="startup">Startup</option><option value="relocation">Relocation</option><option value="additional_office">Additional office</option><option value="renewal">Renewal</option><option value="expansion">Expansion</option><option value="purchase">Purchase</option><option value="other">Other</option></select></div>
+    <div class="field"><label for="dealPhase">Phase</label><select id="dealPhase" name="phase">${phaseOptions('On Deck')}</select></div></div>
+    <div class="field-row"><div class="field"><label for="dealMarket">Market</label><input id="dealMarket" name="market"></div><div class="field"><label for="dealSegment">Healthcare vertical</label><input id="dealSegment" name="segment" placeholder="Dental, Vet, DPC…"></div></div>`,
+    onSubmit:async (data) => {
+      const args = Object.fromEntries(data.entries());
+      await state.client.createDeal({ ...args, lane:'territory', idempotency_key:uuidv4() });
+      await loadHome(); showToast('Deal created in the Team Book');
+    } });
+}
+
+function addAccountForm() {
+  openForm({ eyebrow:'National accounts', title:'Add national account', submit:'Create account', body:`
+    <div class="field"><label for="accountName">Brand / organization</label><input id="accountName" name="name" required><small>Creates one parent account. Market transactions will live under their own sub-clients.</small></div>
+    <div class="field-row"><div class="field"><label for="accountOwner">Account owner</label><select id="accountOwner" name="owner"><option value="${esc(state.selfActor)}">${esc(actorName(state.selfActor))}</option><option value="${state.selfActor === 'joe' ? 'dell' : 'joe'}">${esc(actorName(state.selfActor === 'joe' ? 'dell' : 'joe'))}</option></select></div>
+    <div class="field"><label for="accountVertical">Healthcare vertical</label><input id="accountVertical" name="vertical"></div></div>`,
+    onSubmit:async (data) => { await state.client.createNationalAccount({ ...Object.fromEntries(data.entries()), idempotency_key:uuidv4() }); await loadHome(); showToast('National account created'); } });
+}
+
+function addMarketDealForm() {
+  const selected = account();
+  openForm({ eyebrow:selected.account_name, title:'Add market transaction', submit:'Create market deal', body:`
+    <div class="field"><label for="marketClient">Franchisee / local client</label><input id="marketClient" name="client_name" required><small>Reuses the exact sub-client if it exists; otherwise creates one under ${esc(selected.account_name)}.</small></div>
+    <div class="field"><label for="marketDealName">Deal name</label><input id="marketDealName" name="deal_name" required></div>
+    <div class="field-row"><div class="field"><label for="marketCity">Market</label><input id="marketCity" name="market" required placeholder="City"></div><div class="field"><label for="marketState">State</label><input id="marketState" name="state" maxlength="2"></div></div>
+    <div class="field-row"><div class="field"><label for="marketAgent">Assigned agent</label><input id="marketAgent" name="agent_name" placeholder="Leave blank if unknown"></div><div class="field"><label for="marketSegment">Healthcare vertical</label><input id="marketSegment" name="segment"></div></div>
+    <input type="hidden" name="deal_type" value="startup"><input type="hidden" name="phase" value="pending">`,
+    onSubmit:async (data) => { await state.client.createNationalMarketDeal({ account_client_id:selected.account_client_id,
+      ...Object.fromEntries(data.entries()), idempotency_key:uuidv4() }); await loadHome(); showToast(`Market deal added to ${selected.account_name}`); } });
+}
+
+function accountOwnerForm() {
+  const selected = account();
+  openForm({ eyebrow:selected.account_name, title:'Change account owner', submit:'Save owner', body:`
+    <div class="field"><label for="newAccountOwner">Accountable partner</label><select id="newAccountOwner" name="owner"><option value="joe"${selected.account_owner === 'joe' ? ' selected' : ''}>Joe</option><option value="dell"${selected.account_owner === 'dell' ? ' selected' : ''}>Dell</option></select><small>This changes portfolio accountability only. Individual market-deal owners stay untouched.</small></div>`,
+    onSubmit:async (data) => { await state.client.setNationalAccountOwner({ account_client_id:selected.account_client_id,
+      owner:data.get('owner'), idempotency_key:uuidv4() }); await loadHome(); showToast(`${selected.account_name} owner updated`); } });
+}
+
+function showConflict(conflict) {
+  openForm({ eyebrow:'Two edits crossed', title:`Choose the value for ${conflict.field}`, submit:'Keep selected value', body:`
+    <div class="field"><label><input type="radio" name="winner" value="a" checked> ${esc(actorName(conflict.a.actor))}: ${esc(conflict.a.value ?? '(empty)')}</label></div>
+    <div class="field"><label><input type="radio" name="winner" value="b"> ${esc(actorName(conflict.b.actor))}: ${esc(conflict.b.value ?? '(empty)')}</label></div>`,
+    onSubmit:async (data) => { await state.client.resolveConflict({ conflict_id:conflict.conflict_id, winner:data.get('winner'), idempotency_key:uuidv4() }); await loadHome(); showToast('Conflict resolved with both values preserved in history'); } });
+}
+
+function detailRows(items, renderer, empty='Nothing captured yet.') {
+  return items?.length ? items.map(renderer).join('') : `<div class="detail-row">${esc(empty)}</div>`;
+}
+
+async function openDeal(dealId) {
+  const detail = await state.client.getDeal(dealId);
+  const deal = detail.deal;
+  const html = `<header><div><p class="eyebrow">${esc(deal.account_name || deal.client_name || 'Deal')}</p><h2>${esc(deal.name)}</h2><p class="subhead">${esc(deal.phase)} · ${esc(deal.market || 'Market not captured')}</p></div><button type="button" class="icon-button" data-close-deal aria-label="Close details">×</button></header>
+    <div class="deal-content"><div class="deal-summary">
+      <div class="detail-card"><label>Next step</label><p>${esc(deal.next_step || 'Not set')}</p></div>
+      <div class="detail-card"><label>Next date</label><p>${esc(dateLabel(deal.next_date))}</p></div>
+      <div class="detail-card"><label>${deal.workspace_kind === 'national_account' ? 'Market agent' : 'Owner'}</label><p>${esc(deal.market_agent || actorName(deal.owner))}</p></div>
+      <div class="detail-card"><label>Last touch</label><p>${esc(relative(deal.last_touch))}</p></div></div>
+      <section class="detail-section"><h3>Open next actions</h3><div class="detail-list">${detailRows((detail.next_actions || []).filter((a) => a.status === 'open'), (a) => `<div class="detail-row"><b>${esc(a.description)}</b><small>${esc(actorName(a.owner))} · ${esc(dateLabel(a.due_on))}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Critical dates</h3><div class="detail-list">${detailRows(detail.critical_dates, (d) => `<div class="detail-row"><b>${esc(d.label || d.kind)}</b><small>${esc(dateLabel(d.date || d.due_on))} · source: ${esc(d.source || 'not captured')}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Premises</h3><div class="detail-list">${detailRows(detail.premises, (p) => `<div class="detail-row"><b>${esc(p.label)}</b><small>${esc([p.address,p.suite,p.city,p.state].filter(Boolean).join(' · '))}${p.area_amount ? ` · ${esc(p.area_amount)} ${esc(p.area_basis || 'SF')}` : ''}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Negotiation rounds</h3><div class="detail-list">${detailRows(detail.negotiation_rounds, (n) => `<div class="detail-row"><b>Round ${esc(n.round_no)} · ${esc(n.side)}</b><small>${esc(n.rate_amount ? `${n.rate_amount} ${n.rate_basis || ''}` : 'Rate not captured')} · ${esc(n.term_months ? `${n.term_months} months` : 'Term not captured')}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Participants</h3><div class="detail-list">${detailRows(detail.participants, (p) => `<div class="detail-row"><b>${esc(p.name)}</b><small>${esc(String(p.role).replaceAll('_',' '))}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Recent activity</h3><div class="detail-list">${detailRows(detail.activities, (a) => `<div class="detail-row"><b>${esc(a.summary)}</b><small>${esc(actorName(a.actor))} · ${esc(relative(a.occurred_at))} · ${esc(a.kind)}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Notes and prior next steps</h3><div class="detail-list">${detailRows(detail.thread, (n) => `<div class="detail-row">${esc(n.text)}<small>${esc(actorName(n.actor))} · ${esc(n.kind === 'archived_step' ? 'prior next step' : 'note')}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Documents</h3><div class="detail-list">${detailRows(detail.documents, (d) => `<div class="detail-row"><b>${esc(String(d.sent_status).replaceAll('_',' '))}</b><small>Prepared ${esc(relative(d.prepared_at))} · lint ${d.lint_passed ? 'passed' : 'not confirmed'} · leak check ${d.leak_check_passed ? 'passed' : 'not confirmed'}</small></div>`)}</div></section>
+      <section class="detail-section"><h3>Change history</h3><div class="detail-list">${detailRows(detail.history, (h) => `<div class="detail-row">${esc(h.summary)}<small>${esc(actorName(h.actor))} · ${esc(relative(h.recorded_at))}</small></div>`)}</div></section>
+    </div>`;
+  $('#dealDetail').innerHTML = html;
+  $('#dealDialog').showModal();
+}
+
+function agendaDeals() {
+  return workspaceDeals().sort((a,b) => priority(b) - priority(a));
+}
+
+async function startAgenda() {
+  const deals = agendaDeals();
+  if (!deals.length) return showToast('No deals in this agenda');
+  const result = await state.client.startReview({ workspace_kind:state.workspace,
+    ...(state.accountId ? { account_client_id:state.accountId } : {}), idempotency_key:uuidv4() });
+  state.review = { sessionId:result.session_id, deals, index:0, reviewed:0, skipped:0 };
+  $('#agendaPanel').hidden = false;
+  renderAgenda();
+}
+
+function renderAgenda() {
+  const review = state.review;
+  if (!review) return;
+  const deal = review.deals[review.index];
+  $('#agendaTitle').textContent = state.workspace === 'team' ? 'Team Book' : account()?.account_name || 'National account';
+  $('#agendaProgress').textContent = `${Math.min(review.index + 1,review.deals.length)} of ${review.deals.length}`;
+  $('#agendaMeter').max = review.deals.length;
+  $('#agendaMeter').value = review.index;
+  if (!deal) return finishAgenda();
+  $('#agendaCard').innerHTML = `<article class="agenda-deal"><p class="eyebrow">${esc(deal.market || deal.client_name || '')}</p><h3>${esc(deal.name)}</h3>
+    <span class="agenda-reason">${esc(reasonFor(deal))}</span>
+    <div class="agenda-fact"><label>Phase</label><p>${esc(deal.phase)}</p></div>
+    <div class="agenda-fact"><label>Next step</label><p>${esc(deal.next_step || 'Not set')}</p></div>
+    <div class="agenda-fact"><label>Next date</label><p>${esc(dateLabel(deal.next_date))}</p></div>
+    ${deal.workspace_kind === 'national_account' ? `<div class="agenda-fact"><label>Assigned market agent</label><p>${esc(deal.market_agent || 'Unassigned')}</p></div>` : ''}
+    <button type="button" class="secondary" data-open-deal="${esc(deal.id)}">Open full deal</button>
+    <button type="button" class="secondary" data-agenda-step="${esc(deal.id)}">Set next step</button></article>`;
+}
+
+async function advanceAgenda(disposition) {
+  const review = state.review;
+  const deal = review?.deals[review.index];
+  if (!review || !deal) return;
+  await state.client.reviewDeal({ session_id:review.sessionId, deal:deal.id, disposition, idempotency_key:uuidv4() });
+  review[disposition === 'reviewed' ? 'reviewed' : 'skipped'] += 1;
+  review.index += 1;
+  renderAgenda();
+}
+
+async function finishAgenda(status = 'completed') {
+  if (!state.review) return;
+  const review = state.review;
+  const result = await state.client.endReview({ session_id:review.sessionId, status, idempotency_key:uuidv4() });
+  state.review = null;
+  $('#agendaPanel').hidden = true;
+  await loadHome();
+  showToast(status === 'completed' ? `Agenda finished · ${result.reviewed ?? review.reviewed} deals reviewed` : 'Agenda closed without changing the review clock');
+}
+
+function wireEvents() {
+  document.addEventListener('click', async (event) => {
+    const workspace = event.target.closest('[data-workspace]');
+    if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'all'; state.query = ''; $('#search').value = ''; render(); return; }
+    const accountButton = event.target.closest('[data-account]');
+    if (accountButton) { state.workspace = 'national_account'; state.accountId = accountButton.dataset.account; render(); return; }
+    const open = event.target.closest('[data-open-deal]'); if (open) { await openDeal(open.dataset.openDeal); return; }
+    const attention = event.target.closest('[data-attention]'); if (attention) { const deal=state.deals.get(attention.dataset.attention); await patchField(deal.id,'attention',!deal.attention); return; }
+    const step = event.target.closest('[data-next-step],[data-agenda-step]'); if (step) { nextStepForm(step.dataset.nextStep || step.dataset.agendaStep); return; }
+    const agent = event.target.closest('[data-market-agent]'); if (agent) { marketAgentForm(agent.dataset.marketAgent); return; }
+    const filter = event.target.closest('[data-filter]'); if (filter) { state.filter=filter.dataset.filter; $$('.filter').forEach((b)=>b.classList.toggle('on',b===filter)); renderBoardOnly(); return; }
+    if (event.target.closest('[data-close-deal]')) { $('#dealDialog').close(); return; }
+    if (event.target.closest('[data-undo]') && state.undoEventId) { await state.client.revertDealField({ event_id:state.undoEventId,idempotency_key:uuidv4() }); state.undoEventId=null; await loadHome(); showToast('Change undone'); return; }
+    const confirm = event.target.closest('[data-confirm]'); if (confirm) { const chip=confirm.closest('[data-proposal]'); const yes=confirm.dataset.confirm==='yes'; await state.client.resolveConfirm({proposal_id:chip.dataset.proposal,accept:yes,idempotency_key:uuidv4()}); state.confirms=state.confirms.filter((p)=>p.id!==chip.dataset.proposal); renderConfirms(); if(yes)await loadHome(); showToast(yes?'Suggestion confirmed':'Suggestion skipped'); return; }
+    if (event.target.closest('[data-dialog-cancel]')) { $('#formDialog').close(); return; }
   });
-}
 
-// ── simulate partner call (fixture) ──────────────────────────────────
-async function runDemo() {
-  if (state.demoPlaying || !state.client.simulatePartnerCall) return;
-  state.demoPlaying = true;
-  const btn = $('#demoBtn');
-  btn.classList.add('live');
-  btn.textContent = '● Live - watch the room';
-  const { steps } = await state.client.simulatePartnerCall();
-  for (const s of steps) {
-    setTimeout(async () => {
-      s.run();
-      // Pull fixture mutations through the same poll path the UI always uses.
-      await pollOnce();
-      if (s.at === 400) {
-        say('<b>Dell</b> joined the room');
-      }
-      if (s.at === 1500) {
-        const tr = rowsEl()?.querySelector('tr[data-id="d05"]');
-        tr?.scrollIntoView({
-          block: 'center',
-          behavior: prefersReduced() ? 'auto' : 'smooth',
-        });
-      }
-      if (s.at === 3300) {
-        say('<b>Dell</b> updated Nikki Cottis - landlord signed');
-      }
-      if (s.at === 5000) {
-        say('<b>Dell</b> is on Petersen - his name rides the cell, Excel-style');
-      }
-      if (s.at === 7200) {
-        say('Call ended - the distiller heard three things · nothing writes without a tap');
-      }
-      if (s.at === 12500) {
-        btn.classList.remove('live');
-        btn.textContent = '▶ Simulate the call';
-        state.demoPlaying = false;
-      }
-    }, s.at);
-  }
-}
-
-function prefersReduced() {
-  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-}
-
-// ── events ───────────────────────────────────────────────────────────
-function wireChrome() {
-  rowsEl().addEventListener('click', (e) => {
-    const attn = e.target.closest('[data-attn]');
-    if (attn) {
-      const id = attn.dataset.attn;
-      const r = state.deals.get(id);
-      if (!r) return;
-      const next = !r.attention;
-      patchField(id, 'attention', next).then(() =>
-        say(
-          `${next ? 'Flagged' : 'Cleared'} <b>${escapeHtml(r.name)}</b>${
-            next ? ' ⚠️ needs attention' : ''
-          } - Dell sees it in a second`,
-        ),
-      );
-      return;
-    }
-    const open = e.target.closest('[data-open]');
-    if (open) {
-      e.preventDefault();
-      openDeal(open.dataset.open);
-      return;
-    }
-    const note = e.target.closest('.qn');
-    if (note) {
-      e.stopPropagation();
-      quickNote(note.dataset.note, note);
-      return;
-    }
-    const phase = e.target.closest('[data-phase]');
-    if (phase) {
-      cyclePhase(phase.dataset.phase);
-      return;
-    }
-    const own = e.target.closest('[data-own]');
-    if (own) {
-      cycleOwner(own.dataset.own);
-      return;
-    }
-    const next = e.target.closest('.nextcell');
-    if (next && next.dataset.deal) {
-      openComposer(next.dataset.deal, next);
-    }
+  document.addEventListener('change', async (event) => {
+    if (event.target.matches('[data-phase]')) await patchField(event.target.dataset.phase,'phase',event.target.value);
+    if (event.target.matches('[data-owner]')) await patchField(event.target.dataset.owner,'owner',event.target.value || null);
   });
 
-  document.querySelectorAll('.chip').forEach((c) =>
-    c.addEventListener('click', () => {
-      document.querySelectorAll('.chip').forEach((x) => x.classList.remove('on'));
-      c.classList.add('on');
-      state.filter = c.dataset.f;
-      renderRowsOnly();
-      if (state.filter === 'delta') {
-        say('Δ - only what moved since your last call, straight off the event log');
-      }
-    }),
-  );
-
-  $('#q').addEventListener('input', (e) => {
-    state.query = e.target.value.toLowerCase();
-    renderRowsOnly();
-  });
-
-  document.querySelectorAll('.vibe.lay').forEach((b) =>
-    b.addEventListener('click', () => {
-      document.querySelectorAll('.vibe.lay').forEach((x) => x.classList.remove('on'));
-      b.classList.add('on');
-      document.body.classList.toggle('dense', b.dataset.lay === 'dense');
-    }),
-  );
-
-  document.querySelectorAll('.vibe.col, .vibe.cvd').forEach((b) =>
-    b.addEventListener('click', () => {
-      if (b.classList.contains('cvd')) {
-        b.classList.toggle('on');
-        document.body.classList.toggle('cvd');
-        return;
-      }
-      document.querySelectorAll('.vibe.col:not(.cvd)').forEach((x) => x.classList.remove('on'));
-      b.classList.add('on');
-      document.body.classList.toggle('night', b.dataset.col === 'night');
-    }),
-  );
-
-  $('#mic')?.addEventListener('click', () => {
-    const m = $('#mic');
-    const on = m.classList.toggle('on');
-    say(
-      on
-        ? 'Quill listening - this is one of its three doors (right-cmd · menu bar · here)'
-        : 'Quill off',
-    );
-  });
-
-  $('#demoBtn')?.addEventListener('click', () => runDemo());
-
-  // deep link
-  window.addEventListener('hashchange', () => {
-    const m = location.hash.match(/^#deal\/(.+)$/);
-    if (m) openDeal(m[1]);
-    else if (state.view === 'deal') {
-      state.view = 'board';
-      $('#dealview').style.display = 'none';
-      $('#boardview').style.display = 'block';
-      render();
-    }
-  });
+  $('#search').addEventListener('input', (event) => { state.query=event.target.value.trim(); render(); });
+  $('#accountBack').onclick = () => { state.accountId=null; render(); };
+  $('#addButton').onclick = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
+  $('#ownerButton').onclick = accountOwnerForm;
+  $('#agendaButton').onclick = startAgenda;
+  $('#agendaReviewed').onclick = () => advanceAgenda('reviewed');
+  $('#agendaSkip').onclick = () => advanceAgenda('skipped');
+  $('#agendaEnd').onclick = () => finishAgenda('completed');
+  $('#agendaClose').onclick = () => finishAgenda('abandoned');
+  $('#themeButton').onclick = () => { document.body.classList.toggle('night'); localStorage.setItem('dealroom-theme',document.body.classList.contains('night')?'night':'light'); };
+  window.addEventListener('online', () => { $('#offlineBanner').hidden=true; setSync(true); pollOnce(); });
+  window.addEventListener('offline', () => { $('#offlineBanner').hidden=false; setSync(false,'Offline'); });
+  document.addEventListener('keydown', (event) => { if (event.key==='/' && !event.target.matches('input,textarea,select')) { event.preventDefault(); $('#search').focus(); } });
 }
 
-// ── utils ────────────────────────────────────────────────────────────
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-function escapeAttr(s) {
-  return escapeHtml(s).replace(/'/g, '&#39;');
-}
-
-// ── boot ─────────────────────────────────────────────────────────────
 async function boot() {
+  if (localStorage.getItem('dealroom-theme') === 'night') document.body.classList.add('night');
   const params = new URLSearchParams(location.search);
-  // Production serves live by default; fixture stays the default for local
-  // files and dev servers, and either can be forced with ?mode=.
   const requested = params.get('mode');
-  const isProdHost = location.hostname === 'dealroom.doctorcre.com';
-  const mode =
-    requested === 'live' ? 'live'
-    : requested === 'fixture' ? 'fixture'
-    : isProdHost ? 'live'
-    : 'fixture';
-  state.client = await createClient(mode, {
-    baseUrl: params.get('api') || undefined,
-  });
-  state.selfActor = state.client.selfActor;
-  $('#modePill').textContent = state.client.mode === 'fixture' ? 'Fixture' : 'Live';
-  // The call simulation is a fixture-mode design demo; the live room has real
-  // calls (Joe's ruling: not on the production top bar).
-  if (state.client.mode !== 'fixture') $('#demoBtn')?.remove();
-
-  wireChrome();
-  await loadBoard();
-  startPolling();
-
-  const m = location.hash.match(/^#deal\/(.+)$/);
-  if (m) await openDeal(m[1]);
+  const mode = requested === 'fixture' ? 'fixture' : requested === 'live' ? 'live'
+    : location.hostname === 'dealroom.doctorcre.com' ? 'live' : 'fixture';
+  state.client = await createClient(mode, { baseUrl:params.get('api') || undefined,
+    selfActor:params.get('actor') || undefined });
+  wireEvents();
+  await loadHome();
+  state.pollTimer = setInterval(() => pollOnce(), POLL_MS);
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(()=>{});
 }
 
-boot().catch((err) => {
-  console.error(err);
-  document.body.insertAdjacentHTML(
-    'afterbegin',
-    `<div style="background:#C0392B;color:#fff;padding:12px 16px;font:600 13px var(--body)">Deal Room failed to start: ${escapeHtml(err.message)}</div>`,
-  );
+boot().catch((error) => {
+  console.error(error);
+  document.body.insertAdjacentHTML('afterbegin', `<div class="offline">Deal Room could not start: ${esc(error.message)}</div>`);
 });

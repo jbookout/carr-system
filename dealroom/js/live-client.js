@@ -15,7 +15,7 @@ import { uuidv4 } from './uuid.js';
  */
 export function createLiveClient(opts = {}) {
   const baseUrl = (opts.baseUrl || '').replace(/\/$/, '');
-  const selfActor = opts.selfActor || 'joe';
+  let selfActor = opts.selfActor || null;
   const fetchImpl = opts.fetchImpl || ((path, init) => fetch(`${baseUrl}${path}`, init));
   let rpcId = 0;
 
@@ -87,12 +87,16 @@ export function createLiveClient(opts = {}) {
     next_step: d.next_step || '',
   });
 
-  return {
+  const client = {
     mode: /** @type {const} */ ('live'),
-    selfActor,
+    get selfActor() { return selfActor; },
 
-    async getBoard() {
-      const board = await rpc('deal-room-board', {});
+    async getBoard(options = {}) {
+      const board = await rpc('deal-room-board', {
+        workspace: options.workspace || 'all',
+        ...(options.account_client_id ? { account_client_id: options.account_client_id } : {}),
+      });
+      selfActor = board.actor || selfActor;
       return { ...board, deals: (board.deals || []).map(dealToUi) };
     },
 
@@ -130,6 +134,12 @@ export function createLiveClient(opts = {}) {
         thread: uiThread,
         critical_dates: critical_dates.map((cd) => ({ ...cd, label: cd.note || cd.kind, date: cd.due_on })),
         history,
+        next_actions: page.next_actions || [],
+        activities: page.activities || [],
+        participants: page.participants || [],
+        premises: page.premises || [],
+        negotiation_rounds: page.negotiation_rounds || [],
+        documents: page.documents || [],
       };
     },
 
@@ -184,7 +194,18 @@ export function createLiveClient(opts = {}) {
       if (args.field === 'phase' && UI_TO_PHASE[args.value]) {
         args = { ...args, value: UI_TO_PHASE[args.value] };
       }
-      return write('patch-deal-field', args);
+      const res = await write('patch-deal-field', args);
+      if (res?.ok === false && res.conflict) {
+        const c = res.conflict;
+        return { status: 'conflict', conflict: {
+          conflict_id: c.id,
+          deal: c.deal_id,
+          field: c.field,
+          a: { actor: c.actor_a, value: c.value_a },
+          b: { actor: c.actor_b, value: c.value_b },
+        } };
+      }
+      return { status: 'ok', ...res };
     },
 
     async resolveConflict(args) {
@@ -199,12 +220,30 @@ export function createLiveClient(opts = {}) {
       return write('set-next-step', args);
     },
 
-    async createDeal() {
-      // new-deal requires an existing client and is humanOnly with richer
-      // fields than a jot carries; the jot lane's live path is a design
-      // decision still owed to Joe. Fixture keeps the jot demo; live refuses
-      // honestly instead of inventing a client record.
-      throw new Error('Jot lane is not wired live yet: a deal needs a client on the record. Use the record layer, or jot in fixture mode.');
+    async createDeal(args) {
+      const res = await write('new-deal', {
+        client: args.client,
+        name: args.name,
+        deal_type: args.deal_type || 'other',
+        phase: UI_TO_PHASE[args.phase] || args.phase || 'pending',
+        segment: args.segment || undefined,
+        city: args.market || undefined,
+        lane: args.lane || 'territory',
+        reason: 'Created in the Deal Room',
+        idempotency_key: args.idempotency_key,
+      });
+      await write('set-lead', { deal: res.deal_id, new_lead: selfActor });
+      return { status: 'ok', deal_id: res.deal_id };
     },
+
+    async startReview(args) { return write('start-deal-review', args); },
+    async reviewDeal(args) { return write('review-deal', args); },
+    async endReview(args) { return write('end-deal-review', args); },
+    async setMarketAgent(args) { return write('set-market-agent', args); },
+    async setNationalAccountOwner(args) { return write('set-national-account-owner', args); },
+    async createNationalAccount(args) { return write('create-national-account', args); },
+    async createNationalMarketDeal(args) { return write('create-national-market-deal', args); },
+    async revertDealField(args) { return write('revert-deal-field', args); },
   };
+  return client;
 }
