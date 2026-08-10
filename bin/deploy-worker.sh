@@ -18,7 +18,8 @@
 #
 # TWO GUARDS, because the cause and the class are different problems:
 #   PREFLIGHT catches the cause — refuse to ship anything that is not exactly
-#   origin/main, and refuse to ship a dirty mcp-server/ tree (this repo
+#   origin/main (or an explicitly approved immutable ancestor), and refuse to
+#   ship dirty mcp-server/ or dealroom/ trees (this repo
 #   regularly holds another live session's uncommitted work; see rule 308ef1de).
 #   COUNT CHECK catches the class — compare the verb count about to ship against
 #   the count recorded by the last successful deploy, and refuse on a DROP. A
@@ -35,6 +36,8 @@
 #   bin/deploy-worker.sh              # preflight, deploy, postflight
 #   bin/deploy-worker.sh --check      # preflight only, ship nothing
 #   bin/deploy-worker.sh --allow-shrink   # deliberate verb retirement
+#   bin/deploy-worker.sh --release-sha <full-40-char-sha>
+#       # an approved immutable release when main moves after approval
 #
 # Per rule a8c55a47, this is the same code the manual path and any automated
 # path both run. There is no second way to deploy.
@@ -47,12 +50,19 @@ WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
 
 CHECK_ONLY=0
 ALLOW_SHRINK=0
-for arg in "$@"; do
-  case "$arg" in
+PINNED_RELEASE=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --check)         CHECK_ONLY=1 ;;
     --allow-shrink)  ALLOW_SHRINK=1 ;;
-    *) echo "deploy-worker: unknown argument '$arg'" >&2; exit 64 ;;
+    --release-sha)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --release-sha needs a full commit SHA" >&2; exit 64; }
+      PINNED_RELEASE="$2"
+      shift
+      ;;
+    *) echo "deploy-worker: unknown argument '$1'" >&2; exit 64 ;;
   esac
+  shift
 done
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
@@ -67,7 +77,19 @@ HEAD_SHA="$(git rev-parse HEAD)"
 MAIN_SHA="$(git rev-parse origin/main)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 
-if [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
+if [ -n "$PINNED_RELEASE" ]; then
+  [ "${#PINNED_RELEASE}" -eq 40 ] \
+    || fail "--release-sha must be the full immutable 40-character commit SHA."
+  PINNED_SHA="$(git rev-parse --verify "${PINNED_RELEASE}^{commit}" 2>/dev/null)" \
+    || fail "approved release SHA does not resolve to a commit."
+  [ "$PINNED_RELEASE" = "$PINNED_SHA" ] \
+    || fail "--release-sha must be the exact canonical full SHA, not an abbreviation or tag."
+  [ "$HEAD_SHA" = "$PINNED_SHA" ] \
+    || fail "checkout HEAD does not equal the approved release SHA."
+  git merge-base --is-ancestor "$PINNED_SHA" origin/main \
+    || fail "approved release SHA is not an ancestor of fetched origin/main."
+  echo "  OK  pinned approved release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
+elif [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
   BEHIND="$(git rev-list --count "HEAD..origin/main")"
   AHEAD="$(git rev-list --count "origin/main..HEAD")"
   fail "this checkout is not origin/main.
@@ -80,10 +102,11 @@ if [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
   that exists on main but not here is REMOVED from production silently.
   That is loop #276, exactly. Deploy from a clean main checkout or a worktree:
       git worktree add /tmp/deploy-main main"
+else
+  echo "  OK  HEAD is origin/main ($MAIN_SHA)"
 fi
-echo "  OK  HEAD is origin/main ($MAIN_SHA)"
 
-# ---------- preflight 2: nothing uncommitted in the worker ----------
+# ---------- preflight 2: nothing uncommitted in the Worker or its assets ----------
 # node_modules is excluded BY NAME, not left to .gitignore. mcp-server/.gitignore
 # ignores `node_modules/` with a trailing slash, which matches a directory and
 # NOT a symlink — and symlinking node_modules from a primary checkout is exactly
@@ -95,18 +118,18 @@ echo "  OK  HEAD is origin/main ($MAIN_SHA)"
 # until the file is committed. It is a guard artifact and never ships to the
 # Worker. The postflight still tells you to commit it, because an uncommitted
 # baseline protects only this checkout.
-DIRTY_LIST="$(git status --porcelain -- mcp-server/ \
+DIRTY_LIST="$(git status --porcelain -- mcp-server/ dealroom/ \
   | grep -v 'mcp-server/node_modules' \
   | grep -v 'mcp-server/.last-deployed-verb-count' || true)"
 DIRTY="$(printf '%s' "$DIRTY_LIST" | grep -c . || true)"
 if [ "$DIRTY" != "0" ]; then
   printf '%s\n' "$DIRTY_LIST" >&2
-  fail "mcp-server/ has $DIRTY uncommitted change(s) above.
-  Shipping them would put code in production that is in no commit, and this
+  fail "mcp-server/ or dealroom/ has $DIRTY uncommitted change(s) above.
+  Shipping them would put code or assets in production that are in no commit, and this
   repo regularly holds ANOTHER live session's work (rule 308ef1de). Commit
   them deliberately, or deploy from a clean worktree."
 fi
-echo "  OK  mcp-server/ is clean"
+echo "  OK  mcp-server/ and dealroom/ are clean"
 
 # ---------- preflight 3: verb count did not shrink ----------
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."

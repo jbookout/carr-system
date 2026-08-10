@@ -116,7 +116,7 @@ BASH_CASES = [
     ("sh-ordinary",       f'echo x >> {REPO}/README.md', ALLOW),
 
     # a stronger rule must still win — this is destructive, not a gate tweak
-    ("sh-destructive",    f'rm -rf {REPO}/hooks', DENY),
+    ("sh-destructive",    f'rm -rf {HOME}/Documents/carr-gate-selftest-target', DENY),
 ]
 
 

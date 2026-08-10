@@ -24,7 +24,18 @@ export async function createFixtureClient(opts = {}) {
   const partnerActor = seed.actors?.partner || 'dell';
 
   /** @type {Map<string, any>} */
-  const deals = new Map(seed.deals.map((d) => [d.id, { ...d }]));
+  const deals = new Map(seed.deals.map((d) => [d.id, {
+    operating_state: 'active', parking_reason: null, parking_note: null,
+    parked_at: null, parked_by: null, ...d,
+  }]));
+  // Demonstrate that Salesforce-shaped records are not automatically active
+  // transactions. These are fixture-only examples; production is never
+  // changed from a surname match.
+  for (const name of ['Collin Myrick', 'Drew Knight', 'Terence Cooper']) {
+    const deal = [...deals.values()].find((item) => item.name === name);
+    if (deal) Object.assign(deal, { operating_state:'parked', parking_reason:'other',
+      parking_note:'Reason not yet classified', parked_at:'2026-08-10T12:00:00Z', parked_by:'joe' });
+  }
   // Keep the local demo representative of the production information model:
   // one national-account portfolio, many market deals, no duplicate deal rows.
   const fixtureAccountId = 'acct-musicologie';
@@ -195,7 +206,9 @@ export async function createFixtureClient(opts = {}) {
     }
 
     const mapField = field === 'next_step' ? 'next_step' : field;
-    const old = d[mapField];
+    const old = field === 'operating_state'
+      ? { state:d.operating_state, reason:d.parking_reason, note:d.parking_note }
+      : d[mapField];
     if (field === 'attention') d.attention = !!value;
     else if (field === 'owner') d.owner = value || null;
     else if (field === 'phase') {
@@ -203,9 +216,19 @@ export async function createFixtureClient(opts = {}) {
       d.phase = value;
     } else if (field === 'next_date') d.next_date = value || null;
     else if (field === 'next_step') d.next_step = value || '';
+    else if (field === 'operating_state') {
+      if (!value || !['active', 'parked'].includes(value.state)) throw new Error('bad operating state');
+      if (value.state === 'parked' && !['prospect_never_active', 'client_paused', 'other'].includes(value.reason))
+        throw new Error('parking reason required');
+      d.operating_state = value.state;
+      d.parking_reason = value.state === 'parked' ? value.reason : null;
+      d.parking_note = value.state === 'parked' ? String(value.note || '').trim() || null : null;
+      d.parked_at = value.state === 'parked' ? nowIso() : null;
+      d.parked_by = value.state === 'parked' ? actor : null;
+    }
     else throw new Error(`unknown field ${field}`);
 
-    d.last_touch = nowIso().slice(0, 10);
+    if (field !== 'operating_state') d.last_touch = nowIso().slice(0, 10);
     const e = pushEvent({
       actor,
       verb: verb || 'patch-deal-field',
@@ -224,13 +247,15 @@ export async function createFixtureClient(opts = {}) {
 
     async getBoard() {
       const national = [...deals.values()].filter((d) => d.account_client_id === fixtureAccountId);
+      const activeNational = national.filter((d) => d.operating_state === 'active');
       return {
         actor: selfActor,
         deals: [...deals.values()].map((d) => ({ ...d })),
         accounts: [{ account_client_id: fixtureAccountId, account_client_ref: 'C-161',
-          account_name: 'Musicologie', account_owner: fixtureAccountOwner, open_deals: national.length,
-          attention_deals: national.filter((d) => d.attention).length,
-          overdue_deals: 0, stale_deals: 2, last_review_at: lastCallAt }],
+          account_name: 'Musicologie', account_owner: fixtureAccountOwner, open_deals: activeNational.length,
+          attention_deals: activeNational.filter((d) => d.attention).length,
+          overdue_deals: 0, stale_deals: 2,
+          parked_deals: national.length - activeNational.length, last_review_at: lastCallAt }],
         open_session: [...reviewSessions.values()].find((s) => s.status === 'open') || null,
         as_of: asOf,
         last_call_at: lastCallAt,
@@ -302,10 +327,18 @@ export async function createFixtureClient(opts = {}) {
         const d = getDealOrThrow(c.deal);
         const chosen = winner === 'a' ? c.a.value : c.pending_value;
         const actor = winner === 'a' ? selfActor : c.pending_actor;
-        const old = d[c.field];
+        const old = c.field === 'operating_state'
+          ? { state:d.operating_state, reason:d.parking_reason, note:d.parking_note }
+          : d[c.field];
         if (c.field === 'attention') d.attention = !!chosen;
-        else d[c.field] = chosen;
-        d.last_touch = nowIso().slice(0, 10);
+        else if (c.field === 'operating_state') {
+          d.operating_state = chosen.state;
+          d.parking_reason = chosen.state === 'parked' ? chosen.reason : null;
+          d.parking_note = chosen.state === 'parked' ? chosen.note || null : null;
+          d.parked_at = chosen.state === 'parked' ? nowIso() : null;
+          d.parked_by = chosen.state === 'parked' ? actor : null;
+        } else d[c.field] = chosen;
+        if (c.field !== 'operating_state') d.last_touch = nowIso().slice(0, 10);
         const e = pushEvent({
           actor,
           verb: 'resolve-conflict',
@@ -488,7 +521,15 @@ export async function createFixtureClient(opts = {}) {
       return withIdem(idempotency_key, () => {
         const event = events.find((e) => e.id === event_id);
         if (!event) throw new Error('event not found');
-        const d = getDealOrThrow(event.subject_id); d[event.field] = event.old_value;
+        const d = getDealOrThrow(event.subject_id);
+        if (event.field === 'operating_state') {
+          const prior = event.old_value;
+          d.operating_state = prior.state;
+          d.parking_reason = prior.reason || null;
+          d.parking_note = prior.note || null;
+          d.parked_at = prior.state === 'parked' ? nowIso() : null;
+          d.parked_by = prior.state === 'parked' ? selfActor : null;
+        } else d[event.field] = event.old_value;
         return { ok: true, deal_id: d.id, field: event.field, new_value: event.old_value };
       });
     },

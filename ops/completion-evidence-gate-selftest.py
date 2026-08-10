@@ -8,7 +8,7 @@ import os
 import subprocess
 import tempfile
 
-REPO = os.path.expanduser("~/carr-system")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location(
     "completion_evidence", os.path.join(REPO, "hooks", "completion-evidence-gate.py")
 )

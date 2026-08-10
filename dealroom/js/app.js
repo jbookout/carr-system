@@ -6,7 +6,7 @@ const CALL_MODE_URL = 'http://127.0.0.1:4682';
 const CALL_MODE_HEADER = { 'X-CARR-Call-Mode': 'deal-room-v1' };
 const state = {
   client: null, selfActor: null, deals: new Map(), accounts: [], cursor: null,
-  workspace: 'team', accountId: null, filter: 'all', query: '',
+  workspace: 'team', accountId: null, filter: 'active', query: '',
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null, undoEventId: null,
   callMode: { state: 'idle' }, callModeTimer: null,
@@ -49,7 +49,16 @@ function isStale(deal) {
   return (Date.now() - new Date(`${deal.last_touch}T12:00:00`).getTime()) / 864e5 >= 14;
 }
 
+function parkingReasonLabel(reason) {
+  return ({
+    prospect_never_active: 'Prospect never became active work',
+    client_paused: 'Client paused activity',
+    other: 'Not active right now',
+  })[reason] || 'Parked';
+}
+
 function reasonFor(deal) {
+  if (deal.operating_state === 'parked') return parkingReasonLabel(deal.parking_reason);
   const days = daysFromNow(deal.next_date);
   if (deal.attention) return 'Flagged for attention';
   if (days !== null && days < 0) return `Next date is ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} overdue`;
@@ -112,7 +121,13 @@ async function pollOnce(initial = false) {
       if (event.field === 'owner') deal.owner = event.new_value;
       if (event.field === 'next_date') deal.next_date = event.new_value;
       if (event.field === 'next_step') deal.next_step = event.new_value;
-      if (!initial && event.actor === state.selfActor && ['phase','owner','attention','next_date'].includes(event.field)) {
+      if (event.field === 'operating_state') {
+        const value = event.new_value || {};
+        deal.operating_state = value.state || 'active';
+        deal.parking_reason = value.reason || null;
+        deal.parking_note = value.note || null;
+      }
+      if (!initial && event.actor === state.selfActor && ['phase','owner','attention','next_date','operating_state'].includes(event.field)) {
         showToast(`${deal.name} updated`, event.id);
       } else if (!initial && event.actor !== state.selfActor && event.field) {
         showToast(`${actorName(event.actor)} updated ${deal.name}`);
@@ -148,6 +163,8 @@ function workspaceDeals() {
   } else {
     deals = [];
   }
+  if (state.filter === 'parked') deals = deals.filter((deal) => deal.operating_state === 'parked');
+  else deals = deals.filter((deal) => (deal.operating_state || 'active') === 'active');
   if (state.filter === 'mine') deals = deals.filter((deal) => deal.owner === state.selfActor);
   if (state.filter === 'attention') deals = deals.filter((deal) => deal.attention || (daysFromNow(deal.next_date) ?? 0) < 0);
   if (state.filter === 'stale') deals = deals.filter(isStale);
@@ -164,6 +181,7 @@ function render() {
 
 function renderChrome() {
   $$('.workspace').forEach((button) => button.classList.toggle('on', button.dataset.workspace === state.workspace));
+  $$('.filter').forEach((button) => button.classList.toggle('on', button.dataset.filter === state.filter));
   const selected = account();
   const isAccountHome = state.workspace === 'national_account' && !state.accountId && !state.query;
   $('#accountBack').hidden = !state.accountId;
@@ -171,11 +189,11 @@ function renderChrome() {
     : state.workspace === 'team' ? 'Shared territory pipeline' : selected ? 'National account agenda' : 'Partner-owned portfolios';
   $('#workspaceTitle').textContent = state.query ? 'Search results' : state.workspace === 'team' ? 'Team Book'
     : selected?.account_name || 'National Accounts';
-  $('#workspaceSubtitle').textContent = state.query ? 'Searching territory and every national account.'
-    : state.workspace === 'team' ? 'The live agenda Joe and Dell work together.'
+  $('#workspaceSubtitle').textContent = state.query ? 'Searching work records across the territory and every national account.'
+    : state.workspace === 'team' ? 'The active work Joe and Dell are moving now.'
     : selected ? `${actorName(selected.account_owner)} owns the account; each market deal keeps its assigned agent and owner.`
     : 'One account can hold dozens of market-level transactions without crowding the territory agenda.';
-  $('#addButton').textContent = state.workspace === 'national_account' ? (selected ? 'Add market deal' : 'Add national account') : 'Add deal';
+  $('#addButton').textContent = state.workspace === 'national_account' ? (selected ? 'Add market deal' : 'Add national account') : 'Add work record';
   $('#ownerButton').hidden = !selected;
   $('#agendaButton').hidden = isAccountHome;
   $('#agentHeading').textContent = state.workspace === 'national_account' ? 'Market agent' : 'Owner';
@@ -189,10 +207,10 @@ function renderAccounts() {
     <button type="button" class="account-card" data-account="${esc(item.account_client_id)}">
       <header><div><p class="eyebrow">${esc(item.account_client_ref || 'National account')}</p><h2>${esc(item.account_name)}</h2></div>
         <span class="account-owner" title="Owned by ${esc(actorName(item.account_owner))}">${item.account_owner === 'dell' ? 'D' : item.account_owner === 'joe' ? 'J' : '?'}</span></header>
-      <div class="account-metrics"><div><b>${Number(item.open_deals || 0)}</b><span>Open deals</span></div>
+      <div class="account-metrics"><div><b>${Number(item.open_deals || 0)}</b><span>Active work</span></div>
         <div><b>${Number(item.attention_deals || 0)}</b><span>Attention</span></div>
         <div><b>${Number(item.stale_deals || 0)}</b><span>Gone quiet</span></div></div>
-      <footer>Last account review: ${esc(relative(item.last_review_at))} · Open agenda →</footer>
+      <footer>${Number(item.parked_deals || 0)} parked · Last account review: ${esc(relative(item.last_review_at))} · Open agenda →</footer>
     </button>`).join('') : '<div class="empty">No national accounts yet. Add the first portfolio when it is won.</div>';
 }
 
@@ -204,21 +222,31 @@ function renderBoardOnly() {
   const rows = $('#rows');
   rows.innerHTML = deals.map(rowHtml).join('');
   $('#emptyState').hidden = deals.length > 0;
-  $('#emptyState').textContent = state.query ? 'No deal matches this search.' : 'No deals match this filter.';
+  $('#emptyState').textContent = state.query ? 'No work record matches this search.'
+    : state.filter === 'parked' ? 'No parked work records.' : 'No active work matches this filter.';
   applyPresence();
 }
 
 function renderStats(deals) {
+  if (state.filter === 'parked') {
+    $('#stats').innerHTML = `
+      <div class="stat"><strong>${deals.length}</strong><span>Parked records</span></div>
+      <div class="stat"><strong>${deals.filter((deal) => deal.parking_reason === 'prospect_never_active').length}</strong><span>Never activated</span></div>
+      <div class="stat"><strong>${deals.filter((deal) => deal.parking_reason === 'client_paused').length}</strong><span>Client paused</span></div>
+      <div class="stat"><strong>${deals.filter((deal) => deal.parking_reason === 'other').length}</strong><span>Other reason</span></div>`;
+    return;
+  }
   const overdue = deals.filter((deal) => (daysFromNow(deal.next_date) ?? 0) < 0).length;
   const clarity = deals.filter((deal) => !deal.next_step || isStale(deal)).length;
   $('#stats').innerHTML = `
-    <div class="stat"><strong>${deals.length}</strong><span>Open deals</span></div>
+    <div class="stat"><strong>${deals.length}</strong><span>Active work</span></div>
     <div class="stat"><strong>${deals.filter((deal) => deal.phase === 'Closing').length}</strong><span>At closing</span></div>
     <div class="stat risk"><strong>${overdue}</strong><span>Overdue dates</span></div>
     <div class="stat"><strong>${clarity}</strong><span>Need clarity</span></div>`;
 }
 
 function renderFocus(deals) {
+  if (state.filter === 'parked') { $('#focusStrip').innerHTML = ''; return; }
   const items = deals.filter((deal) => priority(deal) > 0).slice(0, 4);
   $('#focusStrip').innerHTML = items.length ? '<span class="focus-label">Focus first</span>' + items.map((deal) => `
     <button type="button" class="focus-item" data-open-deal="${esc(deal.id)}"><b>${esc(deal.name)}</b><span>${esc(reasonFor(deal))}</span></button>`).join('') : '';
@@ -230,21 +258,23 @@ function phaseOptions(current) {
 
 function rowHtml(deal) {
   const days = daysFromNow(deal.next_date);
-  const classes = [deal.attention ? 'attention' : '', days !== null && days < 0 ? 'overdue' : ''].join(' ');
+  const parked = deal.operating_state === 'parked';
+  const classes = [parked ? 'parked' : '', deal.attention ? 'attention' : '', days !== null && days < 0 ? 'overdue' : ''].join(' ');
   const partnerPresence = state.presence.find((lease) => lease.deal_id === deal.id && lease.actor !== state.selfActor && new Date(lease.expires_at) > new Date());
   const meta = [deal.market, deal.type, state.query && deal.account_name ? deal.account_name : null,
+    parked ? parkingReasonLabel(deal.parking_reason) : null,
     partnerPresence ? `${actorName(partnerPresence.actor)} is editing` : null].filter(Boolean);
   return `<tr class="${classes}" data-deal-id="${esc(deal.id)}">
-    <td><div class="deal-cell"><button type="button" class="attention-button" data-attention="${esc(deal.id)}" aria-pressed="${Boolean(deal.attention)}" aria-label="${deal.attention ? 'Clear attention flag' : 'Flag for attention'} on ${esc(deal.name)}">${deal.attention ? '⚠' : (PHICON[deal.phase] || '○')}</button>
+    <td><div class="deal-cell"><button type="button" class="attention-button" data-attention="${esc(deal.id)}" aria-pressed="${Boolean(deal.attention)}" aria-label="${deal.attention ? 'Clear attention flag' : 'Flag for attention'} on ${esc(deal.name)}"${parked ? ' disabled' : ''}>${deal.attention ? '⚠' : (PHICON[deal.phase] || '○')}</button>
       <div><button type="button" class="deal-link" data-open-deal="${esc(deal.id)}">${esc(deal.name)}</button>
       <div class="deal-meta">${meta.map((item) => `<span>${esc(item)}</span>`).join('<span>·</span>')}</div></div></div></td>
-    <td><select class="cell-select" data-phase="${esc(deal.id)}" aria-label="Phase for ${esc(deal.name)}">${phaseOptions(deal.phase)}</select></td>
-    <td><button type="button" class="step-button ${deal.next_step ? '' : 'empty'}" data-next-step="${esc(deal.id)}">${esc(deal.next_step || 'Set the next step…')}</button></td>
+    <td><select class="cell-select" data-phase="${esc(deal.id)}" aria-label="Phase for ${esc(deal.name)}"${parked ? ' disabled' : ''}>${phaseOptions(deal.phase)}</select></td>
+    <td><button type="button" class="step-button ${deal.next_step ? '' : 'empty'}" data-next-step="${esc(deal.id)}"${parked ? ' disabled' : ''}>${esc(deal.next_step || 'Set the next step…')}</button></td>
     <td><span class="due ${days !== null && days < 0 ? 'over' : days !== null && days <= 3 ? 'soon' : ''}">${esc(dateLabel(deal.next_date))}</span></td>
     <td>${deal.workspace_kind === 'national_account'
-      ? `<button type="button" class="agent-button" data-market-agent="${esc(deal.id)}">${esc(deal.market_agent || 'Assign agent…')}</button>`
-      : `<select class="cell-select" data-owner="${esc(deal.id)}" aria-label="Owner for ${esc(deal.name)}"><option value="">Unassigned</option><option value="joe"${deal.owner === 'joe' ? ' selected' : ''}>Joe</option><option value="dell"${deal.owner === 'dell' ? ' selected' : ''}>Dell</option></select>`}</td>
-    <td class="row-actions"><button type="button" class="row-menu" data-open-deal="${esc(deal.id)}" aria-label="Open ${esc(deal.name)} details">•••</button></td>
+      ? `<button type="button" class="agent-button" data-market-agent="${esc(deal.id)}"${parked ? ' disabled' : ''}>${esc(deal.market_agent || 'Assign agent…')}</button>`
+      : `<select class="cell-select" data-owner="${esc(deal.id)}" aria-label="Owner for ${esc(deal.name)}"${parked ? ' disabled' : ''}><option value="">Unassigned</option><option value="joe"${deal.owner === 'joe' ? ' selected' : ''}>Joe</option><option value="dell"${deal.owner === 'dell' ? ' selected' : ''}>Dell</option></select>`}</td>
+    <td class="row-actions"><button type="button" class="park-button" data-operating-state="${parked ? 'active' : 'parked'}" data-deal="${esc(deal.id)}">${parked ? 'Restore' : 'Park'}</button><button type="button" class="row-menu" data-open-deal="${esc(deal.id)}" aria-label="Open ${esc(deal.name)} details">•••</button></td>
   </tr>`;
 }
 
@@ -404,6 +434,26 @@ async function patchField(dealId, field, value) {
   showToast(`${deal?.name || 'Deal'} updated`);
 }
 
+async function patchOperatingState(dealId, value) {
+  const result = await state.client.patchDealField({ deal:dealId, field:'operating_state', value,
+    base_event_id:state.fieldBase.get(`${dealId}|operating_state`) || null, idempotency_key:uuidv4() });
+  if (result.status === 'conflict') return showConflict(result.conflict);
+  const deal = state.deals.get(dealId);
+  if (deal) {
+    deal.operating_state = value.state;
+    deal.parking_reason = value.state === 'parked' ? value.reason : null;
+    deal.parking_note = value.state === 'parked' ? value.note || null : null;
+    deal.parked_at = value.state === 'parked' ? new Date().toISOString() : null;
+    deal.parked_by = value.state === 'parked' ? state.selfActor : null;
+  }
+  state.changed.add(dealId);
+  if ($('#dealDialog').open) $('#dealDialog').close();
+  render();
+  showToast(value.state === 'parked'
+    ? `${deal?.name || 'Work record'} parked`
+    : `${deal?.name || 'Work record'} restored to active work`);
+}
+
 function openForm({ eyebrow='Deal Room', title, submit='Save', body, onSubmit }) {
   const dialog = $('#formDialog');
   $('#dialogEyebrow').textContent = eyebrow;
@@ -442,6 +492,21 @@ function nextStepForm(dealId) {
     } });
 }
 
+function parkDealForm(dealId) {
+  const deal = state.deals.get(dealId);
+  openForm({ eyebrow:'Active work', title:`Park — ${deal.name}`, submit:'Park record', body:`
+    <p class="form-guidance">Parking removes this record from active counts, focus lists, and weekly agendas. Its Salesforce link, phase, history, and participants stay intact.</p>
+    <div class="field"><label for="parkingReason">Why is this not active work?</label><select id="parkingReason" name="reason" required>
+      <option value="prospect_never_active">Prospect never became active work</option>
+      <option value="client_paused">Client paused activity</option>
+      <option value="other">Other / not active right now</option>
+    </select></div>
+    <div class="field"><label for="parkingNote">Context (optional)</label><textarea id="parkingNote" name="note" maxlength="500" placeholder="What would help when this record becomes active again?"></textarea></div>`,
+    onSubmit:async (data) => patchOperatingState(dealId, {
+      state:'parked', reason:String(data.get('reason')), note:String(data.get('note') || '').trim() || null,
+    }) });
+}
+
 function marketAgentForm(dealId) {
   const deal = state.deals.get(dealId);
   openForm({ title:`Market assignment — ${deal.name}`, submit:'Save assignment', body:`
@@ -456,16 +521,16 @@ function marketAgentForm(dealId) {
 }
 
 function addTeamDealForm() {
-  openForm({ title:'Add territory deal', submit:'Create deal', body:`
-    <div class="field"><label for="clientRef">Existing client</label><input id="clientRef" name="client" required placeholder="C-127 or exact client name"><small>A deal always belongs to a client. This prevents free-floating or duplicate records.</small></div>
-    <div class="field"><label for="dealName">Deal name</label><input id="dealName" name="name" required></div>
+  openForm({ title:'Add work record', submit:'Create work record', body:`
+    <div class="field"><label for="clientRef">Existing client</label><input id="clientRef" name="client" required placeholder="C-127 or exact client name"><small>A work record always belongs to a client. This prevents free-floating or duplicate records.</small></div>
+    <div class="field"><label for="dealName">Record name</label><input id="dealName" name="name" required></div>
     <div class="field-row"><div class="field"><label for="dealType">Type</label><select id="dealType" name="deal_type"><option value="startup">Startup</option><option value="relocation">Relocation</option><option value="additional_office">Additional office</option><option value="renewal">Renewal</option><option value="expansion">Expansion</option><option value="purchase">Purchase</option><option value="other">Other</option></select></div>
     <div class="field"><label for="dealPhase">Phase</label><select id="dealPhase" name="phase">${phaseOptions('On Deck')}</select></div></div>
     <div class="field-row"><div class="field"><label for="dealMarket">Market</label><input id="dealMarket" name="market"></div><div class="field"><label for="dealSegment">Healthcare vertical</label><input id="dealSegment" name="segment" placeholder="Dental, Vet, DPC…"></div></div>`,
     onSubmit:async (data) => {
       const args = Object.fromEntries(data.entries());
       await state.client.createDeal({ ...args, lane:'territory', idempotency_key:uuidv4() });
-      await loadHome(); showToast('Deal created in the Team Book');
+      await loadHome(); showToast('Work record created in the Team Book');
     } });
 }
 
@@ -498,9 +563,12 @@ function accountOwnerForm() {
 }
 
 function showConflict(conflict) {
+  const display = (value) => value && typeof value === 'object'
+    ? value.state === 'parked' ? `Parked — ${parkingReasonLabel(value.reason)}` : 'Active work'
+    : value ?? '(empty)';
   openForm({ eyebrow:'Two edits crossed', title:`Choose the value for ${conflict.field}`, submit:'Keep selected value', body:`
-    <div class="field"><label><input type="radio" name="winner" value="a" checked> ${esc(actorName(conflict.a.actor))}: ${esc(conflict.a.value ?? '(empty)')}</label></div>
-    <div class="field"><label><input type="radio" name="winner" value="b"> ${esc(actorName(conflict.b.actor))}: ${esc(conflict.b.value ?? '(empty)')}</label></div>`,
+    <div class="field"><label><input type="radio" name="winner" value="a" checked> ${esc(actorName(conflict.a.actor))}: ${esc(display(conflict.a.value))}</label></div>
+    <div class="field"><label><input type="radio" name="winner" value="b"> ${esc(actorName(conflict.b.actor))}: ${esc(display(conflict.b.value))}</label></div>`,
     onSubmit:async (data) => { await state.client.resolveConflict({ conflict_id:conflict.conflict_id, winner:data.get('winner'), idempotency_key:uuidv4() }); await loadHome(); showToast('Conflict resolved with both values preserved in history'); } });
 }
 
@@ -511,8 +579,9 @@ function detailRows(items, renderer, empty='Nothing captured yet.') {
 async function openDeal(dealId) {
   const detail = await state.client.getDeal(dealId);
   const deal = detail.deal;
-  const html = `<header><div><p class="eyebrow">${esc(deal.account_name || deal.client_name || 'Deal')}</p><h2>${esc(deal.name)}</h2><p class="subhead">${esc(deal.phase)} · ${esc(deal.market || 'Market not captured')}</p></div><button type="button" class="icon-button" data-close-deal aria-label="Close details">×</button></header>
-    <div class="deal-content"><div class="deal-summary">
+  const parked = deal.operating_state === 'parked';
+  const html = `<header><div><p class="eyebrow">${esc(deal.account_name || deal.client_name || 'Work record')}</p><h2>${esc(deal.name)}</h2><p class="subhead">${parked ? `${esc(parkingReasonLabel(deal.parking_reason))} · ` : ''}${esc(deal.phase)} · ${esc(deal.market || 'Market not captured')}</p></div><div class="detail-header-actions"><button type="button" class="park-button" data-operating-state="${parked ? 'active' : 'parked'}" data-deal="${esc(deal.id)}">${parked ? 'Restore to active' : 'Park'}</button><button type="button" class="icon-button" data-close-deal aria-label="Close details">×</button></div></header>
+    <div class="deal-content">${parked ? `<div class="parking-banner"><b>${esc(parkingReasonLabel(deal.parking_reason))}</b>${deal.parking_note ? `<span>${esc(deal.parking_note)}</span>` : ''}<small>This record is outside active counts and weekly agendas.</small></div>` : ''}<div class="deal-summary">
       <div class="detail-card"><label>Next step</label><p>${esc(deal.next_step || 'Not set')}</p></div>
       <div class="detail-card"><label>Next date</label><p>${esc(dateLabel(deal.next_date))}</p></div>
       <div class="detail-card"><label>${deal.workspace_kind === 'national_account' ? 'Market agent' : 'Owner'}</label><p>${esc(deal.market_agent || actorName(deal.owner))}</p></div>
@@ -532,12 +601,16 @@ async function openDeal(dealId) {
 }
 
 function agendaDeals() {
-  return workspaceDeals().sort((a,b) => priority(b) - priority(a));
+  let deals = [...state.deals.values()].filter((deal) => (deal.operating_state || 'active') === 'active');
+  if (state.workspace === 'team') deals = deals.filter((deal) => deal.workspace_kind === 'team');
+  else if (state.accountId) deals = deals.filter((deal) => deal.account_client_id === state.accountId);
+  else deals = [];
+  return deals.sort((a,b) => priority(b) - priority(a) || a.name.localeCompare(b.name));
 }
 
 async function startAgenda() {
   const deals = agendaDeals();
-  if (!deals.length) return showToast('No deals in this agenda');
+  if (!deals.length) return showToast('No active work in this agenda');
   const result = await state.client.startReview({ workspace_kind:state.workspace,
     ...(state.accountId ? { account_client_id:state.accountId } : {}), idempotency_key:uuidv4() });
   state.review = { sessionId:result.session_id, deals, index:0, reviewed:0, skipped:0 };
@@ -560,7 +633,7 @@ function renderAgenda() {
     <div class="agenda-fact"><label>Next step</label><p>${esc(deal.next_step || 'Not set')}</p></div>
     <div class="agenda-fact"><label>Next date</label><p>${esc(dateLabel(deal.next_date))}</p></div>
     ${deal.workspace_kind === 'national_account' ? `<div class="agenda-fact"><label>Assigned market agent</label><p>${esc(deal.market_agent || 'Unassigned')}</p></div>` : ''}
-    <button type="button" class="secondary" data-open-deal="${esc(deal.id)}">Open full deal</button>
+    <button type="button" class="secondary" data-open-deal="${esc(deal.id)}">Open full record</button>
     <button type="button" class="secondary" data-agenda-step="${esc(deal.id)}">Set next step</button></article>`;
 }
 
@@ -581,15 +654,22 @@ async function finishAgenda(status = 'completed') {
   state.review = null;
   $('#agendaPanel').hidden = true;
   await loadHome();
-  showToast(status === 'completed' ? `Agenda finished · ${result.reviewed ?? review.reviewed} deals reviewed` : 'Agenda closed without changing the review clock');
+  showToast(status === 'completed' ? `Agenda finished · ${result.reviewed ?? review.reviewed} records reviewed` : 'Agenda closed without changing the review clock');
 }
 
 function wireEvents() {
   document.addEventListener('click', async (event) => {
     const workspace = event.target.closest('[data-workspace]');
-    if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'all'; state.query = ''; $('#search').value = ''; render(); return; }
+    if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.query = ''; $('#search').value = ''; render(); return; }
     const accountButton = event.target.closest('[data-account]');
     if (accountButton) { state.workspace = 'national_account'; state.accountId = accountButton.dataset.account; render(); return; }
+    const operating = event.target.closest('[data-operating-state]');
+    if (operating) {
+      const dealId = operating.dataset.deal;
+      if (operating.dataset.operatingState === 'active') await patchOperatingState(dealId, { state:'active' });
+      else { if ($('#dealDialog').open) $('#dealDialog').close(); parkDealForm(dealId); }
+      return;
+    }
     const open = event.target.closest('[data-open-deal]'); if (open) { await openDeal(open.dataset.openDeal); return; }
     const attention = event.target.closest('[data-attention]'); if (attention) { const deal=state.deals.get(attention.dataset.attention); await patchField(deal.id,'attention',!deal.attention); return; }
     const step = event.target.closest('[data-next-step],[data-agenda-step]'); if (step) { nextStepForm(step.dataset.nextStep || step.dataset.agendaStep); return; }

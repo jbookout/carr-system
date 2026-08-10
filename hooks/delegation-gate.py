@@ -28,7 +28,7 @@ import sys
 import tempfile
 
 
-REPO = os.path.expanduser("~/carr-system")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VAULT_MARKERS = ("/CARR AI", "/My Drive/CARR AI")
 LOG = os.path.join(REPO, "out", "delegation-gate.jsonl")
 STATE = os.environ.get(

@@ -9,7 +9,7 @@ import sys
 from glob import glob
 from collections import Counter
 
-REPO = os.path.expanduser("~/carr-system")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VAULT = os.environ.get("CARR_VAULT", os.path.expanduser("~/My Drive/CARR AI"))
 MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 SOURCES = {

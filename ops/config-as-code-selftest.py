@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 
-REPO = os.path.expanduser("~/carr-system")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location(
     "config_as_code", os.path.join(REPO, "ops", "config-as-code.py")
 )

@@ -15,7 +15,7 @@ import re
 import sys
 from datetime import datetime, timezone
 
-REPO = os.path.expanduser("~/carr-system")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
 CLAIM = re.compile(r"\b(done|complete(?:d)?|verified|shipped|deployed|delivered|sent|notified|handed\s+off)\b", re.I)
 # A terminal claim may disclose why fresh verification is unavailable, but a

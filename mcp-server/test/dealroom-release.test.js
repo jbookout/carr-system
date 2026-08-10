@@ -73,7 +73,7 @@ test("national-account migration keeps the 0061 hierarchy and explicitly assigns
     "workspace migration must never reparent or duplicate an existing deal");
 });
 
-test("UI exposes two workspaces, explicit controls, mobile cards, and no pretend microphone", async () => {
+test("UI exposes two workspaces, explicit controls, mobile cards, and Call Mode", async () => {
   const [html, app, css, sw] = await Promise.all([
     file("dealroom/index.html"), file("dealroom/js/app.js"),
     file("dealroom/css/app.css"), file("dealroom/public-shell/sw.js"),
@@ -81,14 +81,35 @@ test("UI exposes two workspaces, explicit controls, mobile cards, and no pretend
   assert.match(html, /data-workspace="team"/);
   assert.match(html, /data-workspace="national_account"/);
   assert.match(html, /Start agenda/);
-  assert.match(html, /Search every deal/);
+  assert.match(html, /Search work records/);
   assert.match(app, /new Date\(new Date\(\)\.toDateString\(\)\)/);
   assert.doesNotMatch(app, /new Date\('2026-/);
-  assert.doesNotMatch(html + app, /Quill listening|id="mic"/i);
+  assert.match(html + app, /Call Mode/);
   assert.match(app, /<select class="cell-select" data-phase/);
   assert.match(app, /<select class="cell-select" data-owner/);
   assert.match(css, /@media\(max-width:680px\)/);
   assert.match(css, /min-height:44px/);
   assert.match(sw, /dealroom-shell-v3/);
   assert.match(sw, /Deliberately no Cache API fallback/);
+});
+
+test("parking separates Salesforce record existence from active work", async () => {
+  const [sql, hardening, html, app, tools] = await Promise.all([
+    file("migrations/0092_deal_operating_state.sql"),
+    file("migrations/0093_deal_parking_shape_hardening.sql"), file("dealroom/index.html"),
+    file("dealroom/js/app.js"), file("mcp-server/src/tools.js"),
+  ]);
+  assert.match(sql, /operating_state text not null default 'active'/);
+  assert.match(sql, /prospect_never_active.*client_paused.*other/s);
+  assert.match(sql, /count\(d\.id\).*operating_state = 'active'.*as open_deals/s);
+  assert.doesNotMatch(sql, /update deal set (phase|outcome)/i);
+  assert.match(hardening, /parking_reason is not null/);
+  assert.match(hardening, /parking_reason in \('prospect_never_active','client_paused','other'\)/);
+  assert.match(html, /data-filter="active"[^>]*>Active/);
+  assert.match(html, /data-filter="parked"[^>]*>Parked/);
+  assert.match(app, /No active work in this agenda/);
+  assert.match(app, /Salesforce link, phase, history, and participants stay intact/);
+  assert.match(tools, /"operating_state"/);
+  assert.match(tools, /dealroom:apply-operating-state/);
+  assert.match(tools, /parked_by=case when \$2='parked' then \$5::uuid else null end/);
 });

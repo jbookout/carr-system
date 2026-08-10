@@ -30,6 +30,8 @@ class FakeClient {
       type: "renewal", city: "Mobile", segment: "healthcare",
       attention: false, next_date: null, version: 1, salesforce_id: null,
       outcome: null, closed_on: null,
+      operating_state: "active", parking_reason: null, parking_note: null,
+      parked_at: null, parked_by: null,
     }]]);
   }
 
@@ -57,6 +59,17 @@ class FakeClient {
     if (sql.startsWith("insert into tool_call")) {
       this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
       return { rows: [] };
+    }
+    if (sql.startsWith("select id,subject_id,field,old_value,new_value from event")) {
+      const event = this.events.find(row => row.id === params[0] && row.subject_type === "deal");
+      return { rows: event ? [{ id:event.id, subject_id:event.subject_id, field:event.field,
+        old_value:event.old_value, new_value:event.new_value }] : [] };
+    }
+    if (sql.startsWith("select id from event where subject_type='deal'")) {
+      const rows = this.events.filter(event => event.subject_type === "deal" &&
+        event.subject_id === params[0] && event.field === params[1])
+        .sort((a, b) => b.recorded_at.localeCompare(a.recorded_at) || b.id.localeCompare(a.id));
+      return { rows: rows.slice(0, 1).map(event => ({ id:event.id })) };
     }
     if (sql.includes("from v_ref_index") && sql.includes("subject_type='deal'")) {
       const needle = String(params[0]).replaceAll("%", "").toLowerCase();
@@ -103,6 +116,21 @@ class FakeClient {
       const field = sql.match(/^select (\w+) as value/)[1];
       const deal = this.deals.get(params[0]);
       return { rows: deal ? [{ value: deal[field] }] : [] };
+    }
+    if (sql.startsWith("select jsonb_build_object('state',operating_state")) {
+      const deal = this.deals.get(params[0]);
+      return { rows: deal ? [{ value: { state: deal.operating_state,
+        reason: deal.parking_reason, note: deal.parking_note } }] : [] };
+    }
+    if (sql.includes("dealroom:apply-operating-state")) {
+      const deal = this.deals.get(params[0]);
+      deal.operating_state = params[1];
+      deal.parking_reason = params[1] === "parked" ? params[2] : null;
+      deal.parking_note = params[1] === "parked" ? params[3] : null;
+      deal.parked_at = params[1] === "parked" ? this.now.toISOString() : null;
+      deal.parked_by = params[1] === "parked" ? params[4] : null;
+      deal.version += 1;
+      return { rows: [] };
     }
     if (sql.startsWith("select ") && sql.endsWith(" from deal where id=$1")) {
       const fields = sql.slice("select ".length, -" from deal where id=$1".length).split(",");
@@ -207,7 +235,10 @@ class FakeClient {
       return { rows: deal ? [{ id: deal.id, name: deal.name, phase: deal.phase, owner: deal.owner,
         type: deal.type, city: deal.city, segment: deal.segment, attention: deal.attention,
         next_date: deal.next_date, next_step: this.nextActions.find(a => a.subject_id === deal.id && a.status === "open")?.description || null,
-        workspace_kind: "team", salesforce_id: deal.salesforce_id, base_version: deal.version }] : [] };
+        workspace_kind: "team", operating_state: deal.operating_state,
+        parking_reason: deal.parking_reason, parking_note: deal.parking_note,
+        parked_at: deal.parked_at, parked_by: deal.parked_by,
+        salesforce_id: deal.salesforce_id, base_version: deal.version }] : [] };
     }
     if (sql.includes("from v_deal_room_note")) {
       const rows = this.notes.filter(n => n.deal_id === params[0])
@@ -329,6 +360,36 @@ test("same-field conflict retains both actors and values; resolve uses normal at
   assert.deepEqual(db.events.map(e => [e.verb, e.actor]),
     [["patch-deal-field", "joe"], ["resolve-conflict", "joe"]]);
   assert.ok(db.events.every(e => e.actor_id));
+});
+
+test("parking is a reversible operating state and never changes phase or outcome", async () => {
+  const db = new FakeClient();
+  const parked = await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "park-alpha", deal: "Deal Alpha", field: "operating_state",
+    value: { state: "parked", reason: "prospect_never_active", note: "Intake did not advance" },
+    base_event_id: null,
+  });
+  assert.equal(parked.ok, true);
+  assert.deepEqual(parked.old_value, { state: "active", reason: null, note: null });
+  assert.equal(db.deals.get(ids.deal).operating_state, "parked");
+  assert.equal(db.deals.get(ids.deal).parking_reason, "prospect_never_active");
+  assert.equal(db.deals.get(ids.deal).phase, "research");
+  assert.equal(db.deals.get(ids.deal).outcome, null);
+  assert.deepEqual(db.events[0].new_value.operating_state,
+    { state: "parked", reason: "prospect_never_active", note: "Intake did not advance" });
+
+  const restored = await call("revert-deal-field", db, actors.dell, {
+    idempotency_key: "restore-alpha", event_id: db.events[0].id,
+  });
+  assert.equal(restored.ok, true);
+  assert.equal(db.deals.get(ids.deal).operating_state, "active");
+  assert.equal(db.deals.get(ids.deal).parking_reason, null);
+  assert.equal(db.deals.get(ids.deal).phase, "research");
+
+  await assert.rejects(call("patch-deal-field", new FakeClient(), actors.joe, {
+    idempotency_key: "park-without-reason", deal: "Deal Alpha", field: "operating_state",
+    value: { state: "parked" }, base_event_id: null,
+  }), /parking_reason_required/);
 });
 
 test("next-step supersede leaves old rows intact and deal thread is stably newest-first", async () => {

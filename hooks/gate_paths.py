@@ -52,9 +52,16 @@ FAILS OPEN on any internal error, like every other gate here.
 import os
 import re
 
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_RX = re.escape(REPO.rstrip("/"))
+
 # The files whose CONTENTS are the enforcement. Kept identical in meaning to
 # gate-edit-gate.py's original private list, which now imports from here.
 PROTECTED_PATTERNS = [
+    re.compile(rf"^{REPO_RX}/hooks/[^/]+\.py$"),
+    re.compile(rf"^{REPO_RX}/ops/config/hooks\.json$"),
+    re.compile(rf"^{REPO_RX}/ops/config/gate-baseline\.json$"),
+    re.compile(rf"^{REPO_RX}/ops/harden-gates\.sh$"),
     re.compile(r"/carr-system/hooks/[^/]+\.py$"),       # the gate logic itself
     re.compile(r"/carr-system/ops/config/hooks\.json$"),        # the wiring
     re.compile(r"/carr-system/ops/config/gate-baseline\.json$"),  # the baseline
@@ -111,11 +118,13 @@ def is_enforcement(path):
 # Path shapes as they appear INSIDE a command string. Deliberately anchored on
 # the same five classes as PROTECTED_PATTERNS rather than a loose "hooks" match,
 # so an ordinary `grep hooks/` or `cat hooks/x.py` never trips it.
+_REPO_PREFIX_RE = rf"(?:{REPO_RX}|(?:[~\w./-]*)?/carr-system)"
 _PATH_RE = re.compile(
-    r"(?:[~\w./-]*)?/(?:carr-system/hooks/[\w.-]+\.py"
-    r"|carr-system/ops/config/(?:hooks|gate-baseline)\.json"
-    r"|carr-system/ops/harden-gates\.sh"
-    r"|\.claude/settings\.json)")
+    rf"(?:{_REPO_PREFIX_RE}/(?:hooks/[\w.-]+\.py"
+    r"|ops/config/(?:hooks|gate-baseline)\.json"
+    r"|ops/harden-gates\.sh)"
+    r"|(?:[~\w./-]*)?/\.claude/settings\.json)"
+)
 
 # Same proven shapes as guard-unattended.py's render door: redirect, tee,
 # in-place sed, truncate. macOS sed carries a backup-suffix argument, so the
