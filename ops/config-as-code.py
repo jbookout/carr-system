@@ -347,7 +347,22 @@ def cmd_install(apply):
         if apply:
             with open(dest, "w", encoding="utf-8") as fh:
                 fh.write(body)
-            print(f"      then: launchctl unload -w {dest}; launchctl load -w {dest}")
+            # Load it, do not print a command for a human to paste (rule
+            # e313a3ca). Writing the plist and stopping leaves the job on disk
+            # and dead: on a fresh machine that means the nightly never runs,
+            # so the record-derived fetch allowlist is generated once by the
+            # migration and then never refreshed as clients are added. unload
+            # is expected to fail when the job was never loaded; that is not
+            # an error, which is why only the load result is reported.
+            subprocess.run(["launchctl", "unload", "-w", dest],
+                           capture_output=True, check=False)
+            r = subprocess.run(["launchctl", "load", "-w", dest],
+                               capture_output=True, text=True, check=False)
+            if r.returncode == 0:
+                print("      loaded")
+            else:
+                print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
+                      f"— run: launchctl load -w {dest}")
 
     # Git hooks. Added 2026-08-03, when Dell was granted WRITE and it turned out
     # branch protection is unavailable on a private free-plan repo — so the pull
