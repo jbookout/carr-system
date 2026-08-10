@@ -296,13 +296,26 @@ def main():
             last_human_idx, last_human = i, t
             break
 
+        # SCAN THE FINAL MESSAGE ONLY, not every message since the human spoke.
+        # The first version joined them all, and the audit ledger showed why that
+        # is wrong: once this gate blocks a turn, the harness-injected feedback is
+        # correctly skipped as not-the-human, so the window keeps stretching back
+        # across messages ALREADY DELIVERED AND ACCEPTED. An id or a command
+        # mentioned several messages ago then re-fires on every later turn and the
+        # session can never close. Measured 2026-08-09: one fire listed A11-A17
+        # and four hex ids that appeared nowhere in the closing prose — they came
+        # from verb-call arguments and from older messages Joe had already read.
+        #
+        # Only assistant TEXT blocks count; text_of() excludes tool_use inputs on
+        # purpose. A verb call legitimately carries raw ids (update-loop needs
+        # "A15") — that is machine-to-machine, and this rule is about what
+        # reaches Joe's eyes, not what crosses the wire.
         start = (last_human_idx + 1) if last_human_idx is not None else 0
-        chunks = []
+        assistant = ""
         for r in recs[start:]:
             t = text_of(r, ("assistant",))
-            if t:
-                chunks.append(t)
-        assistant = "\n\n".join(chunks).strip()
+            if t and t.strip():
+                assistant = t.strip()   # keep overwriting; the last one wins
         if not assistant:
             sys.exit(0)
 

@@ -50,6 +50,58 @@ def run_case(human, assistant):
         except Exception: pass
 
 
+
+def run_multi(human, assistants):
+    """Two assistant messages in one window — the regression this exists for.
+
+    On 2026-08-09 the gate joined EVERY assistant message since the human last
+    spoke. Because its own block-feedback is harness-injected (correctly skipped
+    as not-the-human), the window grew every time it fired, so a violation in an
+    already-delivered message re-fired forever and the turn could never close.
+    Only the FINAL message should be scanned.
+    """
+    fd, path = tempfile.mkstemp(suffix=".jsonl")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"type":"user","origin":{"kind":"user"},
+                "message":{"content":[{"type":"text","text":human}]}}) + "\n")
+            for a in assistants:
+                fh.write(json.dumps({"type":"assistant",
+                    "message":{"content":[{"type":"text","text":a}]}}) + "\n")
+        p = subprocess.run([sys.executable, HOOK],
+            input=json.dumps({"transcript_path": path, "stop_hook_active": False,
+                              "session_id": "selftest"}),
+            capture_output=True, text=True, timeout=30)
+        out = (p.stdout or "").strip()
+        if not out:
+            return False
+        try:
+            return json.loads(out).get("decision") == "block"
+        except Exception:
+            return False
+    finally:
+        try: os.unlink(path)
+        except Exception: pass
+
+
+def regression_cases():
+    """(name, human, [assistant...], expect_block)"""
+    return [
+        ("stale-violation-not-refired", "status?",
+         ["Earlier I said: run this in your terminal.",
+          "Fixed the exporter. Verified the counts match."], False),
+        ("stale-id-not-refired", "status?",
+         ["A17 is still open.",
+          "Dell still has to acknowledge the doctrine store is live."], False),
+        ("final-message-still-caught", "status?",
+         ["Fixed the exporter, counts verified.",
+          "Now run this in your terminal."], True),
+        ("final-id-still-caught", "status?",
+         ["All clean.",
+          "A17 is still open."], True),
+    ]
+
+
 def main():
     if not os.path.exists(HOOK):
         print(f"FAIL: hook not found at {HOOK}"); return 1
@@ -61,6 +113,14 @@ def main():
         if not ok: bad.append(name)
         print(f"  {'ok  ' if ok else 'FAIL'} {name:28} "
               f"want={'BLOCK' if expect else 'allow'} got={'BLOCK' if got else 'allow'}")
+    for name, human, msgs, expect in regression_cases():
+        got = run_multi(human, msgs)
+        ok = (got == expect)
+        passed, failed = (passed+1, failed) if ok else (passed, failed+1)
+        if not ok: bad.append(name)
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:28} "
+              f"want={'BLOCK' if expect else 'allow'} got={'BLOCK' if got else 'allow'}")
+
     print()
     print(f"conduct-gate-selftest: {passed}/{passed+failed} passed")
     if bad:
