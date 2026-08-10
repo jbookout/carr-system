@@ -35,16 +35,73 @@ PSQL_CANDIDATES = [
 ]
 
 
+def _neon_api_key() -> str:
+    """NEON_API_KEY from the environment, or from db.env beside the other
+    credentials. Empty string when there is none.
+
+    WHY THIS EXISTS, 2026-08-10. neonctl's saved browser login expires on its own
+    schedule, and when it does it does not fail cleanly — it PROMPTS, waits 60
+    seconds for a browser nobody is sitting at, and times out. Because this
+    function is the one place four different jobs derive a credential, that one
+    expiry silently took down all four: bin/migrate-prod.sh, bin/import-doctrine.sh,
+    bin/restore-rehearse.sh (the only proof the encrypted backups can be restored)
+    and pipelines/partner_ping.py, the Joe/Dell interrupt channel.
+
+    The ping is the one that shows how bad the failure mode is. It kept running
+    every 120 seconds and kept logging "nothing new since 2026-08-03T20:02:16",
+    382 consecutive identical lines over six days, because a channel whose query
+    is broken and a channel with genuinely nothing to say produce byte-identical
+    output. Its watermark had not moved since the day the login lapsed. Nothing
+    alarmed, because nothing watches it.
+
+    A Neon API key does not expire on a timer and needs no browser, and neonctl
+    reads it from NEON_API_KEY. This keeps the property the pattern was built for
+    — the DSN is still derived per invocation, still never on a command line and
+    never in a transcript — and removes only the human from the refresh."""
+    key = (os.environ.get("NEON_API_KEY") or "").strip()
+    if key:
+        return key
+    env_file = os.path.join(os.path.expanduser("~"), ".config", "carr", "db.env")
+    try:
+        with open(env_file, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("NEON_API_KEY="):
+                    # db.env values are shell-quoted so `set -a; . db.env` survives
+                    # an & in a DSN; strip the quotes the same way db_url() does.
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return ""
+
+
 def dsn(branch: str = "production") -> str:
+    key = _neon_api_key()
+    env = {**os.environ,
+           "PATH": "/usr/local/opt/node@22/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")}
+    if key:
+        env["NEON_API_KEY"] = key
     out = subprocess.run(
         [NEONCTL, "connection-string", branch,
          "--project-id", "steep-field-48688294",
          "--role-name", "neondb_owner"],
-        capture_output=True, text=True, timeout=60,
-        env={**os.environ, "PATH": "/usr/local/opt/node@22/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")},
+        capture_output=True, text=True, timeout=60, env=env,
     )
     if out.returncode != 0 or not out.stdout.strip():
-        sys.exit(f"neonctl failed (rc={out.returncode}): {out.stderr.strip()[:200]}")
+        # NAME THE ACTUAL CAUSE. The old message printed neonctl's stderr, which
+        # on an expired login is a browser URL and an "authentication timed out"
+        # line — true, and it does not tell the reader that the fix is a stored
+        # key rather than another browser trip. A timeout with no key present is
+        # this failure until proven otherwise.
+        detail = out.stderr.strip()[:200]
+        if not key:
+            sys.exit(
+                "neonctl could not derive a connection string, and NEON_API_KEY is NOT SET.\n"
+                "  This is almost certainly the expired-browser-login failure: neonctl\n"
+                "  prompts for a browser, waits 60 seconds, and gives up.\n"
+                "  Fix it once: create a Neon API key in the console and add it to\n"
+                "  ~/.config/carr/db.env as NEON_API_KEY=... (chmod 600, already gitignored).\n"
+                f"  neonctl said: {detail}")
+        sys.exit(f"neonctl failed with NEON_API_KEY set (rc={out.returncode}): {detail}")
     return out.stdout.strip()
 
 
