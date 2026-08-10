@@ -70,11 +70,23 @@ git -C "$REPO" fetch --quiet </dev/null 2>/dev/null || true
 DIRTY_FILES=$(git -C "$REPO" status --porcelain --untracked-files=no 2>/dev/null | awk '{print $2}')
 UPSTREAM=$(git -C "$REPO" rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo "")
 CONFLICTS=""
+
+# INCOMING means "changed upstream SINCE WE DIVERGED", which is a merge-base
+# diff. A plain two-dot `git diff HEAD upstream` is the symmetric difference of
+# two trees, so a file this machine ADDED locally shows up as "changed upstream"
+# even though nothing is arriving for it — which is exactly how this check
+# flagged migrate-dell.sh against itself and aborted its own test run. If there
+# is nothing to pull, no conflict is possible.
 if [ -n "$UPSTREAM" ] && [ -n "$DIRTY_FILES" ]; then
-  INCOMING=$(git -C "$REPO" diff --name-only HEAD "$UPSTREAM" 2>/dev/null)
-  CONFLICTS=$(print -r -- "$DIRTY_FILES" | while read -r f; do
-    [ -n "$f" ] && print -r -- "$INCOMING" | grep -qxF "$f" && print -r -- "$f"
-  done)
+  BASE=$(git -C "$REPO" merge-base HEAD "$UPSTREAM" 2>/dev/null)
+  if [ -n "$BASE" ]; then
+    INCOMING=$(git -C "$REPO" diff --name-only "$BASE" "$UPSTREAM" 2>/dev/null)
+    if [ -n "$INCOMING" ]; then
+      CONFLICTS=$(print -r -- "$DIRTY_FILES" | while read -r f; do
+        [ -n "$f" ] && print -r -- "$INCOMING" | grep -qxF "$f" && print -r -- "$f"
+      done)
+    fi
+  fi
 fi
 if [ -n "$CONFLICTS" ]; then
   bad "these files are modified locally AND changed upstream — commit or stash them first:"
@@ -90,14 +102,35 @@ fi
 step "2. pull latest"
 BRANCH=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
 [ "$BRANCH" = "main" ] && good "on main" || note "on '$BRANCH', not main — pulling that branch"
-if [ $APPLY -eq 1 ]; then
-  if git -C "$REPO" pull --ff-only </dev/null >/tmp/mig-pull.log 2>&1; then
-    good "pulled ($(git -C "$REPO" rev-parse --short HEAD))"
-  else
-    bad "pull failed — $(tail -1 /tmp/mig-pull.log)"
-  fi
+# THREE STATES, NOT TWO — found by running --apply on a machine that had its own
+# unpushed commits. A bare `git pull --ff-only` aborts with "Not possible to
+# fast-forward" whenever the local repo is AHEAD, which is not a failure at all;
+# it just means there is nothing to pull. The first version reported that as
+# MIGRATION INCOMPLETE and would have done the same on Dell's Mac the moment he
+# had one local commit.
+if [ -z "$UPSTREAM" ]; then
+  note "no upstream tracking branch — skipping pull"
 else
-  good "would run: git pull --ff-only"
+  BEHIND=$(git -C "$REPO" rev-list --count HEAD.."$UPSTREAM" 2>/dev/null || echo 0)
+  AHEAD=$(git -C "$REPO" rev-list --count "$UPSTREAM"..HEAD 2>/dev/null || echo 0)
+  if [ "$BEHIND" -eq 0 ] && [ "$AHEAD" -eq 0 ]; then
+    good "already up to date"
+  elif [ "$BEHIND" -eq 0 ]; then
+    good "$AHEAD local commit(s) not yet pushed, nothing to pull — fine"
+  elif [ "$AHEAD" -eq 0 ]; then
+    if [ $APPLY -eq 1 ]; then
+      if git -C "$REPO" merge --ff-only "$UPSTREAM" </dev/null >/tmp/mig-pull.log 2>&1; then
+        good "fast-forwarded $BEHIND commit(s) to $(git -C "$REPO" rev-parse --short HEAD)"
+      else
+        bad "fast-forward failed — $(tail -1 /tmp/mig-pull.log)"
+      fi
+    else
+      good "would fast-forward $BEHIND commit(s)"
+    fi
+  else
+    # Diverged. Never auto-merge or rebase another writer's history.
+    bad "branch has diverged ($AHEAD local, $BEHIND remote) — reconcile by hand before migrating"
+  fi
 fi
 
 # ── 3. HOOKS ────────────────────────────────────────────────────────────────
