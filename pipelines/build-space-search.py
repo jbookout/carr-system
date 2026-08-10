@@ -31,7 +31,7 @@ import base64, json, os, re, sys
 # CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant.
 BRAND = os.path.join(os.environ.get("CARR_VAULT",
     "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"),
-    "Marketing", "Brand Assets")
+    "DNA", "Marketing", "Brand Assets")  # moved to shared DNA 2026-07-29 (T54)
 
 ASSETS = {
     "OSWALD":     f"{BRAND}/fonts/Oswald.ttf",
@@ -109,12 +109,74 @@ def monthly_note(s, r):
     return base
 
 
+
+
+# ---------------------------------------------------------------------------
+# PURCHASE / INVESTMENT SUPPORT (added 2026-07-31, Le C-063 30/70 search)
+#
+# The generator was lease-only: every headline figure was rent per square foot
+# per year. An owner-occupier or investment BUY answers different questions --
+# what does it cost, what does it yield, who is in it, and how much of it can
+# the client actually occupy -- so a purchase record carries a "sale" block and
+# these renderers run instead of the rate ones.
+#
+# ADDITIVE BY DESIGN. Nothing fires unless a record carries "sale", so every
+# existing lease search still renders byte for byte. Verified against Hughes.
+# ---------------------------------------------------------------------------
+
+def price_line(x):
+    if x.get("price") is None:
+        return NOT_PUBLISHED
+    psf = f' &middot; ${x["price_psf"]:,.0f} /SF' if x.get("price_psf") else ""
+    return f'{money(x["price"])}{psf}'
+
+
+def yield_line(x):
+    """Cap rate and NOI travel together or the number means nothing on its own."""
+    cap = f'{x["cap_rate"]:.2f}%' if x.get("cap_rate") else None
+    noi = money(x["noi"]) if x.get("noi") else None
+    if cap and noi:
+        return f'{cap} on {noi} NOI'
+    return cap or (f'{noi} NOI' if noi else NOT_PUBLISHED)
+
+
+def occupancy_line(x):
+    """What the buyer can actually take, stated as a share of the building, because
+    that share is the whole deal on an owner-occupier purchase."""
+    own, bldg = x.get("own_sf"), x.get("building_sf")
+    if not own:
+        return x.get("occupancy_note") or NOT_PUBLISHED
+    pct = f' ({own / bldg:.0%} of the building)' if bldg else ""
+    # square feet are whole numbers; a float reaching sf() prints "10,422.0 SF"
+    return f'{sf(int(round(own)))} SF{pct}'
+
+
+def sale_specs(p, s, b):
+    x = p["sale"]
+    return [
+        spec("Price", price_line(x), em=True),
+        spec("Yield", yield_line(x)),
+        spec("Building", f'{sf(b["building_sf"])} SF' if b.get("building_sf") else NOT_PUBLISHED),
+        spec("He could occupy", occupancy_line(x), em=True,
+             note=x.get("occupancy_note")),
+        spec("Tenancy", val(b.get("tenancy"))),
+        spec("Status", val(p["timing"]["status"])),
+    ]
+
+
 def build_tour_card(p, photos, minis=None):
-    """Tier 1 and 2: a full card with photo, reasoning, specs, and an expandable detail panel."""
+    """Tier 1 and 2: a full card with photo, reasoning, specs, and an expandable detail panel.
+
+    NO loading="lazy" on these images (removed 2026-07-29, Joe's go). Every byte is already
+    inlined as a data URI, so there is no network request to defer and lazy loading buys nothing.
+    What it DID cost: 11 of 16 images stayed blank until a human scrolled them into view, so every
+    screenshot, thumbnail and print-to-PDF captured empty photo frames and an empty map. Dell's
+    side read the Hughes report as having no photos and no map. Do not add it back.
+    """
     img = ""
     if p.get("photo") and p["photo"] in photos:
         img = (f'<div class="shot"><img src="data:image/jpeg;base64,{photos[p["photo"]]}" '
-               f'alt="{esc(p["address"])}" loading="lazy"></div>')
+               f'alt="{esc(p["address"])}"></div>')
 
     # A locator cut centred on this property. The pin sits dead centre because the
     # image was cropped around the coordinate, so no positioning maths is needed.
@@ -125,7 +187,7 @@ def build_tour_card(p, photos, minis=None):
                "so the pin sits on the road." if m.get("approx") else
                "Immediate surroundings.")
         mini = (f'<figure class="mini"><div class="miniwrap">'
-                f'<img src="{m["image"]}" width="{m["w"]}" height="{m["h"]}" loading="lazy" '
+                f'<img src="{m["image"]}" width="{m["w"]}" height="{m["h"]}" '
                 f'alt="Close-up map showing the location of {esc(p["address"])}">'
                 f'<span class="minipin" aria-hidden="true"></span></div>'
                 f'<figcaption>{esc(cap)} Map data &copy; OpenStreetMap contributors</figcaption>'
@@ -134,18 +196,21 @@ def build_tour_card(p, photos, minis=None):
 
     s, r, t, b, site = p["size"], p["rate"], p["timing"], p["building_info"], p["site"]
 
-    specs = [
+    if p.get("sale"):
+        specs = sale_specs(p, s, b)
+    else:
+      specs = [
         spec("Available", size_line(s)),
-        spec("Contiguous", f'{sf(s["contig_sf"])} SF', em=True) if s.get("contig_sf") else "",
-        spec("Asking", rate_line(r)),
-        spec("Base monthly", money(r["monthly_at_contig"]), em=True,
-             note=monthly_note(s, r))
-             if r["monthly_at_contig"] else spec("Base monthly", NOT_PUBLISHED),
-        spec("Structure", val(r["services"])),
-        spec("Available from", val(t["occupancy"])),
-        spec("Term", val(t["term"])),
+          spec("Contiguous", f'{sf(s["contig_sf"])} SF', em=True) if s.get("contig_sf") else "",
+          spec("Asking", rate_line(r)),
+          spec("Base monthly", money(r["monthly_at_contig"]), em=True,
+               note=monthly_note(s, r))
+               if r["monthly_at_contig"] else spec("Base monthly", NOT_PUBLISHED),
+          spec("Structure", val(r["services"])),
+          spec("Available from", val(t["occupancy"])),
+          spec("Term", val(t["term"])),
         spec("Status", val(t["status"])),
-    ]
+      ]
 
     # The second panel is the detail sheet: everything we know, plus what we do not.
     detail = [
@@ -320,8 +385,26 @@ def main():
     # which is not a market range, it is the distance between a warehouse bay and a
     # medical suite. Quoting it invites the client to anchor on a number attached to
     # a building we would never put them in. (Joe, 2026-07-22.)
-    rates = [p["rate"]["min"] for p in tour if p.get("rate") and p["rate"].get("min")]
-    rate_span = f'${min(rates):,.0f}&ndash;{max(rates):,.0f}' if rates else "&mdash;"
+    # The opening sentence names the deal type. It used to be hardcoded to "available
+    # for lease", which told a BUYER his purchase search was a rent roll (caught on the
+    # Le C-063 report, 2026-07-31, before it left the building).
+    if any(p.get("sale") for p in tour):
+        standfirst = (f'{len(props)} buildings are for sale across your search area right now. '
+                      f'{len(tour)} of them are worth your time, and the reasons the others are not '
+                      f'tell you a great deal about this market.')
+    else:
+        standfirst = (f'{len(props)} spaces are available for lease across your search area right now. '
+                      f'{len(tour)} of them are worth your time, and the reasons the others are not '
+                      f'tell you a great deal about this market.')
+
+    if any(p.get("sale") for p in tour):
+        # Asking PRICE range across the tour set only, same rule as the rent span:
+        # quoting the full search range mixes buildings we would never put him in.
+        prices = [p["sale"]["price"] for p in tour if p.get("sale") and p["sale"].get("price")]
+        rate_span = (f'${min(prices):,.0f}&ndash;{max(prices):,.0f}' if prices else "&mdash;")
+    else:
+        rates = [p["rate"]["min"] for p in tour if p.get("rate") and p["rate"].get("min")]
+        rate_span = f'${min(rates):,.0f}&ndash;{max(rates):,.0f}' if rates else "&mdash;"
 
     tpl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "space-search-template.html")
     with open(tpl_path, encoding="utf-8") as fh:
@@ -358,6 +441,7 @@ def main():
         "__N_LOOK__": str(len(look)),
         "__N_OUT__": str(len(out)),
         "__RATE_SPAN__": rate_span,
+        "__STANDFIRST__": standfirst,
         "__TOUR_CARDS__": ("".join(build_tour_card(p, photos, minis) for p in tour) or empty_state(
             "Nothing clears the bar yet",
             "Every available space in this size range has a disqualifying problem right now. That is a real "

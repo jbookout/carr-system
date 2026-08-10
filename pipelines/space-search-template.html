@@ -1,3 +1,6 @@
+<!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__ | Prepared for __CLIENT__</title>
@@ -94,7 +97,7 @@
   body{
     background:var(--paper); color:var(--body);
     font-family:"CARR Text",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
-    font-size:16px; line-height:1.62; margin:0; padding:0 20px 88px;
+    font-size:16px; line-height:1.62; margin:0; padding:0 20px 124px;
   }
   .disp{ font-family:"CARR Display","Oswald",Impact,-apple-system,sans-serif; }
   .mono{ font-family:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; }
@@ -308,7 +311,7 @@
   .stamp{ font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:10.5px; color:var(--muted); line-height:1.75; }
 
   @media (max-width:600px){
-    body{ padding:0 15px 60px; font-size:15px; }
+    body{ padding:0 15px 132px; font-size:15px; }
     .prop,.out{ grid-template-columns:30px 1fr; }
     .tier1 .prop{ padding:20px 17px; }
     .chip{ margin-left:0; }
@@ -603,7 +606,8 @@
     .stamp{ font-size:7.5pt; margin-top:9pt; }
   }
 </style>
-
+</head>
+<body>
 <div class="wrap">
 
   <div class="modebar" role="group" aria-label="Display mode">
@@ -620,7 +624,7 @@
     </div>
 
     <h1>__H1_A__ <em>Space Search</em></h1>
-    <p class="standfirst">Prepared for <b>__CLIENT__</b>. __N_TOTAL__ spaces are available for lease across your search area right now. __N_TOUR__ of them are worth your time, and the reasons the others are not tell you a great deal about this market.</p>
+    <p class="standfirst">Prepared for <b>__CLIENT__</b>. __STANDFIRST__</p>
 
     <dl class="brief">
       <div><dt>Practice</dt><dd>__PRACTICE__</dd></div>
@@ -880,3 +884,5 @@
     }
   })();
 </script>
+</body>
+</html>
