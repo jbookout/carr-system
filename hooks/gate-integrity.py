@@ -70,6 +70,7 @@ GATED = [
     "lint-gate.py",             # writing lint
     "ledger-sweep.py",          # Stop nudge
     "conduct-stop-gate.py",     # Stop HARD gate
+    "context-handoff-gate.py",  # Stop context-threshold handoff
     "escalation-gate.py",       # AskUserQuestion deny
     "conduct_patterns.py",      # the shared classifier both conduct gates use
     "gate-integrity.py",        # this file — it must guard itself

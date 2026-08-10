@@ -1505,6 +1505,79 @@ export const TOOLS = {
     handler: async (c) => ({ digest: (await c.query("select * from v_integrity_digest")).rows }),
   },
 
+  "read-loop": {
+    write: false,
+    description: "Read ONE loop and its current version. THE GAP THIS CLOSES: update-loop and close-loop both refuse without base_version and tell the caller to 'read the record first' — and until this verb existed, nothing could perform that read. The only way to learn a loop's version was to guess, take a version_conflict, and lift the number out of the error message. Pass `number` (the '#142' a human says, with or without the hash) or `loop_id`. A number can repeat across kinds, so an ambiguous number returns the candidates rather than picking one for you.",
+    inputSchema: { type: "object", properties: {
+      number: { type: "string", description: "the loop number as a human writes it, with or without the leading #" },
+      loop_id: { type: "string", description: "exact uuid; wins over number" },
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"], description: "narrows an ambiguous number" },
+    } },
+    handler: async (c, _a, args) => {
+      const cols = `id as loop_id, kind, number, domain, blocker_class, blocker_detail, status,
+                    title, body, owner, marker, since_text, unblocks, source_note, tier, personal_to,
+                    to_jsonb(due_on)#>>'{}' as due_on, close_outcome,
+                    to_jsonb(closed_at)#>>'{}' as closed_at, version,
+                    to_jsonb(created_at)#>>'{}' as created_at,
+                    to_jsonb(updated_at)#>>'{}' as updated_at`;
+      if (args.loop_id) {
+        const r = await c.query(`select ${cols} from loop_item where id=$1`, [args.loop_id]);
+        if (!r.rows.length) return { error: "not_found", hint: "no loop carries that id" };
+        return { loop: r.rows[0] };
+      }
+      const num = String(args.number || "").replace(/^#/, "").trim();
+      if (!num) return { error: "need_number_or_id", hint: "pass number (e.g. '142') or loop_id" };
+      const params = [num];
+      let sql = `select ${cols} from loop_item where number=$1`;
+      if (args.kind) { params.push(args.kind); sql += ` and kind=$${params.length}`; }
+      const r = await c.query(sql, params);
+      if (!r.rows.length) return { error: "not_found", number: num };
+      if (r.rows.length > 1) {
+        return {
+          error: "ambiguous_number",
+          candidates: r.rows.map((x) => ({ loop_id: x.loop_id, kind: x.kind, status: x.status, title: x.title })),
+          hint: "same number in more than one kind — pass kind to narrow",
+        };
+      }
+      return { loop: r.rows[0] };
+    },
+  },
+
+  "loop-board": {
+    write: false,
+    description: "Every open loop with its domain, what it is blocked on, and its version — the live answer to 'what is still open and what is it waiting on'. THE GAP THIS CLOSES: that question used to be answered by reading a generated markdown render, which splits loops across four files by kind and is only as fresh as the last export; a session counting from those files gets a number that is both stale and partial. Defaults to open work loops. Pass blocker:'none' for the rows that predate the blocker requirement — that is the do-it-or-close-it pile, and the standing rule is never to re-file them. Every row carries its version, so a close needs no second read.",
+    inputSchema: { type: "object", properties: {
+      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"], default: "open_loop" },
+      status: { type: "string", enum: ["open", "done", "dropped", "any"], default: "open" },
+      domain: { type: "string", description: "deals | prospecting | networking | marketing | business | system" },
+      blocker: { type: "string", description: "a blocker class to filter to, or 'none' for rows naming no blocker, or 'any' for rows that name one" },
+      search: { type: "string", description: "case-insensitive match against the title" },
+      limit: { type: "integer", default: 60 },
+    } },
+    handler: async (c, _a, args) => {
+      const where = ["kind = $1"];
+      const params = [args.kind || "open_loop"];
+      const st = args.status || "open";
+      if (st !== "any") { params.push(st); where.push(`status = $${params.length}`); }
+      if (args.domain) { params.push(args.domain); where.push(`domain = $${params.length}`); }
+      if (args.blocker === "none") where.push("blocker_class is null");
+      else if (args.blocker === "any") where.push("blocker_class is not null");
+      else if (args.blocker) { params.push(args.blocker); where.push(`blocker_class = $${params.length}`); }
+      if (args.search) { params.push(`%${args.search}%`); where.push(`title ilike $${params.length}`); }
+      params.push(Math.min(Number(args.limit) || 60, 300));
+      const r = await c.query(
+        `select number, kind, domain, status, owner, marker, title,
+                blocker_class, blocker_detail, since_text,
+                to_jsonb(due_on)#>>'{}' as due_on, version
+           from loop_item
+          where ${where.join(" and ")}
+          order by domain nulls last,
+                   coalesce(nullif(regexp_replace(number, '[^0-9]', '', 'g'), '')::int, 999999)
+          limit $${params.length}`, params);
+      return { count: r.rows.length, loops: r.rows };
+    },
+  },
+
   // ===== writes (carr_writer connection, envelope enforced) =====
 
   "log-activity": {

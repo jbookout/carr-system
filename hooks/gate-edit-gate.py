@@ -217,6 +217,74 @@ def main():
             sys.exit(0)
 
         name = os.path.basename(path)
+
+        # DOWNGRADED FROM BLOCK TO ANNOUNCE — Joe's ruling 2026-08-10, decision
+        # bd30b665: "dude, i think the gate think is a shitty rule. its causing
+        # some serious blockage" / "yea downgrade it".
+        #
+        # THREE FINDINGS BEHIND IT, each verified rather than asserted:
+        #   1. THE APPROVAL CHANNEL CANNOT SEE HIS APPROVAL. joe_approved()
+        #      reads the transcript for his most recent genuine user record, but
+        #      messages sent MID-TURN — while a turn is still running — are never
+        #      written there. Checked directly: a session with three genuine user
+        #      records contained neither of the two "approved"s he had typed.
+        #      This is not a regex that can be widened; there is nothing in the
+        #      file to match against.
+        #   2. A CROSS-SESSION MESSAGE DISPLACES HIM. The check reads the LAST
+        #      genuine user record, and an agent-to-agent handoff arrives as one
+        #      — so another session's message silently becomes "Joe's last word"
+        #      and the gate refuses even a genuinely approved edit.
+        #   3. THE BLOCK IS REDUNDANT. gate-integrity.py already reports
+        #      "UNBLESSED: hooks/X exists but is not in the baseline" at every
+        #      SessionStart, and the baseline only moves through a deliberate
+        #      --bless. An unauthorised gate edit is caught either way.
+        #
+        # WHAT WAS WRONG IN THE ORIGINAL CASE FOR THIS CHANGE, recorded so the
+        # next reader does not inherit it: the session first claimed this gate
+        # had NO audit trail, having looked for out/gate-edit-gate.jsonl. It
+        # logs to the SHARED out/conduct-gate.jsonl and had six fires on record.
+        # The claim was false; the argument stood without it, because all six
+        # recorded fires were blocks of work Joe had asked for and none was a
+        # change he did not want.
+        #
+        # WHAT THIS COSTS, PLAINLY: a rogue gate edit is now DETECTED at next
+        # SessionStart rather than PREVENTED in the moment. That is weaker.
+        # Rule 61551180 is why it is still right — a present threat outranks a
+        # possible future use when the protection is reversible, and the present
+        # threat (approved work blocked six times in two days) is the only one
+        # of the two that has ever actually happened.
+        #
+        # The principle Joe encoded — a human authorises changes to enforcement
+        # — is NOT discarded. The announcement below is that authorisation
+        # surfacing where he can see it, instead of a wall he cannot open.
+        announcement = (
+            f"GATE EDIT ANNOUNCED — {name} is enforcement, and it just changed.\n\n"
+            f"  file: {path}\n\n"
+            "The write was ALLOWED. Say in one line what changed in this file "
+            "and whether it makes the gate stronger or weaker — weaker is "
+            "allowed, hiding that it is weaker is not. Then re-bless the "
+            "baseline in the same pass (`python3 hooks/gate-integrity.py "
+            "--bless`), or the next SessionStart reports it UNBLESSED and the "
+            "check goes chronically red for a benign reason, which is the "
+            "failure mode that hid a real five-gate wipe on 2026-08-08."
+        )
+
+        audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_edit"],
+               "patterns": [f"gate_edit:{name}"], "session": payload.get("session_id"),
+               "path": path, "decision": "announce"})
+        dlog(f"ANNOUNCE {path}")
+        print(json.dumps({
+            "systemMessage": announcement,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": announcement,
+            },
+        }))
+        sys.exit(0)
+
+        # --- retired block path, kept for one release so the downgrade can be
+        # --- reverted by deleting the return above. Unreachable.
         reason = (
             f"GATE EDIT — needs Joe's approval before it can be written.\n\n"
             f"  file: {path}\n\n"
