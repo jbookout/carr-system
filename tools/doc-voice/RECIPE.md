@@ -148,9 +148,17 @@ no upspeak on statements).
     aecho=0.8:0.9:21|36:0.10|0.07, alimiter=limit=0.9"
 
   TWO DELIBERATE DIFFERENCES from the Chatterbox chain, each decided by a test:
-    NO asetrate/atempo. The engine's own speed dial already carries Joe's pace
-    (the 0:56/1:00/0:58 comparison). Keeping the chain's tempo applies his slow
-    TWICE — the fault he rejected twice that day. Variant A proved it audibly.
+    NO asetrate/atempo, AND THE REAL REASON IS SAMPLE RATE, NOT PACE.
+    `asetrate=24000*0.97` hardcodes a 24kHz source, which is what Chatterbox
+    produces. ELEVENLABS DELIVERS 44.1kHz, so that filter reinterprets 44,100Hz
+    audio as 23,280 and slows it to roughly HALF SPEED — measured 16.1s against
+    an 8.7s source when it was tried on 2026-08-10. Joe: "all of these sound
+    ridiculous. they are slowed way down."
+    The pace argument (the engine's speed dial already carries his 0:56/1:00/0:58
+    number, so the chain's atempo would slow him twice) is also true and variant
+    A proved it audibly — but it is the SECOND reason, and stating it alone hid
+    a defect that bites anyone porting this chain anywhere. ANY new engine: check
+    its output sample rate before reusing a stage that names one.
     aecho out_gain 0.23 -> 0.9. The level bug documented above.
   AND TWO THINGS DELIBERATELY UNCHANGED, because tests said leave them:
     CHEST STAYS AT +6.5dB. A variant at +4dB was indistinguishable to Joe and
