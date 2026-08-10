@@ -7,8 +7,12 @@ that is already installed on the partner's Mac. It never records audio itself,
 never reads transcript text, and has no send path.
 
 GET  /api/state              current recording/transcription state
+GET  /api/post-call          private local review report for one session
 POST /api/start {mode}       mode = weekly_deal_call | other_call
 POST /api/stop               stop the active Quill recording
+POST /api/call-context       exact active-deal/participant index
+POST /api/post-call/sync     verify Cloudflare candidate dispositions
+POST /api/post-call/drafts/<id>/create   create an Outlook draft, never send
 GET  /                       standalone Call Mode control surface
 
 Security boundary:
@@ -26,12 +30,16 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+import post_call
 
 
 HOST = "127.0.0.1"
@@ -52,6 +60,8 @@ POST_HEADER = "X-CARR-Call-Mode"
 POST_HEADER_VALUE = "deal-room-v1"
 TERMINAL_AGE_SECONDS = 6 * 60 * 60
 ACTIVE_FILE_WINDOW_SECONDS = 90
+SMALL_BODY_LIMIT = 4096
+CONTEXT_BODY_LIMIT = 256 * 1024
 
 
 def utc_now() -> datetime:
@@ -305,6 +315,29 @@ def stop_recording(recordings: Path = RECORDINGS) -> dict[str, Any]:
         return current_state(recordings)
 
 
+def session_path(session: str, recordings: Path | None = None) -> Path:
+    """Resolve one opaque local session name without permitting path traversal."""
+    if not session or session in {".", ".."} or "/" in session or "\\" in session:
+        raise ValueError("invalid recording session")
+    root = (recordings or RECORDINGS).resolve()
+    path = (root / session).resolve()
+    if path.parent != root or not path.is_dir():
+        raise ValueError("recording session not found")
+    return path
+
+
+def sync_post_call(path: Path, runner: Any = subprocess.run) -> dict[str, Any]:
+    """Verify remote dispositions through the device-authenticated local bridge."""
+    bridge = Path(__file__).with_name("capture-bridge.py")
+    result = runner(
+        [sys.executable, str(bridge), "poll", str(path)],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Call Mode could not verify the post-call review state")
+    return post_call.report_for_deal_room(path)
+
+
 CALL_MODE_HTML = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CARR Call Mode</title><style>
@@ -360,6 +393,27 @@ class CallModeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def require_deal_room(self) -> bool:
+        if not self.allowed_origin():
+            self.send_json({"error": "origin_not_allowed"}, 403)
+            return False
+        if self.headers.get(POST_HEADER) != POST_HEADER_VALUE:
+            self.send_json({"error": "call_mode_header_required"}, 403)
+            return False
+        return True
+
+    def read_body(self, limit: int) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError as exc:
+            raise ValueError("invalid content length") from exc
+        if length < 0 or length > limit:
+            raise ValueError("request body too large")
+        value = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(value, dict):
+            raise ValueError("request body must be an object")
+        return value
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         if not self.allowed_origin():
             self.send_json({"error": "origin_not_allowed"}, 403)
@@ -371,9 +425,19 @@ class CallModeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/state":
             self.send_json(current_state())
+            return
+        if path == "/api/post-call":
+            if not self.require_deal_room():
+                return
+            try:
+                session = (parse_qs(parsed.query).get("session") or [""])[0]
+                self.send_json(post_call.report_for_deal_room(session_path(session)))
+            except (ValueError, post_call.ContractError) as exc:
+                self.send_json({"error": str(exc)}, 400)
             return
         if path in {"/", "/index.html"}:
             body = CALL_MODE_HTML.encode("utf-8")
@@ -385,17 +449,12 @@ class CallModeHandler(BaseHTTPRequestHandler):
         self.send_json({"error": "not_found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
-        origin = self.headers.get("Origin")
-        if not origin or not self.allowed_origin():
-            self.send_json({"error": "origin_not_allowed"}, 403)
-            return
-        if self.headers.get(POST_HEADER) != POST_HEADER_VALUE:
-            self.send_json({"error": "call_mode_header_required"}, 403)
+        if not self.require_deal_room():
             return
         try:
-            length = min(int(self.headers.get("Content-Length") or 0), 4096)
-            body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path
+            limit = CONTEXT_BODY_LIMIT if path == "/api/call-context" else SMALL_BODY_LIMIT
+            body = self.read_body(limit)
             if path == "/api/start":
                 if body.get("consent_confirmed") is not True:
                     raise ValueError("confirm that everyone has been told before recording")
@@ -404,7 +463,32 @@ class CallModeHandler(BaseHTTPRequestHandler):
             if path == "/api/stop":
                 self.send_json(stop_recording())
                 return
+            if path == "/api/call-context":
+                target = session_path(str(body.get("session") or ""))
+                context = post_call.store_context(target, body)
+                if (target / "transcript.json").exists():
+                    threading.Thread(
+                        target=post_call.process_session, args=(target,), daemon=True,
+                    ).start()
+                self.send_json({"ok": True, "session": context["session"]})
+                return
+            if path == "/api/post-call/sync":
+                target = session_path(str(body.get("session") or ""))
+                self.send_json(sync_post_call(target))
+                return
+            parts = path.split("/")
+            if len(parts) == 6 and parts[1:4] == ["api", "post-call", "drafts"] and parts[5] == "create":
+                target = session_path(str(body.get("session") or ""))
+                sync_post_call(target)
+                result = post_call.create_outlook_draft(
+                    target, unquote(parts[4]), str(body.get("approved_content_hash") or ""),
+                )
+                self.send_json(result)
+                return
             self.send_json({"error": "not_found"}, 404)
+        except post_call.ContractError as exc:
+            log(f"ERROR {type(exc).__name__}: {exc}")
+            self.send_json({"error": str(exc)}, 400)
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
             log(f"ERROR {type(exc).__name__}: {exc}")
             self.send_json({"error": str(exc)}, 409)

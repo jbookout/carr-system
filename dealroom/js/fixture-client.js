@@ -538,6 +538,18 @@ export async function createFixtureClient(opts = {}) {
       return { proposals: pendingConfirms.map((p) => ({ ...p })) };
     },
 
+    async getCallContext({ deal_ids }) {
+      const wanted = new Set(deal_ids || []);
+      return { deals: [...deals.values()]
+        .filter((deal) => wanted.has(deal.id) && (deal.operating_state || 'active') === 'active')
+        .map((deal) => ({ id: deal.id, name: deal.name, owner: deal.owner || null,
+          operating_state: 'active', participants: [] })) };
+    },
+
+    async resolvePostCallCandidate({ candidate_id, accept, idempotency_key }) {
+      return client.resolveConfirm({ proposal_id:candidate_id, accept, idempotency_key });
+    },
+
     async resolveConfirm({ proposal_id, accept, idempotency_key }) {
       return withIdem(idempotency_key, () => {
         const idx = pendingConfirms.findIndex((p) => p.id === proposal_id);

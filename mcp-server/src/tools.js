@@ -1618,6 +1618,39 @@ export const TOOLS = {
         order by confidence desc, created_at, id`)).rows }),
   },
 
+  "get-call-context": {
+    write: false,
+    description: "Read the exact active Call Mode context for an explicit list of deal UUIDs. It never searches by name: an unknown, closed, or parked UUID refuses the whole request. Current participant party refs, names, emails, and roles are returned only for the requested deals.",
+    inputSchema: { type: "object", properties: {
+      deal_ids: { type: "array", minItems: 1, maxItems: 50, items: { type: "string" } },
+    }, required: ["deal_ids"] },
+    handler: async (c, _actor, args) => {
+      const ids = args.deal_ids;
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+      if (!Array.isArray(ids) || !ids.length || ids.length > 50 || ids.some(id => !uuid.test(id)) ||
+          new Set(ids).size !== ids.length)
+        throw new ToolError({ error: "invalid_call_context_deals" });
+      const rows = (await c.query(
+        `select deal_id,deal_name,owner,operating_state,participant_party_id,participant_party_ref,
+                participant_name,participant_email,participant_role
+           from capture_call_context($1::uuid[])
+          order by deal_name,deal_id,participant_role,participant_name
+          /* capture:tool-call-context */`, [ids])).rows;
+      if (new Set(rows.map(row => String(row.deal_id))).size !== ids.length)
+        throw new ToolError({ error: "invalid_call_context_deals" });
+      const byDeal = new Map();
+      for (const row of rows) {
+        const deal = byDeal.get(row.deal_id) || { id: row.deal_id, name: row.deal_name,
+          owner: row.owner, operating_state: row.operating_state, participants: [] };
+        if (row.participant_role) deal.participants.push({ party_id: row.participant_party_id || null,
+          ref: row.participant_party_ref || null, name: row.participant_name || null,
+          email: row.participant_email || null, role: row.participant_role });
+        byDeal.set(row.deal_id, deal);
+      }
+      return { deals: [...byDeal.values()] };
+    },
+  },
+
   "lead-hot": {
     write: false,
     description: "Scored, unsuppressed leads (score, lane, est_lease_event, next_action_date). ALL of them surface — qualification is the human's job, never pre-filtered.",
@@ -1840,12 +1873,23 @@ export const TOOLS = {
       await c.query(
         `update next_action set status='dropped', updated_by=$1 where subject_type=$2 and subject_id=$3
          and owner_id=$1 and status='open'`, [actor.id, s.type, s.id]);
+      const droppedPostCall = s.type === "deal" ? (await c.query(
+        `update capture_post_call_action
+            set status='dropped',updated_at=now(),completed_at=null
+          where deal_id=$1 and owner_id=$2 and status='open'
+          returning id,description /* capture:replace-post-call-actions */`,
+        [s.id, actor.id])).rows : [];
       const r = await c.query(
         `insert into next_action (subject_type, subject_id, owner_id, due_on, description, created_by)
          values ($1,$2,$3,$4,$5,$3) returning id`, [s.type, s.id, actor.id, args.due_on || null, args.description]);
       await writeEvent(c, actor, "set-next-action", s.type, s.id,
-        { new: { next_action: args.description, due: args.due_on }, idempotency_key: args.idempotency_key });
-      return { ok: true, next_action_id: r.rows[0].id, subject: s };
+        { old: droppedPostCall.length ? { post_call_actions: droppedPostCall.map(x =>
+            ({ id: x.id, description: x.description, status: "open" })) } : null,
+          new: { next_action: args.description, due: args.due_on,
+            dropped_post_call_action_ids: droppedPostCall.map(x => x.id) },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, next_action_id: r.rows[0].id, subject: s,
+        dropped_post_call_action_ids: droppedPostCall.map(x => x.id) };
     }),
   },
 
@@ -1866,14 +1910,26 @@ export const TOOLS = {
         `update next_action set status='done', updated_by=$1
           where subject_type=$2 and subject_id=$3 and owner_id=$1 and status='open'
           returning id, description, due_on`, [actor.id, s.type, s.id]);
-      if (!r.rows.length) {
-        const others = await c.query(
+      const postCall = s.type === "deal" ? (await c.query(
+        `update capture_post_call_action
+            set status='done',updated_at=now(),completed_at=now()
+          where deal_id=$1 and owner_id=$2 and status='open'
+          returning id,description,due_on /* capture:complete-post-call-actions */`,
+        [s.id, actor.id])).rows : [];
+      if (!r.rows.length && !postCall.length) {
+        const others = (await c.query(
           `select a.slug as owner, n.description, n.due_on from next_action n
              join actor a on a.id = n.owner_id
-            where n.subject_type=$1 and n.subject_id=$2 and n.status='open'`, [s.type, s.id]);
+            where n.subject_type=$1 and n.subject_id=$2 and n.status='open'`, [s.type, s.id])).rows;
+        const otherPostCall = s.type === "deal" ? (await c.query(
+          `select a.slug as owner,pca.description,pca.due_on
+             from capture_post_call_action pca join actor a on a.id=pca.owner_id
+            where pca.deal_id=$1 and pca.status='open'
+            /* capture:other-post-call-actions */`, [s.id])).rows : [];
+        const openForOthers = [...others, ...otherPostCall];
         throw new ToolError({ error: "no_open_action", subject: s,
-          open_for_others: others.rows,
-          hint: others.rows.length
+          open_for_others: openForOthers,
+          hint: openForOthers.length
             ? "the open ball on this subject belongs to someone else — only its holder can complete it"
             : "nobody holds an open action here; log-activity records what happened, set-next-action sets the next one" });
       }
@@ -1883,8 +1939,17 @@ export const TOOLS = {
             new: { next_action: row.description, next_action_id: row.id, status: "done",
                    outcome: args.outcome || null },
             human_quote: args.outcome || null, idempotency_key: args.idempotency_key });
-      return { ok: true, completed: r.rows.map(x => ({ next_action_id: x.id, description: x.description })),
-               count: r.rows.length, subject: s };
+      for (const row of postCall)
+        await writeEvent(c, actor, "complete-action", "deal", s.id,
+          { field: "status", old: { status: "open" },
+            new: { post_call_action: row.description, post_call_action_id: row.id, status: "done",
+                   outcome: args.outcome || null },
+            human_quote: args.outcome || null, idempotency_key: args.idempotency_key });
+      const completed = [
+        ...r.rows.map(x => ({ next_action_id: x.id, description: x.description, source: "next_action" })),
+        ...postCall.map(x => ({ next_action_id: x.id, description: x.description, source: "post_call_action" })),
+      ];
+      return { ok: true, completed, count: completed.length, subject: s };
     }),
   },
 
@@ -2522,6 +2587,12 @@ export const TOOLS = {
         `update next_action set status='done', updated_by=$1
           where subject_type=$2 and subject_id=$3 and owner_id=$1 and status='open'
           returning id, description`, [actor.id, s.type, s.id]);
+      const postCallDone = s.type === "deal" ? (await c.query(
+        `update capture_post_call_action
+            set status='done',updated_at=now(),completed_at=now()
+          where deal_id=$1 and owner_id=$2 and status='open'
+          returning id,description,due_on /* capture:outreach-complete-post-call-actions */`,
+        [s.id, actor.id])).rows : [];
 
       let nextId = null, closed = null;
       if (isOpen) {
@@ -2550,15 +2621,24 @@ export const TOOLS = {
 
       await writeEvent(c, actor, "log-outreach", s.type, s.id,
         { new: { activity: act.rows[0].id, outcome: args.outcome, kind,
-                 completed: done.rows[0]?.id || null, next_action: nextId, stage: closed },
+                 completed: done.rows[0]?.id || postCallDone[0]?.id || null,
+                 completed_post_call_action_ids: postCallDone.map(row => row.id),
+                 next_action: nextId, stage: closed },
           human_quote: args.human_quote, idempotency_key: args.idempotency_key });
+
+      const completedActions = [
+        ...done.rows.map(row => ({ id: row.id, description: row.description, source: "next_action" })),
+        ...postCallDone.map(row => ({ id: row.id, description: row.description, source: "post_call_action" })),
+      ];
 
       return { ok: true, subject: s, activity_id: act.rows[0].id,
                occurred_at: act.rows[0].occurred_at, outcome: args.outcome,
-               completed_action: done.rows[0]?.description || null,
+               completed_action: done.rows[0]?.description || postCallDone[0]?.description || null,
+               completed_actions: completedActions,
+               completed_post_call_action_ids: postCallDone.map(row => row.id),
                next_action_id: nextId, next_on: args.next_on || null,
                stage: closed,
-               note: done.rows.length
+               note: completedActions.length
                  ? "your open ball on this subject was completed, which is what feeds the follow-up cadence"
                  : "no open ball of yours existed on this subject; nothing to complete" };
     }),
@@ -5463,6 +5543,79 @@ Object.assign(TOOLS, {
         [candidate.id, actor.id, args.note || null, String(ref)]);
       return { ok: true, candidate_id: candidate.id, status: "confirmed", ref: String(ref),
         verb, result };
+    }),
+  },
+
+  "resolve-post-call-candidate": {
+    write: true,
+    humanOnly: true,
+    description: "Human-only resolution for one Call Mode proposal. assigned_action creates a real next action for the explicit Joe or Dell assignee. email_draft only confirms metadata and its local body hash: it never creates or sends an email or Outlook draft.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, candidate_id: { type: "string" },
+      accept: { type: "boolean" }, note: { type: "string" },
+    }, required: ["idempotency_key", "candidate_id", "accept"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-post-call-candidate", args, async () => {
+      if (!actor.human) throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
+      if (typeof args.accept !== "boolean") throw new ToolError({ error: "accept_required" });
+      const found = await c.query(
+        `select id,kind,deal_id,assignee_slug,action_description,due_on,recipient_party_id,
+                recipient_ref,email_subject,body_sha256,status,resulting_ref
+           from capture_post_call_candidate where id=$1 for update
+           /* capture:resolve-post-call-read */`, [args.candidate_id]);
+      if (!found.rows.length)
+        throw new ToolError({ error: "not_found", table: "capture_post_call_candidate", id: args.candidate_id });
+      const candidate = found.rows[0];
+      if (candidate.status !== "pending") return { ok: true, candidate_id: candidate.id,
+        already: candidate.status, ref: candidate.resulting_ref || null,
+        note: "already dispositioned; nothing changed" };
+      if (!args.accept) {
+        await c.query(
+          `update capture_post_call_candidate
+              set status='skipped',resolved_by=$2,resolution_note=$3,resolved_at=now()
+            where id=$1 /* capture:resolve-post-call-skip */`,
+          [candidate.id, actor.id, args.note || null]);
+        return { ok: true, candidate_id: candidate.id, status: "skipped", ref: null };
+      }
+      if (candidate.kind === "email_draft") {
+        await c.query(
+          `update capture_post_call_candidate
+              set status='confirmed',resolved_by=$2,resolution_note=$3,resolved_at=now()
+            where id=$1 /* capture:resolve-post-call-email */`,
+          [candidate.id, actor.id, args.note || null]);
+        await writeEvent(c, actor, "resolve-post-call-candidate", "deal", candidate.deal_id, {
+          field: "email_draft_metadata",
+          new: { candidate_id: candidate.id, recipient_ref: candidate.recipient_ref,
+            subject: candidate.email_subject, body_sha256: candidate.body_sha256, approved: true },
+          idempotency_key: args.idempotency_key,
+        });
+        return { ok: true, candidate_id: candidate.id, status: "confirmed", ref: null,
+          local_only: true, send: false };
+      }
+      if (candidate.kind !== "assigned_action")
+        throw new ToolError({ error: "unknown_candidate_kind", kind: candidate.kind });
+      const assignee = await c.query(
+        "select id from actor where slug=$1 and active /* capture:resolve-post-call-assignee */",
+        [candidate.assignee_slug]);
+      if (!assignee.rows.length)
+        throw new ToolError({ error: "assignee_not_provisioned", assignee: candidate.assignee_slug });
+      const action = await c.query(
+        `insert into capture_post_call_action (candidate_id,deal_id,owner_id,due_on,description,accepted_by)
+         values ($1,$2,$3,$4,$5,$6) returning id
+         /* capture:resolve-post-call-action */`,
+        [candidate.id, candidate.deal_id, assignee.rows[0].id, candidate.due_on || null,
+         candidate.action_description, actor.id]);
+      await c.query(
+        `update capture_post_call_candidate
+            set status='confirmed',resolved_by=$2,resolution_note=$3,resulting_ref=$4,resolved_at=now()
+          where id=$1 /* capture:resolve-post-call-confirm */`,
+        [candidate.id, actor.id, args.note || null, String(action.rows[0].id)]);
+      await writeEvent(c, actor, "resolve-post-call-candidate", "deal", candidate.deal_id, {
+        field: "next_action", new: { next_action_id: action.rows[0].id,
+          assignee: candidate.assignee_slug, description: candidate.action_description,
+          due_on: candidate.due_on || null }, idempotency_key: args.idempotency_key,
+      });
+      return { ok: true, candidate_id: candidate.id, status: "confirmed",
+        ref: String(action.rows[0].id), assignee: candidate.assignee_slug };
     }),
   },
 });

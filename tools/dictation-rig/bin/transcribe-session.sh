@@ -23,9 +23,9 @@
 #
 # WO-4 capture bridge status pings (added 2026-08-08): "transcribing" right
 # before the python step, "failed" with a short detail on its non-zero
-# exit. Never "done" or "distilling" — those belong to the distiller, which
-# does not exist yet, so a session correctly sits at "transcribing" until
-# it does. Routed through capture-bridge.py, which is itself a clean no-op
+# exit. A successful weekly-call distillation hands sanitized proposals to the
+# bridge's publish command; it reports "distilling" and leaves every proposal
+# pending for Joe or Dell. Routed through capture-bridge.py, which is a clean no-op
 # (exit 0, one log line) whenever the rig isn't provisioned or the worker
 # is unreachable — these calls can never change this script's own exit code.
 
@@ -91,6 +91,9 @@ fi
 rc=$?
 
 if [ "$rc" -eq 0 ]; then
+    if [ -f "$BRIDGE_ENTRY" ]; then
+        "$PYTHON_BIN" "$BRIDGE_ENTRY" publish "$SESSION_DIR" >/dev/null 2>&1 || true
+    fi
     log_line "FINISH transcribe-session.sh session_dir=$SESSION_DIR"
 else
     log_line "ERROR transcribe-session.sh: transcribe_session.py exited rc=$rc session_dir=$SESSION_DIR"

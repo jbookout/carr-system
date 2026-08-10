@@ -22,6 +22,7 @@ class FakeClient {
     this.leases = new Map();
     this.notes = [];
     this.nextActions = [];
+    this.postCallActions = [];
     this.conflicts = [];
     this.criticalDates = [];
     this.captureSessions = [];
@@ -256,7 +257,8 @@ class FakeClient {
       return { rows };
     }
     if (sql.includes("from v_deal_room_action")) {
-      return { rows: this.nextActions.filter(a => a.subject_id === params[0]).map(a => ({ ...a })) };
+      return { rows: [...this.nextActions, ...this.postCallActions]
+        .filter(a => (a.subject_id || a.deal_id) === params[0]).map(a => ({ ...a })) };
     }
     if (sql.includes("from v_deal_room_activity") || sql.includes("from v_deal_room_participant") ||
         sql.includes("from v_deal_room_premises") || sql.includes("from v_deal_room_negotiation") ||
@@ -410,6 +412,20 @@ test("next-step supersede leaves old rows intact and deal thread is stably newes
   assert.deepEqual(page.events.map(e => e.actor), ["dell", "joe"]);
   assert.equal(JSON.stringify(page).includes("sf_commission_placeholder"), false);
   assert.equal(JSON.stringify(page).includes("sf_close_date_placeholder"), false);
+});
+
+test("accepted Call Mode actions appear in the normal Deal Room action payload without replacing another task", async () => {
+  const db = new FakeClient();
+  db.nextActions.push({ id: "existing-action", subject_id: ids.deal, owner: "dell",
+    description: "Review survey", due_on: "2026-08-11", status: "open", updated_at: db.now.toISOString() });
+  db.postCallActions.push({ id: "post-call-action", deal_id: ids.deal, owner: "joe",
+    description: "Call Dr. Alpha", due_on: "2026-08-12", status: "open", updated_at: db.now.toISOString() });
+  const page = await call("get-deal-room", db, actors.joe, { deal: "Deal Alpha" });
+  assert.deepEqual(page.next_actions.map(action => action.description).sort(), ["Call Dr. Alpha", "Review survey"]);
+  const migration = await import("node:fs/promises").then(fs =>
+    fs.readFile(new URL("../../migrations/0094_call_mode_post_call.sql", import.meta.url), "utf8"));
+  assert.match(migration, /create or replace view v_deal_room_action[\s\S]*capture_post_call_action/);
+  assert.match(migration, /create or replace view v_today_triage[\s\S]*post_call_action/);
 });
 
 test("reconciliation reads provide a guarded Salesforce key and verify a closed deal", async () => {

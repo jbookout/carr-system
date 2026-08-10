@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { TOOLS } from "../src/tools.js";
 import { createLiveClient } from "../../dealroom/js/live-client.js";
+import { createPostCallClient } from "../../dealroom/js/post-call-client.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const file = (path) => readFile(ROOT + path, "utf8");
@@ -112,4 +113,58 @@ test("parking separates Salesforce record existence from active work", async () 
   assert.match(tools, /"operating_state"/);
   assert.match(tools, /dealroom:apply-operating-state/);
   assert.match(tools, /parked_by=case when \$2='parked' then \$5::uuid else null end/);
+});
+
+test("Call Mode post-call UI is review-first and never sends email", async () => {
+  const [html, app, live, local, css] = await Promise.all([
+    file("dealroom/index.html"), file("dealroom/js/app.js"),
+    file("dealroom/js/live-client.js"), file("dealroom/js/post-call-client.js"),
+    file("dealroom/css/app.css"),
+  ]);
+  assert.match(html, /id="postCallPanel"/);
+  assert.match(html, /Post-call report/);
+  assert.match(app, /Joe this week/);
+  assert.match(app, /Dell this week/);
+  assert.match(app, /Deal updates/);
+  assert.match(app, /Questions to resolve/);
+  assert.match(app, /Vendor email drafts/);
+  assert.match(app, /Create Outlook draft/);
+  assert.match(app, /Creates a draft only/);
+  assert.match(app, /data-post-call-confirm/);
+  assert.match(app, /data-post-call-skip/);
+  assert.match(app, /data-retry-call-context/);
+  assert.match(live, /rpc\('get-call-context', \{ deal_ids \}\)/);
+  assert.match(live, /write\('resolve-post-call-candidate'/);
+  assert.match(local, /\/api\/call-context/);
+  assert.match(local, /\/api\/post-call\?session=/);
+  assert.match(local, /\/api\/post-call\/sync/);
+  assert.match(local, /approved_content_hash/);
+  assert.doesNotMatch(html, /id="[^"\n]*transcript/i);
+  assert.doesNotMatch(app + local, /sendMail|\/send\b|Send email/);
+  assert.match(css, /post-call-card/);
+  assert.match(css, /@media\(max-width:680px\).*post-call/s);
+});
+
+test("post-call client keeps context and Outlook draft creation on narrow loopback routes", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    calls.push({ url, init });
+    if (url.endsWith('/api/call-context')) return new Response(JSON.stringify({ ok:true, session:'s1' }));
+    if (url.includes('/api/post-call?')) return new Response(JSON.stringify({ status:{ state:'review_ready' }, report:{} }));
+    if (url.endsWith('/api/post-call/sync')) return new Response(JSON.stringify({ status:{ state:'review_ready' }, report:{} }));
+    if (url.endsWith('/api/post-call/drafts/d1/create')) return new Response(JSON.stringify({ draft_id:'d1', idempotent:false }));
+    return new Response(JSON.stringify({ error:'not_found' }), { status:404 });
+  };
+  const client = createPostCallClient({ fetchImpl });
+  await client.publishCallContext({ session:'s1', workspace_kind:'team', generated_at:'now', deals:[] });
+  await client.getStatus('s1');
+  await client.syncStatus('s1');
+  await client.createOutlookDraft('s1', 'd1', 'abc123');
+  assert.equal(calls[0].url, 'http://127.0.0.1:4682/api/call-context');
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    session:'s1', workspace_kind:'team', generated_at:'now', deals:[],
+  });
+  assert.equal(calls[1].url, 'http://127.0.0.1:4682/api/post-call?session=s1');
+  assert.deepEqual(JSON.parse(calls[2].init.body), { session:'s1' });
+  assert.deepEqual(JSON.parse(calls[3].init.body), { session:'s1', approved_content_hash:'abc123' });
 });
