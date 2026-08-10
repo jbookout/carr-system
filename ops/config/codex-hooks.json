@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "^(Bash|functions\\.exec)$",
         "hooks": [
           {
             "type": "command",
@@ -22,12 +22,22 @@
         ]
       },
       {
-        "matcher": "^apply_patch$",
+        "matcher": "^(apply_patch|functions\\.apply_patch)$",
         "hooks": [
           {
             "type": "command",
             "command": "/usr/bin/env python3 {{REPO}}/hooks/record-home-gate.py",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/delegation-gate.py",
+            "timeout": 3
           }
         ]
       }
@@ -36,6 +46,11 @@
     "Stop": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/completion-evidence-gate.py",
+            "timeout": 15
+          },
           {
             "type": "command",
             "command": "/usr/bin/env python3 {{REPO}}/hooks/ledger-sweep.py",

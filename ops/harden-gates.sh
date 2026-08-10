@@ -84,9 +84,14 @@ FILES=(
   "$HOOKS/conduct_patterns.py"
   "$HOOKS/gate-integrity.py"
   "$HOOKS/session-brief.py"
+  "$HOOKS/delegation-gate.py"
+  "$HOOKS/completion-evidence-gate.py"
   "$HOME_DIR/.claude/settings.json"
   "$HOME_DIR/My Drive/CARR AI/.claude/settings.json"
   "$HOME_DIR/My Drive/.claude/settings.json"
+  "$REPO/ops/config/delegation-gate-hook.json"
+  "$REPO/ops/config/codex-hooks.json"
+  "$REPO/ops/config/rule-enforcement-map.json"
 )
 
 status() {

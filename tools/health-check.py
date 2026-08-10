@@ -979,6 +979,32 @@ except Exception as e:
     print(f"  ⚠︎ {'gate protection':<18} selftest failed ({type(e).__name__}: {e})")
     rc = 1
 
+# Rule coverage is deliberately a category map, not a gate count.  A green
+# result means every active rule is classified once and every non-advisory rule
+# names a concrete control/test; it does NOT claim all rules are hard-blocked.
+try:
+    _rem = os.path.join(REPO_ROOT, "ops", "rule-enforcement-map-check.py")
+    if os.path.exists(_rem):
+        _p = subprocess.run([sys.executable, _rem], capture_output=True, text=True, timeout=45)
+        _line = next((l for l in (_p.stdout or "").splitlines()
+                      if l.startswith("rule-enforcement-map:")), "(no output)")
+        _summary = _line.split(" — ", 1)[-1]
+        if _p.returncode == 0:
+            print(f"  OK {'rule coverage':<18} {_summary}")
+        else:
+            print(f"  ✗✗ {'rule coverage':<18} {_summary} · an active rule is unmapped or a claimed control lacks evidence")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'rule coverage':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
+# Equality of ~/.codex/hooks.json with the tracked contract is useful, but it
+# cannot establish that Codex has trusted that hook or actually invokes it.
+# Keep the operational gap explicit until one real negative pre-tool smoke is
+# recorded; do not manufacture an "active" state from JSON alone.
+print(f"  -- {'Codex hook runtime':<18} trust/invocation unverified by local checks · "
+      "requires one live negative blocked-call smoke after install/trust changes")
+
 try:
     _fal = os.path.join(REPO_ROOT, "ops", "fetch-allowlist.py")
     if os.path.exists(_fal):

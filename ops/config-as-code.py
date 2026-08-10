@@ -273,11 +273,76 @@ def live_hooks_block():
 
 
 def live_codex_hooks():
-    """The complete Codex hooks document is its CARR-owned config surface."""
+    """Only the CARR-owned Codex tuples are config-as-code state.
+
+    Codex's global hooks document is shared with unrelated projects.  Comparing
+    or installing it wholesale would turn another project's hook into CARR
+    drift, then overwrite it on the next install.
+    """
     raw = read(CODEX_HOOKS_SRC)
     if raw is None:
         return None
-    return portable(raw)
+    try:
+        live = json.loads(raw)
+        desired = json.loads(concrete(read(CODEX_HOOKS_REPO)))
+    except Exception:
+        return None
+    return portable(json.dumps(carr_owned_hooks_document(
+        live, (desired.get("hooks") or {}).keys()), indent=2) + "\n")
+
+
+def is_carr_hook_command(command):
+    if not isinstance(command, str):
+        return False
+    candidate = command.replace("\\", "/").lower()
+    return "/carr-system/hooks/" in candidate or "/my drive/carr ai/hooks/" in candidate
+
+
+def carr_owned_hooks_document(document, include_events=()):
+    """Extract CARR commands, retaining their event/matcher grouping exactly."""
+    hooks = document.get("hooks") if isinstance(document, dict) else {}
+    out = {}
+    for event in list(include_events) + [e for e in hooks if e not in include_events]:
+        groups = hooks.get(event, []) if isinstance(hooks, dict) else []
+        kept = []
+        for group in groups if isinstance(groups, list) else []:
+            if not isinstance(group, dict):
+                continue
+            commands = [h for h in group.get("hooks", [])
+                        if isinstance(h, dict) and is_carr_hook_command(h.get("command"))]
+            if commands:
+                clone = dict(group)
+                clone["hooks"] = commands
+                kept.append(clone)
+        if kept or event in include_events:
+            out[event] = kept
+    return {"hooks": out}
+
+
+def merge_codex_carr_hooks(live, desired):
+    """Replace only CARR-owned tuples, preserving every unrelated Codex hook."""
+    result = json.loads(json.dumps(live if isinstance(live, dict) else {}))
+    live_hooks = result.get("hooks")
+    if not isinstance(live_hooks, dict):
+        live_hooks = {}
+    desired_hooks = desired.get("hooks") if isinstance(desired, dict) else {}
+    for event in set(live_hooks) | set(desired_hooks or {}):
+        retained = []
+        for group in live_hooks.get(event, []) if isinstance(live_hooks.get(event, []), list) else []:
+            if not isinstance(group, dict):
+                retained.append(group)
+                continue
+            non_carr = [h for h in group.get("hooks", [])
+                        if not (isinstance(h, dict) and is_carr_hook_command(h.get("command")))]
+            if non_carr:
+                clone = dict(group)
+                clone["hooks"] = non_carr
+                retained.append(clone)
+        desired_groups = (desired_hooks or {}).get(event, [])
+        retained.extend(json.loads(json.dumps(desired_groups)) if isinstance(desired_groups, list) else [])
+        live_hooks[event] = retained
+    result["hooks"] = live_hooks
+    return result
 
 
 def pairs():
@@ -289,7 +354,7 @@ def pairs():
     out.append(("hooks block (settings.json)",
                 None if hooks is None else portable(json.dumps(hooks, indent=2) + "\n"),
                 HOOKS_REPO))
-    out.append(("Codex hooks (hooks.json)", live_codex_hooks(), CODEX_HOOKS_REPO))
+    out.append(("Codex CARR hooks (hooks.json)", live_codex_hooks(), CODEX_HOOKS_REPO))
 
     seen = set()
     for name in sorted(os.listdir(TASKS_SRC)) if os.path.isdir(TASKS_SRC) else []:
@@ -439,14 +504,22 @@ def cmd_install(apply):
         return 1
     codex_body = concrete(codex_src)
     try:
-        json.loads(codex_body)
+        desired_codex = json.loads(codex_body)
     except Exception as exc:
         print(f"ERROR: {CODEX_HOOKS_REPO} is not valid JSON ({exc}) — refusing to deploy it.")
         return 1
-    if read(CODEX_HOOKS_SRC) == codex_body:
-        print("  Codex hooks already match the repo")
+    live_codex_raw = read(CODEX_HOOKS_SRC)
+    try:
+        live_codex = json.loads(live_codex_raw) if live_codex_raw is not None else {}
+    except Exception as exc:
+        print(f"ERROR: {CODEX_HOOKS_SRC} is not valid JSON ({exc}) — refusing to touch it.")
+        return 1
+    merged_codex = merge_codex_carr_hooks(live_codex, desired_codex)
+    desired_events = (desired_codex.get("hooks") or {}).keys()
+    if carr_owned_hooks_document(live_codex, desired_events) == desired_codex:
+        print("  Codex CARR hooks already match the repo (unrelated hooks preserved)")
     else:
-        print("  Codex hooks: WILL BE REPLACED with the repo's version")
+        print("  Codex CARR hooks: WILL BE RECONCILED with the repo; unrelated hooks preserved")
 
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
         if f in PRIMARY_ONLY and not IS_PRIMARY:
@@ -530,7 +603,8 @@ def cmd_install(apply):
     if os.path.exists(CODEX_HOOKS_SRC):
         shutil.copy2(CODEX_HOOKS_SRC, codex_backup)
     with open(CODEX_HOOKS_SRC, "w", encoding="utf-8") as fh:
-        fh.write(codex_body)
+        json.dump(merged_codex, fh, indent=2)
+        fh.write("\n")
     try:
         json.loads(read(CODEX_HOOKS_SRC))
     except Exception as exc:
@@ -555,9 +629,42 @@ def cmd_install(apply):
     return 0
 
 
+def config_selftest():
+    """Regression proof that Codex install touches only CARR-owned tuples."""
+    desired = {"hooks": {"Stop": [{"hooks": [{
+        "type": "command", "command": "/Users/booko/carr-system/hooks/completion-evidence-gate.py", "timeout": 15,
+    }]}]}}
+    live = {"hooks": {"Stop": [
+        {"hooks": [{"type": "command", "command": "/Users/booko/other/hooks/keep.py", "timeout": 5}]},
+        {"hooks": [{"type": "command", "command": "/Users/booko/carr-system/hooks/old.py", "timeout": 10}]},
+        {"hooks": [
+            {"type": "command", "command": "/Users/booko/other/hooks/mixed.py", "timeout": 5},
+            {"type": "command", "command": "/Users/booko/carr-system/hooks/old2.py", "timeout": 10},
+        ]},
+    ]}, "user_setting": {"keep": True}}
+    merged = merge_codex_carr_hooks(live, desired)
+    commands = [hook.get("command") for group in merged["hooks"]["Stop"]
+                for hook in group.get("hooks", []) if isinstance(hook, dict)]
+    cases = [
+        ("unrelated Codex hook preserved", "/Users/booko/other/hooks/keep.py" in commands),
+        ("mixed unrelated Codex hook preserved", "/Users/booko/other/hooks/mixed.py" in commands),
+        ("stale CARR hook removed", "/Users/booko/carr-system/hooks/old.py" not in commands),
+        ("desired CARR hook installed once", commands.count(
+            "/Users/booko/carr-system/hooks/completion-evidence-gate.py") == 1),
+        ("unrelated top-level key preserved", merged.get("user_setting") == {"keep": True}),
+        ("CARR snapshot exact", carr_owned_hooks_document(merged, ["Stop"]) == desired),
+    ]
+    for label, passed in cases:
+        print(f"{'PASS' if passed else 'FAIL'}  {label}")
+    print(f"config-as-code-selftest: {sum(ok for _, ok in cases)}/{len(cases)} passed")
+    return 0 if all(ok for _, ok in cases) else 1
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     apply = "--apply" in sys.argv
+    if mode == "--selftest":
+        return config_selftest()
     if mode == "check":
         return cmd_check()
     if mode == "pull":
