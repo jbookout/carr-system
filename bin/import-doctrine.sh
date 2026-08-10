@@ -33,6 +33,12 @@ if [[ " $* " == *" --apply "* ]]; then
     print -u2 "REFUSED: pipelines/doctrine_import.py has uncommitted changes — commit first."
     exit 1
   fi
+  # Non-interactive auth, same reason and same source as restore-rehearse.sh,
+  # migrate-prod.sh and tools/db-tap.py: an expiring browser login does not fail,
+  # it prompts and times out, and this is the fourth caller that inherited it.
+  if [ -z "${NEON_API_KEY:-}" ] && [ -f "$HOME/.config/carr/db.env" ]; then
+    set -a; . "$HOME/.config/carr/db.env"; set +a
+  fi
   DSN="$(neonctl connection-string production --role-name app_writer 2>/dev/null)"
 else
   DSN=""   # dry runs parse only; no credential needed

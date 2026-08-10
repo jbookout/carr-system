@@ -66,6 +66,18 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/usr/local/opt/node@22/bin:/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin"
 
+# NON-INTERACTIVE AUTH. This job is scheduled weekly and runs with nobody
+# watching, so it must never depend on a browser login. When neonctl's saved
+# session expires it does not fail cleanly: it prompts, waits 60 seconds for a
+# browser that is not there, and times out — and this script's only symptom was
+# "cannot list Neon branches", which reads like a Neon outage rather than an
+# expired credential. NEON_API_KEY does not expire on a timer and needs no
+# browser. Sourced from db.env, the same file db-tap.py and migrate-prod.sh read,
+# so all four neonctl callers share one credential and one failure mode.
+if [ -z "${NEON_API_KEY:-}" ] && [ -f "$HOME/.config/carr/db.env" ]; then
+  set -a; . "$HOME/.config/carr/db.env"; set +a
+fi
+
 PROJECT_ID="steep-field-48688294"
 PROD_BRANCH="production"
 NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"
