@@ -83,9 +83,12 @@ test("UI exposes two workspaces, explicit controls, mobile cards, and no pretend
   assert.match(html, /Start agenda/);
   assert.match(html, /Search every deal/);
   assert.match(html, /id="colorAssistButton"/);
+  assert.match(html, />Color assist</);
   assert.match(app, /dealroom-color-assist/);
   assert.match(css, /body\.color-assist/);
   assert.match(css, /repeating-linear-gradient/);
+  assert.match(css, /cell-select\[data-phase\]/);
+  assert.match(css, /cell-select\[data-owner\]/);
   assert.match(app, /new Date\(new Date\(\)\.toDateString\(\)\)/);
   assert.doesNotMatch(app, /new Date\('2026-/);
   assert.doesNotMatch(html + app, /Quill listening|id="mic"/i);
