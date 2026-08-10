@@ -32,6 +32,23 @@ round-trip + trace bit-crush), warm chest (+6.5dB @ 185Hz) with bright presence
 (+3dB @ 4.4kHz), balanced punch (2.4:1), moderate room. Punch is a PER-SURFACE
 dial: desk can run softer, truck/phone punchier — the chain runs at render time.
 
+⚠ THE ROOM STAGE ABOVE THROWS AWAY ~13dB, and it is a bug, not a taste choice.
+ffmpeg's signature is aecho=in_gain:out_gain:delays:decays, and out_gain here is
+0.23 — it scales the WHOLE mix to 23% after the echo is folded in. Measured
+stage by stage on one render: band -22.8, 16k round-trip -22.8, crush -22.8,
+chest -20.5, presence -20.5, punch -21.0, then room -36.2. One stage costs 15dB;
+nothing else costs anything. Raising out_gain to 0.9 restores mean level to
+-23.3 against a -22.5 raw reference and leaves the echo CHARACTER identical,
+because the dry-to-echo ratio is set by the decays, not by out_gain.
+It hid because 13dB at a desk is a volume-knob turn — it would have surfaced in
+the truck, as Doc being inaudible rather than as Doc sounding wrong. It also
+means the compressor (threshold -16dB) and limiter (0.9) have never engaged, so
+the punch setting has effectively never been heard.
+VERIFIED ON THE ELEVENLABS PATH ONLY (Joe's ear, 2026-08-10: "E is best"). The
+Chatterbox line above is left exactly as dialled because the fix has not been
+auditioned on that engine — but it carries the same defect and the same one-
+parameter fix, and that should be a short listen, not a rebuild.
+
 ## Speakable forms (grows with every correction from Joe's ear)
 
 - "real estate" → "realestate" (one word, stress on real)
@@ -111,10 +128,28 @@ no upspeak on statements).
   Background-noise removal OFF at clone time: the source is a synthetic render
   with no noise, so denoising could only smear the timbre being preserved.
   OUTPUT IS MP3 128kbps AND CANNOT BE BETTER ON STARTER — every lossless format
-  is Pro+ ($99/mo). This bites when the mastering chain is re-dialled: the chain
-  lifts +6.5dB at 185Hz and +3dB at 4.4kHz, which amplifies codec artefacts along
-  with Doc. Re-dial by ear against THIS engine's output; never paste the
-  Chatterbox chain on unchanged.
+  is Pro+ ($99/mo).
+
+  THE ELEVENLABS MASTERING CHAIN (adopted 2026-08-10, Joe: "E is best"):
+
+    ffmpeg -af "highpass=f=90,lowpass=f=7400, aresample=16000, aresample=24000,
+    acrusher=bits=14:mode=log:mix=0.08, equalizer=f=185:t=q:w=1.4:g=6.5,
+    equalizer=f=4400:t=q:w=1.2:g=3,
+    acompressor=threshold=-16dB:ratio=2.4:attack=8:release=115:makeup=2dB,
+    aecho=0.8:0.9:21|36:0.10|0.07, alimiter=limit=0.9"
+
+  TWO DELIBERATE DIFFERENCES from the Chatterbox chain, each decided by a test:
+    NO asetrate/atempo. The engine's own speed dial already carries Joe's pace
+    (the 0:56/1:00/0:58 comparison). Keeping the chain's tempo applies his slow
+    TWICE — the fault he rejected twice that day. Variant A proved it audibly.
+    aecho out_gain 0.23 -> 0.9. The level bug documented above.
+  AND TWO THINGS DELIBERATELY UNCHANGED, because tests said leave them:
+    CHEST STAYS AT +6.5dB. A variant at +4dB was indistinguishable to Joe and
+    measured only 0.6dB different overall — a narrow-band change is small. Do
+    not alter a dialled number the ear cannot separate.
+    THE BIT-CRUSH STAYS. Removing it (keeping the 16k round-trip) was "a little
+    too much ... slightly less preferred", so the MP3 codec does NOT already
+    supply Doc's machine texture, which was the plausible theory going in.
 
   ELEVEN V3 WAS TESTED AND REJECTED, 2026-08-10 — do not retry it blind.
   It is the obvious candidate, because it takes per-line audio tags and that is
