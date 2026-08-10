@@ -82,6 +82,22 @@ def main():
               and "spawn_task" in out.get("reason", ""))
         check("70% reason is NOT the hard-line text",
               bool(out) and "HARD LINE" not in out.get("reason", ""))
+        # THE LAST MILE (2026-08-10, decision aa6c00fa). The chip renders on the
+        # desktop app only, so a handoff delivered by chip alone is invisible to
+        # Joe in the field. Every band must order the push; without this
+        # assertion the delivery half is exactly as untested as it was the night
+        # Joe found the defect by looking at his phone.
+        check("70% reason orders the phone push",
+              bool(out) and "PushNotification" in out.get("reason", ""))
+        check("70% reason says why the push is needed (desktop-only chip)",
+              bool(out) and "desktop app only" in out.get("reason", ""))
+        # The 70% band must NOT queue a scheduled continuation: the session
+        # usually keeps working past 70, so a queued run would duplicate it.
+        check("70% band does NOT queue a scheduled continuation",
+              bool(out) and "create_scheduled_task" not in out.get("reason", ""))
+        check("70% reason leads the push with the disposition",
+              bool(out) and "LEAD WITH THE DISPOSITION" in out.get("reason", "")
+              and "truncates the TAIL" in out.get("reason", ""))
 
         # --- fires once per band, then escalates ----------------------------
         # Guards the loop risk (a Stop hook that blocks forever strands Joe)
@@ -98,6 +114,38 @@ def main():
         check("same session escalates to band 88", out and out.get("decision") == "block")
         check("band 88 uses the hard-line text",
               bool(out) and "HARD LINE" in out.get("reason", ""))
+        # At the hard line the session IS stopping, so both delivery routes are
+        # required: the push so Joe learns of it wherever he is, and the
+        # one-time scheduled task so the continuation resumes with no click.
+        check("band 88 orders the phone push",
+              bool(out) and "PushNotification" in out.get("reason", ""))
+        check("band 88 queues a scheduled continuation (removes the click)",
+              bool(out) and "create_scheduled_task" in out.get("reason", "")
+              and "fireAt" in out.get("reason", ""))
+        check("band 88 names a collision-proof taskId for it",
+              bool(out) and "handoff-continuation-" in out.get("reason", ""))
+        # The overclaim guard. A scheduled task does not run on a closed
+        # machine, so the text must promise that the work RESUMES, never that
+        # it runs at a particular time. This is the same class of honesty the
+        # file already keeps about the chip not being a new session.
+        # Joe, on the first live push, phone closed: "i dont know if it did
+        # anything." Tapping the push opens the EXHAUSTED session, not the
+        # continuation, so a message naming only the subject strands him. Both
+        # bands must order the disposition in the same line.
+        # The ORDER is the rule. A lock screen truncates the TAIL at roughly
+        # 100 chars, so a disposition written last is the part the phone eats —
+        # which is exactly what the first corrected push got wrong (163 chars,
+        # "Nothing needed from you" at the end).
+        check("band 88 orders disposition FIRST, not merely present",
+              bool(out) and "DISPOSITION FIRST" in out.get("reason", ""))
+        check("band 88 gives both permitted opening stems",
+              bool(out) and "Nothing needed from you" in out.get("reason", "")
+              and "Need your call on" in out.get("reason", ""))
+        check("band 88 names the truncation limit that forces the order",
+              bool(out) and "100 characters" in out.get("reason", ""))
+        check("band 88 does not promise the continuation runs unattended",
+              bool(out) and "unattended" not in out.get("reason", "").lower()
+              and "only while the app is open" in out.get("reason", ""))
         rc, out = run({"session_id": s, "transcript_path": t90}, statefile=state)
         check("band 88 does not fire twice", out is None, f"out={out}")
 
@@ -154,13 +202,22 @@ def main():
         # --- against a REAL transcript ---------------------------------------
         # The synthetic rows above are my own shape assumption; this is the only
         # case that proves the parser matches what the product actually writes.
-        proj = os.path.expanduser("~/.claude/projects/-Users-booko-My-Drive-CARR-AI")
-        real = None
-        if os.path.isdir(proj):
-            files = [os.path.join(proj, f) for f in os.listdir(proj) if f.endswith(".jsonl")]
-            files = [f for f in files if os.path.getsize(f) > 50_000]
-            if files:
-                real = max(files, key=os.path.getsize)
+        # Was pinned to "-Users-booko-My-Drive-CARR-AI", which is one machine's
+        # project folder and contains a username. On any other Mac that path
+        # cannot exist, so this fell to the else branch and FAILED the whole
+        # selftest — which in turn aborted the migration script that runs it
+        # (2026-08-10 fresh-machine audit). Search every project instead.
+        root = os.path.expanduser("~/.claude/projects")
+        files = []
+        if os.path.isdir(root):
+            for d in os.listdir(root):
+                sub = os.path.join(root, d)
+                if not os.path.isdir(sub):
+                    continue
+                files += [os.path.join(sub, f) for f in os.listdir(sub)
+                          if f.endswith(".jsonl")
+                          and os.path.getsize(os.path.join(sub, f)) > 50_000]
+        real = max(files, key=os.path.getsize) if files else None
         if real:
             sys.path.insert(0, HERE)
             import importlib.util
@@ -174,7 +231,12 @@ def main():
             print(f"       (real session {os.path.basename(real)[:12]}… "
                   f"= {n:,} tokens = {100*n/1_000_000:.1f}% of 1M)")
         else:
-            check("real transcript available to test against", False, "none found")
+            # A machine with no Claude history yet has nothing to parse. That is
+            # a fresh install, not a defect — failing here made a correct
+            # migration report MIGRATION INCOMPLETE. Say it was skipped, out
+            # loud, so a green run never hides which half was exercised.
+            print("       SKIP  real-transcript case — no session ≥50KB on this "
+                  "machine yet (fresh install); synthetic cases above still ran")
 
     print()
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

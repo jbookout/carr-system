@@ -22,6 +22,44 @@ ceilings on this surface:
   about. The click is the whole manual step, stated out loud here so no later
   session mistakes this for full automation.
 
+THE LAST MILE, added 2026-08-10 (decision aa6c00fa). The chip renders ONLY in
+the desktop app. Joe checked his phone: "Yes it was not visible on my phone."
+So the handoff completed exactly when he was already at the machine — the case
+where he needs it least — and went silent when he was in the field, which for a
+CRE broker is most of the working day. Twenty selftests passed and he found this
+in one look, which is the whole argument for testing on the surface the human
+actually carries.
+
+  TWO DELIVERY MECHANISMS NOW, because they do DIFFERENT jobs and neither one
+  closes the gap alone. Both were checked against the live tool contracts on
+  2026-08-10 rather than assumed:
+
+    PushNotification REACHES THE PHONE. It sends a desktop notification and,
+    when Remote Control is connected, also pushes to mobile. A live call from
+    this machine returned "Mobile push requested", so the mobile route is wired
+    on Joe's setup. It REMINDS: it carries no work and it still needs him to
+    come back. Note the tool deliberately SKIPS sending when he is actively at
+    the terminal, so a "not sent" result is correct behaviour, not a failure.
+
+    A ONE-TIME SCHEDULED TASK REMOVES THE CLICK. create_scheduled_task with a
+    `fireAt` timestamp runs once and auto-disables, and a scheduled run starts
+    with no human action at all. It BINDS where the chip only offers.
+
+  THE CORRECTION THAT MATTERS, and the reason this file does not claim more
+  than it does: a scheduled task does NOT run on a closed machine. Per its own
+  tool contract, "scheduled tasks run while this app is open. If the app is
+  closed when a task is due, it runs on next launch." So the continuation is
+  guaranteed to run WITHOUT A CLICK, but it is not guaranteed to run AT A TIME.
+  Calling it "unattended" would be the same overclaim as calling the chip a new
+  session. The honest combined guarantee is:
+
+      Joe LEARNS of the handoff wherever he is (push), and the continuation
+      RUNS WITHOUT HIM CLICKING ANYTHING (scheduled task) the next time the
+      app is open. The chip stays as the instant path when he IS at the desk.
+
+  Three routes, degrading gracefully: chip if he is at the desk, push so he
+  knows either way, scheduled task so the work resumes even if he does nothing.
+
 WHY A Stop HOOK AND NOT A CONTEXT EVENT. There is no context-threshold hook
 event in this product (verified against the hook-events reference 2026-08-09:
 SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolBatch, Stop,
@@ -174,7 +212,35 @@ def reason_for(band, pct, used):
             "one-click chip that opens the new session already holding the "
             "work. The prompt must stand alone: file paths, record refs, the "
             "decisions already settled, and the single next action.\n"
-            "4. Close with ONE next action for Joe, in his words (rule "
+            "4. Call `PushNotification`. The chip is DESKTOP ONLY and Joe is "
+            "usually not at the desk; without this he never learns the handoff "
+            "happened. One line, under 200 characters, naming the work in "
+            "plain words — not 'handoff ready' but what it is a handoff OF. A "
+            "'not sent' result is fine and means he is already at the "
+            "terminal reading you.\n"
+            "   DISPOSITION FIRST, SUBJECT SECOND — and the ORDER is the rule, "
+            "not a preference. Tapping the push opens THIS session, the one "
+            "that just ran out of room, not the continuation. So a message "
+            "naming only the work lands Joe in a dead end with no way to tell "
+            "whether anything happened. Joe, 2026-08-10, on the first live "
+            "push: \"i dont know if it did anything.\" A lock screen shows "
+            "roughly the first 100 characters and truncates the TAIL, so a "
+            "disposition written at the end is the part the phone eats. Open "
+            "with one of exactly two stems:\n"
+            "     'Nothing needed from you — <what happened>'\n"
+            "     'Need your call on <the one thing> — <what happened>'\n"
+            "   Then the subject in plain words. Under 100 characters if it "
+            "can be done honestly, 200 absolute. If the whole line cannot "
+            "survive being cut at 100 characters and still tell Joe whether he "
+            "is needed, it is the wrong line.\n"
+            "5. Call `create_scheduled_task` with a `fireAt` about ten minutes "
+            "out and the SAME self-contained prompt from step 3. This is the "
+            "half that removes the click: a scheduled run needs no human "
+            "action. It runs only while the app is open, so it is a guarantee "
+            "the work RESUMES, never a promise about when. Give it a taskId of "
+            "`handoff-continuation-<yyyymmdd-hhmm>` so it cannot collide with "
+            "the 18 standing tasks, and say in one line that you created it.\n"
+            "6. Close with ONE next action for Joe, in his words (rule "
             "0156e9fa), naming the deal or build in the message itself (rule "
             "c315befa).\n\n"
             "Then stop. Do not re-explain this gate to Joe beyond one line."
@@ -189,7 +255,22 @@ def reason_for(band, pct, used):
         "WRITE LAW 14181e60).\n"
         "4. Call `spawn_task` with a self-contained continuation prompt so the "
         "next session is one click away for Joe. Include file paths, record "
-        "refs, decisions already settled, and the exact next action.\n\n"
+        "refs, decisions already settled, and the exact next action.\n"
+        "5. Call `PushNotification` with one plain-language line naming the "
+        "work. The chip renders on the desktop app only, so this is the only "
+        "part of the handoff that reaches Joe when he is in the field. A 'not "
+        "sent' result means he is at the terminal already and is correct. "
+        "LEAD WITH THE DISPOSITION, then the subject — tapping the push opens "
+        "THIS session, so a line naming only the subject leaves him unable to "
+        "tell whether anything happened, and a lock screen truncates the TAIL "
+        "at roughly 100 characters, so a disposition written last is the part "
+        "the phone eats. At this band the honest opener is usually 'Nothing "
+        "needed from you — packet written, still working' rather than anything "
+        "claiming a handoff completed.\n\n"
+        "At 70% the scheduled-continuation step is deliberately NOT required — "
+        "the packet is insurance and the session usually keeps going, so "
+        "queueing a run that duplicates it would be worse than no run. That "
+        "step belongs to the 88% band, where the session is actually stopping.\n\n"
         "You may keep working after that if the remaining work is small. The "
         "packet is insurance, not a stop order — but it must exist before the "
         "window closes, because a session that runs out with no packet loses "
