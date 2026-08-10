@@ -198,7 +198,6 @@ function renderChrome() {
     : selected ? `${actorName(selected.account_owner)} owns the account; each market deal keeps its assigned agent and owner.`
     : 'One account can hold dozens of market-level transactions without crowding the territory agenda.';
   const addLabel = state.workspace === 'national_account' ? (selected ? 'Add market deal' : 'Add national account') : 'Add work record';
-  $('#addButton').textContent = addLabel;
   $('#stickyAddButton').textContent = `+ ${addLabel}`;
   $('#stickyAddButton').setAttribute('aria-label', addLabel);
   $('#ownerButton').hidden = !selected;
@@ -940,12 +939,10 @@ function wireEvents() {
   $('#search').addEventListener('input', (event) => { state.query=event.target.value.trim(); render(); });
   $('#accountBack').onclick = () => { state.accountId=null; render(); };
   const openAddForm = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
-  $('#addButton').onclick = openAddForm;
   $('#stickyAddButton').onclick = openAddForm;
   $('#ownerButton').onclick = accountOwnerForm;
   $('#agendaButton').onclick = startAgenda;
   $('#callModeButton').onclick = openCallMode;
-  $('#callModeHeroButton').onclick = openCallMode;
   $('#callModeStop').onclick = stopCallMode;
   $('#postCallRefresh').onclick = () => refreshPostCall();
   $('#agendaReviewed').onclick = () => advanceAgenda('reviewed');
