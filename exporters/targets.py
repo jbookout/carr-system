@@ -1033,7 +1033,24 @@ def build_loop_file(rel_path):
         if not blocks:
             raise ValueError(f"no loop_block rows for {rel_path} — the importer has not run")
 
-        lines, canonical = [], []
+        # THE BANNER, added 2026-08-10 (loop #145). These five files were the last
+        # renders in the system that looked hand-editable to a human. The
+        # record-home gate already stops a SESSION writing them, so the risk was
+        # never a session — it was Joe or Dell opening open-loops.md in Drive,
+        # seeing an ordinary checklist, editing it, and having the next export
+        # erase the edit with no warning that it would. That is the same silent
+        # failure the gate exists to prevent, pointed at the humans instead.
+        #
+        # It goes FIRST, above the file's own intro prose, because a banner below
+        # the thing it warns about is read after the damage. Blank line after it
+        # so the existing prose keeps its own heading structure intact.
+        lines, canonical = [
+            "> **GENERATED from the CARR record layer — do not hand-edit; "
+            "regenerated nightly.** Add or change a row with the loop verbs "
+            "(`add-loop`, `update-loop`, `close-loop`), never by editing this file: "
+            "an edit here is overwritten by the next export and leaves no trace.",
+            "",
+        ], []
         for seq, block_key, prose_md, header_cols, col_order, renders_closed in blocks:
             # A prose-only block is emitted even when EMPTY: the last block of
             # open-loops-backlog.md is exactly that, and it is what carries the
