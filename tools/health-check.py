@@ -492,14 +492,43 @@ else:
     # word-bounded (`prospect_pool` no longer matches `v_prospect_pool_x`). A file that
     # cannot be read counts as a live reference — same posture as the UNREADABLE branch
     # above, because a check that cannot see must never report all-clear.
+    # PERFORMANCE, added 2026-08-09 by the system-design council. This grep ran
+    # once per deprecated object with no --exclude-dir, over a repo that is 8.0 GB
+    # (5.7 GB of it ML virtualenvs under tools/doc-convo). Seven full walks took
+    # `run.sh health` to ~8 minutes, and a daily check that takes eight minutes
+    # stops being run daily — which is exactly what happened: nothing automated
+    # calls it, and the one cloud task that does skipped two days this week.
+    # Excluding the venvs, node_modules, .git, out/ and the in-tree worktrees is
+    # correct on the merits too: none of them is executable source this check is
+    # meant to judge, and the worktrees hold two diverged FULL COPIES of the repo,
+    # so every count this produced was inflated up to 3x on any file that exists
+    # in them.
+    _SKIP_DIRS = ["--exclude-dir=.venv", "--exclude-dir=.venv-*",
+                  "--exclude-dir=node_modules", "--exclude-dir=.git",
+                  "--exclude-dir=out", "--exclude-dir=worktrees",
+                  "--exclude-dir=.claude", "--exclude-dir=_to_delete"]
+
     def _live_refs(_n):
         _h = subprocess.run(["grep", "-rlw", _n, REPO_ROOT, "--include=*.py",
-                             "--include=*.js", "--include=*.sh"],
+                             "--include=*.js", "--include=*.sh", *_SKIP_DIRS],
                             capture_output=True, text=True)
         _out = []
         for _f in _h.stdout.splitlines():
             if ("/migrations/" in _f or "node_modules" in _f or "/corpus/" in _f
                     or f"import_{_n}" in _f):
+                continue
+            # A WATCHER NAMING A FILE IS NOT A CONSUMER OF IT. Added 2026-08-09,
+            # same council pass. Five of the six deprecation rows warned solely
+            # because THIS file's own WATCH list holds those filenames, and
+            # parity-lead-board.py is the test harness that dies with them. The
+            # check was its own dependency, so the register could never go green
+            # and had printed the identical six warnings since 2026-08-02. That
+            # is not a harmless cosmetic: a row that is chronically red detects
+            # nothing, and this system has already been bitten by it once — on
+            # 2026-08-08 a plugin install deleted the entire hooks block and the
+            # catastrophic wipe printed the same headline as a benign stale row,
+            # so all five gates were off for a day and it was found by accident.
+            if os.path.basename(_f) in ("health-check.py", "parity-lead-board.py"):
                 continue
             try:
                 _lines = open(_f, errors="replace").read().splitlines()

@@ -43,6 +43,33 @@ else
   echo "$(date -u +%FT%TZ) FAIL review-queue rc=$?" >> "$LOG"; rc=1
 fi
 
+# DELIVER THE CALL LIST TO A SURFACE JOE ACTUALLY OPENS. Added 2026-08-09 by the
+# system-design council: brief_pack writes one-thing.md and renewal-shortlist.md
+# into out/brief-pack/, and .gitignore line 5 excludes out/ entirely. Nothing
+# copied them anywhere, and grep found no consumer but health-check.py watching
+# the mtime — a freshness check on a file with no reader. Meanwhile the shortlist
+# named 15 Pensacola healthcare tenants with phone numbers and lease windows, and
+# THREE of those windows expired unread, each carrying its own auto-generated
+# "est window already past, verify before outreach" footnote. The file recorded
+# the opportunity it was losing.
+#
+# Vault, not email: this deliberately does NOT depend on the handover channel,
+# which cannot run (~/.config/carr/gmail.env is absent) and is a separate fix.
+# 00_Context/ is a folder Joe already opens, so this needs no new habit.
+VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
+if [ -d "$VAULT/00_Context" ]; then
+  { echo "# Today — generated $(date -u +%FT%TZ), do not hand-edit"
+    echo
+    cat "$REPO/out/brief-pack/one-thing.md" 2>/dev/null
+    echo
+    cat "$REPO/out/brief-pack/renewal-shortlist.md" 2>/dev/null
+  } > "$VAULT/00_Context/today.md" \
+    && echo "$(date -u +%FT%TZ) OK today.md -> vault" >> "$LOG" \
+    || { echo "$(date -u +%FT%TZ) FAIL today.md -> vault" >> "$LOG"; rc=1; }
+else
+  echo "$(date -u +%FT%TZ) SKIP today.md — vault not mounted" >> "$LOG"
+fi
+
 # Known defect, tracked as loop #182: review-queue's touches lane reports 0 while
 # ingest_inbox holds real rows, because the read fails and the handler discards
 # the error message. A zero here is not yet trustworthy.
