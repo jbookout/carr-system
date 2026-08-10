@@ -71,6 +71,13 @@ step() { print -r -- ""; print -r -- "── $* ──────────�
 #   uncommitted gates — anything still in the working tree here is invisible to
 #                    the clone, which is the point: it is exactly what Dell gets.
 if [ "${1:-}" = "--preflight" ]; then
+  # Resolved from the REAL home, before HOME is redirected at the scratch machine.
+  REAL_VAULT="${CARR_VAULT:-}"
+  if [ -z "$REAL_VAULT" ]; then
+    for c in "$HOME"/Library/CloudStorage/GoogleDrive-*/"My Drive"/"CARR AI"; do
+      [ -d "$c" ] && { REAL_VAULT="$c"; break; }
+    done
+  fi
   TMP="${TMPDIR:-/tmp}/carr-preflight-$$"
   trap 'rm -rf "$TMP"' EXIT INT TERM
   mkdir -p "$TMP/home/Library/LaunchAgents" "$TMP/home/.claude"
@@ -103,8 +110,25 @@ if [ "${1:-}" = "--preflight" ]; then
            context-handoff-gate corpus-render-gate; do
     F="$TMP/home/carr-system/ops/$t-selftest.py"
     [ -f "$F" ] || { print -r -- "    note  $t — not in the clone"; continue; }
-    if (cd "$TMP/home/carr-system" && HOME="$TMP/home" python3 "$F" </dev/null \
-         >/tmp/pf.log 2>&1); then
+    # CARR_VAULT is passed through deliberately. The scratch HOME has no Drive
+    # mount, and the corpus-render deny set resolves its roots by globbing
+    # ~/Library/CloudStorage/GoogleDrive-*/My Drive/CARR AI — so without this the
+    # deny set comes back empty, a Bash tee onto a render is "allowed", and the
+    # gate reports a failure that exists only because the test machine has no
+    # vault. Handing it the real one (read-only; the selftest writes nothing
+    # there) tests the gate against a real corpus instead of waiving the case.
+    # corpus-render is MACHINE-ANCHORED and so gets the real HOME. Its deny set
+    # is the realpath of files under My Drive/.claude and the vault — absolute
+    # paths that exist on a real Mac and nowhere in a scratch tree — so under a
+    # fake HOME the set resolves to targets the clone's own test paths can never
+    # match, and a Bash tee comes back "allowed" for a gate that is fine. What
+    # preflight needs to know is whether the CODE on origin/main works on a real
+    # machine, so it runs the clone's selftest against this one. Every other gate
+    # keeps the scratch HOME, which is what makes them a fresh-machine test.
+    PF_HOME="$TMP/home"
+    [ "$t" = "corpus-render-gate" ] && PF_HOME="$HOME"
+    if (cd "$TMP/home/carr-system" && HOME="$PF_HOME" CARR_VAULT="$REAL_VAULT" \
+         python3 "$F" </dev/null >/tmp/pf.log 2>&1); then
       print -r -- "    ok    $t"
     elif [ "$t" = "gate-edit-gate" ] && grep -q "FAILURES: sh-destructive" /tmp/pf.log \
          && [ "$(grep -c FAILURES /tmp/pf.log)" = "1" ]; then

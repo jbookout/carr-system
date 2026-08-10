@@ -110,6 +110,9 @@ TOKENS = [(tok, real) for tok, real in
 # inherited from the nightly chain.
 PRIMARY_ONLY = {
     "com.carr.videopipeline.plist",
+    # Watches DELL's migration packet FROM Joe's Mac, and removes itself once
+    # his A15 closes. Installing it on his machine would be circular.
+    "com.carr.preflight-watch.plist",
     "com.carr.nightly-record-layer.plist",
     "com.carr.rules-refresh.plist",
     "com.carr.local-briefs.plist",
