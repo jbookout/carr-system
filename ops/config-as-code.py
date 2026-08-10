@@ -390,7 +390,19 @@ def cmd_install(apply):
         shutil.copy2(backup, SETTINGS)
         print(f"ERROR: write produced unparseable JSON ({exc}) — restored {backup}")
         return 1
-    print(f"\nWROTE OK (backup: {backup}). RESTART THE SESSION — hooks load at start.")
+    # NO RESTART NEEDED, and the old message here said otherwise for months.
+    # Live-tested 2026-08-09 with two independent confirmations: git-writer-gate
+    # and gate-edit-gate were both installed MID-SESSION and both fired in a
+    # session that started before either existed. Claude Code reads the hooks
+    # block per tool call, not once at session start. This matters — the old
+    # wording implied every other running session stayed unguarded until it was
+    # restarted, which would have made a gate install nearly useless on a machine
+    # running five sessions. The opposite is true: an install takes effect
+    # everywhere immediately. Rule 97326357 — a claim about a surface becomes
+    # doctrine only after a live test from that surface.
+    print(f"\nWROTE OK (backup: {backup}). Live immediately — Claude Code reads "
+          f"the hooks block per tool call, so every running session is covered "
+          f"without a restart (verified 2026-08-09).")
     return 0
 
 
