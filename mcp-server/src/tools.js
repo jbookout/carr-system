@@ -1563,10 +1563,24 @@ export const TOOLS = {
       if (args.blocker === "none") where.push("blocker_class is null");
       else if (args.blocker === "any") where.push("blocker_class is not null");
       else if (args.blocker) { params.push(args.blocker); where.push(`blocker_class = $${params.length}`); }
-      if (args.search) { params.push(`%${args.search}%`); where.push(`title ilike $${params.length}`); }
+      if (args.search) {
+        params.push(`%${args.search}%`);
+        // Search BOTH columns. 148 of the 150 open work loops carry a null
+        // title and hold their text in body, so a title-only search matches
+        // almost nothing — which looks identical to "no such loop".
+        where.push(`(coalesce(title,'') || ' ' || coalesce(body,'')) ilike $${params.length}`);
+      }
       params.push(Math.min(Number(args.limit) || 60, 300));
       const r = await c.query(
         `select number, kind, domain, status, owner, marker, title,
+                -- LABEL, not title. Almost every loop predates the title column
+                -- and keeps its text in body, so a board keyed on title alone
+                -- returns a column of nulls and cannot identify anything. Fall
+                -- back to the first line of body with the bold markers stripped.
+                coalesce(
+                  nullif(title, ''),
+                  nullif(regexp_replace(split_part(body, E'\\n', 1), '\\*\\*', '', 'g'), '')
+                ) as label,
                 blocker_class, blocker_detail, since_text,
                 to_jsonb(due_on)#>>'{}' as due_on, version
            from loop_item
