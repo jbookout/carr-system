@@ -1,5 +1,6 @@
 import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { uuidv4 } from './uuid.js';
+import { createPostCallClient } from './post-call-client.js';
 
 const POLL_MS = 1400;
 const CALL_MODE_URL = 'http://127.0.0.1:4682';
@@ -10,6 +11,9 @@ const state = {
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null, undoEventId: null,
   callMode: { state: 'idle' }, callModeTimer: null,
+  postCallClient: null, postCallTimer: null,
+  postCall: { status: 'idle', session: null, report: null, error: null,
+    contextReady: false, draftErrors: new Map() },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -311,8 +315,8 @@ function renderCallMode() {
   if (!stage) return;
   stage.classList.toggle('recording', recording);
   stage.classList.toggle('processing', processing);
-  $('#callModeStarts').hidden = recording;
-  $('#callModeConsentRow').hidden = recording;
+  $('#callModeStarts').hidden = recording || processing;
+  $('#callModeConsentRow').hidden = recording || processing;
   $('#callModeStop').hidden = !recording;
   $('#callModeTimer').textContent = recording ? elapsedTime(snapshot.started_at) : ({
     idle: 'Ready', transcribing: 'Processing', ready_to_extract: 'Transcript ready', filed: 'Summary saved', state_unknown: 'Check Quill',
@@ -334,6 +338,7 @@ function renderCallMode() {
     ? `<span aria-hidden="true">●</span> ${elapsedTime(snapshot.started_at)}`
     : '<span aria-hidden="true">✦</span> Call Mode';
   toolbarButton.setAttribute('aria-label', recording ? `Call Mode recording ${elapsedTime(snapshot.started_at)}` : 'Open Call Mode');
+  renderPostCall();
 }
 
 function showCallModePermission() {
@@ -359,11 +364,223 @@ async function callModeApi(path, body = null) {
   return payload;
 }
 
+function postCallItemStatus(item) {
+  return item.candidate_status || item.status || (item.candidate_id ? 'pending' : 'needs_review');
+}
+
+function reportText(value) {
+  return String(value || '')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/giu, 'unmatched record')
+    .replace(/\bP-\d+\b/giu, 'unmatched participant');
+}
+
+function postCallDealName(item) {
+  return item.deal_name || state.deals.get(item.deal_id)?.name || 'Work record';
+}
+
+function taskCard(item, owner) {
+  const status = postCallItemStatus(item);
+  const pending = status === 'pending';
+  const text = item.action || item.title || item.text || item.summary || 'Action needs review';
+  return `<article class="post-call-card" data-post-call-item="${esc(item.candidate_id || '')}">
+    <div class="post-call-card-head"><b>${esc(postCallDealName(item))}</b><span class="post-call-badge ${esc(status)}">${esc(status.replaceAll('_',' '))}</span></div>
+    <p>${esc(reportText(text))}</p>${item.due_on ? `<small>Due ${esc(dateLabel(item.due_on))}</small>` : ''}
+    ${pending ? `<div class="post-call-card-actions"><button type="button" class="primary" data-post-call-confirm="${esc(item.candidate_id)}" data-candidate-resolver="post_call">Confirm ${esc(owner)} task</button><button type="button" class="secondary" data-post-call-skip="${esc(item.candidate_id)}" data-candidate-resolver="post_call">Skip</button></div>` : ''}
+  </article>`;
+}
+
+function dealUpdateCard(item) {
+  const status = postCallItemStatus(item);
+  const pending = status === 'pending';
+  const summary = item.update || item.summary || item.text || item.action || 'Deal update needs review';
+  return `<article class="post-call-card" data-post-call-item="${esc(item.candidate_id || '')}">
+    <div class="post-call-card-head"><b>${esc(postCallDealName(item))}</b><span class="post-call-badge ${esc(status)}">${esc(status.replaceAll('_',' '))}</span></div>
+    <p>${esc(reportText(summary))}</p>
+    ${pending ? `<div class="post-call-card-actions"><button type="button" class="primary" data-post-call-confirm="${esc(item.candidate_id)}" data-candidate-resolver="${['assigned_action','email_draft'].includes(item.candidate_kind || item.kind) || item.candidate_table === 'capture_post_call_candidate' ? 'post_call' : 'legacy'}">Confirm update</button><button type="button" class="secondary" data-post-call-skip="${esc(item.candidate_id)}" data-candidate-resolver="${['assigned_action','email_draft'].includes(item.candidate_kind || item.kind) || item.candidate_table === 'capture_post_call_candidate' ? 'post_call' : 'legacy'}">Skip</button></div>` : ''}
+  </article>`;
+}
+
+function questionCard(item) {
+  const question = typeof item === 'string' ? item : (item.question || item.text || item.summary || 'Needs review');
+  const options = Array.isArray(item?.options) ? item.options : [];
+  return `<article class="post-call-card question"><p>${esc(reportText(question))}</p>${options.length ? `<div class="post-call-options" aria-label="Possible answers">${options.map((option) => `<span>${esc(reportText(typeof option === 'string' ? option : option.label || option.text))}</span>`).join('')}</div>` : ''}</article>`;
+}
+
+function draftCard(draft) {
+  const status = draft.status || draft.candidate_status || 'pending';
+  const created = ['created','already_created','draft_created'].includes(status) || draft.idempotent === true;
+  const skipped = status === 'skipped';
+  const awaitingReceipt = !draft.candidate_id && !created;
+  const busyError = state.postCall.draftErrors.get(draft.draft_id);
+  const recipient = draft.recipient_name || 'Recipient needs review';
+  return `<article class="post-call-card vendor-draft" data-post-call-draft-card="${esc(draft.draft_id)}">
+    <div class="post-call-card-head"><div><b>${esc(postCallDealName(draft))}</b><small>${esc(recipient)}${draft.recipient_email ? ` · ${esc(draft.recipient_email)}` : ''}</small></div><span class="post-call-badge ${esc(status)}">${esc(status.replaceAll('_',' '))}</span></div>
+    <h5>${esc(reportText(draft.subject || 'Deal update'))}</h5><p class="draft-body">${esc(reportText(draft.body || ''))}</p>
+    ${busyError ? `<p class="post-call-inline-error" role="alert">${esc(busyError)} You can retry safely.</p>` : ''}
+    <div class="post-call-card-actions"><button type="button" class="primary create-draft" data-create-outlook-draft="${esc(draft.draft_id)}" data-draft-candidate="${esc(draft.candidate_id || '')}" data-draft-status="${esc(status)}" data-content-hash="${esc(draft.content_hash || '')}"${created || skipped || awaitingReceipt ? ' disabled' : ''}>${created ? 'Created in Outlook' : skipped ? 'Skipped' : awaitingReceipt ? 'Preparing draft…' : busyError ? 'Retry Outlook draft' : 'Create Outlook draft'}</button>${status === 'pending' && draft.candidate_id ? `<button type="button" class="secondary" data-post-call-skip="${esc(draft.candidate_id)}" data-candidate-resolver="post_call">Skip</button>` : ''}</div>
+    <small class="human-gate">Creates a draft only. Joe or Dell reviews and sends it in Outlook.</small>
+  </article>`;
+}
+
+function reportSection(title, items, renderItem, empty) {
+  return `<section class="post-call-group"><h4>${esc(title)}</h4>${items.length ? `<div class="post-call-cards">${items.map(renderItem).join('')}</div>` : `<p class="post-call-empty">${esc(empty)}</p>`}</section>`;
+}
+
+function renderPostCall() {
+  const panel = $('#postCallPanel');
+  const post = state.postCall;
+  panel.hidden = !post.session && post.status === 'idle';
+  if (panel.hidden) return;
+  const labels = {
+    context_loading: 'Preparing the active weekly agenda…',
+    context_ready: 'Agenda context ready. Recording continues locally.',
+    awaiting_context: 'Preparing the active weekly agenda…',
+    waiting_for_transcript: 'Recording stopped. Quill is transcribing locally…',
+    distilling: 'Quill is distilling the weekly updates and next actions…',
+    review_ready: 'Report ready for Joe and Dell to review.',
+    filed: 'Post-call report filed. Outlook drafts still require a person to send them.',
+    failed: 'The post-call report needs attention.',
+  };
+  $('#postCallStatus').innerHTML = `<span class="post-call-spinner" aria-hidden="true"></span><b>${esc(labels[post.status] || 'Post-call workflow ready.')}</b>${post.error ? `<small role="alert">${esc(post.error)}</small><button type="button" class="secondary" data-retry-call-context>Retry agenda context</button>` : ''}`;
+  $('#postCallStatus').classList.toggle('failed', Boolean(post.error) || post.status === 'failed');
+  const envelope = post.report || {};
+  const core = envelope.report || {};
+  const joe = Array.isArray(envelope.joe_tasks) ? envelope.joe_tasks : [];
+  const dell = Array.isArray(envelope.dell_tasks) ? envelope.dell_tasks : [];
+  const updates = Array.isArray(envelope.deal_updates) ? envelope.deal_updates : (Array.isArray(envelope.deals) ? envelope.deals : []);
+  const questions = [...(Array.isArray(envelope.review_questions) ? envelope.review_questions : []),
+    ...(Array.isArray(core.open_questions) ? core.open_questions : []),
+    ...(Array.isArray(envelope.questions) ? envelope.questions : [])];
+  const drafts = Array.isArray(envelope.draft_proposals) ? envelope.draft_proposals : (Array.isArray(envelope.drafts) ? envelope.drafts : []);
+  const hasReport = post.status === 'review_ready' || post.status === 'filed' || joe.length || dell.length || updates.length || questions.length || drafts.length;
+  $('#postCallReport').innerHTML = hasReport ? `${core.summary ? `<p class="post-call-summary">${esc(reportText(core.summary))}</p>` : ''}
+    ${reportSection('Joe this week', joe, (item) => taskCard(item, 'Joe'), 'No Joe tasks were identified.')}
+    ${reportSection('Dell this week', dell, (item) => taskCard(item, 'Dell'), 'No Dell tasks were identified.')}
+    ${reportSection('Deal updates', updates, dealUpdateCard, 'No deal updates were identified.')}
+    ${reportSection('Questions to resolve', questions, questionCard, 'No unresolved questions.')}
+    ${reportSection('Vendor email drafts', drafts, draftCard, 'No vendor emails are needed from this call.')}` : '';
+}
+
+async function publishWeeklyCallContext(snapshot) {
+  if (!snapshot?.session) throw new Error('Quill did not return a recording session.');
+  if (!state.client.getCallContext) throw new Error('The exact call-context index is not available for this account.');
+  const deals = agendaDeals();
+  if (!deals.length) throw new Error('This weekly agenda has no active work records.');
+  state.postCall = { ...state.postCall, status:'context_loading', session:snapshot.session,
+    report:null, error:null, contextReady:false };
+  renderPostCall();
+  const exact = await state.client.getCallContext({ deal_ids:deals.map((deal) => deal.id) });
+  if (!Array.isArray(exact?.deals)) throw new Error('The call-context index returned an invalid response.');
+  const allowed = new Set(deals.map((deal) => deal.id));
+  const active = exact.deals.filter((deal) => allowed.has(deal.id) && deal.operating_state === 'active');
+  if (!active.length) throw new Error('The call-context index returned no active agenda work.');
+  for (const deal of active) {
+    if (!deal.id || !deal.name || !Array.isArray(deal.participants))
+      throw new Error('The call-context index is missing exact deal or participant metadata.');
+  }
+  await state.postCallClient.publishCallContext({ session:snapshot.session,
+    workspace_kind:state.workspace, ...(state.accountId ? { account_client_id:state.accountId } : {}),
+    generated_at:new Date().toISOString(), deals:active });
+  state.postCall = { ...state.postCall, status:'context_ready', contextReady:true, error:null };
+  renderPostCall();
+}
+
+function stopPostCallPolling() {
+  clearInterval(state.postCallTimer);
+  state.postCallTimer = null;
+}
+
+async function refreshPostCall({ quiet = false } = {}) {
+  if (!state.postCall.session) return;
+  try {
+    const payload = await state.postCallClient.getStatus(state.postCall.session);
+    const rawStatus = (typeof payload.status === 'object' ? payload.status.state : payload.status) || payload.state || 'waiting_for_transcript';
+    const status = ({ ready_review:'review_ready', blocked:'failed' })[rawStatus] || rawStatus;
+    state.postCall = { ...state.postCall, status, report:payload.report || null, error:null };
+    if (['review_ready','filed','failed'].includes(status)) stopPostCallPolling();
+    renderPostCall();
+  } catch (error) {
+    state.postCall.error = error.message;
+    renderPostCall();
+    if (!quiet) showToast(error.message);
+  }
+}
+
+function startPostCallPolling(session) {
+  stopPostCallPolling();
+  state.postCall.session = session;
+  refreshPostCall({ quiet:true });
+  state.postCallTimer = setInterval(() => refreshPostCall({ quiet:true }), 1600);
+}
+
+async function resolvePostCallCandidate(candidateId, accept, button) {
+  if (!candidateId) return;
+  button.disabled = true;
+  try {
+    if (button.dataset.candidateResolver === 'post_call') {
+      await state.client.resolvePostCallCandidate({ candidate_id:candidateId, accept, idempotency_key:uuidv4() });
+    } else {
+      await state.client.resolveConfirm({ proposal_id:candidateId, accept, idempotency_key:uuidv4() });
+    }
+    await state.postCallClient.syncStatus(state.postCall.session);
+    showToast(accept ? 'Post-call item confirmed.' : 'Post-call item skipped.');
+    await refreshPostCall();
+    if (accept) await loadHome();
+  } catch (error) {
+    showToast(error.message);
+  } finally { button.disabled = false; }
+}
+
+async function createPostCallDraft(button) {
+  const draftId = button.dataset.createOutlookDraft;
+  const candidateId = button.dataset.draftCandidate;
+  const status = button.dataset.draftStatus;
+  button.disabled = true;
+  state.postCall.draftErrors.delete(draftId);
+  try {
+    if (!['confirmed','created','already_created','draft_created'].includes(status)) {
+      if (!candidateId) throw new Error('This email draft still needs a matched metadata candidate.');
+      await state.client.resolvePostCallCandidate({ candidate_id:candidateId, accept:true, idempotency_key:uuidv4() });
+    }
+    await state.postCallClient.syncStatus(state.postCall.session);
+    const created = await state.postCallClient.createOutlookDraft(
+      state.postCall.session, draftId, button.dataset.contentHash,
+    );
+    await refreshPostCall();
+    const report = state.postCall.report;
+    for (const draft of report?.draft_proposals || report?.drafts || []) {
+      if (draft.draft_id === draftId) {
+        draft.status = created.idempotent ? 'already_created' : (created.status || 'created');
+        draft.idempotent = Boolean(created.idempotent);
+      }
+    }
+    renderPostCall();
+    showToast('Outlook draft created. Nothing was sent.');
+  } catch (error) {
+    state.postCall.draftErrors.set(draftId, error.message);
+    renderPostCall();
+  } finally { button.disabled = false; }
+}
+
 async function refreshCallMode({ quiet = false } = {}) {
   try {
     state.callMode = await callModeApi('state');
     $('#callModePermission').hidden = true;
     renderCallMode();
+    if (state.callMode.mode === 'weekly_deal_call' && state.callMode.session) {
+      if (callModeActive(state.callMode) && state.postCall.session !== state.callMode.session) {
+        state.postCall = { status:'idle', session:null, report:null, error:null,
+          contextReady:false, draftErrors:new Map() };
+        try { await publishWeeklyCallContext(state.callMode); }
+        catch (error) {
+          state.postCall = { ...state.postCall, status:'failed', session:state.callMode.session,
+            error:error.message };
+          renderPostCall();
+        }
+      } else if (!callModeActive(state.callMode) && state.postCall.session !== state.callMode.session) {
+        startPostCallPolling(state.callMode.session);
+      }
+    }
   } catch (error) {
     if (!quiet) showToast(error.message);
   }
@@ -385,8 +602,19 @@ async function startCallMode(mode) {
   if (button) button.disabled = true;
   try {
     state.callMode = await callModeApi('start', { mode, consent_confirmed: true });
+    stopPostCallPolling();
+    state.postCall = { status:'idle', session:null, report:null, error:null,
+      contextReady:false, draftErrors:new Map() };
     renderCallMode();
     if (mode === 'weekly_deal_call') {
+      try {
+        await publishWeeklyCallContext(state.callMode);
+      } catch (error) {
+        state.postCall = { ...state.postCall, status:'failed',
+          session:state.callMode.session || null, error:error.message };
+        renderPostCall();
+        showToast(`Recording started, but the weekly context needs attention: ${error.message}`);
+      }
       try {
         await startAgenda();
         showToast('Weekly deal call is recording. The agenda is open.');
@@ -410,6 +638,12 @@ async function stopCallMode() {
   try {
     state.callMode = await callModeApi('stop', {});
     renderCallMode();
+    const session = state.callMode.session || state.postCall.session;
+    if (session && (state.callMode.mode === 'weekly_deal_call' || state.postCall.contextReady)) {
+      state.postCall = { ...state.postCall, status:'waiting_for_transcript', session, error:null };
+      renderPostCall();
+      startPostCallPolling(session);
+    }
     showToast('Recording stopped. Quill is processing the call.');
   } catch (error) {
     showToast(error.message);
@@ -678,6 +912,16 @@ function wireEvents() {
     if (event.target.closest('[data-close-deal]')) { $('#dealDialog').close(); return; }
     if (event.target.closest('[data-undo]') && state.undoEventId) { await state.client.revertDealField({ event_id:state.undoEventId,idempotency_key:uuidv4() }); state.undoEventId=null; await loadHome(); showToast('Change undone'); return; }
     const confirm = event.target.closest('[data-confirm]'); if (confirm) { const chip=confirm.closest('[data-proposal]'); const yes=confirm.dataset.confirm==='yes'; await state.client.resolveConfirm({proposal_id:chip.dataset.proposal,accept:yes,idempotency_key:uuidv4()}); state.confirms=state.confirms.filter((p)=>p.id!==chip.dataset.proposal); renderConfirms(); if(yes)await loadHome(); showToast(yes?'Suggestion confirmed':'Suggestion skipped'); return; }
+    const postConfirm = event.target.closest('[data-post-call-confirm]'); if (postConfirm) { await resolvePostCallCandidate(postConfirm.dataset.postCallConfirm, true, postConfirm); return; }
+    const postSkip = event.target.closest('[data-post-call-skip]'); if (postSkip) { await resolvePostCallCandidate(postSkip.dataset.postCallSkip, false, postSkip); return; }
+    const createDraft = event.target.closest('[data-create-outlook-draft]'); if (createDraft) { await createPostCallDraft(createDraft); return; }
+    const retryContext = event.target.closest('[data-retry-call-context]'); if (retryContext) {
+      retryContext.disabled = true;
+      try { await publishWeeklyCallContext(state.callMode); }
+      catch (error) { state.postCall = { ...state.postCall, status:'failed', error:error.message }; renderPostCall(); }
+      finally { retryContext.disabled = false; }
+      return;
+    }
     if (event.target.closest('[data-dialog-cancel]')) { $('#formDialog').close(); return; }
     const callStart = event.target.closest('[data-call-mode-start]'); if (callStart) { await startCallMode(callStart.dataset.callModeStart); return; }
     if (event.target.closest('#callModeClose')) { $('#callModeDialog').close(); return; }
@@ -696,6 +940,7 @@ function wireEvents() {
   $('#callModeButton').onclick = openCallMode;
   $('#callModeHeroButton').onclick = openCallMode;
   $('#callModeStop').onclick = stopCallMode;
+  $('#postCallRefresh').onclick = () => refreshPostCall();
   $('#agendaReviewed').onclick = () => advanceAgenda('reviewed');
   $('#agendaSkip').onclick = () => advanceAgenda('skipped');
   $('#agendaEnd').onclick = () => finishAgenda('completed');
@@ -714,6 +959,8 @@ async function boot() {
     : location.hostname === 'dealroom.doctorcre.com' ? 'live' : 'fixture';
   state.client = await createClient(mode, { baseUrl:params.get('api') || undefined,
     selfActor:params.get('actor') || undefined });
+  state.postCallClient = createPostCallClient({ loopbackUrl:CALL_MODE_URL,
+    postHeaders:CALL_MODE_HEADER });
   wireEvents();
   await loadHome();
   state.pollTimer = setInterval(() => pollOnce(), POLL_MS);

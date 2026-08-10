@@ -25,11 +25,11 @@ For each track present, this script:
   3. Shifts every segment's offsets by that track's start_offset_ms so both
      tracks land on one shared clock, and tags the track's speaker.
 Segments from both tracks are then merged, sorted by start time, and written
-to the session directory as transcript.json (machine-readable) and
-transcript.md (a readable "[m:ss] speaker: text" render).
+to the session directory only as private transcript.json. The JSON retains
+speaker labels, timestamps, consent metadata, and every transcribed segment.
 
 A missing track file is tolerated: whatever tracks exist get transcribed,
-and the gap is logged and noted in transcript.md. A missing model falls back
+and the gap is logged. A missing model falls back
 from CARR_WHISPER_MODEL (or the large-v3-turbo default) to ggml-small.en.bin,
 with a logged warning. Every step, including any failure, is appended to
 <session_dir>/transcribe.log — this script is a leaf of the on_stop hook
@@ -50,6 +50,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypedDict
+
+import post_call
 
 # --- constants ---------------------------------------------------------
 
@@ -169,8 +171,7 @@ def read_meta(session_dir: Path) -> MetaJson:
 def read_consent(session_dir: Path) -> Any:
     """Contents of announcement.json if present, else None. Untyped by
     design: the consent-watch.sh schema is owned elsewhere, and this script
-    only needs to pass it through (transcript.json) and read one field back
-    out of it for the markdown header."""
+    only needs to pass it through to transcript.json."""
     announcement_path = session_dir / "announcement.json"
     if not announcement_path.exists():
         return None
@@ -315,53 +316,12 @@ def shift_and_tag(
 # --- rendering -------------------------------------------------------------
 
 
-def format_mmss(ms: int) -> str:
-    total_seconds = max(ms, 0) // 1000
-    minutes, seconds = divmod(total_seconds, 60)
-    return f"{minutes}:{seconds:02d}"
-
-
-def consent_line(consent: Any) -> str:
-    if isinstance(consent, dict) and consent.get("announcement_fired_at"):
-        return f"Recording announcement fired at {consent['announcement_fired_at']}"
-    if consent is not None:
-        return "Recording announcement fired (announcement.json present, no timestamp field)"
-    return "WARNING: no announcement record"
-
-
-def render_markdown(
-    meta: MetaJson,
-    consent: Any,
-    segments: list[Segment],
-    missing_tracks: list[str],
-) -> str:
-    lines: list[str] = []
-    lines.append(f"# CARR dictation-rig transcript — {meta['started']}")
-    lines.append("")
-    lines.append(f"Duration: {meta['duration_seconds']}s")
-    lines.append(consent_line(consent))
-    if missing_tracks:
-        lines.append(
-            "Note: missing track(s): "
-            + ", ".join(missing_tracks)
-            + " — transcribed the available audio only."
-        )
-    lines.append("")
-    for seg in segments:
-        lines.append(f"[{format_mmss(seg['start_ms'])}] {seg['speaker']}: {seg['text']}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def write_outputs(session_dir: Path, transcript: TranscriptJson, markdown: str) -> None:
+def write_outputs(session_dir: Path, transcript: TranscriptJson) -> None:
     json_path = session_dir / "transcript.json"
-    markdown_path = session_dir / "transcript.md"
     json_path.write_text(
         json.dumps(transcript, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    markdown_path.write_text(markdown, encoding="utf-8")
     json_path.chmod(0o600)
-    markdown_path.chmod(0o600)
 
 
 # --- orchestration -------------------------------------------------------
@@ -416,12 +376,17 @@ def process_session(session_dir: Path, log: LogFunc) -> None:
         "speaker_method": "separate audio channels; no third-party voiceprint",
         "segments": merged_segments,
     }
-    markdown = render_markdown(meta, consent, merged_segments, missing_tracks)
-    write_outputs(session_dir, transcript, markdown)
+    write_outputs(session_dir, transcript)
+
+    # Post-call processing is a local sibling step. It has no network client;
+    # without a context index it records an awaiting state, and without an
+    # explicitly configured distiller it records a blocked state rather than
+    # inventing an AI summary.
+    post_status = post_call.process_session(session_dir)
 
     log(
         f"FINISH transcribe_session.py segments={len(merged_segments)} "
-        f"missing_tracks={missing_tracks or 'none'}"
+        f"missing_tracks={missing_tracks or 'none'} post_call={post_status['state']}"
     )
 
 

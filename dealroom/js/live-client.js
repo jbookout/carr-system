@@ -158,6 +158,10 @@ export function createLiveClient(opts = {}) {
       };
     },
 
+    async getCallContext({ deal_ids }) {
+      return rpc('get-call-context', { deal_ids });
+    },
+
     async resolveConfirm({ proposal_id, accept, idempotency_key }) {
       const res = await write('resolve-candidate', {
         candidate_id: proposal_id,
@@ -165,6 +169,10 @@ export function createLiveClient(opts = {}) {
         idempotency_key,
       });
       return { status: 'ok', event: null, ref: res?.ref || null };
+    },
+
+    async resolvePostCallCandidate({ candidate_id, accept, idempotency_key }) {
+      return write('resolve-post-call-candidate', { candidate_id, accept, idempotency_key });
     },
 
     async getChanges(cursor) {

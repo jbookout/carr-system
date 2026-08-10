@@ -5,14 +5,15 @@ capture-bridge.py — CARR dictation rig, WO-4 capture-bridge rig-side client.
 Spec: WO-4 capture bridge (Cloudflare Worker, built and already deployed by
 a separate work order — see .claude/worktrees/wo4-capture-bridge/SUMMARY.md
 for the wire contract this file was built against). This file is the LOCAL
-client for three of its four surfaces: claim, status, session polling. It
-does NOT build the distiller (/capture/candidates is the distiller's write
-path, gated on a separate design decision) and it never touches vendor/quill,
-~/.config/quill, launchd, or git.
+client for claim, status, sanitized candidate filing, aggregate report filing,
+and session polling. Transcript text, recipient email addresses, and draft
+bodies never cross this bridge. It never touches vendor/quill, ~/.config/quill,
+launchd, or git.
 
 Subcommands:
     claim  <session_dir>          — claim a session with the worker
     status <session_dir> <state> [detail]   — report a state transition
+    publish <session_dir>        — file sanitized post-call proposals
     poll   <session_dir>          — check whether a meeting_record landed
     check                         — print config/provisioning status
 
@@ -38,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -45,12 +47,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import post_call
+
 # --- constants -------------------------------------------------------------
 
 CONFIG_PATH = Path.home() / ".config" / "carr-capture" / "config.json"
 LOG_PATH = Path.home() / "Library" / "Logs" / "capture-bridge.log"
 
 HTTP_TIMEOUT_SECONDS = 10
+CALL_CONTEXT_WAIT_SECONDS = 8
 
 
 class BridgeNetworkError(Exception):
@@ -73,6 +78,19 @@ def log_line(message: str) -> None:
 
 def iso_now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def wait_for_call_mode(session_dir: Path, timeout: float = CALL_CONTEXT_WAIT_SECONDS) -> str | None:
+    """Let Call Mode attach its session mode before an immutable remote claim."""
+    deadline = time.monotonic() + timeout
+    while True:
+        context = read_json(session_dir / "call-context.json") or {}
+        mode = context.get("mode")
+        if mode in {"weekly_deal_call", "other_call"}:
+            return str(mode)
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.1)
 
 
 # --- config --------------------------------------------------------------
@@ -230,6 +248,12 @@ def claim_cmd(cfg: dict[str, str], session_dir: Path) -> int:
         "started_at": started_at,
         "consent": {"announced_at": announced_at},
     }
+    # meta.json exists before this function is reached, so an ordinary Quill
+    # session pays only this bounded wait. A Call Mode start has up to six
+    # seconds to discover its new session and write the mode; waiting eight
+    # prevents capture-watch from permanently claiming it as the wrong workflow.
+    if wait_for_call_mode(session_dir) == "weekly_deal_call":
+        body["workflow"] = "post_call"
     headers = {"Authorization": f"Bearer {cfg['token']}"}
     url = f"{cfg['base_url']}/capture/claim"
 
@@ -318,6 +342,127 @@ def status_cmd(cfg: dict[str, str], session_dir: Path, state: str, detail: str |
     return 0
 
 
+# --- post-call publish ----------------------------------------------------
+
+
+def capture_token(session_dir: Path) -> str | None:
+    marker = read_json(session_dir / ".capture.json")
+    if marker is None:
+        return None
+    token = str(marker.get("session_token") or "").strip()
+    return token or None
+
+
+def post_batch(
+    cfg: dict[str, str], session_dir: Path, route: str,
+    items: list[dict[str, Any]], bindings: list[dict[str, Any]], lane: str,
+) -> bool:
+    if not items:
+        return True
+    token = capture_token(session_dir)
+    if token is None:
+        return False
+    canonical = json.dumps(items, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    key = f"post-call:{session_dir.name}:{lane}:{uuid.uuid5(uuid.NAMESPACE_URL, canonical)}"
+    body = {"session_token": token, "idempotency_key": key, "items": items}
+    try:
+        status, response = http_request("POST", f"{cfg['base_url']}{route}", body, None)
+    except BridgeNetworkError as exc:
+        log_line(f"ERROR publish network failure session={session_dir.name} lane={lane}: {exc}")
+        return False
+    ids = response.get("candidate_ids")
+    if status != 200 or not isinstance(ids, list):
+        log_line(f"ERROR publish rejected session={session_dir.name} lane={lane} status={status}")
+        return False
+    try:
+        post_call.apply_candidate_ids(session_dir, bindings, ids)
+    except post_call.ContractError as exc:
+        log_line(f"ERROR publish receipt mismatch session={session_dir.name} lane={lane}: {exc}")
+        return False
+    return True
+
+
+def publish_cmd(cfg: dict[str, str], session_dir: Path) -> int:
+    """Publish validated metadata only; safe to retry after partial failure."""
+    if capture_token(session_dir) is None:
+        log_line(f"NOOP publish no-capture-marker session={session_dir.name}")
+        return 0
+    try:
+        shaped = post_call.sanitized_candidates(session_dir)
+    except post_call.ContractError as exc:
+        log_line(f"NOOP publish post-call report unavailable session={session_dir.name}: {exc}")
+        return 0
+
+    bindings = shaped.get("bindings") or []
+    post_bindings = [item for item in bindings if item.get("remote") == "post_call"]
+    legacy_bindings = [item for item in bindings if item.get("remote") == "legacy"]
+    status_cmd(cfg, session_dir, "distilling", None)
+    posted = post_batch(
+        cfg, session_dir, "/capture/post-call/candidates",
+        shaped.get("post_call_items") or [], post_bindings, "post-call",
+    )
+    legacy = post_batch(
+        cfg, session_dir, "/capture/candidates",
+        shaped.get("legacy_items") or [], legacy_bindings, "legacy",
+    )
+    if not (posted and legacy):
+        return 1
+    marker = {
+        "published_at": iso_now_utc(),
+        "post_call_count": len(shaped.get("post_call_items") or []),
+        "legacy_count": len(shaped.get("legacy_items") or []),
+    }
+    write_json_atomic(session_dir / post_call.PUSH_FILE, marker, mode=0o600)
+    log_line(
+        f"PUBLISHED session={session_dir.name} "
+        f"post_call={marker['post_call_count']} legacy={marker['legacy_count']}"
+    )
+    return 0
+
+
+def sync_candidate_statuses(session_dir: Path, response: dict[str, Any]) -> None:
+    rows = response.get("candidate_statuses")
+    if not isinstance(rows, list):
+        return
+    statuses: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        candidate_id = row.get("id")
+        status = row.get("status")
+        if isinstance(candidate_id, str) and status in {"confirmed", "skipped"}:
+            statuses[candidate_id] = status
+    if not statuses:
+        return
+    try:
+        post_call.apply_candidate_statuses(session_dir, statuses)
+    except post_call.ContractError as exc:
+        log_line(f"WARN candidate status sync refused session={session_dir.name}: {exc}")
+
+
+def file_post_call_report(
+    cfg: dict[str, str], session_dir: Path, token: str, candidate_count: int,
+) -> tuple[bool, str]:
+    digest = post_call.report_sha256(session_dir)
+    body = {
+        "session_token": token,
+        "idempotency_key": f"post-call-report:{session_dir.name}:{digest}",
+        "report_sha256": digest,
+        "candidate_count": candidate_count,
+    }
+    try:
+        status, response = http_request(
+            "POST", f"{cfg['base_url']}/capture/post-call/report", body, None,
+        )
+    except BridgeNetworkError as exc:
+        log_line(f"ERROR report filing network failure session={session_dir.name}: {exc}")
+        return False, ""
+    if status != 200 or response.get("filed") is not True:
+        log_line(f"ERROR report filing rejected session={session_dir.name} status={status}")
+        return False, ""
+    return True, digest
+
+
 # --- poll ------------------------------------------------------------------
 
 
@@ -331,6 +476,13 @@ def poll_cmd(cfg: dict[str, str], session_dir: Path) -> int:
     session_token = str(marker.get("session_token") or "").strip()
     if not session_token:
         log_line(f"NOOP poll capture-marker-missing-token session={name}")
+        return 0
+
+    # Candidate filing must win this race. Filing a zero-count aggregate report
+    # before local proposals have their remote IDs would lock the session and
+    # silently discard every proposed task/update/draft.
+    if (session_dir / post_call.REPORT_FILE).exists() and publish_cmd(cfg, session_dir) != 0:
+        log_line(f"POLL session={name} candidate publish incomplete — holding recordings")
         return 0
 
     headers = {"Authorization": f"Bearer {session_token}"}
@@ -353,7 +505,8 @@ def poll_cmd(cfg: dict[str, str], session_dir: Path) -> int:
     meeting_record_str = str(meeting_record).strip() if meeting_record is not None else ""
     state = resp.get("state")
 
-    if not meeting_record_str:
+    is_post_call = resp.get("post_call") is True
+    if not is_post_call and not meeting_record_str:
         # HARD GUARD: this is the ordering purge-recordings.sh depends on.
         # Writing ingested.json here without a real meeting_record would
         # make client audio/transcripts eligible for deletion before the
@@ -361,6 +514,36 @@ def poll_cmd(cfg: dict[str, str], session_dir: Path) -> int:
         # actually exists. Write NOTHING in that case — ever.
         log_line(f"POLL session={name} state={state} meeting_record=null — no ingested.json written")
         return 0
+
+    receipt: dict[str, Any] | None = None
+    if is_post_call:
+        if not (session_dir / post_call.REPORT_FILE).exists():
+            log_line(f"POLL session={name} post_call local report unavailable — holding recordings")
+            return 0
+        sync_candidate_statuses(session_dir, resp)
+        candidates = resp.get("candidates") if isinstance(resp.get("candidates"), dict) else {}
+        pending = candidates.get("pending")
+        statuses = resp.get("candidate_statuses")
+        candidate_count = len(statuses) if isinstance(statuses, list) else None
+        report = resp.get("post_call_report") if isinstance(resp.get("post_call_report"), dict) else {}
+        remote_hash = str(report.get("sha256") or "").strip()
+        if report.get("filed") is not True:
+            if pending != 0 or candidate_count is None:
+                log_line(f"POLL session={name} post_call pending={pending} — holding recordings")
+                return 0
+            filed, remote_hash = file_post_call_report(
+                cfg, session_dir, session_token, candidate_count,
+            )
+            if not filed:
+                return 0
+        if not remote_hash:
+            log_line(f"POLL session={name} post_call report missing hash — holding recordings")
+            return 0
+        receipt = post_call.retention_ready(session_dir, remote_hash)
+        if receipt is None:
+            log_line(f"POLL session={name} post_call filed remotely — holding recordings pending local dispositions")
+            return 0
+        status_cmd(cfg, session_dir, "done", None)
 
     # candidates.confirmed may be a count or a list depending on the
     # response shape actually returned; only extract refs if it's a list.
@@ -383,6 +566,9 @@ def poll_cmd(cfg: dict[str, str], session_dir: Path) -> int:
         "meeting_record": meeting_record,
         "records": records,
     }
+    if is_post_call:
+        assert receipt is not None
+        ingested.update({"post_call": True, "aggregate_report_hash": receipt["aggregate_report_hash"], "backend_report_sha256": receipt["backend_report_sha256"], "pending_items": receipt["pending_items"]})
     if not write_json_atomic(session_dir / "ingested.json", ingested, mode=None):
         log_line(f"ERROR poll: could not write ingested.json session={name}")
         return 0
@@ -432,7 +618,7 @@ def check_cmd() -> int:
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         sys.stderr.write(
-            "usage: capture-bridge.py <claim|status|poll|check> [args...]\n"
+            "usage: capture-bridge.py <claim|status|publish|poll|check> [args...]\n"
         )
         return 2
 
@@ -461,6 +647,16 @@ def main(argv: list[str]) -> int:
             return 0
         detail = argv[4] if len(argv) > 4 else None
         return status_cmd(cfg, Path(argv[2]).resolve(), argv[3], detail)
+
+    if cmd == "publish":
+        if len(argv) < 3:
+            sys.stderr.write("usage: capture-bridge.py publish <session_dir>\n")
+            return 2
+        cfg = load_config()
+        if cfg is None:
+            log_line("NOOP publish: no usable config (missing base_url/device_id/token)")
+            return 0
+        return publish_cmd(cfg, Path(argv[2]).resolve())
 
     if cmd == "poll":
         if len(argv) < 3:

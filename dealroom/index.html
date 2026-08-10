@@ -139,6 +139,14 @@
         <button type="button" class="danger" id="callModeStop" hidden>Stop and process</button>
       </div>
       <p class="call-mode-permission" id="callModePermission" hidden></p>
+      <section class="post-call" id="postCallPanel" aria-labelledby="postCallTitle" hidden>
+        <header class="post-call-heading">
+          <div><p class="eyebrow">Weekly call follow-through</p><h3 id="postCallTitle">Post-call report</h3></div>
+          <button type="button" class="text-button post-call-refresh" id="postCallRefresh">Refresh</button>
+        </header>
+        <div class="post-call-status" id="postCallStatus" role="status" aria-live="polite"></div>
+        <div class="post-call-report" id="postCallReport"></div>
+      </section>
       <footer class="call-mode-footer"><a href="http://127.0.0.1:4682/" target="_blank" rel="noopener" id="callModeStandalone">Open standalone local controller</a></footer>
     </article>
   </dialog>
