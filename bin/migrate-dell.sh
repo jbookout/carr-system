@@ -37,6 +37,19 @@ export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
 
+# DEFINED BEFORE ANY CALLER, and that ordering is load-bearing rather than
+# stylistic. `say` is also /usr/bin/say, macOS text-to-speech. The first version
+# of --preflight sat ABOVE these definitions, so every `say` line in it fell
+# through to the system binary: the run printed nothing, exited 0, and READ
+# ITSELF ALOUD through the laptop speakers. Joe heard it before the transcript
+# showed it. Keep every helper above the first caller.
+ok=0; warn=0; fail=0
+say()  { print -r -- "$@"; }
+good() { print -r -- "  ok    $*"; ok=$((ok+1)); }
+note() { print -r -- "  note  $*"; warn=$((warn+1)); }
+bad()  { print -r -- "  FAIL  $*"; fail=$((fail+1)); }
+step() { print -r -- ""; print -r -- "── $* ──────────────────────────────"; }
+
 # ── PREFLIGHT ───────────────────────────────────────────────────────────────
 # Run on the PRIMARY machine, before the visit: "is what Dell will pull actually
 # going to work?" A dry run here cannot answer that — every plist already
@@ -128,13 +141,6 @@ fi
 
 PY="python3"
 [ -x "$REPO/.venv/bin/python" ] && PY="$REPO/.venv/bin/python"
-
-ok=0; warn=0; fail=0
-say()  { print -r -- "$@"; }
-good() { print -r -- "  ok    $*"; ok=$((ok+1)); }
-note() { print -r -- "  note  $*"; warn=$((warn+1)); }
-bad()  { print -r -- "  FAIL  $*"; fail=$((fail+1)); }
-step() { print -r -- ""; print -r -- "── $* ──────────────────────────────"; }
 
 say "CARR migration — Dell's machine"
 say "repo: $REPO"
