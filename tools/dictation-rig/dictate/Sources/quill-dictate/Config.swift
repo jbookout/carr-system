@@ -11,14 +11,11 @@
 import Foundation
 
 struct Config: Codable {
-    /// Virtual keycodes of the push-to-talk / mode-toggle trigger — a SET,
-    /// one entry per keyboard, same gesture on each. 54 = right command
-    /// (MacBook internal). 62 = right control (the Logitech's key right of
-    /// space — live capture 2026-08-07 showed that board emits NO true
-    /// right-cmd: its right side sends rctrl/ropt/LEFT-cmd, so decision
-    /// f799fd49's "right-cmd on both" premise failed at the emission level
-    /// and the config absorbed it, exactly as the ruling intended).
-    var triggerKeyCodes: [Int64] = [54, 62]
+    /// Virtual keycodes of the push-to-talk / mode-toggle trigger — a SET for
+    /// configurable keyboards. The default is 54 = right Command on both the
+    /// MacBook and the Logitech; logitech-keymap.sh repairs that keyboard's
+    /// swapped E4/E7 HID usages before events reach this app.
+    var triggerKeyCodes: [Int64] = [54]
 
     /// Keycode that speaks while held inside conversation mode. 49 = space.
     var conversationKeyCode: Int64 = 49

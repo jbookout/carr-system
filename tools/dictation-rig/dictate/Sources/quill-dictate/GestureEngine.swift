@@ -52,14 +52,10 @@ final class GestureEngine {
 
     /// Modifier signature per trigger keycode: the generic flag mask, the
     /// device-level bit that identifies THIS side, and the sibling bit for
-    /// the opposite side. The sibling matters because some boards (Joe's
-    /// Logitech, live 2026-08-08) report BOTH instances of a modifier under
-    /// ONE keycode — his LEFT control arrived as keycode 62 and fired
-    /// dictation, because the press check accepted any maskControl event on
-    /// a trigger keycode and only consulted the side bit at release. Press
-    /// now requires the correct side bit whenever the board sets either bit
-    /// of the pair; the bit-less fallback (boards that omit device bits
-    /// entirely) stays.
+    /// the opposite side. Some third-party boards report both sides under one
+    /// keycode, so a configured modifier fires only when its matching side bit
+    /// is present. The bit-less fallback remains for boards that omit device
+    /// bits entirely.
     private struct ModifierSignature { let mask: CGEventFlags; let deviceBit: UInt64; let siblingBit: UInt64 }
     private static let signatures: [Int64: ModifierSignature] = [
         54: ModifierSignature(mask: .maskCommand, deviceBit: 0x10, siblingBit: 0x8),     // right cmd (sibling: left)
@@ -181,16 +177,11 @@ final class GestureEngine {
             // (some third-party boards omit the bit — found live 2026-08-07).
             let deviceBit = sig.deviceBit != 0 && (event.flags.rawValue & sig.deviceBit) != 0
             let maskSet = event.flags.contains(sig.mask)
-            // SIDE CHECK AT PRESS (2026-08-08): when the event carries either
-            // side bit of this modifier pair, the trigger fires only on the
-            // RIGHT-side bit. Defensive, and it did NOT fix the bug it was
-            // written for: Joe's stray trigger turned out to be his Logitech's
-            // left-Control keycap emitting keycode 54 with the genuine
-            // right-cmd device bit — indistinguishable from the real thing at
-            // this layer, and repaired at the HID layer instead (see
-            // bin/logitech-keymap.sh). Kept because a board that sets side
-            // bits honestly should still be read honestly. Boards with no side
-            // bits keep the maskSet-only fallback.
+            // When the event carries either side bit of this modifier pair,
+            // the trigger fires only on the configured side. Physical-layout
+            // defects belong in the device-scoped HID map, not here (see
+            // bin/logitech-keymap.sh). Boards with no side bits keep the
+            // maskSet-only fallback.
             let pairBits = event.flags.rawValue & (sig.deviceBit | sig.siblingBit)
             let sideOK = pairBits == 0 || deviceBit
 
@@ -213,9 +204,8 @@ final class GestureEngine {
             // (quill-dictate owns its trigger keys outright; Siri's "press
             // either cmd twice" kept firing no matter what Settings said,
             // live 2026-08-07), or the release of OUR active gesture. A
-            // sibling-side press under the same keycode (Joe's Logitech
-            // reports left ctrl as keycode 62 too, live fix 2026-08-08)
-            // passes through untouched — and so does its release: eating a
+            // sibling-side press under the same keycode passes through
+            // untouched — and so does its release: eating a
             // left-ctrl release we never owned would leave apps believing
             // Control is still held. Subsequent keyDowns carry the modifier
             // in their own flags either way, so chords survive.

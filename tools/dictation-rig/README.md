@@ -57,17 +57,13 @@ One gesture set, both keyboards (decision f799fd49; trigger emissions
 live-corrected 2026-08-07):
 
 - **HOLD the trigger key** = push-to-talk: speak while held, release, text
-  lands at the cursor of whatever app has focus. Trigger keys: **right-cmd
-  (54)** on the MacBook, **right-ctrl (62)** on the Logitech — live capture
-  measurement (2026-08-08) showed the Logitech has its two bottom-row
-  modifiers SWAPPED in firmware: the key right of space reports right-CONTROL
-  (62), and the key labeled Control left of space reported right-COMMAND (54)
-  — the latter indistinguishable from the MacBook's real trigger, so it fired
-  dictation on every press. Repaired at the HID layer, not in the app:
-  `bin/logitech-keymap.sh` + launchd `com.carr.logitech-keymap` remap that
-  keycap to a genuine left Control for that vendor/product only. The ruling's
-  "one key" therefore holds as one *position* (the key right of space) on both
-  boards, absorbed by the config exactly as intended.
+  lands at the cursor of whatever app has focus. The trigger is **right-cmd
+  (54)** on both keyboards. The Logitech receiver reports its immediate-right
+  Command as HID Right Control and its farther-right Control as HID Right GUI;
+  `bin/logitech-keymap.sh` + launchd `com.carr.logitech-keymap` swap those two
+  usages for vendor/product 046d:c52b only. The physical Command immediately
+  right of space is therefore Quill, while the farther-right Control remains
+  an ordinary Control key. The MacBook keyboard is untouched.
 - **DOUBLE-TAP the trigger** = toggle conversation mode; inside it, **hold
   space** speaks, release disengages. A QUICK space tap types a normal space
   (replayed synthetically), so typing keeps working inside the mode; **Esc
@@ -213,12 +209,12 @@ In order, on his Mac:
    (consent watcher), `bin/install-dictate.sh` (dictation agent + launchd).
 7. His one-time permission clicks: mic + Screen & System Audio Recording
    (quill), mic + Accessibility (quill-dictate).
-8. **Trigger keys are per-keyboard**: hold-to-talk defaults to right-cmd (54)
-   and right-ctrl (62). If a key doesn't respond, his keyboard likely emits a
-   different keycode — capture what it sends and edit `trigger_key_codes` in
-   `~/.config/quill-dictate/config.json` (that config line exists exactly for
-   this). If his Mac binds Siri to a command double-press, the agent's
-   event consumption already suppresses it.
+8. **Trigger keys are per-keyboard**: hold-to-talk defaults to right-cmd (54).
+   Joe's Logitech-specific E4/E7 swap is scoped by receiver vendor/product;
+   another keyboard that emits a different keycode can add it to
+   `trigger_key_codes` in `~/.config/quill-dictate/config.json`. If his Mac
+   binds Siri to a command double-press, the agent's event consumption already
+   suppresses it.
 9. Consent still ships: Alabama is one-party consent but Florida is
    all-party, the territory spans both, and the announcement layer plus the
    ask-first habit are non-negotiable either way (Addendum 5).
