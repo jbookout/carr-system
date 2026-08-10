@@ -94,14 +94,17 @@ test("UI exposes two workspaces, explicit controls, mobile cards, and Call Mode"
 });
 
 test("parking separates Salesforce record existence from active work", async () => {
-  const [sql, html, app, tools] = await Promise.all([
-    file("migrations/0092_deal_operating_state.sql"), file("dealroom/index.html"),
+  const [sql, hardening, html, app, tools] = await Promise.all([
+    file("migrations/0092_deal_operating_state.sql"),
+    file("migrations/0093_deal_parking_shape_hardening.sql"), file("dealroom/index.html"),
     file("dealroom/js/app.js"), file("mcp-server/src/tools.js"),
   ]);
   assert.match(sql, /operating_state text not null default 'active'/);
   assert.match(sql, /prospect_never_active.*client_paused.*other/s);
   assert.match(sql, /count\(d\.id\).*operating_state = 'active'.*as open_deals/s);
   assert.doesNotMatch(sql, /update deal set (phase|outcome)/i);
+  assert.match(hardening, /parking_reason is not null/);
+  assert.match(hardening, /parking_reason in \('prospect_never_active','client_paused','other'\)/);
   assert.match(html, /data-filter="active"[^>]*>Active/);
   assert.match(html, /data-filter="parked"[^>]*>Parked/);
   assert.match(app, /No active work in this agenda/);
