@@ -47,6 +47,13 @@ GROUPS = [
   "Build the branded purchase-vs-lease one-pager for a CARR client. Read DNA/Deal Management/fill-engine/fill-it-in-workflow.md. If a filled purchase-vs-lease workbook already exists for this client, use it; if not, ask me one question at a time for the numbers and run the fill-engine first. Generate the CARR-branded one-pager (navy and orange, disclaimer intact), reconcile every headline number against its source cell as a fresh-eyes pass before it is client-facing, and give me the finished Word one-pager plus a note on what to verify."),
 ]),
 ("Get work done", [
+ # THE ONLY TILE THAT CLEARS ANYTHING. Every other tile on this page CREATES
+ # work: new prospect, new vendor, log my day, new idea, log an event, import a
+ # list. Measured 2026-08-09: 24 tiles, and grepping the built page for triage,
+ # waiting, overdue or backlog returned nothing. The entry point to a system
+ # holding 229 open asks was a menu of 24 ways to make it 230.
+ ("What's Waiting On Me","Clear it, one at a time",
+  "Show me what is waiting on me and drive it one item at a time. Call today-triage and read the claim card in 00_Context/today.md. Rank by how late each item is, counting business days only, and lead with the single oldest thing. Then walk me through them ONE AT A TIME, never a list to answer at once: for each, tell me what it is in plain words with the person's name, say how many business days it has been sitting, and give me the choices. If it is a next action: I did it, I am doing it now, push it to a date, or drop it and why. If it is a candidate on the claim card: yes claim it, or no with my reason in my own words. If it is an inbox item: what it became, not ours, or a duplicate. Record each answer as I give it with the right verb, then move to the next one. Do not ask me to confirm the whole batch at the end. When I stop or the list is empty, tell me in one line what got cleared and what is left, and end with the single next thing to do."),
  ("Write a Post","Your voice + a graphic",
   "Write me a social post in Joe's voice. Ask me one question at a time: what it is about, any platform preference, any angle I want. Use the write-content skill and the substance bank, and show me the draft and the graphic for approval before anything is published."),
  ("Audit Writing","Review only, no rewrite",
@@ -80,7 +87,7 @@ def section(name,btns,cls="group"):
     return f'''<section class="{cls}"><div class="group-head"><span class="bar"></span>{html.escape(name)}</div><div class="grid">{tiles_html(btns)}</div></section>'''
 
 lookup={lbl:(sub,p) for _,bs in GROUPS for (lbl,sub,p) in bs}
-EVERYDAY=[(lbl,lookup[lbl][0],lookup[lbl][1]) for lbl in ["Log My Day","New Prospect","Draft a Follow-Up","Prep for a Meeting","New Vendor"]]
+EVERYDAY=[(lbl,lookup[lbl][0],lookup[lbl][1]) for lbl in ["What's Waiting On Me","Log My Day","New Prospect","Draft a Follow-Up","Prep for a Meeting","New Vendor"]]
 BOARDS=[
  ("Open the Dashboard","Your whole system, live","Open the CARR dashboard and rebuild it from current data, then show it to me."),
  ("Open the Lead Board","This week, hot, segments","Open the lead board and show me this week and the hot leads."),
@@ -161,6 +168,7 @@ HTML=f'''<!DOCTYPE html>
       <p class="lede">Tap what you need. A new session opens pointed at your CARR folder with the task written in, you review, hit send, and answer one question at a time. Start with your everyday few. The full set is under All actions.</p>
     </div>
     {everyday_html}
+    {boards_html}
     <details class="more"><summary>All actions</summary>{more_html}</details>
     <p class="foot">Every tile opens a fresh session with your CARR folder linked and the prompt loaded, and nothing sends on its own, so you always review first. Each session tells you in plain words what it changed, and you can say <b>undo</b> to reverse the last thing it did. If a tile does not open the app, tap <b>copy</b> and paste into a new session.</p>
   </div>
@@ -185,6 +193,32 @@ HTML=f'''<!DOCTYPE html>
 
 import os as _os
 open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html'),'w',encoding='utf-8').write(HTML)
+
+# DELIVER IT. Added 2026-08-09. This script wrote the page beside itself inside
+# the repo and NOTHING copied it anywhere, so the front-door.html Joe actually
+# opens in the vault was last written 2026-07-14. Every change made to this
+# generator for nearly a month, including the board links that were built and
+# never inserted, reached a file no human opens.
+#
+# That is the third instance of one property in one audit: brief_pack wrote the
+# daily call list into a gitignored folder, the renewal shortlist went with it,
+# and this page did the same. Codex named the property, and it is worth naming
+# here too because it will keep recurring otherwise: a producer in this system
+# declares success when it CREATES an artifact, never when the consumer can
+# reach it. The generator that builds a surface is the right place to deliver
+# it, so the two cannot drift apart again.
+_vault = _os.environ.get(
+    "CARR_VAULT",
+    _os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+_dest = _os.path.join(_vault, "DNA", "Team", "front-door.html")
+if _os.path.isdir(_os.path.dirname(_dest)):
+    open(_dest, "w", encoding="utf-8").write(HTML)
+    print("delivered ->", _dest)
+else:
+    # Loud, not silent. A vault that is not mounted is a real condition on a
+    # laptop, and the page simply not arriving is exactly the failure this block
+    # exists to end.
+    print("NOT DELIVERED: vault not mounted at", _os.path.dirname(_dest))
 visible=' '.join(re.findall(r'>([^<>]+)<',HTML))
 assert '—' not in visible, "em-dash in visible copy"
 low=visible.lower()
