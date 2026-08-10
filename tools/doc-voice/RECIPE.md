@@ -25,16 +25,18 @@ ffmpeg -af "asetrate=24000*0.97,aresample=24000,atempo=0.965, highpass=f=90,
 lowpass=f=7400, aresample=16000, aresample=24000, acrusher=bits=14:mode=log:mix=0.08,
 equalizer=f=185:t=q:w=1.4:g=6.5, equalizer=f=4400:t=q:w=1.2:g=3,
 acompressor=threshold=-16dB:ratio=2.4:attack=8:release=115:makeup=2dB,
-aecho=0.75:0.23:21|36:0.10|0.07, alimiter=limit=0.9"
+aecho=0.8:0.9:21|36:0.10|0.07, alimiter=limit=0.9"
 
 In words: pitch down 3%, pace eased ~3.5%, clean-machine texture (light 16k
 round-trip + trace bit-crush), warm chest (+6.5dB @ 185Hz) with bright presence
 (+3dB @ 4.4kHz), balanced punch (2.4:1), moderate room. Punch is a PER-SURFACE
 dial: desk can run softer, truck/phone punchier — the chain runs at render time.
 
-⚠ THE ROOM STAGE ABOVE THROWS AWAY ~13dB, and it is a bug, not a taste choice.
-ffmpeg's signature is aecho=in_gain:out_gain:delays:decays, and out_gain here is
-0.23 — it scales the WHOLE mix to 23% after the echo is folded in. Measured
+ROOM GAIN CORRECTED 2026-08-10 (Joe: "approved") — the line above now reads
+aecho=0.8:0.9, not the original 0.75:0.23. Everything else is untouched.
+ffmpeg's signature is aecho=in_gain:out_gain:delays:decays, and the original
+out_gain of 0.23 scaled the WHOLE mix to 23% after the echo was folded in.
+Measured
 stage by stage on one render: band -22.8, 16k round-trip -22.8, crush -22.8,
 chest -20.5, presence -20.5, punch -21.0, then room -36.2. One stage costs 15dB;
 nothing else costs anything. Raising out_gain to 0.9 restores mean level to
@@ -44,10 +46,17 @@ It hid because 13dB at a desk is a volume-knob turn — it would have surfaced i
 the truck, as Doc being inaudible rather than as Doc sounding wrong. It also
 means the compressor (threshold -16dB) and limiter (0.9) have never engaged, so
 the punch setting has effectively never been heard.
-VERIFIED ON THE ELEVENLABS PATH ONLY (Joe's ear, 2026-08-10: "E is best"). The
-Chatterbox line above is left exactly as dialled because the fix has not been
-auditioned on that engine — but it carries the same defect and the same one-
-parameter fix, and that should be a short listen, not a rebuild.
+CONFIRMED ON BOTH ENGINES, so it is the chain and not the engine. On the
+Chatterbox path, the same read through the same chain with only out_gain changed:
+-36.2 dB mean before, -23.8 after. Joe approved the fix on both paths the same
+day ("E is best" for ElevenLabs, "approved" for Chatterbox).
+
+`doc-master-intro-FINAL.wav` WAS REGENERATED with the corrected chain, because
+this file is the reference every future render is matched against and it had been
+12.4 dB low — a quiet reference propagates to everything downstream. The original
+is preserved as `doc-master-intro-FINAL.pre-roomfix-2026-08-10.wav`; nothing was
+destroyed. `doc-master-intro-read.wav` (raw, pre-mastering) is untouched and is
+what the regeneration was made from.
 
 ## Speakable forms (grows with every correction from Joe's ear)
 
