@@ -3,6 +3,8 @@ name: social-metrics-pull-weekly
 description: Weekly social analytics pull (Chrome): reads FB/IG/LinkedIn/X post metrics from Joe's logged-in browser and fills post-performance-log.md rows so the monthly review steers from data
 ---
 
+STORE-FIRST (added 2026-08-09, loop #289): the doctrine STORE is the source of truth for every governing doc named below. Before reading any `.md` path in the vault, try `read-doctrine` with that file's stem as the document slug; if a store doc exists, IT WINS and the vault file may be a stale duplicate. Two such duplicates were found on 2026-08-09 and this routine's sibling had been reading a three-week-old SOP because its pointer named the file instead of the slug. Do not edit the vault copy either way: hand-authored vault markdown is closed by record-home-gate.py (rule 14181e60).
+
 You are running Joe Bookout's weekly social-media metrics pull (CARR AI system). This is a MEASUREMENT-ONLY task: you read analytics and update one log file, plus (since 2026-07-31) you kick off the record layer's own metrics chain with one command. You never post, publish, schedule, or reply to anything.
 
 STEP 0 — THE RECORD-LAYER CHAIN, FIRST, BEFORE ANY BROWSER WORK (added 2026-07-31, ORDER 15). Execute EXACTLY this via Bash, VERBATIM, character for character — do not paraphrase it, do not add flags, do not substitute paths, do not re-quote it. Permission approval matches the exact command string, and any rewording can hit a permission prompt in an unattended run with nobody there to answer it. That is not hypothetical: on 2026-07-31 a scheduled run sat 5 hours 58 minutes on exactly that prompt and produced nothing.
