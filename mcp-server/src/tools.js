@@ -3261,7 +3261,7 @@ export const TOOLS = {
 
   "log-decision": {
     write: true,
-    description: "Record a SETTLED decision and its rationale — the thing that stops it being relitigated next session. Writes a decision event (subject_type='decision', verb='log-decision') that v_decision_entry reads and decision-history.md renders; never hand-edit that file. NOT the same as add-loop marker:'decision', which is an OPEN question awaiting a ruling, and not the same as teach, which stores a standing rule that binds future sessions. Use this when a fork has been closed: what was decided, why, what lost. human_quote is Joe's or Dell's literal words when he said them — omit it and the entry is flagged quote_absent rather than paraphrase being passed off as a quote. PASS `about` WHENEVER THE RULING CONCERNS ONE RECORD: a decision without it is filed in decision-history and reachable from nothing, which is how 363 rulings ended up invisible to catch-me-up on the very deals they governed.",
+    description: "Record a SETTLED decision and its rationale — the thing that stops it being relitigated next session. Writes a decision event (subject_type='decision', verb='log-decision') that v_decision_entry reads and decision-history.md renders; never hand-edit that file. NOT the same as add-loop marker:'decision', which is an OPEN question awaiting a ruling, and not the same as teach, which stores a standing rule that binds future sessions. Use this when a fork has been closed: what was decided, why, what lost. human_quote is Joe's or Dell's literal words when he said them — omit it and the entry is flagged quote_absent rather than paraphrase being passed off as a quote. PASS `about` WHENEVER THE RULING CONCERNS ONE RECORD: a decision without it is filed in decision-history and reachable from nothing, which is how 363 rulings ended up invisible to catch-me-up on the very deals they governed. PRICE IT WHEN THE RULING CHANGES HOW THE SYSTEM WORKS: cost_delta and quality_delta record what a build cost and what it bought, together or not at all, because a build with no before-and-after number can never be shown to have worked, only asserted to have. If the after-measure does not exist yet, log it unpriced and add both halves later with update-decision.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       title: { type: "string", description: "the decision itself, in one line, stated as settled" },
@@ -3271,6 +3271,8 @@ export const TOOLS = {
       human_quote: { type: "string", description: "the partner's literal words, when he said them. Never paraphrase into this field." },
       session_key: { type: "string", description: "groups entries per session (rule 29). Defaults to <date>-<actor>." },
       provenance: { type: "string", description: "where this came from — a session, a call, a document" },
+      cost_delta: { type: "string", description: "WHAT IT COST, in the unit that actually matters for this build — model calls, dollars, minutes of a partner's attention, added latency. Free text on purpose, because the unit changes per build and forcing a number would force a fake one. Must be passed together with quality_delta: half a price is not a price. Example: \"+60% inference cost per finished draft, 3 model calls where there was 1\"." },
+      quality_delta: { type: "string", description: "WHAT IT BOUGHT, stated as before and after against a named baseline, never as an after-value alone. A delta with no baseline is the same unfalsifiable claim the skeptic chair already refuses on client work. Must be passed together with cost_delta. Example: \"approval 45% -> 82.5%, measured on the same 40 drafts\"." },
       occurred_at: { type: "string", description: "when it was decided; defaults now" } },
       required: ["idempotency_key","title","rationale"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "log-decision", args, async () => {
@@ -3284,6 +3286,19 @@ export const TOOLS = {
         ? (Array.isArray(args.about) ? args.about : [args.about]).map(r => String(r || "").trim()).filter(Boolean)
         : [];
       for (const ref of aboutRefs) await resolveSubject(c, ref);
+
+      // [idea 68, 0085] BOTH HALVES OF A PRICE OR NEITHER. A cost with no
+      // quality number is a complaint and a quality number with no cost is a
+      // boast; either alone is the selective reporting the discipline exists to
+      // stop, so one without the other is refused rather than stored. This is a
+      // doctrine rule about honest reporting, which is why it lives here and not
+      // in a CHECK constraint — the same reasoning R-40a applies to grouping.
+      const costDelta = (args.cost_delta || "").trim() || null;
+      const qualityDelta = (args.quality_delta || "").trim() || null;
+      if (Boolean(costDelta) !== Boolean(qualityDelta))
+        throw new ToolError({ error: "half_a_price",
+          got: costDelta ? "cost_delta only" : "quality_delta only",
+          hint: "pass cost_delta AND quality_delta together, or neither. What a build cost is only meaningful beside what it bought, and a quality claim with no cost beside it is unfalsifiable. If the other half genuinely is not known yet, log the decision unpriced and add both later with update-decision." });
       const decisionId = (await c.query("select gen_random_uuid() as id")).rows[0].id;
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
@@ -3298,7 +3313,13 @@ export const TOOLS = {
         [args.occurred_at || null, actor.id, decisionId,
          JSON.stringify({ title: args.title,
                           quote_absent: !args.human_quote,
-                          provenance: args.provenance || null }),
+                          provenance: args.provenance || null,
+                          // Keys are OMITTED when unpriced rather than written as
+                          // null, because v_decision_entry.priced tests key
+                          // PRESENCE (new_value ? 'cost_delta'). A null-valued key
+                          // would read as priced-with-no-price.
+                          ...(costDelta ? { cost_delta: costDelta,
+                                            quality_delta: qualityDelta } : {}) }),
          args.human_quote || null, args.rationale, args.idempotency_key,
          actor.via || null, actor.client_id || null]);
 
@@ -3365,6 +3386,8 @@ export const TOOLS = {
         oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
       human_quote: { type: "string", description: "the partner's literal words. Never paraphrase into this field." },
       provenance: { type: "string" },
+      cost_delta: { type: "string", description: "WHAT IT COST — see log-decision. This is the path for pricing a build whose numbers were not known at the moment it shipped, which is the common case: you rarely have the after-measure on the day. Must be passed together with quality_delta." },
+      quality_delta: { type: "string", description: "WHAT IT BOUGHT, before and after against a named baseline — see log-decision. Must be passed together with cost_delta." },
       reason: { type: "string", description: "why the entry needed correcting — recorded on the amendment" } },
       required: ["idempotency_key","decision_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-decision", args, async () => {
@@ -3376,10 +3399,28 @@ export const TOOLS = {
 
       const nv = cur.new_value || {};
       const quote = args.human_quote !== undefined ? args.human_quote : cur.human_quote;
+
+      // [idea 68, 0085] Same both-or-neither rule log-decision enforces, applied to
+      // the after-the-fact path — which is the COMMON path for pricing, because the
+      // after-measure rarely exists on the day a build ships. Judged against the
+      // MERGED state, not the arguments alone, so passing one half to a decision
+      // that already carries the other is a completion rather than a violation.
+      const mergedCost = args.cost_delta !== undefined
+        ? ((args.cost_delta || "").trim() || null) : (nv.cost_delta || null);
+      const mergedQuality = args.quality_delta !== undefined
+        ? ((args.quality_delta || "").trim() || null) : (nv.quality_delta || null);
+      if (Boolean(mergedCost) !== Boolean(mergedQuality))
+        throw new ToolError({ error: "half_a_price",
+          got: mergedCost ? "cost_delta only" : "quality_delta only",
+          hint: "a decision carries both halves of a price or neither. Pass whichever half is missing in the same call." });
+
       const next = { ...nv,
         title: args.title !== undefined ? args.title : nv.title,
         provenance: args.provenance !== undefined ? args.provenance : nv.provenance,
         quote_absent: !quote };
+      // Presence, not null — v_decision_entry.priced tests for the key itself.
+      if (mergedCost) { next.cost_delta = mergedCost; next.quality_delta = mergedQuality; }
+      else { delete next.cost_delta; delete next.quality_delta; }
 
       await c.query(
         `update event set new_value = $1, human_quote = $2, agent_rationale = $3 where id = $4`,
@@ -3396,7 +3437,8 @@ export const TOOLS = {
         rationale: args.rationale !== undefined ? args.rationale : cur.agent_rationale,
         idempotency_key: args.idempotency_key });
 
-      const changed = ["title","rationale","human_quote","provenance"].filter(f => args[f] !== undefined);
+      const changed = ["title","rationale","human_quote","provenance","cost_delta","quality_delta"]
+        .filter(f => args[f] !== undefined);
       await writeEvent(c, actor, "amend-decision", "decision", args.decision_id,
         { old: { quote_absent: nv.quote_absent },
           new: { fields: changed, quote_absent: !quote,

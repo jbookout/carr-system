@@ -1381,7 +1381,7 @@ def build_decision_history(tmp_path, cur):
     """
     cur.execute(
         "select entry_date, session_key, title, author, human_quote, agent_rationale, "
-        "       quote_absent, provenance "
+        "       quote_absent, provenance, cost_delta, quality_delta "
         "  from v_decision_entry "
         " order by entry_date desc, session_key desc")
     rows = cur.fetchall()
@@ -1406,7 +1406,7 @@ def build_decision_history(tmp_path, cur):
     canonical = []
     last_date = None
     for (entry_date, session_key, title, author, quote, rationale,
-         quote_absent, provenance) in rows:
+         quote_absent, provenance, cost_delta, quality_delta) in rows:
         chunk = []
         if entry_date != last_date:
             chunk.append(f"## {entry_date}")
@@ -1420,6 +1420,14 @@ def build_decision_history(tmp_path, cur):
             chunk.append("")
         if rationale:
             chunk.append(rationale)
+            chunk.append("")
+        # [idea 68, migration 0085] The price, when the ruling carries one. Rendered
+        # AFTER the rationale rather than inside it so it reads as a measurement
+        # rather than as more argument, and so a reader scanning for "did this work"
+        # can find it without reading the case for the decision. The verb refuses one
+        # half without the other, so either both print or neither does.
+        if cost_delta and quality_delta:
+            chunk.append(f"**Cost:** {cost_delta}  ·  **Bought:** {quality_delta}")
             chunk.append("")
 
         size = sum(len(l) + 1 for l in chunk)

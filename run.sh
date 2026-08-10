@@ -93,10 +93,16 @@ case "${1:-}" in
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
   check)        "$REPO/tools/check.sh" ;;
+  # `next` (2026-08-09, loop #297): open loops ordered by how LITTLE is left,
+  # which no other surface answers — bell/dated/decision all order by urgency.
+  # Read-only over v_loop_proximity (migration 0084). Prints its own coverage
+  # first, because most of the backlog predates the blocker gate and a ranking
+  # that hid that would look authoritative and be noise.
+  next)         shift; "$REPO/.venv/bin/python" "$REPO/tools/db-tap.py" run "$REPO/tools/closest-first.py" "$@" ;;
   # The report-card rubric (loop #220, DRAFT). One entry point for both paths:
   # a human runs this, and the monthly audit runs this. Rule a8c55a47 — the
   # manual path and the automated path that do the same job must be the SAME
   # code, which under v1 they were not.
   report-card)  shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/report-card.py" "$@" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>' [actor]|check|report-card [--validate|--run] [--skip-evidence]"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>' [actor]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]"; exit 2 ;;
 esac
