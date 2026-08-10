@@ -58,9 +58,11 @@ fi
 # 00_Context/ is a folder Joe already opens, so this needs no new habit.
 VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
 if [ -d "$VAULT/00_Context" ]; then
-  { echo "# Today — generated $(date -u +%FT%TZ), do not hand-edit"
+  { echo "# Today, generated $(date -u +%FT%TZ). Do not hand-edit."
     echo
     cat "$REPO/out/brief-pack/one-thing.md" 2>/dev/null
+    echo
+    cat "$REPO/out/brief-pack/claim-card.md" 2>/dev/null
     echo
     cat "$REPO/out/brief-pack/renewal-shortlist.md" 2>/dev/null
   } > "$VAULT/00_Context/today.md" \

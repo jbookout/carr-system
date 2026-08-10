@@ -523,8 +523,132 @@ def section_renewal(cur, today) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def section_claim_card(cur, today) -> str:
+    """THE CLAIM CARD ,  the fix for the finding that six lanes accumulated 9,870
+    candidates and promoted ZERO, ever.
+
+    The gate is not the defect and does not move: never-pre-qualify (rule
+    72e06bdf) says the machine presents and Joe judges, and that stays. THE BATCH
+    SIZE is the defect. Nobody claims from a list 9,783 rows long, so nobody ever
+    has ,  `promote-pool` has been called 0 times across 609 local sessions.
+
+    So this presents CARD_SIZE rows, ranked, each with its reason and a
+    pre-written claim, and it is deliberately the only bounded surface in the
+    lane. Everything upstream stays unbounded on purpose: the sweeps keep finding
+    everything, and this decides what reaches a human this week.
+
+    RANKING, and why this order. Window proximity first, because a lease event is
+    the one thing in this business with a deadline attached that the practice
+    owner is not thinking about yet ,  that is the whole CARR opening. Already-past
+    windows rank just behind future ones rather than being dropped: three of them
+    expired unread while the shortlist sat in a gitignored folder, and a passed
+    window is still a live conversation, just a different one. Score breaks ties,
+    and a candidate with no window at all sorts last but is never hidden.
+
+    WHY needs_contact IS A SEPARATE BUCKET rather than a filter. A candidate with
+    no phone and no email is not a call, it is a research task, and mixing the two
+    wastes the slot that mattered. Hiding them would be pre-qualifying, which is
+    the rule this whole design exists to honour, so they are shown and counted."""
+    CARD_SIZE = 5
+
+    out = ["# Candidates waiting on your yes or no", "",
+           "_Owner: Joe. Only a claim creates a lead; nothing here has been contacted, "
+           "promoted or pre-filtered. Say no as freely as yes, because a no is what "
+           "makes this list shorter next week._", ""]
+    try:
+        cur.execute("""
+            select pool_id, base_version, lane, display_name, org_name, vertical,
+                   city, state, score, score_basis, est_lease_event, est_basis,
+                   days_to_window, has_channel, dup_tier, dup_ref, dup_basis
+              from v_claim_card
+             where has_channel
+             order by (est_lease_event is null),
+                      (days_to_window < 0),
+                      abs(days_to_window) nulls last,
+                      score desc nulls last
+             limit %s""", (CARD_SIZE,))
+        rows = cur.fetchall()
+        cur.execute("select count(*), count(*) filter (where not has_channel) from v_claim_card")
+        total, no_channel = cur.fetchone()
+    except Exception as exc:
+        # ROLL BACK FIRST, and this line is load-bearing. Postgres aborts the
+        # whole transaction on a failed statement, so without it every section
+        # AFTER this one dies with "current transaction is aborted" and the
+        # brief pack exits non-zero having written stale files. Caught by running
+        # it: prebriefs, capacity, monday-agenda and the renewal shortlist all
+        # failed behind a missing view, and today.md silently re-served the
+        # previous run's content. This is the same defect class as the swallowed
+        # rollback in ops/forgetting-check.py, which is why that script's growth
+        # snapshot has never written a single row.
+        try:
+            cur.connection.rollback()
+        except Exception:
+            pass
+        # HONEST DEGRADATION, not a silent empty section. Same posture as the
+        # renewal section when its artifact is missing: say what is wrong and
+        # what fixes it, because a card that renders blank is indistinguishable
+        # from a card with nothing to show, and that ambiguity is the exact
+        # defect this whole council pass was convened over.
+        out += ["This card cannot be built yet: `v_claim_card` is not in the database.",
+                "",
+                "It arrives with migration `0086_candidate_claim_card.sql`, which is "
+                "written and has been proven against a throwaway copy of production "
+                "(9,783 rows) but not yet applied to production itself. Applying it "
+                "needs a credential a session is not permitted to hold.",
+                "", f"_Reader error: {plain(str(exc).splitlines()[0])[:160]}_", ""]
+        return "\n".join(out)
+
+    if not rows:
+        out += ["Nothing claimable with a contact channel today. That is either a "
+                "genuinely empty reservoir or a broken lane, and those look identical "
+                "here, so check the lane freshness rows in `run.sh health` before "
+                "believing it.", ""]
+
+    for i, r in enumerate(rows, 1):
+        (pid, ver, lane, name, org, vert, city, state, score, sbasis,
+         le, ebasis, days, _ch, dtier, dref, dbasis) = r
+        where = ", ".join(x for x in (plain(city), plain(state)) if x)
+        bits = [b for b in (plain(vert), where, plain(org) if org and org != name else "") if b]
+        out.append(f"{i}. **{plain(name)}**" + (". " + " · ".join(bits) if bits else ""))
+
+        why = []
+        if le is not None and days is not None:
+            if days < 0:
+                why.append(f"estimated lease event was {le}, {abs(int(days))} days ago, "
+                           "so the opener is a renewal that may already have happened")
+            else:
+                why.append(f"estimated lease event {le}, {int(days)} days out")
+        if ebasis:
+            why.append(f"basis: {plain(ebasis)}")
+        if score is not None:
+            why.append(f"score {score}" + (f" ({plain(sbasis)})" if sbasis else ""))
+        why.append(f"found by the {plain(lane)} lane")
+        out.append(f"   Why this one: {'; '.join(why)}.")
+
+        if dtier == "review" and dref:
+            out.append(f"   ⚠ Possible duplicate of {plain(dref)}: weak match, shown "
+                       f"rather than suppressed so you decide. Basis: {plain(dbasis or 'unstated')}.")
+
+        out.append(f"   Yes → `promote-pool` pool_id `{pid}` base_version `{ver}` "
+                   f"stage `outreach_active`.")
+        out.append(f"   No  → `decline-candidate` pool_id `{pid}` base_version `{ver}` "
+                   f"with the reason in your words.")
+        out.append("")
+
+    tail = [f"Showing {len(rows)} of {total} claimable."]
+    if no_channel:
+        tail.append(f"{no_channel} more have no phone or email on file ,  those are "
+                    "research, not calls, and they are counted here rather than hidden "
+                    "so the lane's contact-discovery gap stays visible.")
+    tail.append("Every no you record removes that candidate from this card permanently, "
+                "which is the only thing that makes it shorter.")
+    out += [" ".join(tail), ""]
+    return "\n".join(out)
+
+
 SECTIONS = {
     "one-thing": ("one-thing.md", section_one_thing),
+    "claim-card": ("claim-card.md", section_claim_card),
     "prebriefs": ("prebriefs.md", section_prebriefs),
     "capacity": ("capacity.md", section_capacity),
     "monday-agenda": ("monday-agenda.md", section_monday),

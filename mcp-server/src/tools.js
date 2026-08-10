@@ -2255,6 +2255,66 @@ export const TOOLS = {
     }),
   },
 
+  "decline-candidate": {
+    write: true,
+    humanOnly: true,
+    description: "Record that a HUMAN looked at a candidate and said no. This is promote-pool's missing counterpart, and it is the only thing that makes the claim card shorter. Measured 2026-08-09: six lanes had accumulated 9,870 candidates and promoted zero, ever, because a candidate rejected at the board stayed exactly as claimable as before and came back on every future card forever. A decline is NOT a suppression: suppression is a machine's assertion about identity and can be wrong, a decline is a human's judgment about fit and no sweep re-litigates it. The reason is REQUIRED and is the input to the lane-retirement decision, since 'no contact channel' is a fixable lane defect, 'out of territory' is a mis-scoped lane, and 'not a fit' is a lane working correctly with a low hit rate. Nothing is deleted: the row keeps its research and its provenance, it just stops being presented. Read the row from v_claim_card or v_pool first and pass its version as base_version.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      pool_id: { type: "string", description: "candidate_pool.id, from v_claim_card" },
+      base_version: { type: "integer", description: "the pool row's version, from a fresh read" },
+      reason: { type: "string", description: "why, in the human's own words. Required. One line is enough, but it must say something a lane owner could act on." } },
+      required: ["idempotency_key","pool_id","base_version","reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "decline-candidate", args, async () => {
+      const reason = (args.reason || "").trim();
+      // Refused rather than defaulted. A blank reason would satisfy the database
+      // constraint's letter if it were only NOT NULL, and would tell the lane
+      // owner nothing — which is the whole point of collecting it.
+      if (!reason)
+        throw new ToolError({ error: "reason_required",
+          hint: "say why in your own words: no contact channel, out of territory, "
+              + "corporate-owned, already represented, not a fit. The reason is what "
+              + "makes a lane's decline pattern readable." });
+
+      await versionGuard(c, "candidate_pool", args.pool_id, args.base_version);
+      const p = (await c.query(
+        `select id, source, source_key, name, status, promoted_lead_id
+           from candidate_pool where id = $1`, [args.pool_id])).rows[0];
+      if (!p)
+        throw new ToolError({ error: "not_found", table: "candidate_pool", id: args.pool_id });
+
+      // Idempotent on an already-declined row, and REFUSING on a promoted one.
+      // Declining something that already became a lead would silently strand the
+      // lead: promote-pool is one-way by design and there is no demote, so the
+      // honest answer is to work the lead's own lifecycle instead.
+      if (p.status === "declined")
+        return { ok: true, pool_id: p.id, already: "declined",
+                 note: "already declined; nothing changed" };
+      if (p.status !== "pool")
+        throw new ToolError({ error: "not_declinable", status: p.status,
+          lead_id: p.promoted_lead_id || null,
+          hint: p.status === "promoted"
+            ? "this candidate already became a lead. Declining here would strand it; "
+              + "work the lead's own lifecycle instead."
+            : "this row is already marked as a duplicate of a record we hold" });
+
+      await c.query(
+        `update candidate_pool
+            set status='declined', declined_at=now(), declined_by=$1,
+                decline_reason=$2, updated_by=$1
+          where id=$3 and status='pool'`, [actor.id, reason, args.pool_id]);
+
+      await writeEvent(c, actor, "decline-candidate", "candidate_pool", args.pool_id,
+        { field: "status", old: { status: "pool" },
+          new: { status: "declined", reason, lane: p.source },
+          idempotency_key: args.idempotency_key });
+
+      return { ok: true, pool_id: p.id, name: p.name, lane: p.source,
+               status: "declined", reason,
+               note: "off the claim card permanently; the research and provenance are kept" };
+    }),
+  },
+
   "new-client": {
     write: true,
     description: "Create a client over a party; mints the next C-ref (roster_ref). Sets client_status and acquisition_source. ALWAYS ask how they found us (acquisition_source) at intake — consult attribution starts day one.",
