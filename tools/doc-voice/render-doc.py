@@ -59,6 +59,15 @@ FMIN, FMAX = 70, 300
 FRAME, HOP = 1024, 256
 TAIL_SEC = 0.8
 
+# The flat end of the gate, in Hz/s. Evidence, not a guess: a take measured at
+# -3 Hz/s is the delivery Joe heard as flat in the ElevenLabs UI on 2026-08-10,
+# while -24 and -36 were both acceptable to him (he mildly preferred the -24).
+# So the failure mode is "barely falls", and 8 sits clear of the bad case with
+# room under the known-good ones. Revise it when there is more ear data; it is
+# one observation, and this comment exists so nobody mistakes it for a
+# calibrated threshold.
+FLAT_FLOOR = 8.0
+
 
 def api_key():
     """Read-only. The value is never printed, logged or returned to a caller
@@ -165,12 +174,27 @@ def main():
             takes.append((p, s))
             print(f"  take{i}: {'no read' if s is None else f'{s:+.0f} Hz/s'}"
                   f"{'' if s is None else ('  FALLING ok' if s < 0 else '  RISING reject')}")
-        scored = [(p, s) for p, s in takes if s is not None and s < 0]
-        if not scored:
-            print("  NO TAKE PASSED the falling-ending screen — nothing shipped.")
+        # A GATE, NOT A RANKER — corrected 2026-08-10 the same day it shipped.
+        # The first cut picked the STEEPEST fall and called it "most settled".
+        # That was my invention: the recipe's rule is only "reject rising
+        # finals". Joe then preferred a -24 Hz/s take over a -36 one, which the
+        # steepest-wins rule had ranked below it. Steeper is not better.
+        # What IS real is the flat end of the range: the take that measured
+        # -3 Hz/s is the delivery he heard as flat in the browser. So the gate
+        # rejects BOTH directions of failure — rising, and barely-falling — and
+        # among the takes that pass it does NOT pretend to rank character.
+        # Default is the median passer (avoids both extremes); --keep-all hands
+        # the ear the whole set, which is the honest instrument for the rest.
+        passing = [(p, s) for p, s in takes if s is not None and s <= -FLAT_FLOOR]
+        if not passing:
+            print(f"  NO TAKE PASSED (need a fall steeper than {FLAT_FLOOR} Hz/s) "
+                  "— nothing shipped.")
             print("  Shipping the best available when none clears the bar is how a corpus rots.")
             return 1
-        winner = min(scored, key=lambda r: r[1])[0]
+        passing.sort(key=lambda r: r[1])
+        winner = passing[len(passing) // 2][0]      # median fall, not steepest
+        print(f"  {len(passing)}/{len(takes)} passed the gate; shipping the "
+              "median fall (steepness is not a quality ranking)")
         os.replace(winner, cached)
         winner = cached
         if not a.keep_all:
