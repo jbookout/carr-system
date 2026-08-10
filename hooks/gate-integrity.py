@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""gate-integrity.py — SessionStart attestation that the gates are still there.
+
+THE PROBLEM THIS ADDRESSES, AND THE HONEST LIMIT OF ITS ANSWER.
+Joe, 2026-08-09: "the gates live in a repo i can edit — so what are you
+suggesting is the solution to that problem?"
+
+Both council chairs raised this unprompted as the decisive hole. Grok: "If the
+system can 'internally decide' to loosen its own collar, you do not have a
+boundary... without it every gate is temporary cosplay." Codex: "None of these
+hooks is truly unbypassable if an AI session with repo access can edit the
+hook, settings, or launcher that enforces them... the agent may be the operator,
+but it cannot also be the root authority that decides whether its own actions
+were allowed."
+
+THIS FILE IS NOT THE FIX. IT IS THE ALARM.
+A session running as Joe's user can edit hooks/*.py, can edit this file, and can
+edit the baseline this file compares against. Two edits instead of one is
+friction and a git trace — it is not prevention, and claiming otherwise would be
+exactly the "hardness cosplay" the council warned about.
+
+THE ACTUAL FIX IS ops/harden-gates.sh, WHICH NEEDS ROOT (Joe's password, one
+time). It chowns the hook scripts and ~/.claude/settings.json to root:wheel with
+mode 644/755 — readable and executable by the session, writable by nobody but
+root. sudo is in the deny list and needs a password only Joe holds, so that
+boundary is enforced by the OS rather than by good intentions. Once that is
+done, THIS hook's job changes from "detect drift" to "detect that hardening was
+undone", which is a much stronger signal because it should never happen.
+
+WHAT IT CHECKS, every SessionStart:
+  1. Each gate script's SHA-256 against ops/config/gate-baseline.json.
+  2. The live settings.json hooks block against the repo's ops/config/hooks.json
+     — a gate whose script is pristine but which settings no longer INVOKES is
+     off, and that is the failure that actually happened on 2026-08-08 when a
+     plugin install silently deleted the whole hooks block for a day.
+  3. Whether hardening is in place (root ownership), reported every session so
+     "we never did that" cannot quietly become the status quo.
+  4. That every gate named in the baseline still EXISTS. A deleted gate is the
+     loudest possible failure and must not read as "no drift".
+
+OUTPUT: stdout on a SessionStart hook is injected into the session's context, so
+a failure is stated to the session AND visible to Joe in the same breath. Silent
+success prints one short line — a check nobody ever sees the output of is a
+check nobody trusts.
+
+Regenerate the baseline deliberately after an intended gate change:
+    python3 hooks/gate-integrity.py --bless
+That writes the current hashes and stamps who/when. It is deliberately a
+separate, named action so that "the baseline moved" is always a decision in the
+git log rather than a side effect.
+"""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOOKS = os.path.join(REPO, "hooks")
+BASELINE = os.path.join(REPO, "ops", "config", "gate-baseline.json")
+REPO_HOOKS_JSON = os.path.join(REPO, "ops", "config", "hooks.json")
+SETTINGS = os.path.expanduser("~/.claude/settings.json")
+
+# The files whose contents ARE the enforcement. Anything that can refuse, block,
+# or classify belongs here.
+GATED = [
+    "guard-unattended.py",      # egress deny
+    "record-home-gate.py",      # .md write deny
+    "rule-shape-gate.py",       # teach shape
+    "lint-gate.py",             # writing lint
+    "ledger-sweep.py",          # Stop nudge
+    "conduct-stop-gate.py",     # Stop HARD gate
+    "escalation-gate.py",       # AskUserQuestion deny
+    "conduct_patterns.py",      # the shared classifier both conduct gates use
+    "gate-integrity.py",        # this file — it must guard itself
+]
+
+
+def sha(path):
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def owner_of(path):
+    """(uid, mode) or None. Root-owned + not user-writable is the real fix."""
+    try:
+        st = os.stat(path)
+        return st.st_uid, oct(st.st_mode & 0o777)
+    except FileNotFoundError:
+        return None
+
+
+def hardened(path):
+    o = owner_of(path)
+    if not o:
+        return False
+    uid, mode = o
+    # root-owned AND the owner-write bit is the only write bit set
+    return uid == 0 and not (int(mode, 8) & 0o022)
+
+
+def current():
+    return {n: sha(os.path.join(HOOKS, n)) for n in GATED}
+
+
+def bless():
+    who = subprocess.run(["git", "-C", REPO, "config", "user.email"],
+                         capture_output=True, text=True).stdout.strip()
+    rev = subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    data = {
+        "_note": "Regenerated by hooks/gate-integrity.py --bless. A change here "
+                 "should always accompany a deliberate gate change in the same "
+                 "commit. If this moved on its own, that is the finding.",
+        "blessed_by": who or "unknown",
+        "blessed_at_rev": rev or "unknown",
+        "hashes": current(),
+    }
+    os.makedirs(os.path.dirname(BASELINE), exist_ok=True)
+    with open(BASELINE, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    print(f"blessed {len([v for v in data['hashes'].values() if v])} gate(s) -> {BASELINE}")
+    return 0
+
+
+def settings_matches_repo():
+    """Is every gate the repo declares actually WIRED UP in live settings?"""
+    try:
+        live = json.load(open(SETTINGS)).get("hooks", {})
+    except Exception:
+        return None, "settings.json unreadable"
+    try:
+        src = open(REPO_HOOKS_JSON).read()
+    except Exception:
+        return None, "repo hooks.json unreadable"
+    want = src.replace("{{REPO}}", REPO).replace("{{HOME}}", os.path.expanduser("~"))
+    want = want.replace("{{VAULT}}", os.path.expanduser("~/My Drive/CARR AI"))
+    try:
+        want = json.loads(want)
+    except Exception as e:
+        return None, f"repo hooks.json unparseable: {e}"
+
+    missing = []
+    live_cmds = {h.get("command", "")
+                 for arr in live.values() for m in arr for h in m.get("hooks", [])}
+    for arr in want.values():
+        for m in arr:
+            for h in m.get("hooks", []):
+                if h.get("command") not in live_cmds:
+                    missing.append(os.path.basename(h.get("command", "?")))
+    return missing, None
+
+
+def main():
+    if "--bless" in sys.argv:
+        return bless()
+
+    problems = []
+
+    if not os.path.exists(BASELINE):
+        print("GATE INTEGRITY: no baseline yet — run "
+              "`python3 hooks/gate-integrity.py --bless` after reviewing the gates. "
+              "Until then, gate tampering is UNDETECTED.")
+        return 0
+
+    base = json.load(open(BASELINE)).get("hashes", {})
+    now = current()
+
+    for name, want in base.items():
+        got = now.get(name)
+        if got is None:
+            problems.append(f"MISSING: hooks/{name} is GONE — that gate is off")
+        elif want and got != want:
+            problems.append(f"CHANGED: hooks/{name} no longer matches the blessed baseline")
+    for name, got in now.items():
+        if name not in base and got:
+            problems.append(f"UNBLESSED: hooks/{name} exists but is not in the baseline")
+
+    missing, err = settings_matches_repo()
+    if err:
+        problems.append(f"WIRING: {err}")
+    elif missing:
+        problems.append("NOT WIRED UP: settings.json does not invoke "
+                        + ", ".join(sorted(set(missing)))
+                        + " — the script exists but nothing runs it")
+
+    unhardened = [n for n in GATED
+                  if os.path.exists(os.path.join(HOOKS, n))
+                  and not hardened(os.path.join(HOOKS, n))]
+
+    if problems:
+        print("=" * 70)
+        print("GATE INTEGRITY FAILURE — the enforcement layer changed.")
+        for p in problems:
+            print(f"  - {p}")
+        print()
+        print("This session must NOT treat the gates as in force. Tell Joe in "
+              "your first response, before doing any other work. If the change "
+              "was intentional and reviewed, re-bless the baseline in the same "
+              "commit as the gate change. If it was not intentional, that is a "
+              "finding: something disabled a gate. On 2026-08-08 a plugin "
+              "install silently deleted the entire hooks block and all five "
+              "gates were off for a day, found by accident.")
+        print("=" * 70)
+        return 0
+
+    note = ""
+    if unhardened:
+        note = (f" · {len(unhardened)}/{len(GATED)} gates still user-writable "
+                f"(run ops/harden-gates.sh with sudo to make tampering "
+                f"impossible rather than merely detectable)")
+    print(f"GATE INTEGRITY: {len(base)} gates match baseline; wiring OK{note}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        # Fail OPEN and SILENT-ish: a broken attestation must never block a
+        # session, but it must not claim everything is fine either.
+        print(f"GATE INTEGRITY: check could not run ({exc}) — treat gates as UNVERIFIED.")
+        sys.exit(0)

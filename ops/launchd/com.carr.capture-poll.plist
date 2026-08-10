@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        WO-4 capture bridge, poll side. Sweeps ~/Recordings every 5 minutes
+        for sessions that hold a live .capture.json (already claimed) but no
+        ingested.json yet, and asks the worker whether a meeting_record has
+        landed for each one. RunAtLoad true so a Mac restart or a fresh
+        install doesn't wait a full interval before the first sweep.
+
+        This plist references the DURABLE main-checkout path, not the
+        wo4-capture-bridge build worktree — see the identical note in
+        com.carr.dictation-consent.plist.
+    -->
+    <key>Label</key>
+    <string>com.carr.capture-poll</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{REPO}}/tools/dictation-rig/bin/capture-poll.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/Library/Logs/capture-bridge.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/Library/Logs/capture-bridge.log</string>
+</dict>
+</plist>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Re-applies the Logitech modifier repair (see bin/logitech-keymap.sh).
+         hidutil mappings die on reboot and on receiver replug, so this runs at
+         login and every 10 minutes; the set is idempotent and costs a few ms. -->
+    <key>Label</key>
+    <string>com.carr.logitech-keymap</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>{{REPO}}/tools/dictation-rig/bin/logitech-keymap.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>600</integer>
+</dict>
+</plist>
