@@ -45,6 +45,14 @@ def main():
     merged = mod.merge_codex_carr_hooks(LIVE, DESIRED)
     names = commands(merged)
     again = mod.merge_codex_carr_hooks(merged, DESIRED)
+    live_permissions = (
+        'default_permissions = "carr_drive_readonly"\n\n'
+        f'{mod.CODEX_PERMISSIONS_BEGIN}\n'
+        '[permissions.carr_drive_readonly.filesystem]\n'
+        f'"{mod.REPO}" = "write"\n'
+        f'{mod.CODEX_PERMISSIONS_END}\n'
+    )
+    portable_permissions = mod.canonical_codex_permissions(live_permissions)
     cases = [
         ("unrelated top-level key preserved", merged.get("user_setting") == {"keep": True}),
         ("unrelated event preserved", "PostToolUse" in merged["hooks"] and "/Users/booko/other/hooks/post.py" in commands(merged)),
@@ -53,6 +61,14 @@ def main():
         ("stale CARR hook removed", all("/carr-system/hooks/old" not in name for name in names)),
         ("desired CARR hook installed once", names.count("/Users/booko/carr-system/hooks/completion-evidence-gate.py") == 1),
         ("second merge is idempotent", again == merged),
+        ("live Codex permission paths become portable tokens",
+         portable_permissions is not None and '"{{REPO}}" = "write"' in portable_permissions),
+        ("Call Mode LaunchAgent resolves to its tracked tool source",
+         mod.launchd_repo_path("com.carr.call-mode.plist").endswith(
+             "/tools/dictation-rig/launchd/com.carr.call-mode.plist")),
+        ("ordinary LaunchAgent resolves to ops launchd",
+         mod.launchd_repo_path("com.carr.example.plist").endswith(
+             "/ops/launchd/com.carr.example.plist")),
     ]
     for label, passed in cases:
         print(f"{'PASS' if passed else 'FAIL'}  {label}")

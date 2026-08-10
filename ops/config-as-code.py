@@ -72,6 +72,11 @@ TASKS_SRC = os.path.join(HOME, ".claude", "scheduled-tasks")
 TASKS_REPO = os.path.join(REPO, "ops", "scheduled-tasks")
 LAUNCHD_SRC = os.path.join(HOME, "Library", "LaunchAgents")
 LAUNCHD_REPO = os.path.join(REPO, "ops", "launchd")
+LAUNCHD_ALT_REPO = {
+    "com.carr.call-mode.plist": os.path.join(
+        REPO, "tools", "dictation-rig", "launchd", "com.carr.call-mode.plist"
+    ),
+}
 HOOKS_REPO = os.path.join(REPO, "ops", "config", "hooks.json")
 CODEX_HOOKS_SRC = os.path.join(HOME, ".codex", "hooks.json")
 CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
@@ -269,6 +274,11 @@ def carr_plists():
         return []
 
 
+def launchd_repo_path(name):
+    """Canonical tracked source for one installed CARR LaunchAgent."""
+    return LAUNCHD_ALT_REPO.get(name, os.path.join(LAUNCHD_REPO, name))
+
+
 def live_hooks_block():
     raw = read(SETTINGS)
     if raw is None:
@@ -360,17 +370,21 @@ def codex_permissions_source():
     return lines[0], "\n".join(lines[1:]).strip() + "\n"
 
 
-def live_codex_permissions():
-    """Render the CARR-owned portion of config.toml in canonical source form."""
-    raw = read(CODEX_CONFIG)
-    if raw is None:
-        return None
+def canonical_codex_permissions(raw):
+    """Render a live CARR-owned Codex permission slice in portable source form."""
     default = re.search(r'^default_permissions\s*=\s*"[^"]+"\s*$', raw, re.M)
     marker = re.search(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n(.*?)'
                        + re.escape(CODEX_PERMISSIONS_END), raw, re.S)
     if not default or not marker:
         return None
-    return default.group(0).strip() + "\n\n" + marker.group(1).strip() + "\n"
+    rendered = default.group(0).strip() + "\n\n" + marker.group(1).strip() + "\n"
+    return portable(rendered)
+
+
+def live_codex_permissions():
+    """Render the CARR-owned portion of config.toml in canonical source form."""
+    raw = read(CODEX_CONFIG)
+    return None if raw is None else canonical_codex_permissions(raw)
 
 
 def install_codex_permissions(raw, default_line, body):
@@ -420,7 +434,7 @@ def pairs():
 
     for f in carr_plists():
         out.append((f"launchd {f}", portable(read(os.path.join(LAUNCHD_SRC, f))),
-                    os.path.join(LAUNCHD_REPO, f)))
+                    launchd_repo_path(f)))
     return out
 
 
