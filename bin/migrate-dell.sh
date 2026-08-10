@@ -139,7 +139,46 @@ fi
 # carries the correct matcher plus every gate built since, so installing it
 # replaces that manual edit entirely — and brings the conduct gates, the
 # escalation gate, the git-writer gate and the integrity check with it.
-step "3. install gates"
+step "3. python environment"
+# THE FRESH-MACHINE BLOCKER, found in the 2026-08-10 audit. bin/nightly.sh runs
+# ./.venv/bin/python explicitly on eight of its steps, two launchd jobs name that
+# interpreter in their ProgramArguments, and NOTHING in this repo has ever
+# created it — it exists on the primary machine only because it was made by hand
+# long ago. On a fresh clone every one of those fails silently at its first fire.
+# The gate selftests themselves are stdlib-only and would have passed, so the
+# migration would have reported success on a machine whose scheduled work could
+# not run. That is precisely the "reports success while half-migrated" outcome
+# this script was written to prevent.
+if [ -x "$REPO/.venv/bin/python" ]; then
+  good "venv present"
+elif [ $APPLY -eq 1 ]; then
+  if python3 -m venv "$REPO/.venv" </dev/null >/tmp/mig-venv.log 2>&1; then
+    good "venv created"
+  else
+    bad "venv creation failed — see /tmp/mig-venv.log"
+  fi
+else
+  good "would create .venv"
+fi
+
+if [ -x "$REPO/.venv/bin/python" ]; then
+  PY="$REPO/.venv/bin/python"
+  if $PY -c "import psycopg, openpyxl, PIL" >/dev/null 2>&1; then
+    good "python deps present"
+  elif [ $APPLY -eq 1 ]; then
+    # The only step that touches the network. Slowest part of the migration.
+    if $PY -m pip install -q --disable-pip-version-check \
+         -r "$REPO/requirements.txt" </dev/null >/tmp/mig-pip.log 2>&1; then
+      good "requirements installed"
+    else
+      bad "pip install failed — see /tmp/mig-pip.log"
+    fi
+  else
+    note "would install requirements.txt (needs network, ~1 min)"
+  fi
+fi
+
+step "4. install gates"
 if [ $APPLY -eq 1 ]; then
   if $PY "$REPO/ops/config-as-code.py" install --apply </dev/null >/tmp/mig-hooks.log 2>&1; then
     good "hooks installed (all other settings keys preserved)"
@@ -155,7 +194,7 @@ fi
 # Machine-local and gitignored, so it does not exist on a fresh clone. Without
 # it the egress guard falls back to its code list — safe, but client practice
 # sites stay unreachable until the nightly runs. Generate it now instead.
-step "4. derived fetch allowlist"
+step "5. derived fetch allowlist"
 if [ -f "$REPO/ops/fetch-allowlist.py" ]; then
   if [ $APPLY -eq 1 ]; then
     if $PY "$REPO/ops/fetch-allowlist.py" </dev/null >/tmp/mig-allow.log 2>&1; then
@@ -175,7 +214,7 @@ fi
 # function (rule a9ecd5b4: a check compares the artifact against what it should
 # be). A migration that installs gates without proving they fire has proved
 # nothing.
-step "5. verify"
+step "6. verify"
 run_check() {
   local label="$1" file="$2"
   [ -f "$REPO/$file" ] || { note "$label — not present, skipped"; return; }

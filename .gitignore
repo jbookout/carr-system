@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .venv/
 out/
+# ...and the bare name, because in a WORKTREE `out` is a SYMLINK to the
+# canonical out/, and a trailing-slash pattern matches directories only —
+# so the link itself showed up as untracked in every worktree (2026-08-10).
+out
 mcp-server/.neon
 _to_delete/
 *.bak-*
