@@ -37,6 +37,95 @@ export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
 
+# ── PREFLIGHT ───────────────────────────────────────────────────────────────
+# Run on the PRIMARY machine, before the visit: "is what Dell will pull actually
+# going to work?" A dry run here cannot answer that — every plist already
+# matches, every gate is already installed, the venv already exists — so it
+# reports 13 ok / 0 fail on a packet that fails on a clean Mac. The 2026-08-10
+# audit found five such defects that way, including a non-executable script that
+# ended the migration at the first character.
+#
+# So: clone what origin/main ACTUALLY holds into a scratch HOME, at the same
+# ~/carr-system path the gates resolve, and run the real verify suite there.
+# Same code as the migration itself (rule a8c55a47), which is why this lives in
+# this file rather than in a checklist somebody runs differently each time.
+#
+# Two results are EXPECTED here and are not defects, both artefacts of the
+# scratch location rather than of the packet:
+#   sh-destructive — the guard waives recursive deletes inside SAFE_ZONES, and
+#                    /private/tmp plus "scratchpad" are both safe zones. On a
+#                    real ~/carr-system the same case denies.
+#   uncommitted gates — anything still in the working tree here is invisible to
+#                    the clone, which is the point: it is exactly what Dell gets.
+if [ "${1:-}" = "--preflight" ]; then
+  TMP="${TMPDIR:-/tmp}/carr-preflight-$$"
+  trap 'rm -rf "$TMP"' EXIT INT TERM
+  mkdir -p "$TMP/home/Library/LaunchAgents" "$TMP/home/.claude"
+  say "PREFLIGHT — cloning origin/main into a scratch machine"
+  say "this answers 'what will Dell actually get', which a dry run here cannot"
+  say ""
+  if ! git -C "$REPO" fetch --quiet </dev/null 2>/dev/null; then
+    say "  note  could not fetch; testing the local main instead"
+  fi
+  REF=$(git -C "$REPO" rev-parse --verify --quiet origin/main || echo main)
+  if ! git clone --quiet --no-local "$REPO" "$TMP/home/carr-system" </dev/null 2>&1; then
+    say "  FAIL  clone failed"; exit 1
+  fi
+  git -C "$TMP/home/carr-system" checkout --quiet "$REF" </dev/null 2>/dev/null
+  git -C "$TMP/home/carr-system" config user.email "preflight@example.com"
+
+  say "testing $(git -C "$TMP/home/carr-system" rev-parse --short HEAD) (origin/main)"
+  MODE=$(git -C "$TMP/home/carr-system" ls-files -s bin/migrate-dell.sh | cut -d' ' -f1)
+  if [ "$MODE" = "100755" ]; then
+    say "  ok    bin/migrate-dell.sh is executable as pulled"
+  else
+    say "  FAIL  bin/migrate-dell.sh is mode $MODE — Dell gets 'permission denied'"
+    say "        fix: git update-index --chmod=+x bin/migrate-dell.sh && commit"
+  fi
+
+  say ""
+  say "  gates, as Dell will run them:"
+  PFAIL=0
+  for t in guard conduct-gate escalation-gate gate-edit-gate git-writer-gate \
+           context-handoff-gate corpus-render-gate; do
+    F="$TMP/home/carr-system/ops/$t-selftest.py"
+    [ -f "$F" ] || { print -r -- "    note  $t — not in the clone"; continue; }
+    if (cd "$TMP/home/carr-system" && HOME="$TMP/home" python3 "$F" </dev/null \
+         >/tmp/pf.log 2>&1); then
+      print -r -- "    ok    $t"
+    elif [ "$t" = "gate-edit-gate" ] && grep -q "FAILURES: sh-destructive" /tmp/pf.log \
+         && [ "$(grep -c FAILURES /tmp/pf.log)" = "1" ]; then
+      print -r -- "    ok    $t (sh-destructive waived: scratch is inside a SAFE_ZONE)"
+    else
+      print -r -- "    FAIL  $t — $(tail -1 /tmp/pf.log | tr -s ' ')"
+      PFAIL=$((PFAIL+1))
+    fi
+  done
+
+  # The defect class that caused this audit: a gate green here only because of
+  # working-tree changes nobody pushed. Name the files rather than the count.
+  say ""
+  UNPUSHED=$(git -C "$REPO" status --porcelain --untracked-files=no -- hooks ops 2>/dev/null \
+             | awk '{print $2}' | grep -E 'hooks/.*\.py$|selftest\.py$' || true)
+  if [ -n "$UNPUSHED" ]; then
+    say "  FAIL  gate work exists here that Dell will NOT get:"
+    print -r -- "$UNPUSHED" | sed 's/^/          /'
+    say "        a gate and its selftest must ship together — commit and push these"
+    PFAIL=$((PFAIL+1))
+  else
+    say "  ok    no uncommitted gate or selftest work"
+  fi
+
+  say ""
+  if [ $PFAIL -gt 0 ]; then
+    say "PREFLIGHT FAILED — $PFAIL item(s). Dell's migration would not be clean."
+    exit 1
+  fi
+  say "PREFLIGHT CLEAN — the packet on origin/main works on a fresh Mac."
+  say "On Dell's machine: ~/carr-system/bin/migrate-dell.sh --apply"
+  exit 0
+fi
+
 PY="python3"
 [ -x "$REPO/.venv/bin/python" ] && PY="$REPO/.venv/bin/python"
 
