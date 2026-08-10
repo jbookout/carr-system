@@ -199,8 +199,8 @@ function renderChrome() {
     : 'One account can hold dozens of market-level transactions without crowding the territory agenda.';
   const addLabel = state.workspace === 'national_account' ? (selected ? 'Add market deal' : 'Add national account') : 'Add work record';
   $('#addButton').textContent = addLabel;
-  $('#persistentAddButton').textContent = `+ ${addLabel}`;
-  $('#persistentAddButton').setAttribute('aria-label', addLabel);
+  $('#stickyAddButton').textContent = `+ ${addLabel}`;
+  $('#stickyAddButton').setAttribute('aria-label', addLabel);
   $('#ownerButton').hidden = !selected;
   $('#agendaButton').hidden = isAccountHome;
   const agentHeading = state.workspace === 'national_account' ? 'Market agent' : 'Owner';
@@ -941,7 +941,7 @@ function wireEvents() {
   $('#accountBack').onclick = () => { state.accountId=null; render(); };
   const openAddForm = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
   $('#addButton').onclick = openAddForm;
-  $('#persistentAddButton').onclick = openAddForm;
+  $('#stickyAddButton').onclick = openAddForm;
   $('#ownerButton').onclick = accountOwnerForm;
   $('#agendaButton').onclick = startAgenda;
   $('#callModeButton').onclick = openCallMode;

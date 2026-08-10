@@ -120,15 +120,19 @@ test("Deal Room keeps accessibility and add-work controls available", async () =
     file("dealroom/index.html"), file("dealroom/js/app.js"), file("dealroom/css/app.css"),
   ]);
   assert.match(html, /id="colorAssistButton"/);
-  assert.match(html, /id="persistentAddButton"[^>]*>\+ Add work record/);
-  assert.match(html, /class="board-sticky"[\s\S]*class="filters"[\s\S]*id="search"[\s\S]*class="sticky-table-header"/);
+  assert.match(html, /id="addButton"/);
+  assert.match(html, /class="board-sticky"[\s\S]*class="filters"[\s\S]*id="search"[\s\S]*id="stickyAddButton"[^>]*>\+ Add work record[\s\S]*class="sticky-table-header"/);
+  assert.doesNotMatch(html, /id="persistentAddButton"/);
   assert.match(app, /dealroom-color-assist/);
-  assert.match(app, /persistentAddButton.*openAddForm/s);
+  assert.match(app, /\$\('#addButton'\)\.onclick = openAddForm;/);
+  assert.match(app, /\$\('#stickyAddButton'\)\.onclick = openAddForm;/);
+  assert.doesNotMatch(app, /persistentAddButton/);
   assert.match(app, /stickyAgentHeading/);
   assert.match(css, /body\.color-assist tr\.attention/);
   assert.match(css, /body\.color-assist tr\.parked/);
   assert.match(css, /\.board-sticky\{position:sticky/);
-  assert.match(css, /\.persistent-add-button\{position:fixed/);
+  assert.match(css, /\.sticky-add-button\{/);
+  assert.doesNotMatch(css, /\.persistent-add-button\{/);
 });
 
 test("Call Mode post-call UI is review-first and never sends email", async () => {
