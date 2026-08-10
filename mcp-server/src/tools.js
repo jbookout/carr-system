@@ -875,6 +875,8 @@ async function resolveRuleId(c, value, field = "rule_id") {
 // because the migration's check constraint and this list are the same contract
 // (rule a8c55a47 — a manual path and an automated path that do the same job must
 // be the same code); the DB is the backstop, this is the surface that explains.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const BLOCKER_CLASSES = Object.freeze([
   "human_only",     // needs Joe or Dell in person: a call, a signature, a site visit, a login only he holds
   "counterparty",   // waiting on someone outside: landlord, broker, client, vendor — named
@@ -2067,6 +2069,24 @@ export const TOOLS = {
       source_type: { type: "string" }, source_detail: { type: "string" } },
       required: ["idempotency_key","party_id","stage"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "new-lead", args, async () => {
+      // stage and lane are FOREIGN KEYS (lead_stage.slug, lead_lane.slug). They used
+      // to go straight into the insert, so a plausible-but-wrong value — `lane:
+      // "referral"`, which reads like an obvious lane and is not one — came back as
+      // a bare "internal error" with nothing naming the field or the options.
+      // Measured live 2026-08-10 creating Dr. Hyder's lead: three attempts failed
+      // opaquely and the bare call succeeded, which tells the caller nothing about
+      // WHICH field was wrong. Same failure class as loop #261.
+      for (const [field, table] of [["stage", "lead_stage"], ["lane", "lead_lane"]]) {
+        const v = args[field];
+        if (!v) continue;
+        const hit = await c.query(`select 1 from ${table} where slug=$1`, [v]);
+        if (!hit.rows.length) {
+          const all = await c.query(`select slug from ${table} order by slug`);
+          throw new ToolError({ error: `unknown_${field}`, got: v,
+            valid: all.rows.map(x => x.slug),
+            hint: `${field} is a foreign key into ${table}; pass one of the listed slugs. Inventing a plausible one fails at the database, not here.` });
+        }
+      }
       const ref = (await c.query("select 'L-' || lpad(nextval('ref_lead_seq')::text, 3, '0') as r")).rows[0].r;
       const r = await c.query(
         `insert into lead (registry_ref, party_id, stage, lane, segment, source_type, source_detail,
@@ -2619,6 +2639,36 @@ export const TOOLS = {
       // found: this verb could not write a single kind the backfill used, and the
       // backfill could not write one this verb offered. One table, one vocabulary.
       const kind = await validateLinkKind(c, args.kind);
+
+      // REFS RESOLVE HERE (2026-08-10). Both ends used to go straight into the
+      // insert as uuids, so passing V-DEV-007 or L-214 — the refs this verb's own
+      // schema tells callers to use — hit a uuid cast error and surfaced as a bare
+      // "internal error". Measured live while recording a real referral edge: the
+      // call failed twice on refs and succeeded immediately on party uuids. Same
+      // failure class as loop #261 — a validation failure wearing the costume of
+      // an outage.
+      const ends = {};
+      for (const side of ["from_party", "to_party"]) {
+        const raw = String(args[side] || "").trim();
+        if (UUID_RE.test(raw)) { ends[side] = raw; continue; }
+        const s = await resolveSubject(c, raw);          // throws subject_not_found, named
+        let pid = s.type === "party" ? s.id : null;
+        if (!pid) {
+          const r = await c.query(
+            "select party_id from v_ref_index where subject_type=$1 and subject_id=$2", [s.type, s.id]);
+          pid = r.rows[0]?.party_id || null;
+        }
+        if (!pid) throw new ToolError({ error: "no_party_under_ref", side, got: raw, resolved: s,
+          hint: "that ref resolves to a record with no person behind it — the intro graph links PEOPLE" });
+        // A merged party is a tombstone; an edge must attach to the survivor or it
+        // is invisible to who-do-we-know (the same rule find applies on read).
+        const hop = await c.query("select merged_into from party where id=$1", [pid]);
+        ends[side] = hop.rows[0]?.merged_into || pid;
+      }
+      if (ends.from_party === ends.to_party)
+        throw new ToolError({ error: "self_link", got: args.from_party,
+          hint: "both ends resolve to the same person — an intro graph edge needs two parties" });
+
       // Upsert against 0020's unique index. Before it, two taps wrote two identical
       // edges and nothing complained. `do nothing` returns no row on conflict, so
       // the existing edge is read back and returned — the caller gets the edge it
@@ -2628,18 +2678,19 @@ export const TOOLS = {
          values ($1,$2,$3,$4,'stated',$5)
          on conflict (from_party, to_party, kind) do nothing
          returning id`,
-        [args.from_party, args.to_party, kind, args.note || null, actor.id]);
+        [ends.from_party, ends.to_party, kind, args.note || null, actor.id]);
       if (!ins.rows.length) {
         const cur = await c.query(
           "select id from party_link where from_party=$1 and to_party=$2 and kind=$3",
-          [args.from_party, args.to_party, kind]);
+          [ends.from_party, ends.to_party, kind]);
         // No event row: nothing changed in the record, and an event that says a
         // link was made when none was is the kind of fiction the ledger exists to
         // prevent. The tool_call row (envelope) still records that it was asked.
         return { ok: true, link_id: cur.rows[0].id, existing: true };
       }
-      await writeEvent(c, actor, "link-parties", "party", args.from_party,
-        { new: { kind, to: args.to_party }, idempotency_key: args.idempotency_key });
+      await writeEvent(c, actor, "link-parties", "party", ends.from_party,
+        { new: { kind, to: ends.to_party, from_input: args.from_party, to_input: args.to_party },
+          idempotency_key: args.idempotency_key });
       return { ok: true, link_id: ins.rows[0].id, existing: false };
     }),
   },
