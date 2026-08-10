@@ -1,0 +1,16 @@
+{
+  "_note": "Canonical CARR-project PreToolUse wiring for the delegation gate. Keep this exact, versioned contract aligned with the project settings file; gate-integrity.py rejects matcher, command, or timeout drift.",
+  "version": 1,
+  "event": "PreToolUse",
+  "matcher": "Bash|Read|Grep|Glob|WebFetch|WebSearch",
+  "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/delegation-gate.py",
+  "timeout": 10,
+  "known_read_sweep_tools": [
+    "Bash",
+    "Read",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch"
+  ]
+}

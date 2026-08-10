@@ -1,53 +1,45 @@
 #!/usr/bin/env python3
-"""Block the second inline mechanical tool call until an executor is named.
+"""Enforce task-sticky delegation for CARR Claude Code sessions.
 
-The delegation rules used to be advisory prose.  That failed on 2026-08-10:
-Joe had explicitly asked for lower-model subagents, the work changed phase when
-Salesforce became available, and the main seat silently reclaimed a repetitive
-browser sweep.  Nothing in the runtime represented Joe's instruction as a
-task-level latch and no hook watched the rule's own "second tool call" trigger.
+The 2026-08-10 failure was not a lack of written policy: an explicit request to
+delegate was forgotten when a new Salesforce login changed the work phase.  A
+transcript-only check also made the instruction vulnerable to transcript
+truncation and continuation.  This hook therefore keeps a small, locked state
+ledger at ``out/delegation-gate-state.json``.  It gives each explicit delegation
+an immutable task id, binds that task to one main session, and permits a new
+session to claim it only with a visible exact ``delegation resume: <task-id>``.
 
-This gate covers local Claude Code, the surface with PreToolUse hooks.  It is
-deliberately narrow:
-
-* only CARR sessions (the vault or carr-system repo);
-* only the main transcript (subagent transcripts live under /subagents/);
-* only mechanical tools; and
-* only the second call after the partner's latest genuine turn.
-
-The main seat can satisfy the tripwire by spawning an Agent on the cheapest
-model that is still qualified to complete the job correctly.  "Cheapest" is
-constrained by competence, data access, risk and the model-fit map; it does not
-mean "lower than the parent."  A Terra parent may need a Terra peer.  For work
-that legitimately belongs inline, the main seat must put a visible
-`executor: ... because ...` line in the transcript before continuing.  That
-escape is disabled when the partner explicitly requested delegation: the
-instruction is sticky for the whole active task and only an Agent spawn or the
-partner's explicit revocation releases it.
-
-This cannot enforce Codex/Cowork surfaces that do not run Claude hooks.  Their
-equivalent rail lives in the always-read bootstrap text.  Calling this hook a
-universal hard boundary would be hardness cosplay.
+This is intentionally narrow.  It intercepts the known read-sweep tools only;
+the main seat retains authorised writes and final verification.  The cheapest
+executor must still be qualified by competence, data access, and risk.  That
+may be a Terra peer, not a forced downgrade.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
+import hashlib
 import json
 import os
 import re
 import sys
+import tempfile
 
 
 REPO = os.path.expanduser("~/carr-system")
 VAULT_MARKERS = ("/CARR AI", "/My Drive/CARR AI")
 LOG = os.path.join(REPO, "out", "delegation-gate.jsonl")
+STATE = os.environ.get(
+    "DELEGATION_GATE_STATE", os.path.join(REPO, "out", "delegation-gate-state.json")
+)
 
 MECHANICAL = {"Bash", "Read", "Grep", "Glob", "WebFetch", "WebSearch"}
 AGENT_TOOLS = {"Agent", "Task"}
 
 DELEGATE = re.compile(
-    r"\b(delegat(?:e|ed|ing|ion)|sub[- ]?agents?|lower[- ]?(?:cost|tier)?\s*models?|"
+    r"\b(delegat(?:e|ed|ing)|sub[- ]?agents?|lower[- ]?(?:cost|tier)?\s*models?|"
     r"cheaper\s+models?|cheapest\s+(?:qualified\s+)?model|"
     r"use\s+(?:a\s+)?(?:sonnet|haiku|terra|codex|grok))\b",
     re.I,
@@ -58,10 +50,20 @@ REVOKE = re.compile(
     re.I,
 )
 EXECUTOR = re.compile(
-    r"(?im)^\s*executor:\s*(?:T3|top(?:\s+seat)?|Fable|Opus|inline)\b[^\n]{0,180}"
+    r"(?im)^\s*executor:\s*(?:T3(?:-inline)?|top(?:\s+seat)?|Fable|Opus|inline|"
+    r"Terra(?:\s+(?:peer|agent|specialist))?|peer(?:\s+Terra)?)\b[^\n]{0,180}"
     r"(?:because|\u2014|--|:)\s*\S+"
 )
-COMPLETE = re.compile(r"(?im)^\s*delegation complete:\s*\S+")
+RESUME_LINE = re.compile(
+    r"(?im)^\s*delegation resume:\s*(dg-[0-9a-f]{16})\s*$"
+)
+
+
+def complete_line(task_id: str) -> re.Pattern[str]:
+    """Exact completion marker for one immutable task, not a prose approximation."""
+    return re.compile(
+        rf"(?im)^\s*delegation complete:\s*{re.escape(task_id)}\s*$"
+    )
 
 
 def now() -> str:
@@ -89,10 +91,11 @@ def in_carr_scope(cwd: str) -> bool:
     return any(marker in path for marker in VAULT_MARKERS)
 
 
-def records(path: str, limit: int = 500) -> list[dict]:
+def records(path: str) -> list[dict]:
+    """Read the whole transcript: a 500-record tail loses active task authority."""
     out = []
     with open(path, "r", errors="replace") as fh:
-        for line in fh.readlines()[-limit:]:
+        for line in fh:
             try:
                 out.append(json.loads(line))
             except Exception:
@@ -137,12 +140,180 @@ def tool_names(rec: dict) -> list[str]:
     ]
 
 
-def deny(payload: dict, reason: str, latch: bool, count: int) -> int:
+def task_id_for(session_id: str, record_index: int, instruction: str) -> str:
+    """Stable opaque id.  Neither the model nor later transcript edits choose it."""
+    material = f"{session_id}\0{record_index}\0{instruction}".encode("utf-8")
+    return "dg-" + hashlib.sha256(material).hexdigest()[:16]
+
+
+def read_state_unlocked() -> dict:
+    try:
+        with open(STATE) as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            data.setdefault("version", 1)
+            data.setdefault("tasks", {})
+            data.setdefault("sessions", {})
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return {"version": 1, "tasks": {}, "sessions": {}}
+
+
+def write_state_unlocked(data: dict) -> None:
+    """Atomic replacement while the adjacent advisory lock is held."""
+    directory = os.path.dirname(STATE)
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".delegation-gate-", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, STATE)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@contextmanager
+def locked_state():
+    """Serialize state transitions across parallel hooks and main sessions."""
+    directory = os.path.dirname(STATE)
+    os.makedirs(directory, exist_ok=True)
+    lock_path = STATE + ".lock"
+    with open(lock_path, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        data = read_state_unlocked()
+        try:
+            yield data
+        finally:
+            write_state_unlocked(data)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def latest_human(recs: list[dict]) -> tuple[int | None, str]:
+    for i in range(len(recs) - 1, -1, -1):
+        text = text_blocks(recs[i], ("user", "human"))
+        if text is not None:
+            return i, text
+    return None, ""
+
+
+def latest_delegate(recs: list[dict]) -> tuple[int | None, str]:
+    """Return a delegation not superseded by a later (or same-message) revoke.
+
+    This matters when the durable state file is missing or recreated.  A later
+    ordinary user turn must not resurrect an old delegation merely because the
+    binding that would otherwise remember its revocation no longer exists.
+    """
+    found: tuple[int | None, str] = (None, "")
+    last_revoke = -1
+    for i, rec in enumerate(recs):
+        human = text_blocks(rec, ("user", "human"))
+        # Revocation wins even when the same message also contains "delegate".
+        if human and REVOKE.search(human):
+            last_revoke = i
+        elif human and DELEGATE.search(human):
+            found = (i, human)
+    return found if found[0] is not None and found[0] > last_revoke else (None, "")
+
+
+def has_exact_completion(recs: list[dict], task_id: str) -> bool:
+    marker = complete_line(task_id)
+    return any(
+        (text := text_blocks(rec, ("assistant",))) and marker.search(text)
+        for rec in recs
+    )
+
+
+def bind_task(data: dict, task_id: str, session_id: str) -> None:
+    """A task has exactly one bound main session at a time."""
+    task = data["tasks"][task_id]
+    old_session = task.get("bound_session")
+    if old_session:
+        data["sessions"].pop(old_session, None)
+    for known_session, known_task in list(data["sessions"].items()):
+        if known_task == task_id:
+            data["sessions"].pop(known_session, None)
+    task["bound_session"] = session_id
+    data["sessions"][session_id] = task_id
+
+
+def release_task(data: dict, task_id: str, status: str) -> None:
+    task = data["tasks"].get(task_id)
+    if not task:
+        return
+    bound = task.get("bound_session")
+    if bound:
+        data["sessions"].pop(bound, None)
+    task["bound_session"] = None
+    task["status"] = status
+    task["ended_at"] = now()
+
+
+def sticky_task(session_id: str, recs: list[dict]) -> str | None:
+    """Return this session's active task, creating/binding it only by valid rails."""
+    if not session_id:
+        return None
+    _, latest = latest_human(recs)
+    with locked_state() as data:
+        bound_id = data["sessions"].get(session_id)
+        bound = data["tasks"].get(bound_id) if bound_id else None
+        if bound and bound.get("bound_session") != session_id:
+            data["sessions"].pop(session_id, None)
+            bound_id, bound = None, None
+
+        if bound and bound.get("status") == "active":
+            if REVOKE.search(latest):
+                # A revocation releases this session's task only, never another
+                # session's task in the same ledger.
+                release_task(data, bound_id, "revoked")
+                return None
+            if has_exact_completion(recs, bound_id):
+                release_task(data, bound_id, "completed")
+                return None
+            return bound_id
+
+        # A new session cannot inherit a task from a broad "delegate" phrase.
+        # It may bind only by the exact visible resume marker and only to an
+        # active task already known to this state ledger.
+        resume = RESUME_LINE.search(latest)
+        if resume:
+            candidate = resume.group(1)
+            task = data["tasks"].get(candidate)
+            if task and task.get("status") == "active":
+                bind_task(data, candidate, session_id)
+                return candidate
+            return None
+
+        # Same-message revoke beats delegation and creates no replacement task.
+        if REVOKE.search(latest):
+            return None
+        index, instruction = latest_delegate(recs)
+        if index is None:
+            return None
+        task_id = task_id_for(session_id, index, instruction)
+        task = data["tasks"].get(task_id)
+        if not task:
+            data["tasks"][task_id] = {
+                "created_at": now(),
+                "origin_session": session_id,
+                "status": "active",
+                "bound_session": None,
+            }
+        bind_task(data, task_id, session_id)
+        return task_id
+
+
+def deny(payload: dict, reason: str, task_id: str | None, count: int) -> int:
     audit({
         "ts": now(),
         "hook": "delegation-gate",
-        "session": payload.get("session_id"),
-        "class": "sticky_latch" if latch else "second_mechanical_call",
+        "session": payload.get("session_id") or payload.get("sessionId"),
+        "class": "sticky_latch" if task_id else "second_mechanical_call",
+        "task_id": task_id,
         "mechanical_calls_before_denial": count,
         "tool": payload.get("tool_name") or payload.get("toolName"),
     })
@@ -168,85 +339,56 @@ def main() -> int:
             return 0
         if f"{os.sep}subagents{os.sep}" in os.path.realpath(path):
             return 0
-
         recs = records(path)
-        last_human_idx = None
-        last_human = ""
-        for i in range(len(recs) - 1, -1, -1):
-            text = text_blocks(recs[i], ("user", "human"))
-            if text is not None:
-                last_human_idx, last_human = i, text
-                break
+        last_human_idx, last_human = latest_human(recs)
         if last_human_idx is None:
             return 0
-        # The partner's explicit no-delegation instruction controls this turn;
-        # it both releases any earlier latch and exempts the ordinary tripwire.
-        if REVOKE.search(last_human):
-            return 0
+
         window = recs[last_human_idx + 1:]
         used = [name for rec in window for name in tool_names(rec)]
+        # Persist/reconcile task authority before applying the one-lookup
+        # allowance.  Otherwise a first allowed lookup could be followed by a
+        # continuation before any durable task id existed.
+        task_id = sticky_task(
+            str(payload.get("session_id") or payload.get("sessionId") or ""), recs
+        )
         if any(name in AGENT_TOOLS for name in used):
             return 0
-
         mechanical_count = sum(name in MECHANICAL for name in used)
-        if mechanical_count == 0:  # the one inline lookup the rule allows
+        if mechanical_count == 0:  # the one inline briefing lookup the rule allows
             return 0
+
+        if task_id:
+            return deny(
+                payload,
+                "DELEGATION GATE — active delegated task " + task_id + ". The partner's "
+                "instruction survives phase changes, new logins/data sources, retries, "
+                "continuation and compaction. One briefing lookup was allowed; this is the "
+                "second mechanical call. Spawn the cheapest Agent qualified to complete the "
+                "subtask correctly, including a Terra peer when the work needs it. The main "
+                "seat may verify load-bearing findings and execute authorised writes, but may "
+                "not reclaim the sweep. Release only with a visible exact `delegation "
+                "complete: " + task_id + "`, or the partner's explicit revocation.",
+                task_id,
+                mechanical_count,
+            )
 
         assistant_text = "\n".join(
             text for rec in window
             if (text := text_blocks(rec, ("assistant",)))
         )
-        # TASK-STICKY MEANS ACROSS TURNS.  The first version looked only at the
-        # latest human message, which would have repeated the production bug:
-        # "delegate this" followed by "I'm in" erased the signal exactly when a
-        # newly available login opened the next mechanical phase.  Walk the
-        # transcript instead.  A later explicit revocation or a visible
-        # `delegation complete: <task>` line ends the latch; ordinary follow-up
-        # messages and compaction summaries do not.
-        last_delegate = -1
-        last_revoke = -1
-        last_complete = -1
-        for i, rec in enumerate(recs):
-            human = text_blocks(rec, ("user", "human"))
-            if human:
-                if DELEGATE.search(human):
-                    last_delegate = i
-                if REVOKE.search(human):
-                    last_revoke = i
-            assistant = text_blocks(rec, ("assistant",))
-            if assistant and COMPLETE.search(assistant):
-                last_complete = i
-        sticky = last_delegate > max(last_revoke, last_complete)
-        if not sticky and EXECUTOR.search(assistant_text):
+        if EXECUTOR.search(assistant_text):
             return 0
-
-        if sticky:
-            return deny(
-                payload,
-                "DELEGATION GATE — the partner explicitly requested delegation for this "
-                "active task. That instruction survives phase changes, new logins/data "
-                "sources, retries, continuation and compaction. One briefing lookup was "
-                "allowed; this is the second mechanical call. Spawn the cheapest Agent "
-                "that is qualified to complete the subtask correctly, including a peer-tier "
-                "Agent when the work needs it, and pass along the evidence already gathered. "
-                "The main seat may then verify "
-                "load-bearing findings and execute authorized writes, but it may not "
-                "reclaim the sweep. Only the partner can revoke the latch.",
-                True,
-                mechanical_count,
-            )
-
         return deny(
             payload,
             "DELEGATION TRIPWIRE — this is the second mechanical tool call on the same "
             "turn and no executor has been declared. Before continuing, either spawn a "
             "qualified Agent on the cheapest model that can do the subtask correctly "
-            "(peer tier is valid when required) or state a transcript-visible "
-            "line `executor: T3-inline — because <specific allowed reason>` for work that "
+            "(a Terra peer is valid when required) or state a transcript-visible line "
+            "`executor: Terra peer — because <specific allowed reason>` for work that "
             "truly belongs to orchestration, judgment, verification, or is too small to "
-            "brief. If this session's harness blocks proactive delegation, use its exact "
-            "user-approval path; do not silently absorb the sweep.",
-            False,
+            "brief. Do not silently absorb the sweep.",
+            None,
             mechanical_count,
         )
     except Exception:

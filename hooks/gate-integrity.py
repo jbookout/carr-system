@@ -59,6 +59,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOKS = os.path.join(REPO, "hooks")
 BASELINE = os.path.join(REPO, "ops", "config", "gate-baseline.json")
 REPO_HOOKS_JSON = os.path.join(REPO, "ops", "config", "hooks.json")
+DELEGATION_HOOK_CONFIG = os.path.join(
+    REPO, "ops", "config", "delegation-gate-hook.json"
+)
+CONTRACTS = {"delegation-gate-hook.json": DELEGATION_HOOK_CONFIG}
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 CARR_PROJECT_SETTINGS = os.path.expanduser(
     "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
@@ -149,6 +153,11 @@ def current():
     return {n: sha(os.path.join(HOOKS, n)) for n in GATED}
 
 
+def current_contracts():
+    """Versioned wiring contracts can change enforcement without changing a hook."""
+    return {name: sha(path) for name, path in CONTRACTS.items()}
+
+
 def bless():
     who = subprocess.run(["git", "-C", REPO, "config", "user.email"],
                          capture_output=True, text=True).stdout.strip()
@@ -161,6 +170,7 @@ def bless():
         "blessed_by": who or "unknown",
         "blessed_at_rev": rev or "unknown",
         "hashes": current(),
+        "contracts": current_contracts(),
     }
     os.makedirs(os.path.dirname(BASELINE), exist_ok=True)
     with open(BASELINE, "w") as fh:
@@ -198,29 +208,99 @@ def settings_matches_repo():
     return missing, None
 
 
-def project_delegation_wired():
-    """The delegation gate is CARR-project-only, never a global Claude hook.
+def delegation_hook_contract():
+    """Load the versioned, exact CARR-project interception contract."""
+    try:
+        contract = json.load(open(DELEGATION_HOOK_CONFIG))
+    except Exception as exc:
+        return None, f"delegation hook contract unreadable: {exc}"
+    required = {"version", "event", "matcher", "command", "timeout",
+                "known_read_sweep_tools"}
+    if not isinstance(contract, dict) or not required.issubset(contract):
+        return None, "delegation hook contract is missing required fields"
+    if contract["version"] != 1 or contract["event"] != "PreToolUse":
+        return None, "delegation hook contract has an unsupported version/event"
+    expected_tools = contract["matcher"].split("|")
+    if (not all(isinstance(tool, str) and tool for tool in expected_tools)
+            or contract["known_read_sweep_tools"] != expected_tools):
+        return None, "delegation hook matcher does not exactly name its classified tools"
+    if (not isinstance(contract["command"], str)
+            or not isinstance(contract["timeout"], int)):
+        return None, "delegation hook contract command/timeout is malformed"
+    return contract, None
 
-    Its classifier already refuses non-CARR cwd values, but scoping the wiring
-    as well prevents a broken future edit from disrupting Life AI or an
-    unrelated repo.  Therefore this one gate deliberately does not appear in
-    ops/config/hooks.json, which is the global baseline checked above.
+
+def validate_delegation_wiring(live, contract):
+    """Require one exact matcher with one exact command and timeout.
+
+    A substring check would accept an injected shell suffix, a narrowed matcher,
+    or a slow timeout that makes the boundary intermittent.  Keep this pure so
+    --selftest can prove its negative cases without touching real settings.
     """
+    entries = live.get(contract["event"], []) if isinstance(live, dict) else []
+    matching = [entry for entry in entries
+                if isinstance(entry, dict)
+                and entry.get("matcher") == contract["matcher"]]
+    if len(matching) != 1:
+        return False, "expected exactly one project PreToolUse matcher"
+    expected_hook = {
+        "type": "command",
+        "command": contract["command"],
+        "timeout": contract["timeout"],
+    }
+    if matching[0].get("hooks") != [expected_hook]:
+        return False, "project matcher command or timeout is not exact"
+    return True, None
+
+
+def project_delegation_wired():
+    """The delegation gate is CARR-project-only, never a global Claude hook."""
+    contract, err = delegation_hook_contract()
+    if err:
+        return False, err
     try:
         live = json.load(open(CARR_PROJECT_SETTINGS)).get("hooks", {})
     except Exception as exc:
         return False, f"CARR project settings unreadable: {exc}"
-    commands = {
-        h.get("command", "")
-        for arr in live.values()
-        for matcher in arr
-        for h in matcher.get("hooks", [])
+    return validate_delegation_wiring(live, contract)
+
+
+def delegation_wiring_selftest():
+    """Regression-test the exact matcher/command/timeout comparison itself."""
+    contract = {
+        "version": 1,
+        "event": "PreToolUse",
+        "matcher": "Bash|Read",
+        "command": "/exact/delegation-gate.py",
+        "timeout": 10,
+        "known_read_sweep_tools": ["Bash", "Read"],
     }
-    wanted = os.path.join(REPO, "hooks", "delegation-gate.py")
-    return any(wanted in command for command in commands), None
+    good = {"PreToolUse": [{"matcher": "Bash|Read", "hooks": [{
+        "type": "command", "command": "/exact/delegation-gate.py", "timeout": 10,
+    }]}]}
+    cases = [
+        ("exact wiring accepted", good, True),
+        ("narrowed matcher rejected", {"PreToolUse": [{"matcher": "Bash", "hooks": good["PreToolUse"][0]["hooks"]}]}, False),
+        ("command suffix rejected", {"PreToolUse": [{"matcher": "Bash|Read", "hooks": [{
+            "type": "command", "command": "/exact/delegation-gate.py --later", "timeout": 10,
+        }]}]}, False),
+        ("timeout drift rejected", {"PreToolUse": [{"matcher": "Bash|Read", "hooks": [{
+            "type": "command", "command": "/exact/delegation-gate.py", "timeout": 11,
+        }]}]}, False),
+    ]
+    outcomes = []
+    for name, live, expected in cases:
+        accepted, _ = validate_delegation_wiring(live, contract)
+        ok = accepted == expected
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        outcomes.append(ok)
+    print(f"{sum(outcomes)}/{len(outcomes)} delegation wiring cases passed")
+    return 0 if all(outcomes) else 1
 
 
 def main():
+    if "--selftest" in sys.argv:
+        return delegation_wiring_selftest()
     if "--bless" in sys.argv:
         return bless()
 
@@ -234,6 +314,9 @@ def main():
 
     base = json.load(open(BASELINE)).get("hashes", {})
     now = current()
+    baseline_data = json.load(open(BASELINE))
+    base_contracts = baseline_data.get("contracts", {})
+    now_contracts = current_contracts()
 
     for name, want in base.items():
         got = now.get(name)
@@ -244,6 +327,15 @@ def main():
     for name, got in now.items():
         if name not in base and got:
             problems.append(f"UNBLESSED: hooks/{name} exists but is not in the baseline")
+    for name, want in base_contracts.items():
+        got = now_contracts.get(name)
+        if got is None:
+            problems.append(f"MISSING: ops/config/{name} is GONE — its wiring contract is off")
+        elif want and got != want:
+            problems.append(f"CHANGED: ops/config/{name} no longer matches the blessed baseline")
+    for name, got in now_contracts.items():
+        if name not in base_contracts and got:
+            problems.append(f"UNBLESSED: ops/config/{name} exists but is not in the baseline")
 
     missing, err = settings_matches_repo()
     if err:
@@ -258,8 +350,9 @@ def main():
         problems.append(f"CARR DELEGATION WIRING: {delegation_err}")
     elif not delegation_wired:
         problems.append(
-            "NOT WIRED UP: CARR project settings do not invoke "
-            "delegation-gate.py — its script exists but CARR sessions do not run it"
+            "NOT WIRED UP: CARR project delegation matcher/command/timeout drifted "
+            "from ops/config/delegation-gate-hook.json — its script may exist but "
+            "CARR sessions are not guaranteed to run the exact boundary"
         )
 
     unhardened = [n for n in GATED
