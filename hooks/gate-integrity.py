@@ -63,7 +63,27 @@ SETTINGS = os.path.expanduser("~/.claude/settings.json")
 
 # The files whose contents ARE the enforcement. Anything that can refuse, block,
 # or classify belongs here.
-GATED = [
+#
+# DERIVED, NOT TYPED — changed 2026-08-10 (loop #231) after this list was found
+# four gates short. It was hand-maintained, so every gate built after it was
+# written silently escaped the integrity check: gate-edit-gate.py (the Write/Edit
+# door, wired in settings.json since 2026-08-09), git-writer-gate.py (also
+# wired), session-brief.py (SessionStart), and the two shared classifiers that
+# DEFINE what the deny gates deny — md_manifest.py and corpus_renders.py. Gutting
+# md_manifest.py would have switched off the vault-wide .md deny-by-default while
+# this check printed "10 gates match baseline; wiring OK".
+#
+# That matters more than an ordinary omission, because the detection layer is the
+# whole justification for the 2026-08-10 downgrade from block to announce
+# (decision bd30b665): "An unauthorised gate edit is caught either way." It was
+# only true for the ten files somebody had remembered to type here.
+#
+# Reading the directory keeps it true for every gate added later, with nobody
+# remembering anything. FLOOR is what the list held before, kept as a floor so a
+# directory read that returns nothing degrades toward MORE coverage rather than
+# silently hashing an empty set — the failure shape this whole file exists to
+# catch.
+FLOOR = [
     "guard-unattended.py",      # egress deny
     "record-home-gate.py",      # .md write deny
     "rule-shape-gate.py",       # teach shape
@@ -75,6 +95,24 @@ GATED = [
     "conduct_patterns.py",      # the shared classifier both conduct gates use
     "gate-integrity.py",        # this file — it must guard itself
 ]
+
+
+def gated():
+    """Every .py in hooks/ — gates and the classifiers they import alike.
+
+    hooks/ holds nothing else by construction: fixtures live in ops/*-selftest.py
+    and are deliberately excluded from protection everywhere (gating them would
+    make testing a gate harder than weakening one).
+    """
+    try:
+        found = sorted(f for f in os.listdir(HOOKS)
+                       if f.endswith(".py") and not f.endswith("-selftest.py"))
+    except Exception:
+        found = []
+    return sorted(set(found) | set(FLOOR))
+
+
+GATED = gated()
 
 
 def sha(path):

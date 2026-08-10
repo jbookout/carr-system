@@ -52,6 +52,16 @@ weighed that and chose the cheaper control. That is his call to make and it is
 recorded in the decision log, not quietly reversed later by a session that finds
 this gate inconvenient.
 
+THE SHELL DOOR, AND A CLAIM THIS FILE MADE THAT WAS FALSE FOR THREE DAYS. The
+deny text below used to tell sessions "guard-unattended.py covers that path" for
+shell writes. It did not. Verified 2026-08-10 by firing the real hook: append,
+`sed -i`, `> ~/.claude/settings.json` and tee onto a gate all returned ALLOW,
+while the render control in the same run correctly DENIED — so the Bash door was
+working and simply did not know the gates existed. That sentence is why nobody
+built it: a docstring asserted the coverage, so the gap read as closed. The door
+exists now, announces identically, and shares this file's list through
+hooks/gate_paths.py.
+
 THE DETECTION LAYER STAYS EITHER WAY: hooks/gate-integrity.py still runs at
 every SessionStart, hashes every gate against ops/config/gate-baseline.json, and
 checks that live settings actually INVOKES each one. So an edit that somehow
@@ -73,17 +83,13 @@ HOME = os.path.expanduser("~")
 LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
 
-PROTECTED_PATTERNS = [
-    re.compile(r"/carr-system/hooks/[^/]+\.py$"),
-    re.compile(r"/carr-system/ops/config/hooks\.json$"),
-    re.compile(r"/carr-system/ops/config/gate-baseline\.json$"),
-    re.compile(r"/carr-system/ops/harden-gates\.sh$"),
-    re.compile(r"/\.claude/settings\.json$"),
-]
-
-# Fixtures prove a gate change; they are not the gate. Gating them would make
-# testing a gate harder than weakening one.
-EXEMPT = re.compile(r"-selftest\.py$")
+# THE LIST MOVED OUT, 2026-08-10 (loop #231). It now lives in hooks/gate_paths.py
+# because a SECOND door needed it: guard-unattended.py's shell path had no idea
+# these files existed, so `echo >> hooks/guard-unattended.py` was ALLOW while Edit
+# on the same file came here. One list, two doors — the same arrangement
+# md_manifest.py and corpus_renders.py already have (rule a8c55a47).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gate_paths import announcement, is_enforcement  # noqa: E402
 
 
 def now():
@@ -111,12 +117,7 @@ def audit(rec):
 
 
 def is_protected(path):
-    if not path:
-        return False
-    p = os.path.abspath(os.path.expanduser(path))
-    if EXEMPT.search(p):
-        return False
-    return any(rx.search(p) for rx in PROTECTED_PATTERNS)
+    return is_enforcement(path)
 
 
 
@@ -257,28 +258,20 @@ def main():
         # The principle Joe encoded — a human authorises changes to enforcement
         # — is NOT discarded. The announcement below is that authorisation
         # surfacing where he can see it, instead of a wall he cannot open.
-        announcement = (
-            f"GATE EDIT ANNOUNCED — {name} is enforcement, and it just changed.\n\n"
-            f"  file: {path}\n\n"
-            "The write was ALLOWED. Say in one line what changed in this file "
-            "and whether it makes the gate stronger or weaker — weaker is "
-            "allowed, hiding that it is weaker is not. Then re-bless the "
-            "baseline in the same pass (`python3 hooks/gate-integrity.py "
-            "--bless`), or the next SessionStart reports it UNBLESSED and the "
-            "check goes chronically red for a benign reason, which is the "
-            "failure mode that hid a real five-gate wipe on 2026-08-08."
-        )
+        # ONE WORDING, shared with the Bash door, so a session gets the same
+        # answer whichever way it reaches the file (hooks/gate_paths.py).
+        announcement_text = announcement(path, f"{tool.lower()}")
 
         audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_edit"],
                "patterns": [f"gate_edit:{name}"], "session": payload.get("session_id"),
                "path": path, "decision": "announce"})
         dlog(f"ANNOUNCE {path}")
         print(json.dumps({
-            "systemMessage": announcement,
+            "systemMessage": announcement_text,
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "permissionDecisionReason": announcement,
+                "permissionDecisionReason": announcement_text,
             },
         }))
         sys.exit(0)
@@ -305,9 +298,11 @@ def main():
             "Then wait for his answer. If he approves, say so and make the edit "
             "in the next turn — this gate does not fire twice on an approved "
             "change because he will have seen it.\n\n"
-            "Do NOT route around this by writing the file with a shell command; "
-            "guard-unattended.py covers that path, and doing so deliberately is "
-            "the exact behaviour this whole layer exists to stop."
+            "Do NOT route around this by writing the file with a shell command. "
+            "guard-unattended.py covers that path as of 2026-08-10 (it did NOT "
+            "before then, despite this text having claimed so since 2026-08-09), "
+            "and doing so deliberately is the exact behaviour this layer exists "
+            "to stop."
         )
 
         audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_edit"],

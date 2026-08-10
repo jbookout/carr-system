@@ -867,6 +867,33 @@ except Exception as e:
     print(f"  ⚠︎ {'egress guard':<18} selftest failed ({type(e).__name__}: {e})")
     rc = 1
 
+# A THIRD INDEPENDENT ROW (2026-08-10, loop #231). The egress row above proves
+# the guard still denies network and render writes. It says nothing about whether
+# the GATES THEMSELVES are still protected, which is a separate claim that was
+# false for three days: gate-edit-gate.py guarded Write/Edit while the shell path
+# was wide open, and its own docstring asserted otherwise. The fixtures for that
+# suite had also gone chronically red — 15/27 — after the gate was downgraded to
+# announce and nobody moved them, so nothing would have reported the regression.
+# A suite nobody runs is not a check, which is why it gets a row here.
+try:
+    _ggt = os.path.join(REPO_ROOT, "ops", "gate-edit-gate-selftest.py")
+    if os.path.exists(_ggt):
+        _p = subprocess.run([sys.executable, _ggt], capture_output=True, text=True, timeout=180)
+        _sum = next((l for l in (_p.stdout or "").splitlines()
+                     if "gate-edit-gate-selftest:" in l), "")
+        _sum = _sum.split(": ", 1)[-1] if _sum else "(no output)"
+        if _p.returncode == 0:
+            print(f"  OK {'gate protection':<18} {_sum} · on breach: a gate can be "
+                  f"changed SILENTLY; python3 ops/gate-edit-gate-selftest.py")
+        else:
+            print(f"  ✗✗ {'gate protection':<18} {_sum} · on breach: a gate can be "
+                  f"changed SILENTLY — the announcement both doors promise is not "
+                  f"firing; python3 ops/gate-edit-gate-selftest.py")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'gate protection':<18} selftest failed ({type(e).__name__}: {e})")
+    rc = 1
+
 try:
     _fal = os.path.join(REPO_ROOT, "ops", "fetch-allowlist.py")
     if os.path.exists(_fal):
