@@ -131,6 +131,23 @@ def load_set():
             while len(parts) < 3:
                 parts.append("")
             rows.append((parts[0].strip(), parts[1].strip(), parts[2].strip()))
+
+    # NON-OVERLAP GUARD (2026-08-10, the two-owners ruling, loop #312). Anything
+    # under `My Drive/.claude/skills` or `.../agents` is owned by claude-tree/ and
+    # written by bin/sync-skills.sh. Two tools projecting to one destination is
+    # how the council's panel-verdict rule was silently deleted 27 minutes after
+    # it was reconciled: each writer saw the other's write as drift and neither
+    # was wrong. Refusing at load time is what stops the overlap coming back by
+    # someone re-adding a row that looks perfectly reasonable on its own.
+    clash = [r[0] for r in rows
+             if r[0].startswith("drive:.claude/skills/")
+             or r[0].startswith("drive:.claude/agents/")]
+    if clash:
+        raise SystemExit(
+            "corpus-set.tsv claims %d file(s) that bin/sync-skills.sh already owns:\n  %s\n"
+            "Those live in claude-tree/ and project to the same Drive folder this tool "
+            "writes. Remove the row(s), or move ownership deliberately and update BOTH "
+            "tools plus hooks/corpus_renders.py." % (len(clash), "\n  ".join(clash)))
     return rows
 
 

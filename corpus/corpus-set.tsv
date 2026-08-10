@@ -71,11 +71,21 @@ DNA/Marketing/Social Media/community-group-playbook-2026.md	playbook	purpose, me
 00_Context/model-tiering.md	doctrine	which model tier does which work; Joe-personal operating doctrine (ORDER 30 phase 2)
 Marketing/Social Media/x-article-playbook.md	playbook	X article craft: research-first rule, batch-improvement law (ORDER 30 phase 2)
 Marketing/Social Media/social-media-workflow.md	playbook	the posting lanes and the video lane's standing state (ORDER 30 phase 2)
-drive:.claude/skills/network-debrief/SKILL.md	skill	network-debrief skill: operating instructions, canonical copy read by both harnesses
-drive:.claude/skills/social-media-manager/SKILL.md	skill	social-media-manager skill: operating instructions, canonical copy read by both harnesses
-drive:.claude/skills/watch-video/SKILL.md	skill	watch-video skill: operating instructions, canonical copy read by both harnesses
-drive:.claude/skills/write-content/SKILL.md	skill	write-content skill: operating instructions, canonical copy read by both harnesses
-drive:.claude/skills/writing-audit/SKILL.md	skill	writing-audit skill: operating instructions, canonical copy read by both harnesses
+# drive:.claude/skills/** and drive:.claude/agents/** — REMOVED from the set 2026-08-10
+# (the two-owners ruling, loop #312). Those 24 files had TWO canonical homes in this repo and
+# both projected to the same Drive folder: corpus/_drive/ via tools/corpus-sync.py, and
+# claude-tree/ via bin/sync-skills.sh. Each saw the other's write as unexpected drift, and on
+# 2026-08-10 the skills projection silently deleted the council's panel-verdict rule from the
+# roster file 27 minutes after it was reconciled here.
+#
+# claude-tree WINS, on the more recent and more specific ruling: skills and agents are CODE
+# (council verdict F4, decision 82a2fb62), not doctrine prose. Doctrine itself now lives in the
+# database, so the corpus's remaining job is the vault's narrative tier, which these were never
+# part of. They stay in git under claude-tree/ and stay protected from hand edits — the
+# corpus-render write-block reads the sync-skills tree too (hooks/corpus_renders.py).
+#
+# home:.claude/skills/** STAYS. sync-skills only writes "My Drive/.claude", never ~/.claude, so
+# the portable meta-skills have exactly one owner and no conflict to resolve.
 home:.claude/skills/catchup/SKILL.md	skill	catchup portable meta-skill: local Claude Code only, Joe's tier
 home:.claude/skills/checkpoint/SKILL.md	skill	checkpoint portable meta-skill: local Claude Code only, Joe's tier
 home:.claude/skills/crux/SKILL.md	skill	crux portable meta-skill: local Claude Code only, Joe's tier
@@ -99,25 +109,6 @@ home:.claude/skills/understand-check/SKILL.md	skill	understand-check portable me
 # THE DRIVE IS STILL CANONICAL. This is versioning, not a second home: Dell reads
 # skills and agents from the Drive and Cowork sessions cannot reach this repo.
 # Making the repo canonical is a real decision and has not been taken.
-drive:.claude/skills/council/SKILL.md	skill	council skill: the Deal Council panel runner, operating instructions, canonical copy read by both harnesses
-drive:.claude/agents/README.md	agent	agent roster and census
-drive:.claude/agents/_ROSTER-ADDITIONS-it-support.md	agent	roster addition, pending merge into README
-drive:.claude/agents/_ROSTER-ADDITIONS-sop-specialists.md	agent	roster addition, pending merge into README
-drive:.claude/agents/benefit-summary.md	agent	benefit-summary agent: job description, tool grant and operating contract
-drive:.claude/agents/client-intake.md	agent	client-intake agent: job description, tool grant and operating contract
-drive:.claude/agents/costar-operator.md	agent	costar-operator agent: job description, tool grant and operating contract
-drive:.claude/agents/council-attorney.md	agent	council-attorney agent: job description, tool grant and operating contract
-drive:.claude/agents/council-contractor.md	agent	council-contractor agent: job description, tool grant and operating contract
-drive:.claude/agents/council-landlord.md	agent	council-landlord agent: job description, tool grant and operating contract
-drive:.claude/agents/council-lender.md	agent	council-lender agent: job description, tool grant and operating contract
-drive:.claude/agents/council-listing-agent.md	agent	council-listing-agent agent: job description, tool grant and operating contract
-drive:.claude/agents/council-skeptic.md	agent	council-skeptic agent: job description, tool grant and operating contract
-drive:.claude/agents/it-lane-worker.md	agent	it-lane-worker agent: job description, tool grant and operating contract
-drive:.claude/agents/it-support.md	agent	it-support agent: job description, tool grant and operating contract
-drive:.claude/agents/marketing-ads.md	agent	marketing-ads agent: job description, tool grant and operating contract
-drive:.claude/agents/marketing-coo.md	agent	marketing-coo agent: job description, tool grant and operating contract
-drive:.claude/agents/marketing-research.md	agent	marketing-research agent: job description, tool grant and operating contract
-drive:.claude/agents/salesforce-reader.md	agent	salesforce-reader agent: job description, tool grant and operating contract
 # Loop #162 (2026-08-06): the Dell starter kit gains a second path — Drive sync
 # latency blocked his onboarding on day one and these files existed on one medium.
 DNA/Team/dell-starter-kit/DELL-START-HERE.md	onboarding	Dell's day-one boot file; freshness matters most exactly when Drive sync lags

@@ -27,17 +27,24 @@ them, something else governs them. Nothing did. An exclusion justified by
 another control's existence is only as good as that control, and here the other
 control was an assumption.
 
-WHAT IT DENIES. Every `source` path in corpus/manifest.json — 78 files across
-three roots — at any extension:
-  * `vault:` paths under CARR AI (doctrine, playbooks, SOPs)
-  * `drive:` paths under My Drive/.claude (the agent roster, the skills)
-  * `home:` paths under ~/.claude (the portable meta-skills)
+WHAT IT DENIES — TWO PROJECTIONS, because the Drive tree has two owners and a
+file is worth protecting regardless of which tool writes it:
+  * every `source` in corpus/manifest.json — `vault:` doctrine under CARR AI and
+    `home:` portable meta-skills under ~/.claude, written by corpus-sync.py
+  * every file under claude-tree/{skills,agents}, projected onto
+    My Drive/.claude by bin/sync-skills.sh
 
-THE SET IS READ FROM THE MANIFEST, NEVER RETYPED. Same discipline as
-record-home-gate parsing exporters/targets.py, and for the same reason: a
-duplicated list is the two-homes disease one layer down, and it goes stale on
-the first file anyone adds to the corpus set. corpus-sync.py rewrites the
-manifest on every sync and every push, so this gate widens itself automatically.
+THE SECOND ONE WAS ADDED 2026-08-10 WITH THE TWO-OWNERS RULING (loop #312), and
+the reason is worth stating. Those 24 files were originally in the corpus set, so
+this module covered them for free. The ruling moved ownership to claude-tree/ and
+took them OUT of the set — which would have silently removed the write-block from
+exactly the files whose loss started the investigation. Protection follows the
+FILE, never the tool that happens to own it this week.
+
+NEITHER LIST IS RETYPED. One is read from the manifest, the other walked from the
+directory. Same discipline as record-home-gate parsing exporters/targets.py: a
+duplicated list is the two-homes disease one layer down, and it goes stale on the
+first file anyone adds.
 
 WHAT IT DOES NOT TOUCH. Anything not in the manifest. The repo's own
 corpus/ copies — those are the canonical originals and editing them is the
@@ -96,13 +103,47 @@ def _abs(source, rt):
     return os.path.join(rt["vault"], source)
 
 
+SKILLS_TREE = os.path.join(REPO, "claude-tree")   # bin/sync-skills.sh's source
+
+
+def _skills_renders(rt):
+    """{realpath: label} for the OTHER projection onto My Drive/.claude.
+
+    Added 2026-08-10 with the two-owners ruling (loop #312). Those 24 files used
+    to be in the corpus set, so this module protected them for free. The ruling
+    moved ownership to claude-tree/ and took them OUT of the set — which would
+    have silently removed the write-block from exactly the files whose loss
+    started the whole investigation. Protection follows the file, not the tool
+    that happens to own it this week.
+
+    Enumerated from the claude-tree directory rather than listed, same discipline
+    as reading the corpus manifest: a list goes stale on the first skill anyone
+    adds."""
+    out = {}
+    dst = os.path.join(rt["drive"], ".claude")
+    for sub in ("skills", "agents"):
+        src_root = os.path.join(SKILLS_TREE, sub)
+        for dirpath, _dirs, files in os.walk(src_root):
+            for fn in files:
+                if fn.startswith("."):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn), src_root)
+                try:
+                    real = os.path.realpath(os.path.join(dst, sub, rel))
+                except Exception:
+                    continue
+                out[real] = f"claude-tree:{sub}/{rel}"
+    return out
+
+
 def render_map():
-    """{realpath: source-label} for every corpus render. Empty on any failure,
-    which is the fail-open path."""
+    """{realpath: source-label} for every projected render — the doctrine corpus
+    AND the skills/agents tree. Empty on any failure, which is the fail-open
+    path."""
+    out = {}
+    rt = roots()
     try:
         man = json.load(open(MANIFEST))
-        rt = roots()
-        out = {}
         for f in man.get("files", []):
             src = f.get("source")
             if not src:
@@ -111,19 +152,32 @@ def render_map():
                 out[os.path.realpath(_abs(src, rt))] = src
             except Exception:
                 continue
-        return out
     except Exception:
-        return {}
+        pass
+    try:
+        out.update(_skills_renders(rt))
+    except Exception:
+        pass
+    return out
 
 
 def _fix(source):
     """The exact repo path to edit instead, so the denial names the next move
     rather than only the refusal. A refusal without the alternative is how a
     gate gets switched off."""
+    if source.startswith("claude-tree:"):
+        return "claude-tree/" + source.split(":", 1)[1]
     if ":" in source and source.split(":", 1)[0] in ("drive", "home"):
         kind, rel = source.split(":", 1)
         return f"corpus/_{kind}/{rel}"
     return f"corpus/{source}"
+
+
+def _publish(source):
+    """The command that publishes the repo original — different per projection."""
+    if source.startswith("claude-tree:"):
+        return "./bin/sync-skills.sh --apply"
+    return "python3 tools/corpus-sync.py --push"
 
 
 def verdict(path, tool="this write"):
@@ -135,22 +189,25 @@ def verdict(path, tool="this write"):
     src = render_map().get(real)
     if not src:
         return None
+    owner = ("the skills-and-agents tree" if src.startswith("claude-tree:")
+             else "the doctrine corpus")
     return (
-        f"'{src}' is a CORPUS RENDER, not a source file. Git has owned the doctrine "
-        f"corpus since 2026-08-06 and these copies exist only to be read — the next "
-        f"`corpus-sync.py --push` either overwrites {tool} or refuses and turns the "
-        f"nightly chain red, which is exactly what happened on 2026-08-10 with the "
-        f"council chair files. "
-        f"EDIT THIS INSTEAD: ~/carr-system/{_fix(src)} — then run "
-        f"`python3 tools/corpus-sync.py --push` to publish it. That is the only path "
-        f"that reaches BOTH partners; a Drive-side edit reaches neither, because "
-        f"Dell's copy is pushed from git too."
+        f"'{src}' is a PROJECTED RENDER, not a source file. Git owns it through "
+        f"{owner}, and this copy exists only to be read — the next projection either "
+        f"overwrites {tool} or refuses and turns the nightly chain red. Both happened "
+        f"on 2026-08-10: the corpus push refused eight council files in the morning, "
+        f"and the skills projection silently deleted the panel-verdict rule from the "
+        f"roster file that afternoon. "
+        f"EDIT THIS INSTEAD: ~/carr-system/{_fix(src)} — then run `{_publish(src)}` "
+        f"to publish it. That is the only path that reaches BOTH partners; a "
+        f"Drive-side edit reaches neither, because Dell's copy is projected from git "
+        f"too."
     )
 
 
 def command_spellings():
-    """{literal path string: realpath} for every corpus render, under EVERY
-    spelling a shell command might use it.
+    """{literal path string: realpath} for every projected render, under EVERY
+    spelling a shell command might use.
 
     This exists because `/Users/booko/My Drive` is a symlink to the CloudStorage
     mount, so realpath collapses two very different-looking strings into one.
@@ -158,24 +215,22 @@ def command_spellings():
     door matches TEXT, so a command written against the CloudStorage spelling
     would sail past a deny set holding only realpaths. guard-unattended.py
     already carries `_VAULT_SPELLINGS` for exactly this reason; this is the same
-    problem one directory up."""
+    problem one directory up.
+
+    DERIVED FROM render_map(), not from the manifest directly. It used to read
+    the manifest alone, and when the skills tree became a second source on
+    2026-08-10 the Write door gained those 24 files while this one silently did
+    not — caught by the selftest, which is the whole reason that test spawns the
+    real hooks instead of importing them."""
     out = {}
-    rt = roots()
-    try:
-        man = json.load(open(MANIFEST))
-    except Exception:
-        return out
-    for f in man.get("files", []):
-        src = f.get("source")
-        if not src:
-            continue
-        try:
-            raw = _abs(src, rt)
-            real = os.path.realpath(raw)
-            for spelling in {raw, real}:
-                out[spelling] = real
-        except Exception:
-            continue
+    for real in render_map():
+        out[real] = real
+        # The unresolved spelling: swap the resolved Drive root back for the
+        # CloudStorage one, when they differ.
+        rt = roots()
+        drive_real = os.path.realpath(rt["drive"])
+        if drive_real != rt["drive"] and real.startswith(drive_real + os.sep):
+            out[rt["drive"] + real[len(drive_real):]] = real
     return out
 
 
