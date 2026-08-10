@@ -39,6 +39,16 @@
           "timeout": 10
         }
       ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/git-writer-gate.py",
+          "timeout": 20
+        }
+      ]
     }
   ],
   "PostToolUse": [
