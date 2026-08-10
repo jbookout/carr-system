@@ -2315,6 +2315,112 @@ export const TOOLS = {
     }),
   },
 
+  "log-outreach": {
+    write: true,
+    humanOnly: true,
+    description: "THE DISPOSITION STEP: say what happened after you actually tried to reach someone, in ONE action. Completes your open ball on that subject, logs the touch at its real time, and either sets the next ball or closes the lead out. Use this instead of calling log-activity and set-next-action separately, because separately is how a touch gets logged with no next step or a next step gets set with no touch, and both halves are needed for the follow-up cadence to run. Outcomes: 'connected' you spoke with them · 'left_message' you tried and did not reach them · 'sent' you sent an email or text · 'no_channel' the number or address does not work · 'not_interested' they said no · 'do_not_contact' they asked you to stop. The first four REQUIRE a next date, because a touch with no next step is how a lead dies quietly. The last two close the lead and refuse a next date.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      ref: { type: "string", description: "L-/C-/V- ref or deal name" },
+      channel: { type: "string", enum: ["call","email","text","meeting","tour"],
+                 description: "how you reached out. Ignored when outcome is no_channel, since nothing was reached." },
+      outcome: { type: "string",
+                 enum: ["connected","left_message","sent","no_channel","not_interested","do_not_contact"] },
+      summary: { type: "string", description: "what happened, in your words. Required: this is the line a future session reads instead of guessing." },
+      occurred_at: { type: "string", description: "ISO timestamp of the ACTUAL contact. Omit only when it just happened. Never backfill a past touch with the current time: a false recent date suppresses the staleness alarm the field exists to raise." },
+      next_on: { type: "string", description: "YYYY-MM-DD, the next step's date. Required for connected, left_message, sent and no_channel." },
+      next_step: { type: "string", description: "what you will do next. Required with next_on." },
+      detail: { type: "string" },
+      human_quote: { type: "string", description: "their literal words, if worth keeping" } },
+      required: ["idempotency_key","ref","outcome","summary"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "log-outreach", args, async () => {
+      const OPEN = ["connected","left_message","sent","no_channel"];
+      const CLOSING = { not_interested: "closed_lost", do_not_contact: "do_not_contact" };
+      const isOpen = OPEN.includes(args.outcome);
+
+      // A touch with no next step is how a lead dies quietly, so the open
+      // outcomes refuse to be recorded without one. This is the same posture
+      // decline-candidate takes on its reason: the field that makes the record
+      // useful is required at the door rather than nagged about afterwards.
+      if (isOpen && !(args.next_on && args.next_step))
+        throw new ToolError({ error: "next_step_required", outcome: args.outcome,
+          hint: "pass next_on (YYYY-MM-DD) and next_step. If there genuinely is no "
+              + "next step because they said no, the outcome is 'not_interested', "
+              + "not a touch with an empty future." });
+      if (!isOpen && (args.next_on || args.next_step))
+        throw new ToolError({ error: "closing_outcome_takes_no_next", outcome: args.outcome,
+          hint: "this outcome closes the lead; a next step would contradict it" });
+
+      const s = await resolveSubject(c, args.ref);
+
+      // no_channel is NOT a contact and must never move last_touch: nothing was
+      // reached. 'note' is is_contact=false in activity_kind, which is exactly
+      // the honest record — the attempt happened, the touch did not.
+      const KIND = { call: "call", email: "email_out", text: "text",
+                     meeting: "meeting", tour: "tour" };
+      const kind = args.outcome === "no_channel" ? "note"
+                 : (KIND[args.channel] || (args.outcome === "sent" ? "email_out" : "call"));
+
+      const act = await c.query(
+        `insert into activity (occurred_at, actor_id, kind, summary, detail, ${FK[s.type]}, source)
+         values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, 'stated')
+         returning id, occurred_at`,
+        [args.occurred_at || null, actor.id, kind,
+         `[${args.outcome}] ${args.summary}`, args.detail || null, s.id]);
+
+      // COMPLETING THE OPEN BALL IS THE POINT, not a side effect. The cadence
+      // engine fires on next_action.status='done' and has spawned 0 actions ever
+      // because complete-action has been called exactly ONCE in the system's
+      // history. Wiring completion into the verb a human actually reaches for
+      // after a call is what starts that engine, with no change to the engine.
+      // Only the caller's own ball, exactly like complete-action: the partner's
+      // stays untouched.
+      const done = await c.query(
+        `update next_action set status='done', updated_by=$1
+          where subject_type=$2 and subject_id=$3 and owner_id=$1 and status='open'
+          returning id, description`, [actor.id, s.type, s.id]);
+
+      let nextId = null, closed = null;
+      if (isOpen) {
+        const n = await c.query(
+          `insert into next_action (subject_type, subject_id, owner_id, description,
+                                    due_on, created_by)
+           values ($1,$2,$3,$4,$5::date,$3) returning id`,
+          [s.type, s.id, actor.id, args.next_step, args.next_on]);
+        nextId = n.rows[0].id;
+      } else if (s.type === "lead") {
+        // do_not_contact sets the EXISTING suppressed flag as well as the stage.
+        // The flag is the mechanical gate every surface already honours; the
+        // stage is the human-readable reason. Setting only the stage would leave
+        // a future sweep free to pick the person back up, which is the one
+        // mistake here that costs more than a lost deal.
+        const stage = CLOSING[args.outcome];
+        await c.query(
+          `update lead set stage=$1, suppressed=$2, updated_by=$3 where id=$4`,
+          [stage, args.outcome === "do_not_contact", actor.id, s.id]);
+        closed = stage;
+      } else {
+        throw new ToolError({ error: "closing_outcome_needs_a_lead", subject: s,
+          hint: "not_interested and do_not_contact set a LEAD's terminal stage. For a "
+              + "client or a deal, the outcome belongs on the deal itself via update-deal." });
+      }
+
+      await writeEvent(c, actor, "log-outreach", s.type, s.id,
+        { new: { activity: act.rows[0].id, outcome: args.outcome, kind,
+                 completed: done.rows[0]?.id || null, next_action: nextId, stage: closed },
+          human_quote: args.human_quote, idempotency_key: args.idempotency_key });
+
+      return { ok: true, subject: s, activity_id: act.rows[0].id,
+               occurred_at: act.rows[0].occurred_at, outcome: args.outcome,
+               completed_action: done.rows[0]?.description || null,
+               next_action_id: nextId, next_on: args.next_on || null,
+               stage: closed,
+               note: done.rows.length
+                 ? "your open ball on this subject was completed, which is what feeds the follow-up cadence"
+                 : "no open ball of yours existed on this subject; nothing to complete" };
+    }),
+  },
+
   "new-client": {
     write: true,
     description: "Create a client over a party; mints the next C-ref (roster_ref). Sets client_status and acquisition_source. ALWAYS ask how they found us (acquisition_source) at intake — consult attribution starts day one.",
