@@ -1,0 +1,652 @@
+# THE SYSTEM REPORT CARD — RUBRIC v2 (DRAFT, NOT ADOPTED)
+#
+# Loop #220. Joe's ruling 2026-08-06: "It feels like the audit is not even
+# configured correctly anymore. The system is not even the same concept as it
+# was when we created this audit."
+#
+# WHY THIS FILE EXISTS AT ALL, rather than a prose rubric inside a markdown card.
+# v1's rubric lived in 00_Context/system-report-card-2026-07-07.md as English
+# prose. That had three consequences, all of which actually happened:
+#   1. The measure agent returned "unmeasurable" on 6 of ~20 rows and got 4 more
+#      wrong, because the prose named retired stubs and retired technology and
+#      nothing could tell it so.
+#   2. The manual path and the fan-out path were different code (a human read
+#      the prose; the workflow re-read the same prose and re-derived it), which
+#      rule a8c55a47 forbids.
+#   3. Nothing bound the rubric to the system: the card was written 2026-07-07,
+#      the system changed daily, and no mechanism ever forced the rubric to
+#      change with it. The drift was found by a human eleven months of
+#      system-time later, not by the instrument.
+# A spec that is DATA and whose every row carries an executable source command
+# fixes all three: rows are checkable, one parser reads it (rule 73381d78), and
+# a row whose command stops working is a signal on the very next run instead of
+# a discovery next quarter.
+#
+# PLACEMENT (rule c1547ed1), stated because it was a real fork:
+#   - THIS SPEC lives in the repo. It is code class — reviewed, diffable,
+#     testable, and it is the same bytes the automated and manual paths read.
+#   - THE RESULTS (scores, correctives, evidence) go to the DATABASE, not into
+#     a markdown table. Rule 14181e60 and ca841807. v1's score history was a
+#     markdown table that only a human could append, which is why the trend line
+#     is six columns wide after a month and cannot be queried.
+#   - THE CARD is a render of the two. Derived outputs land in the vault.
+#
+# THE SPEC IS NOT THE AUDIT. Everything here is the MECHANICAL half — the part
+# that has a command and a number. The audit's actual job is the judgment half
+# (see [meta].purpose), and judgment rows deliberately have no source_command.
+#
+# STATUS: DRAFT. Not adopted, not wired to the September run. The category set
+# below is a starting position for the fresh-context redteam that loop #220
+# requires before adoption (scope item 6) — it is deliberately NOT final, and
+# the operator of the failed v1 instrument does not get to self-certify its
+# successor.
+
+[meta]
+version           = "2.0.0-draft"
+status            = "DRAFT — redteam gate open; not wired to any scheduled run"
+supersedes        = "system-report-card-2026-07-07.md (v1: 12 categories + the bolted-on orchestrator lane)"
+drafted_on        = "2026-08-09"
+adopted_on        = ""            # stays empty until the redteam passes and Joe rules
+dry_run_window    = "2026-08-25/2026-08-28"
+first_production  = "2026-09-04"
+
+# THE ANSWER TO "WHAT IS THE AUDIT FOR" — the first of the six questions the
+# rebuild must settle before any category is written.
+#
+# JOE'S FRAMING, 2026-08-09, in his own words, and it is the one on the record:
+#   "the audit is for assessing each of the categories of the system and scoring
+#    them on performance, effectiveness, staleness, efficiency, and other
+#    metrics. we want to track how the system is trending so we can address
+#    disfunction or recognize greatness."
+#
+# It corrected the session's draft on two counts, both structural:
+#   (a) SCORE ON NAMED DIMENSIONS. The draft gave each category a single 0-100
+#       with no stated axis, which is exactly how a grader invents its own — and
+#       is why v1's twelve scores were never comparable to each other. Joe names
+#       the axes, so they are declared below and every metric maps to one.
+#   (b) RECOGNIZE GREATNESS, not only dysfunction. The draft was entirely
+#       deficit-shaped: the corrective flywheel tracks what is broken and nothing
+#       recorded what was working. That is a real hole beyond morale — with no
+#       record of a mechanism performing well, there is no baseline to notice its
+#       EROSION against later (rule a6e6ab4e). The ledger therefore has two
+#       halves now: correctives and standouts.
+purpose = """
+ASSESS EVERY CATEGORY, SCORE IT ON NAMED DIMENSIONS, AND TRACK THE TREND, so the
+partners can address dysfunction or recognize greatness. That is Joe's framing
+and it governs.
+
+HOW THAT COEXISTS WITH THE DAILY CODE, because the two look like they overlap
+and do not. run.sh health, check.sh, restore-rehearse and the it-support agent
+answer IS ANYTHING BROKEN RIGHT NOW, comprehensively: 26 façade rows, schedule
+drift, the deprecation register, a 45-target export dead-man, R2 quota, corpus
+mirror, machine config, rules-live, forgetting, renders-verify, five
+doctrine-store rows, plus code/video/twin-copy/output-hash drift.
+
+THE AUDIT READS THAT OUTPUT AND SCORES IT. It does not re-derive it. Reading is
+not re-measuring, and the distinction is the whole fix: v1's measure agent walked
+the vault re-deriving numbers by hand and returned "unmeasurable" on 6 of ~20
+rows while getting 4 more wrong. A staleness score now comes FROM health's own
+staleness rows; the audit's contribution is the judgment about what that number
+means over time, not the number.
+
+So the audit produces four things nothing else can:
+  1. TREND per category per dimension. Nothing else keeps a time series.
+  2. INDEPENDENT JUDGMENT. health can say lead-board.html is 0.0d old. It cannot
+     say the lead board is worth reading. Quality is not liveness.
+  3. THE LEDGER, BOTH HALVES. Correctives graded DONE/PARTIAL/IGNORED against
+     file-level evidence with escalation on two consecutive IGNOREDs — v1's own
+     card calls this its healthiest mechanism and it carries over unchanged — AND
+     standouts, which name what is performing excellently with the evidence, so
+     it can be protected, replicated, and regressed against if it decays.
+  4. COVERAGE OF THE UNWATCHED. A monitor only reports what it watches, so no
+     monitor can report a subsystem that has no watcher. Finding those is work
+     only an inventory-first pass does.
+"""
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS — Joe's axes, 2026-08-09. A category is scored on the dimensions it
+# DECLARES, not on all of them: "staleness" is meaningless for Proven business
+# outcomes, and forcing every category onto every axis is how a scorecard fills
+# with rows nobody believes. 13 categories x 4 axes would be 52 scores; declaring
+# per category keeps it honest and keeps the run tractable.
+#
+# sourced_from = "code"     → the number comes from health/check output. The
+#                             grader interprets it; it never re-derives it.
+#                "judgment" → no command can produce it. A grader argues it from
+#                             evidence, and the fan-out's adversarial verifier
+#                             checks the argument.
+#                "mixed"    → a sourced number anchors a judgment call.
+# ---------------------------------------------------------------------------
+
+[[dimension]]
+key          = "performance"
+label        = "Performance"
+sourced_from = "mixed"
+question     = "Is this part of the system doing its job at the volume the business actually needs?"
+note         = "Distinct from effectiveness: a lead board that rebuilds nightly with 9,857 rows PERFORMS. Whether any of those rows became a client is effectiveness."
+
+[[dimension]]
+key          = "effectiveness"
+label        = "Effectiveness"
+sourced_from = "judgment"
+question     = "Is it producing the OUTCOME it exists for, or only the activity?"
+note         = "The dimension v1 had no name for, and the reason Pipeline scored 62-68 for a month while ~9,857 pooled radar rows promoted to exactly zero leads. Activity looked fine. The outcome was nil."
+
+[[dimension]]
+key          = "staleness"
+label        = "Staleness"
+sourced_from = "code"
+question     = "Is the material current, and did the thing that refreshes it actually run?"
+note         = "Sourced entirely from run.sh health's façade and schedule-drift rows. The audit NEVER re-stats files — that re-derivation is precisely what v1 got wrong."
+
+[[dimension]]
+key          = "efficiency"
+label        = "Efficiency"
+sourced_from = "mixed"
+question     = "What does this cost in tokens, human taps, and runtime for what it returns?"
+note = """
+CARRIES THE ONE GENUINELY BLOCKED INPUT. Loop #208's core-budget ruling (Aug 15
+sweep) decides whether a size/token budget exists at all after the 2026-08-21
+cutoff retires the .md renders. Until it rules, efficiency is scored on human
+taps and runtime only, and no byte-budget metric is carried forward. v1's Token
+efficiency 45/100 was measured against a 45 KB core budget where 67% of the bytes
+were generated renders the sweep could not touch — the score measured the
+instrument, not the system, and that row is tombstoned rather than inherited.
+"""
+
+# The audit READS the daily code's output as evidence. It does not re-derive it.
+# This is the single largest change from v1 and it is what kills the
+# 6-unmeasurable/4-wrong measure agent: there is no longer a measurement step
+# that walks the vault guessing at file sizes.
+evidence_sources = [
+  "run.sh health",
+  "run.sh check",
+  "bin/restore-rehearse.sh",
+]
+
+# ---------------------------------------------------------------------------
+# COVERAGE CARVING — scope item 5, inventory-first.
+#
+# The six lanes are the six COO seats, taken verbatim from it-support.md, which
+# already argued this and is worth quoting because it is the exact mistake v1
+# made: "the system's components are already carved that way and inventing a
+# second carving would guarantee gaps at the seams."
+#
+# v1 invented its own twelve, then bolted a thirteenth (the orchestrator lane)
+# on three weeks later — and that thirteenth is the category that rose most,
+# which is the frame breaking in public. v2 does not get a second carving.
+#
+# THE RULE THIS ENFORCES: every subsystem maps to exactly one lane, or to a
+# named gap row. A subsystem that maps to nothing is the finding.
+# ---------------------------------------------------------------------------
+
+[[lane]]
+key   = "marketing"
+seat  = "Marketing & social"
+owns  = "Learning reports, the metric chain, the content calendar, four scheduled tasks"
+
+[[lane]]
+key   = "pipeline"
+seat  = "Pipeline & deals"
+owns  = "Deal Room, the deals JSON, the Salesforce reconciliation"
+
+[[lane]]
+key   = "vendors"
+seat  = "Vendor network & introductions"
+owns  = "vendors.xlsx, introduction-rules.md, the network's graph anomalies"
+
+[[lane]]
+key   = "leads"
+seat  = "Leads & prospecting"
+owns  = "The registry audit, the Lead Board and its seven feeds"
+
+[[lane]]
+key   = "automation"
+seat  = "Automation & system health"
+owns  = "The nightly chain, credentials, backups, quotas, the scheduler"
+
+[[lane]]
+key   = "sysdev"
+seat  = "System development"
+owns  = "The repo, code-vs-vault drift, MCP read verbs, the deprecation register"
+
+# ---------------------------------------------------------------------------
+# CATEGORIES
+#
+# trend_carries=true  → the v1 column is comparable; the trend line continues.
+# trend_carries=false → the sources changed enough that comparing would lie.
+#                       The category starts a FRESH baseline and carries a
+#                       tombstone naming what it superseded (rule def3e84e,
+#                       scope item 8). The overall score never crosses a rubric
+#                       change at all — that was already ruled in the v1 banner.
+# ---------------------------------------------------------------------------
+
+[[category]]
+key        = "content_marketing"
+label      = "Content & marketing system"
+lanes      = ["marketing"]
+kind       = "business"
+dimensions = ["performance", "effectiveness", "staleness"]
+trend_carries = true
+added_on   = "2026-07-07"
+note       = "Label and trend preserved per loop #220 scope item 3; sources re-specified."
+
+[[category]]
+key        = "deal_execution"
+label      = "Deal execution capability"
+lanes      = ["pipeline"]
+kind       = "business"
+dimensions = ["performance", "effectiveness"]
+trend_carries = true
+added_on   = "2026-07-07"
+
+[[category]]
+key        = "vendor_network"
+label      = "Vendor/referral network"
+lanes      = ["vendors"]
+kind       = "business"
+dimensions = ["performance", "effectiveness", "staleness"]
+trend_carries = true
+added_on   = "2026-07-07"
+
+[[category]]
+key        = "pipeline_leadgen"
+label      = "Pipeline & lead generation"
+lanes      = ["leads"]
+kind       = "business"
+dimensions = ["performance", "effectiveness", "staleness"]
+trend_carries = true
+added_on   = "2026-07-07"
+
+[[category]]
+key        = "team_scalability"
+label      = "Team scalability (Dell)"
+lanes      = []
+routes_to  = "Joe"
+kind       = "business"
+dimensions = ["performance", "effectiveness"]
+trend_carries = true
+added_on   = "2026-07-07"
+
+[[category]]
+key        = "proven_outcomes"
+label      = "Proven business outcomes"
+lanes      = []
+routes_to  = "Joe"
+kind       = "business"
+dimensions = ["effectiveness"]
+trend_carries = true
+added_on   = "2026-07-07"
+
+[[category]]
+key        = "automation_safety"
+label      = "Automation reliability & safety"
+lanes      = ["automation"]
+kind       = "structural"
+dimensions = ["performance", "staleness", "efficiency"]
+trend_carries = true
+added_on   = "2026-07-07"
+note       = "Sources re-specified onto run.sh health's own rows rather than schedule existence."
+
+[[category]]
+key        = "system_development"
+label      = "System development"
+lanes      = ["sysdev"]
+kind       = "structural"
+dimensions = ["performance", "staleness", "efficiency"]
+trend_carries = true
+added_on   = "2026-07-25"
+supersedes = "Orchestrator lane"
+note       = "Renamed to the COO seat's name. Same subject, same trend line — the Jul 25 (66) and Aug 6 (79) columns carry."
+
+[[category]]
+key        = "record_quality"
+label      = "Data quality"
+lanes      = ["vendors", "leads", "pipeline"]
+kind       = "structural"
+dimensions = ["performance", "staleness"]
+trend_carries = true
+added_on   = "2026-07-07"
+note = """
+THE MERGE WAS REVERSED HERE, by Joe's ruling 2026-08-09 adopting the red team's
+taxonomy seat. The draft had folded Data quality + Architecture + Token
+efficiency into one "Record & doctrine integrity" category with
+trend_carries=false. The seat falsified the stated reason against the record and
+it does not survive.
+
+WHAT THE DRAFT CLAIMED: "all three measured the MARKDOWN VAULT," a substrate
+retiring at the 2026-08-21 cutoff.
+WHAT THE RECORD SAYS: true of ONE of the three. Data quality's own Aug 6
+correctives were `merge_queue` standing at 40, `commission` and `critical_date`
+both at zero rows, and a missing `update-party-contact` verb whitelist. Every one
+of those is a Postgres object. By Aug 6 this category was ALREADY grading the
+record layer; the xlsx was where the READING happened, not where the defect
+lived.
+
+So the subject never changed — only the read path. The prescribed remedy for a
+metric pointed at the wrong substrate is written into this same file three times
+over (`measured_from`, and `rules_live_agreement` as the worked example of
+RE-POINTING a metric from a render to the store). The draft knew how to fix a
+mis-sourced metric and retired the category instead.
+
+TREND CARRIES: 76 (Jul 7) / 76 (Jul 8) / 60 (Aug 6). Keeping the label keeps the
+series findable. Efficiency is NOT declared — it never graded cost.
+"""
+
+[[category]]
+key        = "placement_discipline"
+label      = "Architecture & information design"
+lanes      = ["sysdev"]
+kind       = "structural"
+dimensions = ["performance", "effectiveness"]
+trend_carries = true
+added_on   = "2026-07-07"
+note = """
+ALSO RESCUED FROM THE REVERSED MERGE. The draft's tombstone described the JULY
+version of this category — folder depth, file placement, index upkeep across a
+markdown vault — and ignored the amendment the v1 card made to it on 2026-07-25:
+
+  "the Architecture & information design grader must weigh the two-layer rule
+   (code in the repo, SOP prose + derived outputs in the vault) and the
+   T0-conversion direction — a task still running as prose that has a proven
+   code path is an architecture gap."
+
+That is placement discipline across code, records, doctrine and renders — the
+exact question this file spends eight comment lines answering about ITSELF under
+rule c1547ed1. The draft applied the placement test to its own spec and retired
+the category that grades placement.
+
+The question gets HARDER after the cutoff, not easier: four substrates now exist
+where one did (repo / Postgres / doctrine store / vault renders). The live
+example has no other home — `DNA/Deal Management/record-layer/` at 821 KB across
+30 dated memos with no INDEX and no lifecycle rule, logged Aug 6 as "the
+concept-fidelity violation of the month."
+
+TREND CARRIES: 92 / 95 / 97 / 80 (Aug 6, verifier overturned 83→80).
+"""
+
+[[category]]
+key        = "source_capture"
+label      = "Source capture & distillation"
+lanes      = ["sysdev"]
+kind       = "structural"
+dimensions = ["performance", "effectiveness", "staleness"]
+trend_carries = false
+added_on   = "2026-08-09"
+supersedes = "Knowledge capture & ingestion"
+note       = "Scope item 3's split. This half is the transcribe/distill/discard pipeline, which the Aug 6 run found CLEAN — fusing it with the other half is what produced a misleading 58."
+
+[[category]]
+key        = "field_ingestion"
+label      = "Field-activity ingestion"
+lanes      = []
+routes_to  = "Joe/Claude"
+kind       = "structural"
+dimensions = ["performance", "effectiveness"]
+trend_carries = false
+added_on   = "2026-08-09"
+supersedes = "Knowledge capture & ingestion"
+note       = "The other half of the split: are real-world touches reaching the record at all? Aug 6 measured ~5% system-wide with 36 of 38 active deals carrying a null last_touch."
+
+[[category]]
+key        = "governance"
+label      = "Governance & self-maintenance"
+lanes      = []
+routes_to  = "Joe/Claude"
+kind       = "structural"
+dimensions = ["performance", "effectiveness", "staleness"]
+trend_carries = true
+added_on   = "2026-07-07"
+
+[[category]]
+key        = "measurement_integrity"
+label      = "Measurement-layer integrity"
+lanes      = []
+routes_to  = "Joe/Claude"
+kind       = "structural"
+dimensions = ["performance", "effectiveness"]
+trend_carries = false
+added_on   = "2026-08-09"
+note = """
+NEW, scope item 4. THE AUDIT GRADES THE GRADERS; it does not trust code blindly.
+Two jobs, and the second is the one that keeps this rubric from dying the way
+v1 did:
+  (a) SAMPLE AND RE-DERIVE. Each run picks a random sample of metrics carrying
+      an independent_command and re-derives them by a second path, then compares.
+      The worked example is real: on 2026-08-06 the T1 measure agent reported
+      working-brain at 22,752 KB by counting .md.generations rotation folders;
+      the true figure was 5,187 KB. Nothing in the instrument caught that — a
+      human did, afterwards.
+  (b) GRADE THE INSTRUMENT ITSELF. A metric whose source_command exits non-zero,
+      or whose value cannot be parsed, on two consecutive runs is reported as
+      RUBRIC DRIFT rather than silently returning "unmeasurable". This is the
+      mechanism v1 never had, and its absence is the deepest cause of the
+      rebuild: a rubric with no drift detector buys exactly one month.
+"""
+
+# ---------------------------------------------------------------------------
+# TOMBSTONES — scope item 8. Nothing silently rots (rule def3e84e).
+# A retired category keeps its history readable and says what replaced it.
+# ---------------------------------------------------------------------------
+
+[[tombstone]]
+label      = "Token efficiency"
+scores     = "Jul 7: 88 · Jul 8 AM: 91 · Jul 8 FINAL: 90 · Aug 6: 45 (verifier UPHELD)"
+retired_on = "2026-08-09"
+replaced_by = "(none — retired outright; no successor metric until loop #208 rules)"
+reason = """
+Measured a 45 KB always-read-core budget written when the core was hand-authored
+prose. By Aug 6, 140 KB of the 209.6 KB core was the two GENERATED compiled-rules
+files, which the size sweep had declared out of edit scope — so the tripwire had
+no lever and the score measured an instrument, not a system. This row is the
+worked example in Joe's ruling.
+NOTE: the successor deliberately does not inherit a core-size metric. Whether one
+exists at all depends on loop #208's core-budget ruling (Aug 15 sweep), which is
+this rebuild's one genuinely blocked input.
+"""
+
+[[tombstone]]
+label      = "Knowledge capture & ingestion"
+scores     = "Jul 7: 96 · Jul 8 AM: 96 · Jul 8 FINAL: 97 · Aug 6: 58"
+retired_on = "2026-08-09"
+replaced_by = "source_capture + field_ingestion"
+reason     = "Fused two unrelated pipelines into one score. One was clean, the other ~5%; the average described neither. One grader flagged its own rubric's conflation in writing on the Aug 6 run."
+
+[[tombstone]]
+label      = "Orchestrator lane"
+scores     = "Jul 25: 66 · Aug 6: 79"
+retired_on = "2026-08-09"
+replaced_by = "system_development"
+reason     = "Renamed only, to the COO seat's own name. Same subject and same sources, so the trend line CARRIES — this is a relabel, not a retirement, and is tombstoned solely so the old name stays findable (rule 7105955b)."
+
+# ---------------------------------------------------------------------------
+# METRICS — the mechanical half.
+#
+# EVERY ROW MUST CARRY (scope item 2 + rule 590b11e1 + rule a9ecd5b4):
+#   key              stable id
+#   category         which category it scores
+#   question         the plain-English thing it answers
+#   source_command   the literal command. $HEALTH and $CHECK point at the
+#                    captured stdout of run.sh health / check, run ONCE per
+#                    audit and reused — the audit reads the daily code's output
+#                    rather than re-deriving it.
+#   measured_from    what the number is physically counted from. Rule a9ecd5b4's
+#                    corollary: an instrument goes on printing a confident figure
+#                    long after the thing it measures stopped being the thing you
+#                    care about, and naming the substrate is what catches that.
+#   threshold        warn / fail
+#   bound_action     what a crossed threshold TRIGGERS. A metric for which no
+#                    response can be defined is not collected. No exceptions —
+#                    this is the constraint that binds at build time.
+#   added_on         / retired_on
+#   independent_command  OPTIONAL second path to the same number, for the
+#                    measurement-integrity sampler. Rows carrying one are the
+#                    only rows that can ever be cross-checked, so prefer adding it.
+#
+# SEEDED SET ONLY. These rows exist to prove the mechanism executes end to end;
+# the full per-lane set is written after the redteam settles the category list.
+# ---------------------------------------------------------------------------
+
+[[metric]]
+key            = "facade_stale_rows"
+category       = "automation_safety"
+dimension      = "staleness"
+question       = "How many watched outputs are stale right now?"
+source_command = "awk '/^Façade check/,/^Schedule drift/' \"$HEALTH\" | grep -cE '⚠︎|MISSING' || true"
+measured_from  = "run.sh health's façade-check SECTION ONLY — file mtimes against each row's declared cadence"
+threshold      = { warn = 3, fail = 6 }
+bound_action   = "Open/update ONE deduplicated loop (domain system, owner Joe/Claude) naming each stale row and its cadence source. Verification: the row reads OK on the next run.sh health. Auto-clears when the count returns under warn."
+added_on       = "2026-08-09"
+independent_command = "awk '/^Façade check/,/^Schedule drift/' \"$HEALTH\" | grep -cE 'STALE|MISSING' || true"
+note = """
+SECTION-SCOPED ON PURPOSE, and this row is its own worked example. The first
+draft counted every '⚠︎' in the whole health output and returned 13 — it was
+silently summing façade staleness, schedule drift, six deprecation rows and a
+machine-config row into one number labelled "stale outputs". The true façade
+count is 5. Nothing about the value 13 looked wrong; only comparing it against
+measured_from caught it, which is the entire argument for that field.
+LIMITATION, stated rather than hidden: the independent path counts a DIFFERENT
+TOKEN in the SAME render, so it catches a parsing or scoping error (which is
+what bit this row) but NOT an error inside health itself. A truly independent
+path re-stats the watched files against the WATCH cadences. That is the right
+version and it is not written yet.
+"""
+
+[[metric]]
+key            = "export_deadman_failures"
+category       = "automation_safety"
+dimension      = "staleness"
+question       = "Did every registered export target succeed inside its dead-man window?"
+source_command = "grep -cE '⚠︎ (STALE|NEVER RAN|NEVER OK) ' \"$HEALTH\" || true"
+measured_from  = "health's export dead-man lines, which it emits one per failing target from the record layer's per-target last-success timestamps"
+independent_command = "grep -cE '^  OK [0-9]+ registered target\\(s\\)' \"$HEALTH\" | sed 's/1/0/' || true"
+note = """
+THIRD REWRITE, AND THE BUG CLASS IS THE LESSON. This row has now been wrong in
+three distinct ways inside one session, every one of them a mismatch between
+what the command reads and what `measured_from` claims:
+
+  v1: `grep -oE '[0-9]+ registered target\\(s\\)'` — returned the INVENTORY SIZE
+      (45) against fail=3. Permanently catastrophic when healthy, and EMPTY when
+      a target actually failed, because health only prints that summary line when
+      nothing is broken. It flagged RUBRIC DRIFT at the exact moment exports were
+      dropping. Four red-team seats found it independently.
+  v2: an awk range over the section — swallowed every row printed AFTER the
+      export block under the same heading (R2 quota, corpus mirror, machine
+      config, rules-live, forgetting, renders-verify) and reported the machine
+      config drift as an export failure.
+  v3, this one: anchored on the FAILURE TOKENS health actually emits per failing
+      target — `⚠︎ STALE <key>`, `⚠︎ NEVER RAN <key>`, `⚠︎ NEVER OK <key>`. The
+      trailing space matters: the façade section prints `⚠︎ <name>  STALE 13.0d`,
+      name first, so it cannot collide.
+
+THE GENERALISABLE PART: a section-range anchor is fragile because it depends on
+what comes after it, which nobody controls. A token anchor depends only on what
+the producer emits for the thing being counted. Prefer the token. And the reason
+all three versions passed `--validate` is that `measured_from` is free text
+nothing verifies — a substrate probe that proves the named source was the one
+read is the real fix, and it is not built yet.
+"""
+threshold      = { warn = 1, fail = 3 }
+bound_action   = "Name the failing target and its exporter; open a loop with the re-export command. Verification: the target reports a success inside 26h."
+added_on       = "2026-08-09"
+
+[[metric]]
+key            = "code_drift_rows"
+category       = "system_development"
+dimension      = "staleness"
+question       = "How many repo files have drifted from their live vault copy?"
+source_command = "grep -c 'DRIFT' \"$CHECK\" || true"
+measured_from  = "check.sh's byte diff of each manifest.tsv row, repo vs vault"
+threshold      = { warn = 1, fail = 5 }
+bound_action   = "Per drifted row, decide which side is canonical and reconcile; drift that is intentional gets a manifest note. Verification: check.sh reports OK for that row."
+added_on       = "2026-08-09"
+
+[[metric]]
+key            = "rules_live_agreement"
+category       = "governance"
+dimension      = "staleness"
+question       = "Does the rule store's active count match what every live surface declares?"
+source_command = "cd \"$REPO\" && { ./.venv/bin/python ops/rules-live-check.py 2>/dev/null || true; } | grep -oE 'behind by [0-9]+' | grep -oE '[0-9]+' || echo 0"
+measured_from  = "the RULE STORE's count of active shared rules, queried live from the database"
+threshold      = { warn = 1, fail = 1 }
+bound_action   = "Run bin/refresh-rules.sh (never a raw run.sh export, which stages to out/exports and once produced a rule that bound nobody). Verification: both counts agree and the health row reads OK."
+added_on       = "2026-08-09"
+independent_command = "cd \"$REPO\" && { ./.venv/bin/python ops/rules-live-check.py 2>/dev/null || true; } | grep -cE '^STALE' || true"
+note = """
+A GENUINELY independent pair, unlike facade_stale_rows: primary queries the
+DATABASE, the second path reads the count the RENDERED FILE declares about
+itself. Different substrates, so a disagreement means the render is stale
+relative to the store — which is the exact failure the 2026-08-04 correction
+was about (a session ran `run.sh export`, got three green results, and produced
+a rule that bound nobody because the write went to staging).
+LIVE EXAMPLE from this row's first runs, 2026-08-09, and it caught a real drift
+within the hour. The store moved 123 -> 124 -> 125 during one session while the
+render trailed: health had captured 123 at 07:44 and declared the file in
+agreement; the file re-exported at 07:52 declaring 124; by the third run the
+store held 125 against a render still on 124, which rules-live-check reported as
+STALE with the remedy bin/refresh-rules.sh. Ran it; both sides now agree at 125.
+Every one of those readings was internally consistent and none of them was
+current. A single-source check cannot see that at all, which is the argument for
+the whole measurement_integrity category.
+
+PARSE HARDENED THE SAME RUN, and this is its own lesson. The first version of
+this command matched only the healthy output shape ("shared: 125 active") and
+returned NOTHING against the STALE shape ("shared: store 125, live file 124").
+So the metric went blind at exactly the moment the system became unhealthy — it
+reported RUBRIC DRIFT when what it had actually found was a real defect. A check
+whose parser only handles the passing case is worse than no check, because its
+silence reads as health. The `|| true` is deliberate too: rules-live-check exits
+1 on STALE, which is a REAL STATE and not a command failure, and the metric must
+still report the number.
+"""
+
+[[metric]]
+key            = "doctrine_stale_sections"
+category       = "governance"
+dimension      = "staleness"
+question       = "How many policy-bearing doctrine sections are past their review clock?"
+source_command = "grep 'stale-sections' \"$HEALTH\" | grep -oE '[0-9]+ past review_after' | grep -oE '^[0-9]+' || echo 0"
+measured_from  = "doctrine section review_after dates in the store"
+threshold      = { warn = 1, fail = 5 }
+bound_action   = "Review or re-confirm each via write-doctrine-section. Verification: the health row returns to 0."
+added_on       = "2026-08-09"
+
+[[metric]]
+key            = "field_touch_coverage"
+category       = "field_ingestion"
+dimension      = "effectiveness"
+question       = "What share of active deals carry a real last_touch?"
+source_command = ""   # DELIBERATELY EMPTY — see note
+measured_from  = "the record layer's deal rows"
+threshold      = { warn = 50, fail = 25 }
+bound_action   = "PENDING. Not collected until the command exists — rule 590b11e1 refuses a metric whose response is undefined, and this row is carried as an explicit gap rather than as a silent absence."
+added_on       = "2026-08-09"
+note           = "Aug 6 measured ~5% system-wide (36 of 38 active deals null). The number matters and the command does not exist yet; writing the row without the command is how v1 accumulated unmeasurable metrics, so this one is marked and left uncollected until the query is written."
+
+# ---------------------------------------------------------------------------
+# JUDGMENT ROWS — the half with no command, and the half that is the point.
+#
+# These are what the graders actually argue about. They are listed here so the
+# rubric is honest that most of its weight is judgment, and so a grader is
+# pointed at a question rather than left to invent one.
+# ---------------------------------------------------------------------------
+
+[[judgment]]
+category = "measurement_integrity"
+dimension = "performance"
+question = "Which numbers in this run did nobody re-derive, and what would it have cost to?"
+
+[[judgment]]
+category = "governance"
+dimension = "effectiveness"
+question = "Name a corrective from the previous run graded IGNORED twice. What has continued inaction actually cost, in this month's evidence?"
+
+[[judgment]]
+category = "proven_outcomes"
+dimension = "effectiveness"
+question = "What moved in the physical world this month that would not have moved without the system?"
+
+[[judgment]]
+category = "team_scalability"
+dimension = "effectiveness"
+question = "Did Dell's side operate on the shared tier this month, and did anything the two brains wrote disagree?"
