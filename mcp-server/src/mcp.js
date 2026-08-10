@@ -354,7 +354,14 @@ export async function dispatch(request, env, ctx, actor) {
             "idempotency_key (UUID) per intended action; mutations need base_version from a fresh read. " +
             "version_conflict and needs_confirm are questions for the human, never auto-retried. There " +
             "is no send tool: drafts are produced, Joe sends. If this server is unreachable mid-task, " +
-            "STOP AND SAY SO — never improvise files." +
+            "STOP AND SAY SO — never improvise files. DELEGATION LATCH: when a partner says delegate, " +
+            "subagent, or cheapest qualified model for an active task, that authority survives new logins " +
+            "or data sources, phase changes, retries, continuation and compaction until the task ends " +
+            "or the partner revokes it. Choose the cheapest model still qualified to do the task " +
+            "correctly; this may be a peer-tier agent, never a forced downgrade. The main seat " +
+            "orchestrates, verifies and performs authorized " +
+            "writes; it does not reclaim the mechanical sweep. State the executor before each phase; " +
+            "a second inline mechanical tool call is the tripwire." +
             (profile === "full" ? "" : ` ACTIVE PROFILE: ${profile}.` + (PROFILE_NOTICE[profile] || "")),
         });
       case "notifications/initialized":

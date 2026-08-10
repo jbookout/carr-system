@@ -29,7 +29,15 @@ STATIC_RAIL = (
     "records live in the store (doctrine-index / search-doctrine / "
     "read-doctrine / catch-me-up); there are NO doctrine files. WRITE LAW "
     "(rule 14181e60): verbs only, never a .md file — a hard gate enforces it. "
-    "Code lives in ~/carr-system, nowhere else."
+    "Code lives in ~/carr-system, nowhere else. DELEGATION LATCH: if the "
+    "partner says delegate, subagent, or cheapest qualified model for an active "
+    "task, that authority survives new logins/data sources, phase changes, "
+    "retries, continuation and compaction until the task ends or the partner "
+    "revokes it. Choose the cheapest model that is still qualified to do the "
+    "task correctly; this may be a peer-tier agent, never a forced downgrade. "
+    "The main seat orchestrates, verifies and performs authorized "
+    "writes; it does not reclaim the mechanical sweep. Before each phase, state "
+    "the executor; a second inline mechanical tool call trips the delegation gate."
 )
 
 

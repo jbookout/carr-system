@@ -60,6 +60,10 @@ HOOKS = os.path.join(REPO, "hooks")
 BASELINE = os.path.join(REPO, "ops", "config", "gate-baseline.json")
 REPO_HOOKS_JSON = os.path.join(REPO, "ops", "config", "hooks.json")
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
+CARR_PROJECT_SETTINGS = os.path.expanduser(
+    "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
+    "My Drive/CARR AI/.claude/settings.json"
+)
 
 # The files whose contents ARE the enforcement. Anything that can refuse, block,
 # or classify belongs here.
@@ -194,6 +198,28 @@ def settings_matches_repo():
     return missing, None
 
 
+def project_delegation_wired():
+    """The delegation gate is CARR-project-only, never a global Claude hook.
+
+    Its classifier already refuses non-CARR cwd values, but scoping the wiring
+    as well prevents a broken future edit from disrupting Life AI or an
+    unrelated repo.  Therefore this one gate deliberately does not appear in
+    ops/config/hooks.json, which is the global baseline checked above.
+    """
+    try:
+        live = json.load(open(CARR_PROJECT_SETTINGS)).get("hooks", {})
+    except Exception as exc:
+        return False, f"CARR project settings unreadable: {exc}"
+    commands = {
+        h.get("command", "")
+        for arr in live.values()
+        for matcher in arr
+        for h in matcher.get("hooks", [])
+    }
+    wanted = os.path.join(REPO, "hooks", "delegation-gate.py")
+    return any(wanted in command for command in commands), None
+
+
 def main():
     if "--bless" in sys.argv:
         return bless()
@@ -226,6 +252,15 @@ def main():
         problems.append("NOT WIRED UP: settings.json does not invoke "
                         + ", ".join(sorted(set(missing)))
                         + " — the script exists but nothing runs it")
+
+    delegation_wired, delegation_err = project_delegation_wired()
+    if delegation_err:
+        problems.append(f"CARR DELEGATION WIRING: {delegation_err}")
+    elif not delegation_wired:
+        problems.append(
+            "NOT WIRED UP: CARR project settings do not invoke "
+            "delegation-gate.py — its script exists but CARR sessions do not run it"
+        )
 
     unhardened = [n for n in GATED
                   if os.path.exists(os.path.join(HOOKS, n))
