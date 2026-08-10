@@ -51,6 +51,9 @@ import sys
 from urllib.parse import urlsplit
 
 LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
+REPO = os.path.expanduser("~/carr-system")
+DELEGATION_STATE = os.path.join(REPO, "out", "delegation-gate-state.json")
+DELEGATION_LOCK = DELEGATION_STATE + ".lock"
 
 # The nightly chain, verbatim. Belt and braces: it matches nothing below, and it
 # is also allowlisted so it can never be caught by a pattern added later.
@@ -109,6 +112,24 @@ KNOWN_HOSTS = (
     # (ggml-large-v3-turbo). Added 2026-08-07 on Joe's explicit go in the
     # dictation-rig build session; read-only model fetches into ~/.cache.
     "huggingface.co",
+    # api.elevenlabs.io: Doc's production renderer. build-voice-corpus.py exists
+    # for exactly this ("once ElevenLabs does production rendering, render speed
+    # stops constraining the SOURCE material", Joe 2026-08-08) and the 193-line
+    # corpus was built to be uploaded there. The guard blocked the host outright,
+    # so the step the corpus was made for could not run. Added 2026-08-10 while
+    # Joe was live in-session ("we can go through eleven labs testing with Doc's
+    # voice"), and flagged to him in that turn rather than passing unannounced —
+    # widening a security gate is not a silent act.
+    #
+    # SCOPE, stated because an allowlist entry is a standing permission: this is
+    # the API host for voice creation and text-to-speech renders of a voice we
+    # designed. Doc has no real-person referent (voice doctrine section 3), so
+    # nothing here is a person's voice. Audio uploaded is synthetic Doc, raw and
+    # pre-mastering by design. NOTE FOR ANY FUTURE READER: the same doctrine
+    # section warns ElevenLabs retains a perpetual licence over the underlying
+    # voice model, so exclusivity of Doc as a brand asset is an OPEN question,
+    # not one this entry settles.
+    "api.elevenlabs.io", "elevenlabs.io",
     # x.com / twitter.com: X retrieval is standing doctrine (rule 57d13061,
     # Grok-first as of 2026-08-07) and Joe hands sessions x.com links directly.
     # The guard was blocking the Grok CLI invocation itself because the link
@@ -607,10 +628,46 @@ def in_safe_zone(cmd):
     return any(z in cmd for z in SAFE_ZONES)
 
 
+def raw_targets_carr(cmd):
+    """Recognize CARR path spellings without evaluating shell variables."""
+    if not isinstance(cmd, str):
+        return False
+    markers = (
+        r"(?:^|[^\w])~/carr-system(?:/|\b)",
+        r"\$(?:\{HOME\}|HOME)/carr-system(?:/|\b)",
+        r"/Users/[^/]+/carr-system(?:/|\b)",
+        r"(?:CloudStorage/GoogleDrive-[^/]+/)?My\\? Drive/CARR\\? AI(?:/|\b)",
+        r"/CARR\\? AI(?:/|\b)",
+    )
+    return any(re.search(marker, cmd) for marker in markers)
+
+
+def delegation_control_plane_write(cmd):
+    """Block ordinary shell tampering with the delegation gate's mutable state.
+
+    The hook itself updates this state by direct atomic filesystem calls, not by
+    issuing a harness Bash tool call, so this does not interfere with normal
+    state transitions.  A model-issued shell command, however, must never edit
+    the latch/control files to release its own task.
+    """
+    names = (DELEGATION_STATE, DELEGATION_LOCK, "delegation-gate-state.json",
+             ".delegation-gate-")
+    if not any(name in cmd for name in names):
+        return None
+    write_shape = re.compile(r"(>>?|\btee\b|\bsed\s+-i\b|\btruncate\b|\brm\b|\bmv\b|\bcp\b|\bchmod\b|\bchflags\b|open\([^\n]+['\"][wa])", re.I)
+    if write_shape.search(cmd):
+        return "delegation control-plane state write — blocked by the CARR guard"
+    return None
+
+
 def check(cmd):
     """Return a reason string to block, or None to allow."""
     if cmd.strip() in ALLOW_EXACT:
         return None
+
+    reason = delegation_control_plane_write(cmd)
+    if reason:
+        return reason
 
     for pat, label in RULES:
         if pat.search(cmd):
@@ -688,9 +745,34 @@ def main():
                 log(f"ALLOW(open-read) {host} :: {url[:200]}")
             sys.exit(0)
 
+        # Codex routes its local shell through functions.exec. Normalise the
+        # name so this remains one command policy across both runtimes.
+        if tool == "functions.exec":
+            # The native Bash guard pre-dates Codex and is intentionally global.
+            # This new Codex alias is CARR-only so it cannot change Life AI or
+            # another repository's workflow merely because they share Codex.
+            cwd = payload.get("cwd") or ""
+            try:
+                real_cwd = os.path.realpath(os.path.expanduser(cwd))
+            except Exception:
+                real_cwd = ""
+            if not (real_cwd == REPO or real_cwd.startswith(REPO + os.sep)
+                    or "/CARR AI" in real_cwd):
+                # A task rooted elsewhere can still target CARR by absolute
+                # path.  Scope by the target too, otherwise a non-CARR cwd is
+                # an accidental bypass for the very files this guard protects.
+                raw = ti if isinstance(ti, str) else ""
+                if REPO not in raw and not raw_targets_carr(raw):
+                    sys.exit(0)
+            tool = "Bash"
         if tool != "Bash":
             sys.exit(0)
-        cmd = ti.get("command", "") if isinstance(ti, dict) else ""
+        # Codex's local-function tool passes freeform JavaScript as a string;
+        # its embedded exec_command({cmd: ...}) must receive the same command
+        # inspection as a native Bash call. A dict remains the Claude shape.
+        cmd = ti.get("command", "") if isinstance(ti, dict) else ti
+        if not isinstance(cmd, str):
+            cmd = ""
         if not cmd:
             sys.exit(0)
 
