@@ -90,7 +90,7 @@ DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from conduct_patterns import (  # noqa: E402
     OFFLOAD, SOFT_WAIT, FENCE, BARE_FENCE_CMD, HANDOFF_PROSE,
-    HUMAN_WANTS_COMMAND, HUMAN_WANTS_CHOICE, PROTECTED,
+    HUMAN_WANTS_COMMAND, HUMAN_WANTS_CHOICE, PROTECTED, bare_id_hits,
 )
 
 
@@ -209,6 +209,12 @@ def scan(assistant, human_last):
             if pat.search(prose):
                 findings.append(("soft_wait", name))
 
+    # (4) BARE ID — scanned on PROSE ONLY, so fenced code, quoted tool output
+    # and command examples never trip it. Joe asked for this after being handed
+    # "A17" with no idea what it was.
+    for name, ident in bare_id_hits(prose):
+        findings.append(("bare_id", f"{name}:{ident}"))
+
     return (len(findings) > 0), findings
 
 
@@ -236,6 +242,18 @@ REMEDY = {
         "confident, the required move is to RESEARCH until you are: read the code, "
         "run the query, test the surface, convene the council. Decide it, do it, "
         "then tell him in one line what you did and why."
+    ),
+    "bare_id": (
+        "BARE ID. You put an identifier in front of Joe with nothing saying what "
+        "it is. His words: \"you name A17 and i have no idea what it even is. its "
+        "unnecesarily confusing and vague.\" The ids exist so a rule can be "
+        "reworded without breaking references — a machine's reason, not his. "
+        "SAY WHAT THE THING DOES, in ordinary language. Not \"per rule aa411351\" "
+        "but \"the rule that says Joe decides client-facing calls and the system "
+        "decides internal ones\". Not \"A17 is open\" but \"Dell still has to "
+        "acknowledge the doctrine store is live\". If he genuinely needs the id "
+        "to run a verb, give the plain name FIRST and the id in parentheses "
+        "after — never the id alone, never the id first."
     ),
     "soft_wait": (
         "SOFT WAIT (rules 14e0408b + aa411351). You parked the turn on Joe without "

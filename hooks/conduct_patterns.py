@@ -50,6 +50,59 @@ SOFT_WAIT = [
     ("parked_pending", re.compile(r"\bpark(ed|ing)?\b[^.]{0,40}\b(you|your|joe)\b", re.I)),
 ]
 
+# (4) BARE ID — an identifier put in front of a human with nothing saying what
+# it is. Joe, 2026-08-09: "you name A17 and i have no idea what it even is. its
+# unnecesarily confusing and vague", then: "make a hook that any time you
+# reference a rule, hook, id number, or any type of ID in the system - you must
+# list what it does."
+#
+# The ids exist so a rule can be reworded without breaking references to it — a
+# real reason, and entirely a MACHINE's reason. A partner reading "rule 9530fb1c
+# binds here" has been handed a lookup task instead of a sentence.
+#
+# THE TEST IS PROXIMITY, NOT PRESENCE, and that distinction is the design.
+# Citing an id is fine when the sentence already says what the thing does; the
+# NAKED id is the failure. Each match is checked for explanatory language within
+# ~90 characters either side:
+#     PASSES  "the audience gate — Joe decides client-facing, the system decides
+#              internal (aa411351)"
+#     CAUGHT  "per rule aa411351" · "A17 is still open" · "see decision ceb792f2"
+# A presence-only check would ban ids outright, breaking the case where Joe
+# genuinely needs one to run a verb.
+BARE_ID = [
+    ("rule_id",    re.compile(r"\b(?:rule|decision|ruling)\s+[`']?([0-9a-f]{8})\b", re.I)),
+    ("hex_alone",  re.compile(r"(?<![0-9a-fA-F-])\b[0-9a-f]{8}\b(?![0-9a-fA-F-])")),
+    ("action_num", re.compile(r"\bA\d{1,3}\b")),
+    ("loop_num",   re.compile(r"\bloop\s*#?\d{2,4}\b", re.I)),
+    ("uuid",       re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)),
+]
+
+# Language showing the id is EXPLAINED rather than merely cited. Kept broad on
+# purpose: a false ALLOW costs one slightly opaque sentence, a false BLOCK stops
+# the session mid-report over punctuation.
+# DELIBERATELY NARROW. The first version included \bis\b, \bwhich\b and a bare
+# colon, and the fixtures caught it immediately: "A17 IS still open" and "this
+# IS required by rule aa411351" both counted as explanations, so the two worst
+# cases sailed through. Generic connectives are not explanation. Only phrasing
+# that actually introduces a description qualifies.
+ID_EXPLAINED = re.compile(
+    r"(the rule that|the ruling that|the one that|the item (numbered|called)"
+    r"|which says|that says|\bsays\b|\bmeaning\b|i\.e\.|that is,"
+    r"|\bcovers\b|\bbinds\b|\brequires\b|\bmeans\b|\btracking\b|\bthe loop\b"
+    r"|—|–)", re.I)
+
+
+def bare_id_hits(text):
+    """[(pattern_name, matched_id)] for identifiers with no explanation nearby."""
+    hits = []
+    for name, pat in BARE_ID:
+        for m in pat.finditer(text):
+            lo = max(0, m.start() - 90)
+            if not ID_EXPLAINED.search(text[lo:m.end() + 90]):
+                hits.append((name, m.group(0)))
+    return hits
+
+
 # (2) Command handoff — the e313a3ca failure, in every costume the council named.
 FENCE = re.compile(r"```[ \t]*(bash|sh|zsh|shell|console|terminal|command)\b", re.I)
 # A fenced block whose first token is a command the session already holds.
