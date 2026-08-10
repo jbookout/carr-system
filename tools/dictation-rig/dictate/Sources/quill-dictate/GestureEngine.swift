@@ -26,6 +26,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import QuillActivity
 
 protocol GestureDelegate: AnyObject {
     func gestureCaptureStarted(kind: GestureEngine.CaptureKind)
@@ -83,15 +84,18 @@ final class GestureEngine {
     /// so utterances cannot interleave out of order.
     var busy = false
 
-    /// Monotonically increasing count of REAL (non-synthetic) keyDown events
-    /// this engine has observed. FIX 3 (2026-08-08 live failure round): App
-    /// snapshots this at gestureCaptureEnded, before dispatching the final
-    /// transcription to workQueue, then compares again right before the
-    /// result would land in the field — if Joe typed for real in between, a
-    /// late final pass is stale and must not overwrite what he already
-    /// typed. Incremented inline in the tap callback (O(1), no allocation),
-    /// so this never adds latency to the live tick path.
-    private(set) var userKeystrokes = 0
+    /// Journal of reversible edits made after trigger release while the
+    /// accurate final pass is still in flight. The old implementation kept
+    /// only a key count and discarded every final after any keyDown. This
+    /// records plain appended text so App can preserve it around the final,
+    /// while marking cursor/focus-changing activity unsafe.
+    private struct PendingPostRelease {
+        let token: Int
+        let bundleId: String?
+        var activity = PostReleaseActivity()
+    }
+    private var nextPostReleaseToken = 0
+    private var pendingPostRelease: PendingPostRelease?
 
 
     init(config: Config) {
@@ -102,7 +106,10 @@ final class GestureEngine {
         let mask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.keyUp.rawValue) |
-            (1 << CGEventType.flagsChanged.rawValue)
+            (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.rightMouseDown.rawValue) |
+            (1 << CGEventType.otherMouseDown.rawValue)
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
@@ -132,6 +139,10 @@ final class GestureEngine {
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            // Input may have landed while the tap was disabled, outside our
+            // journal. Re-enable it, but never pretend the current caret is
+            // still safe for a final rewrite.
+            mutatePendingPostRelease { $0.markUnsafe("event tap disabled") }
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             Log.shared.line("WARN event tap re-enabled after \(type == .tapDisabledByTimeout ? "timeout" : "user input")")
             return Unmanaged.passUnretained(event)
@@ -144,11 +155,20 @@ final class GestureEngine {
             return Unmanaged.passUnretained(event)
         }
 
-        // FIX 3: count every REAL keyDown Joe produces, trigger chords and
-        // ordinary typing alike — App only needs to know SOMETHING was
-        // typed, not what.
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            mutatePendingPostRelease { $0.markUnsafe("mouse click") }
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Preserve ordinary text appended while the final pass runs. The
+        // journal classifies shortcuts/navigation as unsafe; synthetic
+        // Quill events were returned above and never enter it.
         if type == .keyDown {
-            userKeystrokes += 1
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            let text = GestureEngine.unicodeText(from: event)
+            mutatePendingPostRelease {
+                $0.recordKey(keyCode: keyCode, flags: event.flags, text: text)
+            }
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
@@ -233,6 +253,60 @@ final class GestureEngine {
         }
 
         return Unmanaged.passUnretained(event)
+    }
+
+    // MARK: - Post-release activity journal
+
+    /// Begin tracking immediately at trigger release, before final work is
+    /// dispatched. Only one transcription may be in flight (`busy`), but a
+    /// token also prevents a stale callback consuming a newer journal.
+    func beginPostReleaseTracking() -> Int {
+        nextPostReleaseToken += 1
+        pendingPostRelease = PendingPostRelease(
+            token: nextPostReleaseToken,
+            bundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        )
+        return nextPostReleaseToken
+    }
+
+    /// Finish and consume the journal. App identity is checked here as a
+    /// second focus guard: a keyboard-driven app switch is already unsafe,
+    /// but this also catches focus changes Quill did not originate.
+    func finishPostReleaseTracking(token: Int) -> PostReleaseActivity {
+        guard let pending = pendingPostRelease, pending.token == token else {
+            var stale = PostReleaseActivity()
+            stale.markUnsafe("stale post-release journal")
+            return stale
+        }
+        pendingPostRelease = nil
+        var activity = pending.activity
+        let currentBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        guard let startedBundle = pending.bundleId,
+              let currentBundle, startedBundle == currentBundle else {
+            activity.markUnsafe("frontmost app changed")
+            return activity
+        }
+        return activity
+    }
+
+    private func mutatePendingPostRelease(_ mutation: (inout PostReleaseActivity) -> Void) {
+        guard var pending = pendingPostRelease else { return }
+        mutation(&pending.activity)
+        pendingPostRelease = pending
+    }
+
+    private static func unicodeText(from event: CGEvent) -> String {
+        var actualLength = 0
+        var buffer = [UniChar](repeating: 0, count: 32)
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            event.keyboardGetUnicodeString(
+                maxStringLength: pointer.count,
+                actualStringLength: &actualLength,
+                unicodeString: pointer.baseAddress
+            )
+        }
+        guard actualLength > 0, actualLength <= buffer.count else { return "" }
+        return String(utf16CodeUnits: buffer, count: min(actualLength, buffer.count))
     }
 
     // MARK: - Trigger (right-cmd) grammar

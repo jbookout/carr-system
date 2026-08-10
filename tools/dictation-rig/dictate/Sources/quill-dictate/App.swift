@@ -8,6 +8,7 @@
 import AppKit
 import AVFoundation
 import Foundation
+import QuillActivity
 
 final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
     private var config = Config.load()
@@ -188,11 +189,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
         gestures.busy = true
         let transcriber = Transcriber(config: config, finalServer: finalServer)
         let inserter = Inserter(config: config)
-        // FIX 3 (2026-08-08 live failure round): snapshot BEFORE dispatching
-        // to workQueue — this is "how many real keystrokes had landed as of
-        // the moment the trigger key was released," the baseline the final
-        // insert compares itself against down below.
-        let keystrokesAtRelease = gestures.userKeystrokes
+        // Start before dispatch so keys typed immediately after trigger
+        // release are captured. The journal preserves ordinary appended
+        // text and marks focus/caret-changing activity unsafe.
+        let postReleaseToken = gestures.beginPostReleaseTracking()
         workQueue.async { [weak self] in
             defer {
                 DispatchQueue.main.async {
@@ -209,8 +209,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                 guard !text.isEmpty else {
                     Log.shared.line("INFO whisper heard nothing (\(elapsed)s)")
                     DispatchQueue.main.async {
-                        self?.liveTyper.retractAll()
-                        self?.cue(self?.config.soundGated ?? "Bottle")
+                        guard let self else { return }
+                        let activity = self.gestures.finishPostReleaseTracking(token: postReleaseToken)
+                        if activity.isSafe {
+                            self.liveTyper.retractAll(preservingAppended: activity.appendedText)
+                        } else {
+                            Log.shared.line("INFO empty final left live text untouched (\(activity.unsafeReason ?? "unsafe activity"))")
+                            self.lastInsert = nil
+                        }
+                        self.cue(self.config.soundGated)
                     }
                     return
                 }
@@ -228,7 +235,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                 let interpreted = LiveTyper.interpretFinal(text)
                 if interpreted.scratchPrevious {
                     Log.shared.line("INFO scratch-that command received (\(elapsed)s)")
-                    DispatchQueue.main.async { self?.handleCrossUtteranceScratch() }
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        let activity = self.gestures.finishPostReleaseTracking(token: postReleaseToken)
+                        guard activity.isSafe, activity.appendedText.isEmpty else {
+                            Log.shared.line("INFO scratch-that skipped after post-release activity — field left untouched")
+                            self.lastInsert = nil
+                            return
+                        }
+                        self.liveTyper.retractAll()
+                        self.handleCrossUtteranceScratch()
+                    }
                     return
                 }
 
@@ -246,18 +263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                 DispatchQueue.main.async {
                     guard let self else { return }
 
-                    // FIX 3 (2026-08-08 live failure round): if Joe has
-                    // typed for real since the trigger key was released, the
-                    // final pass arrived too late to trust — the caret may
-                    // have moved, and finalizing/pasting now would splice
-                    // stale or duplicated text into wherever it sits now.
-                    // The live-typed text (if any) stands untouched;
-                    // retractAll must NOT run here — there is nothing wrong
-                    // with what's already in the field.
-                    let keystrokesSince = self.gestures.userKeystrokes - keystrokesAtRelease
-                    guard keystrokesSince == 0 else {
-                        Log.shared.line("INSERT skipped (\(keystrokesSince) user keystrokes since release) — live text stands")
-                        self.recordLastInsert(self.liveTyper.typed)
+                    let activity = self.gestures.finishPostReleaseTracking(token: postReleaseToken)
+                    guard activity.isSafe else {
+                        Log.shared.line("INSERT skipped after \(activity.keyDowns) user keystrokes (\(activity.unsafeReason ?? "unsafe activity")) — field left untouched")
+                        // The current caret is no longer known to sit directly
+                        // after the dictation, so cross-utterance scratch is
+                        // unsafe too.
+                        self.lastInsert = nil
                         return
                     }
 
@@ -271,11 +283,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                     // always inserts, regardless of elapsed time.
                     if self.config.previewStyle == "inline", !self.liveTyper.typed.isEmpty, elapsedSeconds > 10.0 {
                         Log.shared.line("INSERT slow final (\(elapsed)s) — live text stands")
-                        self.recordLastInsert(self.liveTyper.typed)
+                        if activity.appendedText.isEmpty {
+                            self.recordLastInsert(self.liveTyper.typed)
+                        } else {
+                            self.lastInsert = nil
+                        }
                         return
                     }
 
-                    if self.config.previewStyle == "inline", !self.liveTyper.typed.isEmpty {
+                    if !activity.appendedText.isEmpty,
+                       self.config.previewStyle == "inline", !self.liveTyper.typed.isEmpty {
+                        // Plain text was appended at the same caret while the
+                        // final ran. Adopt it into LiveTyper's logical state,
+                        // revise the dictation, then replay the suffix.
+                        self.liveTyper.finalize(with: kept, preservingAppended: activity.appendedText)
+                        Log.shared.line("INSERT preserved \(activity.appendedText.count) user-typed chars after final")
+                        // The dictated text is now before a user-owned suffix,
+                        // so a later blind backspace-based scratch cannot
+                        // safely target it.
+                        self.lastInsert = nil
+                    } else if !activity.appendedText.isEmpty {
+                        // Without inline preview text there is no field anchor
+                        // proving where the dictation belongs. Keep the user's
+                        // suffix and retain the original stale-result safety.
+                        Log.shared.line("INSERT skipped after \(activity.keyDowns) appended keystrokes (no inline anchor) — field left untouched")
+                        self.lastInsert = nil
+                        return
+                    } else if self.config.previewStyle == "inline", !self.liveTyper.typed.isEmpty {
                         // Something was already live-typed this capture —
                         // reconcile it against the more-accurate final pass
                         // instead of pasting a duplicate on top of it.
@@ -288,13 +322,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, GestureDelegate {
                         self.liveTyper.retractAll() // no-op unless style is inline and something partial slipped through
                         inserter.insert(kept)
                     }
-                    self.recordLastInsert(kept)
+                    if activity.appendedText.isEmpty {
+                        self.recordLastInsert(kept)
+                    }
                 }
             } catch {
                 Log.shared.line("ERROR transcription failed: \(error)")
                 DispatchQueue.main.async {
-                    self?.liveTyper.retractAll()
-                    self?.cue(self?.config.soundError ?? "Basso")
+                    guard let self else { return }
+                    let activity = self.gestures.finishPostReleaseTracking(token: postReleaseToken)
+                    if activity.isSafe {
+                        self.liveTyper.retractAll(preservingAppended: activity.appendedText)
+                    } else {
+                        Log.shared.line("INFO failed final left live text untouched (\(activity.unsafeReason ?? "unsafe activity"))")
+                        self.lastInsert = nil
+                    }
+                    self.cue(self.config.soundError)
                 }
             }
         }

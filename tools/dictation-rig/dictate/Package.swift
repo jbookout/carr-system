@@ -10,9 +10,22 @@ let package = Package(
     name: "quill-dictate",
     platforms: [.macOS(.v14)],
     targets: [
+        .target(
+            name: "QuillActivity",
+            path: "Sources/QuillActivity"
+        ),
         .executableTarget(
             name: "quill-dictate",
+            dependencies: ["QuillActivity"],
             path: "Sources/quill-dictate"
+        ),
+        // This Mac's standalone CommandLineTools image does not ship XCTest
+        // or Swift Testing. Keep the regression suite as a tiny executable
+        // check so it runs in the same environment as the production build.
+        .executableTarget(
+            name: "quill-activity-check",
+            dependencies: ["QuillActivity"],
+            path: "Checks/quill-activity-check"
         )
     ]
 )

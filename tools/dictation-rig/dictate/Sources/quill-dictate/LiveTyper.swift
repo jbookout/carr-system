@@ -77,11 +77,13 @@ final class LiveTyper {
     }
 
     /// Called when the final (large-v3-turbo) pass returns: revise the
-    /// field to hold exactly `finalText`, then clear state for the next
-    /// capture. Same diff-and-fix as apply(hypothesis:) — the final text is
-    /// just one more, more-accurate hypothesis.
-    func finalize(with finalText: String) {
-        apply(hypothesis: finalText)
+    /// field to hold `finalText` followed by any plain text the user appended
+    /// after releasing the trigger, then clear state for the next capture.
+    /// Treating that suffix as part of our current logical text lets the
+    /// normal diff retract and replay it without losing the user's typing.
+    func finalize(with finalText: String, preservingAppended appendedText: String = "") {
+        typed.append(appendedText)
+        apply(hypothesis: finalText + appendedText)
         typed = ""
     }
 
@@ -91,6 +93,15 @@ final class LiveTyper {
     func retractAll() {
         guard !typed.isEmpty else { return }
         postBackspaces(typed.count)
+        typed = ""
+    }
+
+    /// Remove this capture's preview while preserving plain text appended
+    /// after trigger release. Used when the final pass is empty or fails;
+    /// the old bare retractAll() would backspace the user's new suffix first.
+    func retractAll(preservingAppended appendedText: String) {
+        typed.append(appendedText)
+        apply(hypothesis: appendedText)
         typed = ""
     }
 

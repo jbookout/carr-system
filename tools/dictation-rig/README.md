@@ -50,14 +50,15 @@ live-corrected 2026-08-07):
   any other key pressed during a hold aborts capture into an ordinary
   shortcut. Normal typing and left-hand shortcuts are untouched.
 
-While a capture is held, a **live preview panel** shows words as they are
-heard (resident whisper-server on small.en, ~1s cadence), anchored at the
-text caret of the focused app — or at the focused element's frame when the
-app reports no usable caret (Electron apps report degenerate bounds; the
-locator flips their AX tree on via AXManualAccessibility first). The final
-insert always comes from the full-accuracy large-v3-turbo pass; the preview
-is strictly additive and any preview failure is silent. Tune or disable via
-`live_preview`, `preview_interval_ms`, `preview_window_seconds` in config.
+While a capture is held, the default **inline live preview** types words into
+the focused field (resident whisper-server on small.en, ~1s cadence). The
+final insert always comes from the full-accuracy large-v3-turbo pass. If Joe
+keeps typing while that pass finishes, Quill preserves plain appended text
+and replays it after the corrected dictation; mouse clicks, app changes,
+shortcuts, and navigation keys still block the rewrite so a stale caret is
+never trusted. A panel style remains available for apps that prefer it; tune
+or disable preview via `preview_style`, `preview_interval_ms`, and
+`preview_window_seconds` in config.
 
 Trigger keys live in `~/.config/quill-dictate/config.json`
 (`trigger_key_codes`, a list — one entry per keyboard; a future keyboard is a
