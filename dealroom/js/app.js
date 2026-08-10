@@ -490,6 +490,15 @@ function wireEvents() {
   $('#agendaEnd').onclick = () => finishAgenda('completed');
   $('#agendaClose').onclick = () => finishAgenda('abandoned');
   $('#themeButton').onclick = () => { document.body.classList.toggle('night'); localStorage.setItem('dealroom-theme',document.body.classList.contains('night')?'night':'light'); };
+  $('#colorAssistButton').onclick = () => {
+    const enabled = !document.body.classList.contains('color-assist');
+    document.body.classList.toggle('color-assist', enabled);
+    const button = $('#colorAssistButton');
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', `${enabled ? 'Turn off' : 'Turn on'} color-blind-friendly view`);
+    localStorage.setItem('dealroom-color-assist', enabled ? 'on' : 'off');
+    showToast(enabled ? 'Color-friendly view on · patterns and labels supplement color' : 'Color-friendly view off');
+  };
   window.addEventListener('online', () => { $('#offlineBanner').hidden=true; setSync(true); pollOnce(); });
   window.addEventListener('offline', () => { $('#offlineBanner').hidden=false; setSync(false,'Offline'); });
   document.addEventListener('keydown', (event) => { if (event.key==='/' && !event.target.matches('input,textarea,select')) { event.preventDefault(); $('#search').focus(); } });
@@ -497,6 +506,11 @@ function wireEvents() {
 
 async function boot() {
   if (localStorage.getItem('dealroom-theme') === 'night') document.body.classList.add('night');
+  if (localStorage.getItem('dealroom-color-assist') === 'on') {
+    document.body.classList.add('color-assist');
+    $('#colorAssistButton').setAttribute('aria-pressed', 'true');
+    $('#colorAssistButton').setAttribute('aria-label', 'Turn off color-blind-friendly view');
+  }
   const params = new URLSearchParams(location.search);
   const requested = params.get('mode');
   const mode = requested === 'fixture' ? 'fixture' : requested === 'live' ? 'live'
