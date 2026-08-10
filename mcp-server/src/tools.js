@@ -3659,6 +3659,9 @@ export const TOOLS = {
       marker: { type: "string", enum: ["bell", "dated", "decision", "none"] },
       due_on: { type: "string", description: "YYYY-MM-DD" },
       drift_critical: { type: "boolean" },
+      blocker: { type: "string", enum: ["human_only","counterparty","ruling","external_event","other_lane","capability"],
+        description: "REVISE what the loop is waiting on. add-loop refuses a loop without a blocker, but until 2026-08-09 nothing could change one, so a blocker named on day one was permanent even after the real obstacle turned out to be different — found on loop #295, whose blocker read human_only until building it revealed the actual block was a missing corpus (other_lane). Changing this requires blocker_detail too: a reclassification with the old specifics attached is worse than the original, because it reads as current and is not." },
+      blocker_detail: { type: "string", description: "the SPECIFIC thing, restated for the new class: which person, which ruling, which date, which prerequisite. Required whenever blocker changes; may also be passed alone to sharpen the detail without reclassifying." },
       last_surfaced: { type: "string", description: "IDEA ROWS ONLY: stamp the idea bank's 'Last surfaced' column, YYYY-MM-DD. This is what the monthly resurface writes when a parked idea is presented and KEPT — the column its own rotation reads to pick the oldest ideas next month. Blank or '—' means never surfaced, so leaving it unwritten is not neutral: it keeps re-presenting the same rows." },
       section: { type: "string", enum: ["hot", "backlog", "open"], description: "move the row to this section of its file" } },
       required: ["idempotency_key"] },
@@ -3674,6 +3677,20 @@ export const TOOLS = {
       for (const f of ["title", "body", "owner", "unblocks", "source_note", "domain"])
         if (args[f] !== undefined) set(f, args[f]);
       if (args.drift_critical !== undefined) set("drift_critical", args.drift_critical === true);
+
+      // A blocker may be REVISED, because what a loop is waiting on is a finding
+      // and findings change. Reclassifying without restating the specifics is
+      // refused: a row reading `other_lane` above a detail that explains a
+      // `human_only` block is worse than the stale original, because it reads as
+      // current. Detail alone is allowed — sharpening the specifics under an
+      // unchanged class is exactly what a working loop should do.
+      if (args.blocker !== undefined) {
+        if (args.blocker_detail === undefined)
+          throw new ToolError({ error: "blocker_detail_required",
+            hint: "changing the blocker class means restating the specific thing it is now waiting on. Pass blocker_detail in the same call." });
+        set("blocker_class", args.blocker);
+      }
+      if (args.blocker_detail !== undefined) set("blocker_detail", args.blocker_detail);
 
       // 'Last surfaced' is an extra_cells key, not a column — the idea bank's two
       // bank-specific columns (Status, Last surfaced) ride in that jsonb because
