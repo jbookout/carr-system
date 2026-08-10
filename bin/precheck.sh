@@ -215,9 +215,9 @@ print -r -- "$VERDICT" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 print("  " + d.get("one_line",""))
-print(f"  actual_class={d.get(\"actual_class\",\"?\")} matches_claim={d.get(\"class_matches_claim\",\"?\")}")
-for f in d.get("findings",[]): print(f"  [{f.get(\"severity\",\"?\")}] {f.get(\"what\",\"\")} -> {f.get(\"fix\",\"\")}")
-for q in d.get("questions_for_joe",[]): print(f"  ASK JOE: {q}")
+print("  actual_class=" + str(d.get("actual_class","?")) + " matches_claim=" + str(d.get("class_matches_claim","?")))
+for f in d.get("findings",[]): print("  [" + str(f.get("severity","?")) + "] " + str(f.get("what","")) + " -> " + str(f.get("fix","")))
+for q in d.get("questions_for_joe",[]): print("  ASK JOE: " + str(q))
 '
 print -r -- "  logged independent_review -> $LEDGER   (NOT an approval)"
 

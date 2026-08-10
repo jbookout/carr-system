@@ -69,19 +69,30 @@ GROK_EFFORT="high"
 PRECHECK_MODEL="gpt-5.6-sol"
 PRECHECK_EFFORT="low"
 
+
+# STDIN MUST BE CLOSED, and this cost 45 minutes to find. `codex exec` reads
+# stdin IN ADDITION to its prompt argument. Launched from a script whose stdin
+# is an unclosed pipe, it prints "Reading additional input from stdin..." to
+# stderr and blocks FOREVER. Two precheck runs were killed at 33m57s and 10m27s
+# and diagnosed as "the model is slow at high effort" — it had not started
+# reasoning at all, and out.md was 0 bytes the whole time. `< /dev/null` on
+# every invocation. A hang that looks like latency is the worst kind, because
+# the obvious fix (lower the tier) changes nothing and appears to be worth
+# trying.
+
 # run_codex <brief> <out>          — council tier
 run_codex() {
   codex exec --sandbox read-only --skip-git-repo-check \
     -c model="\"${CODEX_MODEL}\"" \
     -c model_reasoning_effort="\"${CODEX_EFFORT}\"" \
-    "$(cat "$1")" > "$2" 2>"${2:r}.err"
+    "$(cat "$1")" < /dev/null > "$2" 2>"${2:r}.err"
 }
 
 # run_grok <brief> <out>           — council tier
 run_grok() {
   grok --sandbox read-only \
     --model "$GROK_MODEL" --reasoning-effort "$GROK_EFFORT" --print \
-    "$(cat "$1")" > "$2" 2>"${2:r}.err"
+    "$(cat "$1")" < /dev/null > "$2" 2>"${2:r}.err"
 }
 
 # run_precheck <brief> <out>       — triage tier, NOT the council tier
@@ -89,5 +100,5 @@ run_precheck() {
   codex exec --sandbox read-only --skip-git-repo-check \
     -c model="\"${PRECHECK_MODEL}\"" \
     -c model_reasoning_effort="\"${PRECHECK_EFFORT}\"" \
-    "$(cat "$1")" > "$2" 2>"${2:r}.err"
+    "$(cat "$1")" < /dev/null > "$2" 2>"${2:r}.err"
 }
