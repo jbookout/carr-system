@@ -528,6 +528,10 @@ except OSError as _exc:
 # ordinary here and must not nag; work still loose the next morning is the thing
 # actually worth seeing.
 _STALE_H = 12
+# Hours since the NEWEST loose file changed, past which nothing here can be
+# called in-flight. Two, not one: a session can legitimately think, research or
+# sit in a browser for a while between writes.
+_IDLE_H = 2
 try:
     _gs = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
                          capture_output=True, text=True, timeout=20)
@@ -554,18 +558,31 @@ try:
         else:
             _tracked.sort()
             _oldest_h = (time.time() - _tracked[0][0]) / 3600.0
+            # THE NEWEST file's age is the liveness signal, and the first version
+            # of this row did not have one. It reported anything under 12h as
+            # reading "like a live session rather than abandoned work" — an
+            # inference about a cause it could not observe, stated as fact. Joe
+            # caught it: the sessions were all idle, so a 7.6h file was abandoned
+            # exactly like the 13h ones. If even the NEWEST loose file has not
+            # been touched in hours, nobody is mid-edit on any of them, whatever
+            # the process list says.
+            _newest_h = (time.time() - _tracked[-1][0]) / 3600.0
             _names = ", ".join(p for _, p in _tracked[:3])
             _more = f" (+{len(_tracked) - 3} more)" if len(_tracked) > 3 else ""
-            if _oldest_h >= _STALE_H:
+            _why = ("past a night outside git" if _oldest_h >= _STALE_H
+                    else f"nothing here has been touched in {_newest_h:.1f}h, so none of it "
+                         f"is mid-edit")
+            if _oldest_h >= _STALE_H or _newest_h >= _IDLE_H:
                 print(f"  ⚠︎ {'uncommitted work':<22} {len(_tracked)} tracked file(s) loose, "
-                      f"oldest {_oldest_h:.0f}h — {_names}{_more}{_extra}  · past a night "
-                      f"outside git. Commit by NAMING PATHS (never -a, which sweeps another "
-                      f"writer), or say why it is deliberately held")
+                      f"oldest {_oldest_h:.0f}h / newest {_newest_h:.1f}h — {_names}{_more}"
+                      f"{_extra}  · {_why}. Commit by NAMING PATHS (never a sweep, which takes "
+                      f"another writer's files), or say why it is deliberately held")
                 rc = 1
             else:
                 print(f"  -- {'uncommitted work':<22} {len(_tracked)} tracked file(s) loose, "
-                      f"oldest {_oldest_h:.1f}h — {_names}{_more}{_extra}  · under {_STALE_H}h, "
-                      f"so this reads as a live session rather than abandoned work")
+                      f"oldest {_oldest_h:.1f}h / newest {_newest_h:.1f}h — {_names}{_more}"
+                      f"{_extra}  · under {_STALE_H}h and touched within {_IDLE_H}h, which is "
+                      f"consistent with work in progress")
 except Exception as _exc:
     print(f"  -- {'uncommitted work':<22} not checked ({_exc})")
 

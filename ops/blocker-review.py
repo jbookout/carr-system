@@ -78,30 +78,39 @@ def main() -> int:
 
     import psycopg
     today = date.today()
-    # GATE_LIVE: the day add-loop began refusing an open loop with no blocker.
-    # Rows older than this predate the control and carry none through no fault;
-    # rows NEWER than it with no blocker are a leak in the gate and are counted
-    # separately, because those two facts need different fixes and averaging
-    # them hides the defect.
-    GATE_LIVE = date(2026, 8, 9)
+    # GATE_LIVE is the INSTANT the Worker carrying the blocker gate reached
+    # production, not midnight of the day it shipped. That distinction is not
+    # pedantry: the first version of this script used the date, reported ten
+    # loops as gate bypasses, and every one of them was created before 22:20 on
+    # the day in question — the latest by ONE MINUTE. No add-loop call reaching
+    # the old Worker could have been asked for a blocker.
+    #
+    # migration 0083 already fixed this exact error for v_loop_no_blocker and
+    # wrote down why: "a flag that reports fourteen false positives on day one is
+    # a check that is chronically red, and a chronically red check detects
+    # nothing." This script repeated the mistake within a day of that migration
+    # landing, which is the argument for reading the instant from the view rather
+    # than restating it here — a second copy of a boundary is a second chance to
+    # get it wrong.
+    GATE_LIVE = datetime.fromisoformat("2026-08-09T22:20:28.647+00:00")
     cleared, human, unknown, unblockered, leaked = [], 0, 0, 0, []
 
     with psycopg.connect(url) as conn, conn.cursor() as cur:
         cur.execute("""
             select number, owner, domain, blocker_class, blocker_detail, due_on,
                    left(regexp_replace(coalesce(body, title, ''), '[[:space:]]+', ' ', 'g'), 120),
-                   created_at::date
+                   created_at::date, created_at
               from loop_item
              where status = 'open' and kind = 'open_loop'
              order by length(number), number""")
         rows = cur.fetchall()
 
-        for num, owner, domain, bclass, bdetail, due_on, gist, raised in rows:
+        for num, owner, domain, bclass, bdetail, due_on, gist, raised, created_at in rows:
             detail = bdetail or ""
 
             if not bclass:
                 unblockered += 1
-                if raised >= GATE_LIVE:
+                if created_at >= GATE_LIVE:
                     leaked.append((num, owner, gist))
                 continue
 
@@ -167,7 +176,7 @@ def main() -> int:
     print(f"  {unknown} name a blocker this cannot test from the record")
     print()
     if leaked:
-        print(f"⚠︎ THE GATE LEAKS: {len(leaked)} loop(s) raised on or after {GATE_LIVE}")
+        print(f"⚠︎ THE GATE LEAKS: {len(leaked)} loop(s) raised after the gate went live")
         print( "  carry no blocker, though add-loop refuses that. Something reaches")
         print( "  loop_item by another path — find it, or the pile keeps growing:")
         for num, owner, gist in leaked[:8]:
