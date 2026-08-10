@@ -75,6 +75,10 @@ LAUNCHD_REPO = os.path.join(REPO, "ops", "launchd")
 HOOKS_REPO = os.path.join(REPO, "ops", "config", "hooks.json")
 CODEX_HOOKS_SRC = os.path.join(HOME, ".codex", "hooks.json")
 CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
+CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
+CODEX_PERMISSIONS_REPO = os.path.join(REPO, "ops", "config", "codex-permissions.toml")
+CODEX_PERMISSIONS_BEGIN = "# >>> CARR managed permissions >>>"
+CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
 
 # Longest first: REPO and VAULT both sit under HOME, so substituting HOME first
 # would leave "{{HOME}}/carr-system" and the REPO token would never match.
@@ -280,6 +284,48 @@ def live_codex_hooks():
     return portable(raw)
 
 
+def codex_permissions_source():
+    """Return the canonical default line and managed TOML body, or None."""
+    raw = read(CODEX_PERMISSIONS_REPO)
+    if raw is None:
+        return None
+    lines = raw.splitlines()
+    if not lines or not re.fullmatch(r'default_permissions\s*=\s*"[^"]+"', lines[0]):
+        raise ValueError("Codex permissions source must begin with default_permissions")
+    return lines[0], "\n".join(lines[1:]).strip() + "\n"
+
+
+def live_codex_permissions():
+    """Render the CARR-owned portion of config.toml in canonical source form."""
+    raw = read(CODEX_CONFIG)
+    if raw is None:
+        return None
+    default = re.search(r'^default_permissions\s*=\s*"[^"]+"\s*$', raw, re.M)
+    marker = re.search(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n(.*?)'
+                       + re.escape(CODEX_PERMISSIONS_END), raw, re.S)
+    if not default or not marker:
+        return None
+    return default.group(0).strip() + "\n\n" + marker.group(1).strip() + "\n"
+
+
+def install_codex_permissions(raw, default_line, body):
+    """Replace only the managed CARR slice of Codex's user-owned config.toml."""
+    default_re = re.compile(r'^default_permissions\s*=\s*"[^"]+"\s*\n?', re.M)
+    if default_re.search(raw):
+        planned = default_re.sub(default_line + "\n", raw, count=1)
+    else:
+        first_table = re.search(r'^\[', raw, re.M)
+        at = first_table.start() if first_table else len(raw)
+        planned = raw[:at] + default_line + "\n" + raw[at:]
+
+    managed = CODEX_PERMISSIONS_BEGIN + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END
+    marker_re = re.compile(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n.*?'
+                           + re.escape(CODEX_PERMISSIONS_END), re.S)
+    if marker_re.search(planned):
+        return marker_re.sub(managed, planned, count=1)
+    return planned.rstrip() + "\n\n" + managed + "\n"
+
+
 def pairs():
     """(label, live_text, repo_path) for every tracked item. live_text is
     already portable; repo contents are compared verbatim against it."""
@@ -290,6 +336,8 @@ def pairs():
                 None if hooks is None else portable(json.dumps(hooks, indent=2) + "\n"),
                 HOOKS_REPO))
     out.append(("Codex hooks (hooks.json)", live_codex_hooks(), CODEX_HOOKS_REPO))
+    out.append(("Codex CARR permissions (config.toml)", live_codex_permissions(),
+                CODEX_PERMISSIONS_REPO))
 
     seen = set()
     for name in sorted(os.listdir(TASKS_SRC)) if os.path.isdir(TASKS_SRC) else []:
@@ -448,6 +496,27 @@ def cmd_install(apply):
     else:
         print("  Codex hooks: WILL BE REPLACED with the repo's version")
 
+    try:
+        permission_source = codex_permissions_source()
+    except Exception as exc:
+        print(f"ERROR: {CODEX_PERMISSIONS_REPO} is invalid ({exc}) — refusing to deploy it.")
+        return 1
+    if permission_source is None:
+        print(f"ERROR: no tracked Codex permissions at {CODEX_PERMISSIONS_REPO}. Run `pull` first.")
+        return 1
+    code_config = read(CODEX_CONFIG)
+    if code_config is None:
+        print(f"ERROR: no Codex config at {CODEX_CONFIG}")
+        return 1
+    permission_default, permission_body = permission_source
+    permission_config = install_codex_permissions(
+        code_config, concrete(permission_default), concrete(permission_body)
+    )
+    if permission_config == code_config:
+        print("  Codex CARR permissions already match the repo")
+    else:
+        print("  Codex CARR permissions: WILL MAKE THE CURRENT WORKSPACE READ-ONLY")
+
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
         if f in PRIMARY_ONLY and not IS_PRIMARY:
             print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
@@ -538,6 +607,17 @@ def cmd_install(apply):
             shutil.copy2(codex_backup, CODEX_HOOKS_SRC)
         print(f"ERROR: Codex hook write produced unparseable JSON ({exc}) — restored backup")
         return 1
+    code_config_backup = CODEX_CONFIG + ".bak-config-as-code"
+    shutil.copy2(CODEX_CONFIG, code_config_backup)
+    with open(CODEX_CONFIG, "w", encoding="utf-8") as fh:
+        fh.write(permission_config)
+    try:
+        import tomllib
+        tomllib.loads(read(CODEX_CONFIG))
+    except Exception as exc:
+        shutil.copy2(code_config_backup, CODEX_CONFIG)
+        print(f"ERROR: Codex config write produced invalid TOML ({exc}) — restored backup")
+        return 1
     # NO RESTART NEEDED, and the old message here said otherwise for months.
     # Live-tested 2026-08-09 with two independent confirmations: git-writer-gate
     # and gate-edit-gate were both installed MID-SESSION and both fired in a
@@ -548,7 +628,7 @@ def cmd_install(apply):
     # running five sessions. The opposite is true: an install takes effect
     # everywhere immediately. Rule 97326357 — a claim about a surface becomes
     # doctrine only after a live test from that surface.
-    print(f"\nWROTE OK (backups: {backup}, {codex_backup}). Claude Code reads its "
+    print(f"\nWROTE OK (backups: {backup}, {codex_backup}, {code_config_backup}). Claude Code reads its "
           f"hooks block per tool call; Codex must trust a changed non-managed hook "
           f"definition before it runs. Both clients are protected once their hook "
           f"configuration is active.")
