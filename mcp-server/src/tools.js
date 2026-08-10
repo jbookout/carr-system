@@ -894,6 +894,53 @@ const BLOCKER_CLASSES = Object.freeze([
 const VAGUE_BLOCKER_RE =
   /\b(?:later|someday|some day|eventually|when (?:there(?:'s| is) )?(?:more )?time|when time (?:permits|allows)|time permitting|revisit|circle back|down the (?:road|line)|at some point|in (?:the )?future|future session|next session|tbd|to be determined|n\/?a|low priority|nice to have|opportunistically|as time allows|no rush|whenever)\b/i;
 
+// ── THE OWNERSHIP GATE (Joe 2026-08-10) ────────────────────────────────────
+// Joe asked why the backlog never falls. The measured answer: intake is
+// autonomous and the drain is not. Audits, IT sweeps, council reviews and
+// research waves all OPEN loops on their own initiative — 34 of the 108 August
+// loops still open came straight out of one — while nothing CLOSES one unless a
+// human orders it. Stripping the purge Joe ordered on 2026-08-09 (68 closures
+// in a day, 48 inside one hour), the baseline was about 4 closures a day
+// against 21 opened.
+//
+// THE FIELD THAT ENFORCES THAT ASYMMETRY IS THIS ONE. 110 of the 150 open work
+// loops were owned jointly — "Joe/Claude", "Joe + Dell", "Joe→Dell" — and only
+// FOUR were owned by the system outright. Joint ownership reads as
+// collaboration and functions as ambiguity: a row owned by everyone is picked
+// up by no one, and the system is never licensed to close it alone. So the
+// backlog can only fall on a day Joe says so.
+//
+// A single owner is not bureaucracy, it is the precondition for an autonomous
+// drain. Of those 110 rows, 15 say in their own text that a human must act and
+// 25 name Dell — the other 75 carry no human signal at all and were only ever
+// waiting because nobody was unambiguously holding them.
+const LOOP_OWNERS = Object.freeze(["joe", "dell", "claude"]);
+
+// Any separator between two names is the ambiguity: slash, plus, arrow,
+// ampersand, comma, or the word "and". Matched on the raw string because that
+// is exactly how these rows were written by hand.
+const JOINT_OWNER_RE = /[\/+&,]|→|->|\band\b/i;
+
+function assertSingleOwner(owner) {
+  const raw = (owner || "").trim();
+  if (!raw) return null;                 // absent is allowed; ambiguous is not
+  if (JOINT_OWNER_RE.test(raw))
+    throw new ToolError({
+      error: "joint_ownership_refused",
+      got: raw,
+      owners: LOOP_OWNERS,
+      hint: "a loop owned by two people is owned by neither, and a jointly-owned loop can never be closed by the system on its own — which is why this backlog only falls when Joe orders a purge. Pick ONE: 'claude' if the system can finish it without a human, otherwise 'joe' or 'dell' — and then the row must name a blocker saying what it waits on.",
+    });
+  if (!LOOP_OWNERS.includes(raw.toLowerCase()))
+    throw new ToolError({
+      error: "unknown_owner",
+      got: raw,
+      owners: LOOP_OWNERS,
+      hint: "owner is a single actor, lowercase — the field decides who may act, so a free-text value means nobody can be selected for by a query",
+    });
+  return raw.toLowerCase();
+}
+
 // ---------- Deal Room helpers (field-base concurrency, not record version) ----------
 
 const DEAL_ROOM_FIELDS = Object.freeze(["phase", "owner", "attention", "next_date"]);
@@ -1551,6 +1598,7 @@ export const TOOLS = {
       status: { type: "string", enum: ["open", "done", "dropped", "any"], default: "open" },
       domain: { type: "string", description: "deals | prospecting | networking | marketing | business | system" },
       blocker: { type: "string", description: "a blocker class to filter to, or 'none' for rows naming no blocker, or 'any' for rows that name one" },
+      owner: { type: "string", description: "'claude' for the autonomous drain queue — rows the system may finish and close on its own evidence. 'joe' or 'dell' for a person's pile. 'joint' for the legacy rows owned by two people at once, which no query can select for and nobody picks up." },
       search: { type: "string", description: "case-insensitive match against the title" },
       limit: { type: "integer", default: 60 },
     } },
@@ -1563,6 +1611,8 @@ export const TOOLS = {
       if (args.blocker === "none") where.push("blocker_class is null");
       else if (args.blocker === "any") where.push("blocker_class is not null");
       else if (args.blocker) { params.push(args.blocker); where.push(`blocker_class = $${params.length}`); }
+      if (args.owner === "joint") where.push("owner ~ '[/+&,]|→|->'");
+      else if (args.owner) { params.push(args.owner); where.push(`lower(owner) = lower($${params.length})`); }
       if (args.search) {
         params.push(`%${args.search}%`);
         // Search BOTH columns. 148 of the 150 open work loops carry a null
@@ -1581,6 +1631,11 @@ export const TOOLS = {
                   nullif(title, ''),
                   nullif(regexp_replace(split_part(body, E'\\n', 1), '\\*\\*', '', 'g'), '')
                 ) as label,
+                -- Surfaced rather than silently tolerated: a row owned by two
+                -- people is owned by neither, and 110 of the 150 open work
+                -- loops were written that way. New writes are refused; these
+                -- are the legacy rows waiting to be split.
+                (owner ~ '[/+&,]|→|->') as joint_owner,
                 blocker_class, blocker_detail, since_text,
                 to_jsonb(due_on)#>>'{}' as due_on, version
            from loop_item
@@ -3840,6 +3895,12 @@ export const TOOLS = {
             hint: `"${vague[0]}" names a feeling about time, not a blocker. Say who or what has to happen first — and if nothing has to, do the work now instead of filing this.` });
       }
 
+      // ── THE OWNERSHIP GATE ──────────────────────────────────────────────
+      // Refuses a jointly-owned row at the moment it is filed. See LOOP_OWNERS
+      // above for why: joint ownership is what stops the system ever draining
+      // the backlog on its own initiative.
+      args.owner = assertSingleOwner(args.owner);
+
       const marker = args.marker || (args.due_on ? "dated" : "none");
       const literal = marker === "bell" ? "🔔"
         : marker === "decision" ? "❓"
@@ -3924,6 +3985,11 @@ export const TOOLS = {
       if (cur.status !== "open")
         throw new ToolError({ error: "loop_not_open", loop_id: cur.id, status: cur.status,
           hint: "a closed loop is history; open a new one rather than editing the record of what happened" });
+
+      // Ownership gate on the edit path too — otherwise the rule holds only for
+      // rows filed after it shipped, and a session that wants a joint owner
+      // just files clean and edits it back. See LOOP_OWNERS above.
+      if (args.owner !== undefined) args.owner = assertSingleOwner(args.owner);
 
       const sets = [], vals = [];
       const set = (col, v) => { vals.push(v); sets.push(`${col}=$${vals.length}`); };
