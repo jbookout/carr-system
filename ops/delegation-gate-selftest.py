@@ -62,6 +62,8 @@ def main():
         ("Agent spawn satisfies the tripwire", [user("audit this"), tool("Bash"), tool("Agent")], 0, REPO, False),
         ("visible inline executor satisfies ordinary tripwire", [user("audit this"), assistant_text("executor: T3-inline — because this is judgment verification"), tool("Bash")], 0, REPO, False),
         ("inline executor cannot override explicit delegation", [user("use the cheapest qualified model"), assistant_text("executor: T3-inline — because I prefer it"), tool("Bash")], 2, REPO, False),
+        ("delegation survives a later phase message", [user("delegate this to the cheapest qualified model"), tool("Agent"), user("I'm in Salesforce now"), tool("Bash")], 2, REPO, False),
+        ("visible completion releases the latch", [user("delegate this to the cheapest qualified model"), tool("Agent"), assistant_text("delegation complete: Salesforce extraction"), user("check one more thing"), tool("Bash"), assistant_text("executor: T3-inline — because this is one judgment verification")], 0, REPO, False),
         ("partner can explicitly revoke delegation", [user("do not delegate; keep this inline"), tool("Bash")], 0, REPO, False),
         ("subagent transcripts are exempt", [user("do the assigned sweep"), tool("Bash")], 0, REPO, True),
         ("non-CARR sessions are exempt", [user("audit this"), tool("Bash")], 0, "/private/tmp", False),

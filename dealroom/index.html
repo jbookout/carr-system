@@ -22,6 +22,7 @@
     <div class="top-actions">
       <span class="sync" id="syncStatus" role="status">Live</span>
       <span class="capture" id="captureStatus" hidden>Capture inactive</span>
+      <button type="button" class="call-mode-button" id="callModeButton" aria-haspopup="dialog" aria-label="Open Call Mode"><span aria-hidden="true">✦</span> Call Mode</button>
       <span class="avatar" id="selfAvatar" aria-label="Signed-in partner">?</span>
       <button type="button" class="icon-button" id="themeButton" aria-label="Toggle dark theme" title="Toggle dark theme">☾</button>
     </div>
@@ -40,6 +41,7 @@
       <div class="hero-actions">
         <button type="button" class="secondary" id="ownerButton" hidden>Change owner</button>
         <button type="button" class="secondary" id="addButton">Add deal</button>
+        <button type="button" class="secondary call-mode-hero" id="callModeHeroButton"><span aria-hidden="true">✦</span> Call Mode</button>
         <button type="button" class="primary" id="agendaButton">Start agenda</button>
       </div>
     </section>
@@ -109,6 +111,35 @@
 
   <dialog id="dealDialog" class="dialog deal-dialog">
     <article id="dealDetail"></article>
+  </dialog>
+
+  <dialog id="callModeDialog" class="dialog call-mode-dialog" aria-labelledby="callModeTitle">
+    <article>
+      <header>
+        <div><p class="eyebrow">Quill local recorder</p><h2 id="callModeTitle">Call Mode</h2></div>
+        <button type="button" class="icon-button" id="callModeClose" aria-label="Close Call Mode">×</button>
+      </header>
+      <div class="call-mode-stage" id="callModeStage">
+        <div class="recording-orb" aria-hidden="true">●</div>
+        <p class="call-mode-state" id="callModeState">Ready to record</p>
+        <time class="call-mode-timer" id="callModeTimer" aria-live="polite">Ready</time>
+        <p class="call-mode-detail" id="callModeDetail">Start a weekly deal call or another conversation. Quill keeps the local and other-side tracks separate.</p>
+        <p class="call-mode-speakers" id="callModeSpeakers" hidden></p>
+      </div>
+      <div class="call-mode-actions">
+        <label class="call-mode-consent" id="callModeConsentRow">
+          <input type="checkbox" id="callModeConsent">
+          <span>I have told everyone on this call that it will be recorded.</span>
+        </label>
+        <div class="call-mode-starts" id="callModeStarts">
+          <button type="button" class="primary" data-call-mode-start="weekly_deal_call">Start weekly deal call</button>
+          <button type="button" class="secondary" data-call-mode-start="other_call">Start another call</button>
+        </div>
+        <button type="button" class="danger" id="callModeStop" hidden>Stop and process</button>
+      </div>
+      <p class="call-mode-permission" id="callModePermission" hidden></p>
+      <footer class="call-mode-footer"><a href="http://127.0.0.1:4682/" target="_blank" rel="noopener" id="callModeStandalone">Open standalone local controller</a></footer>
+    </article>
   </dialog>
 
   <script type="module" src="js/app.js"></script>

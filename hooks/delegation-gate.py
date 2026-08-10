@@ -61,6 +61,7 @@ EXECUTOR = re.compile(
     r"(?im)^\s*executor:\s*(?:T3|top(?:\s+seat)?|Fable|Opus|inline)\b[^\n]{0,180}"
     r"(?:because|\u2014|--|:)\s*\S+"
 )
+COMPLETE = re.compile(r"(?im)^\s*delegation complete:\s*\S+")
 
 
 def now() -> str:
@@ -178,9 +179,10 @@ def main() -> int:
                 break
         if last_human_idx is None:
             return 0
+        # The partner's explicit no-delegation instruction controls this turn;
+        # it both releases any earlier latch and exempts the ordinary tripwire.
         if REVOKE.search(last_human):
             return 0
-
         window = recs[last_human_idx + 1:]
         used = [name for rec in window for name in tool_names(rec)]
         if any(name in AGENT_TOOLS for name in used):
@@ -194,7 +196,27 @@ def main() -> int:
             text for rec in window
             if (text := text_blocks(rec, ("assistant",)))
         )
-        sticky = bool(DELEGATE.search(last_human))
+        # TASK-STICKY MEANS ACROSS TURNS.  The first version looked only at the
+        # latest human message, which would have repeated the production bug:
+        # "delegate this" followed by "I'm in" erased the signal exactly when a
+        # newly available login opened the next mechanical phase.  Walk the
+        # transcript instead.  A later explicit revocation or a visible
+        # `delegation complete: <task>` line ends the latch; ordinary follow-up
+        # messages and compaction summaries do not.
+        last_delegate = -1
+        last_revoke = -1
+        last_complete = -1
+        for i, rec in enumerate(recs):
+            human = text_blocks(rec, ("user", "human"))
+            if human:
+                if DELEGATE.search(human):
+                    last_delegate = i
+                if REVOKE.search(human):
+                    last_revoke = i
+            assistant = text_blocks(rec, ("assistant",))
+            if assistant and COMPLETE.search(assistant):
+                last_complete = i
+        sticky = last_delegate > max(last_revoke, last_complete)
         if not sticky and EXECUTOR.search(assistant_text):
             return 0
 
