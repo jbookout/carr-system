@@ -56,11 +56,33 @@ frontmatter field and it denies spawning while leaving everything else inherited
 | `client-intake` | everything inherited | `Agent` | The verbs ARE the job. An intake that produces markdown and no records has stranded the interview. Verbs are inherited rather than named because the record-layer MCP server surfaces under an install-specific prefix, and a hardcoded allowlist would silently strip them on Dell's machine or after a reinstall. |
 | `benefit-summary` | everything inherited | `Agent` | Same reasoning. Also needs Bash for the node generator, the PDF render and `run.sh lint`, and Write for the terms JSON and the post-mortem file. |
 
-**The honest caveat on the two broad grants.** Inheriting everything also inherits connectors that
-can post and message. Those are held off by the human-gate rail in each file, not by frontmatter.
-Denying them by name is not portable while the MCP prefixes are install-specific UUIDs, and a
-mistyped entry in `disallowedTools` fails OPEN, which is the wrong failure direction. **This is the
-one item on the tier that wants Joe's ruling.**
+**The honest caveat on the two broad grants — RESOLVED 2026-08-10, loop #231, decision fb27a42d.**
+Inheriting everything also inherits connectors that can post and spend. They were held off by the
+human-gate rail in prose, not by frontmatter. That is now fixed, and the reasoning below corrects an
+error in the original paragraph rather than merely updating it.
+
+The original objection was that "a mistyped entry in `disallowedTools` fails OPEN, which is the wrong
+failure direction." True in isolation, and wrong as a reason to do nothing, because it compares
+against a perfect control rather than against the status quo. THE FAILURE DIRECTIONS ARE NOT
+SYMMETRIC:
+
+  * A wrong or absent UUID in `tools:` (an allowlist) SILENTLY STRIPS the record verbs. The agent
+    still launches — Claude Code only refuses to launch when NOTHING in the list resolves, and
+    `Read` always resolves — so an intake runs, interviews, and lands nothing. Broken, quietly.
+  * A wrong or absent UUID in `disallowedTools:` merely LAPSES back to the posture we already have.
+    Never worse than today, anywhere.
+
+So the denylist entries are free: strictly better on this machine, never worse on Dell's. Both files
+now deny the two connectors that can act on the outside world — Blotato
+(`mcp__3ccf6856-…`, which PUBLISHES) and Meta Ads (`mcp__52e52b1a-…`, which SPENDS). Gmail is
+deliberately left reachable: drafting to Joe's own address IS the sanctioned handover channel (rule
+9b081605), and one human still sends.
+
+Server-level patterns in frontmatter were confirmed against the primary source this day
+(code.claude.com/docs/en/sub-agents.md): both fields accept `mcp__<server>` and `mcp__<server>__*`,
+and `disallowedTools` additionally accepts `mcp__*` for every MCP server at once. What does NOT
+exist is a portable way to GRANT one server without naming it, which is why the allowlist conversion
+stays rejected and these two keep their broad grant.
 
 ### The five hard rails, present in full in all four files
 
@@ -108,5 +130,5 @@ findings; the session lands them with verbs. `client-intake` and `benefit-summar
 
 ## Flagged for Joe
 
-1. **The `disallowedTools` connector gap** described above. Whether to accept prose-only containment of the send-capable connectors on `client-intake` and `benefit-summary`, or to name and deny them by their current UUID prefixes and accept that the denial silently lapses on another machine.
+1. ~~**The `disallowedTools` connector gap**~~ **CLOSED 2026-08-10** (loop #231, decision fb27a42d) and it was never Joe's to rule: rule aa411351 names agent design and permissions as internal, decided and reported. Both connectors are now denied by server pattern; the failure-direction analysis is in the corrected caveat above. A denial that lapses on another machine is not a cost, because lapsing lands on exactly the posture that machine has today.
 2. **Three verbs exist in the code but are NOT exposed by the connector in this session:** `record-finding`, `reassign-deal` and `retire-rule` are all present in `~/carr-system/mcp-server/src/tools.js`, and none of the three appears in the live MCP tool list. `record-finding` is named in rail 4 as the landing path for OSINT results, so if the exposed build really is behind the repo, `client-intake` cannot land its research findings and will correctly stop rather than write them to markdown. Worth checking whether the running server needs a restart or a rebuild.

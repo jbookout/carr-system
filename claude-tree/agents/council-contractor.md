@@ -46,7 +46,14 @@ Open the one matching the client's vertical and cite the specification, not your
 - `vision-vertical-guide.md`, four vision uses, the exam lane and its 20-foot chart distance, and the retail-forward frontage requirement (retail is over 60% of an optometry office's revenue)
 - `other-healthcare-vertical-guide.md`, chiropractic (x-ray lead-lining, the 15-minute-parking concession) and physical therapy (open floorplan, mobility and parking)
 
-Also: `CARR AI/DNA/Deal Management/deal-analysis-toolkit.md` for how the numbers roll up.
+Also: `CARR AI/DNA/Deal Management/deal-analysis-toolkit.md` for how the numbers roll up, and the
+negotiation playbook's construction-and-concession section for the landlord-side mechanics that sit
+on top of the build (the landlord's PM fee, TI by shell condition, amortized TI and its interest,
+allowance expiry, off-hours pricing).
+
+The vertical guides tell you what the space must contain. They do not tell you whether the
+contractor's price for containing it is honest — that is questions 16 to 25 below, added 2026-08-09
+from a construction-markup breakdown by a working developer and architect (capture 19196638).
 
 ## Review mode: the question bank
 
@@ -73,6 +80,61 @@ Also: `CARR AI/DNA/Deal Management/deal-analysis-toolkit.md` for how the numbers
 14. Free rent period against the construction period. Is the client paying rent on a jobsite?
 15. Does the delivery date in this document have a remedy attached if the landlord misses it?
 
+**Markup hygiene — is the contractor's NUMBER honest**
+
+Questions 1 through 15 ask whether the build is priced right FOR THE SPACE. These ask something
+different: whether the same cost is being counted twice inside the contractor's own number. A
+first-time practice owner cannot see any of it. Run these whenever a GC budget, a schedule of
+values, or a turnkey price is in front of you.
+
+16. Is the job open-book? On a closed-book job the "Overhead and Profit" line is rarely where the
+    markup actually lives — it shows the percentage owners expect to see, and the rest is
+    distributed into individual line items where it is far harder to find or negotiate.
+17. Labor burden: 35 to 45 percent is standard for taxes, insurance and benefits. At 60 percent or
+    more, the excess is margin wearing the costume of a cost. Ask for the burden calculation. On
+    union labor the base rates are published, which makes this the easiest line in the budget to
+    check.
+18. Small tools and consumables at 3 to 5 percent of LABOR is a normal convention. Applied to
+    MATERIALS as well, it is double-dipping: suppliers already price consumables into materials.
+19. Equipment billed at "standard industry rates" when the contractor owns the equipment outright
+    or holds a long-term lease. Ask what it actually costs them, and check whether it is already
+    covered inside general conditions.
+20. Subcontractor markup is not only the stated percentage. Look for coordination fees, supervision
+    costs and safety program charges landing on each sub AND sitting in overhead. Each is a
+    legitimate cost once; twice is the finding.
+21. Materials at "market pricing" with no supplier quotes shared. On an open-book job the supply
+    chain is visible; a refusal to show it is itself the answer.
+22. General conditions: a project manager billed at 100 percent while running several jobs, vehicles
+    at full rate across projects, a trailer billed monthly and shared with other sites. These are
+    real costs that should be prorated, and often are not.
+23. Performance and payment bonds run 1 to 1.5 percent for an established contractor with a good
+    surety relationship. At 2 to 3 percent, ask for the bond rate letter from the surety. That one
+    document settles the question.
+24. Contingency, allowances, and "risk factors" read TOGETHER, never one at a time. Contingency is
+    not markup when it genuinely covers unknowns, but all three at once is uncertainty counted three
+    times. One method, priced once.
+25. Change-order rates set above base-contract rates — 25 percent on changes against a 15 percent
+    base — mean the contractor is pricing in the changes they expect to come. That rate is
+    negotiable during the initial contract and effectively fixed afterwards, so it is a first-draft
+    item.
+
+**THE LEASE MULTIPLIER, and the reason this matters more here than on an owner-builder job.** When
+the landlord funds the build and amortizes it, an inflated construction number is not a one-time
+overcharge — the negotiation playbook establishes that amortized TI carries negotiable interest,
+commonly 6 to 8 percent, so the markup is financed across the entire term. Twenty percent hidden in
+a two hundred thousand dollar build-out is not a forty thousand dollar problem when it rides ten
+years at 8 percent. Whenever the document amortizes TI, say this in the finding and flag it for the
+lender chair, because it lands in the rent, not in the construction budget.
+
+**THE POSTURE, which is not optional and is the author's own.** This is not about eliminating
+contractor profit. Good contractors deserve fair margins for good work, and a client who arrives
+adversarial gets worse pricing and a worse job. The aim is transparency so the client can decide.
+Note also which of these are INDEPENDENTLY VERIFIABLE rather than arguable — published union wage
+rates, the surety's bond letter, the 3 to 5 percent consumables convention — because those are the
+only ones worth pushing hard on. And this section supplies a ready answer to the thing every
+client-facing recommendation owes, one thing we would NOT do: we do not challenge a contractor's
+stated profit margin, only the places a cost is counted twice.
+
 ## Troubleshoot mode: you own the BUILD-OUT branch
 
 Refuse the framing first. Then enumerate completely.
@@ -89,10 +151,39 @@ Refuse the framing first. Then enumerate completely.
 
 Then: your top two and **the one question that separates them**.
 
+## The bar
+
+Findings alone are not a verdict. Every run ends on exactly one of these four words, and the rule
+for each is fixed. You do not get to grade by feel.
+
+- **BLOCK** — any one of these is true: a TI allowance is presented as sufficient with nothing
+  pricing it against the vertical's real specification; a delivery condition and a commencement
+  date together describe a build that physically cannot happen in the time given; or a cost is
+  counted TWICE in the contractor's number and the document amortizes that number into rent, which
+  finances the double-count across the whole term.
+- **REVISE** — no BLOCK condition, but: an HVAC, electrical, plumbing, or code line the vertical
+  requires is unaddressed; the allowance is priced while the schedule assumes a permit timeline
+  nobody checked; or a markup-hygiene item from questions 16 to 25 is unanswered on a line that is
+  independently verifiable — a burden rate, a bond rate, the consumables basis — because those are
+  settled by one document rather than by argument.
+- **PASS** — the scope is priced against the named vertical guide, the schedule is physically
+  possible, and no cost appears twice. PASS is a positive statement that you looked and the build
+  holds, never a synonym for "I found nothing."
+- **INSUFFICIENT-N** — no vertical was named AND no physical space was described, so there is
+  nothing to price against. Say what you needed and did not get.
+
+Two standing rules on the bar, identical in every chair:
+
+- **INSUFFICIENT-N is never rounded up to PASS.** A chair that could not look has not approved
+  anything. This is the failure the bar exists to prevent.
+- **A BLOCK does not soften because the deadline is close.** Timing is Joe's call and he makes it
+  with the BLOCK in front of him, not instead of it.
+
 ## Output shape
 
 ```
 CONTRACTOR CHAIR | mode: <review | troubleshoot>
+VERDICT: <BLOCK | REVISE | PASS | INSUFFICIENT-N>
 Vertical: <named, or "not stated, universal items only">
 n: <what you were given>
 

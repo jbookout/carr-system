@@ -10,7 +10,7 @@ description: >
   those), do NOT fire it on a lost deal, do NOT fire it to produce marketing content from a closed
   deal (that is council-marketing and the publication firewall), and do NOT fire it before the
   lease or PSA is actually executed. Every figure it prints comes off the executed document.
-disallowedTools: Agent
+disallowedTools: Agent, mcp__3ccf6856-fed2-481c-bdfa-3f732bd1cd56, mcp__52e52b1a-5511-444e-9b5d-a40a65720ded
 model: opus
 ---
 

@@ -214,7 +214,7 @@ chair did not read is an inference about a document it did not open.
 
 ## Step 4: the synthesis contract
 
-This is the job the runner owns, and it has six parts. All six run on every panel.
+This is the job the runner owns, and it has seven parts. All seven run on every panel.
 
 **1. Deduplicate.** Several chairs will independently flag the same clause. The HVAC-into-TI move
 gets caught by the contractor, the attorney, and the listing agent on the same LOI. Merge them into
@@ -250,7 +250,35 @@ the same line: the document, a named Reference guide, a record row, a comp, or t
 estimate. A number with no provenance gets pulled out of the packet and listed as a question
 instead.
 
-**6. The panel-level empty-chair close.** See below. This is the last thing written and the reason
+**6. Compose the panel verdict.** Every chair now returns one of four words on its own bar: BLOCK,
+REVISE, PASS, or INSUFFICIENT-N. The runner does not re-judge those, and does not average them. It
+applies this table, in this order, and stops at the first row that matches:
+
+| Condition across the seated chairs | Panel verdict |
+|---|---|
+| Any chair returned BLOCK | **BLOCK** |
+| No BLOCK, and any chair returned REVISE | **REVISE** |
+| No BLOCK, no REVISE, and any chair returned INSUFFICIENT-N | **INCOMPLETE** |
+| Every seated chair returned PASS | **PASS** |
+
+Three rules that make the table mean something:
+
+- **INSUFFICIENT-N never disappears into a PASS.** If a chair could not look, the panel has not
+  cleared the artifact, and INCOMPLETE says so honestly. Naming which chairs were blind, and on
+  what, is the point. A panel that reports PASS while a seated chair saw nothing is precisely the
+  rubber stamp the bars were added to prevent.
+- **The runner cannot overturn a chair's verdict.** It may demote a basis tag under part 4 and it
+  may re-run a chair that clearly never opened its source, but it does not convert a BLOCK to a
+  REVISE because the finding looks soft to the runner. Disagreement with a chair's verdict is a
+  CONFLICT item under part 3, surfaced for Joe.
+- **A verdict is not a decision.** BLOCK means the panel is telling Joe not to send it as written.
+  Joe still rules, per finding, exactly as he does today. The verdict changes what he is ruling
+  against, not who rules.
+
+Carry the four chair verdicts into the packet header verbatim, so Joe can see the composition
+rather than trusting the arithmetic.
+
+**7. The panel-level empty-chair close.** See below. This is the last thing written and the reason
 the skill exists.
 
 ## The empty-chair close, at panel level
@@ -359,6 +387,9 @@ question.
 
 ```
 DEAL COUNCIL | mode: <review | troubleshoot> | <deal / artifact>
+PANEL VERDICT: <BLOCK | REVISE | INCOMPLETE | PASS>
+Chair verdicts: <lender: PASS | contractor: REVISE | attorney: BLOCK | ...  every seated chair, verbatim>
+Blind chairs: <any chair that returned INSUFFICIENT-N, and what it needed. "None" if none.>
 Chairs seated: <list>   Model: Opus   Run: <date>
 Pre-brief basis: <what the record returned, in one line, including what failed>
 
@@ -401,6 +432,7 @@ nothing mid-panel. Joe rules first.
 
 | What happened | Proposed call |
 |---|---|
+| **EVERY panel, without exception** | `log-decision` recording the PANEL VERDICT and each chair's verdict verbatim, titled with the artifact. See below — this one is not conditional on anything interesting happening. |
 | A significant catch | `log-activity` on the deal, dated, one line naming the catch and the chair that raised it |
 | Joe waives a finding | `log-decision`, the finding, the waive, and his reason in his words |
 | A newly observed counterparty move | `log-activity`, event only, with a date. Never a characterization. The listing-agent chair returns these in its CAPTURE block already formatted. |
@@ -411,6 +443,33 @@ nothing mid-panel. Joe rules first.
 Write each call out fully so Joe can say yes and the session executes it. Note in the proposal that
 each write needs a fresh idempotency_key and a base_version from a fresh read, and that a
 `version_conflict` or `needs_confirm` goes back to Joe rather than getting retried.
+
+### Logging the verdict is proposed on EVERY panel, including the boring ones
+
+The other rows in that table fire when something notable happens. This one fires always, and the
+reason is a gap found on 2026-08-09: **nothing in the system records what our review path passed.**
+The `document` table held five rows, all draft, `lint_passed` and `leak_check_passed` both null. So
+the question "is the council actually catching things, or is it a rubber stamp with six chairs"
+could not be asked, because there was no corpus of passed artifacts to grade against. Loop #295
+exists to answer that question and cannot run until this row accumulates.
+
+That makes an all-PASS panel the MOST important one to log, not the least. A panel that found
+nothing is precisely the row the measurement needs: it is the claim being tested. Logging only the
+interesting panels would build a corpus of catches and no corpus of clean passes, which measures
+nothing at all.
+
+Propose it in this shape, and price it when a later grading pass gives you the numbers:
+
+```
+log-decision
+  title:    "Council verdict: <artifact> — <PANEL VERDICT>"
+  rationale: "<every seated chair and its verdict verbatim>. Findings: <count by severity>.
+              Blind chairs: <any INSUFFICIENT-N and what it needed>. Joe's rulings: <fix/waive per finding>."
+  about:     "<the deal ref, when the artifact belongs to one>"
+```
+
+Joe still rules first and nothing fires mid-panel. What changes is that "nothing notable happened"
+stops being a reason to write nothing down.
 
 If a council catch produces a standing lesson ("always spell HVAC responsibility in the first
 draft"), that is the `teach` verb, not a markdown note, and it is proposed the same way.

@@ -12,7 +12,7 @@ description: >
   the lead system and `new-lead`), for a vendor (`new-vendor` and the network-debrief skill), for
   logging a meeting that already happened (network-debrief), or to analyse deal numbers (the
   fill-engine). It interviews and records. It does not recommend space.
-disallowedTools: Agent
+disallowedTools: Agent, mcp__3ccf6856-fed2-481c-bdfa-3f732bd1cd56, mcp__52e52b1a-5511-444e-9b5d-a40a65720ded
 model: opus
 ---
 
