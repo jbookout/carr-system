@@ -6,7 +6,7 @@
  * and throws until a base URL is configured by a later deploy step.
  *
  * @typedef {'joe'|'dell'|string} Actor
- * @typedef {'phase'|'owner'|'attention'|'next_date'|'next_step'} DealField
+ * @typedef {'phase'|'owner'|'attention'|'next_date'|'next_step'|'operating_state'} DealField
  *
  * @typedef {Object} PipelineEvent
  * @property {string} id
@@ -42,6 +42,9 @@
  * @property {string|null} next_date
  * @property {string|null} segment
  * @property {string|null} market
+ * @property {'active'|'parked'} operating_state whether this Salesforce-linked row is current work
+ * @property {'prospect_never_active'|'client_paused'|'other'|null} parking_reason
+ * @property {string|null} parking_note
  *
  * @typedef {Object} ThreadEntry
  * @property {string} id

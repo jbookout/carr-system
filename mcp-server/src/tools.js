@@ -946,7 +946,8 @@ function assertSingleOwner(owner) {
 
 // ---------- Deal Room helpers (field-base concurrency, not record version) ----------
 
-const DEAL_ROOM_FIELDS = Object.freeze(["phase", "owner", "attention", "next_date"]);
+const DEAL_ROOM_FIELDS = Object.freeze(["phase", "owner", "attention", "next_date", "operating_state"]);
+const PARKING_REASONS = Object.freeze(["prospect_never_active", "client_paused", "other"]);
 
 function assertDealRoomField(field, value) {
   if (!DEAL_ROOM_FIELDS.includes(field))
@@ -960,6 +961,18 @@ function assertDealRoomField(field, value) {
   if (field === "next_date" && value !== null &&
       (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)))
     throw new ToolError({ error: "invalid_field_value", field, expected: "YYYY-MM-DD or null" });
+  if (field === "operating_state") {
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        !["active", "parked"].includes(value.state))
+      throw new ToolError({ error: "invalid_field_value", field,
+        expected: "{state: active|parked, reason?: prospect_never_active|client_paused|other, note?: string}" });
+    if (value.state === "parked" && !PARKING_REASONS.includes(value.reason))
+      throw new ToolError({ error: "parking_reason_required", allowed: PARKING_REASONS });
+    if (value.state === "active" && (value.reason != null || value.note != null))
+      throw new ToolError({ error: "active_deal_has_no_parking_reason" });
+    if (value.note != null && (typeof value.note !== "string" || value.note.trim().length > 500))
+      throw new ToolError({ error: "invalid_parking_note", max_length: 500 });
+  }
 }
 
 async function lockDealField(c, dealId, field) {
@@ -999,7 +1012,16 @@ async function latestFieldConflict(c, dealId, field, baseEventId) {
 
 async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey, verb) {
   assertDealRoomField(field, value);
-  const oldRow = await c.query(`select ${field} as value from deal where id=$1`, [dealId]);
+  if (field === "operating_state") value = {
+    state: value.state,
+    reason: value.state === "parked" ? value.reason : null,
+    note: value.state === "parked" ? value.note?.trim() || null : null,
+  };
+  const oldRow = field === "operating_state"
+    ? await c.query(
+      `select jsonb_build_object('state',operating_state,'reason',parking_reason,'note',parking_note) as value
+         from deal where id=$1`, [dealId])
+    : await c.query(`select ${field} as value from deal where id=$1`, [dealId]);
   if (!oldRow.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: dealId });
   if (field === "owner") {
     // deal.owner is the board cache; deal_participant(role=lead) remains the
@@ -1017,10 +1039,23 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
          values ($1,$2,'lead',$3) /* dealroom:open-lead */`, [dealId, next.id, actor.id]);
     }
   }
-  await c.query(
-    `update deal set ${field}=$2, updated_by=$3 where id=$1 /* dealroom:apply-field */`,
-    [dealId, value, actor.id],
-  );
+  if (field === "operating_state") {
+    await c.query(
+      `update deal
+          set operating_state=$2, parking_reason=$3, parking_note=$4,
+              parked_at=case when $2='parked' then now() else null end,
+              parked_by=case when $2='parked' then $5 else null end,
+              updated_by=$5
+        where id=$1 /* dealroom:apply-operating-state */`,
+      [dealId, value.state, value.state === "parked" ? value.reason : null,
+       value.state === "parked" ? value.note : null, actor.id],
+    );
+  } else {
+    await c.query(
+      `update deal set ${field}=$2, updated_by=$3 where id=$1 /* dealroom:apply-field */`,
+      [dealId, value, actor.id],
+    );
+  }
   await writeEvent(c, actor, verb, "deal", dealId, {
     field,
     old: { [field]: oldRow.rows[0].value },
@@ -1532,7 +1567,7 @@ export const TOOLS = {
 
   "deal-room-board": {
     write: false,
-    description: "The Deal Room home read: open deals plus national-account portfolio summaries, current partner identity, review clocks, market-agent assignments, and one open review session. workspace may be team, national_account, or all; no deal is duplicated between workspaces.",
+    description: "The Deal Room home read: Salesforce-linked work records plus their active/parked operating state, national-account portfolio summaries, current partner identity, review clocks, market-agent assignments, and one open review session. workspace may be team, national_account, or all; no row is duplicated between workspaces.",
     inputSchema: { type: "object", properties: {
       workspace: { type: "string", enum: ["team","national_account","all"], default: "all" },
       account_client_id: { type: "string", description: "optional national-account client uuid" },
@@ -1545,7 +1580,9 @@ export const TOOLS = {
                 client_id, client_ref, client_name, account_client_id, account_client_ref,
                 account_name, account_owner, market_agent,
                 to_jsonb(last_touch)#>>'{}' as last_touch,
-                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind
+                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind,
+                operating_state, parking_reason, parking_note,
+                to_jsonb(parked_at)#>>'{}' as parked_at, parked_by
            from v_deal_room_board
           where ($1 = 'all' or workspace_kind = $1)
             and ($2::uuid is null or account_client_id = $2::uuid)
@@ -1554,7 +1591,7 @@ export const TOOLS = {
       const accounts = await c.query(
         `select account_client_id, account_client_ref, account_name, account_owner,
                 open_deals, attention_deals, overdue_deals, stale_deals,
-                to_jsonb(last_review_at)#>>'{}' as last_review_at
+                to_jsonb(last_review_at)#>>'{}' as last_review_at, parked_deals
            from v_deal_room_account order by account_name`);
       const session = await c.query(
         `select session_id, workspace_kind, account_client_id,
@@ -4862,7 +4899,7 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
 // the rest of this registry; the one explicit exception is the ephemeral lease.
 Object.assign(TOOLS, {
   "get-deal-room": {
-    description: "Read one complete open Deal Room record: board/workspace fields, next actions, notes, critical dates, activity, parties, premises, current economics, documents, and attributed history. Includes salesforce_id and base_version only so a reconciler can make one guarded follow-on write. Placeholder Salesforce fields are structurally excluded.",
+    description: "Read one complete open Deal Room work record: board/workspace and active/parked fields, next actions, notes, critical dates, activity, parties, premises, current economics, documents, and attributed history. Includes salesforce_id and base_version only so a reconciler can make one guarded follow-on write. Placeholder Salesforce fields are structurally excluded.",
     inputSchema: { type: "object", properties: { deal: { type: "string" } }, required: ["deal"] },
     handler: async (c, _actor, args) => {
       const s = await resolveSubject(c, args.deal);
@@ -4873,6 +4910,8 @@ Object.assign(TOOLS, {
                 b.account_client_id, b.account_client_ref, b.account_name, b.account_owner,
                 b.market_agent, to_jsonb(b.last_touch)#>>'{}' as last_touch,
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
+                b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 r.salesforce_id, r.base_version
            from v_deal_room_board b
            join v_deal_reconciliation_read r on r.id=b.id

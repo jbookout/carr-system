@@ -36,7 +36,7 @@
         <button type="button" class="back-link" id="accountBack" hidden>← All national accounts</button>
         <p class="eyebrow" id="workspaceEyebrow">Shared territory pipeline</p>
         <h1 id="workspaceTitle">Team Book</h1>
-        <p class="subhead" id="workspaceSubtitle">The live agenda Joe and Dell work together.</p>
+        <p class="subhead" id="workspaceSubtitle">The active work Joe and Dell are moving now.</p>
       </div>
       <div class="hero-actions">
         <button type="button" class="secondary" id="ownerButton" hidden>Change owner</button>
@@ -53,26 +53,27 @@
       <aside class="focus" id="focusStrip" aria-label="Suggested focus"></aside>
 
       <div class="toolbar">
-        <div class="filters" role="group" aria-label="Filter deals">
-          <button type="button" class="filter on" data-filter="all">All</button>
+        <div class="filters" role="group" aria-label="Filter work records">
+          <button type="button" class="filter on" data-filter="active">Active</button>
           <button type="button" class="filter" data-filter="mine">Mine</button>
           <button type="button" class="filter" data-filter="attention">Needs attention</button>
           <button type="button" class="filter" data-filter="stale">Gone quiet</button>
           <button type="button" class="filter" data-filter="missing">Missing next step</button>
           <button type="button" class="filter" data-filter="delta">Changed since review</button>
+          <button type="button" class="filter" data-filter="parked">Parked</button>
         </div>
         <label class="search-wrap">
-          <span class="sr-only">Search every deal</span>
-          <input id="search" type="search" autocomplete="off" placeholder="Search every deal…">
+          <span class="sr-only">Search work records</span>
+          <input id="search" type="search" autocomplete="off" placeholder="Search work records…">
           <kbd>/</kbd>
         </label>
       </div>
 
       <div class="table-frame" id="tableFrame">
-        <table aria-label="Open deals">
+        <table aria-label="Active and parked work records">
           <thead>
             <tr>
-              <th>Deal</th><th>Phase</th><th>Next step</th><th>Next date</th>
+              <th>Work record</th><th>Phase</th><th>Next step</th><th>Next date</th>
               <th id="agentHeading">Owner</th><th><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
