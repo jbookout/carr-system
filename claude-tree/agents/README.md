@@ -117,9 +117,10 @@ The panel runner's job, in order:
 1. **Assemble the pre-brief ONCE.** The runner makes the record-layer reads (`catch-me-up` on the deal, `counterparty-history` on the listing agent or owner, `deal-board`) and pastes the results into every chair's prompt. Chairs do not each make their own calls. This is cheaper, it keeps the chairs write-nothing by construction, and it means every chair reasons from identical facts. *(Known caveat: `catch-me-up` and `find` were flagged broken on 2026-07-31. If they still fail, the pre-brief is Joe's description plus a direct read of the deal file, and the runner says so at the top of the pre-brief so every chair can state its n honestly.)*
 2. **Name the mode and the branch.** In troubleshoot mode, tell each chair which branch it owns.
 3. **Merge.** Collect the findings, de-duplicate across chairs, rank by severity across the whole panel.
-4. **In troubleshoot mode, name the crux and the single discriminating question** across the panel's top two candidates, not just each chair's top two.
-5. **Collect the empty chairs.** One empty-chair line comes back per chair run. Report the union of them to Joe as one list of known gaps.
-6. **Hand to Joe with one action.** Per `DNA/ux-doctrine.md` law 3, the packet ends in one obvious next step, not an open question.
+4. **Compose the panel verdict.** Every chair now returns one word on its own written bar: BLOCK, REVISE, PASS, or INSUFFICIENT-N. The runner composes, never re-judges: any BLOCK makes the panel BLOCK; otherwise any REVISE makes it REVISE; otherwise any INSUFFICIENT-N makes it INCOMPLETE; only an all-PASS panel is PASS. A blind chair is never absorbed into a PASS, which is the whole reason the bars exist. Full table and rules in the council skill, synthesis contract part 6.
+5. **In troubleshoot mode, name the crux and the single discriminating question** across the panel's top two candidates, not just each chair's top two.
+6. **Collect the empty chairs.** One empty-chair line comes back per chair run. Report the union of them to Joe as one list of known gaps.
+7. **Hand to Joe with one action.** Per `DNA/ux-doctrine.md` law 3, the packet ends in one obvious next step, not an open question. A verdict is not a decision: BLOCK tells Joe not to send it as written, and he still rules per finding.
 
 **Which chairs for which artifact:**
 
