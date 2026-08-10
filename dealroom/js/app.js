@@ -197,10 +197,15 @@ function renderChrome() {
     : state.workspace === 'team' ? 'The active work Joe and Dell are moving now.'
     : selected ? `${actorName(selected.account_owner)} owns the account; each market deal keeps its assigned agent and owner.`
     : 'One account can hold dozens of market-level transactions without crowding the territory agenda.';
-  $('#addButton').textContent = state.workspace === 'national_account' ? (selected ? 'Add market deal' : 'Add national account') : 'Add work record';
+  const addLabel = state.workspace === 'national_account' ? (selected ? 'Add market deal' : 'Add national account') : 'Add work record';
+  $('#addButton').textContent = addLabel;
+  $('#persistentAddButton').textContent = `+ ${addLabel}`;
+  $('#persistentAddButton').setAttribute('aria-label', addLabel);
   $('#ownerButton').hidden = !selected;
   $('#agendaButton').hidden = isAccountHome;
-  $('#agentHeading').textContent = state.workspace === 'national_account' ? 'Market agent' : 'Owner';
+  const agentHeading = state.workspace === 'national_account' ? 'Market agent' : 'Owner';
+  $('#agentHeading').textContent = agentHeading;
+  $('#stickyAgentHeading').textContent = agentHeading;
   $('#accountGrid').hidden = !isAccountHome;
   $('#boardSection').hidden = isAccountHome;
 }
@@ -934,7 +939,9 @@ function wireEvents() {
 
   $('#search').addEventListener('input', (event) => { state.query=event.target.value.trim(); render(); });
   $('#accountBack').onclick = () => { state.accountId=null; render(); };
-  $('#addButton').onclick = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
+  const openAddForm = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
+  $('#addButton').onclick = openAddForm;
+  $('#persistentAddButton').onclick = openAddForm;
   $('#ownerButton').onclick = accountOwnerForm;
   $('#agendaButton').onclick = startAgenda;
   $('#callModeButton').onclick = openCallMode;
@@ -946,6 +953,15 @@ function wireEvents() {
   $('#agendaEnd').onclick = () => finishAgenda('completed');
   $('#agendaClose').onclick = () => finishAgenda('abandoned');
   $('#themeButton').onclick = () => { document.body.classList.toggle('night'); localStorage.setItem('dealroom-theme',document.body.classList.contains('night')?'night':'light'); };
+  $('#colorAssistButton').onclick = () => {
+    const enabled = !document.body.classList.contains('color-assist');
+    document.body.classList.toggle('color-assist', enabled);
+    const button = $('#colorAssistButton');
+    button.setAttribute('aria-pressed', String(enabled));
+    button.setAttribute('aria-label', `${enabled ? 'Turn off' : 'Turn on'} color-blind-friendly view`);
+    localStorage.setItem('dealroom-color-assist', enabled ? 'on' : 'off');
+    showToast(enabled ? 'Color-friendly view on · patterns and labels supplement color' : 'Color-friendly view off');
+  };
   window.addEventListener('online', () => { $('#offlineBanner').hidden=true; setSync(true); pollOnce(); });
   window.addEventListener('offline', () => { $('#offlineBanner').hidden=false; setSync(false,'Offline'); });
   document.addEventListener('keydown', (event) => { if (event.key==='/' && !event.target.matches('input,textarea,select')) { event.preventDefault(); $('#search').focus(); } });
@@ -953,6 +969,11 @@ function wireEvents() {
 
 async function boot() {
   if (localStorage.getItem('dealroom-theme') === 'night') document.body.classList.add('night');
+  if (localStorage.getItem('dealroom-color-assist') === 'on') {
+    document.body.classList.add('color-assist');
+    $('#colorAssistButton').setAttribute('aria-pressed', 'true');
+    $('#colorAssistButton').setAttribute('aria-label', 'Turn off color-blind-friendly view');
+  }
   const params = new URLSearchParams(location.search);
   const requested = params.get('mode');
   const mode = requested === 'fixture' ? 'fixture' : requested === 'live' ? 'live'

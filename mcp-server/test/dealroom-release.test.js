@@ -115,6 +115,22 @@ test("parking separates Salesforce record existence from active work", async () 
   assert.match(tools, /parked_by=case when \$2='parked' then \$5::uuid else null end/);
 });
 
+test("Deal Room keeps accessibility and add-work controls available", async () => {
+  const [html, app, css] = await Promise.all([
+    file("dealroom/index.html"), file("dealroom/js/app.js"), file("dealroom/css/app.css"),
+  ]);
+  assert.match(html, /id="colorAssistButton"/);
+  assert.match(html, /id="persistentAddButton"[^>]*>\+ Add work record/);
+  assert.match(html, /class="board-sticky"[\s\S]*class="filters"[\s\S]*id="search"[\s\S]*class="sticky-table-header"/);
+  assert.match(app, /dealroom-color-assist/);
+  assert.match(app, /persistentAddButton.*openAddForm/s);
+  assert.match(app, /stickyAgentHeading/);
+  assert.match(css, /body\.color-assist tr\.attention/);
+  assert.match(css, /body\.color-assist tr\.parked/);
+  assert.match(css, /\.board-sticky\{position:sticky/);
+  assert.match(css, /\.persistent-add-button\{position:fixed/);
+});
+
 test("Call Mode post-call UI is review-first and never sends email", async () => {
   const [html, app, live, local, css] = await Promise.all([
     file("dealroom/index.html"), file("dealroom/js/app.js"),
