@@ -8,6 +8,7 @@
 #   ./run.sh review-queue  — rebuild the ONE review queue (out/review-queue/), a surface only
 #   ./run.sh brief-pack    — the four brief sections as callable units (out/brief-pack/)
 #   ./run.sh restore-rehearse — prove the encrypted backups actually restore (needs the age key)
+#   ./run.sh call-mode     — inspect or operate the local Quill Call Mode bridge
 # CARR_VAULT overrides the vault path (default: Joe's Drive mount).
 
 set -eu
@@ -84,6 +85,7 @@ case "${1:-}" in
   verify-emails) verify_emails "$@" ;;
   restore-rehearse) restore_rehearse "$@" ;;
   call)         call_verb "$@" ;;
+  call-mode)    shift; python3 "$REPO/tools/dictation-rig/bin/call-mode.py" "$@" ;;
   # retrieve runs on the repo venv since the store pass (P4 dual-read) needs psycopg;
   # fails soft to file-index-only on any machine without it.
   retrieve)     shift; CARR_VAULT="$VAULT" "$PY" "$REPO/tools/retrieve.py" "$@" ;;
@@ -110,5 +112,5 @@ case "${1:-}" in
   # three, two of which (the .venv and out/ symlinks) are invisible until
   # something breaks on a path that is simply not there.
   worktree)     shift; "$REPO/bin/worktree.sh" "$@" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>' [actor]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|worktree <name> [--from B]|--list|--remove <name>"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>' [actor]|call-mode [serve|state|start|stop]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|worktree <name> [--from B]|--list|--remove <name>"; exit 2 ;;
 esac

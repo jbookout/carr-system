@@ -2,11 +2,14 @@ import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { uuidv4 } from './uuid.js';
 
 const POLL_MS = 1400;
+const CALL_MODE_URL = 'http://127.0.0.1:4682';
+const CALL_MODE_HEADER = { 'X-CARR-Call-Mode': 'deal-room-v1' };
 const state = {
   client: null, selfActor: null, deals: new Map(), accounts: [], cursor: null,
   workspace: 'team', accountId: null, filter: 'all', query: '',
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null, undoEventId: null,
+  callMode: { state: 'idle' }, callModeTimer: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -254,10 +257,133 @@ function applyPresence() {
 }
 
 function renderCaptureStatus() {
-  const active = state.captureSessions.find((session) => !['completed','failed','cancelled'].includes(session.state));
+  const active = state.captureSessions.find((session) => !['done','completed','failed','cancelled'].includes(session.state));
   const badge = $('#captureStatus');
   badge.hidden = !active;
   if (active) badge.textContent = `Capture: ${String(active.state).replaceAll('_',' ')}`;
+}
+
+function elapsedTime(startedAt) {
+  if (!startedAt) return '0:00';
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function callModeActive(snapshot = state.callMode) {
+  return snapshot?.state === 'recording';
+}
+
+function renderCallMode() {
+  const snapshot = state.callMode || { state: 'idle' };
+  const recording = callModeActive(snapshot);
+  const processing = ['transcribing', 'ready_to_extract', 'filed'].includes(snapshot.state);
+  const stage = $('#callModeStage');
+  if (!stage) return;
+  stage.classList.toggle('recording', recording);
+  stage.classList.toggle('processing', processing);
+  $('#callModeStarts').hidden = recording;
+  $('#callModeConsentRow').hidden = recording;
+  $('#callModeStop').hidden = !recording;
+  $('#callModeTimer').textContent = recording ? elapsedTime(snapshot.started_at) : ({
+    idle: 'Ready', transcribing: 'Processing', ready_to_extract: 'Transcript ready', filed: 'Summary saved', state_unknown: 'Check Quill',
+  }[snapshot.state] || 'Ready');
+  $('#callModeState').textContent = recording ? 'Recording live' : ({
+    transcribing: 'Quill is processing this call', ready_to_extract: 'Transcript ready for extraction',
+    filed: 'Meeting summary saved', state_unknown: 'Recorder state needs attention',
+  }[snapshot.state] || 'Ready to record');
+  $('#callModeDetail').textContent = recording ? 'Quill is recording separate local and other-side audio tracks.'
+    : processing ? 'The recording has stopped. Quill is preparing the local transcript for the review pipeline.'
+      : 'Start a weekly deal call or another conversation. Quill keeps the local and other-side tracks separate.';
+  const labels = snapshot.speaker_labels || {};
+  const speakers = $('#callModeSpeakers');
+  speakers.hidden = !labels.mic;
+  speakers.textContent = labels.mic ? `${labels.mic} on microphone · ${labels.system || 'Other participant'} on system audio` : '';
+  const toolbarButton = $('#callModeButton');
+  toolbarButton.classList.toggle('recording', recording);
+  toolbarButton.innerHTML = recording
+    ? `<span aria-hidden="true">●</span> ${elapsedTime(snapshot.started_at)}`
+    : '<span aria-hidden="true">✦</span> Call Mode';
+  toolbarButton.setAttribute('aria-label', recording ? `Call Mode recording ${elapsedTime(snapshot.started_at)}` : 'Open Call Mode');
+}
+
+function showCallModePermission() {
+  const message = 'Chrome needs one-time Local Network Access permission to reach Quill on this Mac. Allow the prompt, then retry here. The standalone controller remains available if the local bridge itself needs checking.';
+  const notice = $('#callModePermission');
+  notice.textContent = message;
+  notice.hidden = false;
+}
+
+async function callModeApi(path, body = null) {
+  const options = body ? {
+    method: 'POST', headers: { 'content-type': 'application/json', ...CALL_MODE_HEADER }, body: JSON.stringify(body), targetAddressSpace: 'loopback',
+  } : { method: 'GET', targetAddressSpace: 'loopback' };
+  let response;
+  try {
+    response = await fetch(`${CALL_MODE_URL}/api/${path}`, options);
+  } catch (error) {
+    showCallModePermission();
+    throw new Error('Call Mode could not reach Quill locally.');
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Call Mode could not complete that action.');
+  return payload;
+}
+
+async function refreshCallMode({ quiet = false } = {}) {
+  try {
+    state.callMode = await callModeApi('state');
+    $('#callModePermission').hidden = true;
+    renderCallMode();
+  } catch (error) {
+    if (!quiet) showToast(error.message);
+  }
+}
+
+async function openCallMode() {
+  $('#callModeDialog').showModal();
+  renderCallMode();
+  await refreshCallMode({ quiet: true });
+}
+
+async function startCallMode(mode) {
+  if (!$('#callModeConsent').checked) {
+    showToast('Confirm that everyone has been told before recording.');
+    $('#callModeConsent').focus();
+    return;
+  }
+  const button = document.querySelector(`[data-call-mode-start="${mode}"]`);
+  if (button) button.disabled = true;
+  try {
+    state.callMode = await callModeApi('start', { mode, consent_confirmed: true });
+    renderCallMode();
+    if (mode === 'weekly_deal_call') {
+      try {
+        await startAgenda();
+        showToast('Weekly deal call is recording. The agenda is open.');
+      } catch (error) {
+        console.error('Could not start the weekly agenda', error);
+        showToast('Weekly deal call is recording. The agenda could not open.');
+      }
+    } else {
+      showToast('Call is recording.');
+    }
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function stopCallMode() {
+  const button = $('#callModeStop');
+  button.disabled = true;
+  try {
+    state.callMode = await callModeApi('stop', {});
+    renderCallMode();
+    showToast('Recording stopped. Quill is processing the call.');
+  } catch (error) {
+    showToast(error.message);
+  } finally { button.disabled = false; }
 }
 
 function renderConfirms() {
@@ -473,6 +599,8 @@ function wireEvents() {
     if (event.target.closest('[data-undo]') && state.undoEventId) { await state.client.revertDealField({ event_id:state.undoEventId,idempotency_key:uuidv4() }); state.undoEventId=null; await loadHome(); showToast('Change undone'); return; }
     const confirm = event.target.closest('[data-confirm]'); if (confirm) { const chip=confirm.closest('[data-proposal]'); const yes=confirm.dataset.confirm==='yes'; await state.client.resolveConfirm({proposal_id:chip.dataset.proposal,accept:yes,idempotency_key:uuidv4()}); state.confirms=state.confirms.filter((p)=>p.id!==chip.dataset.proposal); renderConfirms(); if(yes)await loadHome(); showToast(yes?'Suggestion confirmed':'Suggestion skipped'); return; }
     if (event.target.closest('[data-dialog-cancel]')) { $('#formDialog').close(); return; }
+    const callStart = event.target.closest('[data-call-mode-start]'); if (callStart) { await startCallMode(callStart.dataset.callModeStart); return; }
+    if (event.target.closest('#callModeClose')) { $('#callModeDialog').close(); return; }
   });
 
   document.addEventListener('change', async (event) => {
@@ -485,6 +613,9 @@ function wireEvents() {
   $('#addButton').onclick = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
   $('#ownerButton').onclick = accountOwnerForm;
   $('#agendaButton').onclick = startAgenda;
+  $('#callModeButton').onclick = openCallMode;
+  $('#callModeHeroButton').onclick = openCallMode;
+  $('#callModeStop').onclick = stopCallMode;
   $('#agendaReviewed').onclick = () => advanceAgenda('reviewed');
   $('#agendaSkip').onclick = () => advanceAgenda('skipped');
   $('#agendaEnd').onclick = () => finishAgenda('completed');
@@ -506,6 +637,9 @@ async function boot() {
   wireEvents();
   await loadHome();
   state.pollTimer = setInterval(() => pollOnce(), POLL_MS);
+  state.callModeTimer = setInterval(() => {
+    if (callModeActive()) renderCallMode();
+  }, 250);
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(()=>{});
 }
 

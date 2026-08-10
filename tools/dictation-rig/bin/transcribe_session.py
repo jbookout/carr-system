@@ -7,13 +7,16 @@ Spec: specs/dictation-rig-build-plan-2026-08-07.md, Phase A step 5.
 Invoked by transcribe-session.sh with one argument, the quill session
 directory (e.g. ~/Recordings/2026.08.07-1430/), which holds:
 
-    mic.caf       the user's mic (AAC-in-CAF, mono, speaker "me")
-    system.caf    system audio = the other side of a call (speaker "them")
+    mic.caf       the user's mic (AAC-in-CAF, mono)
+    system.caf    system audio = the other side of a call
     meta.json     {"started", "ended", "duration_seconds",
                    "files": {"mic", "system"},
                    "start_offset_ms": {"mic", "system"}}
     announcement.json   optional, written by consent-watch.sh:
                    {"announcement_fired_at", "clip", "played_by"}
+    call-context.json   optional, written by Deal Room Call Mode. Carries
+                   mic/system speaker labels based on separate audio channels,
+                   never a third-party voiceprint.
 
 For each track present, this script:
   1. Converts CAF -> 16kHz mono WAV via /usr/bin/afconvert into a temp dir.
@@ -46,7 +49,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, TypedDict
+from typing import Any, Callable, TypedDict
 
 # --- constants ---------------------------------------------------------
 
@@ -62,10 +65,7 @@ FALLBACK_MODEL_PATH = Path(
 
 ENGINE_LABEL = "whisper.cpp large-v3-turbo (carr dictation-rig)"
 
-Speaker = Literal["me", "them"]
-
-# (meta.json "files"/"start_offset_ms" key, speaker label)
-TRACK_LABELS: tuple[tuple[str, Speaker], ...] = (("mic", "me"), ("system", "them"))
+DEFAULT_SPEAKER_LABELS: dict[str, str] = {"mic": "Me", "system": "Other participant"}
 
 LogFunc = Callable[[str], None]
 
@@ -99,6 +99,8 @@ class TranscriptJson(TypedDict):
     vocab_prompt: bool
     generated: str
     consent: Any
+    speaker_labels: dict[str, str]
+    speaker_method: str
     segments: list[Segment]
 
 
@@ -177,6 +179,27 @@ def read_consent(session_dir: Path) -> Any:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def read_speaker_labels(session_dir: Path) -> dict[str, str]:
+    """Read the channel labels Call Mode resolved at recording start.
+
+    The only accepted keys are the two physical capture channels. Missing or
+    malformed context falls back to human-readable generic labels. This is
+    channel attribution, not biometric speaker recognition.
+    """
+    context_path = session_dir / "call-context.json"
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        raw = context.get("speaker_labels", {}) if isinstance(context, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    labels = dict(DEFAULT_SPEAKER_LABELS)
+    for channel in ("mic", "system"):
+        value = raw.get(channel)
+        if isinstance(value, str) and value.strip() and len(value.strip()) <= 80:
+            labels[channel] = value.strip()
+    return labels
 
 
 # --- model + prompt resolution ------------------------------------------
@@ -276,7 +299,7 @@ def run_whisper(
 
 
 def shift_and_tag(
-    raw_segments: list[RawSegment], offset_ms: int, speaker: Speaker
+    raw_segments: list[RawSegment], offset_ms: int, speaker: str
 ) -> list[Segment]:
     return [
         {
@@ -331,10 +354,14 @@ def render_markdown(
 
 
 def write_outputs(session_dir: Path, transcript: TranscriptJson, markdown: str) -> None:
-    (session_dir / "transcript.json").write_text(
+    json_path = session_dir / "transcript.json"
+    markdown_path = session_dir / "transcript.md"
+    json_path.write_text(
         json.dumps(transcript, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    (session_dir / "transcript.md").write_text(markdown, encoding="utf-8")
+    markdown_path.write_text(markdown, encoding="utf-8")
+    json_path.chmod(0o600)
+    markdown_path.chmod(0o600)
 
 
 # --- orchestration -------------------------------------------------------
@@ -345,6 +372,7 @@ def process_session(session_dir: Path, log: LogFunc) -> None:
 
     meta = read_meta(session_dir)
     consent = read_consent(session_dir)
+    speaker_labels = read_speaker_labels(session_dir)
     model_path = resolve_model(log)
     prompt = load_prompt()
 
@@ -353,7 +381,8 @@ def process_session(session_dir: Path, log: LogFunc) -> None:
 
     with tempfile.TemporaryDirectory(prefix="carr-transcribe-") as tmp_str:
         tmp_dir = Path(tmp_str)
-        for label, speaker in TRACK_LABELS:
+        for label in ("mic", "system"):
+            speaker = speaker_labels[label]
             filename = meta["files"]["mic"] if label == "mic" else meta["files"]["system"]
             caf_path = session_dir / filename
             offset_ms = meta["start_offset_ms"].get(label, 0)
@@ -383,6 +412,8 @@ def process_session(session_dir: Path, log: LogFunc) -> None:
         "vocab_prompt": True,
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "consent": consent,
+        "speaker_labels": speaker_labels,
+        "speaker_method": "separate audio channels; no third-party voiceprint",
         "segments": merged_segments,
     }
     markdown = render_markdown(meta, consent, merged_segments, missing_tracks)

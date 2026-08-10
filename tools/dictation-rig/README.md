@@ -20,6 +20,36 @@ loop #243 / decision f799fd49.
 Both modes share ONE transcription engine: `/opt/homebrew/bin/whisper-cli`,
 ggml-large-v3-turbo, `vocab-prompt.txt`. Never a second engine.
 
+## Deal Room Call Mode
+
+The Deal Room is a second control surface for meeting mode. The existing Quill
+menu-bar icon remains available. The Deal Room's **Call Mode** button talks to a
+loopback-only companion at `http://127.0.0.1:4682`; the companion clicks Quill's
+existing Start/Stop menu item and reports the real recorder state back to the
+page. It does not contain another recorder.
+
+Install or refresh the companion with `bin/install-call-mode.sh`. The installer
+loads `com.carr.call-mode` as a user LaunchAgent and verifies its state endpoint.
+The first connection from `dealroom.doctorcre.com` may trigger Chrome's Local
+Network Access prompt. Allowing it gives that Deal Room origin access to the
+loopback companion; every other web origin is refused by the companion.
+
+**Risk color: red, human initiated.** Starting a call fires the audible consent
+announcement and begins client-visible recording, so it only happens after Joe
+or Dell clicks Start. No schedule or background trigger can start a recording.
+Stopping starts the same local transcription hook used by the menu-bar path.
+
+For the weekly Joe + Dell deal call, Call Mode writes `call-context.json` into
+the new Quill session folder. Separate capture tracks then label the local mic
+as Joe or Dell from that Mac's provisioned device identity, and label the system
+audio as the other partner. Other calls use "Other participant" for system
+audio. This is channel attribution, not biometric speaker recognition, and no
+third-party voiceprint is created or retained.
+
+The post-call extraction/report/draft layer is specified in
+`specs/post-call-workflow-2026-08-10.md`. Call Mode intentionally does not claim
+that unfinished layer is already running.
+
 ## Phase B — quill-dictate (system-wide dictation to the active text box)
 
 `dictate/` — own Swift package (menu-bar agent, no dependency on vendor/quill).
