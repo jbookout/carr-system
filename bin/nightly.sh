@@ -218,6 +218,11 @@ step "verb probe (worker gate + view sweep)"         ./.venv/bin/python ops/nigh
 # the zsh scoping reason stated at CARR_EXPORT_LIVE above.
 export HC_EXPORTS_RC="$EXPORTS_RC"
 export HC_BACKUP_RC="$BACKUP_RC"
+# The WHOLE chain's outcome, added 2026-08-10. rc_total is final here: every step
+# except this one has run. Without it, only the three named steps are watched,
+# and any other failing step alarms nowhere — which is how the mypy tripwire
+# stayed red from 08-08 to 08-10 with every dead-man check reporting healthy.
+export HC_CHAIN_RC="$rc_total"
 step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 
 if [ "$rc_total" -eq 0 ]; then

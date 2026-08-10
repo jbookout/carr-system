@@ -16,7 +16,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(os.path.dirname(HERE), "hooks", "context-handoff-gate.py")
 
-PASS, FAIL = [], []
+PASS: list[str] = []
+FAIL: list[str] = []
 
 
 def transcript(rows, tmpdir, name="t.jsonl"):

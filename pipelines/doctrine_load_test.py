@@ -12,7 +12,7 @@ import os, sys, time, threading, statistics, random
 
 import psycopg
 
-MINUTES = 15
+MINUTES: float = 15
 if "--minutes" in sys.argv:
     MINUTES = float(sys.argv[sys.argv.index("--minutes") + 1])
 
@@ -23,7 +23,9 @@ QUERIES = ["conflict of interest listing broker", "lease renewal timeline",
            "vendor introduction", "banned phrases", "dental startup lender",
            "TI allowance negotiation"]
 
-reads, searches, errors = [], [], []
+reads: list[float] = []
+searches: list[float] = []
+errors: list[str] = []
 lock = threading.Lock()
 stop_at = time.time() + MINUTES * 60
 

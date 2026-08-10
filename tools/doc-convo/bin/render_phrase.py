@@ -73,6 +73,11 @@ def main() -> int:
         if slope < best_slope:
             best, best_slope = audio, slope
 
+    if best is None:
+        # Only reachable with takes <= 0, which means the caller asked for zero
+        # renders and then wanted a file. Saying so beats an AttributeError on
+        # None deep inside torchaudio.
+        raise SystemExit(f"takes={takes} produced no audio — ask for at least one take")
     torchaudio.save(out_path, best.cpu(), model.sr)
     return 0
 

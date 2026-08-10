@@ -316,6 +316,54 @@ def vault_md_write_target(cmd):
         return None                                   # fail open, same as siblings
 
 
+def corpus_render_write_target(cmd):
+    """The Bash door of the corpus-render write-block (2026-08-10, Joe's
+    instruction after the nightly chain failed on eight Drive-side edits).
+    Same deny set as the Write/Edit door — one module, hooks/corpus_renders.py —
+    so the two doors cannot drift apart (rule a8c55a47: a manual path and an
+    automated path that do the same job must be the same code).
+
+    `corpus-sync.py` itself is exempt and must be: it is the sanctioned writer
+    of every one of these files. It never names them literally, so the exemption
+    is belt-and-braces rather than load-bearing."""
+    try:
+        if "corpus-sync.py" in cmd:
+            return None
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from corpus_renders import paths_in_command, verdict
+        hits = paths_in_command(cmd)
+        if not hits:
+            return None
+        for spelling, real in hits.items():
+            written = False
+            idx = 0
+            while True:
+                idx = cmd.find(spelling, idx)
+                if idx < 0:
+                    break
+                if _WRITE_BEFORE_CTX.search(cmd[max(0, idx - 60):idx]):
+                    written = True
+                    break
+                idx += len(spelling)
+            if not written:
+                for clause in re.split(r"[;&|]", cmd):
+                    toks = clause.strip().split()
+                    if toks and toks[0] in ("cp", "mv", "rsync") \
+                            and clause.rstrip("\"' ").endswith(spelling):
+                        written = True
+                        break
+            if not written and re.search(
+                    r"open\(\s*[\"'][^\"']*" + re.escape(os.path.basename(spelling))
+                    + r"[\"']\s*,\s*[\"'][wa]", cmd):
+                written = True
+            if written:
+                return (f"shell write onto a corpus render — {verdict(real, 'this command')} "
+                        f"(blocked by the CARR guard, Bash door of the corpus-render block)")
+        return None
+    except Exception:
+        return None                                   # fail open, same as siblings
+
+
 RULES = [
     # 1. destructive filesystem
     (re.compile(r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+", re.I), "recursive/forced delete"),
@@ -572,6 +620,9 @@ def check(cmd):
                         f"practice email and re-run ops/fetch-allowlist.py.")
 
     reason = render_write_target(cmd)
+    if reason:
+        return reason
+    reason = corpus_render_write_target(cmd)
     if reason:
         return reason
     reason = vault_md_write_target(cmd)

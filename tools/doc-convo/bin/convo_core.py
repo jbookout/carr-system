@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from typing import IO
 
 import speak
 
@@ -32,11 +33,25 @@ BRAIN_MODEL = os.environ.get("DOC_BRAIN_MODEL", "sonnet")
 MIN_BYTES = 20_000  # ~0.6s at 16kHz mono s16 — shorter is a misfire, not speech
 
 
+def _pipe(stream: IO[str] | None, name: str) -> IO[str]:
+    """Narrow a Popen pipe from Optional to real, once and loudly.
+
+    Popen types stdin/stdout/stderr as Optional because they are only real when
+    you asked for PIPE. Every Popen in this file asks for all three, so None here
+    means the process was constructed wrong — a programming error worth a clear
+    exception, not a silent AttributeError deep in a read loop. Narrowing at the
+    boundary keeps the call sites readable instead of scattering `if x is None`
+    through the streaming loop."""
+    if stream is None:
+        raise RuntimeError(f"brain process has no {name} pipe — Popen was not given PIPE")
+    return stream
+
+
 class BrainProcess:
     def __init__(self) -> None:
-        self.process = None
-        self.system_prompt = None
-        self.stderr = deque(maxlen=100)
+        self.process: subprocess.Popen[str] | None = None
+        self.system_prompt: str | None = None
+        self.stderr: deque[str] = deque(maxlen=100)
         self.lock = threading.Lock()
 
     def _stop(self) -> None:
@@ -45,17 +60,17 @@ class BrainProcess:
         if process is None or process.poll() is not None:
             return
         try:
-            process.stdin.close()
+            _pipe(process.stdin, "stdin").close()
             process.wait(timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             process.kill()
             process.wait()
 
-    def _drain_stderr(self, process: subprocess.Popen) -> None:
-        for line in process.stderr:
+    def _drain_stderr(self, process: subprocess.Popen[str]) -> None:
+        for line in _pipe(process.stderr, "stderr"):
             self.stderr.append(line.rstrip())
 
-    def _start(self, system_prompt: str) -> subprocess.Popen:
+    def _start(self, system_prompt: str) -> subprocess.Popen[str]:
         self._stop()
         cmd = [
             "claude", "-p", "--verbose", "--model", BRAIN_MODEL,
@@ -79,7 +94,7 @@ class BrainProcess:
         ).start()
         return process
 
-    def _ensure(self, system_prompt: str) -> subprocess.Popen:
+    def _ensure(self, system_prompt: str) -> subprocess.Popen[str]:
         if (self.process is None or self.process.poll() is not None or
                 self.system_prompt != system_prompt):
             return self._start(system_prompt)
@@ -100,17 +115,19 @@ class BrainProcess:
                 },
             }
             try:
-                process.stdin.write(json.dumps(payload) + "\n")
-                process.stdin.flush()
+                stdin = _pipe(process.stdin, "stdin")
+                stdin.write(json.dumps(payload) + "\n")
+                stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 self._stop()
                 return subprocess.CompletedProcess([], 1, "", str(exc))
 
+            stdout = _pipe(process.stdout, "stdout")
             streamed = False
             result = ""
             is_error = False
             while True:
-                line = process.stdout.readline()
+                line = stdout.readline()
                 if not line:
                     try:
                         code = process.wait(timeout=1)

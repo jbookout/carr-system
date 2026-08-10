@@ -51,7 +51,14 @@ def main() -> int:
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select open_loops, scored, unscored, scored_pct "
                     "from v_loop_proximity_coverage")
-        total, scored, unscored, pct = cur.fetchone()
+        coverage = cur.fetchone()
+        if coverage is None:
+            # The view is an aggregate and always returns a row, so no row means
+            # the view is gone or renamed by a migration, not "no loops". The
+            # unguarded unpack crashed with a tuple error naming nothing.
+            raise SystemExit("v_loop_proximity_coverage returned no row — the view is "
+                             "missing or was renamed; check the latest migration.")
+        total, scored, unscored, pct = coverage
 
         # Coverage first, always. The ranking below is a view of `scored` rows
         # only, and printing that share up front is what stops the head of the

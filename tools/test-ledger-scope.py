@@ -27,6 +27,9 @@ import sys
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "..", "hooks", "ledger-sweep.py")
 spec = importlib.util.spec_from_file_location("ledger_sweep", HOOK)
+if spec is None or spec.loader is None:
+    raise SystemExit(f"cannot load the ledger-sweep hook from {HOOK} — the file is "
+                     f"missing or unreadable, so this test proves nothing")
 ls = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ls)
 

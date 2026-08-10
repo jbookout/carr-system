@@ -46,7 +46,7 @@ def bash(cmd):
     return {"tool_name": "Bash", "tool_input": {"command": cmd}}
 
 
-CASES = []
+CASES: list[tuple] = []
 
 
 def case(name, payload, expect):

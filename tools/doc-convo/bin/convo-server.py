@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import IO, cast
 
 import convo_core
 import reflexes
@@ -40,12 +41,12 @@ def split_card(reply: str) -> tuple[str, object | None]:
 class Engine:
     def __init__(self, system_prompt: str | None) -> None:
         self.state = "idle"
-        self.turns = []
+        self.turns: list[dict] = []
         self.system_prompt = system_prompt
-        self.recording = None
-        self.recording_stderr = None
-        self.utterance = None
-        self.listeners = []
+        self.recording: subprocess.Popen[bytes] | None = None
+        self.recording_stderr: IO[bytes] | None = None
+        self.utterance: pathlib.Path | None = None
+        self.listeners: list[queue.Queue] = []
         self.lock = threading.Lock()
         self.workdir = pathlib.Path(tempfile.mkdtemp(prefix="doc-convo-server."))
         self.turn_number = 0
@@ -55,7 +56,7 @@ class Engine:
             return {"state": self.state, "turns": list(self.turns[-20:])}
 
     def subscribe(self) -> queue.Queue:
-        listener = queue.Queue()
+        listener: queue.Queue = queue.Queue()
         with self.lock:
             self.listeners.append(listener)
             state = self.state
@@ -188,7 +189,7 @@ class Engine:
             speaking = False
             streamed_turn = None
             streamed_doc = ""
-            speech_queue = queue.Queue()
+            speech_queue: queue.Queue = queue.Queue()
             speech_done = object()
 
             def emit_envelope(wav: pathlib.Path) -> None:
@@ -278,12 +279,23 @@ class Engine:
         self.workdir.rmdir()
 
 
+class ConvoServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that carries the Engine.
+
+    The engine used to be stapled on as `server.engine = engine` after
+    construction, which works at runtime and is invisible to a type checker —
+    BaseServer has no such attribute, so every read of it was unchecked. Naming
+    the subclass makes the handler's access verifiable instead."""
+
+    engine: "Engine"
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "DocConvo/1"
 
     @property
     def engine(self) -> Engine:
-        return self.server.engine
+        return cast(ConvoServer, self.server).engine
 
     def json_response(self, status: int, body: dict) -> None:
         payload = json.dumps(body).encode("utf-8")
@@ -365,7 +377,7 @@ def main() -> int:
     convo_core.warm_voice()
     system_prompt = convo_core.refresh_hot_context()
     engine = Engine(system_prompt)
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server = ConvoServer((HOST, PORT), Handler)
     server.engine = engine
 
     def stop(_signum: int, _frame: object) -> None:

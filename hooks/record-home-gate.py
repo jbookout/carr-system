@@ -241,6 +241,7 @@ GENERATED_FALLBACK = {
 # rules are superseded: both are strict subsets of deny-by-default.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from md_manifest import md_write_verdict  # noqa: E402
+from corpus_renders import verdict as corpus_verdict  # noqa: E402
 
 # --- D. the one content check ------------------------------------------------
 RULE_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
@@ -284,6 +285,18 @@ def check(tool, ti):
     path = ti.get("file_path") or ti.get("filePath") or ""
     if not path:
         return None
+
+    # A0. CORPUS RENDERS — checked FIRST and deliberately ahead of the vault
+    # test below, because two of the three corpus roots sit OUTSIDE the vault:
+    # `drive:` paths live under My Drive/.claude and `home:` paths under
+    # ~/.claude. Both would hit `rel is None` and be waved through, which is
+    # precisely the hole that let the 2026-08-09 chair-bars edits land on eight
+    # renders. Added 2026-08-10 on Joe's instruction; rationale in
+    # hooks/corpus_renders.py.
+    reason = corpus_verdict(path, tool.lower() + "'s change")
+    if reason:
+        return reason
+
     rel = rel_to_vault(path)
     if rel is None:
         return None                                   # outside the vault: not ours

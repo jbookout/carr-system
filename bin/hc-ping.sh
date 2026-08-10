@@ -52,6 +52,28 @@ ping_outcome() {
 ping_outcome "exports" "$HC_PING_EXPORTS" "${HC_EXPORTS_RC:-}"
 ping_outcome "backup"  "$HC_PING_BACKUP"  "${HC_BACKUP_RC:-}"
 
+# THE WHOLE-CHAIN CHECK, added 2026-08-10. The three checks above each report on
+# ONE named step, so a failure anywhere else pings nothing at all — and on
+# 2026-08-10 that was not hypothetical: the mypy tripwire had been failing since
+# 08-08 and the corpus push failed that morning, the chain exited 1 three nights
+# running, and all three checks pinged OK every time. Every alarm Joe had was
+# green while the chain was red.
+#
+# OPTIONAL BY DESIGN. HC_PING_CHAIN is a fourth Healthchecks.io check that only
+# Joe can create (it is an account action, not a script's job). Until the URL is
+# in healthchecks.env this says so and pings nothing, rather than failing the
+# step — the same SKIP-not-FAIL contract the rest of the chain uses. The health
+# check's own "nightly chain result" row covers the same ground locally in the
+# meantime, so the gap is visible either way.
+if [ -n "${HC_PING_CHAIN:-}" ]; then
+  ping_outcome "whole chain" "$HC_PING_CHAIN" "${HC_CHAIN_RC:-}"
+else
+  echo "hc-ping: HC_PING_CHAIN not set — the whole-chain check is not created yet."
+  echo "         Until it is, a failing step that is not exports/backup/worker"
+  echo "         alarms NOWHERE. Create a check at healthchecks.io and add its"
+  echo "         ping URL to ~/.config/carr/healthchecks.env as HC_PING_CHAIN."
+fi
+
 if curl -fsS -m 15 "https://api.practicecre.com/health" | grep -q '"ok"'; then
   curl -fsS -m 15 --retry 3 "$HC_PING_MCP" > /dev/null || rc=1
   echo "hc-ping: worker health ok -> pinged"

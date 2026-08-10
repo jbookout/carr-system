@@ -142,7 +142,7 @@ def main() -> int:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 
-            speech_queue = queue.Queue()
+            speech_queue: queue.Queue = queue.Queue()
             speech_done = object()
             printed = False
 

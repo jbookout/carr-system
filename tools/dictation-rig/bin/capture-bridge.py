@@ -253,7 +253,7 @@ def claim_cmd(cfg: dict[str, str], session_dir: Path) -> int:
     claimed_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     expires_at = ""
     try:
-        expires_at = (now + timedelta(seconds=float(ttl_seconds))).strftime(
+        expires_at = (now + timedelta(seconds=float(ttl_seconds or 0))).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
     except (TypeError, ValueError):

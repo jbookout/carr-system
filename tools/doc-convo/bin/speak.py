@@ -64,7 +64,7 @@ def split_sentences(text: str) -> list[str]:
     if len(units) < 2:
         return units
 
-    merged = []
+    merged: list[str] = []
     pending = ""
     for unit in units:
         if len(unit) < MIN_UNIT_CHARS:
@@ -197,7 +197,7 @@ def prepare(text: str, cache_only: bool = False) -> pathlib.Path | None:
 def stream(text: str, before_play: Callable[[pathlib.Path], None] | None = None,
            on_first_play: Callable[[], None] | None = None) -> int:
     units = split_sentences(text)
-    ready = queue.Queue()
+    ready: queue.Queue = queue.Queue()
     done = object()
 
     def produce() -> None:

@@ -437,6 +437,70 @@ for name, out_pat, want_hour, tol_h, note in SCHEDULE:
         rc = 1
     else:
         print(f"  OK {name:<22} ran {time.strftime('%H:%M', lt)}, within {tol_h}h of ~{want_hour:02d}:00")
+# --- did the chain WORK, not merely run (added 2026-08-10) -------------------
+# The drift row above answers "did it run on time" and nothing else, which is the
+# same defect the backup guard had: a success signal that never looks at the
+# thing it reports on. On 2026-08-10 the chain had been exiting non-zero for
+# three nights — the mypy tripwire since 08-08 — and every surface Joe had said
+# fine. The three Healthchecks dead-man pings each report on ONE named step
+# (exports, backup, worker), so a failure anywhere else pings nothing at all.
+#
+# CONSECUTIVE COUNT, not a bare red. A check that is chronically red detects
+# nothing, which is exactly how the settings wipe hid behind an already-red
+# config row on 2026-08-08. Naming the streak separates "this broke last night"
+# from "this has been broken all week and nobody looked".
+_nightly_log = os.path.expanduser("~/carr-system/out/nightly.log")
+# PARSED ON COMPLETION LINES, NOT ON "chain begin", and the difference is not
+# cosmetic. Two chains can overlap in this log — it happened on 2026-08-10, two
+# runs 44 seconds apart — and anchoring each FAIL to the most recent begin then
+# hands every failure to the second run and leaves the first with no verdict at
+# all, which under-counts the streak and reports a chronic red as a first
+# failure. Attributing the FAILs seen since the previous verdict to the run that
+# just ended is the honest reading under interleaving: it can over-attribute
+# between two overlapping runs, never lose one.
+try:
+    _done: list[tuple[bool, list[str]]] = []   # newest-last: (clean?, failed step labels)
+    _pending: list[str] = []
+    _begins = _overlaps = 0
+    _open = 0
+    for _ln in open(_nightly_log, errors="replace"):
+        if "chain begin" in _ln:
+            _begins += 1
+            _open += 1
+            if _open > 1:
+                _overlaps += 1
+        elif "  FAIL  " in _ln:
+            _pending.append(_ln.split("  FAIL  ", 1)[1].strip())
+        elif "chain OK" in _ln or "FINISHED WITH FAILURES" in _ln:
+            _done.append(("chain OK" in _ln, _pending))
+            _pending = []
+            _open = max(0, _open - 1)
+    if not _done:
+        print(f"  -- {'nightly chain result':<22} no completed run in the log — the chain "
+              f"has not finished since the log was last trimmed")
+    else:
+        _last_ok, _last_fails = _done[-1]
+        if _last_ok:
+            print(f"  OK {'nightly chain result':<22} last run exited clean, all steps OK")
+        else:
+            # how many consecutive completed runs, newest-first, ended red
+            _streak = 0
+            for _ok, _ in reversed(_done):
+                if _ok:
+                    break
+                _streak += 1
+            _labels = sorted({s.split(" (exit")[0] for s in _last_fails})
+            _age = "FIRST FAILURE" if _streak == 1 else f"{_streak} runs in a row"
+            _note = (f" · {_overlaps} overlapping run(s) in this log, so step names may be "
+                     f"attributed to the wrong one" if _overlaps else "")
+            print(f"  ⚠︎ {'nightly chain result':<22} last run FAILED ({_age}) — "
+                  f"{', '.join(_labels) or 'step name not in the log'}  · read "
+                  f"out/nightly.log; a chain red for several runs is one nobody is reading, "
+                  f"which is the failure this row exists to catch{_note}")
+            rc = 1
+except OSError as _exc:
+    print(f"  -- {'nightly chain result':<22} cannot read {_nightly_log} ({_exc})")
+
 # The scheduler's own store is not readable from a script (see the scheduler register at
 # the top of this file), so this run cannot judge the other 14 tasks. It says so instead
 # of staying quiet, because silence here reads as "all clear" for tasks nobody checked.
@@ -808,8 +872,8 @@ try:
     if os.path.exists(_fal):
         _p = subprocess.run([sys.executable, _fal, "--check"],
                             capture_output=True, text=True, timeout=60)
-        _line = (_p.stdout or "").strip().splitlines()
-        _line = _line[0].split(": ", 1)[-1] if _line else "(no output)"
+        _lines = (_p.stdout or "").strip().splitlines()
+        _line = _lines[0].split(": ", 1)[-1] if _lines else "(no output)"
         # The tool's own line reads "fetch-allowlist: OK — 30 hosts…" because it
         # is also run by hand. The row already carries the glyph, so strip the
         # repeated status token rather than printing "OK fetch allowlist OK —".
