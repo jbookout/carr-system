@@ -637,7 +637,7 @@ def section_claim_card(cur, today) -> str:
 
     tail = [f"Showing {len(rows)} of {total} claimable."]
     if no_channel:
-        tail.append(f"{no_channel} more have no phone or email on file ,  those are "
+        tail.append(f"{no_channel} more have no phone or email on file. Those are "
                     "research, not calls, and they are counted here rather than hidden "
                     "so the lane's contact-discovery gap stays visible.")
     tail.append("Every no you record removes that candidate from this card permanently, "
