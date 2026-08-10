@@ -28,7 +28,8 @@ class FakeClient {
     this.deals = new Map([[ids.deal, {
       id: ids.deal, name: "Deal Alpha", phase: "research", owner: "joe",
       type: "renewal", city: "Mobile", segment: "healthcare",
-      attention: false, next_date: null, version: 1,
+      attention: false, next_date: null, version: 1, salesforce_id: null,
+      outcome: null, closed_on: null,
     }]]);
   }
 
@@ -81,10 +82,32 @@ class FakeClient {
       return { rows: rows.slice(0, 1).map(e => ({ event_id: e.id, actor_id: e.actor_id,
         actor: e.actor, value: e.new_value?.[field] ?? null })) };
     }
+    if (sql === "select version from deal where id=$1 for update") {
+      const deal = this.deals.get(params[0]);
+      return { rows: deal ? [{ version: deal.version }] : [] };
+    }
+    if (sql.startsWith("select a.slug as actor, e.verb, e.field")) {
+      return { rows: this.events.filter(e => e.subject_id === params[0]).slice(-5).reverse()
+        .map(({ actor, verb, field, old_value, new_value, recorded_at }) =>
+          ({ actor, verb, field, old_value, new_value, recorded_at })) };
+    }
+    if (sql.startsWith("update deal set ") && sql.includes("updated_by=$1")) {
+      const deal = this.deals.get(params.at(-1));
+      const assignments = sql.slice("update deal set ".length, sql.indexOf(", updated_by=$1"))
+        .split(", ");
+      assignments.forEach((assignment, index) => { deal[assignment.split("=")[0]] = params[index + 1]; });
+      deal.version += 1;
+      return { rows: [] };
+    }
     if (/^select (phase|owner|attention|next_date) as value from deal/.test(sql)) {
       const field = sql.match(/^select (\w+) as value/)[1];
       const deal = this.deals.get(params[0]);
       return { rows: deal ? [{ value: deal[field] }] : [] };
+    }
+    if (sql.startsWith("select ") && sql.endsWith(" from deal where id=$1")) {
+      const fields = sql.slice("select ".length, -" from deal where id=$1".length).split(",");
+      const deal = this.deals.get(params[0]);
+      return { rows: deal ? [Object.fromEntries(fields.map(field => [field, deal[field]]))] : [] };
     }
     if (sql.includes("dealroom:apply-field")) {
       const field = sql.match(/update deal set (\w+)=/)[1];
@@ -174,12 +197,17 @@ class FakeClient {
       return { rows };
     }
     if (sql.includes("from v_capture_session_status")) return { rows: this.captureSessions.map(row => ({ ...row })) };
-    if (sql.includes("from v_deal_room_board") && sql.includes("where id=$1")) {
+    if (sql.includes("from v_deal_reconciliation_read") && !sql.includes("v_deal_room_board")) {
+      const deal = this.deals.get(params[0]);
+      return { rows: deal ? [{ id: deal.id, name: deal.name, salesforce_id: deal.salesforce_id,
+        base_version: deal.version, phase: deal.phase, outcome: deal.outcome, closed_on: deal.closed_on }] : [] };
+    }
+    if (sql.includes("from v_deal_room_board") && sql.includes("where b.id=$1")) {
       const deal = this.deals.get(params[0]);
       return { rows: deal ? [{ id: deal.id, name: deal.name, phase: deal.phase, owner: deal.owner,
         type: deal.type, city: deal.city, segment: deal.segment, attention: deal.attention,
         next_date: deal.next_date, next_step: this.nextActions.find(a => a.subject_id === deal.id && a.status === "open")?.description || null,
-        workspace_kind: "team" }] : [] };
+        workspace_kind: "team", salesforce_id: deal.salesforce_id, base_version: deal.version }] : [] };
     }
     if (sql.includes("from v_deal_room_note")) {
       const rows = this.notes.filter(n => n.deal_id === params[0])
@@ -321,6 +349,35 @@ test("next-step supersede leaves old rows intact and deal thread is stably newes
   assert.deepEqual(page.events.map(e => e.actor), ["dell", "joe"]);
   assert.equal(JSON.stringify(page).includes("sf_commission_placeholder"), false);
   assert.equal(JSON.stringify(page).includes("sf_close_date_placeholder"), false);
+});
+
+test("reconciliation reads provide a guarded Salesforce key and verify a closed deal", async () => {
+  const db = new FakeClient();
+  db.deals.get(ids.deal).salesforce_id = "006PQ00000hXMNaYAO";
+
+  const before = await call("get-deal-room", db, actors.joe, { deal: "Deal Alpha" });
+  assert.equal(before.salesforce_id, "006PQ00000hXMNaYAO");
+  assert.equal(before.base_version, 1);
+  assert.equal(JSON.stringify(before).includes("sf_commission_placeholder"), false);
+  assert.equal(JSON.stringify(before).includes("sf_close_date_placeholder"), false);
+
+  const updated = await call("update-deal", db, actors.joe, {
+    idempotency_key: "close-from-sf", deal: "Deal Alpha", base_version: before.base_version,
+    fields: { phase: "closed", outcome: "won", closed_on: "2026-07-30" },
+  });
+  assert.deepEqual(updated, { ok: true, updated: ["phase", "outcome", "closed_on"] });
+
+  const after = await call("read-deal-reconciliation", db, actors.joe, { deal: "Deal Alpha" });
+  assert.deepEqual(after, { id: ids.deal, name: "Deal Alpha", salesforce_id: "006PQ00000hXMNaYAO",
+    base_version: 2, phase: "closed", outcome: "won", closed_on: "2026-07-30" });
+
+  await assert.rejects(
+    call("update-deal", db, actors.dell, {
+      idempotency_key: "stale-close", deal: "Deal Alpha", base_version: before.base_version,
+      fields: { outcome: "lost" },
+    }),
+    error => error?.payload?.error === "version_conflict",
+  );
 });
 
 test("cursor round-trips the pg wire timestamp format (microseconds + offset) without JS Date", async () => {

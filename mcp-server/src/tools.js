@@ -120,7 +120,10 @@ async function mirrorDecision(client, actor, d) {
 }
 
 async function versionGuard(client, table, id, baseVersion) {
-  const r = await client.query(`select version from ${table} where id=$1`, [id]);
+  // Every write handler runs inside mcp.js's writer transaction.  Locking the
+  // row makes the optimistic check real: a concurrent writer waits, then sees
+  // the incremented version instead of letting two same-version writes through.
+  const r = await client.query(`select version from ${table} where id=$1 for update`, [id]);
   if (!r.rows.length) throw new ToolError({ error: "not_found", table, id });
   const current = r.rows[0].version;
   if (baseVersion === undefined || baseVersion === null)
@@ -4859,18 +4862,21 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
 // the rest of this registry; the one explicit exception is the ephemeral lease.
 Object.assign(TOOLS, {
   "get-deal-room": {
-    description: "Read one complete Deal Room record: board/workspace fields, next actions, notes, critical dates, activity, parties, premises, current economics, documents, and attributed history. Placeholder Salesforce fields are structurally excluded.",
+    description: "Read one complete open Deal Room record: board/workspace fields, next actions, notes, critical dates, activity, parties, premises, current economics, documents, and attributed history. Includes salesforce_id and base_version only so a reconciler can make one guarded follow-on write. Placeholder Salesforce fields are structurally excluded.",
     inputSchema: { type: "object", properties: { deal: { type: "string" } }, required: ["deal"] },
     handler: async (c, _actor, args) => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       const deal = await c.query(
-        `select id, name, phase, owner, type, market as city, segment, attention,
-                to_jsonb(next_date)#>>'{}' as next_date, next_step, client_ref, client_name,
-                account_client_id, account_client_ref, account_name, account_owner,
-                market_agent, to_jsonb(last_touch)#>>'{}' as last_touch,
-                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind
-           from v_deal_room_board where id=$1`, [s.id]);
+        `select b.id, b.name, b.phase, b.owner, b.type, b.market as city, b.segment, b.attention,
+                to_jsonb(b.next_date)#>>'{}' as next_date, b.next_step, b.client_ref, b.client_name,
+                b.account_client_id, b.account_client_ref, b.account_name, b.account_owner,
+                b.market_agent, to_jsonb(b.last_touch)#>>'{}' as last_touch,
+                to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
+                r.salesforce_id, r.base_version
+           from v_deal_room_board b
+           join v_deal_reconciliation_read r on r.id=b.id
+          where b.id=$1`, [s.id]);
       if (!deal.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
       const thread = await c.query(
         "select id, kind, text, actor, to_jsonb(created_at)#>>'{}' as created_at from v_deal_room_note where deal_id=$1 order by created_at desc, id desc",
@@ -4923,6 +4929,21 @@ Object.assign(TOOLS, {
         activities: activities.rows, participants: participants.rows,
         premises: premises.rows, negotiation_rounds: negotiation.rows,
         documents: documents.rows, events: history.rows });
+    },
+  },
+
+  "read-deal-reconciliation": {
+    description: "Read the minimal all-deal reconciliation record. Use after update-deal closes a deal, because the Deal Room board intentionally contains only open deals. Returns the Salesforce reconciliation key, current base_version, and close-state fields; it never exposes Salesforce placeholders or source_row.",
+    inputSchema: { type: "object", properties: { deal: { type: "string" } }, required: ["deal"] },
+    handler: async (c, _actor, args) => {
+      const s = await resolveSubject(c, args.deal);
+      if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      const r = await c.query(
+        `select id, name, salesforce_id, base_version, phase, outcome,
+                to_jsonb(closed_on)#>>'{}' as closed_on
+           from v_deal_reconciliation_read where id=$1`, [s.id]);
+      if (!r.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
+      return r.rows[0];
     },
   },
 
