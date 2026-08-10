@@ -28,15 +28,20 @@ import sys
 import tempfile
 
 
-REPO = os.path.expanduser("~/carr-system")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VAULT_MARKERS = ("/CARR AI", "/My Drive/CARR AI")
 LOG = os.path.join(REPO, "out", "delegation-gate.jsonl")
 STATE = os.environ.get(
     "DELEGATION_GATE_STATE", os.path.join(REPO, "out", "delegation-gate-state.json")
 )
 
-MECHANICAL = {"Bash", "Read", "Grep", "Glob", "WebFetch", "WebSearch"}
-AGENT_TOOLS = {"Agent", "Task"}
+# Claude Code records these names directly. Codex uses functions.<name> in
+# PreToolUse payloads and a custom_tool_call named <name> in its transcript.
+MECHANICAL = {
+    "Bash", "Read", "Grep", "Glob", "WebFetch", "WebSearch",
+    "apply_patch", "functions.exec", "functions.apply_patch",
+}
+AGENT_TOOLS = {"Agent", "Task", "functions.Agent", "functions.spawn_agent"}
 
 DELEGATE = re.compile(
     r"\b(delegat(?:e|ed|ing)|sub[- ]?agents?|lower[- ]?(?:cost|tier)?\s*models?|"
@@ -103,21 +108,67 @@ def records(path: str) -> list[dict]:
     return out
 
 
+SYNTHETIC_CODEX_USER_PREFIXES = (
+    "<recommended_plugins>", "# AGENTS.md instructions", "<environment_context>",
+    "<app-context>", "<skills_instructions>", "<permissions instructions>",
+    "<apps_instructions>", "<plugins_instructions>",
+    "The following is the Codex agent history added since your last approval",
+)
+
+
+def message_for(rec: dict) -> dict:
+    """Return a Claude message or Codex response-item payload."""
+    payload = rec.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "message":
+        return payload
+    msg = rec.get("message")
+    return msg if isinstance(msg, dict) else rec
+
+
 def text_blocks(rec: dict, roles: tuple[str, ...]) -> str | None:
-    if rec.get("type") not in roles:
+    """Read genuine partner/assistant text from Claude or Codex transcripts.
+
+    Codex represents generated environment context and approval-review deltas
+    as user messages. Those may quote an old "delegate" instruction, so they
+    must not create a delegation latch.
+    """
+    msg = message_for(rec)
+    role = msg.get("role") or rec.get("type")
+    if role not in roles:
         return None
     if rec.get("isMeta") or rec.get("isCompactSummary"):
         return None
-    msg = rec.get("message") or rec
     content = msg.get("content")
     if isinstance(content, str):
         text = content
     elif isinstance(content, list):
-        text = "\n".join(
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        )
+        # A Codex approval/history wrapper is one synthetic user record even
+        # when the quoted delta arrives in a later content block.  Skipping only
+        # its prefix block would let an old quoted "delegate" recreate a live
+        # task latch.
+        eligible = [block.get("text", "") for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") in {"text", "input_text", "output_text"}
+                    and isinstance(block.get("text"), str)]
+        if role in {"user", "human"} and eligible and eligible[0].lstrip().startswith(
+            SYNTHETIC_CODEX_USER_PREFIXES
+        ):
+            return None
+        chunks = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") not in {"text", "input_text", "output_text"}:
+                continue
+            value = block.get("text", "")
+            if not isinstance(value, str):
+                continue
+            if role in {"user", "human"} and value.lstrip().startswith(
+                SYNTHETIC_CODEX_USER_PREFIXES
+            ):
+                continue
+            chunks.append(value)
+        text = "\n".join(chunks)
     else:
         return None
     if not text or text.lstrip().startswith((
@@ -129,6 +180,16 @@ def text_blocks(rec: dict, roles: tuple[str, ...]) -> str | None:
 
 
 def tool_names(rec: dict) -> list[str]:
+    payload = rec.get("payload")
+    if isinstance(payload, dict):
+        if payload.get("type") == "custom_tool_call":
+            name = payload.get("name", "")
+            return [f"functions.{name}"] if isinstance(name, str) else []
+        if payload.get("type") == "function_call":
+            name, namespace = payload.get("name", ""), payload.get("namespace")
+            if isinstance(name, str):
+                return [f"{namespace}.{name}" if namespace else name]
+            return []
     msg = rec.get("message") or rec
     content = msg.get("content")
     if not isinstance(content, list):
@@ -138,6 +199,26 @@ def tool_names(rec: dict) -> list[str]:
         for b in content
         if isinstance(b, dict) and b.get("type") == "tool_use"
     ]
+
+
+def is_mechanical(tool: str) -> bool:
+    """Classify repeatable CARR sweep work across both runtime spellings."""
+    return tool in MECHANICAL or tool.startswith(("mcp__carr__", "mcp__carr_records__"))
+
+
+def is_agent_tool(tool: str) -> bool:
+    return tool in AGENT_TOOLS or tool.endswith(".spawn_agent")
+
+
+def is_subagent_payload(payload: dict) -> bool:
+    """Codex supplies agent_type for child tool calls; main calls omit it."""
+    kind = str(payload.get("agent_type") or payload.get("agentType") or "").lower()
+    return kind in {"subagent", "sub_agent", "child"}
+
+
+def is_carr_mcp_tool(tool: str) -> bool:
+    """CARR record calls remain in scope even when a desktop task has no cwd."""
+    return tool.startswith(("mcp__carr__", "mcp__carr_records__"))
 
 
 def task_id_for(session_id: str, record_index: int, instruction: str) -> str:
@@ -317,6 +398,11 @@ def deny(payload: dict, reason: str, task_id: str | None, count: int) -> int:
         "mechanical_calls_before_denial": count,
         "tool": payload.get("tool_name") or payload.get("toolName"),
     })
+    # Codex requires structured JSON to block a PreToolUse invocation. Claude
+    # Code blocks command hooks on exit 2 and stderr. Both paths are hard.
+    if payload.get("hook_event_name") == "PreToolUse":
+        print(json.dumps({"decision": "block", "reason": reason}))
+        return 0
     print(reason, file=sys.stderr)
     return 2
 
@@ -329,9 +415,15 @@ def main() -> int:
 
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
-        if tool not in MECHANICAL:
+        if not is_mechanical(tool):
             return 0
-        if not in_carr_scope(payload.get("cwd") or ""):
+        if not in_carr_scope(payload.get("cwd") or "") and not is_carr_mcp_tool(tool):
+            return 0
+
+        # Child agents do their assigned mechanical work. The main session is
+        # the seat constrained by the no-reclaim rule; blocking the worker is
+        # both redundant and would defeat the delegated task itself.
+        if is_subagent_payload(payload):
             return 0
 
         path = payload.get("transcript_path") or payload.get("transcriptPath") or ""
@@ -352,9 +444,9 @@ def main() -> int:
         task_id = sticky_task(
             str(payload.get("session_id") or payload.get("sessionId") or ""), recs
         )
-        if any(name in AGENT_TOOLS for name in used):
+        if any(is_agent_tool(name) for name in used):
             return 0
-        mechanical_count = sum(name in MECHANICAL for name in used)
+        mechanical_count = sum(is_mechanical(name) for name in used)
         if mechanical_count == 0:  # the one inline briefing lookup the rule allows
             return 0
 

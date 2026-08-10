@@ -50,8 +50,8 @@ import re
 import sys
 from urllib.parse import urlsplit
 
-LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
-REPO = os.path.expanduser("~/carr-system")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG = os.path.join(REPO, "out", "hook-guard.log")
 DELEGATION_STATE = os.path.join(REPO, "out", "delegation-gate-state.json")
 DELEGATION_LOCK = DELEGATION_STATE + ".lock"
 

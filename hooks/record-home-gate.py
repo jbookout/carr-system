@@ -303,6 +303,22 @@ def check(tool, ti):
     if not path:
         return None
 
+    # The delegation latch is mutable only by delegation-gate.py itself.  A
+    # normal Edit/Write/apply_patch call could otherwise release a task by
+    # changing the same state ledger the gate trusts.  This is deliberately
+    # narrower than the record-home policy: it names exactly the control-plane
+    # files and leaves ordinary out/ artifacts writable.
+    try:
+        control = {
+            os.path.realpath(os.path.expanduser("~/carr-system/out/delegation-gate-state.json")),
+            os.path.realpath(os.path.expanduser("~/carr-system/out/delegation-gate-state.json.lock")),
+        }
+        real_path = os.path.realpath(os.path.expanduser(path))
+        if real_path in control or os.path.basename(real_path).startswith(".delegation-gate-"):
+            return "delegation control-plane state is maintained only by delegation-gate.py"
+    except Exception:
+        pass
+
     # A0. CORPUS RENDERS — checked FIRST and deliberately ahead of the vault
     # test below, because two of the three corpus roots sit OUTSIDE the vault:
     # `drive:` paths live under My Drive/.claude and `home:` paths under
@@ -376,7 +392,10 @@ def check_apply_patch(ti, cwd):
     agent can remove an already-created forbidden markdown file; creating or
     editing one remains denied.
     """
-    command = ti.get("command") if isinstance(ti, dict) else None
+    # Codex's freeform apply_patch call supplies the patch itself as a string;
+    # Claude-style callers use {command: patch}. Both are the same transport
+    # policy and must remain equally inspectable.
+    command = ti.get("command") if isinstance(ti, dict) else ti
     if not isinstance(command, str):
         return "Codex apply_patch did not provide a parseable patch command; denying the write."
 
@@ -418,7 +437,7 @@ def main():
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
         ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        if tool == "apply_patch":
+        if tool in ("apply_patch", "functions.apply_patch"):
             reason = check_apply_patch(ti, payload.get("cwd"))
         elif tool in ("Write", "Edit", "MultiEdit") and isinstance(ti, dict):
             reason = check(tool, ti)
@@ -430,7 +449,7 @@ def main():
             sys.exit(2)
         sys.exit(0)
     except Exception as exc:
-        if tool == "apply_patch":                    # fail closed on Codex writes
+        if tool in ("apply_patch", "functions.apply_patch"):  # Codex writes
             log(f"DENY apply_patch internal-error {exc}")
             print("BLOCKED by the CARR record-home gate: could not inspect Codex patch.",
                   file=sys.stderr)

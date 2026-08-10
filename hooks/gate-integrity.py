@@ -54,6 +54,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOKS = os.path.join(REPO, "hooks")
@@ -62,7 +63,15 @@ REPO_HOOKS_JSON = os.path.join(REPO, "ops", "config", "hooks.json")
 DELEGATION_HOOK_CONFIG = os.path.join(
     REPO, "ops", "config", "delegation-gate-hook.json"
 )
-CONTRACTS = {"delegation-gate-hook.json": DELEGATION_HOOK_CONFIG}
+CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
+CODEX_HOOKS_LIVE = os.path.expanduser("~/.codex/hooks.json")
+RULE_ENFORCEMENT_MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
+RULE_ENFORCEMENT_MAP_CHECK = os.path.join(REPO, "ops", "rule-enforcement-map-check.py")
+CONTRACTS = {
+    "delegation-gate-hook.json": DELEGATION_HOOK_CONFIG,
+    "codex-hooks.json": CODEX_HOOKS_REPO,
+    "rule-enforcement-map.json": RULE_ENFORCEMENT_MAP,
+}
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 CARR_PROJECT_SETTINGS = os.path.expanduser(
     "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
@@ -180,32 +189,57 @@ def bless():
     return 0
 
 
+def render_config(path):
+    """Load one portable hooks config with this machine's concrete paths."""
+    raw = open(path).read()
+    raw = raw.replace("{{REPO}}", REPO).replace("{{HOME}}", os.path.expanduser("~"))
+    return json.loads(raw.replace("{{VAULT}}", os.path.expanduser("~/My Drive/CARR AI")))
+
+
+def hook_tuples(hooks):
+    """Exact event/matcher/command/timeout tuples, preserving duplicate evidence."""
+    out = []
+    for event, groups in (hooks or {}).items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            matcher = group.get("matcher", "")
+            for hook in group.get("hooks", []) or []:
+                if isinstance(hook, dict):
+                    out.append((event, matcher, hook.get("type"), hook.get("command"), hook.get("timeout")))
+    return out
+
+
+def validate_expected_wiring(live, expected):
+    """Return exact CARR-owned wiring defects while allowing unrelated user hooks."""
+    want = hook_tuples(expected)
+    have = hook_tuples(live)
+    errors = []
+    for item, count in Counter(want).items():
+        actual = have.count(item)
+        if actual != count:
+            errors.append(f"expected {count} exact {item[0]}/{item[1] or 'Stop'} hook {os.path.basename(str(item[3]))}; found {actual}")
+    wanted_commands = {item[3] for item in want}
+    wanted_events = {item[0] for item in want}
+    for item in have:
+        if item[0] in wanted_events and item[3] in wanted_commands and item not in want:
+            errors.append(f"CARR hook tuple drifted for {os.path.basename(str(item[3]))}: matcher/timeout/type is not the tracked contract")
+    return errors
+
+
 def settings_matches_repo():
-    """Is every gate the repo declares actually WIRED UP in live settings?"""
+    """Is every CARR-owned Claude hook exactly wired once in live settings?"""
     try:
         live = json.load(open(SETTINGS)).get("hooks", {})
     except Exception:
         return None, "settings.json unreadable"
     try:
-        src = open(REPO_HOOKS_JSON).read()
-    except Exception:
-        return None, "repo hooks.json unreadable"
-    want = src.replace("{{REPO}}", REPO).replace("{{HOME}}", os.path.expanduser("~"))
-    want = want.replace("{{VAULT}}", os.path.expanduser("~/My Drive/CARR AI"))
-    try:
-        want = json.loads(want)
+        want = render_config(REPO_HOOKS_JSON)
     except Exception as e:
         return None, f"repo hooks.json unparseable: {e}"
-
-    missing = []
-    live_cmds = {h.get("command", "")
-                 for arr in live.values() for m in arr for h in m.get("hooks", [])}
-    for arr in want.values():
-        for m in arr:
-            for h in m.get("hooks", []):
-                if h.get("command") not in live_cmds:
-                    missing.append(os.path.basename(h.get("command", "?")))
-    return missing, None
+    return validate_expected_wiring(live, want), None
 
 
 def delegation_hook_contract():
@@ -265,6 +299,69 @@ def project_delegation_wired():
     return validate_delegation_wiring(live, contract)
 
 
+def codex_wiring_matches_repo():
+    """Codex has one machine hooks document; enforce CARR scope in its scripts.
+
+    Codex supports repository-local hooks, but this installation deliberately
+    keeps one tracked global document because both ~/carr-system and the Drive
+    CARR AI vault are active roots for the same operating system. Each added
+    Codex path self-scopes to CARR before applying a rule, so Life AI and other
+    repos receive no new behavior. Compare parsed JSON to avoid whitespace
+    drift hiding a matcher, command, or timeout change. This proves only that
+    the installed file exactly matches this contract; Codex runtime trust and
+    invocation still require a live negative smoke.
+    """
+    try:
+        wanted = json.load(open(CODEX_HOOKS_REPO))
+        rendered = json.loads(json.dumps(wanted).replace("{{REPO}}", REPO))
+        live = json.load(open(CODEX_HOOKS_LIVE))
+    except Exception as exc:
+        return False, f"Codex hooks unreadable: {exc}"
+    errors = validate_carr_owned_wiring(live.get("hooks", {}), rendered.get("hooks", {}))
+    if errors:
+        return False, "; ".join(errors)
+    return True, None
+
+
+def is_carr_hook_command(command):
+    """Only paths owned by this CARR checkout are subject to exact comparison."""
+    if not isinstance(command, str):
+        return False
+    candidate = command.replace("\\", "/").lower()
+    return "/carr-system/hooks/" in candidate or "/my drive/carr ai/hooks/" in candidate
+
+
+def validate_carr_owned_wiring(live, expected):
+    """Exact CARR tuples once each, while allowing unrelated global Codex hooks."""
+    errors = validate_expected_wiring(live, expected)
+    wanted = set(hook_tuples(expected))
+    for item in hook_tuples(live):
+        if is_carr_hook_command(item[3]) and item not in wanted:
+            errors.append("untracked/drifted CARR hook tuple: "
+                          f"{item[0]}/{item[1] or 'Stop'} {os.path.basename(str(item[3]))}")
+    return errors
+
+
+def rule_enforcement_map_matches_inventory(runner=subprocess.run):
+    """Run the semantic map checker, not just its baseline hash.
+
+    A blessed JSON file can still be stale relative to the compiled rule
+    inventory. Give that checker a bounded execution path so integrity cannot
+    call the contract green on hash equality alone.
+    """
+    try:
+        result = runner([sys.executable, RULE_ENFORCEMENT_MAP_CHECK], cwd=REPO,
+                        capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        return False, "rule-enforcement map checker timed out after 45s"
+    except Exception as exc:
+        return False, f"rule-enforcement map checker could not run: {type(exc).__name__}: {exc}"
+    if result.returncode == 0:
+        return True, None
+    detail = ((result.stderr or result.stdout or "no output").strip().splitlines() or ["no output"])[-1]
+    return False, f"rule-enforcement map checker failed: {detail}"
+
+
 def delegation_wiring_selftest():
     """Regression-test the exact matcher/command/timeout comparison itself."""
     contract = {
@@ -294,7 +391,61 @@ def delegation_wiring_selftest():
         ok = accepted == expected
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         outcomes.append(ok)
-    print(f"{sum(outcomes)}/{len(outcomes)} delegation wiring cases passed")
+    expected_wiring = {"PreToolUse": [{"matcher": "Bash", "hooks": [{
+        "type": "command", "command": "/exact/guard.py", "timeout": 10,
+    }]}]}
+    wiring_cases = [
+        ("global exact tuple accepted", expected_wiring, True),
+        ("global narrowed matcher rejected", {"PreToolUse": [{"matcher": "Read", "hooks": expected_wiring["PreToolUse"][0]["hooks"]}]}, False),
+        ("global timeout drift rejected", {"PreToolUse": [{"matcher": "Bash", "hooks": [{
+            "type": "command", "command": "/exact/guard.py", "timeout": 11,
+        }]}]}, False),
+        ("global duplicate rejected", {"PreToolUse": expected_wiring["PreToolUse"] * 2}, False),
+        ("unrelated hook allowed", {"PreToolUse": expected_wiring["PreToolUse"] + [{"matcher": "Other", "hooks": [{
+            "type": "command", "command": "/other/plugin.py", "timeout": 3,
+        }]}]}, True),
+    ]
+    for name, live, expected_ok in wiring_cases:
+        ok = (not validate_expected_wiring(live, expected_wiring)) == expected_ok
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        outcomes.append(ok)
+    codex_expected = {"Stop": [{"matcher": "", "hooks": [{
+        "type": "command", "command": "/Users/booko/carr-system/hooks/completion-evidence-gate.py", "timeout": 15,
+    }]}]}
+    codex_live = {"Stop": codex_expected["Stop"] + [{"matcher": "", "hooks": [{
+        "type": "command", "command": "/Users/booko/other/hooks/keep.py", "timeout": 5,
+    }]}]}
+    codex_cases = [
+        ("Codex unrelated tuple allowed", codex_live, True),
+        ("Codex CARR duplicate rejected", {"Stop": codex_expected["Stop"] * 2}, False),
+        ("Codex untracked CARR tuple rejected", {"Stop": codex_expected["Stop"] + [{"matcher": "", "hooks": [{
+            "type": "command", "command": "/Users/booko/carr-system/hooks/other.py", "timeout": 15,
+        }]}]}, False),
+    ]
+    for name, live, expected_ok in codex_cases:
+        ok = (not validate_carr_owned_wiring(live, codex_expected)) == expected_ok
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        outcomes.append(ok)
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+    def succeeds(*args, **kwargs):
+        return Result()
+    def fails(*args, **kwargs):
+        return Result(1, stderr="coverage missing")
+    def times_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired("rule-enforcement-map-check.py", 45)
+    map_cases = [
+        ("rule map check accepted", succeeds, True),
+        ("rule map checker failure rejected", fails, False),
+        ("rule map checker timeout rejected", times_out, False),
+    ]
+    for name, runner, expected_ok in map_cases:
+        ok, _ = rule_enforcement_map_matches_inventory(runner)
+        passes = ok == expected_ok
+        print(f"{'PASS' if passes else 'FAIL'}  {name}")
+        outcomes.append(passes)
+    print(f"{sum(outcomes)}/{len(outcomes)} exact wiring cases passed")
     return 0 if all(outcomes) else 1
 
 
@@ -337,13 +488,24 @@ def main():
         if name not in base_contracts and got:
             problems.append(f"UNBLESSED: ops/config/{name} exists but is not in the baseline")
 
-    missing, err = settings_matches_repo()
+    map_valid, map_err = rule_enforcement_map_matches_inventory()
+    if not map_valid:
+        problems.append(f"RULE ENFORCEMENT MAP: {map_err}")
+
+    codex_wired, codex_err = codex_wiring_matches_repo()
+    if codex_err:
+        problems.append(f"CODEX WIRING: {codex_err}")
+    elif not codex_wired:
+        problems.append(
+            "NOT WIRED UP: Codex does not run the tracked hooks contract — "
+            "the CARR-scoped Codex boundary is not active"
+        )
+
+    wiring_errors, err = settings_matches_repo()
     if err:
         problems.append(f"WIRING: {err}")
-    elif missing:
-        problems.append("NOT WIRED UP: settings.json does not invoke "
-                        + ", ".join(sorted(set(missing)))
-                        + " — the script exists but nothing runs it")
+    elif wiring_errors:
+        problems.append("CLAUDE WIRING: " + "; ".join(sorted(set(wiring_errors))))
 
     delegation_wired, delegation_err = project_delegation_wired()
     if delegation_err:
@@ -380,7 +542,9 @@ def main():
         note = (f" · {len(unhardened)}/{len(GATED)} gates still user-writable "
                 f"(run ops/harden-gates.sh with sudo to make tampering "
                 f"impossible rather than merely detectable)")
-    print(f"GATE INTEGRITY: {len(base)} gates match baseline; wiring OK{note}")
+    print(f"GATE INTEGRITY: {len(base)} gates match baseline; config wiring exact{note}")
+    print("CODEX RUNTIME STATUS: installed config equality does not prove trust or invocation; "
+          "a live negative blocked-call smoke is still required.")
     return 0
 
 

