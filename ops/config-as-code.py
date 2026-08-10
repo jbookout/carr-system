@@ -73,6 +73,8 @@ TASKS_REPO = os.path.join(REPO, "ops", "scheduled-tasks")
 LAUNCHD_SRC = os.path.join(HOME, "Library", "LaunchAgents")
 LAUNCHD_REPO = os.path.join(REPO, "ops", "launchd")
 HOOKS_REPO = os.path.join(REPO, "ops", "config", "hooks.json")
+CODEX_HOOKS_SRC = os.path.join(HOME, ".codex", "hooks.json")
+CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
 
 # Longest first: REPO and VAULT both sit under HOME, so substituting HOME first
 # would leave "{{HOME}}/carr-system" and the REPO token would never match.
@@ -270,6 +272,14 @@ def live_hooks_block():
     return json.loads(raw).get("hooks")
 
 
+def live_codex_hooks():
+    """The complete Codex hooks document is its CARR-owned config surface."""
+    raw = read(CODEX_HOOKS_SRC)
+    if raw is None:
+        return None
+    return portable(raw)
+
+
 def pairs():
     """(label, live_text, repo_path) for every tracked item. live_text is
     already portable; repo contents are compared verbatim against it."""
@@ -279,6 +289,7 @@ def pairs():
     out.append(("hooks block (settings.json)",
                 None if hooks is None else portable(json.dumps(hooks, indent=2) + "\n"),
                 HOOKS_REPO))
+    out.append(("Codex hooks (hooks.json)", live_codex_hooks(), CODEX_HOOKS_REPO))
 
     seen = set()
     for name in sorted(os.listdir(TASKS_SRC)) if os.path.isdir(TASKS_SRC) else []:
@@ -422,6 +433,21 @@ def cmd_install(apply):
               f"{sum(len(v) for v in p.values() if isinstance(v, list))}")
         cfg["hooks"] = planned
 
+    codex_src = read(CODEX_HOOKS_REPO)
+    if codex_src is None:
+        print(f"ERROR: no tracked Codex hooks at {CODEX_HOOKS_REPO}. Run `pull` first.")
+        return 1
+    codex_body = concrete(codex_src)
+    try:
+        json.loads(codex_body)
+    except Exception as exc:
+        print(f"ERROR: {CODEX_HOOKS_REPO} is not valid JSON ({exc}) — refusing to deploy it.")
+        return 1
+    if read(CODEX_HOOKS_SRC) == codex_body:
+        print("  Codex hooks already match the repo")
+    else:
+        print("  Codex hooks: WILL BE REPLACED with the repo's version")
+
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
         if f in PRIMARY_ONLY and not IS_PRIMARY:
             print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
@@ -499,6 +525,19 @@ def cmd_install(apply):
         shutil.copy2(backup, SETTINGS)
         print(f"ERROR: write produced unparseable JSON ({exc}) — restored {backup}")
         return 1
+    os.makedirs(os.path.dirname(CODEX_HOOKS_SRC), exist_ok=True)
+    codex_backup = CODEX_HOOKS_SRC + ".bak-config-as-code"
+    if os.path.exists(CODEX_HOOKS_SRC):
+        shutil.copy2(CODEX_HOOKS_SRC, codex_backup)
+    with open(CODEX_HOOKS_SRC, "w", encoding="utf-8") as fh:
+        fh.write(codex_body)
+    try:
+        json.loads(read(CODEX_HOOKS_SRC))
+    except Exception as exc:
+        if os.path.exists(codex_backup):
+            shutil.copy2(codex_backup, CODEX_HOOKS_SRC)
+        print(f"ERROR: Codex hook write produced unparseable JSON ({exc}) — restored backup")
+        return 1
     # NO RESTART NEEDED, and the old message here said otherwise for months.
     # Live-tested 2026-08-09 with two independent confirmations: git-writer-gate
     # and gate-edit-gate were both installed MID-SESSION and both fired in a
@@ -509,9 +548,10 @@ def cmd_install(apply):
     # running five sessions. The opposite is true: an install takes effect
     # everywhere immediately. Rule 97326357 — a claim about a surface becomes
     # doctrine only after a live test from that surface.
-    print(f"\nWROTE OK (backup: {backup}). Live immediately — Claude Code reads "
-          f"the hooks block per tool call, so every running session is covered "
-          f"without a restart (verified 2026-08-09).")
+    print(f"\nWROTE OK (backups: {backup}, {codex_backup}). Claude Code reads its "
+          f"hooks block per tool call; Codex must trust a changed non-managed hook "
+          f"definition before it runs. Both clients are protected once their hook "
+          f"configuration is active.")
     return 0
 
 

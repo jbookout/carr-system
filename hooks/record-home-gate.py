@@ -362,7 +362,53 @@ def check(tool, ti):
     return None
 
 
+PATCH_FILE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$", re.M)
+PATCH_MOVE = re.compile(r"^\*\*\* Move to: (.+?)\s*$", re.M)
+
+
+def check_apply_patch(ti, cwd):
+    """Apply the same record-home policy to Codex's patch transport.
+
+    Claude exposes a file path and content separately as Write/Edit tool inputs.
+    Codex exposes one patch string through ``apply_patch``.  The policy belongs
+    here, not in a second manifest: extract every target from the standard patch
+    header and pass it through ``check``.  A delete-only patch is allowed so an
+    agent can remove an already-created forbidden markdown file; creating or
+    editing one remains denied.
+    """
+    command = ti.get("command") if isinstance(ti, dict) else None
+    if not isinstance(command, str):
+        return "Codex apply_patch did not provide a parseable patch command; denying the write."
+
+    targets = PATCH_FILE.findall(command)
+    if not targets:
+        return "Codex apply_patch named no file targets; denying an uninspectable write."
+
+    base = cwd if isinstance(cwd, str) and cwd else os.getcwd()
+    for operation, raw_path in targets:
+        if operation == "Delete":
+            continue
+        path = os.path.expanduser(raw_path)
+        if not os.path.isabs(path):
+            path = os.path.join(base, path)
+        reason = check("apply_patch", {"file_path": path, "content": command})
+        if reason:
+            return reason
+    # A move is emitted inside an Update File stanza. Inspect the destination
+    # too, otherwise a non-markdown source could be renamed into vault Markdown
+    # without ever presenting the destination to the policy.
+    for raw_path in PATCH_MOVE.findall(command):
+        path = os.path.expanduser(raw_path)
+        if not os.path.isabs(path):
+            path = os.path.join(base, path)
+        reason = check("apply_patch", {"file_path": path, "content": command})
+        if reason:
+            return reason
+    return None
+
+
 def main():
+    tool = ""
     try:
         payload = json.load(sys.stdin)
     except Exception as exc:                          # fail OPEN
@@ -372,16 +418,23 @@ def main():
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
         ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        if tool not in ("Write", "Edit", "MultiEdit") or not isinstance(ti, dict):
+        if tool == "apply_patch":
+            reason = check_apply_patch(ti, payload.get("cwd"))
+        elif tool in ("Write", "Edit", "MultiEdit") and isinstance(ti, dict):
+            reason = check(tool, ti)
+        else:
             sys.exit(0)
-
-        reason = check(tool, ti)
         if reason:
             log(f"DENY {tool} :: {reason[:220]}")
             print(f"BLOCKED by the CARR record-home gate: {reason}", file=sys.stderr)
             sys.exit(2)
         sys.exit(0)
-    except Exception as exc:                          # fail OPEN
+    except Exception as exc:
+        if tool == "apply_patch":                    # fail closed on Codex writes
+            log(f"DENY apply_patch internal-error {exc}")
+            print("BLOCKED by the CARR record-home gate: could not inspect Codex patch.",
+                  file=sys.stderr)
+            sys.exit(2)
         log(f"ALLOW(internal-error) {exc}")
         sys.exit(0)
 
