@@ -543,16 +543,16 @@ reason     = "Renamed only, to the COO seat's own name. Same subject and same so
 # ---------------------------------------------------------------------------
 
 [[metric]]
-key            = "facade_stale_rows"
+key            = "facade_unhealthy_rows"
 category       = "automation_safety"
 dimension      = "staleness"
-question       = "How many watched outputs are stale right now?"
-source_command = "awk '/^Façade check/,/^Schedule drift/' \"$HEALTH\" | grep -cE '⚠︎|MISSING' || true"
-measured_from  = "run.sh health's façade-check SECTION ONLY — file mtimes against each row's declared cadence"
-threshold      = { warn = 3, fail = 6 }
-bound_action   = "Open/update ONE deduplicated loop (domain system, owner Joe/Claude) naming each stale row and its cadence source. Verification: the row reads OK on the next run.sh health. Auto-clears when the count returns under warn."
+question       = "How many watched façade outputs are missing, stale, behind, or broken right now?"
+source_command = "\"$REPO/.venv/bin/python\" \"$REPO/ops/report-card/evidence-metric.py\" facade-findings"
+measured_from  = "run.sh health's façade-check SECTION ONLY — MISSING rows plus every warning row (STALE, BEHIND, or gated-credential failure)"
+threshold      = { polarity = "higher_is_worse", warn = 3, fail = 6 }
+bound_action   = "Open/update ONE deduplicated loop (domain system, owner Joe/Claude) naming each unhealthy row and its source state. Verification: the row reads OK on the next run.sh health. Auto-clears when the count returns under warn."
 added_on       = "2026-08-09"
-independent_command = "awk '/^Façade check/,/^Schedule drift/' \"$HEALTH\" | grep -cE 'STALE|MISSING' || true"
+independent_command = "\"$REPO/.venv/bin/python\" \"$REPO/ops/report-card/evidence-metric.py\" facade-findings-independent"
 note = """
 SECTION-SCOPED ON PURPOSE, and this row is its own worked example. The first
 draft counted every '⚠︎' in the whole health output and returned 13 — it was
@@ -560,9 +560,10 @@ silently summing façade staleness, schedule drift, six deprecation rows and a
 machine-config row into one number labelled "stale outputs". The true façade
 count is 5. Nothing about the value 13 looked wrong; only comparing it against
 measured_from caught it, which is the entire argument for that field.
-LIMITATION, stated rather than hidden: the independent path counts a DIFFERENT
-TOKEN in the SAME render, so it catches a parsing or scoping error (which is
-what bit this row) but NOT an error inside health itself. A truly independent
+The independent path uses a separate explicit state classifier over the same
+defined set, including BEHIND as well as STALE, MISSING, and broken credential
+rows. It catches parsing or scoping disagreement (which is what bit this row)
+but NOT an error inside health itself. A truly independent
 path re-stats the watched files against the WATCH cadences. That is the right
 version and it is not written yet.
 """
@@ -572,9 +573,8 @@ key            = "export_deadman_failures"
 category       = "automation_safety"
 dimension      = "staleness"
 question       = "Did every registered export target succeed inside its dead-man window?"
-source_command = "grep -cE '⚠︎ (STALE|NEVER RAN|NEVER OK) ' \"$HEALTH\" || true"
+source_command = "\"$REPO/.venv/bin/python\" \"$REPO/ops/report-card/evidence-metric.py\" export-deadman-failures"
 measured_from  = "health's export dead-man lines, which it emits one per failing target from the record layer's per-target last-success timestamps"
-independent_command = "grep -cE '^  OK [0-9]+ registered target\\(s\\)' \"$HEALTH\" | sed 's/1/0/' || true"
 note = """
 THIRD REWRITE, AND THE BUG CLASS IS THE LESSON. This row has now been wrong in
 three distinct ways inside one session, every one of them a mismatch between
@@ -601,7 +601,7 @@ all three versions passed `--validate` is that `measured_from` is free text
 nothing verifies — a substrate probe that proves the named source was the one
 read is the real fix, and it is not built yet.
 """
-threshold      = { warn = 1, fail = 3 }
+threshold      = { polarity = "higher_is_worse", warn = 1, fail = 3 }
 bound_action   = "Name the failing target and its exporter; open a loop with the re-export command. Verification: the target reports a success inside 26h."
 added_on       = "2026-08-09"
 
@@ -610,9 +610,9 @@ key            = "code_drift_rows"
 category       = "system_development"
 dimension      = "staleness"
 question       = "How many repo files have drifted from their live vault copy?"
-source_command = "grep -c 'DRIFT' \"$CHECK\" || true"
-measured_from  = "check.sh's byte diff of each manifest.tsv row, repo vs vault"
-threshold      = { warn = 1, fail = 5 }
+source_command = "\"$REPO/.venv/bin/python\" \"$REPO/ops/report-card/evidence-metric.py\" code-drift-rows"
+measured_from  = "check.sh's completed Code drift section: DRIFT plus MISSING rows, repo vs vault"
+threshold      = { polarity = "higher_is_worse", warn = 1, fail = 5 }
 bound_action   = "Per drifted row, decide which side is canonical and reconcile; drift that is intentional gets a manifest note. Verification: check.sh reports OK for that row."
 added_on       = "2026-08-09"
 
@@ -621,38 +621,37 @@ key            = "rules_live_agreement"
 category       = "governance"
 dimension      = "staleness"
 question       = "Does the rule store's active count match what every live surface declares?"
-source_command = "cd \"$REPO\" && { ./.venv/bin/python ops/rules-live-check.py 2>/dev/null || true; } | grep -oE 'behind by [0-9]+' | grep -oE '[0-9]+' || echo 0"
-measured_from  = "the RULE STORE's count of active shared rules, queried live from the database"
-threshold      = { warn = 1, fail = 1 }
-bound_action   = "Run bin/refresh-rules.sh (never a raw run.sh export, which stages to out/exports and once produced a rule that bound nobody). Verification: both counts agree and the health row reads OK."
+source_command = "\"$REPO/.venv/bin/python\" \"$REPO/ops/report-card/rules-live-metric.py\" --primary"
+measured_from  = "authenticated standing-context shared_rules count compared with the direct rule-store count; no compiled-rule render participates"
+threshold      = { polarity = "higher_is_worse", warn = 1, fail = 1 }
+bound_action   = "Compare deployed standing-context filtering with the direct v_compiled_rules query; reconcile the differing read contract without using compiled Markdown. Verification: both modes of ops/report-card/rules-live-metric.py return 0."
 added_on       = "2026-08-09"
-independent_command = "cd \"$REPO\" && { ./.venv/bin/python ops/rules-live-check.py 2>/dev/null || true; } | grep -cE '^STALE' || true"
+independent_command = "\"$REPO/.venv/bin/python\" \"$REPO/ops/report-card/rules-live-metric.py\" --independent"
 note = """
-A GENUINELY independent pair, unlike facade_stale_rows: primary queries the
-DATABASE, the second path reads the count the RENDERED FILE declares about
-itself. Different substrates, so a disagreement means the render is stale
-relative to the store — which is the exact failure the 2026-08-04 correction
-was about (a session ran `run.sh export`, got three green results, and produced
-a rule that bound nobody because the write went to staging).
-LIVE EXAMPLE from this row's first runs, 2026-08-09, and it caught a real drift
-within the hour. The store moved 123 -> 124 -> 125 during one session while the
-render trailed: health had captured 123 at 07:44 and declared the file in
-agreement; the file re-exported at 07:52 declaring 124; by the third run the
-store held 125 against a render still on 124, which rules-live-check reported as
-STALE with the remedy bin/refresh-rules.sh. Ran it; both sides now agree at 125.
-Every one of those readings was internally consistent and none of them was
-current. A single-source check cannot see that at all, which is the argument for
-the whole measurement_integrity category.
+A POST-CUTOFF pair. The Aug 25 dry run follows the Aug 21 compiled-Markdown
+cutoff, so neither path may read a retired rule file. Both call authenticated
+standing-context through the locked read-only probe identity and compare its
+shared_rules count with the direct store. Primary uses the exporter's canonical
+`_fetch_rules`; independent uses a raw count from v_compiled_rules with the
+intro-politics exclusion stated explicitly and does not import `_fetch_rules`.
 
-PARSE HARDENED THE SAME RUN, and this is its own lesson. The first version of
-this command matched only the healthy output shape ("shared: 125 active") and
-returned NOTHING against the STALE shape ("shared: store 125, live file 124").
-So the metric went blind at exactly the moment the system became unhealthy — it
-reported RUBRIC DRIFT when what it had actually found was a real defect. A check
-whose parser only handles the passing case is worse than no check, because its
-silence reads as health. The `|| true` is deliberate too: rules-live-check exits
-1 on STALE, which is a REAL STATE and not a command failure, and the metric must
-still report the number.
+TRANSPORT DIAGNOSIS, verified live 2026-08-11. Python urllib received Cloudflare
+error 1010 before reaching the Worker, while the estate's established curl
+transport returned HTTP 200 for tools/list and standing-context with the same
+token. The deployed registry exposed standing-context as read-only, and the
+response identified smoke-probe / personal_scope:none with 144 shared rules.
+The helper now uses the same curl transport as mcp-server/smoke-reads.sh. Both
+post-cutoff parity modes returned 0 live; no permission or production-auth
+change was needed.
+
+PARSE HARDENED AGAIN AFTER ADVERSARIAL REVIEW. The first parser matched only the
+healthy output shape. Its successor swallowed every rules-live-check failure
+with `|| true` and converted missing output, including database unavailability,
+to a healthy 0. Both are now retired. The primary helper accepts only the
+explicit OK/STALE output contracts of rules-live-check; the independent helper
+queries the store and reads the rendered headers by a separate code path. A
+credential skip, database exception, missing file/count, unrecognized output or
+non-contract exit is UNKNOWN/RUBRIC DRIFT, never zero.
 """
 
 [[metric]]
@@ -660,9 +659,9 @@ key            = "doctrine_stale_sections"
 category       = "governance"
 dimension      = "staleness"
 question       = "How many policy-bearing doctrine sections are past their review clock?"
-source_command = "grep 'stale-sections' \"$HEALTH\" | grep -oE '[0-9]+ past review_after' | grep -oE '^[0-9]+' || echo 0"
+source_command = "\"$REPO/.venv/bin/python\" \"$REPO/ops/report-card/evidence-metric.py\" doctrine-stale-sections"
 measured_from  = "doctrine section review_after dates in the store"
-threshold      = { warn = 1, fail = 5 }
+threshold      = { polarity = "higher_is_worse", warn = 1, fail = 5 }
 bound_action   = "Review or re-confirm each via write-doctrine-section. Verification: the health row returns to 0."
 added_on       = "2026-08-09"
 
@@ -673,7 +672,7 @@ dimension      = "effectiveness"
 question       = "What share of active deals carry a real last_touch?"
 source_command = ""   # DELIBERATELY EMPTY — see note
 measured_from  = "the record layer's deal rows"
-threshold      = { warn = 50, fail = 25 }
+threshold      = { polarity = "higher_is_better", warn = 50, fail = 25 }
 bound_action   = "PENDING. Not collected until the command exists — rule 590b11e1 refuses a metric whose response is undefined, and this row is carried as an explicit gap rather than as a silent absence."
 added_on       = "2026-08-09"
 note           = "Aug 6 measured ~5% system-wide (36 of 38 active deals null). The number matters and the command does not exist yet; writing the row without the command is how v1 accumulated unmeasurable metrics, so this one is marked and left uncollected until the query is written."

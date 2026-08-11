@@ -62,6 +62,10 @@ echo "== smoke: report-card rubric validates =="
 python3 "$REPO/tools/report-card.py" --validate > /dev/null || { echo "  FAIL: rubric validation"; exit 1; }
 echo "  OK  rubric-v2 validates"
 
+echo "== smoke: report-card runner contract =="
+python3 "$REPO/ops/report-card-selftest.py" > /dev/null 2>&1 || { echo "  FAIL: report-card runner contract"; exit 1; }
+echo "  OK  runner rejects malformed or incomplete evidence"
+
 echo "== smoke: retrieval answers =="
 CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" -n 1 "monthly health audit procedure" | head -2
 

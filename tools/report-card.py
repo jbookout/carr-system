@@ -34,8 +34,9 @@ TWO MODES:
                breach. Runs no commands, needs no database, takes milliseconds.
                THIS IS THE CHECK FOR THE SPEC ITSELF, and it was written before
                the spec was populated (rule 43e2ef76).
-  --run        Capture health + check once, execute every metric's source
-               command, sample the independent commands, report. Read-only.
+  --run        First validate the spec, then capture health + check once,
+               execute every metric's source command, sample the independent
+               commands, report. Read-only.
 """
 
 import argparse
@@ -58,6 +59,23 @@ VAULT = os.environ.get(
 # every time, not a full second measurement pass. Scope item 4 says "a small
 # random sample" and means it.
 INTEGRITY_SAMPLE = 3
+
+# Metric source commands in the seeded set are simple parsers over captured
+# evidence. A source that hangs must become RUBRIC DRIFT instead of holding an
+# unattended audit forever. Health/check have their own longer timeout because
+# they are the evidence producers, not per-row parsers.
+METRIC_TIMEOUT = 60
+
+# `run.sh health` and `run.sh check` use exit 1 to report real findings, so a
+# nonzero code alone is not a failed evidence capture. A missing interpreter or
+# shell failure is normally 126/127, however, and no stdout means there is no
+# artifact for any metric to read. Treat only the documented finding codes as
+# admissible evidence-producing exits.
+EVIDENCE_EXIT_CODES = {0, 1}
+EVIDENCE_MARKERS = {
+    "health": "CARR_EVIDENCE_COMPLETE health-check/v1",
+    "check": "CARR_EVIDENCE_COMPLETE check/v1",
+}
 
 
 def load(path=SPEC):
@@ -208,10 +226,50 @@ def validate(spec):
         if not m.get("added_on"):
             errs.append(f"metric {key}: no added_on")
 
+        # Thresholds have direction. The first runner implicitly treated every
+        # number as higher-is-worse. That happens to fit the seeded staleness
+        # rows, but it would silently invert a success-rate or coverage row.
+        # Require the direction at authoring time, before a future metric can
+        # make a valid-looking but sign-corrupt report.
+        source_command = m.get("source_command")
+        blocking_gap = m.get("blocking_gap", False)
+        if not isinstance(blocking_gap, bool):
+            errs.append(f"metric {key}: blocking_gap must be true|false")
+        if source_command and blocking_gap:
+            errs.append(f"metric {key}: collected metric cannot also be a blocking gap")
+        if blocking_gap and not m.get("gap_reason"):
+            errs.append(f"metric {key}: blocking gap needs gap_reason")
+        elif blocking_gap:
+            # A blocking gap is structurally declared but still makes the
+            # candidate inadmissible. Keeping it in errs prevents both
+            # `--validate` and `--run` from printing green until the named
+            # instrument exists.
+            errs.append(f"metric {key}: BLOCKING GAP — {m['gap_reason']}")
+        threshold = m.get("threshold")
+        if source_command and (not isinstance(threshold, dict) or not threshold):
+            errs.append(f"metric {key}: collected metric needs a non-empty threshold table")
+        elif threshold is not None:
+            if not isinstance(threshold, dict) or not threshold:
+                errs.append(f"metric {key}: threshold must be a non-empty table")
+            else:
+                polarity = threshold.get("polarity")
+                if polarity not in ("higher_is_worse", "higher_is_better"):
+                    errs.append(f"metric {key}: threshold needs polarity "
+                                "higher_is_worse|higher_is_better")
+                warn, fail = threshold.get("warn"), threshold.get("fail")
+                warn_is_number = isinstance(warn, (int, float)) and not isinstance(warn, bool)
+                fail_is_number = isinstance(fail, (int, float)) and not isinstance(fail, bool)
+                if not warn_is_number or not fail_is_number:
+                    errs.append(f"metric {key}: threshold needs numeric warn and fail")
+                elif polarity == "higher_is_worse" and warn > fail:
+                    errs.append(f"metric {key}: higher_is_worse requires warn <= fail")
+                elif polarity == "higher_is_better" and fail > warn:
+                    errs.append(f"metric {key}: higher_is_better requires fail <= warn")
+
         # An empty source_command is LEGAL and deliberate: it declares a known
         # gap out loud. It is a warning, never silence — v1 accumulated
         # unmeasurable rows precisely by staying quiet about them.
-        if not m.get("source_command"):
+        if not source_command:
             warns.append(f"metric {key}: no source_command — carried as a declared gap, "
                          "not collected")
 
@@ -282,30 +340,37 @@ def _grade(val, threshold):
         return "UNPARSED"
     n = float(m.group())
     fail, warn = threshold.get("fail"), threshold.get("warn")
-    # Direction is inferred as higher-is-worse because every seeded row counts
-    # defects (stale rows, drifted files, disagreements). A metric where higher
-    # is BETTER must say so; that field is the next thing to add here and is
-    # tracked on loop #220.
-    if fail is not None and n >= fail:
-        return "FAIL"
-    if warn is not None and n >= warn:
-        return "WARN"
+    polarity = threshold.get("polarity")
+    if polarity == "higher_is_worse":
+        if fail is not None and n >= fail:
+            return "FAIL"
+        if warn is not None and n >= warn:
+            return "WARN"
+    elif polarity == "higher_is_better":
+        if fail is not None and n <= fail:
+            return "FAIL"
+        if warn is not None and n <= warn:
+            return "WARN"
+    else:
+        # `--run` validates first, so this only protects direct callers. A
+        # missing direction is never a healthy grade.
+        return "UNPARSED"
     return "OK"
 
 
-def capture(cmd, timeout=600):
-    """Run a command, return (rc, stdout). Never raises — a failing evidence
+def capture(cmd, timeout=600, env=None):
+    """Run a command, return (rc, stdout, stderr). Never raises — a failing evidence
     source is a finding to report, not a crash that hides every other row."""
     try:
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                           timeout=timeout)
-        return p.returncode, p.stdout
+                           timeout=timeout, env=env)
+        return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         # A hang is rule a9ecd5b4's limit case: no exit code exists, so an
         # exit-code check can never catch it. Name it explicitly.
-        return 124, f"TIMEOUT after {timeout}s"
+        return 124, f"TIMEOUT after {timeout}s", ""
     except Exception as exc:                       # noqa: BLE001
-        return 1, f"ERROR {exc}"
+        return 1, f"ERROR {exc}", ""
 
 
 def run(spec, skip_evidence=False):
@@ -323,25 +388,53 @@ def run(spec, skip_evidence=False):
         # identical confident numbers and say nothing — a staleness instrument
         # with no staleness guard on its own evidence. 26h matches the dead-man
         # window health-check.py already uses everywhere else.
-        age_h = (time.time() - os.path.getmtime(health_p)) / 3600.0
-        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(health_p)))
-        if age_h > 26:
-            print(f"evidence: REFUSED — cached capture is {age_h:.1f}h old "
-                  f"(captured {stamp}, limit 26h). Re-run without --skip-evidence.")
+        cache_ages = {
+            "health": (time.time() - os.path.getmtime(health_p)) / 3600.0,
+            "check": (time.time() - os.path.getmtime(check_p)) / 3600.0,
+        }
+        stale = [name for name, age in cache_ages.items() if age >= 26]
+        empty = []
+        incomplete = []
+        for name, path in (("health", health_p), ("check", check_p)):
+            with open(path) as fh:
+                content = fh.read().strip()
+                if not content:
+                    empty.append(name)
+                elif not content.endswith(EVIDENCE_MARKERS[name]):
+                    incomplete.append(name)
+        if stale or empty or incomplete:
+            details = []
+            if stale:
+                details.append("stale " + ", ".join(
+                    f"{name}={cache_ages[name]:.1f}h" for name in stale))
+            if empty:
+                details.append("empty " + ", ".join(empty))
+            if incomplete:
+                details.append("incomplete " + ", ".join(incomplete))
+            print("evidence: REFUSED — cached " + "; ".join(details) +
+                  ". Re-run without --skip-evidence.")
             return 1
-        print(f"evidence: reusing cache from {stamp} ({age_h:.1f}h old)")
+        print("evidence: reusing cache — " + ", ".join(
+            f"{name} {age:.1f}h old" for name, age in cache_ages.items()))
     else:
-        print("evidence: capturing run.sh health (this takes minutes) ...")
-        rc, out = capture(f'"{REPO}/run.sh" health')
-        with open(health_p, "w") as fh:
-            fh.write(out)
-        print(f"  health rc={rc}, {len(out.splitlines())} lines")
-
-        print("evidence: capturing run.sh check ...")
-        rc, out = capture(f'"{REPO}/run.sh" check')
-        with open(check_p, "w") as fh:
-            fh.write(out)
-        print(f"  check  rc={rc}, {len(out.splitlines())} lines")
+        evidence_failures = []
+        for label, command, path in (
+            ("health", f'"{REPO}/run.sh" health', health_p),
+            ("check", f'"{REPO}/run.sh" check', check_p),
+        ):
+            print(f"evidence: capturing run.sh {label} ...")
+            rc, out, err = capture(command)
+            with open(path, "w") as fh:
+                fh.write(out)
+            print(f"  {label:6} rc={rc}, {len(out.splitlines())} lines")
+            complete = out.strip().endswith(EVIDENCE_MARKERS[label])
+            if rc not in EVIDENCE_EXIT_CODES or not out.strip() or not complete:
+                evidence_failures.append((label, rc, (err or out).strip()[:160]))
+        if evidence_failures:
+            print("\nEVIDENCE CAPTURE FAILURE — no metric may grade incomplete evidence:")
+            for label, rc, detail in evidence_failures:
+                print(f"  {label:6} rc={rc} {detail}")
+            return 1
 
     env["HEALTH"] = health_p
     env["CHECK"] = check_p
@@ -351,15 +444,15 @@ def run(spec, skip_evidence=False):
     for m in spec.get("metric", []):
         key, cmd = m["key"], m.get("source_command", "")
         if not cmd:
-            gaps.append(key)
+            gaps.append(m)
             continue
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=env)
-        val = p.stdout.strip()
-        if p.returncode != 0 or not val:
+        rc, val, err = capture(cmd, timeout=METRIC_TIMEOUT, env=env)
+        val = val.strip()
+        if rc != 0 or not val:
             # RUBRIC DRIFT, not "unmeasurable". The distinction is the whole
             # point: v1 returned unmeasurable and nothing ever acted on it.
-            drifted.append((key, p.returncode, (p.stderr or "").strip()[:120]))
-            results.append((key, m, "—", p.returncode, "DRIFT"))
+            drifted.append((key, rc, (err or "").strip()[:120]))
+            results.append((key, m, "—", rc, "DRIFT"))
             continue
 
         # THRESHOLDS ARE NOW EVALUATED. Until 2026-08-09 they were not: the word
@@ -372,7 +465,7 @@ def run(spec, skip_evidence=False):
         state = _grade(val, m.get("threshold") or {})
         if state in ("WARN", "FAIL"):
             breaches.append((key, m, val, state))
-        results.append((key, m, val, p.returncode, state))
+        results.append((key, m, val, rc, state))
 
     print(f"\nmetrics — {len(results)} executed, {len(gaps)} declared gaps, "
           f"{len(drifted)} drifted, {len(breaches)} over threshold")
@@ -385,8 +478,11 @@ def run(spec, skip_evidence=False):
     for key, m, val, state in breaches:
         print(f"\n  {state} {key} = {val}")
         print(f"       → {m.get('bound_action', '(none)')[:300]}")
-    for key in gaps:
-        print(f"  -- {key:28} DECLARED GAP — no source_command, not collected")
+    for metric in gaps:
+        label = "BLOCKING DECLARED GAP" if metric.get("blocking_gap") else "DECLARED GAP"
+        print(f"  -- {metric['key']:28} {label} — no source_command, not collected")
+        if metric.get("gap_reason"):
+            print(f"       → {metric['gap_reason'][:300]}")
     if drifted:
         print("\nRUBRIC DRIFT — these rows could not produce a value:")
         for key, rc, err in drifted:
@@ -396,16 +492,21 @@ def run(spec, skip_evidence=False):
 
     # --- measurement-layer integrity: sample and re-derive -------------------
     disagreed = 0
+    invalid_samples = 0
     sampleable = [m for m in spec.get("metric", []) if m.get("independent_command")]
     if sampleable:
         picked = random.sample(sampleable, min(INTEGRITY_SAMPLE, len(sampleable)))
         print(f"\nmeasurement integrity — re-deriving {len(picked)} of "
               f"{len(sampleable)} sampleable metrics by a second path")
         for m in picked:
-            a = subprocess.run(m["source_command"], shell=True, capture_output=True,
-                               text=True, env=env).stdout.strip()
-            b = subprocess.run(m["independent_command"], shell=True,
-                               capture_output=True, text=True, env=env).stdout.strip()
+            a_rc, a, _ = capture(m["source_command"], timeout=METRIC_TIMEOUT, env=env)
+            b_rc, b, _ = capture(m["independent_command"], timeout=METRIC_TIMEOUT, env=env)
+            a, b = a.strip(), b.strip()
+            if a_rc != 0 or b_rc != 0 or not a or not b:
+                invalid_samples += 1
+                print(f"  INVALID  {m['key']:28} primary_rc={a_rc} second_rc={b_rc} "
+                      f"primary={a[:24]!r} second={b[:24]!r}")
+                continue
             verdict = "AGREE" if a == b else "DISAGREE"
             print(f"  {verdict:8} {m['key']:28} primary={a[:24]!r} second={b[:24]!r}")
             if verdict == "DISAGREE":
@@ -422,10 +523,13 @@ def run(spec, skip_evidence=False):
     # a watcher that could never fail. A red-team seat called this decisive, and
     # it is: it is the difference between a check and a decoration.
     rc = 0
-    if drifted or any(s in ("FAIL", "UNPARSED") for *_, s in results) or disagreed:
+    blocking_gaps = sum(1 for metric in gaps if metric.get("blocking_gap"))
+    if (drifted or any(s in ("FAIL", "UNPARSED") for *_, s in results)
+            or disagreed or invalid_samples or blocking_gaps):
         rc = 1
     print(f"\nexit {rc} — {len(drifted)} drifted · {len(breaches)} over threshold · "
-          f"{disagreed} integrity disagreement(s)")
+          f"{disagreed} integrity disagreement(s) · {invalid_samples} invalid sample(s) · "
+          f"{blocking_gaps} blocking gap(s)")
     return rc
 
 
@@ -446,10 +550,12 @@ def main():
     print(f"rubric {meta.get('version','?')} — {meta.get('status','?')}")
     print(f"spec: {args.spec}\n")
 
-    if args.validate or not args.run:
-        errs, warns = validate(spec)
-        cats = spec.get("category", [])
-        print(f"structure: {len(cats)} categories "
+    # A run is never allowed to operate a malformed spec. The previous shape
+    # validated only `--validate` and skipped validation for `--run`, turning a
+    # smoke-green but malformed future edit into a live audit.
+    errs, warns = validate(spec)
+    cats = spec.get("category", [])
+    print(f"structure: {len(cats)} categories "
               f"({sum(1 for c in cats if c.get('kind')=='business')} business, "
               f"{sum(1 for c in cats if c.get('kind')=='structural')} structural, "
               f"{sum(1 for c in cats if c.get('kind')=='gate')} gate) · "
@@ -461,24 +567,24 @@ def main():
         # A gate produces no score, so its axes must not be counted as scores.
         # Counting them would inflate the very number this rubric exists to make
         # honest, and "34 scores per run" is exactly the figure a reader quotes.
-        scores = sum(len(c.get("dimensions", []))
-                     for c in cats if c.get("kind") != "gate")
-        print(f"scoreboard: {scores} category-by-dimension scores per run "
+    scores = sum(len(c.get("dimensions", []))
+                 for c in cats if c.get("kind") != "gate")
+    print(f"scoreboard: {scores} category-by-dimension scores per run "
               f"(not {len(cats)*len(spec.get('dimension',[]))} — categories declare "
               f"only the axes that apply)")
-        carried = [c["label"] for c in cats if c.get("trend_carries")]
-        print(f"trend carries for {len(carried)} of {len(cats)} categories; "
+    carried = [c["label"] for c in cats if c.get("trend_carries")]
+    print(f"trend carries for {len(carried)} of {len(cats)} categories; "
               f"{len(cats)-len(carried)} start fresh baselines")
-        for w in warns:
-            print(f"  WARN  {w}")
-        for e in errs:
-            print(f"  FAIL  {e}")
-        print(f"\n{'VALIDATION FAILED' if errs else 'validation OK'} — "
-              f"{len(errs)} error(s), {len(warns)} warning(s)")
-        if errs:
-            return 1
-        if not args.run:
-            return 0
+    for w in warns:
+        print(f"  WARN  {w}")
+    for e in errs:
+        print(f"  FAIL  {e}")
+    print(f"\n{'VALIDATION FAILED' if errs else 'validation OK'} — "
+          f"{len(errs)} error(s), {len(warns)} warning(s)")
+    if errs:
+        return 1
+    if not args.run:
+        return 0
 
     return run(spec, skip_evidence=args.skip_evidence)
 

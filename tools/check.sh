@@ -139,4 +139,5 @@ if CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" >/dev/null 2>&1; 
 else
   echo "  BROKEN  lead-registry — run: ./run.sh registry-audit"; rc=1
 fi
+echo "CARR_EVIDENCE_COMPLETE check/v1"
 exit $rc

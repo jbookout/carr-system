@@ -1223,4 +1223,8 @@ except Exception as e:
     print(f"  ⚠︎ portability-mirror check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# Evidence consumers accept rc=1 because this program uses it for real health
+# findings. This terminal marker distinguishes a completed finding-bearing run
+# from an interpreter/bootstrap/internal failure that happened to print stdout.
+print("CARR_EVIDENCE_COMPLETE health-check/v1")
 sys.exit(rc)
