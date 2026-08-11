@@ -1,0 +1,266 @@
+{
+  "contract": "carr-phase0-council-reconciliation",
+  "version": "1.0.0",
+  "status": "prepared_for_council_not_approved",
+  "prepared_at": "2026-08-11",
+  "review_event_date": "2026-08-12",
+  "base_commit": "d4e0f67259d633bfe16272e070530ea81f08a4a9",
+  "scope": {
+    "purpose": "Give the three-model council one explicit reconciliation packet without silently changing canonical doctrine or approving disputed roadmap choices.",
+    "authority": "This artifact records settled factual corrections and partner-confirmed decisions. Every item marked proposed_for_council_not_approved requires council disposition and Joe approval before canonical BDUF amendment or production construction.",
+    "canonical_sources_unchanged": true,
+    "construction_gate": "No production construction, migration, deployment, or irreversible implementation begins until the council output is complete and Joe approves the reconciled roadmaps."
+  },
+  "canonical_inputs": [
+    {
+      "name": "CARR Workspace BDUF and Implementation Roadmap",
+      "doctrine_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+      "generation": 344,
+      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-workspace-bduf.md"
+    },
+    {
+      "name": "CARR Control Room BDUF and Implementation Roadmap",
+      "doctrine_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+      "generation": 345,
+      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-control-room-bduf.md"
+    },
+    {
+      "name": "CARR Mature Software End State BDUF",
+      "doctrine_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
+      "generation": 346,
+      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-mature-software-end-state-bduf.md"
+    },
+    {
+      "name": "CARR Production Maturity Baseline",
+      "doctrine_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
+      "generation": 336,
+      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-production-maturity-baseline.md"
+    }
+  ],
+  "settled_fact_corrections": [
+    {
+      "id": "FACT-001",
+      "topic": "standing_context_counts",
+      "settled_fact": "The current declared standing-context count is 144 shared rules and 30 Joe-personal rules.",
+      "stale_claims": [
+        "Workspace review snapshot lines 85 and 1099 say 143 shared rules.",
+        "Control Room review snapshot line 90 says 143 shared rules.",
+        "Mature End State review snapshot line 22 says 143 shared rules."
+      ],
+      "canonical_correction_after_council": "Replace fixed 143 counts with 144 as the current preparation fact and retain the instruction to report future live counts when they change."
+    },
+    {
+      "id": "FACT-002",
+      "topic": "repository_release_truth",
+      "settled_fact": "Fresh local observation on 2026-08-11 found main and origin/main both at 2c0d6025542bec0390cda9d455787a5597a8b4a1 with ahead 0 and behind 0. The shared checkout had untracked deliverables and doc-convo assets, so isolated worktrees and explicit-path commits remain required.",
+      "stale_claims": [
+        "Workspace review snapshot line 854 records main 5da6809, origin/main 4435489, ahead 15 and behind 14.",
+        "Control Room review snapshot line 92 records origin/main 4435489 and the same 15/14 divergence."
+      ],
+      "canonical_correction_after_council": "Label the August 10 divergence as historical evidence, add the August 11 synchronized baseline, and keep clean isolated release-truth requirements unchanged."
+    },
+    {
+      "id": "FACT-003",
+      "topic": "canonical_record_and_connector_state",
+      "settled_fact": "The canonical CARR record layer exists and the connector is restored. Canonical status must be expressed as current evidence with fresh read-back, not as a future state contingent on connector restoration.",
+      "stale_claims": [
+        "Workspace review snapshot line 79 describes the canonical CARR record as occurring after connector restoration."
+      ],
+      "canonical_correction_after_council": "Rewrite the status sentence in the Workspace executive/current-state material; preserve fresh-read and no-shadow-database requirements."
+    },
+    {
+      "id": "FACT-004",
+      "topic": "migration_inventory",
+      "settled_fact": "The repository contains forward migration files through ordinal 0097, including duplicate 0095 filenames. This repository inventory does not assert that every file is applied in Production; a sanctioned fresh production read is still required before an applied-migration claim.",
+      "stale_claims": [
+        "Control Room review snapshot line 767 describes the numbered migration inventory as 0001-0094."
+      ],
+      "canonical_correction_after_council": "Replace the fixed 0001-0094 inventory claim with a fresh-read instruction or the verified repository range through 0097, explicitly separating repository files from applied Production migrations."
+    },
+    {
+      "id": "FACT-005",
+      "topic": "control_room_source_path",
+      "settled_fact": "The reviewed Control Room Word artifact is under /Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx.",
+      "stale_claims": [
+        "Control Room review snapshot line 1032 omits the System Road Maps directory."
+      ],
+      "canonical_correction_after_council": "Correct the receiving-session source path without changing the artifact identity or roadmap content."
+    },
+    {
+      "id": "FACT-006",
+      "topic": "oauth_kv_workers_paid",
+      "settled_fact": "Joe confirmed Workers Paid was activated on 2026-08-11 after the KV daily-quota incident. The immediate whether-to-pay fork is closed; the production-readiness obligation to measure OAuth/session KV writes, reduce duplicate or high-churn writes, document peak headroom, verify alerts, and rehearse recovery remains open.",
+      "stale_claims": [
+        "Workspace review snapshot line 1031 correctly describes the incident but predates the paid-capacity decision.",
+        "The Workspace council register OPEN-AUTH-KV-001 still presents paying for higher capacity as an undecided option."
+      ],
+      "canonical_correction_after_council": "Record Workers Paid as the chosen capacity tier; retain AUTH-KV-001 and AUTH-RECOVERY-001 as engineering evidence gates and retain alternate-state-store analysis only as a measured future redesign trigger."
+    }
+  ],
+  "proposed_rulings": [
+    {
+      "id": "PROP-001",
+      "topic": "dell_phase0_gating",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Workspace snapshot line 948 and Workspace phase0-acceptance manual checks require Joe and Dell to complete Phase 0 prototype journeys, while current standing authority says Joe completes system design and Dell reviews finished system work. Mature End State snapshot lines 774 and 1042 already distinguish Joe acceptance/completion from Dell finished-workflow validation.",
+      "recommended_ruling": "Joe is the Phase 0 roadmap and prototype exit approver. Dell validation remains a required post-finish shared-business-workflow and adoption gate, but Dell availability does not gate completion of system design, the council audit, or entry into non-production construction.",
+      "preserved_boundary": "Dell remains an equal operator of shared business records; this ruling concerns system-design sequencing only and does not weaken later two-partner workflow acceptance."
+    },
+    {
+      "id": "PROP-002",
+      "topic": "phase_numbering_and_entry",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Mature End State snapshot lines 897-900 define G0 as Approved and Ready and G1 as Trustworthy foundation; its Phase 0 action register at lines 1028-1045 mixes preconstruction planning with release-truth construction. Workspace snapshot lines 942-954 treat Phase 0 as the program/readiness gate and Phase 1 as website foundation acceptance.",
+      "recommended_ruling": "Reserve Phase 0 for planning, inventories, contracts, runnable synthetic prototypes, council reconciliation, and Joe approval through G0. Rename baseline P0 construction programs as Foundation work packages. Phase 1 begins at G1 with clean release truth, isolated staging, CI, artifact provenance, environment auth, audit correlation, and restore rehearsal before product vertical slices.",
+      "entry_rule": "Phase 1 may start immediately after council recommendation, Joe approval, all Phase 0 machine checks, Joe's five uncoached Workspace journeys and six uncoached Control Room flows, five baseline collection methods ready without invented values, and every material fork either decided or deferred with a named reopen trigger."
+    },
+    {
+      "id": "PROP-003",
+      "topic": "persistent_staging",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Mature End State snapshot lines 750-753 and Production Maturity Baseline snapshot lines 543-547 and 966-970 require isolated Staging, while Control Room snapshot lines 358, 406, and 1010 describe Staging as planned and recommend rehearsal branches first.",
+      "recommended_ruling": "Adopt a persistent isolated Staging environment as a G1 requirement. Rehearsal remains a distinct earlier safety environment and must not be relabeled as Staging. Staging must be proven unable to access Production data or credentials and must publish intentional drift.",
+      "preserved_boundary": "Until Staging exists, every product and UI must show it as Planned/Unknown and production mutation remains closed."
+    },
+    {
+      "id": "PROP-004",
+      "topic": "canonical_prototype_suite",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Mature End State snapshot lines 745-746 and 1041-1042 describe six synthetic integrated prototypes, Workspace defines five primary journeys, and Control Room snapshot lines 839-841 says six flows while nearby concept lists can be mistaken for seven separate acceptance journeys.",
+      "recommended_ruling": "Make the executable acceptance contracts canonical: five Workspace journeys plus six Control Room flows. Screen concepts are supporting views, not additional human exit journeys.",
+      "workspace_journeys": [
+        "FLOW-WS-01 Command Center to source",
+        "FLOW-WS-02 Park and restore Myrick",
+        "FLOW-WS-03 Weekly Deal Room call",
+        "FLOW-WS-04 Doc context and engineering request",
+        "FLOW-WS-05 Multi-stop Tour Mode"
+      ],
+      "control_room_flows": [
+        "flow-01-honest-health Collector failure is honest",
+        "flow-02-service-provenance Service and environment provenance",
+        "flow-03-request-bridge Business problem to safe Work Request",
+        "flow-04-plan-invalidation Scoped plan and invalidated approval",
+        "flow-05-deployment-proof Release evidence and reconnect",
+        "flow-06-incident-audit Incident investigation to audit chain"
+      ]
+    },
+    {
+      "id": "PROP-005",
+      "topic": "delegation_commit_rule",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Workspace snapshot line 835 says subagents do not commit unless explicitly authorized, while the current standing rule requires every session to commit and push only its explicit paths. workspace/contracts/environment-release-process.v1.json also carries the obsolete no-commit/no-push wording.",
+      "recommended_ruling": "The current standing rule controls: each delegated coding session uses an isolated worktree or explicitly owned paths, stages explicit paths, runs proportional verification, commits its own completed scope, and pushes its branch when available. Deployment, production writes, external communication, and merges remain separately authorized actions.",
+      "preserved_boundary": "A commit is evidence packaging, not merge, deploy, production-write, or expansion of task scope."
+    },
+    {
+      "id": "PROP-006",
+      "topic": "council_deferral_schema",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "control-room/contracts/council-review.v1.json allows only accept_recommendation, choose_alternative, or defer_with_named_external_blocker. A valid evidence-gated deferral can depend on an internal measurement or scheduled review rather than an external blocker.",
+      "recommended_ruling": "Add defer_with_named_reopen_trigger. Every deferral must name the exact trigger, owner, due or observation condition, affected construction scope, and safe interim default. Deferral must never imply approval or silently unblock construction.",
+      "proposed_required_fields": [
+        "fork_id",
+        "disposition",
+        "rationale",
+        "evidence_used",
+        "contract_changes",
+        "owner",
+        "approved_at",
+        "reopen_trigger",
+        "interim_default",
+        "blocked_scope"
+      ]
+    }
+  ],
+  "canonical_amendments_after_approval": [
+    {
+      "order": 1,
+      "targets": ["all four canonical inputs"],
+      "change": "Apply FACT-001 through FACT-006 using fresh sanctioned reads where identified; do not turn snapshot observations into timeless claims."
+    },
+    {
+      "order": 2,
+      "targets": ["Workspace section 23.1 and its Phase 0 acceptance contract", "Mature End State week-4 acceptance and Phase 0 action register"],
+      "change": "Apply PROP-001: Joe owns preconstruction exit; Dell validates finished shared workflows at the later adoption gate."
+    },
+    {
+      "order": 3,
+      "targets": ["Mature End State sections 30, 36, and Phase 0 action register", "Workspace sections 23.1 and 23.2", "Production Maturity Baseline Phase 0 action register"],
+      "change": "Apply PROP-002: Phase 0 ends at G0; rename construction-bearing P0 programs as Foundation work packages; Phase 1 starts with G1 trust foundation."
+    },
+    {
+      "order": 4,
+      "targets": ["Mature End State week-2 and G1", "Production Maturity Baseline environment and Phase 0 action-register sections", "Control Room environment-state and delivery sections"],
+      "change": "Apply PROP-003: persistent isolated Staging is required at G1; Rehearsal remains separate; Planned/Unknown is shown until deployment exists."
+    },
+    {
+      "order": 5,
+      "targets": ["Mature End State weekly plan and Phase 0 action register", "Workspace prototype/acceptance sections", "Control Room BDUF and phase0-acceptance contract"],
+      "change": "Apply PROP-004: enumerate the canonical 5+6 human suite and distinguish journeys from supporting screens."
+    },
+    {
+      "order": 6,
+      "targets": ["Workspace section 21.3", "workspace/contracts/environment-release-process.v1.json", "receiving-session prompts in all roadmaps"],
+      "change": "Apply PROP-005: align delegation with explicit-path commit/push discipline while retaining separate authorization for merge, deploy, production writes, and external communication."
+    },
+    {
+      "order": 7,
+      "targets": ["control-room/contracts/council-review.v1.json", "Workspace council review register", "council output templates in all roadmaps"],
+      "change": "Apply PROP-006: add the named-reopen-trigger disposition and its required fields."
+    },
+    {
+      "order": 8,
+      "targets": ["all amended canonical doctrine records and generated Word artifacts"],
+      "change": "Re-render sanctioned artifacts, record new generations and checksums, run cross-roadmap contradiction checks, and obtain Joe's explicit approval before opening Phase 1 construction."
+    }
+  ],
+  "remaining_gates": {
+    "must_be_ready_before_council": [
+      "Both product contract suites and static prototypes remain green.",
+      "The council receives this reconciliation packet plus the current open-item registers and live-inventory gaps.",
+      "No proposal in this packet is represented as an approved doctrine change."
+    ],
+    "council_and_joe_decisions": [
+      "PROP-001 Dell gating",
+      "PROP-002 phase numbering and Phase 1 entry",
+      "PROP-003 persistent Staging",
+      "PROP-004 canonical 5+6 prototype suite",
+      "PROP-005 delegation and commit rule",
+      "PROP-006 deferral schema"
+    ],
+    "phase0_exit_evidence": [
+      "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",
+      "Joe completes all five Workspace journeys and all six Control Room flows without coaching under the approved PROP-001 ruling.",
+      "Responsive, keyboard, screen-reader, sterile-mode, and Color Assist checks are captured.",
+      "Collection methods for all five operating baselines and maintenance time exist; no measured value is invented.",
+      "Live service, surface, writer, route, job, identity, vendor, migration, and environment inventories are reconciled or explicitly deferred with named reopen triggers.",
+      "Every material council fork is approved or safely deferred and Joe approves the final integrated roadmaps."
+    ],
+    "phase1_entry_dependencies": [
+      "Phase 0 exit evidence is complete and Joe approval is durable.",
+      "A clean reviewed release-truth branch and protected integration policy are in effect.",
+      "Construction begins with G1 trust-foundation work, not product feature breadth.",
+      "No production mutation path opens before isolated Staging, CI, provenance, authorization, audit, rollback, restore rehearsal, and fresh verification pass."
+    ],
+    "safe_to_defer_without_blocking_phase1_start": [
+      "Post-launch 30-day, 60-day, and 90-day comparisons that require elapsed observation time.",
+      "Two-week surface cutover observation periods before retiring old surfaces.",
+      "Five-business-day Command Center adoption evidence and later weekly-call observations.",
+      "Native Mac, iPhone, and iPad actual-device gates until their settled predecessor gates are reached.",
+      "Three-complete-consecutive-normal-month evidence required for low-toil or mature claims."
+    ]
+  },
+  "acceleration_boundary": {
+    "safe_to_parallelize_after_phase0": [
+      "G1 release truth, CI, environment isolation, identity, audit, and restore rails with bounded ownership",
+      "read-only Workspace and Control Room vertical-slice preparation behind feature flags",
+      "independent verification against frozen shared contracts"
+    ],
+    "cannot_be_compressed_by_more_agents": [
+      "human uncoached evidence",
+      "cutover observation windows",
+      "actual-device acceptance",
+      "production reliability and maintenance observation periods"
+    ]
+  }
+}
