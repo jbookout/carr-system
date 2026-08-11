@@ -9,8 +9,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location(
     "rule_enforcement_map_check", os.path.join(REPO, "ops", "rule-enforcement-map-check.py")
 )
+assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
-assert spec.loader
 spec.loader.exec_module(mod)
 
 BASE = {
