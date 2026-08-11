@@ -8,6 +8,7 @@
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
 import { stripDealPlaceholders } from "./dealroom.js";
+import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
 // ---------- envelope helpers ----------
 
@@ -39,6 +40,16 @@ async function requestHash(args) {
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+export function auditIdentity(actor) {
+  const scope = personalScopeForActor(actor);
+  return {
+    organization_tenant_id: organizationTenantForActor(actor),
+    sponsoring_human_slug: scope.status === "personal" ? scope.sponsor : null,
+    personal_scope: scope.status === "personal" ? `${scope.sponsor}-personal` : "none",
+    authorization_class: actor.authorization_class || authorizationClassForActor(actor),
+  };
+}
+
 async function withEnvelope(client, actor, verb, args, fn) {
   const key = args.idempotency_key;
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
@@ -50,21 +61,29 @@ async function withEnvelope(client, actor, verb, args, fn) {
     return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction
+  const identity = auditIdentity(actor);
   await client.query(
-    "insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id) values ($1,$2,$3,$4,$5,$6,$7)",
-    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null]);
+    `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null,
+     identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
+     identity.authorization_class]);
   return result;
 }
 
 async function writeEvent(client, actor, verb, subjectType, subjectId, fields = {}) {
+  const identity = auditIdentity(actor);
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
-       old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11, $12, $13)`,
+       old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
+     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
-     actor.via || null, actor.client_id || null]);
+     actor.via || null, actor.client_id || null, identity.organization_tenant_id,
+     identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
 }
 
 // [loop #278] The ONE place a decision gets mirrored onto the record it governs.
@@ -3823,11 +3842,13 @@ export const TOOLS = {
           got: costDelta ? "cost_delta only" : "quality_delta only",
           hint: "pass cost_delta AND quality_delta together, or neither. What a build cost is only meaningful beside what it bought, and a quality claim with no cost beside it is unfalsifiable. If the other half genuinely is not known yet, log the decision unpriced and add both later with update-decision." });
       const decisionId = (await c.query("select gen_random_uuid() as id")).rows[0].id;
+      const identity = auditIdentity(actor);
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
-           new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id)
+           new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
+           organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
          values (coalesce($1::timestamptz, now()), $2, 'log-decision', 'decision', $3,
-                 $4, 'human_stated', $5, $6, $7, $8, $9)
+                 $4, 'human_stated', $5, $6, $7, $8, $9, $10, $11, $12, $13)
          -- to_char, not ::date: node-postgres hands a ::date back as a JS Date, and
          -- interpolating that into session_key produced
          -- "Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated Universal Time)-joe"
@@ -3844,7 +3865,8 @@ export const TOOLS = {
                           ...(costDelta ? { cost_delta: costDelta,
                                             quality_delta: qualityDelta } : {}) }),
          args.human_quote || null, args.rationale, args.idempotency_key,
-         actor.via || null, actor.client_id || null]);
+         actor.via || null, actor.client_id || null, identity.organization_tenant_id,
+         identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
 
       const ev = r.rows[0];
       const sessionKey = args.session_key || `${ev.entry_date}-${actor.slug}`;

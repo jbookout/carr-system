@@ -62,8 +62,8 @@ test("agentSlugForClient: no fuzzy or substring matching — a name that merely 
   assert.equal(agentSlugForClient("NotCodex"), null);
 });
 
-test("agentSlugForClient: Claude's own connector never resolves to an outside-model actor", () => {
-  assert.equal(agentSlugForClient("Claude Code"), null);
+test("agentSlugForClient: approved Claude Code resolves to its runtime actor", () => {
+  assert.equal(agentSlugForClient("Claude Code"), "claude");
   assert.equal(agentSlugForClient("Claude"), null);
 });
 
@@ -147,10 +147,11 @@ function deriveWriteActor(humanSlug, clientName) {
   return actorFromProps(propsForSlug(slug, extra));
 }
 
-test("derivation: Joe in Claude Code writes as joe", () => {
+test("derivation: Joe in Claude Code writes as Claude and preserves Joe as sponsor", () => {
   const actor = deriveWriteActor("joe", "Claude Code");
-  assert.equal(actor.slug, "joe");
-  assert.equal(actor.human, true);
+  assert.equal(actor.slug, "claude");
+  assert.equal(actor.human, false);
+  assert.equal(actor.human_slug, "joe");
 });
 
 test("derivation: Joe in Codex CLI writes as codex, not joe", () => {
@@ -193,7 +194,8 @@ test("agent token resolves to the tool's own actor, never a human", () => {
   const actor = agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS);
   assert.deepEqual(actor, {
     slug: "grok", display: "Agent (grok)", human: false, agent: true,
-    via: "agent-token", client_id: null,
+    via: "agent-token", client_id: null, sponsoring_human_slug: null,
+    human_slug: null, sponsor_required: false,
   });
   // The whole security claim in one line: humanOnly verbs key off actor.human.
   assert.equal(actor.human, false);

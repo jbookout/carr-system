@@ -12,6 +12,15 @@
 // rewrite (council verdict, unanimous). Every run persists to doctrine_gate_run
 // + findings, dry or real; any failed `block` finding aborts the transaction
 // with the findings in the error payload, precise enough to self-repair.
+
+import { organizationTenantForActor, personalScopeForActor } from "./identity.js";
+
+/** Read the count banner emitted by the generated personal/shared rule renders. */
+export function generatedRuleCount(rendered) {
+  const match = String(rendered || "").match(/\b(\d+) active rule\(s\)/);
+  if (!match) throw new Error("generated rule render has no active-rule count");
+  return Number(match[1]);
+}
 //
 // P2 HONESTY NOTES, each with its named completion point:
 //   * body model is {text} — plain prose sections. Structured per-class JSON
@@ -768,13 +777,29 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     "standing-context": {
       description: "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store — the taught rules (shared + this partner's personal set, with the counts to recite), pending action-required items, and the doctrine catalog pointer. This replaces file-based rule loading: a session that calls this needs no compiled-rules file, no vault read, no Drive. Call it FIRST in any session; recite the counts back to the partner. DEFAULT detail is `gist` — one line per rule, which is what a boot call can actually hold. Pull full text for the handful you need with rule_ids, or everything with detail=full (large; see the payload note in the handler).",
       inputSchema: { type: "object", properties: {
-        partner: { type: "string", description: "joe | dell — whose personal rules to include (defaults to the calling actor)" },
         detail: { type: "string", enum: ["gist", "full"], description: "gist (DEFAULT) = one line per rule, no human_quote. full = every rule's complete text; ~180KB at 147 rules, which overflows a tool result on most clients. Prefer gist + rule_ids." },
         rule_ids: { type: "array", items: { type: "string" }, description: "Short ids (the 8-char form the gist prints, e.g. '4e104d4c'). These rules come back in FULL regardless of detail — the lookup path for 'read the binding text before acting on a gist'." } },
         },
       handler: async (c, actor, args) => {
         await actorId(c, actor);
-        const who = (args.partner || actor.slug || "").toLowerCase();
+        // Personal rules come only from the verified sponsor embedded in the
+        // authenticated actor. `partner` was deliberately removed from this
+        // schema: a tool argument must never select another human's brain.
+        if (Object.prototype.hasOwnProperty.call(args || {}, "partner")) {
+          throw new ToolError({ error: "partner_not_selectable",
+            hint: "personal scope is derived from the authenticated server-side sponsor; a tool argument cannot select Joe or Dell." });
+        }
+        if (Object.prototype.hasOwnProperty.call(args || {}, "tenant_id") ||
+            Object.prototype.hasOwnProperty.call(args || {}, "organization_tenant_id")) {
+          throw new ToolError({ error: "tenant_not_selectable",
+            hint: "organization tenant is derived by the server; a tool argument cannot select another tenant." });
+        }
+        const scope = personalScopeForActor(actor);
+        if (scope.status === "error") {
+          throw new ToolError({ error: scope.error,
+            hint: "this authenticated runtime expected a server-derived sponsoring human. Reconnect through the registered OAuth flow; do not supply a partner argument." });
+        }
+        const who = scope.sponsor;
         const detail = args.detail === "full" ? "full" : "gist";
         const wanted = new Set((args.rule_ids || []).map(s => String(s).trim().toLowerCase()));
         // Same filter set as the compiled-rules exporter (_fetch_rules +
@@ -785,7 +810,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         const rules = (await c.query(
           `select statement, human_quote, taught_by, personal_to, scope, id
              from v_compiled_rules
-            where (personal_to is null or personal_to = $1)
+            where (personal_to is null or ($1::text is not null and personal_to = $1))
               and coalesce(scope->>'kind','') <> 'intro_politics'
             order by personal_to nulls first, activated_at, statement`, [who])).rows;
         const shared = rules.filter(r => !r.personal_to);
@@ -814,7 +839,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           `select id, statement, taught_by, personal_to, created_at
              from rule
             where status = 'proposed'
-              and (personal_to is null or personal_to = $1)
+              and (personal_to is null or ($1::text is not null and personal_to = $1))
             order by created_at`, [who]).catch(() => ({ rows: [] }))).rows;
         const gen = (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
         // PAYLOAD NOTE (2026-08-08, Joe's yes): detail=full returned ~183KB at
@@ -858,7 +883,20 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         const missing = [...wanted].filter(
           w => !rules.some(r => String(r.id).slice(0, 8).toLowerCase() === w));
         return { ok: true,
-          recite: `Rules loaded: ${shared.length} shared, ${personal.length} ${who}-personal`,
+          recite: scope.status === "personal"
+            ? `Rules loaded: ${shared.length} shared, ${personal.length} ${who}-personal`
+            : `Rules loaded: ${shared.length} shared, 0 personal (unsponsored runtime)`,
+          identity: {
+            organization_tenant_id: organizationTenantForActor(actor),
+            sponsoring_human_id: who,
+            agent_principal_id: actor.slug,
+            runtime_principal: actor.slug,
+            personal_brain_scope: scope.status === "personal" ? `${who}-personal` : "none",
+            personal_scope_source: scope.source,
+            session_capability_profile: actor.authorization_class || "unknown",
+            operational_profile: actor.operational_profile || "full",
+            human_only_authority: actor.human === true,
+          },
           detail,
           ...(missing.length ? { rule_ids_not_found: missing } : {}),
           ...(detail === "gist" ? { hint_full_text:
