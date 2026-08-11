@@ -88,17 +88,21 @@ test("every test ID resolves to either an executed check or an explicit future g
   }
 });
 
-test("every registered contract test executes against the prototype evidence", async () => {
-  const [fixtures, html, css, app, client, server, environment] = await Promise.all([
+test("every registered contract test executes against the prototype and planning evidence", async () => {
+  const [fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance] = await Promise.all([
     loadFixtures(),
     readText("public/index.html"),
     readText("public/css/app.css"),
     readText("public/js/app.js"),
     readText("public/js/client.js"),
     readText("public/server.mjs"),
-    readJson("contracts/environment-release-process.v1.json")
+    readJson("contracts/environment-release-process.v1.json"),
+    readJson("contracts/phase0-manifest.v1.json"),
+    readJson("contracts/council-review-register.v1.json"),
+    readJson("contracts/phase0-traceability.v1.json"),
+    readJson("contracts/phase0-acceptance.v1.json")
   ]);
-  const context = { fixtures, html, css, app, client, server, environment };
+  const context = { fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance };
   for (const [id, check] of testRegistry) assert.doesNotThrow(() => check(context), id);
 });
 
@@ -146,10 +150,45 @@ test("glossary provenance and all six conceptual operating roles are explicit", 
   const glossary = await readJson("contracts/domain-glossary.v1.json");
   assert.equal(glossary.source.source_sha256, "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b");
   assert.equal(glossary.source.doctrine_document_id, "c7f31740-7f4b-47e9-ab93-c7f2854bacc6");
-  assert.equal(glossary.source.doctrine_generation, 252);
+  assert.equal(glossary.source.doctrine_generation, 324);
   assert.equal(glossary.source.doctrine_section_count, 33);
+  assert.equal(glossary.source.timing_section_key, "s23");
+  assert.equal(glossary.source.timing_section_version, 3);
   const terms = new Set(glossary.terms.map(item => item.term));
   for (const role of ["CARR Workspace", "The Command Center", "CARR Control Room", "Doc", "Claude Code and Codex", "CARR record layer"]) assert.ok(terms.has(role), role);
+});
+
+test("integrated planning sources, milestone timing, predecessors, and cost bands stay harmonized", async () => {
+  const [manifest, trace, council, acceptance] = await Promise.all([
+    readJson("contracts/phase0-manifest.v1.json"),
+    readJson("contracts/phase0-traceability.v1.json"),
+    readJson("contracts/council-review-register.v1.json"),
+    readJson("contracts/phase0-acceptance.v1.json")
+  ]);
+  const expectedIds = [
+    "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+    "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+    "15d2250c-4821-4f83-9dc5-063f9470139d",
+    "10d25f48-916b-4a7f-a1a6-d231274fed4b"
+  ].sort();
+  assert.deepEqual(manifest.canonical_planning_sources.map(item => item.document_id).sort(), expectedIds);
+  assert.deepEqual(trace.canonical_planning_set.map(item => item.document_id).sort(), expectedIds);
+  for (const id of expectedIds) assert.ok(council.review_event.inputs.some(item => item.includes(id)), id);
+  assert.equal(manifest.source.doctrine_generation, 324);
+  assert.equal(manifest.source.timing_section_version, 3);
+  assert.equal(manifest.source.desktop_artifact_matches_current_doctrine_generation, "unverified_after_timing_section_revision");
+  const program = manifest.integrated_delivery_program;
+  assert.equal(program.mature_foundation_v1.target_date, "2026-10-05");
+  assert.equal(program.workspace_web_timing.evidence_range, "12–16 weeks");
+  assert.match(program.full_multi_platform_timing, /^4–6 months/);
+  assert.deepEqual(program.pricing_evidence_bands_usd_per_month, {
+    phase0_or_pilot_incremental: {min: 5, max: 20},
+    mature_two_partner_web_operations: {min: 62, max: 84},
+    before_paid_incident_response: {min: 28, max: 50},
+    with_apple_reserve_approximate: {min: 70, max: 93},
+    high_intentional_use: {min: 300, max: 500}
+  });
+  assert.match(acceptance.integrated_program_acceptance.construction_gate, /Joe approves.*council output/);
 });
 
 test("domain entities are complete typed objects rather than generic record aliases", async () => {

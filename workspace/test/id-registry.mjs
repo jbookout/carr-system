@@ -71,6 +71,25 @@ const checks = {
     requireCondition(context.server.includes('new Set(["GET", "HEAD", "OPTIONS"])'), "static method allow-list missing");
     requireCondition(context.server.includes("405"), "unsupported-method refusal missing");
   },
+  roadmapHarmony(context) {
+    const sources = new Map(context.manifest.canonical_planning_sources.map(item => [item.slug, item]));
+    requireCondition(sources.size === 4, "canonical planning source count mismatch");
+    requireCondition(sources.get("carr-workspace-bduf")?.verified_generation === 324, "Workspace doctrine generation mismatch");
+    requireCondition(sources.get("carr-workspace-bduf")?.timing_section?.version === 3, "Workspace s23 version mismatch");
+    requireCondition(sources.get("carr-control-room-bduf")?.verified_generation === 251, "Control Room doctrine generation mismatch");
+    requireCondition(sources.get("carr-mature-software-end-state-bduf")?.verified_generation === 325, "mature roadmap generation mismatch");
+    requireCondition(sources.get("carr-production-maturity-baseline")?.verified_generation === 280, "production baseline generation mismatch");
+    const program = context.manifest.integrated_delivery_program;
+    requireCondition(program.mature_foundation_v1.target_date === "2026-10-05", "foundation target mismatch");
+    requireCondition(program.workspace_web_timing.planning_estimate === "approximately 12 weeks", "Workspace web plan mismatch");
+    requireCondition(program.workspace_web_timing.evidence_range === "12–16 weeks", "Workspace web evidence range mismatch");
+    requireCondition(program.full_multi_platform_timing.startsWith("4–6 months"), "mature program timing mismatch");
+    requireCondition(program.hard_predecessors.join(" > ").includes("Website Completion"), "Website Completion predecessor missing");
+    requireCondition(program.construction_gate.includes("Joe approves") && program.construction_gate.includes("council output"), "Joe approval of the council output is missing");
+    requireCondition(context.trace.entries.some(item => item.id === "PROGRAM-SEQUENCE-001"), "program sequence trace missing");
+    requireCondition(context.council.review_event.inputs.some(item => item.includes("15d2250c-4821-4f83-9dc5-063f9470139d")), "mature roadmap council input missing");
+    requireCondition(context.acceptance.phase0_exit.not_complete_until.some(item => item.includes("Joe approves") && item.includes("all three roadmap versions")), "Joe approval of all three roadmap versions is missing");
+  },
   security(context) {
     const fixtures = JSON.stringify([...context.fixtures.values()]);
     requireCondition(!/@[a-z0-9.-]+\.[a-z]{2,}/i.test(fixtures), "email-shaped fixture value");
@@ -116,6 +135,7 @@ const groups = {
   notification: ["NOTIFY-001"],
   offline: ["OFFLINE-TRUTH-001", "SYNC-CONFLICT-001"],
   release: ["AUTH-KV-001", "AUTH-RECOVERY-001", "RELEASE-GATE-001"],
+  roadmapHarmony: ["ROADMAP-HARMONY-001"],
   security: ["PRIV-REDACT-001", "PRIV-STERILE-001", "SEC-AUTH-001", "SEC-AUTHZ-001", "SEC-CSRF-001", "SEC-DEVICE-001", "SEC-PUBLIC-001", "SEC-REPLAY-001", "SEC-SECRET-001"],
   surface: ["SURFACE-PARITY-001", "SURFACE-WRITER-001"],
   tour: ["FLOW-WS-05", "TOUR-ROUTE-001", "TOUR-SYNC-001"]

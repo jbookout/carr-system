@@ -1,22 +1,97 @@
 {
   "contract": "carr-workspace-phase0-manifest",
   "version": "1.0.0",
-  "status": "phase0_artifacts_independently_verified_pending_human_acceptance_and_council",
+  "status": "phase0_artifacts_reconciled_to_integrated_planning_set_pending_human_acceptance_and_council",
   "source": {
     "path": "/Users/booko/Desktop/CARR Workspace - BDUF and Implementation Roadmap.docx",
     "original_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d",
     "sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b",
     "durable_doctrine_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-    "doctrine_generation": 252,
+    "doctrine_generation": 324,
     "doctrine_sections": 33,
+    "timing_section_key": "s23",
+    "timing_section_version": 3,
     "objective_section_id": "888131ae-9e0f-407f-9282-4dfafb70fb22",
-    "objective_section_version": 1
+    "objective_section_version": 1,
+    "desktop_artifact_matches_current_doctrine_generation": "unverified_after_timing_section_revision"
+  },
+  "canonical_planning_sources": [
+    {
+      "role": "workspace_product_roadmap",
+      "slug": "carr-workspace-bduf",
+      "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+      "verified_generation": 324,
+      "receipt_status": "read_back_by_main_seat",
+      "timing_section": {"section_key": "s23", "version": 3}
+    },
+    {
+      "role": "operations_and_safety_roadmap",
+      "slug": "carr-control-room-bduf",
+      "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+      "verified_generation": 251,
+      "active_unique_sections": 38,
+      "receipt_status": "read_back_by_main_seat"
+    },
+    {
+      "role": "integrated_mature_end_state_roadmap",
+      "slug": "carr-mature-software-end-state-bduf",
+      "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
+      "verified_generation": 325,
+      "active_unique_sections": 40,
+      "ordinal_range": [0, 39],
+      "receipt_status": "read_back_by_main_seat",
+      "dependency_section": {
+        "section_key": "s05",
+        "verified_edges": [
+          "carr-workspace-bduf",
+          "carr-control-room-bduf",
+          "carr-production-maturity-baseline"
+        ]
+      }
+    },
+    {
+      "role": "governing_production_baseline",
+      "slug": "carr-production-maturity-baseline",
+      "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
+      "verified_generation": 280,
+      "active_unique_sections": 27,
+      "receipt_status": "read_back_by_main_seat"
+    }
+  ],
+  "integrated_delivery_program": {
+    "decision_id": "69512a40-99ec-483f-8528-5e05a4969551",
+    "ruling": "Eight weeks is the CARR Mature Foundation milestone, not the full native mature end state.",
+    "mature_foundation_v1": {
+      "target_date": "2026-10-05",
+      "scope": [
+        "Production Maturity Level 1 plus selected Level 2 controls",
+        "core Workspace and Command Center web milestone",
+        "Calls and Doc request loop",
+        "thin authoritative read-first Control Room"
+      ]
+    },
+    "workspace_web_timing": {"planning_estimate": "approximately 12 weeks", "evidence_range": "12–16 weeks"},
+    "full_multi_platform_timing": "4–6 months as an evidence-gated program",
+    "hard_predecessors": [
+      "Website Completion before installed Mac desktop product construction",
+      "installed Mac desktop parity before iPhone construction",
+      "iPhone before iPad Tour Mode construction"
+    ],
+    "construction_gate": "No production construction before Joe approves the Fable 5, GPT-5.6 Sol, and SuperGrok 4.5 council output.",
+    "pricing_evidence_bands_usd_per_month": {
+      "phase0_or_pilot_incremental": {"min": 5, "max": 20},
+      "mature_two_partner_web_operations": {"min": 62, "max": 84},
+      "before_paid_incident_response": {"min": 28, "max": 50},
+      "with_apple_reserve_approximate": {"min": 70, "max": 93},
+      "high_intentional_use": {"min": 300, "max": 500}
+    }
   },
   "settled_decisions": [
     {"decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7", "subject": "Workspace and Control Room product and authority boundary"},
-    {"decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f", "subject": "Complete both Phase 0 preparations before Wednesday council; no construction before final approval"},
+    {"decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f", "subject": "Complete both Phase 0 preparations before Wednesday council; no construction before Joe approves the council output"},
     {"decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5", "subject": "Operating objective and AI-session displacement test controls both roadmaps and adoption"},
-    {"decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84", "subject": "Freeze independently verified Phase 0 artifacts pending human and council gates"}
+    {"decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84", "subject": "Freeze independently verified Phase 0 artifacts pending human and council gates"},
+    {"decision_id": "69512a40-99ec-483f-8528-5e05a4969551", "subject": "Treat eight weeks as the Mature Foundation milestone, not the full native mature end state"}
   ],
   "repository": {
     "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0",
@@ -59,10 +134,10 @@
     "tests": ["test/contract-resolution.test.mjs", "test/fixtures.test.mjs", "test/prototype.test.mjs"]
   },
   "automated_evidence": {
-    "node_test_count": 28,
-    "node_test_passed": 28,
-    "registry_ids": 56,
-    "phase0_executable_registry_checks": 40,
+    "node_test_count": 29,
+    "node_test_passed": 29,
+    "registry_ids": 57,
+    "phase0_executable_registry_checks": 41,
     "contracts_including_manifest": 16,
     "canonical_twins": 9,
     "authored_states_per_twin": 10,
@@ -92,13 +167,14 @@
     "interactive_visual_accessibility": "runtime entry verified; full visual, keyboard, and screen-reader review remains unverified",
     "joe_and_dell_uncoached_five_journeys": "not performed",
     "baseline_measurement": "all five values remain unknown pending instrumentation or interview",
-    "roadmap_final_approval": "scheduled for Wednesday council"
+    "roadmap_final_approval": "Joe's approval is required after the Wednesday council recommends integrated versions across all three roadmaps and the governing production baseline",
+    "integrated_program_reconciliation": "passed cold-context independent verification with zero P0, P1, or P2 findings"
   },
   "prohibited_claims": [
     "production Workspace implementation exists",
     "production auth or authorization is enforced",
     "business writes are enabled",
     "website or native applications are deployed",
-    "Phase 0 exit is complete before human evidence and council approval"
+    "Phase 0 exit is complete before human evidence and Joe's approval of the council output"
   ]
 }

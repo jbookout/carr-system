@@ -4,6 +4,13 @@
   "status": "phase0_candidate",
   "validator": "workspace/contracts/validate.mjs",
   "namespaces": {
+    "planning_sources": {
+      "definitions": "phase0-manifest.v1.json#/canonical_planning_sources/*/document_id",
+      "references": [
+        "phase0-traceability.v1.json#/canonical_planning_set/*/document_id",
+        "council-review-register.v1.json#/review_event/inputs"
+      ]
+    },
     "requirements": {
       "definitions": "phase0-traceability.v1.json#/entries/*/id",
       "references": [
@@ -138,6 +145,7 @@
     "PRIV-REDACT-001",
     "PRIV-STERILE-001",
     "RELEASE-GATE-001",
+    "ROADMAP-HARMONY-001",
     "RESPONSIVE-001",
     "SEC-AUTH-001",
     "SEC-AUTHZ-001",

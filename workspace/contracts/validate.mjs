@@ -22,6 +22,7 @@ const fixtureContract = contracts["prototype-fixture-contract.v1.json"];
 const api = contracts["business-entity-api-contracts.v1.json"];
 const stateContract = contracts["state-machines.v1.json"];
 const surfaceMap = contracts["surface-registry-migration-map.v1.json"];
+const manifest = contracts["phase0-manifest.v1.json"];
 const exact = (actual, expected, label) => assert.deepEqual([...actual].sort(), [...expected].sort(), label);
 const validateFixture = compileSchema(fixtureContract);
 assert.equal(api.api_policy.prototype_fixture_schema, fixtureContract.$id, "prototype fixture/API schema linkage");
@@ -60,6 +61,42 @@ const settledIds = new Set(council.settled_inputs.map(item => item.id));
 const councilLinkIds = new Set([...councilIds, ...settledIds]);
 for (const adr of council.adr_candidates) for (const id of adr.linked) assert(councilLinkIds.has(id), `ADR ${adr.id} link ${id}`);
 assert.equal(new Set(council.current_evidence_inputs.map(item => item.id)).size, council.current_evidence_inputs.length, "unique council evidence IDs");
+const expectedPlanningSourceIds = new Set([
+  "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+  "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+  "15d2250c-4821-4f83-9dc5-063f9470139d",
+  "10d25f48-916b-4a7f-a1a6-d231274fed4b"
+]);
+exact(manifest.canonical_planning_sources.map(item => item.document_id), expectedPlanningSourceIds, "manifest canonical planning sources");
+exact(trace.canonical_planning_set.map(item => item.document_id), expectedPlanningSourceIds, "trace canonical planning sources");
+for (const id of expectedPlanningSourceIds) assert(council.review_event.inputs.some(item => item.includes(id)), `council input ${id}`);
+assert.equal(manifest.source.doctrine_generation, 324, "Workspace doctrine generation");
+assert.equal(manifest.source.timing_section_key, "s23", "Workspace timing section key");
+assert.equal(manifest.source.timing_section_version, 3, "Workspace timing section version");
+const matureSource = manifest.canonical_planning_sources.find(item => item.role === "integrated_mature_end_state_roadmap");
+const controlRoomSource = manifest.canonical_planning_sources.find(item => item.role === "operations_and_safety_roadmap");
+const productionBaselineSource = manifest.canonical_planning_sources.find(item => item.role === "governing_production_baseline");
+assert.equal(controlRoomSource.verified_generation, 251, "Control Room roadmap generation");
+assert.equal(matureSource.verified_generation, 325, "mature roadmap generation");
+assert.equal(matureSource.active_unique_sections, 40, "mature roadmap section count");
+exact(matureSource.dependency_section.verified_edges, ["carr-workspace-bduf", "carr-control-room-bduf", "carr-production-maturity-baseline"], "mature roadmap dependency edges");
+assert.equal(productionBaselineSource.verified_generation, 280, "production baseline generation");
+assert.equal(productionBaselineSource.active_unique_sections, 27, "production baseline section count");
+const program = manifest.integrated_delivery_program;
+assert.equal(program.decision_id, "69512a40-99ec-483f-8528-5e05a4969551", "integrated delivery decision");
+assert.equal(program.mature_foundation_v1.target_date, "2026-10-05", "foundation target");
+assert.equal(program.workspace_web_timing.planning_estimate, "approximately 12 weeks", "Workspace web timing");
+assert.equal(program.workspace_web_timing.evidence_range, "12–16 weeks", "Workspace web evidence range");
+assert.equal(program.full_multi_platform_timing, "4–6 months as an evidence-gated program", "mature program timing");
+assert.deepEqual(program.pricing_evidence_bands_usd_per_month, {
+  phase0_or_pilot_incremental: {min: 5, max: 20},
+  mature_two_partner_web_operations: {min: 62, max: 84},
+  before_paid_incident_response: {min: 28, max: 50},
+  with_apple_reserve_approximate: {min: 70, max: 93},
+  high_intentional_use: {min: 300, max: 500}
+}, "pricing evidence bands");
+assert(requirementIds.has("PROGRAM-SEQUENCE-001"), "integrated program trace requirement");
+assert(testIds.has("ROADMAP-HARMONY-001"), "integrated roadmap harmony test ID");
 const baselineIds = new Set(acceptance.baseline_measure_plan.map(item => item.id));
 exact(contracts["surface-registry-migration-map.v1.json"].baseline_measure_ids, baselineIds, "surface baseline refs");
 assert.equal(acceptance.baseline_measure_plan.length, 5, "five baseline measures");
@@ -128,4 +165,4 @@ for (const fixture of fixtures) {
   }
 }
 
-console.log(JSON.stringify({ok: true, contracts: Object.keys(contracts).length, fixtures: fixtures.length, states: expectedStates.length, requirements: requirementIds.size, aliases: aliases.size, test_catalog: testIds.size, future_gates: futureGateIds.size, phase0_executable_tests: testIds.size - futureGateIds.size, events: eventIds.size, council_ids: councilIds.size, baselines: baselineIds.size, machines: Object.keys(stateContract.machines).length, endpoints: api.prototype_read_routes.length, domain_groups: api.domain_groups.length}, null, 2));
+console.log(JSON.stringify({ok: true, contracts: Object.keys(contracts).length, fixtures: fixtures.length, states: expectedStates.length, requirements: requirementIds.size, aliases: aliases.size, test_catalog: testIds.size, future_gates: futureGateIds.size, phase0_executable_tests: testIds.size - futureGateIds.size, events: eventIds.size, council_ids: councilIds.size, baselines: baselineIds.size, planning_sources: expectedPlanningSourceIds.size, machines: Object.keys(stateContract.machines).length, endpoints: api.prototype_read_routes.length, domain_groups: api.domain_groups.length}, null, 2));

@@ -1,23 +1,82 @@
 {
-  "contract": "carr-two-product-phase0-program",
-  "version": "1.0.0",
-  "status": "phase0_artifacts_independently_verified_pending_human_acceptance_and_council",
+  "contract": "carr-integrated-phase0-program",
+  "version": "1.1.0",
+  "status": "phase0_artifacts_reconciled_and_independently_verified_against_three_roadmaps_and_production_baseline_pending_human_acceptance_and_council",
   "decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f",
   "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
   "artifact_freeze_decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84",
+  "integrated_delivery_decision_id": "69512a40-99ec-483f-8528-5e05a4969551",
   "source_thread_id": "019fec56-49b6-7ae0-9dfa-0af4289fbaa8",
   "human_quote": "i honestly plan to run a claude fable audit of both roadmaps, plus a council meeting between fable 5, 5.6 Sol, and SuperGrok 4.5 to produce a final version. this will likely occur wednesday night when i get my claude usage reset. I'm going to proceed with phase 0 for both roadmaps tonight that way we are prepared as soon as the final version is approved to start rolling out construction",
-  "lanes": [
-    {"product": "CARR Workspace", "role": "main private business product", "root": "workspace", "original_source_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d", "source_sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b", "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "doctrine_generation": 252, "doctrine_sections": 33, "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"},
-    {"product": "CARR Control Room", "role": "operational safety and evidence counterpart", "root": "control-room", "original_source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "source_sha256": "b25cf6ca1c50998699f858322847b3911b96e322a34256068e88ece85af3c565", "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 251, "doctrine_sections": 38, "phase0_exit": "artifact preparation plus Joe's six uncoached flows and authority/evidence mapping acceptance"}
+  "canonical_sources": [
+    {
+      "title": "CARR Workspace — Big Design Up Front",
+      "slug": "carr-workspace-bduf",
+      "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+      "generation": 324,
+      "active_sections": 33,
+      "receipt": "fresh_read_verified",
+      "material_revision": "s23 version 3 harmonizes the roadmap to approximately 12 weeks, a 12–16-week evidence range for production-mature web, and 4–6 months for the full multi-platform end state."
+    },
+    {
+      "title": "CARR Control Room — Big Design Up Front",
+      "slug": "carr-control-room-bduf",
+      "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+      "generation": 251,
+      "active_sections": 38,
+      "receipt": "fresh_read_verified"
+    },
+    {
+      "title": "CARR Mature Software End State — Big Design Up Front",
+      "slug": "carr-mature-software-end-state-bduf",
+      "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
+      "generation": 325,
+      "active_sections": 40,
+      "ordinal_range": [0, 39],
+      "receipt": "fresh_read_verified",
+      "dependency_edges": ["CARR Workspace — Big Design Up Front", "CARR Control Room — Big Design Up Front", "CARR Production Maturity Baseline"]
+    },
+    {
+      "title": "CARR Production Maturity Baseline",
+      "slug": "carr-production-maturity-baseline",
+      "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
+      "generation": 280,
+      "active_sections": 27,
+      "role": "governing production source",
+      "receipt": "fresh_read_verified"
+    }
   ],
+  "lanes": [
+    {"product": "CARR Workspace", "role": "main private business product", "root": "workspace", "original_source_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d", "phase0_word_snapshot_sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b", "word_snapshot_status": "historical_snapshot_predating_live_doctrine_generation_324", "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "doctrine_generation": 324, "doctrine_sections": 33, "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"},
+    {"product": "CARR Control Room", "role": "operational safety and evidence counterpart", "root": "control-room", "original_source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "phase0_word_snapshot_sha256": "b25cf6ca1c50998699f858322847b3911b96e322a34256068e88ece85af3c565", "word_snapshot_status": "validated_snapshot_of_control_room_doctrine_generation_251_but_not_an_integrated_umbrella_export", "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 251, "doctrine_sections": 38, "phase0_exit": "artifact preparation plus Joe's six uncoached flows and authority/evidence mapping acceptance"}
+  ],
+  "integrated_delivery": {
+    "ruling": "Eight weeks is the CARR Mature Foundation milestone, not the full native mature end state.",
+    "mature_foundation_v1": {
+      "target_date": "2026-10-05",
+      "scope": ["Production Maturity Level 1 plus selected Level 2 controls", "core Workspace and Command Center web milestone", "Calls and Doc request loop", "thin authoritative read-first Control Room"]
+    },
+    "production_mature_web_timing": {"planning_center": "approximately 12 weeks", "evidence_range": "12–16 weeks"},
+    "full_multi_platform_timing": "4–6 months, evidence-gated",
+    "hard_predecessor_chain": ["Website Completion", "installed Mac desktop parity", "iPhone", "iPad Tour Mode"],
+    "control_room_sequence": "Ship thin authoritative read-first operational visibility before mutable AgentOps; safely mutable AgentOps remains evidence- and approval-gated.",
+    "construction_gate": "No production construction before Joe approves the Wednesday Fable 5, GPT-5.6 Sol, and SuperGrok 4.5 council output."
+  },
+  "incremental_cost_bands_usd_per_month": {
+    "phase0_or_pilot": "$5–20",
+    "mature_two_partner_web_operations": "$62–84",
+    "before_paid_incident_response": "$28–50",
+    "with_apple_reserve": "approximately $70–93",
+    "high_intentional_use": "$300–500",
+    "source": "CARR Mature Software End State sections 25–28; estimates remain subject to measured usage and current vendor pricing."
+  },
   "operating_objective": {"section_title": "Operating objective and AI-session displacement test", "cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?", "objectives": 8, "baseline_measures": 5, "baseline_values": "unknown until instrumented or interviewed", "adoption_rule": "A routine is not adopted until Joe or Dell can complete and understand it without a heavy Claude Code or Codex session and the old session-driven ritual has an explicit retirement or cutover path.", "council_criterion": "The Wednesday council must reject a slice that cannot trace the objective and baseline through requirements, screens, canonical data/actions, tests, post-launch comparison, and cutover."},
   "artifact_verification": {
-    "workspace": {"node_tests": 28, "p0": 0, "p1": 0, "p2": 0, "runtime_public_assets": "verified", "runtime_internal_files": "denied"},
-    "control_room": {"node_tests": 74, "p0": 0, "p1": 0, "p2": 0, "runtime_public_assets": "verified", "runtime_interactive_visual_accessibility": "open"}
+    "workspace": {"node_tests": 29, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_internal_files": "denied"},
+    "control_room": {"node_tests": 75, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_interactive_visual_accessibility": "open"}
   },
   "tonight_allowed": ["terminology and domain glossary", "state machines and explicit transition guards", "role, authority, capability, and risk matrices", "route and information-architecture maps", "business and operational entity contracts", "traceability matrices", "retention and redaction contracts", "notification and event taxonomies", "test and acceptance strategy", "threat models", "runnable fixture-backed wireframes", "canonical synthetic JSON twins", "environment and release process", "structured open-decision and council-review registers"],
   "tonight_forbidden": ["production construction", "production migration", "deployment", "irreversible implementation", "live authority route", "automatic consequential or external effect", "claiming a human exit gate without observed evidence"],
-  "council": {"timing": "Wednesday night after Claude usage reset", "members": ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"], "input": "both canonical BDUFs, both Phase 0 artifact packages, independent verifier findings, and every structured unresolved fork", "output": "final approved roadmap versions with explicit fork dispositions", "construction_after": "Construction begins immediately only after Joe approves the council output."},
+  "council": {"timing": "Wednesday night after Claude usage reset", "members": ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"], "input": "the three canonical BDUFs, the governing Production Maturity Baseline, both Phase 0 artifact packages, independent verifier findings, and every structured unresolved fork", "output": "recommended integrated roadmap versions with explicit fork dispositions for Joe's approval", "construction_after": "Construction begins immediately only after Joe approves the council output."},
   "release_truth": {"repository": "/Users/booko/carr-system", "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0", "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253", "canonical_dirty_checkout_is_not_release_source": true, "explicit_path_staging_required": true, "production_changes_tonight": 0}
 }

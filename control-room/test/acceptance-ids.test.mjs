@@ -211,6 +211,35 @@ const assertions = {
     assert.match(edge("agent_session", "blocked", "collecting")?.guard || "", /read scope revalidated.*read only/i);
     assert.match(edge("approval", "revised", "proposed")?.guard || "", /new immutable plan hash.*prior approval.*invalidated/i);
   },
+  umbrella_program_alignment: () => {
+    const manifest = read("contracts/phase0-manifest.v1.json");
+    const council = read("contracts/council-review.v1.json");
+    const trace = read("contracts/phase0-traceability.v1.json");
+    assert.deepEqual(manifest.governing_sources.map(item => [item.document_id, item.generation, item.active_sections]), [
+      ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 324, 33],
+      ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 251, 38],
+      ["15d2250c-4821-4f83-9dc5-063f9470139d", 325, 40],
+      ["10d25f48-916b-4a7f-a1a6-d231274fed4b", 280, 27]
+    ]);
+    assert.ok(manifest.governing_sources.every(item => item.receipt === "fresh_read_verified"));
+    assert.equal(manifest.integrated_delivery_program.october_5_2026_milestone.not_full_mature_end_state, true);
+    assert.equal(manifest.integrated_delivery_program.full_mature_end_state.planning_horizon, "4–6 months");
+    assert.match(manifest.integrated_delivery_program.full_mature_end_state.scope.join(" "), /Mac parity after Website Completion.*iPhone.*iPad Tour Mode.*mutable Production AgentOps/i);
+    assert.match(manifest.integrated_delivery_program.construction_gate, /No production construction.*Joe approves.*council output/i);
+    assert.deepEqual(Object.fromEntries(Object.entries(manifest.planning_cost_bands_usd_monthly).filter(([, value]) => typeof value === "object")), {
+      phase0_or_pilot_incremental: {low: 5, high: 20},
+      mature_two_partner_web_operations: {low: 62, high: 84},
+      before_paid_incident_response: {low: 28, high: 50},
+      with_apple_reserve_approximate: {low: 70, high: 93},
+      high_intentional_use: {low: 300, high: 500}
+    });
+    assert.ok(manifest.settled_decisions.some(item => item.decision_id === "69512a40-99ec-483f-8528-5e05a4969551"));
+    assert.ok(council.settled_inputs.some(item => item.id === "CR-S09" && /Mature Foundation v1/.test(item.decision)));
+    assert.ok(council.settled_inputs.some(item => item.id === "CR-S12" && /\$5–20/.test(item.decision)));
+    assert.deepEqual(trace.governing_sources.map(item => item.document_id), manifest.governing_sources.map(item => item.document_id));
+    assert.ok(trace.entries.some(item => item.id === "P0-021" && item.tests.includes("no_mutation_route") && item.source_refs.includes("carr-workspace-bduf#s23@v3")));
+    assert.equal(api.routes.some(route => route.method !== "GET"), false);
+  },
   plan_hash_format: () => {
     const pattern = /^sha256:[a-f0-9]{64}$/;
     assert.match(fixture("plan-approval").data.current_revision.hash, pattern);

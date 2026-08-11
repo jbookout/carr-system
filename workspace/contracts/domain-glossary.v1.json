@@ -4,11 +4,13 @@
   "status": "phase0_candidate",
   "source": {
     "doctrine_document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-    "doctrine_generation": 252,
+    "doctrine_generation": 324,
     "doctrine_section_count": 33,
+    "timing_section_key": "s23",
+    "timing_section_version": 3,
     "source_sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b",
     "planning_baseline": "2026-08-11",
-    "provenance_status": "revised Word artifact read back from the durable doctrine record"
+    "provenance_status": "durable doctrine read back at generation 324; retained Word checksum predates the s23 timing revision and is not claimed current"
   },
   "north_star": "One place to run the business; one assistant that turns conversation into governed work.",
   "operating_objective": {

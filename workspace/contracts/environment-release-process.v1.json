@@ -33,5 +33,12 @@
   ],
   "release_sequence": ["freeze requirement and traceability revision", "verify Definition of Ready", "build immutable artifact from reviewed commit", "run local and preview checks", "independent verification", "rehearse staging migration and rollback where applicable", "capture approval bound to exact artifact and environment", "deploy through sanctioned wrapper", "smoke auth, key reads, guarded writes, rollback flag, telemetry", "read back live routes, assets, verbs, database version, and golden workflows", "observe feature flag and error budget", "retire old write only after parity and observation"],
   "rollback_contract": {"required_before_release": ["feature flag disable", "schema compatibility boundary", "data forward-fix or rollback method", "owner", "trigger", "maximum safe recovery time", "verification after rollback"], "rule": "Command success is not completion; rollback also requires target read-back."},
-  "phase_gates": {"phase0_exit": ["approved contracts and open-decision register", "runnable prototypes and canonical JSON twins", "Joe and Dell complete five primary journeys without coaching", "approved test, release, rollback, CI, runbook, and threat-model package"], "phase1_entry": "Only after final roadmap council approval and Phase 0 exit evidence."}
+  "integrated_program_gate": {
+    "foundation_target": "CARR Mature Foundation v1 on 2026-10-05; not the full mature end state",
+    "workspace_web_timing": "approximately 12 weeks with a 12–16-week evidence range",
+    "full_multi_platform_timing": "4–6 months, evidence gated",
+    "platform_predecessors": ["Website Completion", "installed Mac desktop parity", "iPhone voice-first", "iPad Tour Mode"],
+    "rule": "A date or elapsed estimate never substitutes for the named acceptance and production-maturity evidence."
+  },
+  "phase_gates": {"phase0_exit": ["approved contracts and open-decision register", "runnable prototypes and canonical JSON twins", "Joe and Dell complete five primary journeys without coaching", "approved test, release, rollback, CI, runbook, and threat-model package", "three-roadmap reconciliation against the Production Maturity Baseline"], "phase1_entry": "Only after Joe approves the Fable 5, GPT-5.6 Sol, and SuperGrok 4.5 council output and Phase 0 exit evidence; Website Completion remains the hard predecessor for later platform construction."}
 }

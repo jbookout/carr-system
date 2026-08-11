@@ -1,8 +1,15 @@
 {
   "contract": "carr-workspace-phase0-traceability",
   "version": "1.0.0",
-  "status": "phase0_candidate",
+  "status": "phase0_candidate_reconciled_to_integrated_planning_set",
   "source_doctrine_document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+  "source_doctrine_generation": 324,
+  "canonical_planning_set": [
+    {"slug": "carr-workspace-bduf", "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "verified_generation": 324, "timing_section": "s23 v3"},
+    {"slug": "carr-control-room-bduf", "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "verified_generation": 251},
+    {"slug": "carr-mature-software-end-state-bduf", "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d", "verified_generation": 325},
+    {"slug": "carr-production-maturity-baseline", "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b", "verified_generation": 280, "active_unique_sections": 27}
+  ],
   "columns": [
     "requirement",
     "source_sections",
@@ -788,8 +795,57 @@
       "open_decisions": []
     },
     {
+      "id": "PROGRAM-SEQUENCE-001",
+      "requirement": "October 5, 2026 and eight weeks target CARR Mature Foundation v1, not the full mature end state; Workspace web is planned at approximately 12 weeks within a 12–16-week evidence range, the full evidence-gated multi-platform program is 4–6 months, and Website Completion remains the hard predecessor to Mac, then iPhone, then iPad construction.",
+      "source_sections": [
+        "Workspace s23 v3",
+        "Mature End State s05",
+        "Production Maturity Baseline"
+      ],
+      "screen": [
+        "none in static prototype",
+        "future release and program evidence surfaces"
+      ],
+      "business_entity": [
+        "program milestone",
+        "dependency edge",
+        "evidence gate",
+        "cost band"
+      ],
+      "api_or_action": [
+        "Phase 0 contract validation",
+        "future approved release plan"
+      ],
+      "authority": [
+        "Joe's approval of the council output required before production construction",
+        "calendar passage does not satisfy an evidence gate"
+      ],
+      "event": [
+        "workspace.engineering_request.state_changed",
+        "workspace.write.verified"
+      ],
+      "evidence": [
+        "decision 69512a40-99ec-483f-8528-5e05a4969551",
+        "Workspace doctrine generation 324 and s23 v3",
+        "Mature End State doctrine generation 325",
+        "Production Maturity Baseline generation 280",
+        "like-for-like cost observations"
+      ],
+      "rollback": [
+        "reject schedule or release claim that collapses the foundation milestone into the mature end state",
+        "retain predecessor gate until its named evidence passes"
+      ],
+      "tests": [
+        "ROADMAP-HARMONY-001",
+        "RELEASE-GATE-001"
+      ],
+      "open_decisions": [
+        "COUNCIL-ROADMAP-001"
+      ]
+    },
+    {
       "id": "RELEASE-001",
-      "requirement": "Construction starts only after final council approval and Phase 0 exit; release uses immutable evidence, sanctioned gates, rollback, and live read-back.",
+      "requirement": "Construction starts only after Joe approves the final council output and Phase 0 exit evidence passes; release uses immutable evidence, sanctioned gates, rollback, and live read-back.",
       "source_sections": [
         21,
         22,
