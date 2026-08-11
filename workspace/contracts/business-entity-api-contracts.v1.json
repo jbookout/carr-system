@@ -13,15 +13,28 @@
     "write_contract_rule": "Future product API and MCP adapters call one shared narrow business service; no duplicated business rules.",
     "required_endpoint_declarations": ["authentication", "authorization", "request_schema", "response_schema", "idempotency", "typed_errors", "version_conflict", "telemetry", "rollback_implication"]
   },
+  "tenant_context_policy": {
+    "authoritative_source": "server-verified session, actor assignment, and server-owned resource mapping",
+    "immutable_per_request": true,
+    "client_tenant_fields_authoritative": false,
+    "required_for": ["record", "projection", "event", "job", "sync receipt", "search", "export", "attachment", "Doc context", "AI request"],
+    "privacy_safe_cross_tenant_error": "TENANT_SCOPE_REFUSED",
+    "launch": "one CARR tenant; Joe and Dell only"
+  },
+  "tenant_configuration_policy": {
+    "allowed": ["branding tokens", "approved vocabulary labels", "enabled module identifiers", "approved feature flags", "retention within owner policy bounds", "seat-safe display identity and notification preferences"],
+    "forbidden": ["arbitrary code", "SQL", "shell commands", "customer-authored executable workflows", "tenant or authorization overrides", "audit suppression", "ownership transfer"]
+  },
   "domain_groups": [
     {"group": "calls", "entities": ["CallSession", "CallParticipant", "CallRecordLink", "CallSummary", "CallFact", "CallDecision", "CallDeliverable", "CallCandidate", "CallRetentionReceipt"]},
     {"group": "tours", "entities": ["Tour", "TourStop", "TourRouteVersion", "TourConstraint", "TourPack", "TourNotePage", "TourStrokeBatch", "TourMedia", "TourReviewItem"]},
     {"group": "doc", "entities": ["DocConversation", "DocMessage", "DocContextLink", "DocActionCandidate", "EngineeringRequest", "EngineeringExecution", "EvidenceLink"]},
     {"group": "notifications", "entities": ["Notification", "NotificationDelivery", "Acknowledgement", "Snooze", "DevicePreference"]},
     {"group": "devices_and_sync", "entities": ["Device", "DeviceKey", "LocalOutboxItem", "SyncReceipt", "Conflict"]},
-    {"group": "product_delivery", "entities": ["Requirement", "AcceptanceCase", "FeatureFlag", "Release", "Deployment", "RollbackEvent"]}
+    {"group": "product_delivery", "entities": ["Requirement", "AcceptanceCase", "FeatureFlag", "Release", "Deployment", "RollbackEvent"]},
+    {"group": "tenant_and_workflow_governance", "entities": ["TenantContext", "WorkflowDefinition", "WorkflowVersion", "WorkflowPromotion", "MaintenanceEntry"]}
   ],
-  "endpoint_contract_defaults": {"authentication": "verified Workspace session for Joe or Dell", "request_schema": "path/query schema with additionalProperties false", "idempotency_or_read_semantics": "safe GET; no state change; cache identity includes authenticated principal and exact scope", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "OBJECT_NOT_FOUND", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"], "version_conflict": "reads return record version/ETag where applicable; future writes require If-Match", "telemetry": "safe operation ID, outcome, duration, freshness, correlation ID; no payload", "rollback_implication": "disable read-model feature flag or revert projection; canonical records unchanged"},
+  "endpoint_contract_defaults": {"authentication": "verified Workspace session for Joe or Dell", "authorization": "server derives immutable tenant context and verifies actor plus exact resource in that tenant; client tenant input is never authoritative", "request_schema": "path/query schema with additionalProperties false and no authoritative tenant selector", "idempotency_or_read_semantics": "safe GET; no state change; cache identity includes server tenant, authenticated principal, and exact scope", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "TENANT_SCOPE_REFUSED", "OBJECT_NOT_FOUND", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"], "version_conflict": "reads return record version/ETag where applicable; future writes require If-Match", "telemetry": "safe server tenant, operation ID, outcome, duration, freshness, correlation ID; no payload", "rollback_implication": "disable read-model feature flag or revert projection; canonical records unchanged"},
   "prototype_read_routes": [
     {"operation_id": "getWorkspaceMeta", "method": "GET", "path": "/api/v1/meta", "authentication": "verified Workspace session for Joe or Dell", "authorization": "authenticated product audience", "request_schema": "NoBodyNoQuery", "response_schema": "#/$defs/WorkspaceMeta", "idempotency_or_read_semantics": "safe configuration read", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "INTERNAL_ERROR"], "version_conflict": "not applicable; returns configuration fingerprint", "telemetry": "workspace.meta.read without payload", "rollback_implication": "disable shell flag; canonical records unchanged"},
     {"operation_id": "getCommandCenter", "method": "GET", "path": "/api/v1/command-center", "authentication": "verified Workspace session for Joe or Dell", "authorization": "partner-specific projection", "request_schema": "CommandCenterQuery", "response_schema": "#/$defs/CommandCenterReadModel", "idempotency_or_read_semantics": "safe read; each card carries source freshness", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"], "version_conflict": "not applicable to aggregate; destination object versions included", "telemetry": "workspace.command_center.read with source outcomes only", "rollback_implication": "disable home read model; owner modules remain available"},
@@ -38,6 +51,7 @@
   "typed_errors": [
     {"code": "AUTHENTICATION_REQUIRED", "http": 401, "safe_message": "Sign in to CARR Workspace.", "retryable": false},
     {"code": "AUTHORIZATION_REFUSED", "http": 403, "safe_message": "This account cannot access that object.", "retryable": false},
+    {"code": "TENANT_SCOPE_REFUSED", "http": 404, "safe_message": "The requested object is unavailable.", "retryable": false, "privacy": "Same response for cross-tenant and nonexistent targets; disclose no existence or metadata."},
     {"code": "OBJECT_NOT_FOUND", "http": 404, "safe_message": "The requested object is unavailable.", "retryable": false, "privacy": "Do not distinguish nonexistent from unauthorized."},
     {"code": "FRESHNESS_UNKNOWN", "http": 409, "safe_message": "Current data cannot be verified. Editing is disabled.", "retryable": true},
     {"code": "VERSION_CONFLICT", "http": 409, "safe_message": "This item changed. Review the newer version before continuing.", "retryable": false},
@@ -53,6 +67,11 @@
     "IsoDateTime": {"type": "string", "format": "date-time"},
     "NoBodyNoQuery": {"type": "object", "additionalProperties": false, "maxProperties": 0},
     "UuidPath": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"$ref": "#/$defs/Uuid"}}},
+    "TenantContext": {"type": "object", "additionalProperties": false, "required": ["tenant_id", "actor_id", "actor_kind", "derived_by", "immutable_for_request"], "properties": {"tenant_id": {"$ref": "#/$defs/Uuid"}, "actor_id": {"$ref": "#/$defs/Uuid"}, "actor_kind": {"enum": ["joe", "dell", "bounded_automation"]}, "derived_by": {"const": "server_verified_session_actor_and_resource_mapping"}, "immutable_for_request": {"const": true}}},
+    "WorkflowDefinition": {"type": "object", "additionalProperties": false, "required": ["record", "name", "owner_id", "current_version_id", "lifecycle"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "name": {"type": "string", "minLength": 1}, "owner_id": {"$ref": "#/$defs/Uuid"}, "current_version_id": {"$ref": "#/$defs/Uuid"}, "lifecycle": {"enum": ["experimental", "pilot", "approved", "standard", "retired"]}}},
+    "WorkflowVersion": {"type": "object", "additionalProperties": false, "required": ["record", "workflow_id", "version_number", "immutable", "locked_rail_fingerprint", "definition"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "workflow_id": {"$ref": "#/$defs/Uuid"}, "version_number": {"type": "integer", "minimum": 1}, "immutable": {"const": true}, "locked_rail_fingerprint": {"type": "string", "minLength": 1}, "definition": {"type": "object"}}},
+    "WorkflowPromotion": {"type": "object", "additionalProperties": false, "required": ["record", "workflow_id", "version_id", "from_state", "to_state", "evidence_refs", "approved_by", "observed_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "workflow_id": {"$ref": "#/$defs/Uuid"}, "version_id": {"$ref": "#/$defs/Uuid"}, "from_state": {"enum": ["experimental", "pilot", "approved", "standard"]}, "to_state": {"enum": ["experimental", "pilot", "approved", "standard", "retired"]}, "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "approved_by": {"$ref": "#/$defs/Uuid"}, "observed_at": {"$ref": "#/$defs/IsoDateTime"}}},
+    "MaintenanceEntry": {"type": "object", "additionalProperties": false, "required": ["record", "started_at", "human_minutes", "category", "normal_or_exception", "actor_id", "evidence_ref"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "started_at": {"$ref": "#/$defs/IsoDateTime"}, "human_minutes": {"type": "integer", "minimum": 1}, "category": {"type": "string", "minLength": 1}, "normal_or_exception": {"enum": ["normal_internal", "exception"]}, "exception_reason": {"type": ["string", "null"]}, "work_request_id": {"type": ["string", "null"], "format": "uuid"}, "workflow_id": {"type": ["string", "null"], "format": "uuid"}, "actor_id": {"$ref": "#/$defs/Uuid"}, "evidence_ref": {"type": "string", "minLength": 1}}},
     "CommandCenterQuery": {"type": "object", "additionalProperties": false, "properties": {"viewer": {"enum": ["joe", "dell"]}}},
     "LeadListQuery": {"type": "object", "additionalProperties": false, "properties": {"view": {"enum": ["my_queue", "hot", "this_week", "segments", "search_all", "decisions"]}, "cursor": {"type": ["string", "null"]}}},
     "WorkRecordListQuery": {"type": "object", "additionalProperties": false, "properties": {"operating_state": {"enum": ["active", "parked", "closed"]}, "workspace": {"enum": ["team_book", "national_accounts"]}, "cursor": {"type": ["string", "null"]}}},
@@ -89,9 +108,10 @@
     "VersionedRecord": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "version", "created_at", "created_by", "updated_at", "updated_by", "provenance"],
+      "required": ["id", "tenant_id", "version", "created_at", "created_by", "updated_at", "updated_by", "provenance"],
       "properties": {
         "id": {"$ref": "#/$defs/Uuid"},
+        "tenant_id": {"$ref": "#/$defs/Uuid"},
         "version": {"type": "integer", "minimum": 1},
         "created_at": {"$ref": "#/$defs/IsoDateTime"},
         "created_by": {"$ref": "#/$defs/Uuid"},
@@ -210,8 +230,8 @@
       }
     },
     "WorkspaceMeta": {
-      "type": "object", "additionalProperties": false, "required": ["product", "home", "viewer", "environment", "configuration_fingerprint", "source"],
-      "properties": {"product": {"const": "CARR Workspace"}, "home": {"const": "The Command Center"}, "viewer": {"enum": ["joe", "dell"]}, "environment": {"enum": ["local", "preview", "staging", "production"]}, "configuration_fingerprint": {"type": "string", "minLength": 1}, "source": {"$ref": "#/$defs/SourceEnvelope"}}
+      "type": "object", "additionalProperties": false, "required": ["product", "home", "viewer", "environment", "tenant_context", "configuration_fingerprint", "source"],
+      "properties": {"product": {"const": "CARR Workspace"}, "home": {"const": "The Command Center"}, "viewer": {"enum": ["joe", "dell"]}, "environment": {"enum": ["local", "preview", "staging", "production"]}, "tenant_context": {"$ref": "#/$defs/TenantContext"}, "configuration_fingerprint": {"type": "string", "minLength": 1}, "source": {"$ref": "#/$defs/SourceEnvelope"}}
     },
     "CommandCenterReadModel": {
       "type": "object", "additionalProperties": false, "required": ["viewer", "needs_you_now", "this_week", "metrics", "recent_calls", "doc_at_work", "recent_activity", "source"],

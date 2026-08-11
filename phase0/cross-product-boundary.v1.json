@@ -1,7 +1,7 @@
 {
   "contract": "carr-workspace-control-room-boundary",
-  "version": "1.0.0",
-  "status": "phase0_frozen",
+  "version": "1.1.0",
+  "status": "phase0_amended_pending_lane_validation_human_acceptance_and_council",
   "decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7",
   "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
   "conceptual_roles": {
@@ -19,6 +19,29 @@
     "cross_product_trace": "Every routine must trace through its owning product screen, canonical record or data contract, governed action, evidence return, test, post-launch comparison, and cutover state."
   },
   "principles": ["Workspace is the business system; Control Room is the operations and evidence plane.", "Each product has a separate browser origin, audience, and session namespace.", "Shared components and identity infrastructure do not imply shared authorization.", "Business payloads remain in Workspace; Control Room receives opaque origin references and safe labels only.", "Operational diagnostics and restricted audit evidence do not flow back to Workspace.", "Agents may extract, draft, propose, queue, and return evidence; consequential or external effects retain human gates."],
+  "tenant_boundary": {
+    "launch_scope": "One private CARR tenant with Joe and Dell only.",
+    "authoritative_context": "The server derives tenant identity from authenticated audience, session, membership, and route binding; a tenant identifier supplied by a browser, agent, tool call, record reference, or bridge payload is never authoritative.",
+    "bridge_envelope": "The receiving server binds tenant_id and correlation_id after authenticating the source; tenant_id is not an accepted authority-bearing payload field.",
+    "enforcement": "Every read, write, event, evidence reference, work request, job, and automation is tenant-scoped and denies an otherwise-valid foreign-tenant identifier before resolving or projecting payload data.",
+    "future_licensing": "Future seats remain owner-controlled and customer-scoped; tenant readiness does not authorize public signup, self-service tenant creation, a public SaaS, or transfer of platform control or intellectual property.",
+    "owner": "Joe retains platform ownership, intellectual property, and control; a corporation may only license seats as a customer."
+  },
+  "workflow_governance": {
+    "lifecycle": ["experimental", "pilot", "approved", "standard", "retired"],
+    "promotion_rule": "Every promotion is explicit, attributed, evidence-backed, and reviewable, with an immutable version, accountable owner, observation window, failure criteria and handling, rollback plan, adoption result, and cutover plan; no experimental or pilot workflow silently becomes standard.",
+    "version_rule": "In-flight work pins an immutable workflow version across the product boundary; promotion, rollback, replacement, or retirement cannot rewrite completed history.",
+    "retirement_rule": "Retirement blocks new starts, preserves evidence and audit history, and names the replacement or deliberate end state.",
+    "bounded_trial_rule": "A bounded trial takes at most five business days, may be shorter, and cannot create a new source of truth, destructive migration, parallel writer, or generic workflow engine.",
+    "current_program_exclusions": ["generic workflow engine", "plugin marketplace", "customer scripting", "customer-authored executable workflows"]
+  },
+  "maintenance_accounting": {
+    "normal_internal_target": "3–5 human hours per month",
+    "cross_product_measure": "Attribute human time to the product, workflow version, maintenance category, cause, and evidence reference without duplicating the underlying work record.",
+    "exceptions": "Material new scope, vendor or platform incidents, security events, and other approved exceptions are reported separately and do not silently consume or redefine normal internal maintenance.",
+    "toil_trigger": "More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work.",
+    "mature_claim_gate": "Three complete consecutive normal months must remain at three to five hours with required control evidence intact and exceptions separately attributed before the low-toil mature claim."
+  },
   "workspace_to_control_room": {
     "typed_object": "EngineeringWorkRequestOrigin",
     "allowed_fields": ["request_id", "origin_type", "origin_ref", "safe_label", "desired_outcome", "acceptance_criteria_refs", "requester_id", "created_at"],
@@ -33,5 +56,5 @@
   },
   "shared_identifiers": {"format": "opaque stable IDs", "record_resolution": "server-side exact current record only", "invented_or_ambiguous_id": "refuse", "correlation": "one correlation ID may link safe projections without copying payloads"},
   "crosswalk": {"workspace_capability_ladder": ["read", "local_capture", "propose", "confirmed_narrow_write", "background_engineering_request"], "control_room_risk_classes": ["R0", "R1", "R2", "R3", "R4", "R5", "R6"], "rule": "The ladders must be explicitly cross-walked before implementation; neither silently replaces the other.", "status": "open_for_wednesday_council"},
-  "tests": ["XP-BND-001 separate audience and cookie replay refusal", "XP-BND-002 safe origin contains no business payload", "XP-BND-003 safe return contains no restricted diagnostics", "XP-BND-004 bridge creates no capability", "XP-BND-005 invented or ambiguous record ID refused", "XP-BND-006 correlation reconstructs the request without payload duplication"]
+  "tests": ["XP-BND-001 separate audience and cookie replay refusal", "XP-BND-002 safe origin contains no business payload", "XP-BND-003 safe return contains no restricted diagnostics", "XP-BND-004 bridge creates no capability", "XP-BND-005 invented or ambiguous record ID refused", "XP-BND-006 correlation reconstructs the request without payload duplication", "XP-BND-007 server derives tenant context and ignores authority claims in payloads", "XP-BND-008 valid foreign-tenant record ID is denied before payload projection", "XP-BND-009 workflow version remains pinned across request and evidence return", "XP-BND-010 maintenance time is attributed once with exceptions reported separately", "XP-BND-011 five-business-day trial creates no new source of truth, destructive migration, parallel writer, or generic workflow engine", "XP-BND-012 two-month toil trigger and three-month mature claim gate remain cross-product requirements"]
 }

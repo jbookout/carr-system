@@ -18,6 +18,43 @@
     {"id": "BASE-STATE-TIME-001", "measure": "Median time to determine business state and system health", "baseline_method": "timed uncoached tasks across representative days; no synthetic measured value", "bound_product_action": "Refine Command Center summaries, source links, freshness, and Control Room safe status until the delay cause is removed", "post_launch_comparison": "Repeat the same timed tasks at 30 and 90 days"},
     {"id": "BASE-HANDCARRY-001", "measure": "Number of hand-carried context transfers between sessions", "baseline_method": "count observed manual copy/relay events and interview examples; value remains unknown until measured", "bound_product_action": "Add durable request context, task-to-task handoff, origin links, and returned evidence", "post_launch_comparison": "Compare like-for-like hand-carried transfers at 30 and 90 days"}
   ],
+  "tenant_boundary_acceptance": {
+    "launch_scope": "Exactly one owner-controlled CARR tenant and Joe/Dell only; no public SaaS, signup, self-service tenant creation, client portal, launch billing, or client tenant selector.",
+    "configuration_allow_list": ["branding tokens", "approved vocabulary", "module identifiers", "approved feature flags", "retention choices inside owner policy bounds", "seat-safe display identity and notification preferences"],
+    "configuration_refusals": ["arbitrary code", "SQL", "shell commands", "customer-authored executable workflows", "generic workflow engine", "plugin marketplace", "customer scripting", "authorization or tenant overrides", "audit suppression", "ownership transfer"],
+    "static_evidence": ["server-derived immutable tenant contract", "nine-channel synthetic cross-tenant denial fixture", "privacy-safe nonexistent-target response parity"],
+    "future_runtime_evidence": ["browser", "API", "background job", "local edge sync", "search", "export", "attachment", "Doc", "AI"],
+    "pass_rule": "Every runtime channel proves exact server-derived tenant isolation and payload-free attributed denial; a static fixture alone never counts as production enforcement."
+  },
+  "workflow_lifecycle_acceptance": {
+    "states": ["experimental", "pilot", "approved", "standard", "retired"],
+    "locked_rails": ["tenant isolation", "authentication and authorization", "risk and exact approval", "attributed audit", "retention bounds", "immutable versions", "release and rollback", "Joe platform ownership"],
+    "flexible_only_within_schema": ["approved labels", "non-security thresholds", "saved views", "module visibility", "Doc presentation", "nonconsequential routing"],
+    "five_business_day_trial": {
+      "maximum_duration_business_days": 5,
+      "scope": "one named tenant, workflow, immutable version, partner cohort, record allow-list, and rollback owner",
+      "safety_clause": ["no new source of truth", "no destructive migration", "no parallel writer", "no generic workflow engine"],
+      "pass": ["no tenant or authority failure", "consequential effects exactly approved and read back", "rollback stays executable", "routine passes the AI-session displacement test", "toil and exceptions are attributed", "owner approves promotion from evidence"],
+      "failure": "hold or roll back and create a new immutable version; calendar passage never promotes a workflow"
+    },
+    "future_runtime_evidence": "Promotion, rollback, cutover, running-work version pinning, and retirement are future staging and production gates."
+  },
+  "maintenance_measure_plan": {
+    "normal_internal_target_human_hours_per_month": {"minimum": 3, "maximum": 5},
+    "observed_baseline_hours": null,
+    "baseline_method": "time diary, attributed work-request classification, and Joe interview; no observed value until evidence exists",
+    "exception_rule": "material new scope, vendor/platform incidents, security/privacy events, data repair/migration, council redesign, owner investigation, and legal/compliance change are attributed separately",
+    "escalation_gate": "More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work.",
+    "low_toil_mature_claim_gate": "A low-toil or mature claim requires three complete consecutive normal months at three to five human hours, with required control evidence intact and exceptions reported separately.",
+    "required_control_evidence_for_claim": ["tenant isolation", "authorization and exact approvals", "attributed audit", "backup and restore", "release and rollback", "workflow version and promotion", "retention and exception attribution"],
+    "bound_product_action": "When the two-consecutive-month escalation gate fires, create prioritized toil-reduction work for the repeated toil.",
+    "post_launch_comparison": "Compare like-for-like rolling monthly normal internal hours and separately reported exceptions at 30, 60, and 90 days; do not claim low-toil or mature before the three-complete-consecutive-month gate passes."
+  },
+  "owner_control_acceptance": {
+    "owner": "Joe Bookout",
+    "customer_boundary": "Corporate may license owner-controlled seats only as a customer and receives no platform, intellectual-property, source, infrastructure, security-policy, or roadmap control.",
+    "launch_surface_rule": "No public signup, billing, tenant administration, ownership-transfer, generic workflow engine, plugin marketplace, customer scripting, or customer workflow-authoring surface exists."
+  },
   "test_layers": [
     {"layer": "unit", "coverage": ["state transitions", "validation", "routing", "formatting", "local queues", "model output parser"]},
     {"layer": "contract", "coverage": ["JSON schema", "typed API compatibility", "exact errors", "idempotency", "version conflicts", "generated clients"]},
@@ -26,7 +63,9 @@
     {"layer": "migration", "coverage": ["forward and compatibility rehearsal", "restartable backfill", "parity counts", "rollback boundary"]},
     {"layer": "accessibility", "coverage": ["WCAG 2.2 AA scan", "keyboard", "screen reader", "zoom", "contrast", "reduced motion", "44-pixel targets", "map/list equivalence"]},
     {"layer": "performance", "coverage": ["Core Web Vitals", "API p50/p95/p99", "realistic board", "call report", "tour pack", "sync backlog", "300ms acknowledgement"]},
-    {"layer": "security_privacy", "coverage": ["authorization", "CSRF", "revocation", "PII logs", "prompt injection", "wrong target", "raw capture leakage", "no-send boundary"]},
+    {"layer": "security_privacy", "coverage": ["authorization", "server-derived tenant context", "nine-channel cross-tenant denial", "CSRF", "revocation", "PII logs", "prompt injection", "wrong target", "raw capture leakage", "no-send boundary"]},
+    {"layer": "workflow_governance", "coverage": ["immutable versions", "lifecycle transition refusal", "no-more-than-five-business-day bounded pilot", "no new source of truth", "no destructive migration", "no parallel writer", "no generic workflow engine", "promotion evidence", "running-work version pinning", "rollback", "cutover", "retirement"]},
+    {"layer": "maintenance_accounting", "coverage": ["unknown observed baseline", "three-to-five-hour target semantics", "two consecutive months above five creates prioritized toil-reduction work", "three complete consecutive normal months required for low-toil or mature claim", "required controls remain intact", "normal versus exception attribution", "rolling comparison"]},
     {"layer": "actual_device", "coverage": ["both partner Macs", "iPhones", "iPad Pros", "Pencils", "Bluetooth routes", "weak/offline network"]}
   ],
   "ai_evaluations": ["grounded answer with source", "uncertainty and refusal", "ambiguous client/deal/person resolution", "document/transcript prompt injection", "invented ID rejection", "sensitive-data leakage", "unsafe send/publish/deploy/ownership request", "call extraction and speaker uncertainty", "conversational quality and brevity", "cost and latency by route"],
@@ -44,5 +83,5 @@
     "pricing_review": "Compare observed costs against the canonical five corrected cost bands; a range is planning evidence, not an authorization to spend.",
     "construction_gate": "Production construction remains closed until Joe approves the three-model council output."
   },
-  "phase0_exit": {"automatic_checks": ["all JSON parses", "all schema contracts compile", "every state machine rejects unlisted transitions", "every route has authored-state fixtures", "every traceability, threat, event, fixture, baseline, council, and planning-source ID resolves", "three-roadmap timing, predecessor, maturity, and cost-band contracts remain harmonized", "secret/PII canary absent", "prototype static checks pass"], "manual_checks": ["Joe and Dell complete all five journeys without coaching", "ask the exact AI-session displacement question for each routine", "capture all five baselines by instrumentation/interview without invented values", "responsive matrix", "keyboard and screen reader", "sterile mode", "Color Assist", "actual-device capture and Tour Mode are later platform gates"], "not_complete_until": ["Joe approves the Wednesday council output for all three roadmap versions against the Production Maturity Baseline", "open material Phase 0 decisions are dispositioned or explicitly deferred without changing construction", "Phase 0 evidence is independently verified", "each cutover candidate passes the AI-session displacement test or remains unretired"]}
+  "phase0_exit": {"automatic_checks": ["all JSON parses", "all schema contracts compile", "every state machine rejects unlisted transitions", "every route has authored-state fixtures", "every traceability, threat, event, fixture, baseline, council, and planning-source ID resolves", "all four amended planning sources and tenant/workflow sections are receipted at fresh generations", "server-derived tenant and strict configuration contracts compile", "synthetic cross-tenant fixture covers all nine required channels", "workflow lifecycle and locked-rail contracts remain exact", "bounded workflow trial is no more than five business days and adds no source of truth, destructive migration, parallel writer, or generic workflow engine", "maintenance observed baseline remains null", "two consecutive normal months above five hours create prioritized toil-reduction work", "low-toil or mature claim requires three complete consecutive normal months at three to five hours with controls intact and exceptions separate", "three-roadmap timing, predecessor, maturity, and cost-band contracts remain harmonized", "secret/PII canary absent", "prototype static checks pass"], "manual_checks": ["Joe and Dell complete all five journeys without coaching", "ask the exact AI-session displacement question for each routine", "capture all five operating baselines by instrumentation/interview without invented values", "capture maintenance time and exception baseline without inventing a value", "review no-more-than-five-business-day bounded workflow trial evidence before promotion", "responsive matrix", "keyboard and screen reader", "sterile mode", "Color Assist", "actual-device capture and Tour Mode are later platform gates"], "not_complete_until": ["Joe approves the Wednesday council output for all three roadmap versions against the Production Maturity Baseline", "open material Phase 0 decisions are dispositioned or explicitly deferred without changing construction", "Phase 0 evidence is independently verified", "each cutover candidate passes the AI-session displacement test or remains unretired", "cross-tenant runtime denial and workflow promotion remain explicitly future-gated until staged evidence exists", "maintenance target is not reported as an observed baseline", "no low-toil or mature claim is made before the exact three-complete-consecutive-normal-month evidence gate passes"]}
 }

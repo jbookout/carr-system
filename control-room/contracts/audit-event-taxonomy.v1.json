@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "status": "phase0_frozen",
   "append_only": true,
-  "required_fields": ["event_id", "event_type", "occurred_at", "correlation_id", "causation_id", "actor", "sponsor_id", "service_id", "resource_id", "environment", "risk_class", "result", "failure_class", "redaction_class", "evidence_refs"],
+  "required_fields": ["event_id", "event_type", "occurred_at", "correlation_id", "causation_id", "actor", "sponsor_id", "tenant_id", "service_id", "resource_id", "environment", "risk_class", "result", "failure_class", "redaction_class", "evidence_refs"],
   "conditional_fields": ["work_request_id", "agent_session_id", "plan_id", "plan_revision", "plan_hash", "approval_id", "release_id", "deployment_id", "incident_id", "before_hash", "after_hash", "idempotency_key"],
   "families": {
     "authentication_access": ["auth.succeeded", "auth.failed", "auth.audience_refused", "reauth.completed", "authorization.allowed", "authorization.refused", "capability.proposed", "capability.approved", "capability.expired_revoked", "read_only_kill_switch.changed"],
@@ -12,7 +12,7 @@
     "plan_approval": ["plan.revision_created", "plan.rehearsed", "plan.hash_frozen", "approval.proposed", "approval.approved", "approval.not_required", "approval.rejected", "approval.expired", "approval.invalidated"],
     "release_deployment": ["release.assembled", "deployment.preflight_passed", "deployment.rehearsal_completed", "deployment.execution_started", "actuator.invoked", "deployment.reconnect_replayed", "deployment.verification_completed", "deployment.aborted", "deployment.rolled_back"],
     "incident_recovery": ["incident.detected", "incident.deduplicated", "incident.fact_recorded", "incident.hypothesis_recorded", "incident.mitigation_proposed", "incident.resolved", "incident.reviewed", "recovery.rehearsed"],
-    "governance": ["feature_flag.evaluated", "feature_flag.changed", "schema.checksum_verified", "audit.exported", "retention.applied", "unsupported_action.refused", "state_transition.refused"]
+    "governance": ["feature_flag.evaluated", "feature_flag.changed", "schema.checksum_verified", "audit.exported", "retention.applied", "unsupported_action.refused", "state_transition.refused", "tenant.scope_refused", "tenant.configuration_refused", "workflow.pilot_started", "workflow.pilot_expired", "workflow.promotion_decided", "workflow.retired", "maintenance.time_recorded", "maintenance.toil_triggered", "maintenance.remedy_opened", "alert.deduplicated", "automation.outcome_verified", "automation.refused"]
   },
   "chain": ["origin", "agent_session", "plan_revision", "approval", "execution", "verification", "release_or_incident"],
   "never_record": ["secret values", "DSNs", "bearer tokens", "cookies", "authorization headers", "raw OAuth claims", "raw client payloads", "raw transcripts", "unrestricted tool inputs or outputs", "prompt injection source text as instruction"]

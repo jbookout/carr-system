@@ -1,26 +1,31 @@
 {
   "contract": "carr-workspace-phase0-manifest",
   "version": "1.0.0",
-  "status": "phase0_artifacts_reconciled_to_integrated_planning_set_pending_human_acceptance_and_council",
+  "status": "phase0_artifacts_reconciled_and_independently_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
   "source": {
-    "path": "/Users/booko/Desktop/CARR Workspace - BDUF and Implementation Roadmap.docx",
+    "path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
     "original_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d",
-    "sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b",
+    "sha256": "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16",
     "durable_doctrine_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-    "doctrine_generation": 324,
-    "doctrine_sections": 33,
+    "doctrine_generation": 334,
+    "doctrine_sections": 34,
     "timing_section_key": "s23",
     "timing_section_version": 3,
     "objective_section_id": "888131ae-9e0f-407f-9282-4dfafb70fb22",
     "objective_section_version": 1,
-    "desktop_artifact_matches_current_doctrine_generation": "unverified_after_timing_section_revision"
+    "document_control_section_version": 3,
+    "page_count": 47,
+    "tenant_workflow_section_id": "8eb8136e-9657-473d-98d1-54b809b956df",
+    "tenant_workflow_section_key": "s32-tenant-ready-workspace-and-evolving-workflows",
+    "desktop_artifact_matches_current_doctrine_generation": "verified_at_generation_334"
   },
   "canonical_planning_sources": [
     {
       "role": "workspace_product_roadmap",
       "slug": "carr-workspace-bduf",
       "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-      "verified_generation": 324,
+      "verified_generation": 334,
+      "active_unique_sections": 34,
       "receipt_status": "read_back_by_main_seat",
       "timing_section": {"section_key": "s23", "version": 3}
     },
@@ -28,17 +33,17 @@
       "role": "operations_and_safety_roadmap",
       "slug": "carr-control-room-bduf",
       "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
-      "verified_generation": 251,
-      "active_unique_sections": 38,
+      "verified_generation": 335,
+      "active_unique_sections": 39,
       "receipt_status": "read_back_by_main_seat"
     },
     {
       "role": "integrated_mature_end_state_roadmap",
       "slug": "carr-mature-software-end-state-bduf",
       "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
-      "verified_generation": 325,
-      "active_unique_sections": 40,
-      "ordinal_range": [0, 39],
+      "verified_generation": 330,
+      "active_unique_sections": 41,
+      "ordinal_range": [0, 40],
       "receipt_status": "read_back_by_main_seat",
       "dependency_section": {
         "section_key": "s05",
@@ -53,8 +58,8 @@
       "role": "governing_production_baseline",
       "slug": "carr-production-maturity-baseline",
       "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
-      "verified_generation": 280,
-      "active_unique_sections": 27,
+      "verified_generation": 326,
+      "active_unique_sections": 28,
       "receipt_status": "read_back_by_main_seat"
     }
   ],
@@ -91,7 +96,11 @@
     {"decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f", "subject": "Complete both Phase 0 preparations before Wednesday council; no construction before Joe approves the council output"},
     {"decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5", "subject": "Operating objective and AI-session displacement test controls both roadmaps and adoption"},
     {"decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84", "subject": "Freeze independently verified Phase 0 artifacts pending human and council gates"},
-    {"decision_id": "69512a40-99ec-483f-8528-5e05a4969551", "subject": "Treat eight weeks as the Mature Foundation milestone, not the full native mature end state"}
+    {"decision_id": "69512a40-99ec-483f-8528-5e05a4969551", "subject": "Treat eight weeks as the Mature Foundation milestone, not the full native mature end state"},
+    {"decision_id": "f8799b7f-f655-4da7-b378-20ff312d4fe3", "subject": "Tenant-ready safety and future owner-controlled seat licensing; one CARR tenant and Joe/Dell only at launch; no public SaaS"},
+    {"decision_id": "1e929e67-6c69-4be3-ae57-47950a0d2a4d", "subject": "Build mature rails while provisional workflows graduate through the controlled lifecycle"},
+    {"decision_id": "9e06926b-8928-4b99-8a4c-5fb89717289a", "subject": "Target three to five normal internal human maintenance hours monthly and attribute exceptions separately"},
+    {"decision_id": "09959bb0-8f3e-4abf-84cb-cc1b72b1d8f9", "subject": "Joe retains platform, intellectual property, and control; corporate may license seats only as a customer"}
   ],
   "repository": {
     "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0",
@@ -116,7 +125,8 @@
       "route-ia.v1.json",
       "state-machines.v1.json",
       "surface-registry-migration-map.v1.json",
-      "threat-model.v1.json"
+      "threat-model.v1.json",
+      "tenant-workflow-governance.v1.json"
     ],
     "canonical_twins": [
       "call-review.v1.json",
@@ -129,22 +139,23 @@
       "notifications.v1.json",
       "tour.v1.json"
     ],
+    "security_fixtures": ["test/fixtures/tenant-boundary-denials.v1.json"],
     "prototype": ["public/index.html", "public/css/app.css", "public/js/app.js", "public/js/client.js", "public/server.mjs"],
     "validators": ["contracts/validate.mjs", "contracts/schema-validator.mjs", "test/id-registry.mjs"],
     "tests": ["test/contract-resolution.test.mjs", "test/fixtures.test.mjs", "test/prototype.test.mjs"]
   },
   "automated_evidence": {
-    "node_test_count": 29,
-    "node_test_passed": 29,
-    "registry_ids": 57,
-    "phase0_executable_registry_checks": 41,
-    "contracts_including_manifest": 16,
+    "node_test_count": 30,
+    "node_test_passed": 30,
+    "registry_ids": 65,
+    "phase0_executable_registry_checks": 46,
+    "contracts_including_manifest": 17,
     "canonical_twins": 9,
     "authored_states_per_twin": 10,
     "json_schema_compilation": "passed",
     "syntax_checks": ["public/server.mjs", "public/js/app.js", "public/js/client.js", "contracts/schema-validator.mjs"],
     "json_parse": "passed",
-    "future_only_unimplemented_gates": 16,
+    "future_only_unimplemented_gates": 19,
     "mutation_routes": 0,
     "external_effect_paths": 0,
     "deployments": 0,
@@ -163,16 +174,19 @@
     "allow": "GET, HEAD, OPTIONS"
   },
   "exit_gates": {
-    "artifact_preparation": "passed independent re-verification with zero P0, P1, or P2 findings",
+    "artifact_preparation": "tenant/workflow amendment passed local schema, cross-reference, fixture, test, runtime-boundary, and cold-context independent verification with P0/P1/P2 equal to zero",
     "interactive_visual_accessibility": "runtime entry verified; full visual, keyboard, and screen-reader review remains unverified",
     "joe_and_dell_uncoached_five_journeys": "not performed",
     "baseline_measurement": "all five values remain unknown pending instrumentation or interview",
     "roadmap_final_approval": "Joe's approval is required after the Wednesday council recommends integrated versions across all three roadmaps and the governing production baseline",
-    "integrated_program_reconciliation": "passed cold-context independent verification with zero P0, P1, or P2 findings"
+    "integrated_program_reconciliation": "amended tenant/workflow package passed cold-context independent verification against the three roadmaps and governing production baseline"
   },
   "prohibited_claims": [
     "production Workspace implementation exists",
     "production auth or authorization is enforced",
+    "production tenant isolation or cross-tenant denial is enforced",
+    "workflow promotion, rollback, or maintenance telemetry is implemented",
+    "public tenant provisioning, public SaaS, billing, or seat licensing is implemented",
     "business writes are enabled",
     "website or native applications are deployed",
     "Phase 0 exit is complete before human evidence and Joe's approval of the council output"

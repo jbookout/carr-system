@@ -11,7 +11,7 @@ const expectedScenarios = ["normal", "loading", "empty", "partial", "stale", "of
 const fixtures = Object.fromEntries(fs.readdirSync(FIXTURE_DIR).filter(name => name.endsWith(".json")).map(name => {
   const value = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, name), "utf8"));
   return [value.surface, value];
-}));
+}).filter(([surface]) => surface));
 
 test("exactly seven canonical synthetic twins exist", () => {
   assert.deepEqual(Object.keys(fixtures).sort(), [...expectedSurfaces].sort());
@@ -28,6 +28,14 @@ test("exactly seven canonical synthetic twins exist", () => {
     assert.ok(fixture.meta.redaction.classification);
     assert.ok(fixture.meta.correlation_id);
   }
+});
+
+test("tenant denial fixture is classified separately from the seven canonical twins", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "contracts", "phase0-manifest.v1.json"), "utf8"));
+  const canonicalFiles = expectedSurfaces.map(surface => `${surface}.v1.json`).sort();
+  assert.deepEqual([...manifest.artifact_groups.canonical_twins].sort(), canonicalFiles);
+  assert.deepEqual(manifest.artifact_groups.security_fixtures, ["tenant-boundary.v1.json"]);
+  assert.deepEqual(fs.readdirSync(FIXTURE_DIR).filter(name => name.endsWith(".json")).sort(), [...canonicalFiles, ...manifest.artifact_groups.security_fixtures].sort());
 });
 
 test("fixtures contain no secret-shaped material or client payload", () => {

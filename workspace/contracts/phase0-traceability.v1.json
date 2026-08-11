@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "status": "phase0_candidate_reconciled_to_integrated_planning_set",
   "source_doctrine_document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-  "source_doctrine_generation": 324,
+  "source_doctrine_generation": 334,
   "canonical_planning_set": [
-    {"slug": "carr-workspace-bduf", "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "verified_generation": 324, "timing_section": "s23 v3"},
-    {"slug": "carr-control-room-bduf", "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "verified_generation": 251},
-    {"slug": "carr-mature-software-end-state-bduf", "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d", "verified_generation": 325},
-    {"slug": "carr-production-maturity-baseline", "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b", "verified_generation": 280, "active_unique_sections": 27}
+    {"slug": "carr-workspace-bduf", "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "verified_generation": 334, "active_unique_sections": 34, "timing_section": "s23 v3", "tenant_workflow_section": "s32"},
+    {"slug": "carr-control-room-bduf", "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "verified_generation": 335, "active_unique_sections": 39, "tenant_workflow_section": "s37"},
+    {"slug": "carr-mature-software-end-state-bduf", "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d", "verified_generation": 330, "active_unique_sections": 41, "tenant_workflow_section": "s40"},
+    {"slug": "carr-production-maturity-baseline", "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b", "verified_generation": 326, "active_unique_sections": 28, "tenant_workflow_section": "s27"}
   ],
   "columns": [
     "requirement",
@@ -826,9 +826,9 @@
       ],
       "evidence": [
         "decision 69512a40-99ec-483f-8528-5e05a4969551",
-        "Workspace doctrine generation 324 and s23 v3",
-        "Mature End State doctrine generation 325",
-        "Production Maturity Baseline generation 280",
+        "Workspace doctrine generation 334 and s23 v3",
+        "Mature End State doctrine generation 330",
+        "Production Maturity Baseline generation 326",
         "like-for-like cost observations"
       ],
       "rollback": [
@@ -958,6 +958,207 @@
       "open_decisions": [
         "COUNCIL-ROADMAP-001"
       ]
+    },
+    {
+      "id": "TENANT-BOUNDARY-001",
+      "requirement": "The server derives immutable tenant context; records, events, search, files and attachments, calls, AI memory and retrieval, queues, integrations, audit, and offline packs are tenant-bound, as are projections, jobs, sync receipts, exports, Doc context, and AI requests, and cross-tenant access is privacy-safely refused.",
+      "source_sections": [
+        "Workspace s32 section 8eb8136e-9657-473d-98d1-54b809b956df",
+        "Production Maturity Baseline s27",
+        "Mature End State s40"
+      ],
+      "screen": [
+        "all Workspace surfaces",
+        "no tenant selector"
+      ],
+      "business_entity": [
+        "TenantContext",
+        "all VersionedRecord entities",
+        "event envelope",
+        "records, events, search, files and attachments, calls, AI memory and retrieval, queues, integrations, audit, and offline packs"
+      ],
+      "api_or_action": [
+        "all product API reads and future governed writes",
+        "background jobs",
+        "local edge sync",
+        "search, export, attachment, Doc, and AI adapters",
+        "calls, AI memory/retrieval, queues, integrations, audit, and offline-pack paths"
+      ],
+      "authority": [
+        "server-derived tenant only",
+        "Joe and Dell within the launch CARR tenant",
+        "default deny"
+      ],
+      "event": [
+        "workspace.tenant_scope.refused",
+        "workspace.authorization.refused"
+      ],
+      "evidence": [
+        "decision f8799b7f-f655-4da7-b378-20ff312d4fe3",
+        "synthetic nine-channel denial fixture",
+        "privacy-safe response parity",
+        "tenant-scoped audit without payload",
+        "exact ten-class tenant resource coverage"
+      ],
+      "rollback": [
+        "disable affected route or worker",
+        "preserve records and denial evidence",
+        "never fall back to a client-supplied tenant"
+      ],
+      "tests": [
+        "TENANT-CONTRACT-001",
+        "TENANT-DENIAL-FIXTURE-001",
+        "TENANT-CROSS-DENIAL-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "WORKFLOW-LIFECYCLE-001",
+      "requirement": "Tenant-bound immutable workflow versions graduate experimental to pilot to approved to standard to retired through attributed evidence, exact owner approval, rollback, cutover, observation, and fresh read-back gates; a trial lasts no more than five business days and creates no new source of truth, destructive migration, parallel writer, or generic workflow engine.",
+      "source_sections": [
+        "Workspace s32",
+        "Production Maturity Baseline s27",
+        "Mature End State s40"
+      ],
+      "screen": [
+        "future governed workflow status and action cards",
+        "no production mutation in Phase 0 prototype",
+        "no generic workflow engine, plugin marketplace, or customer scripting"
+      ],
+      "business_entity": [
+        "WorkflowDefinition",
+        "WorkflowVersion",
+        "WorkflowPromotion"
+      ],
+      "api_or_action": [
+        "future owner-controlled promotion",
+        "future rollback and retirement",
+        "version-pinned execution",
+        "bounded trial only; no new source of truth, destructive migration, or parallel writer"
+      ],
+      "authority": [
+        "Joe is platform owner",
+        "stage and exact-version allow-list",
+        "material revision invalidates approval"
+      ],
+      "event": [
+        "workspace.workflow.lifecycle_changed",
+        "workspace.workflow.promoted",
+        "workspace.workflow.retired",
+        "workspace.state_transition.refused"
+      ],
+      "evidence": [
+        "decision 1e929e67-6c69-4be3-ae57-47950a0d2a4d",
+        "immutable version",
+        "promotion acceptance",
+        "no-more-than-five-business-day trial safety clause",
+        "absence of generic workflow engine, plugin marketplace, and customer scripting",
+        "rollback rehearsal",
+        "cutover and observation evidence"
+      ],
+      "rollback": [
+        "select a previously evidenced immutable version",
+        "preserve running-work disposition and audit history",
+        "freshly verify the restored behavior"
+      ],
+      "tests": [
+        "WORKFLOW-CONTRACT-001",
+        "WORKFLOW-PROMOTION-001",
+        "STATE-REFUSE-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "MAINTENANCE-ACCOUNTING-001",
+      "requirement": "Measure normal internal maintenance separately from attributed exceptions against a three-to-five-human-hours-per-month operating target without inventing an observed baseline; more than five normal hours in each of two consecutive months creates prioritized toil-reduction work, and a low-toil or mature claim requires three complete consecutive normal months at three to five hours with required control evidence intact and exceptions separate.",
+      "source_sections": [
+        "Workspace s32",
+        "Production Maturity Baseline s27",
+        "Mature End State s40"
+      ],
+      "screen": [
+        "future owner maintenance evidence view",
+        "council review packet"
+      ],
+      "business_entity": [
+        "MaintenanceEntry",
+        "EngineeringRequest",
+        "WorkflowDefinition"
+      ],
+      "api_or_action": [
+        "future attributed time capture",
+        "rolling monthly evidence report",
+        "prioritized toil-reduction work request after the exact two-month escalation gate"
+      ],
+      "authority": [
+        "Joe owns target and exception taxonomy",
+        "reported evidence is immutable and attributable"
+      ],
+      "event": [
+        "workspace.maintenance.time_recorded",
+        "workspace.maintenance.toil_triggered",
+        "workspace.maintenance.remedy_opened"
+      ],
+      "evidence": [
+        "decision 9e06926b-8928-4b99-8a4c-5fb89717289a",
+        "observed baseline remains unknown",
+        "normal hours",
+        "separately attributed exceptions",
+        "two consecutive normal months above five hours create prioritized toil-reduction work",
+        "three complete consecutive normal months at three to five hours",
+        "tenant, authorization, approval, audit, backup/restore, release/rollback, workflow, retention, and exception evidence intact",
+        "30, 60, and 90-day comparisons"
+      ],
+      "rollback": [
+        "correct classification through an attributed compensating entry",
+        "never silently fold an exception into normal maintenance",
+        "refuse low-toil or mature claim until the exact three-month control-evidence gate passes"
+      ],
+      "tests": [
+        "MAINTENANCE-CONTRACT-001",
+        "MAINTENANCE-MEASURE-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "OWNER-CONTROL-001",
+      "requirement": "Joe retains the CARR platform, intellectual property, source, infrastructure, security policy, and roadmap; a corporate customer may receive owner-controlled seat licenses but not platform ownership or control.",
+      "source_sections": [
+        "Workspace s32",
+        "Production Maturity Baseline s27",
+        "Mature End State s40"
+      ],
+      "screen": [
+        "no launch billing, public signup, tenant administration, ownership-transfer, generic workflow engine, plugin marketplace, customer scripting, or customer workflow-authoring surfaces"
+      ],
+      "business_entity": [
+        "TenantContext",
+        "future owner-controlled seat grant outside launch scope"
+      ],
+      "api_or_action": [
+        "none in Phase 0 prototype"
+      ],
+      "authority": [
+        "Joe as platform owner",
+        "corporate as customer licensee only"
+      ],
+      "event": [
+        "workspace.authorization.refused"
+      ],
+      "evidence": [
+        "decision 09959bb0-8f3e-4abf-84cb-cc1b72b1d8f9",
+        "absence of prohibited launch routes",
+        "owner-controlled policy review"
+      ],
+      "rollback": [
+        "refuse any customer-control or ownership-transfer proposal",
+        "require a new explicit owner decision before future seat licensing construction"
+      ],
+      "tests": [
+        "OWNER-CONTROL-001",
+        "SEC-PUBLIC-001"
+      ],
+      "open_decisions": []
     }
   ]
 }

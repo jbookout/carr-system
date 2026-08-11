@@ -28,6 +28,11 @@
     {"term": "Evidence", "definition": "A redacted attributable result tied to an expected assertion, exact source and target, timestamp, correlation, verifier, and immutable reference."},
     {"term": "Audit Event", "definition": "An append-only event linking origin, actor and sponsor, request and session, scope, plan and approval, execution, verification, result, and redaction declaration."},
     {"term": "Safe Bridge Summary", "definition": "The Workspace-safe projection of a Control Room object: opaque ID, safe label, lifecycle, plain impact or result, verified time, and next action, with no engineering internals or client payload."},
-    {"term": "Unknown", "definition": "The honest health state when authoritative evidence is absent, stale, out of scope, or unreachable. Unknown always names its source gap and monitoring action."}
+    {"term": "Unknown", "definition": "The honest health state when authoritative evidence is absent, stale, out of scope, or unreachable. Unknown always names its source gap and monitoring action."},
+    {"term": "Tenant Context", "definition": "The immutable tenant and environment scope the server derives from the authenticated principal and typed server route before authorization. Client, agent, and model tenant claims are never authoritative."},
+    {"term": "Platform Administration", "definition": "Joe-controlled authority over platform code, intellectual property, provisioning, licensing, release governance, and platform-wide policy. It is distinct from and never implied by tenant administration."},
+    {"term": "Tenant Administration", "definition": "Narrow owner-controlled administration within one tenant. At launch Joe administers the single CARR tenant and Dell remains a Control Room Reporter/Viewer."},
+    {"term": "Workflow Lifecycle", "definition": "The evidence-gated states experimental, pilot, approved, standard, and retired. Each work item pins an immutable version, promotion is audited, and retirement blocks new starts."},
+    {"term": "Maintenance Scorecard", "definition": "Measured normal internal human time, separately attributed exception time, toil concentration, actionable alerts, verified safe automation, and named remedies. Three complete consecutive months are required before a mature-maintenance claim."}
   ]
 }

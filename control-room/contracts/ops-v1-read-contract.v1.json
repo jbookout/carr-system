@@ -4,6 +4,13 @@
   "status": "phase0_frozen_not_implemented",
   "base_path": "/ops/v1",
   "audience": "carr-control-room-web",
+  "server_context": {
+    "tenant_id": "derived from the authenticated principal; never accepted from client input",
+    "environment": "derived from the typed route and server-authorized scope; never accepted as an authority claim",
+    "binding": "immutable for the full request, response, event, audit, export, and safe-return chain",
+    "cross_tenant_effect": "not_found before existence disclosure",
+    "implementation_status": "future server enforcement gate; absent from the Phase 0 prototype"
+  },
   "allowed_methods": ["GET", "HEAD", "OPTIONS"],
   "other_method_response": {"status": 405, "allow": "GET, HEAD, OPTIONS", "audit_event": "unsupported_action.refused"},
   "prohibitions": ["no mutation route", "no action broker route", "no actuator route", "no raw SQL", "no arbitrary command string", "no generic MCP passthrough", "no profile parameter in authorization"],
@@ -11,7 +18,8 @@
   "response_envelope": {
     "data": {"oneOf": ["ControlRoomMetadata", "OverviewReadModel", "ServiceList", "Service", "ServiceEnvironment", "CheckRunList", "JobRunList", "WorkRequestList", "WorkRequest", "AgentSessionList", "AgentSession", "PlanRevision", "ApprovalList", "ReleaseList", "Release", "DeploymentList", "Deployment", "IncidentList", "Incident", "AuditEventList", "AuditEvent", "EventReplay"]},
     "meta": {
-      "request_id": "opaque",
+        "request_id": "opaque",
+        "tenant_scope": "server_derived_opaque_tenant_id",
       "environment_scope": "local|rehearsal|staging|production",
       "source": {"kind": "collector|registry|wrapper|operator", "ref": "opaque"},
       "observed_at": "RFC3339",
@@ -49,6 +57,8 @@
     "Schemas are strict and IDs and cursors are opaque.",
     "Pagination uses stable snapshot and cursor semantics.",
     "Environment is required on each operational object and never inferred.",
+    "Tenant is required on every operation and is derived by the server from the authenticated principal; no client-selected tenant is authoritative.",
+    "Repository, event, audit, export, and model-context reads require an exact server-derived tenant and environment predicate.",
     "Event replay contains server-stored redacted events only.",
     "Reconnect reports continued server state and cannot imply browser ownership.",
     "The browser session uses a distinct audience and cookie from Workspace, Deal Room, and MCP."

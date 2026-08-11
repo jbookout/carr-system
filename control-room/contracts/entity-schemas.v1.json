@@ -4,6 +4,21 @@
   "contract": "carr-control-room-entity-schemas",
   "version": "1.0.0",
   "status": "phase0_frozen",
+  "tenant_context_policy": {
+    "applies_to": "every operational entity, list query, event, approval, export, and model-context projection",
+    "binding_location": "server request envelope before authorization and persistence access",
+    "authoritative_sources": [
+      "authenticated principal tenant mapping",
+      "typed route and server-authorized environment scope"
+    ],
+    "never_authoritative": [
+      "client tenant_id",
+      "client environment",
+      "agent output",
+      "model context"
+    ],
+    "phase0_status": "schema and acceptance contract only; production middleware and storage constraints not implemented"
+  },
   "$defs": {
     "OpaqueId": {
       "type": "string",
@@ -24,6 +39,69 @@
         "staging",
         "production"
       ]
+    },
+    "TenantContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tenant_id",
+        "environment",
+        "derived_by",
+        "client_mutable"
+      ],
+      "properties": {
+        "tenant_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "derived_by": {
+          "const": "server_identity_and_typed_scope"
+        },
+        "client_mutable": {
+          "const": false
+        }
+      }
+    },
+    "WorkflowDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_id",
+        "version",
+        "tenant_id",
+        "lifecycle_state",
+        "owner_id",
+        "risk_class",
+        "evidence_contract",
+        "retirement_path"
+      ],
+      "properties": {
+        "workflow_id": {"$ref": "#/$defs/OpaqueId"},
+        "version": {"type": "integer", "minimum": 1},
+        "tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "lifecycle_state": {"enum": ["experimental", "pilot", "approved", "standard", "retired"]},
+        "owner_id": {"$ref": "#/$defs/OpaqueId"},
+        "risk_class": {"type": "string", "pattern": "^R[0-6]$"},
+        "evidence_contract": {"type": "string", "minLength": 1},
+        "retirement_path": {"type": "string", "minLength": 1}
+      }
+    },
+    "MaintenanceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_id", "tenant_id", "actor_id", "occurred_at", "measured_minutes", "category", "normal_or_exception", "evidence_ref"],
+      "properties": {
+        "entry_id": {"$ref": "#/$defs/OpaqueId"},
+        "tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "actor_id": {"$ref": "#/$defs/OpaqueId"},
+        "occurred_at": {"$ref": "#/$defs/Timestamp"},
+        "measured_minutes": {"type": "integer", "minimum": 1},
+        "category": {"type": "string", "minLength": 1},
+        "normal_or_exception": {"enum": ["normal_internal", "exception"]},
+        "evidence_ref": {"$ref": "#/$defs/OpaqueId"}
+      }
     },
     "Freshness": {
       "type": "object",

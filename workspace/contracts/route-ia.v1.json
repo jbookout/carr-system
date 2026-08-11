@@ -4,6 +4,12 @@
   "status": "phase0_candidate",
   "primary_navigation": ["command-center", "leads", "deals", "calls", "marketing", "more"],
   "persistent_controls": ["global-search", "single-call-mode-control", "notification-center", "doc-launcher", "partner-identity", "non-production-environment-indicator"],
+  "tenant_configuration_boundary": {
+    "tenant_selector": "structurally absent",
+    "launch_tenant_administration": "structurally absent",
+    "allowed_settings": ["branding tokens", "approved vocabulary", "module visibility", "approved feature flags", "retention choices inside owner policy bounds", "seat-safe display identity and notification preferences"],
+    "forbidden_settings": ["arbitrary code", "SQL", "shell commands", "customer-authored executable workflows", "tenant or authorization overrides", "audit suppression", "platform ownership transfer"]
+  },
   "routes": [
     {"id": "command-center", "path": "/", "label": "The Command Center", "owner_module": "command-center", "purpose": "What changed, what needs me, and what Doc is handling", "deep_links": ["/deals/:work_record_id", "/calls/:call_id", "/marketing/drafts/:draft_id", "/more/system-activity/requests/:request_id"], "forbidden_content": ["named lead outreach reminders", "raw model traces", "copied task queues", "uncited live claims"]},
     {"id": "leads", "path": "/leads", "label": "The Lead Board", "owner_module": "leads", "children": ["my-queue", "hot", "this-week", "segments", "search-all", "decisions"], "exclusive_ownership": ["named lead outreach reminders"]},
@@ -22,5 +28,5 @@
     {"range": "<=767px", "behavior": "bottom navigation for Home, Leads, Deals, Calls, More; cards replace tables; dialogs become full-height sheets"},
     {"range": "200% zoom", "behavior": "no clipped controls or page-level horizontal scroll except intentional data tables"}
   ],
-  "global_invariants": ["Exactly one Call Mode control exists", "Every metric deep-links to its owning filtered view", "Every object has a stable cross-device deep link", "Sterile mode is presentation suppression, never authorization", "No public-site route shares private session or data"]
+  "global_invariants": ["Exactly one Call Mode control exists", "Every metric deep-links to its owning filtered view", "Every object has a stable cross-device deep link", "Sterile mode is presentation suppression, never authorization", "No public-site route shares private session or data", "No route, query, header, local cache, Doc action, or AI action lets a client select the authoritative tenant", "Public signup, self-service tenant creation, client portal, billing, and customer workflow authoring have no launch routes"]
 }

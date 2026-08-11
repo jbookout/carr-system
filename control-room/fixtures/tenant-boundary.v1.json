@@ -1,0 +1,91 @@
+{
+  "fixture_id": "fixture-control-room-tenant-boundary-v1",
+  "status": "phase0_synthetic_contract_fixture_frozen_not_production_evidence",
+  "authenticated_context": {
+    "principal_id": "principal-joe",
+    "tenant_id": "tenant-carr-internal",
+    "environment": "rehearsal",
+    "derived_by": "server_session_and_typed_route",
+    "client_mutable": false
+  },
+  "foreign_context": {
+    "tenant_id": "tenant-synthetic-foreign",
+    "environment": "production",
+    "exists_only_for_denial_testing": true
+  },
+  "attempts": [
+    {
+      "path": "browser",
+      "covered_surfaces": ["records", "events", "calls", "queues", "audit"],
+      "resource": "service-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 404,
+      "expected_code": "not_found",
+      "must_not_disclose_existence": true
+    },
+    {
+      "path": "API",
+      "covered_surfaces": ["records", "events", "queues", "integrations", "audit"],
+      "resource": "request-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 404,
+      "expected_code": "not_found",
+      "must_not_disclose_existence": true
+    },
+    {
+      "path": "background",
+      "covered_surfaces": ["events", "queues", "integrations", "audit"],
+      "resource": "approval-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 403,
+      "expected_code": "scope_violation",
+      "must_not_disclose_existence": true
+    },
+    {
+      "path": "local-edge",
+      "covered_surfaces": ["records", "events", "files and attachments", "offline packs"],
+      "resource": "workflow-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 404,
+      "expected_code": "not_found",
+      "must_not_disclose_existence": true
+    },
+    {
+      "path": "search",
+      "covered_surfaces": ["search", "records", "events", "calls", "files and attachments"],
+      "resource": "event-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 404,
+      "expected_code": "not_found",
+      "must_not_disclose_existence": true
+    },
+    {
+      "path": "export",
+      "covered_surfaces": ["records", "events", "files and attachments", "calls", "audit", "offline packs"],
+      "resource": "evidence-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 404,
+      "expected_code": "not_found",
+      "must_not_disclose_existence": true
+    },
+    {
+      "path": "attachment",
+      "covered_surfaces": ["files and attachments", "records", "calls", "offline packs"],
+      "resource": "attachment-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 404,
+      "expected_code": "not_found",
+      "must_not_disclose_existence": true
+    },
+    {
+      "path": "Doc",
+      "covered_surfaces": ["AI memory and retrieval", "search", "records", "events", "calls", "queues"],
+      "resource": "memory-synthetic-foreign",
+      "presented_tenant": "tenant-synthetic-foreign",
+      "expected_status": 404,
+      "expected_code": "not_found",
+      "must_not_disclose_existence": true
+    }
+  ],
+  "phase0_limit": "This static fixture proves the expected denial contract is complete and machine checked. It does not prove production middleware, storage isolation, API enforcement, or deployed cross-tenant denial."
+}

@@ -8,7 +8,7 @@
     "terminal_semantics": "A terminal state has no outgoing allowed transition. Reversible or recurring stable states must not be declared terminal.",
     "refusal_precedence": "If no allowed transition and guard match exactly, refuse even when a UI proposes the destination.",
     "server_enforcement": true,
-    "required_write_guards": ["authenticated_actor", "authorized_exact_target", "current_version", "idempotency_key", "attributed_event", "fresh_read_back"],
+    "required_write_guards": ["authenticated_actor", "server_derived_tenant", "resource_tenant_match", "authorized_exact_target", "current_version", "idempotency_key", "attributed_event", "fresh_read_back"],
     "refusal_event": "workspace.state_transition.refused",
     "refusal_response_fields": ["code", "machine", "from", "requested_to", "safe_reason", "correlation_id", "next_allowed_actions"]
   },
@@ -154,6 +154,34 @@
         {"from": "needs_review", "to": "synced", "reason": "human conflict resolution required"},
         {"from": "synced", "to": "uploading", "reason": "synced payload is immutable; create a new item"},
         {"from": "*", "to": "saved", "reason": "ambiguous saved state is forbidden"}
+      ]
+    },
+    "workflow_definition": {
+      "initial": "experimental",
+      "terminal": ["retired"],
+      "states": ["experimental", "pilot", "approved", "standard", "retired"],
+      "allowed": [
+        {"from": "experimental", "to": "pilot", "risk": "W3", "guard": "immutable tenant-bound version; trial maximum is five business days and may be shorter; exact scope, record allow-list, success/refusal cases, risk map, owner, rehearsed rollback, and no new source of truth, destructive migration, parallel writer, or generic workflow engine"},
+        {"from": "pilot", "to": "approved", "risk": "W4", "guard": "at-most-five-business-day trial evidence complete; no tenant or authority failure; no new source of truth, destructive migration, parallel writer, or generic workflow engine; exact effects verified; toil attributed; Joe approves promotion"},
+        {"from": "approved", "to": "standard", "risk": "W4", "guard": "cutover, running-work disposition, rollback, routine displacement, and observation evidence complete; Joe approves default"},
+        {"from": ["experimental", "pilot", "approved", "standard"], "to": "retired", "risk": "W4", "guard": "new starts refused; dependent and running work dispositioned; history preserved; rollback/cutover evidence and Joe approval recorded"},
+        {"from": "pilot", "to": "experimental", "risk": "W2", "guard": "rollback selects a previously evidenced immutable version; pilot stopped; reason and fresh read-back recorded"},
+        {"from": "approved", "to": "pilot", "risk": "W3", "guard": "rollback scope and affected work recorded; owner approves bounded pilot; fresh read-back"},
+        {"from": "standard", "to": "approved", "risk": "W4", "guard": "rollback and old-default restoration rehearsed; running work dispositioned; Joe approves; fresh read-back"}
+      ],
+      "refused": [
+        {"from": "experimental", "to": "approved", "reason": "bounded pilot evidence is required"},
+        {"from": "pilot", "to": "standard", "reason": "approved state and cutover evidence are required"},
+        {"from": "retired", "to": "standard", "reason": "retired version is immutable; create a new experimental version"},
+        {"from": "pilot", "to": "approved", "reason": "at-most-five-business-day trial safety evidence or owner approval is incomplete", "condition": "trial_duration_business_days > 5 or trial_safety_evidence_incomplete or owner_approval_missing"},
+        {"from": "approved", "to": "standard", "reason": "material revision invalidated prior approval", "condition": "version_changed or locked_rail_changed"},
+        {"from": "standard", "to": "retired", "reason": "running work or rollback/cutover evidence is unresolved", "condition": "running_work_unresolved or rollback_unverified"}
+      ],
+      "invariants": [
+        "every version is immutable and tenant-bound",
+        "running and queued work remain pinned to an exact version unless explicitly migrated",
+        "calendar passage never promotes a workflow",
+        "a flexible change touching a locked rail is a material revision and invalidates approval"
       ]
     },
     "notification": {

@@ -791,6 +791,36 @@
         }
       ]
     },
+    "workflow_lifecycle": {
+      "initial": "experimental",
+      "terminal": [
+        "retired"
+      ],
+      "main": [
+        "experimental",
+        "pilot",
+        "approved",
+        "standard",
+        "retired"
+      ],
+      "side": [],
+      "invariants": [
+        "workflow identity and version are immutable",
+        "running work pins one workflow version",
+        "every promotion requires named evidence, immutable workflow version, accountable owner, completed observation window, failure criteria and handling, tested rollback, adoption result and adoption test, cutover plan and cutover gate, and an authorized audited governance decision",
+        "retirement blocks new starts and preserves historical evidence",
+        "Doc availability never controls workflow authorization or routine operability"
+      ],
+      "transitions": [
+        {"from": "experimental", "to": "pilot", "guard": "accountable owner freezes immutable workflow version and opens bounded observation window with named evidence, failure criteria and handling, tested rollback, adoption result expectation and adoption test, cutover plan, closed cutover gate, and audited authorization"},
+        {"from": "pilot", "to": "approved", "guard": "accountable owner presents named evidence for immutable workflow version after completed observation window, including failure criteria and handling, tested rollback, adoption result and adoption test, cutover plan, explicit approved-or-closed cutover gate, and audited authorization"},
+        {"from": "approved", "to": "standard", "guard": "accountable owner presents named evidence for immutable workflow version after completed standard-readiness observation window, including failure criteria and handling, tested rollback, repeated adoption result and adoption test, cutover plan, passed standard cutover gate, and audited authorization"},
+        {"from": "experimental", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, and active-work disposition"},
+        {"from": "pilot", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, and active-work disposition"},
+        {"from": "approved", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, and active-work disposition"},
+        {"from": "standard", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, migration or drain plan, and evidence retention"}
+      ]
+    },
     "health": {
       "initial": "unknown",
       "terminal": [],

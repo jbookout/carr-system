@@ -74,11 +74,12 @@ const checks = {
   roadmapHarmony(context) {
     const sources = new Map(context.manifest.canonical_planning_sources.map(item => [item.slug, item]));
     requireCondition(sources.size === 4, "canonical planning source count mismatch");
-    requireCondition(sources.get("carr-workspace-bduf")?.verified_generation === 324, "Workspace doctrine generation mismatch");
+    requireCondition(sources.get("carr-workspace-bduf")?.verified_generation === 334, "Workspace doctrine generation mismatch");
+    requireCondition(sources.get("carr-workspace-bduf")?.active_unique_sections === 34, "Workspace doctrine section count mismatch");
     requireCondition(sources.get("carr-workspace-bduf")?.timing_section?.version === 3, "Workspace s23 version mismatch");
-    requireCondition(sources.get("carr-control-room-bduf")?.verified_generation === 251, "Control Room doctrine generation mismatch");
-    requireCondition(sources.get("carr-mature-software-end-state-bduf")?.verified_generation === 325, "mature roadmap generation mismatch");
-    requireCondition(sources.get("carr-production-maturity-baseline")?.verified_generation === 280, "production baseline generation mismatch");
+    requireCondition(sources.get("carr-control-room-bduf")?.verified_generation === 335, "Control Room doctrine generation mismatch");
+    requireCondition(sources.get("carr-mature-software-end-state-bduf")?.verified_generation === 330, "mature roadmap generation mismatch");
+    requireCondition(sources.get("carr-production-maturity-baseline")?.verified_generation === 326, "production baseline generation mismatch");
     const program = context.manifest.integrated_delivery_program;
     requireCondition(program.mature_foundation_v1.target_date === "2026-10-05", "foundation target mismatch");
     requireCondition(program.workspace_web_timing.planning_estimate === "approximately 12 weeks", "Workspace web plan mismatch");
@@ -95,6 +96,74 @@ const checks = {
     requireCondition(!/@[a-z0-9.-]+\.[a-z]{2,}/i.test(fixtures), "email-shaped fixture value");
     requireCondition(!/\b(?:sk|pk)_(?:live|test)_[a-z0-9]+\b/i.test(fixtures), "credential-shaped fixture value");
     requireCondition(context.html.includes("synthetic prototype"), "synthetic boundary missing");
+  },
+  tenantGovernance(context) {
+    const governance = context.governance;
+    const exactTenantClasses = ["records", "events", "search", "files_and_attachments", "calls", "ai_memory_and_retrieval", "queues", "integrations", "audit", "offline_packs"];
+    const requiredExclusions = ["generic workflow engine", "plugin marketplace", "customer scripting"];
+    const exactTrialSafety = ["trial creates no new source of truth", "trial performs no destructive migration", "trial creates no parallel writer", "trial does not introduce or depend on a generic workflow engine"];
+    const exactDenials = new Map([
+      ["browser", "deny_before_render"],
+      ["api", "deny_before_object_lookup_response"],
+      ["background_job", "deny_before_job_execution"],
+      ["local_edge_sync", "deny_before_sync_acceptance"],
+      ["search", "zero_cross_tenant_hits"],
+      ["export", "deny_before_export_creation"],
+      ["attachment", "deny_before_metadata_or_content"],
+      ["doc", "deny_before_context_assembly"],
+      ["ai", "deny_before_prompt_or_tool_context"]
+    ]);
+    requireCondition(governance.status === "phase0_contract_only_no_production_enforcement_claim", "tenant governance Phase 0 boundary missing");
+    requireCondition(governance.launch_topology.authorized_people.join("|") === "Joe Bookout|Dell McCraney", "launch people mismatch");
+    requireCondition(governance.launch_topology.explicit_exclusions.includes("public SaaS") && governance.launch_topology.explicit_exclusions.includes("client-supplied tenant selector"), "launch exclusions missing");
+    requireCondition(requiredExclusions.every(item => governance.launch_topology.explicit_exclusions.includes(item)), "workflow product exclusions missing");
+    requireCondition(governance.tenant_context_contract.authoritative_source.startsWith("server derives"), "server tenant derivation missing");
+    requireCondition(JSON.stringify(governance.tenant_context_contract.scoped_resource_classes) === JSON.stringify(exactTenantClasses), "tenant resource class contract drift");
+    requireCondition(governance.tenant_configuration_contract.forbidden_configuration.includes("arbitrary code") && governance.tenant_configuration_contract.forbidden_configuration.includes("SQL"), "unsafe tenant configuration remains");
+    requireCondition(requiredExclusions.every(item => governance.tenant_configuration_contract.forbidden_configuration.includes(item)), "forbidden workflow configuration missing");
+    requireCondition(JSON.stringify(governance.mature_rail_boundary.locked).includes("tenant isolation"), "locked tenant rail missing");
+    requireCondition(governance.bounded_workflow_trial_acceptance.duration === "at most five business days; shorter trials are allowed", "bounded trial duration semantics mismatch");
+    requireCondition(governance.bounded_workflow_trial_acceptance.maximum_duration_business_days <= 5, "workflow trial exceeds five business days");
+    requireCondition(JSON.stringify(governance.bounded_workflow_trial_acceptance.safety_clause) === JSON.stringify(exactTrialSafety), "workflow trial safety clause drift");
+    requireCondition(governance.workflow_definition_contract.lifecycle.join(",") === "experimental,pilot,approved,standard,retired", "workflow lifecycle mismatch");
+    requireCondition(governance.maintenance_accounting_contract.observed_baseline_hours === null, "maintenance baseline was invented");
+    requireCondition(governance.maintenance_accounting_contract.normal_internal_target_human_hours_per_month.minimum === 3 && governance.maintenance_accounting_contract.normal_internal_target_human_hours_per_month.maximum === 5, "maintenance target mismatch");
+    requireCondition(governance.maintenance_accounting_contract.escalation_gate === "more than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work", "two-month toil escalation gate drift");
+    requireCondition(governance.maintenance_accounting_contract.low_toil_mature_claim_gate === "a low-toil or mature claim requires three complete consecutive normal months at three to five human hours, with required control evidence intact and exceptions reported separately", "three-month low-toil/mature claim gate drift");
+    requireCondition(governance.maintenance_accounting_contract.required_control_evidence_for_claim.length === 7 && governance.maintenance_accounting_contract.required_control_evidence_for_claim.every(Boolean), "required maintenance control evidence missing");
+    requireCondition(requiredExclusions.every(item => context.acceptance.tenant_boundary_acceptance.configuration_refusals.includes(item)), "acceptance workflow product exclusions missing");
+    requireCondition(context.acceptance.workflow_lifecycle_acceptance.five_business_day_trial.maximum_duration_business_days <= 5, "acceptance workflow trial exceeds five business days");
+    requireCondition(JSON.stringify(context.acceptance.workflow_lifecycle_acceptance.five_business_day_trial.safety_clause) === JSON.stringify(["no new source of truth", "no destructive migration", "no parallel writer", "no generic workflow engine"]), "acceptance workflow trial safety drift");
+    requireCondition(context.acceptance.maintenance_measure_plan.escalation_gate === "More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work.", "acceptance two-month toil gate drift");
+    requireCondition(context.acceptance.maintenance_measure_plan.low_toil_mature_claim_gate === "A low-toil or mature claim requires three complete consecutive normal months at three to five human hours, with required control evidence intact and exceptions reported separately.", "acceptance three-month claim gate drift");
+    requireCondition(context.acceptance.maintenance_measure_plan.required_control_evidence_for_claim.length === 7, "acceptance claim control evidence drift");
+    requireCondition(context.tenantDenial.authoritative_context.tenant_id !== context.tenantDenial.other_tenant.tenant_id, "tenant denial fixture uses same authoritative and foreign tenant");
+    requireCondition(context.tenantDenial.cases.length === exactDenials.size, "tenant denial case count drift");
+    requireCondition(context.tenantDenial.cases.every(item => exactDenials.get(item.channel) === item.expected && item.target_tenant_id === context.tenantDenial.other_tenant.tenant_id), "tenant denial path semantics drift or allow introduced");
+    requireCondition(context.tenantDenial.expected_response.code === "TENANT_SCOPE_REFUSED" && context.tenantDenial.expected_response.http === 404 && context.tenantDenial.expected_response.matches_nonexistent_target === true && context.tenantDenial.expected_response.returns_business_payload === false && context.tenantDenial.expected_response.returns_object_metadata === false, "tenant denial response semantics drift");
+    const tenantTrace = context.trace.entries.find(item => item.id === "TENANT-BOUNDARY-001");
+    const workflowTrace = context.trace.entries.find(item => item.id === "WORKFLOW-LIFECYCLE-001");
+    const maintenanceTrace = context.trace.entries.find(item => item.id === "MAINTENANCE-ACCOUNTING-001");
+    requireCondition(["records", "events", "search", "files and attachments", "calls", "AI memory and retrieval", "queues", "integrations", "audit", "offline packs"].every(item => tenantTrace.requirement.toLowerCase().includes(item.toLowerCase())), "tenant trace resource classes drift");
+    requireCondition(["no new source of truth", "destructive migration", "parallel writer", "generic workflow engine"].every(item => workflowTrace.requirement.includes(item)), "workflow trace safety clause drift");
+    requireCondition(maintenanceTrace.requirement.includes("two consecutive months creates prioritized toil-reduction work") && maintenanceTrace.requirement.includes("three complete consecutive normal months"), "maintenance trace gates drift");
+    const settled = new Map(context.council.settled_inputs.map(item => [item.id, item.decision]));
+    requireCondition(["no new source of truth", "destructive migration", "parallel writer", "generic workflow engine", "plugin marketplaces", "customer scripting"].every(item => settled.get("SET-013").includes(item)), "council workflow safety decision drift");
+    requireCondition(settled.get("SET-014").includes("each of two consecutive months creates prioritized toil-reduction work") && settled.get("SET-014").includes("three complete consecutive normal months"), "council maintenance decision drift");
+    const threatMap = new Map(context.threat.threats.map(item => [item.id, item]));
+    requireCondition(["no new source of truth", "no destructive migration", "no parallel writer"].every(item => threatMap.get("T14").mitigations.includes(item)), "workflow threat safety rails drift");
+    requireCondition(threatMap.get("T15").mitigations.some(item => item.includes("two consecutive months")) && threatMap.get("T15").mitigations.some(item => item.includes("three complete consecutive normal months")) && threatMap.get("T15").mitigations.some(item => item.includes("required tenant, authorization, approval, audit, backup/restore, release/rollback, workflow, retention, and exception evidence")), "maintenance threat gates drift");
+    const eventMap = new Map(context.events.events.map(item => [item.name, item.outcomes]));
+    requireCondition(JSON.stringify(eventMap.get("workspace.workflow.promoted")) === JSON.stringify(["pilot", "approved", "standard", "refused"]), "workflow promotion event drift");
+    requireCondition(JSON.stringify(eventMap.get("workspace.workflow.retired")) === JSON.stringify(["retired", "refused"]), "workflow retirement event drift");
+    requireCondition(JSON.stringify(eventMap.get("workspace.maintenance.toil_triggered")) === JSON.stringify(["triggered_after_two_consecutive_over_five_normal_months"]), "maintenance toil trigger event drift");
+    requireCondition(JSON.stringify(eventMap.get("workspace.maintenance.remedy_opened")) === JSON.stringify(["prioritized_toil_reduction_work_opened"]), "maintenance remedy event drift");
+    const pilotGuard = context.machines.machines.workflow_definition.allowed.find(item => item.from === "experimental" && item.to === "pilot").guard;
+    requireCondition(pilotGuard.includes("maximum is five business days and may be shorter") && ["no new source of truth", "destructive migration", "parallel writer", "generic workflow engine"].every(item => pilotGuard.includes(item)), "workflow state-machine pilot guard drift");
+    const workflowGate = context.environment.runtime_verification_gates.find(item => item.test_id === "WORKFLOW-PROMOTION-001");
+    requireCondition(workflowGate.required_evidence.some(item => item.includes("no more than five business days") && item.includes("shorter is allowed")) && workflowGate.required_evidence.some(item => ["no new source of truth", "destructive migration", "parallel writer", "generic workflow engine"].every(label => item.includes(label))), "workflow runtime gate drift");
+    const maintenanceGate = context.environment.runtime_verification_gates.find(item => item.test_id === "MAINTENANCE-MEASURE-001");
+    requireCondition(maintenanceGate.required_evidence.some(item => item.includes("each of two consecutive months") && item.includes("prioritized toil-reduction work")) && maintenanceGate.required_evidence.some(item => item.includes("three complete consecutive normal months") && item.includes("three to five hours")) && maintenanceGate.required_evidence.some(item => item.includes("tenant, authorization, approval, audit, backup/restore, release/rollback, workflow, retention, and exception evidence")), "maintenance runtime gate drift");
   },
   surface(context) {
     requireCondition(context.fixtures.size === 9, "surface count mismatch");
@@ -137,6 +206,7 @@ const groups = {
   release: ["AUTH-KV-001", "AUTH-RECOVERY-001", "RELEASE-GATE-001"],
   roadmapHarmony: ["ROADMAP-HARMONY-001"],
   security: ["PRIV-REDACT-001", "PRIV-STERILE-001", "SEC-AUTH-001", "SEC-AUTHZ-001", "SEC-CSRF-001", "SEC-DEVICE-001", "SEC-PUBLIC-001", "SEC-REPLAY-001", "SEC-SECRET-001"],
+  tenantGovernance: ["TENANT-CONTRACT-001", "TENANT-DENIAL-FIXTURE-001", "WORKFLOW-CONTRACT-001", "MAINTENANCE-CONTRACT-001", "OWNER-CONTROL-001"],
   surface: ["SURFACE-PARITY-001", "SURFACE-WRITER-001"],
   tour: ["FLOW-WS-05", "TOUR-ROUTE-001", "TOUR-SYNC-001"]
 };
@@ -148,6 +218,7 @@ export const futureGateIds = new Set([
   "SURFACE-PARITY-001", "SURFACE-WRITER-001",
   "SEC-AUTH-001", "SEC-AUTHZ-001", "SEC-CSRF-001", "SEC-DEVICE-001", "SEC-REPLAY-001",
   "AUTH-KV-001", "AUTH-RECOVERY-001", "RELEASE-GATE-001"
+  , "TENANT-CROSS-DENIAL-001", "WORKFLOW-PROMOTION-001", "MAINTENANCE-MEASURE-001"
 ]);
 for (const id of futureGateIds) testRegistry.delete(id);
 testRegistry.set("SEC-PUBLIC-001", publicBoundary);

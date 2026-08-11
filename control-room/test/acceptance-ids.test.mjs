@@ -216,10 +216,10 @@ const assertions = {
     const council = read("contracts/council-review.v1.json");
     const trace = read("contracts/phase0-traceability.v1.json");
     assert.deepEqual(manifest.governing_sources.map(item => [item.document_id, item.generation, item.active_sections]), [
-      ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 324, 33],
-      ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 251, 38],
-      ["15d2250c-4821-4f83-9dc5-063f9470139d", 325, 40],
-      ["10d25f48-916b-4a7f-a1a6-d231274fed4b", 280, 27]
+      ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 334, 34],
+      ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 335, 39],
+      ["15d2250c-4821-4f83-9dc5-063f9470139d", 330, 41],
+      ["10d25f48-916b-4a7f-a1a6-d231274fed4b", 326, 28]
     ]);
     assert.ok(manifest.governing_sources.every(item => item.receipt === "fresh_read_verified"));
     assert.equal(manifest.integrated_delivery_program.october_5_2026_milestone.not_full_mature_end_state, true);
@@ -238,7 +238,110 @@ const assertions = {
     assert.ok(council.settled_inputs.some(item => item.id === "CR-S12" && /\$5–20/.test(item.decision)));
     assert.deepEqual(trace.governing_sources.map(item => item.document_id), manifest.governing_sources.map(item => item.document_id));
     assert.ok(trace.entries.some(item => item.id === "P0-021" && item.tests.includes("no_mutation_route") && item.source_refs.includes("carr-workspace-bduf#s23@v3")));
+    assert.ok(trace.entries.some(item => item.id === "P0-022" && item.source_refs.includes("carr-control-room-bduf#s37")));
     assert.equal(api.routes.some(route => route.method !== "GET"), false);
+  },
+  server_derived_tenant_context: () => {
+    const tenant = read("contracts/tenant-workflow-maintenance.v1.json");
+    assert.match(tenant.tenant_boundary.derivation, /server derives tenant_id.*environment/i);
+    assert.match(tenant.tenant_boundary.immutability, /immutable/i);
+    assert.equal(read("contracts/security-redaction.v1.json").session.tenant_context.client_mutable, false);
+    assert.match(api.server_context.implementation_status, /future server enforcement gate/i);
+  },
+  cross_tenant_denial_fixture: () => {
+    const value = read("fixtures/tenant-boundary.v1.json");
+    const contract = read("contracts/tenant-workflow-maintenance.v1.json");
+    const expectedPaths = ["browser", "API", "background", "local-edge", "search", "export", "attachment", "Doc"];
+    const expectedSurfaces = ["records", "events", "search", "files and attachments", "calls", "AI memory and retrieval", "queues", "integrations", "audit", "offline packs"];
+    const expectedDenials = {
+      browser: {expected_status: 404, expected_code: "not_found"},
+      API: {expected_status: 404, expected_code: "not_found"},
+      background: {expected_status: 403, expected_code: "scope_violation"},
+      "local-edge": {expected_status: 404, expected_code: "not_found"},
+      search: {expected_status: 404, expected_code: "not_found"},
+      export: {expected_status: 404, expected_code: "not_found"},
+      attachment: {expected_status: 404, expected_code: "not_found"},
+      Doc: {expected_status: 404, expected_code: "not_found"}
+    };
+    assert.equal(value.authenticated_context.client_mutable, false);
+    assert.notEqual(value.authenticated_context.tenant_id, value.foreign_context.tenant_id);
+    assert.deepEqual(value.attempts.map(item => item.path).sort(), [...expectedPaths].sort());
+    assert.deepEqual(Object.fromEntries(value.attempts.map(item => [item.path, {expected_status: item.expected_status, expected_code: item.expected_code}])), expectedDenials);
+    assert.ok(value.attempts.every(item => item.expected_status >= 400 && item.expected_status < 500));
+    assert.ok(value.attempts.every(item => item.expected_code !== "allowed"));
+    assert.deepEqual(contract.tenant_boundary.path_coverage.sort(), [...expectedPaths].sort());
+    assert.deepEqual(contract.tenant_boundary.scoped_surfaces.sort(), [...expectedSurfaces].sort());
+    assert.deepEqual([...new Set(value.attempts.flatMap(item => item.covered_surfaces))].sort(), [...expectedSurfaces].sort());
+    assert.ok(value.attempts.every(item => item.presented_tenant === value.foreign_context.tenant_id && item.must_not_disclose_existence === true));
+    assert.match(value.phase0_limit, /does not prove production/i);
+  },
+  platform_tenant_authority_split: () => {
+    const tenant = read("contracts/tenant-workflow-maintenance.v1.json");
+    assert.deepEqual(tenant.tenant_boundary.launch_principals, ["joe", "dell"]);
+    assert.equal(authority.authority_planes.platform_administration.customer_delegable, false);
+    assert.equal(authority.authority_planes.platform_administration.launch_holder, "Joe");
+    for (const denied of ["public signup", "customer provisioning or billing plane", "public invite flow", "public SaaS launch"]) assert.ok(tenant.authority_planes.explicit_exclusions.includes(denied));
+  },
+  workflow_lifecycle_governance: () => {
+    const tenant = read("contracts/tenant-workflow-maintenance.v1.json");
+    const acceptance = read("contracts/phase0-acceptance.v1.json");
+    const trace = read("contracts/phase0-traceability.v1.json");
+    const council = read("contracts/council-review.v1.json");
+    const threat = read("contracts/threat-model.v1.json");
+    const requiredPromotionEvidence = ["named evidence", "immutable workflow version", "accountable owner", "observation window", "failure criteria and handling", "tested rollback", "adoption result and adoption test", "cutover plan and cutover gate"];
+    const requiredPromotionPatterns = [/named evidence/i, /immutable workflow version/i, /accountable owner/i, /observation window/i, /failure criteria and handling/i, /tested rollback/i, /adoption result and adoption test/i, /cutover plan/i, /cutover gate/i];
+    assert.deepEqual(tenant.workflow_governance.lifecycle, ["experimental", "pilot", "approved", "standard", "retired"]);
+    assert.deepEqual(tenant.workflow_governance.promotion_evidence_envelope.required, requiredPromotionEvidence);
+    for (const description of Object.values(tenant.workflow_governance.promotion_evidence_envelope).filter(value => typeof value === "string")) for (const pattern of requiredPromotionPatterns) assert.match(description, pattern);
+    for (const edgeKey of [["pilot", "approved"], ["approved", "standard"]]) {
+      const edge = machines.machines.workflow_lifecycle.transitions.find(item => item.from === edgeKey[0] && item.to === edgeKey[1]);
+      for (const pattern of requiredPromotionPatterns) assert.match(edge.guard, pattern, `${edgeKey.join("->")} missing ${pattern}`);
+    }
+    assert.match(tenant.workflow_governance.bounded_trial, /at most 5 business days/i);
+    for (const rail of [/no new source of truth/i, /no destructive migration/i, /no parallel writer/i, /not a generic workflow engine/i]) assert.match(tenant.workflow_governance.bounded_trial, rail);
+    const acceptanceText = acceptance.adversarial_tests.find(item => item.id === "workflow_lifecycle_governance").assertion;
+    const traceText = trace.entries.find(item => item.id === "P0-023").requirement;
+    const councilText = council.settled_inputs.find(item => item.id === "CR-S19").decision;
+    const threatText = threat.threats.find(item => item.id === "T15").mitigations.join(" ");
+    for (const text of [acceptanceText, traceText, councilText, threatText]) for (const pattern of requiredPromotionPatterns) assert.match(text, pattern);
+    for (const rail of [/no new source of truth/i, /no destructive migration/i, /no parallel writer/i, /not a generic workflow engine/i]) assert.match(acceptanceText, rail);
+    assert.match(council.settled_inputs.find(item => item.id === "CR-S18").decision, /five business days.*no new source of truth.*destructive migration.*parallel writer.*generic workflow engine/i);
+    assert.match(threat.threats.find(item => item.id === "T15").mitigations.join(" "), /no new source of truth.*no destructive migration.*no parallel writer.*no generic workflow engine/i);
+    assert.match(tenant.workflow_governance.execution_rule, /pins one workflow version/i);
+    assert.match(tenant.workflow_governance.retirement_rule, /blocks new starts/i);
+    assert.ok(machines.machines.workflow_lifecycle.transitions.every(edge => edge.guard));
+  },
+  doc_outage_operability: () => {
+    const rule = read("contracts/tenant-workflow-maintenance.v1.json").workflow_governance.doc_outage_rule;
+    assert.match(rule, /remain usable.*Doc is unavailable/i);
+    assert.match(rule, /not an authorization boundary/i);
+  },
+  maintenance_accounting_gate: () => {
+    const maintenance = read("contracts/tenant-workflow-maintenance.v1.json").maintenance_accounting;
+    assert.match(maintenance.target, /3–5 human hours per month/i);
+    assert.match(maintenance.baseline_rule, /Measure actual human time.*do not estimate/i);
+    assert.match(maintenance.toil_trigger, /More than 5.*two consecutive/i);
+    assert.match(maintenance.mature_claim_gate, /three complete consecutive months/i);
+    assert.ok(maintenance.integrity_rules.some(rule => /No health, security, authority, incident, or audit control may be disabled or suppressed/i.test(rule)));
+    assert.ok(maintenance.integrity_rules.some(rule => /mislabeled as an exception/i.test(rule)));
+  },
+  tenant_config_allowlist: () => {
+    const tenant = read("contracts/tenant-workflow-maintenance.v1.json");
+    const acceptance = read("contracts/phase0-acceptance.v1.json");
+    const trace = read("contracts/phase0-traceability.v1.json");
+    assert.ok(tenant.authority_planes.tenant_config_allow_list.length >= 4);
+    assert.match(tenant.authority_planes.tenant_config_denies.join(" "), /code.*scripts.*SQL.*command strings.*customer-authored executable workflows/i);
+    assert.deepEqual(tenant.authority_planes.current_program_exclusions, ["generic workflow engine", "plugin marketplace", "customer scripting"]);
+    assert.match(acceptance.adversarial_tests.find(item => item.id === "tenant_config_allowlist").assertion, /generic workflow engine.*plugin marketplace.*customer scripting/i);
+    assert.match(trace.entries.find(item => item.id === "P0-023").requirement, /Generic workflow engines, plugin marketplaces, and customer scripting are outside the current program/i);
+    assert.ok(tenant.workflow_governance.locked_rails.some(rule => /no arbitrary code or SQL/i.test(rule)));
+  },
+  actionable_alert_and_safe_automation: () => {
+    const maintenance = read("contracts/tenant-workflow-maintenance.v1.json").maintenance_accounting;
+    assert.ok(maintenance.scorecard.some(metric => /deduplicated actionable alert/i.test(metric)));
+    assert.ok(maintenance.integrity_rules.some(rule => /deduplicate only when tenant, resource, condition, and evidence window match/i.test(rule)));
+    assert.ok(maintenance.integrity_rules.some(rule => /typed, tenant-bound, idempotent, allow-listed, bounded, observable.*outcome verification/i.test(rule)));
+    assert.ok(maintenance.integrity_rules.some(rule => /binds a named remedy or work request/i.test(rule)));
   },
   plan_hash_format: () => {
     const pattern = /^sha256:[a-f0-9]{64}$/;

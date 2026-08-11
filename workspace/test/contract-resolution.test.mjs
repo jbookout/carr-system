@@ -89,7 +89,7 @@ test("every test ID resolves to either an executed check or an explicit future g
 });
 
 test("every registered contract test executes against the prototype and planning evidence", async () => {
-  const [fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance] = await Promise.all([
+  const [fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial] = await Promise.all([
     loadFixtures(),
     readText("public/index.html"),
     readText("public/css/app.css"),
@@ -100,9 +100,14 @@ test("every registered contract test executes against the prototype and planning
     readJson("contracts/phase0-manifest.v1.json"),
     readJson("contracts/council-review-register.v1.json"),
     readJson("contracts/phase0-traceability.v1.json"),
-    readJson("contracts/phase0-acceptance.v1.json")
+    readJson("contracts/phase0-acceptance.v1.json"),
+    readJson("contracts/tenant-workflow-governance.v1.json"),
+    readJson("contracts/threat-model.v1.json"),
+    readJson("contracts/notification-event-taxonomy.v1.json"),
+    readJson("contracts/state-machines.v1.json"),
+    readJson("test/fixtures/tenant-boundary-denials.v1.json")
   ]);
-  const context = { fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance };
+  const context = { fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial };
   for (const [id, check] of testRegistry) assert.doesNotThrow(() => check(context), id);
 });
 
@@ -148,10 +153,10 @@ test("baseline presentation exposes the bound action and like-for-like compariso
 
 test("glossary provenance and all six conceptual operating roles are explicit", async () => {
   const glossary = await readJson("contracts/domain-glossary.v1.json");
-  assert.equal(glossary.source.source_sha256, "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b");
+  assert.equal(glossary.source.source_sha256, "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16");
   assert.equal(glossary.source.doctrine_document_id, "c7f31740-7f4b-47e9-ab93-c7f2854bacc6");
-  assert.equal(glossary.source.doctrine_generation, 324);
-  assert.equal(glossary.source.doctrine_section_count, 33);
+  assert.equal(glossary.source.doctrine_generation, 334);
+  assert.equal(glossary.source.doctrine_section_count, 34);
   assert.equal(glossary.source.timing_section_key, "s23");
   assert.equal(glossary.source.timing_section_version, 3);
   const terms = new Set(glossary.terms.map(item => item.term));
@@ -174,9 +179,9 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.deepEqual(manifest.canonical_planning_sources.map(item => item.document_id).sort(), expectedIds);
   assert.deepEqual(trace.canonical_planning_set.map(item => item.document_id).sort(), expectedIds);
   for (const id of expectedIds) assert.ok(council.review_event.inputs.some(item => item.includes(id)), id);
-  assert.equal(manifest.source.doctrine_generation, 324);
+  assert.equal(manifest.source.doctrine_generation, 334);
   assert.equal(manifest.source.timing_section_version, 3);
-  assert.equal(manifest.source.desktop_artifact_matches_current_doctrine_generation, "unverified_after_timing_section_revision");
+  assert.equal(manifest.source.desktop_artifact_matches_current_doctrine_generation, "verified_at_generation_334");
   const program = manifest.integrated_delivery_program;
   assert.equal(program.mature_foundation_v1.target_date, "2026-10-05");
   assert.equal(program.workspace_web_timing.evidence_range, "12–16 weeks");
@@ -191,6 +196,92 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.match(acceptance.integrated_program_acceptance.construction_gate, /Joe approves.*council output/);
 });
 
+test("tenant, workflow, maintenance, and owner-control amendments are executable Phase 0 contracts without production claims", async () => {
+  const [governance, denial, acceptance, machines, api, manifest, authority, routes, retention, trace, council, threat, events] = await Promise.all([
+    readJson("contracts/tenant-workflow-governance.v1.json"),
+    readJson("test/fixtures/tenant-boundary-denials.v1.json"),
+    readJson("contracts/phase0-acceptance.v1.json"),
+    readJson("contracts/state-machines.v1.json"),
+    readJson("contracts/business-entity-api-contracts.v1.json"),
+    readJson("contracts/phase0-manifest.v1.json"),
+    readJson("contracts/authority-risk-matrix.v1.json"),
+    readJson("contracts/route-ia.v1.json"),
+    readJson("contracts/retention-redaction.v1.json"),
+    readJson("contracts/phase0-traceability.v1.json"),
+    readJson("contracts/council-review-register.v1.json"),
+    readJson("contracts/threat-model.v1.json"),
+    readJson("contracts/notification-event-taxonomy.v1.json")
+  ]);
+  const expectedChannels = ["browser", "api", "background_job", "local_edge_sync", "search", "export", "attachment", "doc", "ai"];
+  const expectedDenials = ["deny_before_render", "deny_before_object_lookup_response", "deny_before_job_execution", "deny_before_sync_acceptance", "zero_cross_tenant_hits", "deny_before_export_creation", "deny_before_metadata_or_content", "deny_before_context_assembly", "deny_before_prompt_or_tool_context"];
+  const expectedTenantClasses = ["records", "events", "search", "files_and_attachments", "calls", "ai_memory_and_retrieval", "queues", "integrations", "audit", "offline_packs"];
+  const expectedTrialSafety = ["trial creates no new source of truth", "trial performs no destructive migration", "trial creates no parallel writer", "trial does not introduce or depend on a generic workflow engine"];
+  const requiredExclusions = ["generic workflow engine", "plugin marketplace", "customer scripting"];
+  assert.equal(governance.canonical_sources.find(item => item.document_id === manifest.source.durable_doctrine_id).generation, 334);
+  assert.deepEqual(governance.tenant_context_contract.propagation_channels, expectedChannels);
+  assert.equal(governance.tenant_context_contract.immutable_per_request, true);
+  assert.match(governance.tenant_context_contract.authoritative_source, /^server derives/);
+  assert.deepEqual(governance.tenant_context_contract.scoped_resource_classes, expectedTenantClasses);
+  assert.deepEqual(denial.cases.map(item => item.channel), expectedChannels);
+  assert.deepEqual(denial.cases.map(item => item.expected), expectedDenials);
+  assert.equal(new Set(denial.cases.map(item => item.id)).size, expectedChannels.length);
+  assert.notEqual(denial.authoritative_context.tenant_id, denial.other_tenant.tenant_id);
+  assert.ok(denial.cases.every(item => item.untrusted_tenant_hint === denial.other_tenant.tenant_id));
+  assert.ok(denial.cases.every(item => item.target_tenant_id === denial.other_tenant.tenant_id));
+  assert.equal(denial.expected_response.matches_nonexistent_target, true);
+  assert.equal(denial.expected_response.returns_business_payload, false);
+  assert.equal(denial.expected_response.returns_object_metadata, false);
+  assert.equal(denial.expected_response.audit_contains_business_payload, false);
+  assert.deepEqual(machines.machines.workflow_definition.states, ["experimental", "pilot", "approved", "standard", "retired"]);
+  assert.deepEqual(machines.machines.workflow_definition.terminal, ["retired"]);
+  assert.equal(governance.bounded_workflow_trial_acceptance.duration, "at most five business days; shorter trials are allowed");
+  assert.ok(governance.bounded_workflow_trial_acceptance.maximum_duration_business_days <= 5);
+  assert.deepEqual(governance.bounded_workflow_trial_acceptance.safety_clause, expectedTrialSafety);
+  assert.ok(governance.mature_rail_boundary.locked.includes("server-derived tenant isolation"));
+  assert.ok(governance.tenant_configuration_contract.forbidden_configuration.includes("arbitrary code"));
+  assert.ok(governance.tenant_configuration_contract.forbidden_configuration.includes("SQL"));
+  assert.ok(requiredExclusions.every(item => governance.launch_topology.explicit_exclusions.includes(item)));
+  assert.ok(requiredExclusions.every(item => governance.tenant_configuration_contract.forbidden_configuration.includes(item)));
+  assert.equal(acceptance.maintenance_measure_plan.observed_baseline_hours, null);
+  assert.deepEqual(acceptance.maintenance_measure_plan.normal_internal_target_human_hours_per_month, {minimum: 3, maximum: 5});
+  assert.equal(governance.maintenance_accounting_contract.escalation_gate, "more than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work");
+  assert.equal(governance.maintenance_accounting_contract.low_toil_mature_claim_gate, "a low-toil or mature claim requires three complete consecutive normal months at three to five human hours, with required control evidence intact and exceptions reported separately");
+  assert.equal(governance.maintenance_accounting_contract.required_control_evidence_for_claim.length, 7);
+  assert.match(acceptance.maintenance_measure_plan.escalation_gate, /^More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work\.$/);
+  assert.match(acceptance.maintenance_measure_plan.low_toil_mature_claim_gate, /^A low-toil or mature claim requires three complete consecutive normal months at three to five human hours, with required control evidence intact and exceptions reported separately\.$/);
+  assert.equal(acceptance.maintenance_measure_plan.required_control_evidence_for_claim.length, 7);
+  assert.equal(api.tenant_context_policy.client_tenant_fields_authoritative, false);
+  assert.ok(api.$defs.VersionedRecord.required.includes("tenant_id"));
+  assert.equal(api.typed_errors.find(item => item.code === "TENANT_SCOPE_REFUSED").http, 404);
+  assert.match(authority.identity_boundary.tenant_rule, /server derives one immutable tenant context/);
+  assert.equal(authority.platform_control.owner, "Joe Bookout");
+  assert.equal(routes.tenant_configuration_boundary.tenant_selector, "structurally absent");
+  assert.ok(routes.tenant_configuration_boundary.forbidden_settings.includes("arbitrary code"));
+  assert.ok(retention.hard_rules.some(item => item.includes("tenant-bound")));
+  assert.ok(manifest.prohibited_claims.some(item => item.includes("production tenant isolation")));
+  const tenantTrace = trace.entries.find(item => item.id === "TENANT-BOUNDARY-001");
+  const workflowTrace = trace.entries.find(item => item.id === "WORKFLOW-LIFECYCLE-001");
+  const maintenanceTrace = trace.entries.find(item => item.id === "MAINTENANCE-ACCOUNTING-001");
+  for (const label of ["records", "events", "search", "files and attachments", "calls", "AI memory and retrieval", "queues", "integrations", "audit", "offline packs"]) assert.match(tenantTrace.requirement, new RegExp(label, "i"));
+  for (const label of ["no new source of truth", "destructive migration", "parallel writer", "generic workflow engine"]) assert.match(workflowTrace.requirement, new RegExp(label, "i"));
+  assert.match(maintenanceTrace.requirement, /more than five normal hours in each of two consecutive months creates prioritized toil-reduction work/i);
+  assert.match(maintenanceTrace.requirement, /three complete consecutive normal months at three to five hours with required control evidence intact and exceptions separate/i);
+  const settled = new Map(council.settled_inputs.map(item => [item.id, item.decision]));
+  for (const label of ["no new source of truth", "destructive migration", "parallel writer", "generic workflow engine", "plugin marketplaces", "customer scripting"]) assert.match(settled.get("SET-013"), new RegExp(label, "i"));
+  assert.match(settled.get("SET-014"), /more than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work/i);
+  assert.match(settled.get("SET-014"), /three complete consecutive normal months at three to five hours with required control evidence intact and exceptions reported separately/i);
+  const threats = new Map(threat.threats.map(item => [item.id, item]));
+  for (const label of ["no new source of truth", "no destructive migration", "no parallel writer", "plugin marketplace", "customer scripting"]) assert.ok(threats.get("T14").mitigations.some(item => item.includes(label)), label);
+  assert.ok(threats.get("T15").mitigations.some(item => item.includes("two consecutive months")));
+  assert.ok(threats.get("T15").mitigations.some(item => item.includes("three complete consecutive normal months")));
+  assert.ok(threats.get("T15").mitigations.some(item => item.includes("required tenant, authorization, approval, audit, backup/restore, release/rollback, workflow, retention, and exception evidence")));
+  const eventMap = new Map(events.events.map(item => [item.name, item.outcomes]));
+  assert.deepEqual(eventMap.get("workspace.workflow.promoted"), ["pilot", "approved", "standard", "refused"]);
+  assert.deepEqual(eventMap.get("workspace.workflow.retired"), ["retired", "refused"]);
+  assert.deepEqual(eventMap.get("workspace.maintenance.toil_triggered"), ["triggered_after_two_consecutive_over_five_normal_months"]);
+  assert.deepEqual(eventMap.get("workspace.maintenance.remedy_opened"), ["prioritized_toil_reduction_work_opened"]);
+});
+
 test("domain entities are complete typed objects rather than generic record aliases", async () => {
   const api = await readJson("contracts/business-entity-api-contracts.v1.json");
   for (const group of api.domain_groups) for (const entity of group.entities) {
@@ -198,7 +289,7 @@ test("domain entities are complete typed objects rather than generic record alia
     assert.equal(schema.type, "object", entity);
     assert.equal(schema.additionalProperties, false, entity);
     assert.ok(schema.required.length >= 3, entity);
-    assert.ok(schema.properties.record || ["CallSummary", "CallCandidate", "EngineeringRequest", "Tour", "Notification"].includes(entity), entity);
+    assert.ok(schema.properties.record || ["CallSummary", "CallCandidate", "EngineeringRequest", "Tour", "Notification", "TenantContext"].includes(entity), entity);
   }
   assert.ok(api.$defs.Tour.properties.device_sync.items.properties.state.enum.includes("superseded"));
 });

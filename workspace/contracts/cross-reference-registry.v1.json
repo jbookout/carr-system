@@ -139,9 +139,12 @@
     "LEAD-CONVERT-001",
     "LEAD-TOUCH-001",
     "MKT-DECISION-001",
+    "MAINTENANCE-CONTRACT-001",
+    "MAINTENANCE-MEASURE-001",
     "NOTIFY-001",
     "OBS-ROUTE-001",
     "OFFLINE-TRUTH-001",
+    "OWNER-CONTROL-001",
     "PRIV-REDACT-001",
     "PRIV-STERILE-001",
     "RELEASE-GATE-001",
@@ -158,8 +161,13 @@
     "SURFACE-PARITY-001",
     "SURFACE-WRITER-001",
     "SYNC-CONFLICT-001",
+    "TENANT-CONTRACT-001",
+    "TENANT-CROSS-DENIAL-001",
+    "TENANT-DENIAL-FIXTURE-001",
     "TOUR-ROUTE-001",
-    "TOUR-SYNC-001"
+    "TOUR-SYNC-001",
+    "WORKFLOW-CONTRACT-001",
+    "WORKFLOW-PROMOTION-001"
   ],
   "validation_rules": [
     "Every reference resolves in its namespace or through one explicit canonical alias",
@@ -170,6 +178,10 @@
     "Fixture surfaces and state sets equal the contract exactly",
     "Fixture top-level and per-surface/state keys are exact",
     "Evidence excerpts contain no more than fifteen whitespace-delimited words",
-    "Baseline values remain absent until instrumented or interviewed"
+    "Baseline values remain absent until instrumented or interviewed",
+    "Authoritative tenant context is server-derived and immutable for the request; no client tenant selector exists",
+    "Every cross-tenant denial fixture channel returns privacy-safe nonexistent parity without object metadata or business payload",
+    "Workflow lifecycle is exactly experimental, pilot, approved, standard, retired and calendar passage never promotes",
+    "Maintenance target is distinct from the null observed baseline and exceptions are separately attributed"
   ]
 }

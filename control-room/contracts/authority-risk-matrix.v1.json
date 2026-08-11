@@ -4,8 +4,8 @@
   "status": "phase0_frozen",
   "default_effect": "deny",
   "enforcement": {
-    "permit_only_if": ["session audience is carr-control-room-web or the principal is a registered non-browser identity", "principal is active and mapped to a Control Room role", "capability is explicit, unexpired, and not revoked", "exact resource and environment are server allowed", "risk gate requirements pass", "global read-only kill switch permits mutation"],
-    "never_authoritative": ["query parameter profile", "client supplied actor", "client supplied role", "client supplied environment", "client supplied risk class", "client supplied capability", "Workspace cookie", "Deal Room cookie", "MCP OAuth bearer", "AGENT_TOKENS", "PROBE_TOKENS", "REVIEW_TOKENS", "model prompt", "agent memory"]
+    "permit_only_if": ["session audience is carr-control-room-web or the principal is a registered non-browser identity", "principal is active and mapped to a Control Room role", "tenant is derived from the authenticated principal and environment is derived from typed server context", "capability is explicit, unexpired, and not revoked", "exact resource and environment are server allowed", "risk gate requirements pass", "global read-only kill switch permits mutation"],
+    "never_authoritative": ["query parameter profile", "client supplied actor", "client supplied role", "client supplied tenant", "client supplied environment", "client supplied risk class", "client supplied capability", "Workspace cookie", "Deal Room cookie", "MCP OAuth bearer", "AGENT_TOKENS", "PROBE_TOKENS", "REVIEW_TOKENS", "model prompt", "agent memory"]
   },
   "roles": {
     "joe_owner_production_approver": {"R0": "read authorized operations views", "R1": "own presentation preferences", "R2": "create and triage requests and evidence candidates", "R3": "confirm typed operating changes", "R4": "approve typed high-consequence record actions after re-authentication", "R5": "approve exact production plan hash after re-authentication; browser never executes", "R6": "review only; send in owning outbound system"},
@@ -18,7 +18,12 @@
     "roles": ["joe_owner_production_approver", "dell_reporter_viewer", "doc_system_desk", "codex_or_claude_code", "service_identity"],
     "resources": ["overview", "services", "work_requests", "agent_sessions", "plans", "approvals", "releases", "deployments", "incidents", "audit_summaries", "audit_restricted", "collector_observations", "registered_actuators"],
     "environments": ["local", "rehearsal", "staging", "production"],
-    "capabilities": ["read_ops_safe", "read_ops_restricted", "propose_request", "propose_plan", "submit_observation", "approve_plan_hash", "execute_registered_actuator", "draft_external_effect"]
+    "capabilities": ["read_ops_safe", "read_ops_restricted", "propose_request", "propose_plan", "submit_observation", "approve_plan_hash", "execute_registered_actuator", "draft_external_effect", "administer_tenant", "administer_platform"]
+  },
+  "authority_planes": {
+    "platform_administration": {"capability": "administer_platform", "launch_holder": "Joe", "scope": "platform code, intellectual property, tenant provisioning, licensing, release governance, and platform-wide controls", "customer_delegable": false},
+    "tenant_administration": {"capability": "administer_tenant", "launch_holder": "Joe", "scope": "the single CARR tenant only; future seat licenses may grant narrow tenant-local capabilities without platform ownership", "customer_delegable": "only by Joe through an owner-controlled typed grant after implementation approval"},
+    "phase0": "Both administration capabilities are modeled but no administration route or grant exists in Phase 0."
   },
   "grants": [
     {"id": "G-P0-JOE-SAFE-READ", "phase": "phase0", "effect": "allow", "role": "joe_owner_production_approver", "risk_classes": ["R0"], "resources": ["overview", "services", "work_requests", "agent_sessions", "plans", "approvals", "releases", "deployments", "incidents", "audit_summaries"], "environments": ["local", "rehearsal", "staging", "production"], "capabilities": ["read_ops_safe"], "conditions": ["authenticated Control Room audience", "active principal", "server redaction"]},
@@ -32,7 +37,8 @@
     {"id": "D-P0-MUTATION", "phase": "phase0", "roles": ["joe_owner_production_approver", "dell_reporter_viewer", "doc_system_desk", "codex_or_claude_code", "service_identity"], "resources": ["work_requests", "plans", "approvals", "releases", "deployments", "incidents", "registered_actuators"], "environments": ["local", "rehearsal", "staging", "production"], "capabilities": ["propose_request", "propose_plan", "approve_plan_hash", "execute_registered_actuator", "draft_external_effect"], "reason": "Phase 0 has no mutation, approval, grant, execution, or external-effect route."},
     {"id": "D-DELL-PRODUCTION", "phase": "all", "roles": ["dell_reporter_viewer"], "resources": ["approvals", "registered_actuators"], "environments": ["production"], "capabilities": ["approve_plan_hash", "execute_registered_actuator"], "reason": "Dell launches as Reporter/Viewer for system operations."},
     {"id": "D-AGENT-SELF-AUTHORITY", "phase": "all", "roles": ["doc_system_desk", "codex_or_claude_code", "service_identity"], "resources": ["approvals", "registered_actuators"], "environments": ["local", "rehearsal", "staging", "production"], "capabilities": ["approve_plan_hash"], "reason": "An agent or service identity cannot approve or grant itself authority."},
-    {"id": "D-MOBILE-PRODUCTION", "phase": "initial_release", "roles": ["joe_owner_production_approver", "dell_reporter_viewer"], "resources": ["approvals", "registered_actuators"], "environments": ["production"], "capabilities": ["approve_plan_hash", "execute_registered_actuator"], "client_classes": ["phone", "tablet"], "reason": "No Production approval or execution on phone or iPad initially."}
+    {"id": "D-MOBILE-PRODUCTION", "phase": "initial_release", "roles": ["joe_owner_production_approver", "dell_reporter_viewer"], "resources": ["approvals", "registered_actuators"], "environments": ["production"], "capabilities": ["approve_plan_hash", "execute_registered_actuator"], "client_classes": ["phone", "tablet"], "reason": "No Production approval or execution on phone or iPad initially."},
+    {"id": "D-CUSTOMER-PLATFORM-CONTROL", "phase": "all", "roles": ["dell_reporter_viewer", "doc_system_desk", "codex_or_claude_code", "service_identity"], "resources": ["registered_actuators"], "environments": ["local", "rehearsal", "staging", "production"], "capabilities": ["administer_platform"], "reason": "Joe retains platform and intellectual-property control; a tenant or corporate customer may license seats but cannot become platform owner or administrator."}
   ],
   "risk_classes": {
     "R0": {"name": "Observe", "gate": "authenticated scoped read with declared redaction and freshness; no approval"},

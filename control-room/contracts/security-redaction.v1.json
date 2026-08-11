@@ -5,6 +5,7 @@
   "session": {
     "origin": "https://ops.doctorcre.com",
     "audience": "carr-control-room-web",
+    "tenant_context": {"source": "server mapping from authenticated principal", "launch_value": "tenant-carr-internal", "client_mutable": false, "environment_source": "typed route and server-authorized request or plan scope", "cross_tenant_response": "not_found without existence disclosure"},
     "cookie": "__Host-ops_session",
     "oauth_pending_cookie": "__Host-ops_oauth",
     "cookie_requirements": ["opaque random session ID only; server stores the hash", "Secure", "HttpOnly", "Path=/", "no Domain attribute", "session SameSite=Strict", "OAuth pending cookie SameSite=Lax"],
@@ -23,7 +24,8 @@
     "Every evidence item declares its redaction profile and withheld paths.",
     "SecretReference stores provider, location, version, owner, rotation, and test metadata only.",
     "Logs, documents, issue text, and business content are untrusted data and cannot alter capability, target, plan, tool choice, or approval.",
-    "Unauthorized object lookup returns not_found unless the caller already has authorized existence context."
+    "Unauthorized object lookup returns not_found unless the caller already has authorized existence context.",
+    "Every storage, audit, export, Workspace-return, telemetry, and model-context projection is filtered by the same server-derived tenant and environment context before redaction."
   ],
   "phase0_executable_boundary": {
     "proven": ["every nested fixture object is closed by additionalProperties false", "undeclared nested fields fail synthetic pre-persistence fixture validation", "prototype presentation models are serialized only through contract-declared fields", "secret-shaped values in declared strings are redacted", "prototype telemetry is a closed seven-field projection"],
@@ -46,5 +48,5 @@
     "raw_sensitive_artifacts": "never persist",
     "implementation_gate": "No deletion automation ships until Joe accepts durations and legal-hold ownership."
   },
-  "errors": ["unauthenticated", "wrong_audience", "csrf_or_origin_mismatch", "forbidden_role", "scope_violation", "capability_missing", "capability_expired_or_revoked", "reauth_required", "target_ambiguous", "environment_mismatch", "base_version_conflict", "idempotency_replay", "idempotency_key_reuse", "invalid_state_transition", "plan_hash_mismatch", "approval_missing_rejected_or_expired", "kill_switch_active", "unregistered_actuator", "collector_stale_or_offline", "verification_partial_or_failed", "event_cursor_expired", "upstream_timeout_or_unavailable", "redacted_internal_error"]
+  "errors": ["unauthenticated", "wrong_audience", "csrf_or_origin_mismatch", "forbidden_role", "scope_violation", "tenant_scope_violation", "capability_missing", "capability_expired_or_revoked", "reauth_required", "target_ambiguous", "environment_mismatch", "base_version_conflict", "idempotency_replay", "idempotency_key_reuse", "invalid_state_transition", "plan_hash_mismatch", "approval_missing_rejected_or_expired", "kill_switch_active", "unregistered_actuator", "collector_stale_or_offline", "verification_partial_or_failed", "event_cursor_expired", "upstream_timeout_or_unavailable", "redacted_internal_error"]
 }

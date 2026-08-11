@@ -67,10 +67,13 @@ test("authorization defaults deny and never trusts profile", () => {
   const authority = read("contracts/authority-risk-matrix.v1.json");
   assert.equal(authority.default_effect, "deny");
   assert.ok(authority.enforcement.never_authoritative.includes("query parameter profile"));
+  assert.ok(authority.enforcement.never_authoritative.includes("client supplied tenant"));
   assert.equal(authority.phase0.production_mobile_approval, false);
   assert.deepEqual(Object.keys(authority.risk_classes), ["R0", "R1", "R2", "R3", "R4", "R5", "R6"]);
   assert.equal(authority.roles.dell_reporter_viewer.R5, "deny");
   assert.match(authority.roles.joe_owner_production_approver.R5, /approve exact production plan hash/i);
+  assert.equal(authority.authority_planes.platform_administration.customer_delegable, false);
+  assert.equal(authority.authority_planes.platform_administration.launch_holder, "Joe");
 });
 
 test("security contract separates audience, session, data, and freshness", () => {
@@ -78,6 +81,7 @@ test("security contract separates audience, session, data, and freshness", () =>
   assert.equal(security.session.origin, "https://ops.doctorcre.com");
   assert.equal(security.session.audience, "carr-control-room-web");
   assert.equal(security.session.cookie, "__Host-ops_session");
+  assert.equal(security.session.tenant_context.client_mutable, false);
   assert.match(security.classifications.O4_never_store, /DSNs/);
   assert.match(security.freshness.healthy_only_when, /Every required authoritative signal/);
   assert.ok(security.freshness.forbidden.some(rule => rule.includes("cached Healthy")));
@@ -101,7 +105,7 @@ test("acceptance freezes six critical flows and all adversarial gates", () => {
   assert.equal(acceptance.flows.length, 6);
   assert.deepEqual(acceptance.presentation_states, ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"]);
   const ids = new Set(acceptance.adversarial_tests.map(item => item.id));
-  for (const required of ["cross_audience_replay", "profile_not_auth", "self_escalation", "stale_approval", "wrong_environment_or_target", "injection_is_data", "secret_canary", "offline_or_stale_collector", "reconnect_authority", "agent_new_session", "audit_chain"]) {
+  for (const required of ["cross_audience_replay", "profile_not_auth", "self_escalation", "stale_approval", "wrong_environment_or_target", "injection_is_data", "secret_canary", "offline_or_stale_collector", "reconnect_authority", "agent_new_session", "audit_chain", "server_derived_tenant_context", "cross_tenant_denial_fixture", "platform_tenant_authority_split", "workflow_lifecycle_governance", "doc_outage_operability", "maintenance_accounting_gate", "tenant_config_allowlist", "actionable_alert_and_safe_automation"]) {
     assert.ok(ids.has(required), required);
   }
 });

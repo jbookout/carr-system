@@ -4,13 +4,13 @@
   "status": "phase0_candidate",
   "source": {
     "doctrine_document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-    "doctrine_generation": 324,
-    "doctrine_section_count": 33,
+    "doctrine_generation": 334,
+    "doctrine_section_count": 34,
     "timing_section_key": "s23",
     "timing_section_version": 3,
-    "source_sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b",
+    "source_sha256": "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16",
     "planning_baseline": "2026-08-11",
-    "provenance_status": "durable doctrine read back at generation 324; retained Word checksum predates the s23 timing revision and is not claimed current"
+    "provenance_status": "durable doctrine read back at generation 334; 47-page Word artifact checksum verified against s00 v3 metadata"
   },
   "north_star": "One place to run the business; one assistant that turns conversation into governed work.",
   "operating_objective": {
@@ -35,7 +35,7 @@
     "canonical_truth": "Neon-backed CARR record layer",
     "clients": ["responsive website", "installed Mac shell after website completion", "iPhone voice-first client", "iPad Tour Mode client"],
     "separate_products": ["CARR Control Room", "future public marketing website"],
-    "non_goals": ["Android", "client portal", "third-party user roles", "Slack as operating system", "Hermes dependency", "automatic external sends", "automatic publishing or spend", "full transcript library", "wholesale Front Door port"]
+    "non_goals": ["Android", "client portal", "third-party user roles", "public SaaS or public signup", "self-service tenant creation or client-supplied tenant selection", "customer tenant administration or launch billing", "customer ownership or control of CARR platform intellectual property", "Slack as operating system", "Hermes dependency", "automatic external sends", "automatic publishing or spend", "full transcript library", "wholesale Front Door port"]
   },
   "canonical_item_grammar": ["name", "explicit_state", "why_it_matters", "accountable_owner", "next_action", "source", "freshness_when_relevant"],
   "terms": [
@@ -56,6 +56,9 @@
     {"term": "Doc", "definition": "Human-friendly explanation, intake, and routing. Doc may read, capture, propose, and queue governed work but never inherits unrestricted partner authority."},
     {"term": "Claude Code and Codex", "definition": "Heavy sessions for exploration, genuinely complex investigation, construction, and system improvement—not the routine operating interface."},
     {"term": "CARR record layer", "definition": "The canonical source of truth for governed business records, decisions, provenance, and durable work history."},
+    {"term": "Tenant", "definition": "A server-owned isolation boundary applied to records, projections, events, jobs, attachments, search, exports, Doc, AI, and sync. Launch has exactly one CARR tenant for Joe and Dell; clients never select the authoritative tenant."},
+    {"term": "Workflow definition", "definition": "An owner-controlled, tenant-bound, immutable version of a routine that graduates experimental, pilot, approved, standard, then retired through evidence-gated promotion, rollback, and cutover."},
+    {"term": "Normal internal maintenance", "definition": "Routine upkeep measured separately from attributed exceptions against a three-to-five-human-hours-per-month operating target; the actual baseline remains unknown until measured."},
     {"term": "Engineering request", "definition": "A durable system-change request from a conversation, call, tour, screen, or manual report, claimed by a later interactive coding session and completed only with evidence."},
     {"term": "Notification Center", "definition": "The authoritative inbox for unresolved human decisions and meaningful failures; operating modules remain the source of work."},
     {"term": "Sterile mode", "definition": "A global client-facing presentation preference that suppresses internal notes, commissions, traces, system activity, and sensitive reasoning without changing authorization."},

@@ -1,11 +1,17 @@
 {
   "contract": "carr-integrated-phase0-program",
-  "version": "1.1.0",
-  "status": "phase0_artifacts_reconciled_and_independently_verified_against_three_roadmaps_and_production_baseline_pending_human_acceptance_and_council",
+  "version": "1.2.0",
+  "status": "phase0_amendment_reconciled_and_independently_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
   "decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f",
   "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
   "artifact_freeze_decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84",
   "integrated_delivery_decision_id": "69512a40-99ec-483f-8528-5e05a4969551",
+  "tenant_and_workflow_decision_ids": {
+    "tenant_ready_owner_controlled_licensing": "f8799b7f-f655-4da7-b378-20ff312d4fe3",
+    "mature_rails_with_provisional_workflows": "1e929e67-6c69-4be3-ae57-47950a0d2a4d",
+    "normal_internal_maintenance_budget": "9e06926b-8928-4b99-8a4c-5fb89717289a",
+    "platform_ip_and_control_retained_by_joe": "09959bb0-8f3e-4abf-84cb-cc1b72b1d8f9"
+  },
   "source_thread_id": "019fec56-49b6-7ae0-9dfa-0af4289fbaa8",
   "human_quote": "i honestly plan to run a claude fable audit of both roadmaps, plus a council meeting between fable 5, 5.6 Sol, and SuperGrok 4.5 to produce a final version. this will likely occur wednesday night when i get my claude usage reset. I'm going to proceed with phase 0 for both roadmaps tonight that way we are prepared as soon as the final version is approved to start rolling out construction",
   "canonical_sources": [
@@ -13,42 +19,77 @@
       "title": "CARR Workspace — Big Design Up Front",
       "slug": "carr-workspace-bduf",
       "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-      "generation": 324,
-      "active_sections": 33,
+      "generation": 334,
+      "active_sections": 34,
       "receipt": "fresh_read_verified",
-      "material_revision": "s23 version 3 harmonizes the roadmap to approximately 12 weeks, a 12–16-week evidence range for production-mature web, and 4–6 months for the full multi-platform end state."
+      "material_revision": "s32 adds tenant-ready Workspace boundaries and evolving-workflow governance without changing the approved timing or commercial scope.",
+      "new_section": {
+        "section_key": "s32-tenant-ready-workspace-and-evolving-workflows",
+        "section_id": "8eb8136e-9657-473d-98d1-54b809b956df"
+      },
+      "document_control_version": 3,
+      "word_artifact": {
+        "path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
+        "sha256": "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16",
+        "pages": 47
+      }
     },
     {
       "title": "CARR Control Room — Big Design Up Front",
       "slug": "carr-control-room-bduf",
       "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
-      "generation": 251,
-      "active_sections": 38,
-      "receipt": "fresh_read_verified"
+      "generation": 335,
+      "active_sections": 39,
+      "receipt": "fresh_read_verified",
+      "material_revision": "s37 adds tenant operations, workflow governance, and lean-maintenance controls without changing the approved timing or commercial scope.",
+      "new_section": {
+        "section_key": "s37-tenant-operations-workflow-governance-and-lean-maintenance",
+        "section_id": "e6892082-fc29-47a3-a6ad-25080a8fac17"
+      },
+      "document_control_version": 3,
+      "word_artifact": {
+        "path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx",
+        "sha256": "b504da8b9e06cb5a291c8f4fb00ad0f8d410d2415ade668a79251d6b1b3ff5cc",
+        "pages": 42
+      }
     },
     {
       "title": "CARR Mature Software End State — Big Design Up Front",
       "slug": "carr-mature-software-end-state-bduf",
       "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
-      "generation": 325,
-      "active_sections": 40,
-      "ordinal_range": [0, 39],
+      "generation": 330,
+      "active_sections": 41,
+      "ordinal_range": [0, 40],
       "receipt": "fresh_read_verified",
-      "dependency_edges": ["CARR Workspace — Big Design Up Front", "CARR Control Room — Big Design Up Front", "CARR Production Maturity Baseline"]
+      "dependency_edges": ["CARR Workspace — Big Design Up Front", "CARR Control Room — Big Design Up Front", "CARR Production Maturity Baseline"],
+      "new_section": {
+        "section_key": "s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state",
+        "section_id": "4552de91-0806-47ae-ae02-6ea313b90d72"
+      },
+      "document_control_version": 4,
+      "word_artifact": {
+        "path": "/Users/booko/Desktop/System Road Maps/CARR Mature Software End State - BDUF and Implementation Roadmap.docx",
+        "sha256": "db14da9c7d5b6b2cd5cdec27a10290bfa67f59ee2271eca109e53560db69b23d",
+        "pages": 49
+      }
     },
     {
       "title": "CARR Production Maturity Baseline",
       "slug": "carr-production-maturity-baseline",
       "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
-      "generation": 280,
-      "active_sections": 27,
+      "generation": 326,
+      "active_sections": 28,
       "role": "governing production source",
-      "receipt": "fresh_read_verified"
+      "receipt": "fresh_read_verified",
+      "new_section": {
+        "section_key": "s27-owner-controlled-tenant-readiness-workflow-evolution-and-maintenance-budget",
+        "section_id": "a4864ee7-e0a4-4b36-848f-5aa134989796"
+      }
     }
   ],
   "lanes": [
-    {"product": "CARR Workspace", "role": "main private business product", "root": "workspace", "original_source_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d", "phase0_word_snapshot_sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b", "word_snapshot_status": "historical_snapshot_predating_live_doctrine_generation_324", "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "doctrine_generation": 324, "doctrine_sections": 33, "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"},
-    {"product": "CARR Control Room", "role": "operational safety and evidence counterpart", "root": "control-room", "original_source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "phase0_word_snapshot_sha256": "b25cf6ca1c50998699f858322847b3911b96e322a34256068e88ece85af3c565", "word_snapshot_status": "validated_snapshot_of_control_room_doctrine_generation_251_but_not_an_integrated_umbrella_export", "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 251, "doctrine_sections": 38, "phase0_exit": "artifact preparation plus Joe's six uncoached flows and authority/evidence mapping acceptance"}
+    {"product": "CARR Workspace", "role": "main private business product", "root": "workspace", "original_source_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d", "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx", "current_word_artifact_sha256": "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16", "current_word_artifact_pages": 47, "word_artifact_status": "verified_current_doctrine_export_generation_334", "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "doctrine_generation": 334, "doctrine_sections": 34, "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"},
+    {"product": "CARR Control Room", "role": "operational safety and evidence counterpart", "root": "control-room", "original_source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx", "current_word_artifact_sha256": "b504da8b9e06cb5a291c8f4fb00ad0f8d410d2415ade668a79251d6b1b3ff5cc", "current_word_artifact_pages": 42, "word_artifact_status": "verified_current_doctrine_export_generation_335", "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 335, "doctrine_sections": 39, "phase0_exit": "artifact preparation plus Joe's six uncoached flows and authority/evidence mapping acceptance"}
   ],
   "integrated_delivery": {
     "ruling": "Eight weeks is the CARR Mature Foundation milestone, not the full native mature end state.",
@@ -71,9 +112,42 @@
     "source": "CARR Mature Software End State sections 25–28; estimates remain subject to measured usage and current vendor pricing."
   },
   "operating_objective": {"section_title": "Operating objective and AI-session displacement test", "cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?", "objectives": 8, "baseline_measures": 5, "baseline_values": "unknown until instrumented or interviewed", "adoption_rule": "A routine is not adopted until Joe or Dell can complete and understand it without a heavy Claude Code or Codex session and the old session-driven ritual has an explicit retirement or cutover path.", "council_criterion": "The Wednesday council must reject a slice that cannot trace the objective and baseline through requirements, screens, canonical data/actions, tests, post-launch comparison, and cutover."},
+  "tenant_readiness_and_workflow_governance": {
+    "launch_scope": "One private CARR tenant with Joe and Dell only; tenant-ready safety does not authorize a public SaaS launch.",
+    "tenant_context": "The server derives authoritative tenant context from the authenticated audience, session, membership, and route binding; client or agent supplied tenant identifiers never grant or widen access.",
+    "cross_tenant_rule": "Every tenant-scoped read, write, event, evidence reference, job, and automation must fail closed when the authenticated tenant differs, including fixtures that use otherwise-valid foreign record IDs.",
+    "workflow_lifecycle": ["experimental", "pilot", "approved", "standard", "retired"],
+    "workflow_promotion": "Promotion is explicit, attributed, reviewable, and gated by named evidence, immutable version, accountable owner, observation window, failure criteria and handling, rollback plan, adoption result, and cutover plan; in-flight work pins its workflow version and retirement preserves audit history and a rollback or replacement path.",
+    "bounded_trial_rule": "A workflow trial must be possible in at most five business days, and may be shorter, using the governed thin primitives, with no new source of truth, destructive migration, parallel writer, or generic workflow engine.",
+    "maintenance_budget": {
+      "normal_internal_target": "3–5 human hours per month",
+      "measurement_rule": "Measure actual human hours; do not invent a baseline or hide toil in agent or vendor cost.",
+      "exception_rule": "Attribute material new scope, vendor or platform incidents, security events, and other approved exceptions separately from normal internal maintenance.",
+      "toil_trigger": "More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work.",
+      "mature_claim_gate": "The low-toil mature claim requires three complete consecutive normal months at three to five hours with required release, audit, security, backup, restore, and SLO evidence intact and exception time separately attributed."
+    },
+    "ownership_and_commercial_exclusions": [
+      "Joe retains platform ownership, intellectual property, and control.",
+      "A corporation may license owner-controlled seats only as a customer.",
+      "No public signup, self-service tenant creation, public SaaS, customer platform control, ownership transfer, or launch-scope expansion is authorized.",
+      "No generic workflow engine, plugin marketplace, customer scripting, or customer-authored executable workflow is authorized in the current program.",
+      "The amendment does not change the approved delivery timing or cost bands."
+    ],
+    "construction_gate": "These are Phase 0 contracts and fixtures only; production construction remains blocked until Joe approves the Wednesday council output."
+  },
+  "doctrine_metadata_integrity": {
+    "status": "blocked_by_deployed_verb_bug",
+    "open_loop_id": "2a9eca94-2311-42a5-a90a-a7675ea714f8",
+    "open_loop_number": 315,
+    "defect": "Workspace s01a and s02 still share ordinal 2; Control Room s01a and s02 still share ordinal 2.",
+    "attempt_result": "The deployed change verb accepted ordinal in its input schema but only applies ordinal when creating a section, so metadata-only updates advanced generations without changing either ordinal.",
+    "integrity_evidence": "Fresh read-back confirmed section IDs, titles, body text, and body hashes were unchanged.",
+    "release_claim": "Ordinal repair is not complete and must not be represented as fixed."
+  },
   "artifact_verification": {
-    "workspace": {"node_tests": 29, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_internal_files": "denied"},
-    "control_room": {"node_tests": 75, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_interactive_visual_accessibility": "open"}
+    "status": "cold_context_independent_verification_passed",
+    "workspace": {"prior_node_tests": 29, "current_node_tests": 30, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_internal_files": "denied"},
+    "control_room": {"prior_node_tests": 75, "current_node_tests": 84, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_internal_files": "denied", "runtime_interactive_visual_accessibility": "open"}
   },
   "tonight_allowed": ["terminology and domain glossary", "state machines and explicit transition guards", "role, authority, capability, and risk matrices", "route and information-architecture maps", "business and operational entity contracts", "traceability matrices", "retention and redaction contracts", "notification and event taxonomies", "test and acceptance strategy", "threat models", "runnable fixture-backed wireframes", "canonical synthetic JSON twins", "environment and release process", "structured open-decision and council-review registers"],
   "tonight_forbidden": ["production construction", "production migration", "deployment", "irreversible implementation", "live authority route", "automatic consequential or external effect", "claiming a human exit gate without observed evidence"],
