@@ -199,9 +199,20 @@ def classify(rel):
     return "reference"
 
 
+# Generated renders written OUTSIDE exporters/targets.py, which generated_set()
+# parses and therefore cannot see. Added 2026-08-11: 00_Context/today.md is
+# rebuilt every morning by bin/local-briefs.sh (line 68) and opens with "Do not
+# hand-edit", but because it is not an export target it was counted as
+# un-migrated doctrine — leaving migration-coverage permanently at 1 and
+# inviting someone to freeze one morning's brief into the store as an SOP.
+# It belongs to the generated class, not the archive class: archive means
+# immutable history kept as byte-exact evidence, and this file is neither.
+LOCAL_GENERATED = {"00_Context/today.md"}
+
+
 def main():
     count_only = "--count" in sys.argv
-    gen = generated_set()
+    gen = generated_set() | LOCAL_GENERATED
     migrated, mig_err = migrated_set()
     remaining, archive = [], []
     for root, dirs, files in os.walk(VAULT):
