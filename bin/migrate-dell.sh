@@ -81,33 +81,61 @@ if [ "${1:-}" = "--preflight" ]; then
   TMP="${TMPDIR:-/tmp}/carr-preflight-$$"
   trap 'rm -rf "$TMP"' EXIT INT TERM
   mkdir -p "$TMP/home/Library/LaunchAgents" "$TMP/home/.claude"
+  print -r -- '{}' > "$TMP/home/.claude/settings.json"
   say "PREFLIGHT — cloning origin/main into a scratch machine"
   say "this answers 'what will Dell actually get', which a dry run here cannot"
   say ""
   if ! git -C "$REPO" fetch --quiet </dev/null 2>/dev/null; then
     say "  note  could not fetch; testing the local main instead"
   fi
-  REF=$(git -C "$REPO" rev-parse --verify --quiet origin/main || echo main)
+  PREFLIGHT_REF="${CARR_PREFLIGHT_REF:-origin/main}"
+  if ! REF=$(git -C "$REPO" rev-parse --verify --quiet "$PREFLIGHT_REF^{commit}"); then
+    say "  FAIL  preflight ref '$PREFLIGHT_REF' is not a commit"
+    exit 1
+  fi
   if ! git clone --quiet --no-local "$REPO" "$TMP/home/carr-system" </dev/null 2>&1; then
     say "  FAIL  clone failed"; exit 1
   fi
-  git -C "$TMP/home/carr-system" checkout --quiet "$REF" </dev/null 2>/dev/null
+  # A local clone transfers branch refs, not the source repo's remote-tracking
+  # refs. After a GitHub merge, origin/main can therefore name an object the
+  # clone did not receive. The old checkout suppressed that failure and tested
+  # the feature-branch HEAD while labelling it origin/main. Fetch the selected
+  # source ref explicitly, compare its object ID, and refuse any mismatch.
+  if ! git -C "$TMP/home/carr-system" fetch --quiet "$REPO" "$PREFLIGHT_REF" </dev/null 2>/dev/null; then
+    say "  FAIL  could not fetch exact preflight ref '$PREFLIGHT_REF' into scratch clone"
+    exit 1
+  fi
+  FETCHED=$(git -C "$TMP/home/carr-system" rev-parse FETCH_HEAD 2>/dev/null || print -r -- "")
+  if [ "$FETCHED" != "$REF" ]; then
+    say "  FAIL  requested $REF but scratch fetch returned ${FETCHED:-nothing}"
+    exit 1
+  fi
+  if ! git -C "$TMP/home/carr-system" checkout --quiet --detach "$REF" </dev/null 2>/dev/null; then
+    say "  FAIL  could not check out exact preflight commit $REF"
+    exit 1
+  fi
+  CHECKED_OUT=$(git -C "$TMP/home/carr-system" rev-parse HEAD 2>/dev/null || print -r -- "")
+  if [ "$CHECKED_OUT" != "$REF" ]; then
+    say "  FAIL  scratch checkout is ${CHECKED_OUT:-nothing}, expected $REF"
+    exit 1
+  fi
   git -C "$TMP/home/carr-system" config user.email "preflight@example.com"
+  PFAIL=0
 
-  say "testing $(git -C "$TMP/home/carr-system" rev-parse --short HEAD) (origin/main)"
+  say "testing $(git -C "$TMP/home/carr-system" rev-parse --short HEAD) ($PREFLIGHT_REF)"
   MODE=$(git -C "$TMP/home/carr-system" ls-files -s bin/migrate-dell.sh | cut -d' ' -f1)
   if [ "$MODE" = "100755" ]; then
     say "  ok    bin/migrate-dell.sh is executable as pulled"
   else
     say "  FAIL  bin/migrate-dell.sh is mode $MODE — Dell gets 'permission denied'"
     say "        fix: git update-index --chmod=+x bin/migrate-dell.sh && commit"
+    PFAIL=$((PFAIL+1))
   fi
 
   say ""
   say "  gates, as Dell will run them:"
-  PFAIL=0
   for t in guard conduct-gate escalation-gate gate-edit-gate git-writer-gate \
-           context-handoff-gate corpus-render-gate; do
+           context-handoff-gate corpus-render-gate config-as-code migrate-dell; do
     F="$TMP/home/carr-system/ops/$t-selftest.py"
     [ -f "$F" ] || { print -r -- "    note  $t — not in the clone"; continue; }
     # CARR_VAULT is passed through deliberately. The scratch HOME has no Drive
@@ -139,6 +167,16 @@ if [ "${1:-}" = "--preflight" ]; then
     fi
   done
 
+  say ""
+  say "  actual installer, with empty Claude settings and no Codex client:"
+  if (cd "$TMP/home/carr-system" && HOME="$TMP/home" CARR_VAULT="$REAL_VAULT" \
+       python3 ops/config-as-code.py install </dev/null >/tmp/pf-install.log 2>&1); then
+    print -r -- "    ok    Claude-only config install dry run"
+  else
+    print -r -- "    FAIL  Claude-only config install — $(tail -1 /tmp/pf-install.log | tr -s ' ')"
+    PFAIL=$((PFAIL+1))
+  fi
+
   # The defect class that caused this audit: a gate green here only because of
   # working-tree changes nobody pushed. Name the files rather than the count.
   say ""
@@ -158,10 +196,68 @@ if [ "${1:-}" = "--preflight" ]; then
     say "PREFLIGHT FAILED — $PFAIL item(s). Dell's migration would not be clean."
     exit 1
   fi
-  say "PREFLIGHT CLEAN — the packet on origin/main works on a fresh Mac."
-  say "On Dell's machine: ~/carr-system/bin/migrate-dell.sh --apply"
+  say "PREFLIGHT CLEAN — the packet at $PREFLIGHT_REF works on a fresh Mac."
+  say "On Dell's machine: start Claude Code in ~/carr-system and type: ready for migration"
   exit 0
 fi
+
+# An apply run always leaves a machine-readable receipt, including on failure.
+# The session uses this as the boundary between machine work and record writes:
+# only the exact success status below permits the latter. Atomic rename prevents
+# a killed process from leaving a half-written receipt that looks authoritative.
+RECEIPT="$REPO/out/dell-migration-receipt.json"
+migration_receipt() {
+  local rc="${1:-1}"
+  trap - EXIT
+  [ $APPLY -eq 1 ] || return 0
+  mkdir -p "$REPO/out" 2>/dev/null || return 0
+  # `status` is a special read-only parameter in zsh (the script's shell), so
+  # a local of that name aborts the EXIT receipt path on Dell's Mac. Keep the
+  # JSON field name but use an ordinary local variable.
+  local receipt_status="migration_incomplete"
+  [ "$rc" -eq 0 ] && receipt_status="machine_migrated_pending_record_closeout"
+  local commit branch tmp
+  commit=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || print -r -- "unknown")
+  branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || print -r -- "unknown")
+  tmp="$RECEIPT.tmp.$$"
+  /usr/bin/python3 -c '
+import datetime, json, sys
+path, status, commit, branch, rc, ok, note, fail = sys.argv[1:]
+receipt = {
+  "schema_version": 1,
+  "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+  "status": status,
+  "exit_code": int(rc),
+  "source_commit": commit,
+  "source_branch": branch,
+  "counts": {"ok": int(ok), "note": int(note), "fail": int(fail)},
+  "machine_checks": [
+    "preconditions", "fast_forward_only", "python_environment",
+    "config_as_code_install", "derived_fetch_allowlist", "gate_selftests",
+    "config_drift_check"
+  ],
+  "record_closeout": {
+    "performed_by_script": False,
+    "required_after_success": ["A15", "A17"],
+    "must_remain_open": ["A11", "A12", "A13", "A16"]
+  },
+  "live_identity_verification_required": True,
+  "logs": [
+    "/tmp/mig-pull.log", "/tmp/mig-venv.log", "/tmp/mig-pip.log",
+    "/tmp/mig-hooks.log", "/tmp/mig-allow.log", "/tmp/mig-check.log",
+    "/tmp/mig-drift.log"
+  ]
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(receipt, handle, indent=2, sort_keys=True)
+    handle.write("\\n")
+' "$tmp" "$receipt_status" "$commit" "$branch" "$rc" "$ok" "$warn" "$fail" \
+    && mv -f "$tmp" "$RECEIPT" \
+    && say "receipt: $RECEIPT" \
+    || { rm -f "$tmp"; say "  FAIL  could not write migration receipt: $RECEIPT"; }
+  return 0
+}
+trap 'migration_receipt $?' EXIT
 
 PY="python3"
 [ -x "$REPO/.venv/bin/python" ] && PY="$REPO/.venv/bin/python"
@@ -318,8 +414,13 @@ if [ $APPLY -eq 1 ]; then
     bad "hook install failed — see /tmp/mig-hooks.log"
   fi
 else
-  $PY "$REPO/ops/config-as-code.py" install </dev/null 2>&1 | sed 's/^/        /' | head -6
-  good "would install the repo's hooks block"
+  if $PY "$REPO/ops/config-as-code.py" install </dev/null >/tmp/mig-hooks.log 2>&1; then
+    sed 's/^/        /' /tmp/mig-hooks.log | head -6
+    good "would install the repo's hooks block"
+  else
+    sed 's/^/        /' /tmp/mig-hooks.log | head -6
+    bad "hook install dry run failed — see /tmp/mig-hooks.log"
+  fi
 fi
 
 # ── 4. DERIVED ALLOWLIST ────────────────────────────────────────────────────
@@ -399,16 +500,24 @@ without a restart (verified 2026-08-09).
 THE SESSION'S HALF — the driving session does these, not this script, because
 they are record writes and records go through verbs:
 
-  1. Call standing-context. It should return the shared rules and Dell's
-     inbound queue. If it answers, the doctrine store is live for him and the
-     old markdown boot path is no longer needed.
+  1. Require out/dell-migration-receipt.json to report
+     machine_migrated_pending_record_closeout. Then call standing-context and
+     verify its server-derived sponsor is Dell, its personal brain is
+     dell-personal, and its shared/personal counts match the current generated
+     fallback headers. Do not pass a partner, tenant, or capability selector.
 
-  2. Close these inbound items for Dell, since this script just did them:
-       - the repo-pull item (guard protections, host allowlist, egress rebuild)
-       - the doctrine-store item (his sessions now boot from the store)
-     Leave the three protocol-adoption items open — those need Dell to actually
-     read and agree, which no script can do for him.
+  2. Fresh-read, close with a concrete verified outcome, and read back exactly:
+       - A15 / fa0e6c92-8bc7-4e42-9970-0402914d6a19 (machine migration)
+       - A17 / deb4357e-801f-49f6-bc6c-4c884e3e1f7c (doctrine-store readiness)
+     Leave A11, A12 and A13 open: Dell must actually read and agree to those
+     protocol changes. Leave A16 open because the dictation rig is unrelated.
 
-  3. Tell Dell what changed on his machine, in plain words, not item numbers.
+  3. Run ./run.sh health and ops/config-as-code.py check, then tell Dell what
+     changed on his machine in plain words, not item numbers.
+
+The compiled shared and Dell-personal files remain the supported local fallback
+through the 2026-08-21 cutoff. A live doctrine-store read does not retire them
+early. Do not disconnect or reconnect the connector unless the deployed tool
+registry proves that is required.
 NEXT
 exit 0

@@ -13,7 +13,7 @@
 
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool } from "./tools.js";
-import { actorFromProps } from "./identity.js";
+import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -229,7 +229,14 @@ function toolList(profile = "full") {
     }));
 }
 
-async function callTool(env, actor, name, args, profile = "full") {
+// Exported for deterministic no-network identity-gate tests. It remains the
+// single normal dispatcher path; callers receive no additional route or grant.
+export async function callTool(env, actor, name, args, profile = "full") {
+  const personalScope = personalScopeForActor(actor);
+  if (personalScope.status === "error") {
+    throw new ToolError({ error: personalScope.error,
+      hint: "this OAuth agent grant lacks its required server-derived sponsor. Reconnect through the registered OAuth flow; no tool argument can select a personal brain." });
+  }
   // call-verb: the deploy-gap passthrough (Joe, 2026-08-08: "theres got to be
   // a way to fix the need for having to reconnect the connector to ship
   // things"). Connectors cache tools/list at connect time, so a freshly
@@ -323,6 +330,13 @@ export async function dispatch(request, env, ctx, actor) {
   // reasoning, for actor.review, set in exactly one place (index.js's
   // reviewActorFor, on a REVIEW_TOKENS bearer match).
   const profile = actor.probe ? "probe" : actor.review ? "reviewer" : profileFor(request);
+  // The authority class is server-derived from the authenticated actor. The
+  // legacy ?profile= remains only a voluntary operational limiter: it can
+  // reduce the listed/callable verbs, never select a sponsor or widen humanOnly.
+  const scopedActor = { ...actor,
+    authorization_class: authorizationClassForActor(actor),
+    organization_tenant_id: organizationTenantForActor(actor),
+    operational_profile: profile };
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 
@@ -373,7 +387,7 @@ export async function dispatch(request, env, ctx, actor) {
       case "tools/call": {
         env.ctx = ctx;
         try {
-          const result = await callTool(env, actor, rpc.params?.name, rpc.params?.arguments, profile);
+          const result = await callTool(env, scopedActor, rpc.params?.name, rpc.params?.arguments, profile);
           return reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
         } catch (e) {
           if (e instanceof ToolError)

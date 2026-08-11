@@ -81,7 +81,10 @@ test("UI exposes two workspaces, explicit controls, mobile cards, and Call Mode"
   ]);
   assert.match(html, /data-workspace="team"/);
   assert.match(html, /data-workspace="national_account"/);
-  assert.match(html, /Start agenda/);
+  assert.match(html, /Review deals/);
+  assert.doesNotMatch(html, /Start agenda|id="callModeHeroButton"/);
+  assert.match(html, /id="callModeButton"/);
+  assert.doesNotMatch(app, /callModeHeroButton/);
   assert.match(html, /Search work records/);
   assert.match(app, /new Date\(new Date\(\)\.toDateString\(\)\)/);
   assert.doesNotMatch(app, /new Date\('2026-/);
@@ -113,6 +116,26 @@ test("parking separates Salesforce record existence from active work", async () 
   assert.match(tools, /"operating_state"/);
   assert.match(tools, /dealroom:apply-operating-state/);
   assert.match(tools, /parked_by=case when \$2='parked' then \$5::uuid else null end/);
+});
+
+test("Deal Room keeps accessibility and add-work controls available", async () => {
+  const [html, app, css] = await Promise.all([
+    file("dealroom/index.html"), file("dealroom/js/app.js"), file("dealroom/css/app.css"),
+  ]);
+  assert.match(html, /id="colorAssistButton"/);
+  assert.match(html, /class="board-sticky"[\s\S]*class="filters"[\s\S]*id="search"[\s\S]*id="stickyAddButton"[^>]*>\+ Add work record[\s\S]*class="sticky-table-header"/);
+  assert.doesNotMatch(html, /id="addButton"/);
+  assert.doesNotMatch(html, /id="persistentAddButton"/);
+  assert.match(app, /dealroom-color-assist/);
+  assert.match(app, /\$\('#stickyAddButton'\)\.onclick = openAddForm;/);
+  assert.doesNotMatch(app, /\$\('#addButton'\)/);
+  assert.doesNotMatch(app, /persistentAddButton/);
+  assert.match(app, /stickyAgentHeading/);
+  assert.match(css, /body\.color-assist tr\.attention/);
+  assert.match(css, /body\.color-assist tr\.parked/);
+  assert.match(css, /\.board-sticky\{position:sticky/);
+  assert.match(css, /\.sticky-add-button\{/);
+  assert.doesNotMatch(css, /\.persistent-add-button\{/);
 });
 
 test("Call Mode post-call UI is review-first and never sends email", async () => {

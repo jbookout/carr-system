@@ -110,7 +110,7 @@ test("Deal Room gate admits exactly both partner identities with their existing 
     // part of that claim, not an incidental field.
     assert.deepEqual((await api.json()).actor,
       { slug, display, human: true, via: "dealroom-cookie", client_id: "dealroom-pwa",
-        human_slug: null });
+        human_slug: null, sponsoring_human_slug: null, sponsor_required: false });
   }
 });
 

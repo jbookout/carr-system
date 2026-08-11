@@ -24,6 +24,7 @@
       <span class="capture" id="captureStatus" hidden>Capture inactive</span>
       <button type="button" class="call-mode-button" id="callModeButton" aria-haspopup="dialog" aria-label="Open Call Mode"><span aria-hidden="true">✦</span> Call Mode</button>
       <span class="avatar" id="selfAvatar" aria-label="Signed-in partner">?</span>
+      <button type="button" class="icon-button color-assist-toggle" id="colorAssistButton" aria-label="Turn on color-blind-friendly view" aria-pressed="false" title="Color-blind-friendly view"><span aria-hidden="true">◐</span><span class="assist-label">Color assist</span></button>
       <button type="button" class="icon-button" id="themeButton" aria-label="Toggle dark theme" title="Toggle dark theme">☾</button>
     </div>
   </header>
@@ -40,9 +41,7 @@
       </div>
       <div class="hero-actions">
         <button type="button" class="secondary" id="ownerButton" hidden>Change owner</button>
-        <button type="button" class="secondary" id="addButton">Add deal</button>
-        <button type="button" class="secondary call-mode-hero" id="callModeHeroButton"><span aria-hidden="true">✦</span> Call Mode</button>
-        <button type="button" class="primary" id="agendaButton">Start agenda</button>
+        <button type="button" class="primary" id="agendaButton">Review deals</button>
       </div>
     </section>
 
@@ -52,25 +51,33 @@
       <div class="stats" id="stats" aria-label="Workspace summary"></div>
       <aside class="focus" id="focusStrip" aria-label="Suggested focus"></aside>
 
-      <div class="toolbar">
-        <div class="filters" role="group" aria-label="Filter work records">
-          <button type="button" class="filter on" data-filter="active">Active</button>
-          <button type="button" class="filter" data-filter="mine">Mine</button>
-          <button type="button" class="filter" data-filter="attention">Needs attention</button>
-          <button type="button" class="filter" data-filter="stale">Gone quiet</button>
-          <button type="button" class="filter" data-filter="missing">Missing next step</button>
-          <button type="button" class="filter" data-filter="delta">Changed since review</button>
-          <button type="button" class="filter" data-filter="parked">Parked</button>
+      <div class="board-sticky" id="boardSticky">
+        <div class="toolbar">
+          <div class="filters" role="group" aria-label="Filter work records">
+            <button type="button" class="filter on" data-filter="active">Active</button>
+            <button type="button" class="filter" data-filter="mine">Mine</button>
+            <button type="button" class="filter" data-filter="attention">Needs attention</button>
+            <button type="button" class="filter" data-filter="stale">Gone quiet</button>
+            <button type="button" class="filter" data-filter="missing">Missing next step</button>
+            <button type="button" class="filter" data-filter="delta">Changed since review</button>
+            <button type="button" class="filter" data-filter="parked">Parked</button>
+          </div>
+          <label class="search-wrap">
+            <span class="sr-only">Search work records</span>
+            <input id="search" type="search" autocomplete="off" placeholder="Search work records…">
+            <kbd>/</kbd>
+          </label>
+          <button type="button" class="primary sticky-add-button" id="stickyAddButton" aria-label="Add work record">+ Add work record</button>
         </div>
-        <label class="search-wrap">
-          <span class="sr-only">Search work records</span>
-          <input id="search" type="search" autocomplete="off" placeholder="Search work records…">
-          <kbd>/</kbd>
-        </label>
+        <div class="sticky-table-header" aria-hidden="true">
+          <span>Work record</span><span>Phase</span><span>Next step</span><span>Next date</span>
+          <span id="stickyAgentHeading">Owner</span><span>Actions</span>
+        </div>
       </div>
 
       <div class="table-frame" id="tableFrame">
         <table aria-label="Active and parked work records">
+          <colgroup><col class="col-work"><col class="col-phase"><col class="col-step"><col class="col-date"><col class="col-owner"><col class="col-actions"></colgroup>
           <thead>
             <tr>
               <th>Work record</th><th>Phase</th><th>Next step</th><th>Next date</th>
