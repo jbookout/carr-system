@@ -123,7 +123,29 @@ no upspeak on statements).
   ref_audio + per-line delivery instructions ("with quiet concern") for the four
   doctrine registers. Test result lands in the bake-off order's execution log;
   adopt as primary render path if identity holds.
-- ELEVENLABS (identity confirmed 2026-08-10, Joe: "yea thats him"). Voice "Doc",
+- ELEVENLABS IS NOT PROMOTED. RULED 2026-08-10 at the end of the build session.
+  It works, it is fast enough, and it is NOT Doc's production voice. Chatterbox
+  remains the voice of record.
+    THE EVIDENCE FOR IT: identity survived the clone (Joe: "yea thats him"), and
+    latency is fine — 5 full renders of a 63-char line measured 0.90/1.13/1.16/
+    1.18/1.62s, median 1.16s. The doctrine's 300ms acknowledgment is served by a
+    pre-rendered earcon rather than TTS, so the spoken answer has its own budget
+    and 1.2s sits inside it. Speed was the whole reason for going to ElevenLabs
+    and ElevenLabs delivers it.
+    THE EVIDENCE AGAINST IT, which wins: Joe on the mastered ElevenLabs render —
+    "it sounded more masculine and a little more like jarvis [on Chatterbox].
+    after the master it sounded too human". Character, not level or pace.
+    WHY THAT SETTLES IT: this doctrine says the voice IS the character and a new
+    voice is a new being, never changed casually. Running both engines in
+    production means two Docs, which is precisely what that rule prevents. A
+    1.2-second speed gain does not buy back an audible character change.
+  WHAT WOULD REOPEN IT: closing the character gap (a re-clone from a different
+  corpus slice, or settings that recover the lower, drier read), or a live need
+  where local render speed genuinely blocks the product. Everything built for it
+  stays — the clone, render-doc.py, the mastering chain, the measured latency —
+  so promoting it later is a ruling, not a rebuild.
+
+- ELEVENLABS DETAIL (identity confirmed 2026-08-10, Joe: "yea thats him"). Voice "Doc",
   an Instant Voice Clone of 3m07s of the RAW corpus. Professional Voice Cloning
   is permanently closed to Doc — 30-minute floor against our 15.9, and it demands
   the account holder record a verification read matching the samples, which no
