@@ -70,6 +70,12 @@ VAULT = _find_vault()
 SETTINGS = os.path.join(HOME, ".claude", "settings.json")
 TASKS_SRC = os.path.join(HOME, ".claude", "scheduled-tasks")
 TASKS_REPO = os.path.join(REPO, "ops", "scheduled-tasks")
+# A quarantined definition is deliberately outside Claude's active discovery
+# directory.  It is recoverable evidence of what this reconciler removed, not
+# a second scheduler source of truth.
+TASKS_QUARANTINE = os.path.join(
+    HOME, ".claude", "scheduled-tasks-quarantine", "carr-primary-only"
+)
 LAUNCHD_SRC = os.path.join(HOME, "Library", "LaunchAgents")
 LAUNCHD_REPO = os.path.join(REPO, "ops", "launchd")
 LAUNCHD_ALT_REPO = {
@@ -134,6 +140,90 @@ PRIMARY_ONLY = {
 # The mirror image: jobs only the SECOND machine needs, because the primary
 # already gets the same effect from a chain the second machine must not run.
 SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
+
+
+# Claude scheduled-task definitions are not merely configuration files: their
+# presence asks a local AI client to perform work later.  Every tracked task is
+# therefore primary-only until its *own* machine scope has been reviewed and
+# deliberately listed here.  The empty allow-list is intentional.  It keeps a
+# Dell migration from turning Joe's existing task catalogue into Dell's queue,
+# while still leaving a narrow, auditable path for a future Dell-specific task.
+#
+# This policy is fail-closed in both directions:
+#   * a tracked primary task missing from a secondary machine is not drift;
+#   * a CARR-managed task found on a secondary machine is visible drift and is
+#     never pulled into the shared baseline; unrelated personal tasks are not
+#     CARR configuration and this tool never claims, moves, or counts them; and
+#   * secondary install never creates ~/.claude/scheduled-tasks; primary install
+#     renders the tracked definitions it owns.
+# The actual scheduler registration is outside this config reconciler, so
+# copying a SKILL.md would be both insufficient and unsafe.
+SECONDARY_SCHEDULED_TASKS: set[str] = set()
+
+
+def scheduled_task_allowed(name):
+    """Whether this machine may host the named CARR scheduled task.
+
+    Unknown task names deliberately resolve to false on a non-primary machine.
+    A new secondary task must be added to the explicit allow-list with its
+    safety case, rather than becoming installable because it happened to appear
+    in the repository.
+    """
+    return IS_PRIMARY or name in SECONDARY_SCHEDULED_TASKS
+
+
+def tracked_scheduled_task_paths():
+    """Tracked CARR task definitions, keyed by their scheduler directory name.
+
+    The repository is the ownership registry.  A random task in Claude's
+    user-owned directory is personal configuration, not CARR state: do not
+    pull it, delete it, quarantine it, or make CARR health falsely red for it.
+    """
+    if not os.path.isdir(TASKS_REPO):
+        return {}
+    return {
+        filename[:-9]: os.path.join(TASKS_REPO, filename)
+        for filename in os.listdir(TASKS_REPO)
+        if filename.endswith(".SKILL.md")
+        and os.path.isfile(os.path.join(TASKS_REPO, filename))
+    }
+
+
+def secondary_scheduled_task_state():
+    """CARR-owned task definitions active on a secondary, by safe disposition.
+
+    Exact tracked renders are safe to quarantine.  A tracked name whose body
+    differs is intentionally a hard stop: it might be a local change and this
+    reconciler must not silently discard it.  Names outside the tracked CARR
+    registry are personal tasks and are intentionally absent from this result.
+    """
+    state = {"exact": [], "modified": []}
+    if IS_PRIMARY or not os.path.isdir(TASKS_SRC):
+        return state
+    tracked = tracked_scheduled_task_paths()
+    for name in sorted(os.listdir(TASKS_SRC)):
+        local = os.path.join(TASKS_SRC, name, "SKILL.md")
+        source = tracked.get(name)
+        if not source or not os.path.isfile(local) or scheduled_task_allowed(name):
+            continue
+        if portable(read(local)) == read(source):
+            state["exact"].append(name)
+        else:
+            state["modified"].append(name)
+    return state
+
+
+def secondary_scheduled_task_violations():
+    """Installed, disallowed CARR tasks for the drift report only."""
+    state = secondary_scheduled_task_state()
+    return state["exact"] + state["modified"]
+
+
+def scheduled_task_install_plan():
+    """Return a fail-closed repo-to-machine scheduled-task reconciliation plan."""
+    if IS_PRIMARY:
+        return {"install": sorted(tracked_scheduled_task_paths()), "exact": [], "modified": []}
+    return {"install": [], **secondary_scheduled_task_state()}
 
 
 def _owner_email():
@@ -443,16 +533,17 @@ def pairs():
     seen = set()
     for name in sorted(os.listdir(TASKS_SRC)) if os.path.isdir(TASKS_SRC) else []:
         skill = os.path.join(TASKS_SRC, name, "SKILL.md")
-        if os.path.isfile(skill):
+        if os.path.isfile(skill) and scheduled_task_allowed(name):
             seen.add(f"{name}.SKILL.md")
             out.append((f"scheduled-task {name}", portable(read(skill)),
                         os.path.join(TASKS_REPO, f"{name}.SKILL.md")))
     # A task deleted from the machine but still in the repo is drift too — the
     # repo would otherwise quietly claim a job that no longer runs anywhere.
-    for f in sorted(os.listdir(TASKS_REPO)) if os.path.isdir(TASKS_REPO) else []:
-        if f.endswith(".SKILL.md") and f not in seen:
-            out.append((f"scheduled-task {f[:-9]} (IN REPO, NOT ON MACHINE)",
-                        None, os.path.join(TASKS_REPO, f)))
+    for name, source in sorted(tracked_scheduled_task_paths().items()):
+        filename = f"{name}.SKILL.md"
+        if scheduled_task_allowed(name) and filename not in seen:
+            out.append((f"scheduled-task {name} (IN REPO, NOT ON MACHINE)",
+                        None, source))
 
     for f in carr_plists():
         out.append((f"launchd {f}", portable(read(os.path.join(LAUNCHD_SRC, f))),
@@ -500,7 +591,13 @@ def cmd_check():
     # UNVERSIONED rather than folded into `untracked`, because the remedy is a
     # commit rather than a `pull`.
     unversioned = hook_scripts_untracked()
-    drift = missing + untracked + different
+    secondary_task_violations = secondary_scheduled_task_violations()
+    disallowed = [
+        (f"scheduled-task {name} (NOT ALLOWED ON SECONDARY)",
+         "present on disk; this machine has no approved scope for it")
+        for name in secondary_task_violations
+    ]
+    drift = missing + untracked + different + disallowed
     if not drift and not unversioned:
         print(f"config-as-code: OK — {len(pairs())} items, repo matches machine")
         return 0
@@ -515,7 +612,12 @@ def cmd_check():
         return 1
     # The headline carries the severity, because callers that summarise this
     # tool (tools/health-check.py) read the FIRST LINE ONLY.
-    headline = f"config-as-code: DRIFT — {len(drift)} of {len(pairs())} items"
+    # The denominator includes a CARR-owned disallowed task even though it is
+    # intentionally omitted from normal pairs() on a secondary.  Otherwise
+    # "16 of 4" could claim to have checked only four items while reporting
+    # sixteen violations, which is operationally misleading.
+    checked_items = len(pairs()) + len(disallowed)
+    headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
             label for label, _ in missing)
@@ -530,6 +632,10 @@ def cmd_check():
               "  host outside KNOWN_HOSTS.")
     if untracked or different:
         print("\n  `ops/config-as-code.py pull` to capture the machine into the repo.")
+    if disallowed:
+        print("\n  A secondary machine must not run CARR's primary-only scheduled-task "
+              "catalogue. `install --apply` can quarantine an exact tracked render; "
+              "a modified tracked task needs review and is never overwritten.")
     # Reported even when settings drift is also present: the two have different
     # remedies (a pull versus a commit), so folding them together would hide one.
     if unversioned:
@@ -544,6 +650,11 @@ def cmd_pull(apply):
     if codex_configuration_state() == "partial":
         print(f"ERROR: partial Codex configuration — {CODEX_HOOKS_SRC} exists but "
               f"{CODEX_CONFIG} does not; refusing to omit it from the captured baseline.")
+        return 1
+    disallowed = secondary_scheduled_task_violations()
+    if disallowed:
+        print("ERROR: unapproved scheduled task(s) on this secondary machine: "
+              + ", ".join(disallowed) + "; refusing to capture them into the repo.")
         return 1
     wrote = 0
     for label, live, repo_path in pairs():
@@ -641,6 +752,32 @@ def cmd_install(apply):
         else:
             print("  Codex CARR permissions: WILL MAKE THE CURRENT WORKSPACE READ-ONLY")
 
+    task_plan = scheduled_task_install_plan()
+    if task_plan["modified"]:
+        print("ERROR: modified CARR scheduled task(s) active on this secondary: "
+              + ", ".join(task_plan["modified"])
+              + "; refusing to move or overwrite them.")
+        return 1
+    if IS_PRIMARY:
+        for name in task_plan["install"]:
+            source = tracked_scheduled_task_paths()[name]
+            destination = os.path.join(TASKS_SRC, name, "SKILL.md")
+            if read(destination) == concrete(read(source)):
+                print(f"  scheduled task already matches: {name}")
+            else:
+                print(f"  {'WRITE' if apply else 'would write'}  scheduled task {name}")
+    elif task_plan["exact"]:
+        for name in task_plan["exact"]:
+            destination = os.path.join(TASKS_QUARANTINE, name)
+            if os.path.exists(destination):
+                print(f"ERROR: recovery quarantine already has {destination}; refusing to overwrite it.")
+                return 1
+            print(f"  {'QUARANTINE' if apply else 'would quarantine'}  scheduled task {name} "
+                  f"-> {destination}")
+    else:
+        print("  SKIP  scheduled tasks (secondary machines install none; no approved "
+              "secondary task scope is configured)")
+
     launchd_load_failures = []
     if apply:
         os.makedirs(LAUNCHD_SRC, exist_ok=True)
@@ -715,6 +852,26 @@ def cmd_install(apply):
     if not apply:
         print("\nDRY RUN — nothing written. Re-run with --apply.")
         return 0
+
+    # Scheduled task definitions are reconciled as definitions only.  Scheduler
+    # registration stays outside this tool; an on-disk SKILL.md must never be
+    # mistaken for proof that a task is enabled.
+    if IS_PRIMARY:
+        for name, source in sorted(tracked_scheduled_task_paths().items()):
+            destination = os.path.join(TASKS_SRC, name, "SKILL.md")
+            desired = concrete(read(source))
+            if read(destination) != desired:
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                with open(destination, "w", encoding="utf-8") as fh:
+                    fh.write(desired)
+    elif task_plan["exact"]:
+        os.makedirs(TASKS_QUARANTINE, exist_ok=True)
+        for name in task_plan["exact"]:
+            source_dir = os.path.join(TASKS_SRC, name)
+            destination = os.path.join(TASKS_QUARANTINE, name)
+            # The full directory moves so task-local state stays together and
+            # the active scheduler directory contains no CARR definition.
+            shutil.move(source_dir, destination)
 
     os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
     backup = SETTINGS + ".bak-config-as-code"

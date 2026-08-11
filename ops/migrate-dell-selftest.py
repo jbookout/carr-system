@@ -68,6 +68,19 @@ require(
     'tmp="$RECEIPT.tmp.$$"' in script and 'mv -f "$tmp" "$RECEIPT"' in script,
 )
 require(
+    "zsh receipt does not shadow its read-only status parameter",
+    'local receipt_status="migration_incomplete"' in script
+    and '"$tmp" "$receipt_status" "$commit"' in script
+    and 'local status=' not in script,
+)
+requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+require(
+    "type checking is a Python-gated dev dependency, not a Dell runtime dependency",
+    'mypy>=2.3; python_version >= "3.10"' in requirements
+    and "Development/nightly static checking only" in requirements
+    and "mypy>=1.13" not in requirements,
+)
+require(
     "record closeout is exact",
     all(token in combined for token in (
         "fa0e6c92-8bc7-4e42-9970-0402914d6a19",

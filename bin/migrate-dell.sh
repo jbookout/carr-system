@@ -211,8 +211,11 @@ migration_receipt() {
   trap - EXIT
   [ $APPLY -eq 1 ] || return 0
   mkdir -p "$REPO/out" 2>/dev/null || return 0
-  local status="migration_incomplete"
-  [ "$rc" -eq 0 ] && status="machine_migrated_pending_record_closeout"
+  # `status` is a special read-only parameter in zsh (the script's shell), so
+  # a local of that name aborts the EXIT receipt path on Dell's Mac. Keep the
+  # JSON field name but use an ordinary local variable.
+  local receipt_status="migration_incomplete"
+  [ "$rc" -eq 0 ] && receipt_status="machine_migrated_pending_record_closeout"
   local commit branch tmp
   commit=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || print -r -- "unknown")
   branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || print -r -- "unknown")
@@ -248,7 +251,7 @@ receipt = {
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(receipt, handle, indent=2, sort_keys=True)
     handle.write("\\n")
-' "$tmp" "$status" "$commit" "$branch" "$rc" "$ok" "$warn" "$fail" \
+' "$tmp" "$receipt_status" "$commit" "$branch" "$rc" "$ok" "$warn" "$fail" \
     && mv -f "$tmp" "$RECEIPT" \
     && say "receipt: $RECEIPT" \
     || { rm -f "$tmp"; say "  FAIL  could not write migration receipt: $RECEIPT"; }

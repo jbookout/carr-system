@@ -10,4 +10,7 @@ psycopg[binary]>=3.2   # record layer: tools/migrate.py + (build day) the MCP se
 #   node         — workflows/*.workflow.js syntax checks (tools/smoke.sh); the Workflow
 #                  runtime itself is provided by Claude Code, not this repo
 #   git          — manifest/baseline discipline assumes a git checkout
-mypy>=2.3
+# Development/nightly static checking only.  The declared type-check scope
+# requires mypy 2.3+, but Dell's older runtime does not run that dev tripwire;
+# the marker keeps its migration/runtime dependency install compatible.
+mypy>=2.3; python_version >= "3.10"

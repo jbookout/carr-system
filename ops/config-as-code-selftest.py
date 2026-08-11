@@ -80,6 +80,9 @@ def main():
         mod.SETTINGS = str(home / ".claude" / "settings.json")
         mod.TASKS_SRC = str(home / ".claude" / "scheduled-tasks")
         mod.TASKS_REPO = str(tasks)
+        mod.TASKS_QUARANTINE = str(
+            home / ".claude" / "scheduled-tasks-quarantine" / "carr-primary-only"
+        )
         mod.LAUNCHD_SRC = str(home / "Library" / "LaunchAgents")
         mod.LAUNCHD_REPO = str(launchd)
         mod.LAUNCHD_ALT_REPO = {}
@@ -119,6 +122,82 @@ def main():
             configured_check = mod.cmd_check()
         configured_hooks = json.loads(Path(mod.CODEX_HOOKS_SRC).read_text(encoding="utf-8"))
         configured_toml = Path(mod.CODEX_CONFIG).read_text(encoding="utf-8")
+
+        # Scheduled task *definitions* are CARR-managed only when their name
+        # exists in the repo registry.  Primary install must render every
+        # tracked definition; secondary install must move an exact tracked
+        # render out of Claude's active directory without touching a personal
+        # task.  The 16-task fixture mirrors Dell's reproduced current state.
+        primary_tasks = {
+            f"task-{number:02d}": f"---\nname: task-{number:02d}\n---\nCARR managed {number}\n"
+            for number in range(1, 17)
+        }
+        for name, body in primary_tasks.items():
+            (tasks / f"{name}.SKILL.md").write_text(body, encoding="utf-8")
+        original_primary = mod.IS_PRIMARY
+        mod.IS_PRIMARY = True
+        with contextlib.redirect_stdout(io.StringIO()) as primary_task_out:
+            primary_task_install_rc = mod.cmd_install(True)
+            primary_task_check_rc = mod.cmd_check()
+        primary_task_rendered = all(
+            (Path(mod.TASKS_SRC) / name / "SKILL.md").read_text(encoding="utf-8") == body
+            for name, body in primary_tasks.items()
+        )
+
+        mod.IS_PRIMARY = False
+        secondary_task_source = Path(mod.TASKS_SRC)
+        with contextlib.redirect_stdout(io.StringIO()) as secondary_dry_out:
+            secondary_dry_rc = mod.cmd_install(False)
+        secondary_dry_output = secondary_dry_out.getvalue()
+        secondary_dry_preserves_active = all(
+            (secondary_task_source / name / "SKILL.md").is_file()
+            for name in primary_tasks
+        ) and not Path(mod.TASKS_QUARANTINE).exists()
+        with contextlib.redirect_stdout(io.StringIO()) as secondary_clean_out:
+            secondary_install_rc = mod.cmd_install(True)
+            secondary_clean_check_rc = mod.cmd_check()
+        secondary_clean_output = secondary_clean_out.getvalue()
+        secondary_quarantine = Path(mod.TASKS_QUARANTINE)
+        active_carr_tasks_after = [
+            path for path in secondary_task_source.glob("*/SKILL.md")
+            if path.parent.name in primary_tasks
+        ]
+        quarantined_carr_tasks = [
+            secondary_quarantine / name / "SKILL.md" for name in primary_tasks
+        ]
+        secondary_quarantine_complete = (
+            secondary_install_rc == 0 and len(active_carr_tasks_after) == 0
+            and all(path.is_file() for path in quarantined_carr_tasks)
+            and "QUARANTINE  scheduled task task-01" in secondary_clean_output
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as secondary_retry_out:
+            secondary_retry_rc = mod.cmd_install(True)
+        secondary_retry_output = secondary_retry_out.getvalue()
+
+        # Personal task names do not belong to CARR's registry: neither the
+        # health denominator nor apply is permitted to claim or move them.
+        personal_task = secondary_task_source / "personal-reminder" / "SKILL.md"
+        personal_task.parent.mkdir(parents=True)
+        personal_task.write_text("personal task\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as personal_task_out:
+            personal_task_check_rc = mod.cmd_check()
+            personal_task_install_rc = mod.cmd_install(True)
+        personal_task_output = personal_task_out.getvalue()
+        personal_task_preserved = personal_task.is_file()
+
+        # A tracked CARR name with a changed body is potentially user work.
+        # It blocks safely and remains active rather than being overwritten or
+        # quarantined.
+        modified_task = secondary_task_source / "task-01" / "SKILL.md"
+        modified_task.parent.mkdir(parents=True)
+        modified_task.write_text("modified CARR task\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as secondary_bad_out:
+            secondary_bad_check_rc = mod.cmd_check()
+            secondary_bad_pull_rc = mod.cmd_pull(True)
+            secondary_bad_install_rc = mod.cmd_install(True)
+        secondary_bad_output = secondary_bad_out.getvalue()
+        modified_task_preserved = modified_task.read_text(encoding="utf-8") == "modified CARR task\n"
+        mod.IS_PRIMARY = original_primary
         failing_plist = {
             "Label": "com.carr.synthetic-load-failure",
             "ProgramArguments": ["/usr/bin/true"],
@@ -187,6 +266,33 @@ def main():
          'model = "test"' in configured_toml
          and mod.CODEX_PERMISSIONS_BEGIN in configured_toml
          and mod.CODEX_PERMISSIONS_END in configured_toml),
+        ("fresh primary install renders all tracked scheduled-task definitions",
+         primary_task_install_rc == 0 and primary_task_rendered
+         and "WRITE  scheduled task task-01" in primary_task_out.getvalue()),
+        ("fresh primary scheduled-task install leaves check clean",
+         primary_task_check_rc == 0),
+        ("secondary dry run names quarantine work without moving active tasks",
+         secondary_dry_rc == 0 and secondary_dry_preserves_active
+         and "would quarantine  scheduled task task-01" in secondary_dry_output),
+        ("secondary quarantines all 16 exact managed definitions",
+         secondary_quarantine_complete),
+        ("secondary exact-task retry is idempotent",
+         secondary_retry_rc == 0 and "QUARANTINE" not in secondary_retry_output),
+        ("secondary ignores absent primary scheduled-task definitions as drift",
+         secondary_clean_check_rc == 0),
+        ("unrelated personal scheduled tasks are preserved and excluded",
+         personal_task_check_rc == 0 and personal_task_install_rc == 0
+         and personal_task_preserved and "personal-reminder" not in personal_task_output),
+        ("modified CARR secondary scheduled task fails visibly",
+         secondary_bad_check_rc == 1
+         and "NOT ALLOWED ON SECONDARY" in secondary_bad_output),
+        ("secondary refuses to pull a modified CARR scheduled task into the repo",
+         secondary_bad_pull_rc == 1
+         and "refusing to capture" in secondary_bad_output
+         and modified_task_preserved),
+        ("secondary refuses to quarantine or overwrite a modified CARR task",
+         secondary_bad_install_rc == 1 and "refusing to move or overwrite" in secondary_bad_output
+         and modified_task_preserved),
         ("LaunchAgent load failure and idempotent retry both stay nonzero",
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
         ("fresh install creates the LaunchAgents directory",
