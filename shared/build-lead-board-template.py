@@ -41,6 +41,7 @@ connected (update_artifact); otherwise note it and move on. The file is the reco
 import sys, os, glob, json, re
 from collections import Counter
 from datetime import datetime, date
+from typing import Any
 import openpyxl
 
 _ARGV = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -374,7 +375,7 @@ hot_n = len(HOT.get("ranked",[])) + len(HOT.get("proposed",[]))
 def _namekey(n):
     return re.sub(r"[^a-z]", "", str(n or "").lower())
 
-reg_by_name: dict[str, dict] = {}
+reg_by_name: dict[str, dict[str, Any]] = {}
 for r in registry_all:
     k = _namekey(r.get("name"))
     if k: reg_by_name.setdefault(k, r)

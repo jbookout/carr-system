@@ -203,7 +203,10 @@ WATCH = [
      "FL DOR x out-of-state DOH join, quarterly-ish; board ingests it (corrective 2026-07-25)"),
     ("National accounts", "DNA/Team/national-accounts.json", None,  [],
      "curated shared feed, human-review cadence — existence/readability watch only (corrective 2026-07-25)"),
-    ("Radar digest",      "Automation/radar/radar-digest-2*.md", 9, [],
+    # The weekly run retains dated history when it has one, while the current
+    # scheduler writes/refreshes the canonical `radar-digest-latest.md`.
+    # Watch both names and let the normal newest-match logic judge freshness.
+    ("Radar digest",      "Automation/radar/radar-digest-*.md", 9, [],
      "Monday radar run (radar-digest-sop.md)"),
     ("PECOS pool",        "Automation/radar/upstream/pecos.json", 100, [],
      "quarterly (Jan/Apr/Jul/Oct; next diff vs the Q1 baseline in Oct)"),

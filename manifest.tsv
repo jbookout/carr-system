@@ -23,7 +23,10 @@ pipelines/radar/build-license-pool-from-raw.py	Automation/radar/build-license-po
 pipelines/radar/parse-tax-rolls.py	Automation/radar/parse-tax-rolls.py
 pipelines/radar/date-founders.py	Automation/radar/date-founders.py
 shared/build-lead-board-template.py	DNA/Team/build-lead-board.py
-shared/vendor_intro_for_stage.py	DNA/Network/vendor_intro_for_stage.py
+# FORKED BY DESIGN 2026-08-11: the repo helper is Joe's record-mode runtime and
+# imports lib.record_sources; the Drive helper is Dell/cloud's standalone XLSX
+# runtime, where that library does not exist. Equality would break one side.
+# Former row: shared/vendor_intro_for_stage.py <TAB> DNA/Network/vendor_intro_for_stage.py
 shared/fill-engine/extract_pvl_onepager.py	DNA/Deal Management/fill-engine/extract_pvl_onepager.py
 shared/fill-engine/fill_deal_template.py	DNA/Deal Management/fill-engine/fill_deal_template.py
 # bin/launch-automation-chrome.sh DELETED 2026-07-25 (orphaned Firefly launcher; the lane was demoted Jul 18 and its companion firefly_receiver.py never lived here). Vault copy retired to _to_delete/.
