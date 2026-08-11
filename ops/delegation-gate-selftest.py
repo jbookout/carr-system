@@ -9,6 +9,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,6 +138,102 @@ def run_codex_case(name, recs, should_block, reason_prefix=None, agent_type=None
         return ok
 
 
+def run_race_case(name, recs, appended, state, session, delay=0.45):
+    """The declaration lands on disk only after the hook has already started.
+
+    This is the 2026-08-11 failure made deterministic.  The harness writes the
+    assistant text block and the tool_use it accompanies as separate records, so
+    a hook that decided on one synchronous read could miss a declaration that
+    had in fact been made, and deny a call its own logic would have allowed.
+    The delay must land AFTER the hook's first read (roughly one interpreter
+    startup, ~0.1s) and inside the retry window (~0.77s), or the case proves
+    nothing: at 0.18s the pre-fix hook also passed, because the append had
+    already happened before it ever read.  Verified to split at 0.45s.
+    Before the retry fix this case returns 2; after it, 0.
+    """
+    with tempfile.TemporaryDirectory(prefix="delegation-gate-race-") as td:
+        transcript = os.path.join(td, "session.jsonl")
+        with open(transcript, "w") as fh:
+            for rec in recs:
+                fh.write(json.dumps(rec) + "\n")
+        payload = {
+            "session_id": session,
+            "cwd": REPO,
+            "transcript_path": transcript,
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+        }
+
+        def append_later():
+            time.sleep(delay)
+            with open(transcript, "a") as fh:
+                fh.write(json.dumps(appended) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+
+        writer = threading.Thread(target=append_later)
+        proc = subprocess.Popen(
+            [sys.executable, HOOK],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=dict(os.environ, DELEGATION_GATE_STATE=state),
+        )
+        writer.start()
+        _, err = proc.communicate(json.dumps(payload))
+        writer.join()
+        ok = proc.returncode == 0
+        print(f"{'PASS' if ok else 'FAIL'}  {name}: got {proc.returncode}, want 0")
+        if not ok and err:
+            print(err.strip())
+        return ok
+
+
+def run_tool_input_case(name, recs, tool_input, want, state, session):
+    """A declaration carried on the call itself, immune to transcript timing."""
+    with tempfile.TemporaryDirectory(prefix="delegation-gate-ti-") as td:
+        transcript = os.path.join(td, "session.jsonl")
+        with open(transcript, "w") as fh:
+            for rec in recs:
+                fh.write(json.dumps(rec) + "\n")
+        payload = {
+            "session_id": session,
+            "cwd": REPO,
+            "transcript_path": transcript,
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+        }
+        got = subprocess.run(
+            [sys.executable, HOOK], input=json.dumps(payload), text=True,
+            capture_output=True, env=dict(os.environ, DELEGATION_GATE_STATE=state),
+        )
+        ok = got.returncode == want
+        print(f"{'PASS' if ok else 'FAIL'}  {name}: got {got.returncode}, want {want}")
+        return ok
+
+
+def run_message_case(name, recs, state, session, must_contain):
+    """The deny message must name every label the regex accepts."""
+    with tempfile.TemporaryDirectory(prefix="delegation-gate-msg-") as td:
+        transcript = os.path.join(td, "session.jsonl")
+        with open(transcript, "w") as fh:
+            for rec in recs:
+                fh.write(json.dumps(rec) + "\n")
+        payload = {
+            "session_id": session,
+            "cwd": REPO,
+            "transcript_path": transcript,
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+        }
+        got = subprocess.run(
+            [sys.executable, HOOK], input=json.dumps(payload), text=True,
+            capture_output=True, env=dict(os.environ, DELEGATION_GATE_STATE=state),
+        )
+        message = got.stderr or ""
+        ok = got.returncode == 2 and must_contain in message
+        print(f"{'PASS' if ok else 'FAIL'}  {name}: labels present={must_contain in message}")
+        return ok
+
+
 def task_id(session, index, instruction):
     return GATE.task_id_for(session, index, instruction)
 
@@ -155,6 +253,8 @@ def main():
             ("later revocation prevents recreation after state loss", [user("delegate this to the cheapest qualified model"), user("do not delegate; keep this inline"), user("continue with the final verification"), assistant_text("executor: Terra peer — because this is a final verification"), tool("Bash")], 0, "fresh-revocation", REPO, False),
             ("generic completion cannot release a task", [user("delegate this to the cheapest qualified model"), tool("Agent"), assistant_text("delegation complete: Salesforce extraction"), user("check one more thing"), assistant_text("executor: Terra peer — because this is one judgment verification"), tool("Bash")], 2, "generic-complete", REPO, False),
             ("full transcript keeps delegation beyond 500 records", [user("delegate this to the cheapest qualified model")] + [assistant_text("filler") for _ in range(501)] + [user("new data source is ready"), tool("Bash")], 2, "long-transcript", REPO, False),
+            ("main seat rationale satisfies ordinary tripwire", [user("audit this"), assistant_text("executor: main seat — because this is the verification step the main seat must own"), tool("Bash")], 0, "ordinary-main-seat", REPO, False),
+            ("an unlisted executor label is still rejected", [user("audit this"), assistant_text("executor: the vibes — because reasons"), tool("Bash")], 2, "ordinary-bogus-label", REPO, False),
             ("subagent transcripts are exempt", [user("do the assigned sweep"), tool("Bash")], 0, "subagent", REPO, True),
             ("non-CARR sessions are exempt", [user("audit this"), tool("Bash")], 0, "non-carr", "/private/tmp", False),
         ]
@@ -209,6 +309,45 @@ def main():
             "other session's bound task remains sticky",
             [user("new phase"), assistant_text("executor: Terra peer — because this is final verification"), tool("Bash")],
             2, state, task_b,
+        ))
+
+        oks.append(run_race_case(
+            "a declaration written while the hook runs is still honoured",
+            [user("audit this"), tool("Bash")],
+            assistant_text("executor: main seat — because verification belongs to the main seat"),
+            state, "race-late-write",
+        ))
+        oks.append(run_message_case(
+            "the deny message names every accepted label",
+            [user("audit this"), tool("Bash")],
+            state, "message-labels", GATE.EXECUTOR_LABELS,
+        ))
+        blocked_window = [user("audit this"), tool("Bash")]
+        oks.append(run_tool_input_case(
+            "a declaration in the Bash description satisfies the tripwire",
+            blocked_window,
+            {"command": "true",
+             "description": "executor: main seat — because this is the seat's own verification"},
+            0, state, "tool-input-description",
+        ))
+        oks.append(run_tool_input_case(
+            "a leading executor comment on the command satisfies the tripwire",
+            blocked_window,
+            {"command": "# executor: main seat — because this is the seat's own verification\ntrue"},
+            0, state, "tool-input-comment",
+        ))
+        oks.append(run_tool_input_case(
+            "an unlisted label on the call is still rejected",
+            blocked_window,
+            {"command": "true", "description": "executor: the vibes — because reasons"},
+            2, state, "tool-input-bogus",
+        ))
+        oks.append(run_tool_input_case(
+            "a declaration on the call cannot release a sticky delegation",
+            [user("delegate this to the cheapest qualified model"), tool("Bash")],
+            {"command": "true",
+             "description": "executor: main seat — because I would rather do it myself"},
+            2, state, "tool-input-sticky",
         ))
 
         oks.append(run_codex_case(
