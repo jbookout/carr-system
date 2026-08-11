@@ -23,8 +23,8 @@
     "applies_to": "every agent session, rule briefing, capability evaluation, action attribution, and audit projection",
     "binding_location": "server session envelope before personal-rule selection or authorization",
     "independent_dimensions": ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count"],
-    "failure_rule": "missing or ambiguous personal scope is identity_scope_unknown; zero is emitted only for a resolved brain whose connector and render agree",
-    "phase0_status": "schema and acceptance contract only; production identity and standing-context repair not implemented"
+    "failure_rule": "missing or ambiguous expected personal scope is identity_scope_unknown with null count; zero is emitted only for a resolved Dell brain or authenticated unsponsored scope none",
+    "phase0_status": "planning schema reconciled to separately authorized and live-verified standing-context sponsor/runtime repair; broader Control Room production identity middleware remains unimplemented"
   },
   "$defs": {
     "OpaqueId": {

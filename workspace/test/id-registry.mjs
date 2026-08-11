@@ -169,7 +169,7 @@ const checks = {
     const fixture = context.sponsorIdentity;
     const cases = new Map(fixture.cases.map(item => [item.id, item]));
     const dimensions = ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version"];
-    requireCondition(fixture.status.includes("reproduced_runtime_defect_open"), "identity runtime defect must remain visibly open");
+    requireCondition(fixture.status.includes("reconciled_to_verified_runtime_repair"), "identity runtime evidence status drift");
     requireCondition(JSON.stringify(fixture.immutable_dimensions) === JSON.stringify(dimensions), "identity dimensions drift");
     for (const id of ["joe_codex_rules", "joe_claude_rules"]) {
       requireCondition(cases.get(id).expected.shared_rule_count === 143 && cases.get(id).expected.personal_rule_count === 30, `${id} counts drift`);
@@ -178,15 +178,15 @@ const checks = {
     requireCondition(cases.get("dell_codex_rules").expected.personal_rule_count_source === "fresh_resolved_dell_personal_artifact", "Dell count must be fresh-derived");
     requireCondition(cases.get("dell_codex_rules").expected.zero_requires_explicit_resolved_scope === true, "Dell zero semantics missing");
     requireCondition(cases.get("cross_brain_read").expected.safe_error_code === "PERSONAL_SCOPE_REFUSED", "cross-brain read not refused");
-    requireCondition(cases.get("unattended_agent").expected.human_only_capability === false && cases.get("unattended_agent").expected.may_claim_human_sponsor === false, "unattended impersonation remains");
+    requireCondition(cases.get("unattended_agent").expected.human_only_capability === false && cases.get("unattended_agent").expected.may_claim_human_sponsor === false && cases.get("unattended_agent").expected.personal_brain_scope === "none" && cases.get("unattended_agent").expected.personal_rule_count === 0, "unattended identity semantics drift");
     requireCondition(cases.get("missing_scope").expected.status === "Unknown" && cases.get("missing_scope").expected.personal_rule_count === null && cases.get("missing_scope").expected.successful_zero === false, "missing scope must be Unknown, not zero");
     requireCondition(cases.get("connector_fallback_parity").expected.connector_scope_equals_fallback_scope === true && cases.get("connector_fallback_parity").expected.connector_counts_equal_fallback_counts === true, "connector/fallback parity missing");
     const nonEscalation = cases.get("personal_rules_non_escalation");
     requireCondition(nonEscalation.expected.organization_tenant_id === nonEscalation.server_context.organization_tenant_id && nonEscalation.expected.session_capability_profile === nonEscalation.server_context.session_capability_profile && nonEscalation.expected.personal_brain_scope === nonEscalation.server_context.personal_brain_scope, "personal rule changed immutable identity");
     requireCondition(fixture.audit_expectation.forbidden_fields.includes("personal_rule_bodies") && fixture.audit_expectation.required_safe_fields.includes("agent_principal_id") && fixture.audit_expectation.required_safe_fields.includes("sponsoring_human_id"), "safe identity audit contract missing");
     requireCondition(context.api.sponsor_runtime_identity_policy.failure_semantics.includes("Unknown") && context.api.sponsor_runtime_identity_policy.non_escalation.includes("cannot select tenant"), "API identity policy missing");
-    requireCondition(context.authority.identity_boundary.personal_rule_resolution.unsponsored_background.includes("Task-scoped rules only"), "authority unsponsored rule missing");
-    requireCondition(context.acceptance.sponsor_runtime_identity_acceptance.current_gate_status.startsWith("open_reproduced_defect"), "acceptance incorrectly claims identity complete");
+    requireCondition(context.authority.identity_boundary.personal_rule_resolution.unsponsored_background.includes("Shared rules and/or server-attached task-scoped rules"), "authority unsponsored rule missing");
+    requireCondition(context.acceptance.sponsor_runtime_identity_acceptance.current_gate_status.startsWith("passed_live_and_deterministic_matrix"), "acceptance identity gate status drift");
   },
   surface(context) {
     requireCondition(context.fixtures.size === 9, "surface count mismatch");

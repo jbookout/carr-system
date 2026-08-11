@@ -1,7 +1,7 @@
 {
   "contract": "carr-control-room-phase0-manifest",
   "version": "1.0.0",
-  "status": "phase0_identity_contract_independently_verified_pending_human_acceptance_council_joe_approval_live_identity_repair_and_ordinal_capability",
+  "status": "phase0_identity_contract_and_live_runtime_machine_gate_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
   "source": {"path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx", "original_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "sha256": "b504da8b9e06cb5a291c8f4fb00ad0f8d410d2415ade668a79251d6b1b3ff5cc", "pages": 42, "durable_doctrine_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 335, "doctrine_sections": 39, "objective_section_id": "fae3acb3-2efb-4b80-81f7-2b2d978c237a", "objective_section_version": 1},
   "governing_sources": [
     {"role": "business_product_roadmap", "slug": "carr-workspace-bduf", "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "generation": 334, "active_sections": 34, "receipt": "fresh_read_verified", "specific_binding": "s23 version 3 harmonizes the website milestone to approximately 12 weeks, the evidence range to 12–16 weeks, and the full multi-platform program to 4–6 months; s32 adds tenant-ready Workspace and evolving workflows"},
@@ -44,12 +44,12 @@
   },
   "automated_evidence": {"node_test_count": 93, "node_test_passed": 93, "syntax_checks": ["public/js/app.js", "public/js/client.js"], "json_parse": "passed", "mutation_routes": 0, "production_actions": 0, "deployments": 0, "migrations": 0},
   "exit_gates": {
-    "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning artifacts passed fresh-context independent verification with P0/P1/P2 all zero; the separate live connector repair remains open",
+    "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning artifacts passed fresh-context independent verification with P0/P1/P2 all zero; the separately authorized narrow connector repair also passed live verification",
     "browser_runtime_visual_accessibility": "loopback HTTP entry, CSS, JavaScript, and fixture fetch returned 200; interactive visual and accessibility review remains unverified",
     "joe_uncoached_six_flows": "not performed",
     "roadmap_final_approval": "Joe's approval is required after the Wednesday council produces its recommendation",
-    "integrated_program_reconciliation": "tenant, workflow, and maintenance amendment passed prior cold-context verification; identity sponsorship now separates tenant, sponsor, agent, runtime, brain, and capability but production connector repair remains absent",
-    "production_identity_repair": "not implemented: standing-context must stop selecting personal scope from the runtime agent slug, pass same-partner connector/render parity, and return explicit Unknown on unresolved scope after council recommendation and Joe approval"
+    "integrated_program_reconciliation": "tenant, workflow, maintenance, and sponsor/runtime identity machine gates passed cold-context verification; identity sponsorship separates tenant, sponsor, agent, runtime, brain, and capability",
+    "production_identity_repair": "verified narrow bugfix: commit e88299c78bf8df29786e435a91e8b9b94f14da8a, migration 0095, Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377, 73/73 runtime tests, live 143 shared plus 30 Joe-personal, partner spoof refusal, and loop 319 done; no Control Room Phase 0 files were deployed"
   },
   "prohibited_claims": ["production implementation exists", "Control Room auth is enforced", "ops.doctorcre.com is deployed", "collectors are live", "action broker exists", "Phase 0 exit gate is complete before independent and human evidence"]
 }

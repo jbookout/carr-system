@@ -1,7 +1,7 @@
 {
   "contract": "carr-integrated-phase0-program",
   "version": "1.3.0",
-  "status": "phase0_planning_contracts_independently_verified_pending_human_acceptance_council_joe_approval_live_identity_repair_and_ordinal_capability",
+  "status": "phase0_planning_and_sponsor_identity_machine_gates_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
   "decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f",
   "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
   "artifact_freeze_decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84",
@@ -136,7 +136,7 @@
     "construction_gate": "These are Phase 0 contracts and fixtures only; production construction remains blocked until Joe approves the Wednesday council output."
   },
   "sponsor_agent_personal_brain_identity_boundary": {
-    "status": "planning_contract_independently_verified_live_runtime_repair_open",
+    "status": "planning_contract_and_authorized_live_runtime_repair_independently_verified",
     "open_loop_id": "162c8d3a-a673-425c-aa18-cc9d4bcf949f",
     "open_loop_number": 319,
     "defect": "The current standing-context read path defaults personal scope from the runtime actor slug, so a Joe-sponsored Codex session can report 0 codex-personal while the Joe-personal generated render contains 30 active rules.",
@@ -158,7 +158,9 @@
       "audit": "Audit records tenant, runtime agent, sponsoring human when present, personal-brain scope/version/count, and capability profile without exposing personal rule bodies."
     },
     "source_evidence": {
-      "live_standing_context": "Joe's Codex session returned 143 shared and 0 codex-personal.",
+      "original_live_standing_context": "Before repair, Joe's Codex session returned 143 shared and 0 codex-personal.",
+      "verified_live_standing_context": "After deployment, Joe-sponsored Codex returned 143 shared and 30 Joe-personal with organization tenant carr-internal, sponsoring human joe, runtime and agent principal codex, personal scope joe-personal, and humanOnly authority false.",
+      "live_cross_brain_spoof": "A caller-supplied partner=dell request was refused as partner_not_selectable before any shared or personal rule arrays were returned.",
       "joe_generated_render": {
         "path": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/00_Context/compiled-rules-joe.md",
         "active_rules": 30,
@@ -170,7 +172,9 @@
         "exported_at": "2026-08-11T12:00:06Z"
       },
       "governing_shared_rule_id": "4f7c348f",
-      "current_code_observation": "OAuth preserves verified human_slug for recognized outside-model attribution, but standing-context currently chooses partner scope from args.partner or actor.slug and can therefore conflate runtime principal with sponsoring human."
+      "runtime_fix": {"commit": "e88299c78bf8df29786e435a91e8b9b94f14da8a", "migration": "0095_sponsor_runtime_audit.sql", "cloudflare_worker_version": "b0067bcd-00e6-4c9c-adeb-eedb22e6e377", "live_verbs": 91, "health": "HTTP 200", "node_tests": "73/73", "independent_verifier": "P0/P1/P2 all zero"},
+      "durable_decision_id": "0da54973-10c7-4d38-9e10-bdf62c227874",
+      "loop_319": "closed done at version 2 after live verification"
     },
     "required_machine_tests": [
       "Joe plus Codex returns the current shared count plus 30 Joe-personal rules.",
@@ -183,8 +187,8 @@
       "Personal rules cannot alter tenant or capability.",
       "Audit carries tenant, agent, sponsor, personal-brain scope/version/count, and capability profile without rule bodies."
     ],
-    "completion_rule": "Tenant, workflow, and maintenance Phase 0 remains independently verified, but integrated Phase 0 identity is not machine-complete until both product lanes implement this contract in planning artifacts, all required fixtures and tests pass, and a fresh-context verifier reports no P0/P1/P2 finding.",
-    "production_gate": "This is a Phase 0 contract and test amendment only. Repairing the live connector, store, OAuth, exporter, or audit path remains future production construction gated by the Wednesday council recommendation and Joe's approval."
+    "completion_rule": "Tenant, workflow, maintenance, and integrated sponsor/runtime identity machine gates are complete: both planning lanes pass, the narrow separately authorized runtime repair is deployed, live Joe-sponsored Codex and spoof-refusal evidence pass, and fresh-context verification reports no P0/P1/P2 finding.",
+    "production_gate": "This narrow current-system identity bugfix was separately and explicitly authorized by Joe. It does not authorize any other Workspace, Control Room, roadmap, AgentOps, or production construction before the Wednesday council recommendation and Joe's approval."
   },
   "doctrine_metadata_integrity": {
     "status": "blocked_by_deployed_verb_bug",
@@ -196,12 +200,12 @@
     "release_claim": "Ordinal repair is not complete and must not be represented as fixed."
   },
   "artifact_verification": {
-    "status": "tenant_workflow_maintenance_and_identity_planning_cold_verification_passed_live_identity_repair_open",
+    "status": "tenant_workflow_maintenance_identity_planning_and_live_runtime_machine_verification_passed",
     "workspace": {"prior_node_tests": 29, "current_node_tests": 31, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_internal_files": "denied"},
     "control_room": {"prior_node_tests": 75, "current_node_tests": 93, "p0": 0, "p1": 0, "p2": 0, "roadmap_reconciliation_reverification": "passed", "runtime_public_assets": "verified", "runtime_internal_files": "denied", "runtime_interactive_visual_accessibility": "open"}
   },
   "tonight_allowed": ["terminology and domain glossary", "state machines and explicit transition guards", "role, authority, capability, and risk matrices", "route and information-architecture maps", "business and operational entity contracts", "traceability matrices", "retention and redaction contracts", "notification and event taxonomies", "test and acceptance strategy", "threat models", "runnable fixture-backed wireframes", "canonical synthetic JSON twins", "environment and release process", "structured open-decision and council-review registers"],
   "tonight_forbidden": ["production construction", "production migration", "deployment", "irreversible implementation", "live authority route", "automatic consequential or external effect", "claiming a human exit gate without observed evidence"],
   "council": {"timing": "Wednesday night after Claude usage reset", "members": ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"], "input": "the three canonical BDUFs, the governing Production Maturity Baseline, both Phase 0 artifact packages, independent verifier findings, and every structured unresolved fork", "output": "recommended integrated roadmap versions with explicit fork dispositions for Joe's approval", "construction_after": "Construction begins immediately only after Joe approves the council output."},
-  "release_truth": {"repository": "/Users/booko/carr-system", "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0", "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253", "canonical_dirty_checkout_is_not_release_source": true, "explicit_path_staging_required": true, "production_changes_tonight": 0}
+  "release_truth": {"repository": "/Users/booko/carr-system", "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0", "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253", "canonical_dirty_checkout_is_not_release_source": true, "explicit_path_staging_required": true, "phase0_files_deployed": 0, "separately_authorized_runtime_bugfix": {"commit": "e88299c78bf8df29786e435a91e8b9b94f14da8a", "pushed_to_origin_main": true, "worker_version": "b0067bcd-00e6-4c9c-adeb-eedb22e6e377", "migration": "0095 applied with 100 applied and 0 pending on repeat dry-run"}}
 }

@@ -1,7 +1,7 @@
 {
   "contract": "carr-control-room-identity-sponsorship",
   "version": "1.0.0",
-  "status": "phase0_frozen_not_implemented",
+  "status": "phase0_planning_contract_with_separately_verified_runtime_identity_fix",
   "purpose": "Keep organization tenancy, human sponsorship, agent attribution, session capability, and personal-brain selection as independent server-derived identity dimensions.",
   "immutable_dimensions": {
     "organization_tenant_id": "The organization data boundary. Derived and validated by the server; never selected by a browser, model, job payload, personal rule, or personal-brain scope.",
@@ -10,9 +10,9 @@
     "agent_principal_id": "The registered actor to which the action is attributed, such as Codex, Claude, Doc, or a service identity.",
     "runtime_principal": "The authenticated runtime instance and credential class used for this session. It validates agent_principal_id but does not select a human brain.",
     "session_capability_profile": "The server-issued, time-limited capability envelope. Personal rules and sponsorship cannot create, widen, or transfer it.",
-    "personal_brain_scope": "The verified sponsoring partner's personal rule namespace, joe or dell. Null for unsponsored/background work and never inferred from agent_principal_id.",
+    "personal_brain_scope": "The verified sponsoring partner's personal rule namespace, joe or dell. Explicit none for authenticated unsponsored/background work; null only when sponsor resolution is missing or ambiguous and a sponsor was expected. Never inferred from agent_principal_id.",
     "personal_brain_version": "The exported/store generation or immutable digest used to prove which personal set was loaded.",
-    "personal_rule_count": "The count for the resolved personal-brain version. Zero is valid only after an explicit partner scope resolves and both authoritative surfaces agree."
+    "personal_rule_count": "The count for the resolved personal-brain version. Zero is valid for an explicitly resolved Dell brain or an authenticated unsponsored scope none; null is required for missing or ambiguous expected scope."
   },
   "resolution_order": [
     "authenticate runtime_principal and map registered agent_principal_id",
@@ -39,8 +39,9 @@
       "acceptance": "A Dell-sponsored session may report zero Dell-personal only after Dell scope resolves explicitly and connector/store and generated Dell render agree."
     },
     "unsponsored_background_agent": {
-      "personal_brain_scope": null,
-      "loads": ["task-scoped rules explicitly attached to the registered job"],
+      "personal_brain_scope": "none",
+      "personal_rule_count": 0,
+      "loads": ["active shared rules", "task-scoped rules explicitly attached to the registered job"],
       "forbidden": ["shared or personal brain impersonation", "humanOnly capability", "human sponsor claim", "capability inheritance from a human session"]
     }
   },
@@ -57,18 +58,19 @@
     "Joe-personal and Dell-personal rules never cross-load; a requested foreign brain is refused even when tenant and agent are otherwise valid.",
     "Unsponsored/background agents cannot claim a sponsoring human and cannot call humanOnly verbs.",
     "Tenant, sponsor, agent, personal-brain scope, and capability are server-derived or server-validated; browser, model, connector argument, and job input cannot widen any dimension.",
-    "A personal count of zero is a verified value only for an explicitly resolved scope; missing scope is identity_scope_unknown, never a misleading successful zero."
+    "A personal count of zero is a verified value only for an explicitly resolved Dell brain or authenticated unsponsored scope none; missing or ambiguous expected scope is identity_scope_unknown with null count, never a misleading successful zero."
   ],
   "source_parity": {
     "authoritative_pair": ["live connector/store query", "generated compiled-rules render for the same partner brain"],
     "comparison": ["partner scope", "active shared count", "active personal count", "personal-brain version or export timestamp"],
     "rule": "Both surfaces resolve the same partner brain. A mismatch is visible Unknown and cannot degrade to a successful partial load.",
-    "known_reproduced_defect": "On 2026-08-11 Joe-sponsored Codex resolved runtime actor codex as the personal scope and returned 143 shared plus 0 codex-personal while the Joe generated render declared 30 active Joe-personal rules."
+    "known_reproduced_defect": "Before repair on 2026-08-11, Joe-sponsored Codex resolved runtime actor codex as the personal scope and returned 143 shared plus 0 codex-personal while the Joe generated render declared 30 active Joe-personal rules.",
+    "verified_repair": "Commit e88299c78bf8df29786e435a91e8b9b94f14da8a and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377 returned live 143 shared plus 30 Joe-personal with distinct sponsor and runtime metadata; caller-selected partner was refused."
   },
   "audit_projection": {
     "required": ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "session_capability_profile", "result"],
     "forbidden": ["personal rule bodies", "human quotes", "raw OAuth claims", "tokens", "prompt text"],
     "attribution_rule": "actor/agent fields identify the executor; sponsor fields identify the verified human origin when present."
   },
-  "phase0_boundary": "This is a planning contract, synthetic fixture, and executable semantic gate only. It does not mutate the production connector, identity store, compiled-rule exporter, deployment, or migration state."
+  "phase0_boundary": "This file remains a planning contract and its fixture remains synthetic. A separately authorized narrow current-system repair was deployed and live-verified; no Control Room product route, action broker, Phase 0 artifact, or broader construction was deployed."
 }

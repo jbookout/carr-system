@@ -32,10 +32,10 @@
       "agent_principal_id": "service-identity",
       "sponsoring_human_id": null,
       "partner_id": null,
-      "personal_brain_scope": null,
+      "personal_brain_scope": "none",
       "personal_brain_version": null,
       "session_capability_profile": "task-scoped-background",
-      "expected": {"result": "task_scoped_only", "shared_rule_count": null, "personal_rule_count": null, "human_only": false}
+      "expected": {"result": "task_scoped_only", "shared_rule_count": 143, "personal_rule_count": 0, "human_only": false}
     },
     {
       "id": "missing-scope",

@@ -31,17 +31,20 @@
     "independent_dimensions": ["organization_tenant_id", "sponsoring_human_id_or_partner_id", "agent_principal_id_or_runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count"],
     "derivation": "Tenant, sponsor, runtime agent, capability profile, and personal-brain scope are derived or validated by the server from authenticated grants, session binding, membership, and job provenance. Browser, model, bridge, and job input cannot select or widen them.",
     "sponsored_session": "A Joe- or Dell-sponsored Codex or Claude session loads shared rules plus only that verified sponsor's personal rules. Runtime actions remain attributed to Codex or Claude; audit separately preserves the sponsoring human.",
-    "unsponsored_session": "A background agent without a verified sponsor receives only task-scoped rules, cannot claim Joe or Dell personal scope, and is ineligible for humanOnly capabilities.",
+    "unsponsored_session": "An authenticated background agent without a verified sponsor receives active shared rules and/or explicit server-attached job rules, reports personal scope none and personal count zero, cannot claim Joe or Dell personal scope, and is ineligible for humanOnly capabilities. Null scope/count is reserved for missing or ambiguous expected sponsorship.",
     "cross_brain_rule": "A personal-brain read for someone other than the verified sponsor is denied before rule bodies or private metadata are projected.",
     "fail_visible_rule": "Missing, ambiguous, stale, inconsistent, or unavailable personal scope returns explicit failure or Unknown and cannot be rendered as successful zero personal rules.",
     "parity_rule": "The connector/store and generated fallback must resolve the same partner brain, version, rule membership, and counts; parity failure is observable drift.",
     "personal_rule_non_authority": "A personal rule cannot choose or change tenant, grant or widen capability, change runtime attribution, cross-load to another brain, or silently promote itself.",
     "audit_projection": "Audit stores organization tenant, runtime agent, sponsoring human when present, personal-brain scope/version/count, and session capability profile, but never personal rule bodies.",
-    "current_defect": {
-      "open_loop_id": "162c8d3a-a673-425c-aa18-cc9d4bcf949f",
-      "open_loop_number": 319,
-      "observed": "Joe's live Codex standing-context returned 143 shared and 0 codex-personal while the current Joe render declared 30 active Joe-personal rules.",
-      "rule_id": "4f7c348f"
+    "verified_runtime_repair": {
+      "loop_id": "162c8d3a-a673-425c-aa18-cc9d4bcf949f",
+      "loop_number": 319,
+      "loop_status": "done at version 2",
+      "original_observation": "Before repair, Joe's live Codex standing-context returned 143 shared and 0 codex-personal while the current Joe render declared 30 active Joe-personal rules.",
+      "verified_observation": "After commit e88299c78bf8df29786e435a91e8b9b94f14da8a and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377, Joe-sponsored Codex returned 143 shared plus 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner was refused.",
+      "rule_id": "4f7c348f",
+      "decision_id": "0da54973-10c7-4d38-9e10-bdf62c227874"
     }
   },
   "workflow_governance": {

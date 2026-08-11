@@ -142,7 +142,7 @@ assert.equal(tenantGovernance.maintenance_accounting_contract.required_control_e
 assert.equal(api.tenant_context_policy.client_tenant_fields_authoritative, false, "client tenant authority");
 assert(api.$defs.VersionedRecord.required.includes("tenant_id"), "tenant ID on versioned records");
 exact(sponsorIdentityFixture.immutable_dimensions, ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version"], "sponsor/runtime identity dimensions");
-assert.match(sponsorIdentityFixture.status, /reproduced_runtime_defect_open/, "identity defect gate must remain open");
+assert.match(sponsorIdentityFixture.status, /reconciled_to_verified_runtime_repair/, "identity runtime evidence status");
 const identityCases = new Map(sponsorIdentityFixture.cases.map(item => [item.id, item]));
 assert.equal(identityCases.size, 8, "identity fixture case count");
 const validatePrincipalExecutionContext = compileSchema(api, api.$defs.PrincipalExecutionContext);
@@ -158,8 +158,9 @@ assert.equal(identityCases.get("dell_codex_rules").expected.personal_rule_count_
 assert.equal(identityCases.get("dell_codex_rules").expected.zero_requires_explicit_resolved_scope, true, "Dell explicit zero resolution semantics");
 assert.equal(identityCases.get("cross_brain_read").expected.safe_error_code, "PERSONAL_SCOPE_REFUSED", "cross-brain refusal");
 assert.equal(identityCases.get("unattended_agent").expected.human_only_capability, false, "unattended humanOnly refusal");
-assert.equal(identityCases.get("unattended_agent").server_context.personal_brain_scope, null, "unattended personal brain scope");
-assert.equal(identityCases.get("unattended_agent").server_context.personal_rule_count, null, "unattended personal count");
+assert.equal(identityCases.get("unattended_agent").server_context.personal_brain_scope, "none", "unattended personal brain scope");
+assert.equal(identityCases.get("unattended_agent").server_context.personal_rule_count, 0, "unattended explicit no-personal count");
+assert.equal(identityCases.get("unattended_agent").server_context.shared_rule_count, 143, "unattended shared rule count");
 assert.equal(identityCases.get("dell_codex_rules").server_context.personal_rule_count, 0, "resolved Dell explicit zero");
 assert.equal(identityCases.get("missing_scope").expected.status, "Unknown", "missing scope status");
 assert.equal(identityCases.get("missing_scope").expected.personal_rule_count, null, "missing scope null count");
@@ -170,7 +171,7 @@ assert(api.$defs.PrincipalExecutionContext.required.includes("sponsoring_human_i
 const identityEnvelopeFields = new Set(events.event_envelope.required);
 for (const field of ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "shared_rule_count", "personal_rule_count", "session_capability_profile", "identity_resolution_status"]) assert(identityEnvelopeFields.has(field), `identity audit field ${field}`);
 assert(events.event_envelope.forbidden.includes("personal_rule_bodies") && events.event_envelope.forbidden.includes("shared_rule_bodies"), "identity audit body exclusion");
-assert.match(acceptance.sponsor_runtime_identity_acceptance.current_gate_status, /^open_reproduced_defect/, "identity acceptance must remain open");
+assert.match(acceptance.sponsor_runtime_identity_acceptance.current_gate_status, /^passed_live_and_deterministic_matrix/, "identity acceptance must record verified gate");
 
 const endpointFields = api.api_policy.required_endpoint_declarations.map(field => field === "idempotency" ? "idempotency_or_read_semantics" : field === "response_schema" ? "response_schema" : field);
 for (const endpoint of api.prototype_read_routes) for (const field of endpointFields) assert(field in endpoint, `${endpoint.operation_id}.${field}`);

@@ -1162,7 +1162,7 @@
     },
     {
       "id": "SPONSOR-RUNTIME-IDENTITY-001",
-      "requirement": "Keep organization tenant, sponsoring human/partner, runtime agent principal, session capability profile, and personal brain scope/version/counts separate and immutable. Joe-sponsored Codex/Claude resolves shared plus Joe-personal; Dell-sponsored resolves shared plus fresh Dell-personal; unsponsored agents receive task-scoped rules only. Cross-brain access, human impersonation, tenant selection, capability escalation, and silent personal-rule promotion are refused. Missing or ambiguous scope is visible failure or Unknown, connector and fallback resolve the same brain and counts, and audit preserves agent plus sponsor without rule bodies.",
+      "requirement": "Keep organization tenant, sponsoring human/partner, runtime agent principal, session capability profile, and personal brain scope/version/counts separate and immutable. Joe-sponsored Codex/Claude resolves shared plus Joe-personal; Dell-sponsored resolves shared plus fresh Dell-personal; unsponsored agents receive active shared rules and/or explicit server-attached job rules and report personal scope none with count zero. Cross-brain access, human impersonation, tenant selection, capability escalation, and silent personal-rule promotion are refused. Missing or ambiguous expected scope is visible failure or Unknown with null count, connector and fallback resolve the same brain and counts, and audit preserves agent plus sponsor without rule bodies.",
       "source_sections": ["Shared rule 4f7c348f", "reproduced system loop 319 / 162c8d3a-a673-425c-aa18-cc9d4bcf949f", "Phase 0 identity defect ruling"],
       "screen": ["standing-context identity status", "future safe session diagnostics", "no tenant or personal-brain selector"],
       "business_entity": ["PrincipalExecutionContext", "TenantContext", "event envelope"],
@@ -1170,7 +1170,7 @@
       "authority": ["server derives and validates every identity dimension", "personal rules select neither tenant nor capability", "runtime principal remains the action actor"],
       "event": ["workspace.identity.context_resolved", "workspace.identity.personal_scope_refused"],
       "evidence": ["143 shared plus 30 Joe-personal", "fresh resolved Dell-personal count", "cross-brain denial", "agent and sponsor audit", "unattended humanOnly denial", "Unknown on missing scope", "connector/fallback parity", "non-escalation"],
-      "rollback": ["fail closed before loading personal rules", "retain task-scoped rules only for unsponsored work", "surface Unknown and preserve prior audit evidence"],
+      "rollback": ["fail closed before loading personal rules", "retain active shared rules and/or explicit server-attached task rules for unsponsored work", "surface Unknown and preserve prior audit evidence"],
       "tests": ["IDENTITY-CONTRACT-001", "IDENTITY-FIXTURE-001", "IDENTITY-JOE-RULES-001", "IDENTITY-DELL-RULES-001", "IDENTITY-CROSS-BRAIN-001", "IDENTITY-AUDIT-001", "IDENTITY-UNSPONSORED-001", "IDENTITY-SCOPE-UNKNOWN-001", "IDENTITY-CONNECTOR-PARITY-001", "IDENTITY-NONESCALATION-001"],
       "open_decisions": []
     }

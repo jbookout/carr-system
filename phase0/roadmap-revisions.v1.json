@@ -1,7 +1,7 @@
 {
   "contract": "carr-roadmap-revisions",
   "version": "1.3.0",
-  "status": "historical_word_snapshots_with_current_doctrine_receipts_and_reopened_identity_boundary_gate",
+  "status": "historical_word_snapshots_with_current_doctrine_receipts_and_verified_identity_boundary_gate",
   "decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
   "section_title": "Operating objective and AI-session displacement test",
   "cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?",
@@ -82,18 +82,21 @@
     "platform_ip_and_control_retained_by_joe": "09959bb0-8f3e-4abf-84cb-cc1b72b1d8f9"
   },
   "identity_boundary_reconciliation": {
-    "status": "phase0_machine_gate_reopened",
+    "status": "phase0_machine_gate_verified_and_live_runtime_repaired",
     "open_loop_id": "162c8d3a-a673-425c-aa18-cc9d4bcf949f",
     "open_loop_number": 319,
     "governing_shared_rule_id": "4f7c348f",
-    "observed_live_result": "Joe-sponsored Codex standing-context returned 143 shared and 0 codex-personal.",
+    "original_live_result": "Before repair, Joe-sponsored Codex standing-context returned 143 shared and 0 codex-personal.",
+    "verified_live_result": "After deployment, Joe-sponsored Codex returned 143 shared and 30 Joe-personal with distinct tenant, sponsor, runtime, personal scope, and capability metadata; partner=dell spoofing was refused before rule arrays were returned.",
     "generated_render_evidence": {
       "joe": {"path": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/00_Context/compiled-rules-joe.md", "active_rules": 30, "exported_at": "2026-08-11T12:00:05Z"},
       "dell": {"path": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/DNA/compiled-rules-dell.md", "active_rules": 0, "exported_at": "2026-08-11T12:00:06Z"}
     },
     "required_contract": "Organization tenant, sponsoring human, runtime agent, capability profile, and personal-brain scope/version/count are separate server-derived or server-validated dimensions; personal rules cannot cross-load, promote themselves, select tenant, or grant capabilities; missing scope fails visibly; connector and generated render must agree.",
-    "completion_correction": "The tenant-readiness, workflow-governance, and maintenance amendment remains independently verified. Integrated Phase 0 identity is not complete until product contracts, fixtures, validators, and tests implement this boundary and fresh-context independent verification passes.",
-    "production_change": "none; the live connector and store read path were inspected as evidence only and remain council- and Joe-gated future construction"
+    "completion_correction": "The tenant-readiness, workflow-governance, maintenance, and integrated sponsor/runtime identity machine gates are independently verified. Human journey, baseline, council, Joe-approval, and ordinal-repair gates remain open.",
+    "production_change": "Joe separately authorized the narrow runtime bugfix at commit e88299c78bf8df29786e435a91e8b9b94f14da8a; migration 0095 and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377 were deployed without any Phase 0 planning files.",
+    "decision_id": "0da54973-10c7-4d38-9e10-bdf62c227874",
+    "loop_319_status": "done at version 2"
   },
   "ordinal_metadata_correction": {
     "status": "blocked_by_deployed_verb_bug",
@@ -114,8 +117,8 @@
     "The Control Room System Road Maps export is the verified 42-page generation 335 artifact with s00 document-control version 3; the Mature End State remains a separate canonical record.",
     "The Mature End State Desktop artifact at the refreshed System Road Maps path is independently verified against its 41-section generation 330 doctrine record and s00 document-control version 4.",
     "The attempted Workspace and Control Room ordinal repair is blocked by deployed verb behavior; duplicate ordinal 2 remains in both documents and no repair is claimed.",
-    "A newly reproduced sponsor-to-personal-brain identity defect reopens one machine-verifiable Phase 0 gate; the prior tenant, workflow, and maintenance verification remains valid but is not a claim that identity is complete.",
-    "The live code inspection found that recognized outside-model OAuth grants preserve a verified human_slug for attribution, while standing-context currently defaults partner scope from args.partner or actor.slug; the production repair is intentionally not implemented in Phase 0.",
+    "The sponsor-to-personal-brain identity defect was reproduced, contracted, repaired under separate explicit authority, and verified live at 143 shared plus 30 Joe-personal with distinct sponsor and runtime attribution.",
+    "No Phase 0 planning file was included in the narrow runtime deployment; the remaining roadmap construction gate is unchanged.",
     "No roadmap revision authorizes production construction, migration, deployment, or irreversible implementation before Joe approves the council output."
   ]
 }

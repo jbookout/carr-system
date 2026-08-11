@@ -122,8 +122,13 @@ test("sponsor and runtime identity fixture covers every required identity outcom
     readJson("contracts/business-entity-api-contracts.v1.json")
   ]);
   assert.deepEqual(fixture.cases.map(item => item.id), ["joe_codex_rules", "joe_claude_rules", "dell_codex_rules", "cross_brain_read", "unattended_agent", "missing_scope", "connector_fallback_parity", "personal_rules_non_escalation"]);
-  assert.equal(fixture.reproduced_evidence.standing_context_result.shared_rule_count, 143);
-  assert.equal(fixture.reproduced_evidence.standing_context_result.personal_rule_count, 0);
+  assert.equal(fixture.reproduced_evidence.original_standing_context_result.shared_rule_count, 143);
+  assert.equal(fixture.reproduced_evidence.original_standing_context_result.personal_rule_count, 0);
+  assert.equal(fixture.reproduced_evidence.verified_live_result.shared_rule_count, 143);
+  assert.equal(fixture.reproduced_evidence.verified_live_result.personal_rule_count, 30);
+  assert.equal(fixture.reproduced_evidence.verified_live_result.sponsoring_human_id, "joe");
+  assert.equal(fixture.reproduced_evidence.verified_live_result.agent_principal_id, "codex");
+  assert.equal(fixture.reproduced_evidence.verified_live_result.human_only, false);
   assert.equal(fixture.reproduced_evidence.joe_personal_artifact.active_rule_count, 30);
   const validatePrincipalExecutionContext = compileSchema(api, api.$defs.PrincipalExecutionContext);
   for (const item of fixture.cases) {
@@ -131,12 +136,13 @@ test("sponsor and runtime identity fixture covers every required identity outcom
     assert.equal(validation.valid, true, `${item.id}: ${validation.errors.join("; ")}`);
   }
   const unattended = fixture.cases.find(item => item.id === "unattended_agent");
-  assert.equal(unattended.server_context.personal_brain_scope, null);
-  assert.equal(unattended.server_context.personal_rule_count, null);
+  assert.equal(unattended.server_context.personal_brain_scope, "none");
+  assert.equal(unattended.server_context.personal_rule_count, 0);
+  assert.equal(unattended.server_context.shared_rule_count, 143);
   const dell = fixture.cases.find(item => item.id === "dell_codex_rules");
   assert.equal(dell.server_context.resolution_status, "resolved");
   assert.equal(dell.server_context.personal_rule_count, 0);
-  assert.match(acceptance.sponsor_runtime_identity_acceptance.current_gate_status, /^open_reproduced_defect/);
+  assert.match(acceptance.sponsor_runtime_identity_acceptance.current_gate_status, /^passed_live_and_deterministic_matrix/);
   const required = new Set(events.event_envelope.required);
   for (const field of fixture.audit_expectation.required_safe_fields) assert.ok(required.has(field === "resolution_status" ? "identity_resolution_status" : field), field);
   const forbidden = new Set(events.event_envelope.forbidden);

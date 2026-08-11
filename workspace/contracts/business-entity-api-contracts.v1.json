@@ -26,7 +26,7 @@
     "separation_rule": "Organization tenant constrains data, sponsoring human selects one matching personal brain, runtime principal owns agent attribution, and the session capability profile constrains actions. None substitutes for another.",
     "joe_rule_resolution": "Joe-sponsored Codex or Claude resolves shared plus Joe-personal; current verified artifact evidence declares 143 shared and 30 Joe-personal.",
     "dell_rule_resolution": "Dell-sponsored Codex or Claude resolves shared plus the fresh Dell-personal artifact; an explicit zero is valid only after successful scope and version resolution.",
-    "unsponsored_rule_resolution": "Background or otherwise unsponsored agents receive task-scoped rules only and cannot claim a human sponsor or humanOnly capability.",
+    "unsponsored_rule_resolution": "Background or otherwise unsponsored agents receive active shared rules and/or explicit server-attached job rules, report personal_brain_scope none with personal_rule_count zero, and cannot claim a human sponsor or humanOnly capability. Null personal scope/count is reserved for missing or ambiguous resolution when a sponsor was expected.",
     "failure_semantics": "Missing or ambiguous personal scope returns PERSONAL_SCOPE_REQUIRED or PERSONAL_SCOPE_AMBIGUOUS with resolution status Unknown and null personal count; never a misleading successful zero.",
     "non_escalation": "Personal rules cannot select tenant, grant or widen capability, cross-load another partner brain, silently promote themselves, or replace runtime attribution.",
     "parity": "Connector/store and generated fallback resolve the same partner brain, version, shared count, and personal count.",

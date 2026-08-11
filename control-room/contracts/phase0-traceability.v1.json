@@ -305,7 +305,7 @@
     },
     {
       "id": "P0-025",
-      "requirement": "Every interactive or unattended agent session separately binds immutable organization tenant, verified sponsoring human and partner or explicit unsponsored status, agent principal, runtime principal, session capability profile, and personal-brain scope/version/count. Joe-sponsored Codex or Claude loads shared plus Joe-personal; Dell-sponsored loads shared plus Dell-personal; an unsponsored agent receives task-scoped rules only and never humanOnly capability.",
+      "requirement": "Every interactive or unattended agent session separately binds immutable organization tenant, verified sponsoring human and partner or explicit unsponsored status, agent principal, runtime principal, session capability profile, and personal-brain scope/version/count. Joe-sponsored Codex or Claude loads shared plus Joe-personal; Dell-sponsored loads shared plus Dell-personal; an unsponsored agent receives active shared rules and/or explicit job-scoped rules, reports personal scope none and zero personal, and never receives humanOnly capability.",
       "source_sections": [6, 19, 20, 33, 37],
       "source_refs": ["carr-control-room-bduf#s19", "carr-control-room-bduf#s20", "carr-control-room-bduf#s37", "system-loop:319"],
       "screen": ["agent sessions", "audit", "identity status", "council review"],
@@ -323,7 +323,7 @@
       "source_refs": ["carr-control-room-bduf#s19", "carr-control-room-bduf#s20", "system-loop:319", "shared-rule:4f7c348f"],
       "screen": ["identity status", "agent sessions", "audit", "council review"],
       "operational_entity": ["IdentityContext", "PersonalBrainScope", "RuleSourceParity", "CapabilityGrant"],
-      "api_or_action": ["future standing-context partner resolution and generated-render parity gate; no production connector mutation in Phase 0"],
+      "api_or_action": ["separately authorized standing-context sponsor resolution and generated-render parity repair is deployed; no Control Room product mutation route or Phase 0 artifact was deployed"],
       "authority": ["verified sponsor alone selects its matching personal brain", "personal rules shape behavior but grant no tenant, identity, role, risk, capability, or promotion authority"],
       "evidence": ["cross-brain denial fixture", "identity_scope_unknown fixture", "same-partner connector/render comparison", "tenant and capability widening denial fixtures"],
       "rollback": ["fail closed with personal_scope_mismatch, identity_scope_unknown, or identity_source_mismatch and disclose no foreign rule bodies"],

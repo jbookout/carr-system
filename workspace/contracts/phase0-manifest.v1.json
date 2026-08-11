@@ -174,8 +174,8 @@
     "allow": "GET, HEAD, OPTIONS"
   },
   "exit_gates": {
-    "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning contracts passed fresh-context independent verification with P0/P1/P2 all zero; the separate live connector repair remains open",
-    "sponsor_runtime_identity": "open: Joe-sponsored Codex returned 143 shared and zero personal while the fresh Joe-personal artifact declares 30; completion requires the full fresh runtime identity matrix and connector/fallback parity",
+    "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning contracts passed fresh-context independent verification with P0/P1/P2 all zero; the separately authorized narrow connector repair also passed live verification",
+    "sponsor_runtime_identity": "machine gate passed: Joe-sponsored Codex returned 143 shared and 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner=dell was refused before rule arrays; runtime tests passed 73/73 and loop 319 is done",
     "interactive_visual_accessibility": "runtime entry verified; full visual, keyboard, and screen-reader review remains unverified",
     "joe_and_dell_uncoached_five_journeys": "not performed",
     "baseline_measurement": "all five values remain unknown pending instrumentation or interview",
@@ -186,7 +186,7 @@
     "production Workspace implementation exists",
     "production auth or authorization is enforced",
     "production tenant isolation or cross-tenant denial is enforced",
-    "sponsor/runtime identity resolution is complete while Joe-sponsored standing context returns zero personal or any runtime identity gate remains open",
+    "sponsor/runtime identity resolution is complete without live same-sponsor count, identity-separation, spoof-refusal, audit, and independent verification evidence",
     "workflow promotion, rollback, or maintenance telemetry is implemented",
     "public tenant provisioning, public SaaS, billing, or seat licensing is implemented",
     "business writes are enabled",

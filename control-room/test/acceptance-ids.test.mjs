@@ -379,8 +379,10 @@ const assertions = {
     const background = value.scenarios.find(item => item.id === "unsponsored-background");
     const impersonation = value.denial_attempts.find(item => item.id === "background-claims-joe");
     assert.equal(background.sponsoring_human_id, null);
-    assert.equal(background.personal_brain_scope, null);
+    assert.equal(background.personal_brain_scope, "none");
     assert.equal(background.expected.result, "task_scoped_only");
+    assert.equal(background.expected.shared_rule_count, 143);
+    assert.equal(background.expected.personal_rule_count, 0);
     assert.equal(background.expected.human_only, false);
     assert.equal(impersonation.expected_result, "sponsor_impersonation_refused");
     assert.ok(authority.explicit_denies.some(item => item.id === "D-UNSPONSORED-HUMAN-ONLY"));
