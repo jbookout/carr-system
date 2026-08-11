@@ -10,8 +10,8 @@ Usage:
 
 TWO SOURCE MODES (ORDER 26(b), the ORDER 29a pattern).
   --files    the historical read: the router xlsx, the lane JSONs, the registry
-             xlsx. Still the fallback, and still the only mode Dell's runtime and
-             any machine without a database credential can use. No longer the
+             xlsx. Still the fallback, and still the only mode a cloud-only
+             session or machine without a database credential can use. No longer the
              default: the chain flipped to records on 2026-08-04 (ORDER 26(c)).
   --records  the same board derived from the record layer: `candidate_pool` (the
              router rows ORDER 25 imported plus the radar-lane rows ORDER 26(a)
@@ -50,8 +50,8 @@ LEADS_DIR = os.path.join(ROOT, "DNA", "Leads")
 AUTO = os.path.join(ROOT, "Automation")
 
 # ── source mode ──────────────────────────────────────────────────────────────
-# The import is guarded, not assumed: the vault copy of this script (Dell's and
-# the cloud runtime, per manifest.tsv) sits beside a bare sheets.py with no lib/
+# The import is guarded, not assumed: the cloud-only vault copy of this script,
+# per manifest.tsv, sits beside a bare sheets.py with no lib/
 # package next to it. There, records mode simply does not exist and the board
 # runs exactly as it always has.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -449,9 +449,9 @@ out_path = os.path.join(AUTO, "lead-board.html")
 open(out_path,"w",encoding="utf-8").write(html)
 print(f"Wrote {out_path}  ({os.path.getsize(out_path):,} bytes)")
 
-# Shared-tier publish (added 2026-07-20, Joe's brain): Dell's brain cannot see
-# Automation/, so every rebuild also drops the built board into the shared
-# DNA/Team/live-boards/ for his side to re-persist. Derived view; overwrite is correct.
+# Shared-tier publish (added 2026-07-20): every rebuild also drops the built
+# board into DNA/Team/live-boards/ for the cloud-only delivery path to re-persist.
+# Derived view; overwrite is correct.
 shared_path = os.path.join(ROOT, "DNA", "Team", "live-boards", "lead-board-latest.html")
 publish_failed = None
 try:
@@ -460,12 +460,12 @@ try:
     print(f"Published shared copy: {shared_path}")
 except Exception as e:
     publish_failed = e
-    print(f"WARNING: shared-tier publish failed ({e}) — Dell's copy will go stale; fix before session end.")
+    print(f"WARNING: shared-tier publish failed ({e}) — cloud fallback will go stale; fix before session end.")
 _src = ("records (candidate_pool + v_export_leads)" if MODE == MODE_RECORDS
         else "generated files")
 print(f"Router: {os.path.basename(router_path)} | {len(L):,} leads | queue {queue_n} | "
       f"decisions {len(DECISIONS)} | source: {_src}")
 if publish_failed:
     # Corrective #2 (2026-07-25): a failed shared publish must FAIL the run, not
-    # whisper — exit 0 here let the heartbeat report success while Dell's copy went stale.
+    # whisper — exit 0 here let the heartbeat report success while the cloud fallback went stale.
     sys.exit(f"EXIT 1: board written, but the shared-tier publish failed ({publish_failed}).")

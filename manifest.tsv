@@ -1,9 +1,9 @@
 # repo-path <TAB> vault-path (relative to CARR AI). One row per synced code file.
-# check.sh reads this for the code-drift pass. Vault copies are the fallback +
-# Dell's/cloud runtime for generators; for pipelines/ the vault copy is still the
-# SOP-invoked runtime (repoint happens per-script after a verified identical run).
+# check.sh reads this for the code-drift pass. Dell's migrated Mac uses this repo
+# and the live record/doctrine store, not these Drive copies. Vault copies remain
+# only for cloud-only delivery/runtime until that surface is separately retired.
 # FORKED BY DESIGN 2026-07-31 (ORDER 29a ratification): repo copy reads record views
-# (records-mode default); the vault copy is Dell's/cloud FILE-mode runtime and stays so
+# (records-mode default); the vault copy is the cloud-only FILE-mode runtime and stays so
 # per the ORDER 28 finding (no DB path off this Mac). The two can never match again, so
 # the drift pairing is retired rather than alarming every night. Vault copy governed by
 # dna-protocol as before. Former row: generators/build-deal-room.py <TAB> DNA/Team/live-boards/build-deal-room.py
@@ -24,7 +24,7 @@ pipelines/radar/parse-tax-rolls.py	Automation/radar/parse-tax-rolls.py
 pipelines/radar/date-founders.py	Automation/radar/date-founders.py
 shared/build-lead-board-template.py	DNA/Team/build-lead-board.py
 # FORKED BY DESIGN 2026-08-11: the repo helper is Joe's record-mode runtime and
-# imports lib.record_sources; the Drive helper is Dell/cloud's standalone XLSX
+# imports lib.record_sources; the Drive helper is the cloud-only standalone XLSX
 # runtime, where that library does not exist. Equality would break one side.
 # Former row: shared/vendor_intro_for_stage.py <TAB> DNA/Network/vendor_intro_for_stage.py
 shared/fill-engine/extract_pvl_onepager.py	DNA/Deal Management/fill-engine/extract_pvl_onepager.py
