@@ -59,6 +59,9 @@ def main() -> int:
              where status='ok' and file_sha is not null
              order by target, ran_at desc""")
         rows = cur.fetchall()
+        cur.execute("select value #>> '{}' from system_config where key in "
+                    "('doctrine.md_renders_retiring','doctrine.md_renders_retired')")
+        markdown_cutoff = any(str(row[0]).lower() == "true" for row in cur.fetchall())
     except Exception as e:
         print(f"SKIP: read failed ({type(e).__name__}: {str(e).splitlines()[0]})")
         return 2
@@ -72,12 +75,15 @@ def main() -> int:
         print(f"SKIP: registry unreadable ({type(e).__name__})")
         return 2
 
-    checked = mismatched = missing = 0
+    checked = mismatched = missing = retired = 0
     bad = []
     for target, stored in rows:
         rel = paths.get(target)
         if not rel:
             continue          # loop-file targets etc. register elsewhere; covered as adopted
+        if markdown_cutoff and rel.lower().endswith(".md"):
+            retired += 1
+            continue
         p = os.path.join(VAULT, rel)
         if not os.path.exists(p):
             missing += 1
@@ -94,9 +100,10 @@ def main() -> int:
               f"renders: {', '.join(bad[:5])} · on breach: re-export the target AND investigate "
               f"the edit first (a re-export erases the evidence)")
         return 1
+    suffix = f"; {retired} Markdown projection(s) retired" if retired else ""
     print(f"OK renders-verify — {checked} hashed renders match their export bytes "
           f"({len(paths) - checked} not yet hashed; they gain a hash at next export) "
-          f"· on breach: re-export + investigate")
+          f"· on breach: re-export + investigate{suffix}")
     return 0
 
 

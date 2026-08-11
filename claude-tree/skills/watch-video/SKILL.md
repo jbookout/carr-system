@@ -8,7 +8,7 @@ description: >
   inspiration bank. Say "watch this video", "what does this video say about X", "pull the tactics
   from this webinar". LOCAL Claude Code only (needs ffmpeg + yt-dlp on the Mac) — not Cowork cloud.
   Do NOT use on meeting/call recordings: Teams meetings are Copilot's lane (division-of-labor rule
-  `8aefcdce`, DNA/compiled-rules-shared.md), and client-call recordings carry consent/privacy weight — flag and stop if asked.
+  `8aefcdce`, retrieved through standing-context), and client-call recordings carry consent/privacy weight — flag and stop if asked.
 ---
 
 # Watch Video — vetted CARR adaptation (July 6, 2026)
@@ -52,7 +52,7 @@ Joe can jump to it.
 and before anything is written anywhere permanent, summarize what the source contains and ask Joe
 whether it applies system-wide or belongs somewhere more specific (own section/business model,
 one prospect, personal tier, or nowhere).** Ask Joe whether findings belong anywhere permanent before writing: tactics worth repeating →
-the `add-loop` verb with kind `idea` (`00_Context/idea-bank.md` is a GENERATED render of those rows — never edit it), or, when the tactic is a standing rule meant to bind future sessions, the `teach` verb with Joe's verbatim words, which stays PROPOSED until he activates it (his yes required); post patterns →
+the `add-loop` verb with kind `idea`, or, when the tactic is a standing rule meant to bind future sessions, the `teach` verb with Joe's verbatim words, which stays PROPOSED until he activates it (his yes required); post patterns →
 content-inspiration-bank Section 1 with the transferable pattern named; market data points →
 substance bank (dated, sourced). Then delete the temp dir.
 
@@ -61,7 +61,7 @@ call): podcasts, YouTube channels, webinars, conference recordings, and member-g
 (training portal / Agent Central) are all the SAME pipeline — the portal is just one source among
 many, and the system should never describe this as "pulling transcripts from the portal."**
 The pipeline for ANY learning capture:
-1. **Dedup first:** check `CARR AI/DNA/Marketing/Source Material/INDEX.md` (the capture log) — if the
+1. **Dedup first:** search the capture records through the record layer — if the
    session is listed, it's already absorbed; stop. **Also check `CARR AI/DNA/Research/open-questions.md`
    (added Jul 31, 2026): if the source ANSWERS an open question there, close that row (dated, answer +
    source pointer) as part of the capture — answers must find their questions.**

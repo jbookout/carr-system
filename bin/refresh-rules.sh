@@ -16,6 +16,12 @@ REPO="$HOME/carr-system"
 LOG="$REPO/out/rules-refresh.log"
 [ -f "$HOME/.config/carr/db.env" ] || { echo "$(date -u +%FT%TZ) SKIP no db.env" >> "$LOG"; exit 0; }
 cd "$REPO" || exit 1
+if "$REPO/.venv/bin/python" -c \
+  'from exporters.run_exports import md_renders_disabled; raise SystemExit(0 if md_renders_disabled() else 1)'
+then
+  echo "$(date -u +%FT%TZ) RETIRED doctrine Markdown projections are store-served" >> "$LOG"
+  exit 0
+fi
 if CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules >> "$LOG" 2>&1; then
   echo "$(date -u +%FT%TZ) OK rules refreshed" >> "$LOG"
 else

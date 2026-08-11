@@ -404,36 +404,31 @@ def section_capacity(cur, today) -> str:
 # 4. Monday partner agenda — decisions only
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_decisions():
-    """❓ rows are the house marker for a pending decision, and the open-loops
-    header is the authority on that. This reads the marker, so a row becomes an
-    agenda item the moment it is marked, with nobody remembering to copy it."""
+def read_decisions(cur):
+    """Pending decision loops, read from their canonical store rows."""
     items = []
-    for name in ("00_Context/open-loops-backlog.md", "00_Context/open-loops.md"):
-        f = VAULT / name
-        if not f.exists():
-            continue
-        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.startswith("|") or "❓" not in line:
-                continue
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cells) < 5 or not cells[0].isdigit():
-                continue
-            body = cells[2]
-            head = re.sub(r"\*\*(.+?)\*\*", r"\1", body).replace("❓", "").strip()
-            head = plain(" ".join(head.split()))
-            question = head.split(". ")[0].rstrip(" .")
-            if len(question) > 210:
-                question = question[:210].rsplit(" ", 1)[0].rstrip(",;") + "..."
-            items.append({"owner": plain(cells[1]), "question": no_ids(question) + ".",
-                          "unblocks": no_ids(plain(cells[4])) if len(cells) > 4 else ""})
+    rows = q(cur, """select coalesce(owner, '') as owner,
+                            coalesce(title, body, '') as body,
+                            coalesce(unblocks, blocker_detail, '') as unblocks
+                       from loop_item
+                      where status='open' and marker='decision'
+                        and kind in ('open_loop','team_loop')
+                      order by created_at""")
+    for row in rows:
+        head = re.sub(r"\*\*(.+?)\*\*", r"\1", row["body"]).replace("❓", "").strip()
+        head = plain(" ".join(head.split()))
+        question = head.split(". ")[0].rstrip(" .")
+        if len(question) > 210:
+            question = question[:210].rsplit(" ", 1)[0].rstrip(",;") + "..."
+        items.append({"owner": plain(row["owner"]), "question": no_ids(question) + ".",
+                      "unblocks": no_ids(plain(row["unblocks"]))})
     return items
 
 
 def section_monday(cur, today) -> str:
     days = (7 - today.weekday()) % 7 or 7
     nxt = today + timedelta(days=days)
-    items = read_decisions()
+    items = read_decisions(cur)
     both = [i for i in items if "+" in i["owner"] or "/" in i["owner"] or "Dell" in i["owner"]]
     solo = [i for i in items if i not in both]
 

@@ -50,6 +50,7 @@ sys.path.insert(0, str(REPO))
 
 from exporters.common import VAULT, connect          # noqa: E402
 from exporters.targets import _fetch_rules           # noqa: E402
+from exporters.run_exports import md_renders_disabled  # noqa: E402
 
 # audience label, personal_to slug (None = shared), vault-relative path
 AUDIENCES = [
@@ -77,6 +78,18 @@ def main():
     except SystemExit as e:
         # connect() sys.exit()s with a message when the credential is absent.
         print(f"SKIP rules-live-check: {e}")
+        return 0
+
+    # Once the cutoff is active, the store/standing-context path is the binding
+    # surface. Do not call a deliberately retired file missing—or teach a human
+    # to resurrect it—as an outage. We still fetch each audience through the
+    # exporter contract, which proves the same store partition is readable.
+    if md_renders_disabled():
+        with conn, conn.cursor() as cur:
+            findings = [f"{label}: {len(_fetch_rules(cur, slug))} active in store"
+                        for label, slug, _rel in AUDIENCES]
+        print("OK rules live — doctrine-store cutoff active; no compiled render expected; "
+              + "; ".join(findings))
         return 0
 
     rc = 0

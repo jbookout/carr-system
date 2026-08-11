@@ -14,7 +14,7 @@ PICK THE 40, in this priority order (read-only queries first):
 4. Leads and clients missing title, org, email or phone.
 Skip anything whose party has `contact_state` of `do_not_contact`.
 
-FOR EACH RECORD, run the deep-dive research the standing rule requires (it is in compiled-rules-shared.md — read it first). Gather: full legal and trade name, title, current company, practice website, address/city/county, specialty, NPI/licence where applicable, other practitioners at the practice, hours, entity filings, and SOCIAL MEDIA ACCOUNTS with direct links so Joe can follow them.
+FOR EACH RECORD, call standing-context first and follow the active shared research rule returned by the record layer. Gather: full legal and trade name, title, current company, practice website, address/city/county, specialty, NPI/licence where applicable, other practitioners at the practice, hours, entity filings, and SOCIAL MEDIA ACCOUNTS with direct links so Joe can follow them.
 
 CONTACT INFO — GET THE REACHABLE ONES. Joe: "you need to get contact info where it is available too (email and cell phone, not office phone)." A direct email and a CELL number are what let him actually reach someone; an office line reaches a front desk and is close to useless for this business. Record office numbers only when nothing better exists, and LABEL them as office so nobody mistakes one for a direct line. If a cell or personal email cannot be found from open sources, say so plainly rather than filling the field with the switchboard.
 

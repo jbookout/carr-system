@@ -91,4 +91,4 @@ const report = await agent(
 
 return { date: TODAY, question: QUESTION, angles: scoped.angles, findingCount: all.length,
   confirmed: kept.filter(k => k.verified === 'CONFIRMED').length, dropped, report,
-  writeBackReminder: `Top seat: save as DNA/Research/${TODAY}-<slug>.md, cross-ref any relevant prospect files + clients-active.md, feed content-worthy items to the substance bank, stamp.` }
+  writeBackReminder: `Top seat: record research through record-finding/log-capture with source provenance, attach it to relevant records, feed content-worthy items to the substance bank through its record verb, and verify read-back. Do not create a Markdown report.` }

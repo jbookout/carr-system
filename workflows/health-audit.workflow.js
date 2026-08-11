@@ -85,4 +85,4 @@ const summary = await agent(
 
 log(`health-audit ${TODAY}: ${rows.length}/12 categories graded+verified`)
 return { date: TODAY, metrics, rows, summary,
-  writeBackReminder: 'Top seat now: append dated column to score-history + FINAL metrics tables, decision-history entry, open 🔔 loops (audit-task.md rules).' }
+  writeBackReminder: 'Top seat now: write measured outcomes to the health record, log settled rulings with log-decision, add only genuinely blocked work with add-loop, then read each record back.' }

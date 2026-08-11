@@ -46,7 +46,7 @@ wins if they ever disagree, and any *new* approved rule goes into the file, not 
 - **DNA/templates.md** — email/outreach voice + CTA rules, strongest pitch hooks, the
   Pre-Delivery Self-Check.
 - **DNA/brand-voice.md** — marketing/brand voice, messaging pillars, visual identity.
-- **The compiled rules (DNA/compiled-rules-shared.md)** — behavioral rules (healthcare-not-CRE audience,
+- **Standing-context** — active behavioral rules (healthcare-not-CRE audience,
   no-conflict framing, Microsoft-format default, HIPAA spelling, no-sycophancy), plus its
   **Zero-Tolerance AI-Tell List** (added July 6, 2026) — the hard-ban list this skill's "sounds
   like AI" pass now runs first, before the judgment-based checks.
@@ -57,9 +57,9 @@ competing rulebook.
 
 **Before auditing, actually open the source-of-record file(s) for the surface you named in Step 1
 and audit against their current contents, not the rule summaries baked into this skill — those
-files change over time, and they win.** Map: outreach email → DNA/templates.md; social post →
+sources change over time, and they win.** Map: outreach email → DNA/templates.md; social post →
 write-content/SKILL.md (the voice source of record) plus DNA/brand-voice.md; brand/marketing piece →
-DNA/brand-voice.md; any surface → the compiled rules (DNA/compiled-rules-shared.md) for the behavioral rules. The lists below are a
+DNA/brand-voice.md; any surface → standing-context for the active behavioral rules. The lists below are a
 checklist for applying the live rules, not a substitute for reading them.
 
 ## Step 1 — Identify the surface and its rules
@@ -106,7 +106,7 @@ hinge on it.
     asking for a decision or is emotionally loaded, note that a call may beat an email. Writing is
     not a substitute for a targeted conversation.
 
-### CARR hard rules (from DNA/templates.md / the compiled rules (DNA/compiled-rules-shared.md) — these are non-negotiable)
+### CARR hard rules (from DNA/templates.md / standing-context — these are non-negotiable)
 - **No em dashes** in client-facing writing — use commas/periods or restructure. (Email: Critical.)
 - **Never the word "just"** ("I just wanted to reach out") — sounds apologetic.
 - **No corporate clichés** (list above).
@@ -147,7 +147,7 @@ These catch tells that don't carry a recognizable one-word signature — generic
 ## Step 3 — Assign severity
 
 - **Critical** — breaks a CARR hard rule, hits anything on the Zero-Tolerance AI-Tell List
-  (the compiled rules (DNA/compiled-rules-shared.md) — em dash on any surface, flagged vocabulary, contrast-reframe, rule-of-three
+  (standing-context — em dash on any surface, flagged vocabulary, contrast-reframe, rule-of-three
   overuse, generic AI openers, corporate clichés), would hurt credibility or response rate, or would
   embarrass Joe if sent (CRE jargon to a dentist, no clear CTA, an unverified dollar claim, "I hope
   this finds you well," HIPAA misspelled or an uncaveated patient-data reference). Fix before sending.
@@ -180,7 +180,7 @@ Return exactly this structure, nothing rewritten:
   manufactured "imperfections" to seem human — that produces fake voice, not real voice (same
   principle as the standing rule against inventing hypothetical prospects). Real voice comes from
   cutting filler and being specific, not from adding noise.
-- **Be direct, no sycophancy** (the compiled rules, DNA/compiled-rules-shared.md). If the piece is weak, say so plainly and
+- **Be direct, no sycophancy** (standing-context). If the piece is weak, say so plainly and
   say why. Joe values accuracy over flattery.
 - **Match the surface.** Don't apply first-touch-email CTA rules to a brand flyer, or relax
   no-em-dash for a client proposal.
@@ -190,7 +190,7 @@ Return exactly this structure, nothing rewritten:
 - Content calendar / scheduling / publishing → **social-media-manager** skill.
 - Email/outreach rules of record → **DNA/templates.md**.
 - Brand/marketing voice of record → **DNA/brand-voice.md**.
-- Behavioral rules → **the compiled rules (DNA/compiled-rules-shared.md + 00_Context/compiled-rules-joe.md)**.
+- Behavioral rules → **standing-context (shared plus the verified sponsor's personal scope)**.
 
 *Built July 3, 2026 from Nicolas Cole's "David Ogilvy Writing Coach" article (X, July 2, 2026),
 adapted to CARR's own rules rather than adopted generically. The Ogilvy rules that overlapped

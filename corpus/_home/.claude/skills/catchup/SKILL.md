@@ -21,11 +21,15 @@ The inverse of a handoff. When a session starts cold on a project that already h
 
 ## Procedure
 
-1. **Find the trail, newest first.** Look for, in rough priority order:
+1. **Use the authoritative project source first.** In CARR, call
+   `standing-context`, then use `catch-me-up`, `today-triage`, `loop-board`,
+   `doctrine-index`, and `read-doctrine` as needed. Do not look for or read
+   generated Markdown projections or bootstrap files: the record layer is the
+   only current source after the doctrine cutoff. In a project without a
+   record layer, find the trail newest first. Look for, in rough priority order:
    - a handoff packet (a `handoffs/` folder, a `HANDOFF*.md`, or a pasted packet in the conversation),
    - an open-items / TODO / open-loops file,
    - a decision log (`decisions*.md`, `decision-history*.md`, an ADR folder),
-   - (in CARR these are GENERATED renders — `open-loops.md`, `open-loops-backlog.md`, `action-required.md`, `team-loops.md`, `decision-history.md`, `idea-bank.md`. Read them freely; they are current as of the last export. But treat the record layer as truth and never write back into them.)
    - a changelog or recent version-control history,
    - the project's context files (`CLAUDE.md`, `AGENTS.md`, `README`).
    Read what exists; skip what does not. Do not invent a trail that is not there.

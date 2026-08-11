@@ -28,7 +28,7 @@ THE THREE LANES
              is the record of them, and it is not readable under the only
              credential this Mac holds.
   social     a POINTER into the existing Blotato review flow, not a rebuild.
-             The house rule already writes one open-loops row per scheduled
+             The house rule already writes one canonical loop row per scheduled
              batch ("No scheduled post fires unreviewed"); this lane surfaces
              those rows beside everything else waiting, and sends Joe to
              Blotato, where the posts actually live.
@@ -85,8 +85,8 @@ VAULT = Path(os.environ.get(
     "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
 
 # The standing enforcement rule's own words, from social-media-workflow.md step 4.
-# Every scheduled batch writes an open-loops row carrying this in its
-# "What it unblocks" cell, so keying on it is reading the house convention
+# Every scheduled batch writes a loop row carrying this in its canonical
+# unblocks field, so keying on it is reading the house convention
 # rather than pattern-matching prose that may be reworded next week.
 SOCIAL_UNBLOCKS = "No scheduled post fires unreviewed"
 
@@ -427,30 +427,33 @@ def read_documents():
 # social lane — a pointer, not a rebuild
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_social():
-    f = VAULT / "00_Context/open-loops.md"
-    if not f.exists():
-        return [], "the open items file is not reachable from here"
+def read_social(url):
+    if not url:
+        return [], "the loop store is not reachable: no database credential"
+    try:
+        import psycopg
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute("""select number, owner, marker, body, due_on
+                             from loop_item
+                            where status='open' and kind='open_loop'
+                              and (body ilike %s or unblocks ilike %s
+                                   or blocker_detail ilike %s)
+                            order by due_on nulls last, number""",
+                        ((f"%{SOCIAL_UNBLOCKS}%",) * 3))
+            rows = cur.fetchall()
+    except Exception as exc:
+        return [], f"the loop store read failed ({type(exc).__name__})"
     items = []
     not_due = 0
     today = datetime.now().date().isoformat()
-    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.startswith("|") or SOCIAL_UNBLOCKS not in line:
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) < 6:
-            continue
-        body = cells[2]
-        # The marker convention in the open-loops header is the authority on what
-        # is live, and this reads it rather than judging the prose: a future-dated
-        # row is silent until its day. Skipping it is not hiding it, which is why
-        # the count comes back in the lane status.
-        dated = re.match(r"🗓(\d{4}-\d{2}-\d{2})", body)
-        if dated and dated.group(1) > today:
+    for number, owner, marker_name, body, due_on in rows:
+        body = body or ""
+        due = due_on.isoformat() if due_on else None
+        if marker_name == "dated" and due and due > today:
             not_due += 1
             continue
-        marker = "due now" if body.startswith("🔔") else (
-            "now due" if dated else "open")
+        marker = "due now" if marker_name == "bell" else (
+            "now due" if marker_name == "dated" else "open")
         headline = re.sub(r"\*\*(.+?)\*\*", r"\1", body)
         headline = re.sub(r"[🔔🗓✅⚠️⏳]", "", headline).strip()
         headline = re.sub(r"^\d{4}-\d{2}-\d{2}\s*", "", headline)
@@ -461,12 +464,12 @@ def read_social():
             count = int(m.group(1))
         first = headline.split(". ")[0][:200].rstrip(" .") + "."
         items.append({
-            "item_id": f"social-{cells[0]}",
-            "owner": cells[1],
+            "item_id": f"social-{number}",
+            "owner": owner,
             "state": marker,
             "headline": first,
             "posts": count,
-            "where": cells[5],
+            "where": "loop store",
         })
     if not items:
         return [], ("nothing is scheduled and waiting"
@@ -733,7 +736,7 @@ def main() -> int:
     pruned = write_drafts(drafts, store / "drafts")
 
     doc_items, doc_status = read_documents()
-    soc_items, soc_status = read_social()
+    soc_items, soc_status = read_social(url)
 
     now = datetime.now(timezone.utc)
     queue: dict[str, Any] = {

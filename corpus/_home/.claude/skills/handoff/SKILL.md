@@ -33,7 +33,7 @@ narrative clothing: every piece of it already has a verb —
 | Decisions made, with rationale | `log-decision` (one call per settled call, alternatives in the rationale) |
 | Open questions / next actions | `add-loop` (owner, marker, what it unblocks) |
 | Research results, verified facts | `record-finding` (source required) |
-| Standing rules the successor must honor | `teach` (only if genuinely new — usually they already bind via compiled rules) |
+| Standing rules the successor must honor | `teach` (only if genuinely new — active rules load through `standing-context`) |
 | Current state / watch-outs | the decision entries' rationale carries them |
 
 The RECEIVING end already exists: the next session runs `catch-me-up` /
@@ -62,8 +62,11 @@ This is **build-and-deliver**. It never sends anything, never opens the new sess
 
 This skill runs in any project. Before writing, take ten seconds to fit the local conventions:
 
-- **Read the project's own context** if present — `CLAUDE.md`, `AGENTS.md`, `README`, or a docs index — to learn the project's operating rules, vocabulary, and where notes live.
-- **Find the handoff home, and check it is writable.** If the project already has an obvious place for continuation notes, decisions, or open items (a `handoffs/` or `docs/` folder, a decision log, an open-loops or TODO file), plan to offer that — but first confirm it is not a generated projection. In CARR, `open-loops.md`, `decision-history.md` and `idea-bank.md` are all renders: an open item goes in through `add-loop`, a settled decision through `log-decision`. If nothing exists, the default is a `handoffs/` folder at the project root with a dated file.
+- **Read the project's own context.** In CARR, call `standing-context` and the
+  record-layer doctrine verbs; do not look for retired bootstrap or projection
+  files. In a project without a record layer, use its `CLAUDE.md`, `AGENTS.md`,
+  `README`, or docs index if present.
+- **Find the handoff home, and check it is writable.** If the project already has an obvious place for continuation notes, decisions, or open items (a `handoffs/` or `docs/` folder, a decision log, an open-loops or TODO file), plan to offer that — but first confirm it is not a generated projection. In CARR, those domains are record-backed: an open item goes through `add-loop`, a settled decision through `log-decision`, and no Markdown handoff is created. If nothing exists in a non-record-backed project, the default is a `handoffs/` folder at the project root with a dated file.
 - **Carry the project's guardrails.** If the project's context defines standing rules — an approval gate before outbound actions, confidentiality boundaries, formatting defaults, a house style — restate the ones the successor could trip over in the packet. If there is no such context, skip this section rather than inventing rules.
 
 ## Two modes — decide first

@@ -42,4 +42,4 @@ MECHANICS:
 
 REPORT AT THE END, in the record not just in the transcript (rule 1f3a7372 — an unattended run that only prints is a run whose findings die with the session): log one `log-decision` naming which loops you closed, what you actually did for each, and the open count before and after. Keep it to a few lines per loop.
 
-CONTEXT: decision 4090076e in decision-history carries the full state as of 2026-08-10 — what shipped, two corrections a session made to its own wrong claims, and what is deliberately not started. Read it on your first run.
+CONTEXT: decision 4090076e in the record layer carries the full state as of 2026-08-10 — what shipped, two corrections a session made to its own wrong claims, and what is deliberately not started. Retrieve it through the record interface on your first run.

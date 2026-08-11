@@ -358,6 +358,41 @@ def newest(pattern):
 def age_days(path):
     return (time.time() - os.path.getmtime(path)) / 86400
 
+
+def doctrine_markdown_cutoff_active():
+    """Read the server flag. An unreadable flag is deliberately false: before
+    a verified cutoff, a missing projection must stay a visible health failure."""
+    try:
+        sys.path.insert(0, REPO_ROOT)
+        from lib.doctrine_cutoff_state import markdown_writes_blocked
+        if markdown_writes_blocked(REPO_ROOT):
+            return True
+    except Exception:
+        # Before the cutoff helper is installed, keep the legacy health posture.
+        pass
+    query = ("select value #>> '{}' from system_config where key in "
+             "('doctrine.md_renders_retiring','doctrine.md_renders_retired');")
+    try:
+        result = subprocess.run(
+            [os.path.join(REPO_ROOT, ".venv", "bin", "python"),
+             os.path.join(REPO_ROOT, "tools", "db-tap.py"), "sql", "/dev/stdin"],
+            input=query, capture_output=True, text=True, timeout=30)
+        return result.returncode == 0 and any(
+            line.strip().lower() == "true" for line in result.stdout.splitlines())
+    except Exception:
+        return False
+
+
+RETIRED_RENDER_WATCHES = {
+    "DNA/Clients/clients-active.md",
+    "DNA/compiled-rules-shared.md",
+    "00_Context/compiled-rules-joe.md",
+    "DNA/Network/introduction-rules.md",
+}
+if doctrine_markdown_cutoff_active():
+    WATCH = [row for row in WATCH if row[1] not in RETIRED_RENDER_WATCHES]
+    print("  -- doctrine Markdown projections retired; watcher rows now bind store checks")
+
 rc = 0
 print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — outputs, not schedules")
 for name, out_pat, max_age, inputs, note in WATCH:
@@ -735,7 +770,12 @@ _probe = r'''
 import sys
 from exporters.targets import TARGETS
 from exporters.common import connect
-print("REG\t" + "\t".join(sorted(TARGETS)))
+from exporters.run_exports import md_renders_disabled
+targets = TARGETS
+if md_renders_disabled():
+    targets = {key: value for key, value in TARGETS.items()
+               if not value[0].lower().endswith('.md')}
+print("REG\t" + "\t".join(sorted(targets)))
 with connect() as c, c.cursor() as cur:
     cur.execute("""select target,
                           coalesce(max(ran_at) filter (where status='ok')::text,''),

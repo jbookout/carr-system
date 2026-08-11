@@ -22,7 +22,10 @@ Work leaves a trail of half-done things: a TODO dropped mid-file, a "we'll circl
 
 1. **Scan the likely sources:**
    - inline markers — `TODO`, `FIXME`, `HACK`, `XXX`, "come back to", "flag for later" — across the working files (or the whole project if the user wants a full sweep);
-   - the project's TODO / open-items / open-loops file, if one exists (in CARR, `open-loops.md` and `open-loops-backlog.md` are GENERATED renders — read them, but any item you open or close goes through `add-loop` / `update-loop` / `close-loop`, never an edit to the file);
+   - the project's TODO / open-items / open-loops source, if one exists. In
+     CARR, call `loop-board` and `today-triage`; do not read or edit retired
+     Markdown projections. Open or close items only through `add-loop`,
+     `update-loop`, and `close-loop`;
    - recent work in this session for threads that were started and not closed;
    - decisions raised but never settled;
    - docs or context files that reference things that have since changed (stale-doc catch).

@@ -12,7 +12,8 @@ import os
 import subprocess
 import sys
 
-GATE = os.path.expanduser("~/carr-system/hooks/record-home-gate.py")
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+GATE = os.path.join(REPO, "hooks", "record-home-gate.py")
 VAULT = os.path.expanduser(
     "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
@@ -108,7 +109,7 @@ def run(tool, ti):
 def manifest_unit_cases():
     """Direct md_manifest checks the subprocess harness cannot reach: the
     retirement clock is injectable only in-process."""
-    sys.path.insert(0, os.path.expanduser("~/carr-system/hooks"))
+    sys.path.insert(0, os.path.join(REPO, "hooks"))
     from datetime import date, timedelta
     from md_manifest import md_write_verdict, CUTOFF
     cases = [
@@ -124,6 +125,8 @@ def manifest_unit_cases():
          "log-decision" in (md_write_verdict("DNA/writing-rules.md") or "")),
         ("unit · exact allow is not a prefix (CLAUDE.md.bak-style)",
          md_write_verdict("CLAUDE.md.old.md") is not None),
+        ("unit · bootstrap stub DENIED after cutoff",
+         md_write_verdict("CLAUDE.md", today=CUTOFF + timedelta(days=1)) is not None),
     ]
     return cases
 

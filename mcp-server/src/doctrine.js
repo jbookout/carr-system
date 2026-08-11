@@ -50,6 +50,72 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     return actor.id;
   }
 
+  async function cutoffState(c, lock = false) {
+    const rows = (await c.query(
+      `select key, value #>> '{}' as value from system_config
+        where key in ('doctrine.md_renders_retiring','doctrine.md_renders_retired')
+        ${lock ? "for update" : ""}`)).rows;
+    const values = Object.fromEntries(rows.map(r => [r.key, String(r.value).toLowerCase() === "true"]));
+    if (values["doctrine.md_renders_retired"]) return "retired";
+    if (values["doctrine.md_renders_retiring"]) return "retiring";
+    return "active";
+  }
+
+  async function cutoffEvidence(c, recordId) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(recordId || ""))
+      throw new ToolError({ error: "full_durable_record_id_required", record_id: recordId || null });
+    const ev = (await c.query(
+      `select e.id::text event_id, e.subject_id::text, e.verb, e.subject_type,
+              a.slug actor, e.sponsoring_human_slug, e.human_quote,
+              e.agent_rationale, e.new_value, e.cause, e.organization_tenant_id
+         from event e join actor a on a.id=e.actor_id
+        where e.id::text=$1 or e.subject_id::text=$1
+        order by e.recorded_at desc limit 1`, [recordId])).rows[0];
+    if (ev) return { id: recordId, ...ev, record_type: ev.verb === "log-decision" ? "decision" : "finding",
+      provenance: ev.new_value?.provenance || ev.cause,
+      text: [ev.human_quote, ev.agent_rationale, JSON.stringify(ev.new_value || {})]
+        .filter(Boolean).join(" ").toLowerCase() };
+    const rev = (await c.query(
+      `select r.id::text, r.plain_text, r.commit_message, a.slug actor,
+              s.section_key, d.slug document
+         from doctrine_revision r join actor a on a.id=r.actor_id
+         join doctrine_section s on s.id=r.section_id
+         join doctrine_document d on d.id=s.document_id
+        where r.id::text=$1 and s.current_revision_id=r.id`, [recordId])).rows[0];
+    if (rev) return { ...rev, record_type: "doctrine_revision", current: true,
+      provenance: rev.commit_message, text: `${rev.plain_text || ""} ${rev.commit_message || ""}`.toLowerCase() };
+    throw new ToolError({ error: "cutoff_evidence_not_found", record_id: recordId });
+  }
+
+  function requireJoeCutoffActor(actor) {
+    if (actor.human !== true || actor.slug !== "joe")
+      throw new ToolError({ error: "joe_human_only", actor: actor.slug, human: actor.human === true });
+    if (organizationTenantForActor(actor) !== "carr-internal")
+      throw new ToolError({ error: "wrong_organization_tenant" });
+  }
+
+  async function requireJoeDecision(c, recordId, word) {
+    const ev = await cutoffEvidence(c, recordId);
+    const sponsor = ev.sponsoring_human_slug || ev.actor;
+    if (ev.record_type !== "decision" || sponsor !== "joe" || ev.organization_tenant_id !== "carr-internal"
+        || !ev.provenance || !ev.text.includes("approve") || !ev.text.includes("cutoff")
+        || !ev.text.includes(word))
+      throw new ToolError({ error: "invalid_cutoff_approval", record_id: recordId, expected: word });
+    return ev;
+  }
+
+  async function requireSystemEvidence(c, recordId, evidenceType, manifestSha = null) {
+    const ev = await cutoffEvidence(c, recordId);
+    const sponsor = ev.sponsoring_human_slug || ev.actor;
+    if (ev.verb !== "record-system-evidence" || ev.new_value?.evidence_type !== evidenceType
+        || sponsor !== "joe" || ev.organization_tenant_id !== "carr-internal" || !ev.provenance)
+      throw new ToolError({ error: "invalid_system_evidence", record_id: recordId,
+                            expected: evidenceType });
+    if (manifestSha && ev.new_value?.observations?.manifest_sha256 !== manifestSha)
+      throw new ToolError({ error: "manifest_evidence_mismatch", record_id: recordId });
+    return ev;
+  }
+
   async function resolveDoc(c, ref) {
     // by id, live slug, or alias — aliases keep old links resolving (0075)
     let r = await c.query(
@@ -920,6 +986,196 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           doctrine: { generation: Number(gen.generation),
             hint: "doctrine-index for the catalog; search-doctrine / read-doctrine to read — there are no files" } };
       },
+    },
+
+    "cutoff-status": {
+      description: "Read the durable doctrine Markdown cutoff state. Tenant and authority are server-derived; this verb accepts no selector.",
+      inputSchema: { type: "object", properties: {} },
+      handler: async (c, actor) => {
+        await actorId(c, actor);
+        return { ok: true, organization_tenant_id: organizationTenantForActor(actor),
+                 state: await cutoffState(c), source: "system_config" };
+      },
+    },
+
+    "transition-doctrine-cutoff": {
+      write: true, humanOnly: true,
+      description: "Human-only audited transition for the doctrine Markdown cutoff. The server validates the current state and durable evidence; callers cannot select tenant, sponsor, actor, or capability.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        expected_state: { type: "string", enum: ["active", "retiring", "retired"] },
+        target_state: { type: "string", enum: ["active", "retiring", "retired"] },
+        approved_commit: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        monday_evidence_id: { type: "string" },
+        bootstrap_revision_ids: { type: "array", items: { type: "string" } },
+        stage_evidence_id: { type: "string" },
+        cold_start_evidence_id: { type: "string" },
+        rollback_evidence_id: { type: "string" },
+        approval_decision_id: { type: "string" },
+        reason: { type: "string" },
+      }, required: ["idempotency_key", "expected_state", "target_state", "approved_commit",
+                    "manifest_sha256", "approval_decision_id", "reason"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "transition-doctrine-cutoff", args, async () => {
+        requireJoeCutoffActor(actor);
+        await actorId(c, actor);
+        if (!/^[0-9a-f]{40}$/i.test(args.approved_commit || "")
+            || !/^[0-9a-f]{64}$/i.test(args.manifest_sha256 || ""))
+          throw new ToolError({ error: "invalid_cutoff_artifact_identity" });
+        const before = await cutoffState(c, true);
+        if (before !== args.expected_state)
+          throw new ToolError({ error: "cutoff_state_conflict", expected: args.expected_state, current: before });
+        const allowed = (before === "active" && args.target_state === "retiring")
+          || (before === "retiring" && args.target_state === "retired")
+          || ((before === "retiring" || before === "retired") && args.target_state === "active");
+        if (!allowed) throw new ToolError({ error: "illegal_cutoff_transition", from: before, to: args.target_state });
+
+        const evidenceIds = [];
+        if (args.target_state === "retiring") {
+          const monday = await requireSystemEvidence(c, args.monday_evidence_id, "monday_store_cycle");
+          const observations = monday.new_value?.observations || {};
+          if (observations.store_first !== true || observations.heartbeat_complete !== true
+              || String(observations.cycle || "").toLowerCase() !== "monday")
+            throw new ToolError({ error: "monday_store_cycle_not_proven" });
+          const ids = args.bootstrap_revision_ids || [];
+          if (ids.length !== 3 || new Set(ids).size !== 3)
+            throw new ToolError({ error: "three_unique_bootstrap_revisions_required" });
+          const revisions = await Promise.all(ids.map(id => cutoffEvidence(c, id)));
+          const docs = new Set(revisions.map(r => r.document));
+          const expectedDocs = ["carr-workspace-bduf", "carr-control-room-bduf",
+                                "carr-mature-software-end-state-bduf"];
+          if (revisions.some(r => r.record_type !== "doctrine_revision" || r.current !== true
+              || !r.provenance || !r.text.includes("standing-context")
+              || r.text.includes("compiled-rules") || r.text.includes("claude.md"))
+              || expectedDocs.some(doc => !docs.has(doc)))
+            throw new ToolError({ error: "invalid_bootstrap_revisions" });
+          await requireJoeDecision(c, args.approval_decision_id, "stage");
+          evidenceIds.push(args.monday_evidence_id, ...ids, args.approval_decision_id);
+        } else if (args.target_state === "retired") {
+          await requireSystemEvidence(c, args.stage_evidence_id, "cutoff_stage_smoke", args.manifest_sha256);
+          const cold = await requireSystemEvidence(c, args.cold_start_evidence_id, "cutoff_cold_start");
+          const observations = cold.new_value?.observations || {};
+          if (observations.fresh_session !== true || observations.standing_context !== true
+              || observations.file_bootstrap_used !== false
+              || !Number.isInteger(observations.shared_count)
+              || !Number.isInteger(observations.personal_count))
+            throw new ToolError({ error: "cold_start_not_proven" });
+          await requireJoeDecision(c, args.approval_decision_id, "final");
+          evidenceIds.push(args.stage_evidence_id, args.cold_start_evidence_id,
+                           args.approval_decision_id);
+        } else {
+          const rollback = await requireSystemEvidence(c, args.rollback_evidence_id, "cutoff_rollback",
+                                                       args.manifest_sha256);
+          const observations = rollback.new_value?.observations || {};
+          if (observations.collision_preflight_passed !== true
+              || observations.restored_hashes_verified !== true)
+            throw new ToolError({ error: "rollback_restore_not_proven" });
+          await requireJoeDecision(c, args.approval_decision_id, "rollback");
+          evidenceIds.push(args.rollback_evidence_id, args.approval_decision_id);
+        }
+
+        const retiring = args.target_state === "retiring";
+        const retired = args.target_state === "retired";
+        await c.query(
+          `insert into system_config (key,value,note,updated_by) values
+             ('doctrine.md_renders_retiring',$1::jsonb,$3,$4),
+             ('doctrine.md_renders_retired',$2::jsonb,$3,$4)
+           on conflict (key) do update set value=excluded.value,note=excluded.note,
+                                           updated_at=now(),updated_by=excluded.updated_by`,
+          [JSON.stringify(retiring), JSON.stringify(retired), args.reason, actor.id]);
+        const transitionId = (await c.query("select gen_random_uuid() id")).rows[0].id;
+        await writeEvent(c, actor, "transition-doctrine-cutoff", "system_config", transitionId, {
+          field: "doctrine_markdown_cutoff_state", old: { state: before },
+          new: { state: args.target_state, organization_tenant_id: organizationTenantForActor(actor),
+                 approved_commit: args.approved_commit, manifest_sha256: args.manifest_sha256,
+                 evidence_ids: evidenceIds, provenance: args.reason },
+          agent_rationale: args.reason, idempotency_key: args.idempotency_key,
+        });
+        return { ok: true, transition_id: transitionId, previous_state: before,
+                 state: args.target_state, evidence_ids: evidenceIds };
+      }),
+    },
+
+    "rule-context": {
+      description: "Read active task-scoped shared rules that are intentionally excluded from the every-session standing-context payload. Initial scope is intro_politics. This is the canonical replacement for the retired introduction-rules projection; read-only and unable to select a partner, tenant, or capability.",
+      inputSchema: { type: "object", properties: {
+        scope_kind: { type: "string", enum: ["intro_politics"] },
+      }, required: ["scope_kind"] },
+      handler: async (c, actor, args) => {
+        await actorId(c, actor);
+        const rows = (await c.query(
+          `select id, statement, human_quote, taught_by, activated_at
+             from v_compiled_rules
+            where personal_to is null and scope->>'kind' = $1
+            order by activated_at, statement`, [args.scope_kind])).rows;
+        return { ok: true, scope_kind: args.scope_kind, count: rows.length, rules: rows };
+      },
+    },
+
+    "cutoff-evidence": {
+      description: "Read one durable cutoff evidence record by full UUID. Returns a normalized decision/finding/current-doctrine-revision envelope with actor, verified sponsor, content, and provenance so the two-phase cutoff can verify gates rather than trust command-line labels.",
+      inputSchema: { type: "object", properties: {
+        record_id: { type: "string", pattern: "^[0-9a-fA-F-]{36}$" },
+      }, required: ["record_id"] },
+      handler: async (c, actor, args) => {
+        await actorId(c, actor);
+        const ev = (await c.query(
+          `select e.id::text, e.subject_id::text, e.verb, e.subject_type,
+                  a.slug actor, e.sponsoring_human_slug, e.human_quote,
+                  e.agent_rationale, e.new_value, e.cause, e.recorded_at
+             from event e join actor a on a.id=e.actor_id
+            where e.id::text=$1 or e.subject_id::text=$1
+            order by e.recorded_at desc limit 1`, [args.record_id])).rows[0];
+        if (ev) return { ok: true, evidence: {
+          id: args.record_id,
+          record_type: ev.verb === "log-decision" ? "decision" : "finding",
+          verb: ev.verb, subject_type: ev.subject_type, actor: ev.actor,
+          sponsoring_human: ev.sponsoring_human_slug, human_quote: ev.human_quote,
+          content: [ev.human_quote, ev.agent_rationale, JSON.stringify(ev.new_value || {})]
+            .filter(Boolean).join(" "),
+          provenance: ev.new_value?.provenance || ev.cause,
+          recorded_at: ev.recorded_at,
+        }};
+        const rev = (await c.query(
+          `select r.id::text, r.plain_text, r.commit_message, a.slug actor,
+                  r.created_at, s.section_key, d.slug document
+             from doctrine_revision r
+             join actor a on a.id=r.actor_id
+             join doctrine_section s on s.id=r.section_id
+             join doctrine_document d on d.id=s.document_id
+            where r.id::text=$1 and s.current_revision_id=r.id`, [args.record_id])).rows[0];
+        if (rev) return { ok: true, evidence: { ...rev, record_type: "doctrine_revision",
+                                                current: true, content: rev.plain_text,
+                                                provenance: rev.commit_message } };
+        throw new ToolError({ error: "cutoff_evidence_not_found", record_id: args.record_id });
+      },
+    },
+
+    "record-system-evidence": {
+      write: true,
+      description: "Record one typed internal system proof as an append-only event. This is the evidence counterpart to record-finding for facts that are about CARR itself rather than a client/marketing subject. It cannot change configuration or satisfy its own approval gate; it only records observations with provenance.",
+      inputSchema: { type: "object", properties: {
+        idempotency_key: { type: "string" },
+        evidence_type: { type: "string", enum: ["monday_store_cycle", "cutoff_cold_start", "cutoff_stage_smoke", "cutoff_rollback"] },
+        observations: { type: "object" },
+        provenance: { type: "string", description: "Re-verifiable task/session/run locator" },
+        observed_at: { type: "string" },
+      }, required: ["idempotency_key", "evidence_type", "observations", "provenance"] },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "record-system-evidence", args, async () => {
+        if (!args.observations || !Object.keys(args.observations).length)
+          throw new ToolError({ error: "observations_required" });
+        if (String(args.provenance || "").trim().length < 12)
+          throw new ToolError({ error: "provenance_not_reverifiable" });
+        const evidenceId = (await c.query("select gen_random_uuid() id")).rows[0].id;
+        await writeEvent(c, actor, "record-system-evidence", "system_evidence", evidenceId, {
+          occurred_at: args.observed_at || null,
+          new: { evidence_type: args.evidence_type, observations: args.observations,
+                 provenance: args.provenance },
+          agent_rationale: "typed internal system evidence",
+          idempotency_key: args.idempotency_key,
+        });
+        return { ok: true, evidence_id: evidenceId, evidence_type: args.evidence_type };
+      }),
     },
 
     "dry-run-doctrine-gates": {

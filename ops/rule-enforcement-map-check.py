@@ -10,22 +10,23 @@ from glob import glob
 from collections import Counter
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VAULT = os.environ.get("CARR_VAULT", os.path.expanduser("~/My Drive/CARR AI"))
 MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
-SOURCES = {
-    "shared": os.path.join(VAULT, "DNA", "compiled-rules-shared.md"),
-    "joe": os.path.join(VAULT, "00_Context", "compiled-rules-joe.md"),
-}
-RULE_ID = re.compile(r"`#([0-9a-f]{8})`")
 CATEGORIES = {
     "hard_pre_action", "transactional_schema", "post_action_verification",
     "session_task_rail", "judgment_advisory",
 }
 
 
-def ids(path: str) -> list[str]:
-    with open(path, encoding="utf-8") as fh:
-        return RULE_ID.findall(fh.read())
+def active_rule_ids() -> dict[str, list[str]]:
+    """Use the same store query/order contract as standing rule exporters."""
+    sys.path.insert(0, REPO)
+    from exporters.common import connect
+    from exporters.targets import _fetch_rules
+    with connect() as conn, conn.cursor() as cur:
+        return {
+            "shared": [str(row["id"])[:8] for row in _fetch_rules(cur, None)],
+            "joe": [str(row["id"])[:8] for row in _fetch_rules(cur, "joe")],
+        }
 
 
 def reference_errors(control_name: str, kind: str, refs) -> list[str]:
@@ -161,7 +162,7 @@ def main() -> int:
     try:
         with open(MAP, encoding="utf-8") as fh:
             data = json.load(fh)
-        source_ids = {scope: ids(path) for scope, path in SOURCES.items()}
+        source_ids = active_rule_ids()
     except Exception as exc:
         print(f"rule-enforcement-map: ERROR — {exc}")
         return 2

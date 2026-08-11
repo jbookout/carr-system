@@ -131,7 +131,8 @@ LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 #   * The dossiers are a DIRECTORY (DOSSIER_DIR), not a fixed list. Guarding the
 #     directory covers the 23 that exist and every one minted later; enumerating
 #     them would reopen the same gap the day a new client lands.
-TARGETS_PY = os.path.expanduser("~/carr-system/exporters/targets.py")
+TARGETS_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "exporters", "targets.py")
 PARTIAL_TARGET_KEYS = {"compiled-rules-gist-index"}
 
 
@@ -144,13 +145,16 @@ def generated_paths():
     """
     import ast
     exact, dirs = set(), set()
-    tree = ast.parse(open(TARGETS_PY).read())
+    with open(TARGETS_PY, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
 
     def module_consts(path):
         """module-level NAME = "literal" pairs, or {} when unreadable."""
         try:
             out = {}
-            for n in ast.parse(open(path).read()).body:
+            with open(path, encoding="utf-8") as fh:
+                nodes = ast.parse(fh.read()).body
+            for n in nodes:
                 if (isinstance(n, ast.Assign) and len(n.targets) == 1
                         and isinstance(n.targets[0], ast.Name)
                         and isinstance(n.value, ast.Constant)

@@ -33,19 +33,25 @@ on purpose; the vault is where all four incidents happened.
 """
 
 from datetime import date
+from pathlib import Path
+import sys
+
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
+from lib.doctrine_cutoff_state import markdown_writes_blocked  # noqa: E402
 
 # The cutoff bound to Joe's calibration bet (decision 71cc1099): P6 acceptance
 # target 2026-08-21. If the cutoff moves, move it HERE and the temporary rows
 # move with it — never edit a row's date individually.
 CUTOFF = date(2026, 8, 21)
 
-# Machine-required bootstrap surfaces a session may legitimately hand-edit
-# before their content migrates. CLAUDE.md is a PARTIAL render (gist block is
+# Temporary bootstrap surfaces. CLAUDE.md is a PARTIAL render (gist block is
 # exporter-owned; the prose around it is doctrine Joe edits). AGENTS.md is the
-# Cowork-facing standing context, same status.
+# Cowork-facing standing context. Both use the same expiry as every other
+# bridge: after cutoff a revived stub must not silently become a second source.
 ALLOW_EXACT = {
-    "CLAUDE.md",
-    "AGENTS.md",
+    "CLAUDE.md": CUTOFF,
+    "AGENTS.md": CUTOFF,
 }
 
 # PERMANENT machine-required prefixes (no retirement): launchd-scheduled runs
@@ -90,15 +96,15 @@ def md_write_verdict(rel, today=None):
     specific message). `today` is injectable for tests.
     """
     today = today or date.today()
-    if rel in ALLOW_EXACT:
-        return None
-    for prefix in ALLOW_MACHINE_PREFIX:
-        if rel.startswith(prefix):
-            return None
     retired_msg = (f"'{rel}' sat on a TEMPORARY manifest row that retired at the "
                    f"doctrine-store cutoff. Its writer should have been re-pointed "
                    f"at the store by P5 — this write is the alarm that it was not. "
                    f"Route the content through a verb and fix the job.")
+    if rel in ALLOW_EXACT:
+        return None if (today <= ALLOW_EXACT[rel] and not markdown_writes_blocked(_REPO)) else retired_msg
+    for prefix in ALLOW_MACHINE_PREFIX:
+        if rel.startswith(prefix):
+            return None
     for prefix, retires in ALLOW_PREFIX.items():
         if rel.startswith(prefix):
             return None if today <= retires else retired_msg

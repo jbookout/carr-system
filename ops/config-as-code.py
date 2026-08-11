@@ -112,13 +112,15 @@ TOKENS = [(tok, real) for tok, real in
 #                         (bin/nightly.sh:154), which cannot resolve on another
 #                         machine. The cadence engine inside it IS idempotent,
 #                         so the risk is the vault writes, not double-spawning.
-#   rules-refresh       — writes the shared compiled-rules renders, and the cost
+#   rules-refresh       — pre-cutoff writes shared rule renders; the cutoff
+#                         procedure unloads it and its retained recovery script
+#                         self-disables from server-side state.
 #                         ruling in its own plist is decisive: Neon free is
 #                         100 CU-h/month at ~5 min per wake, so a second Mac
 #                         waking it hourly doubles the burn and can SUSPEND the
 #                         database for the rest of the month.
-#   local-briefs        — writes today.md into Joe's vault path; on another
-#                         machine it correctly SKIPs, so it is pure noise.
+#   local-briefs        — rebuilds primary-machine repo brief outputs; it no
+#                         longer writes a Drive Markdown projection.
 #   partner-ping        — writes the shared record. One pinger is the point.
 #
 # What the second machine still needs from the nightly is the record-derived
