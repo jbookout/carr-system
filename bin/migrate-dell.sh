@@ -81,6 +81,7 @@ if [ "${1:-}" = "--preflight" ]; then
   TMP="${TMPDIR:-/tmp}/carr-preflight-$$"
   trap 'rm -rf "$TMP"' EXIT INT TERM
   mkdir -p "$TMP/home/Library/LaunchAgents" "$TMP/home/.claude"
+  print -r -- '{}' > "$TMP/home/.claude/settings.json"
   say "PREFLIGHT — cloning origin/main into a scratch machine"
   say "this answers 'what will Dell actually get', which a dry run here cannot"
   say ""
@@ -119,6 +120,7 @@ if [ "${1:-}" = "--preflight" ]; then
     exit 1
   fi
   git -C "$TMP/home/carr-system" config user.email "preflight@example.com"
+  PFAIL=0
 
   say "testing $(git -C "$TMP/home/carr-system" rev-parse --short HEAD) ($PREFLIGHT_REF)"
   MODE=$(git -C "$TMP/home/carr-system" ls-files -s bin/migrate-dell.sh | cut -d' ' -f1)
@@ -127,13 +129,13 @@ if [ "${1:-}" = "--preflight" ]; then
   else
     say "  FAIL  bin/migrate-dell.sh is mode $MODE — Dell gets 'permission denied'"
     say "        fix: git update-index --chmod=+x bin/migrate-dell.sh && commit"
+    PFAIL=$((PFAIL+1))
   fi
 
   say ""
   say "  gates, as Dell will run them:"
-  PFAIL=0
   for t in guard conduct-gate escalation-gate gate-edit-gate git-writer-gate \
-           context-handoff-gate corpus-render-gate migrate-dell; do
+           context-handoff-gate corpus-render-gate config-as-code migrate-dell; do
     F="$TMP/home/carr-system/ops/$t-selftest.py"
     [ -f "$F" ] || { print -r -- "    note  $t — not in the clone"; continue; }
     # CARR_VAULT is passed through deliberately. The scratch HOME has no Drive
@@ -164,6 +166,16 @@ if [ "${1:-}" = "--preflight" ]; then
       PFAIL=$((PFAIL+1))
     fi
   done
+
+  say ""
+  say "  actual installer, with empty Claude settings and no Codex client:"
+  if (cd "$TMP/home/carr-system" && HOME="$TMP/home" CARR_VAULT="$REAL_VAULT" \
+       python3 ops/config-as-code.py install </dev/null >/tmp/pf-install.log 2>&1); then
+    print -r -- "    ok    Claude-only config install dry run"
+  else
+    print -r -- "    FAIL  Claude-only config install — $(tail -1 /tmp/pf-install.log | tr -s ' ')"
+    PFAIL=$((PFAIL+1))
+  fi
 
   # The defect class that caused this audit: a gate green here only because of
   # working-tree changes nobody pushed. Name the files rather than the count.
@@ -399,8 +411,13 @@ if [ $APPLY -eq 1 ]; then
     bad "hook install failed — see /tmp/mig-hooks.log"
   fi
 else
-  $PY "$REPO/ops/config-as-code.py" install </dev/null 2>&1 | sed 's/^/        /' | head -6
-  good "would install the repo's hooks block"
+  if $PY "$REPO/ops/config-as-code.py" install </dev/null >/tmp/mig-hooks.log 2>&1; then
+    sed 's/^/        /' /tmp/mig-hooks.log | head -6
+    good "would install the repo's hooks block"
+  else
+    sed 's/^/        /' /tmp/mig-hooks.log | head -6
+    bad "hook install dry run failed — see /tmp/mig-hooks.log"
+  fi
 fi
 
 # ── 4. DERIVED ALLOWLIST ────────────────────────────────────────────────────

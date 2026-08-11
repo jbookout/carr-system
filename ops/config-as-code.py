@@ -315,6 +315,10 @@ def is_carr_hook_command(command):
 def carr_owned_hooks_document(document, include_events=()):
     """Extract CARR commands, retaining their event/matcher grouping exactly."""
     hooks = document.get("hooks") if isinstance(document, dict) else {}
+    # A first-run Codex document may be absent or may not have a hooks key yet.
+    # Both are empty hook collections, not iterables named None.
+    if not isinstance(hooks, dict):
+        hooks = {}
     out = {}
     for event in list(include_events) + [e for e in hooks if e not in include_events]:
         groups = hooks.get(event, []) if isinstance(hooks, dict) else []
@@ -405,6 +409,23 @@ def install_codex_permissions(raw, default_line, body):
     return planned.rstrip() + "\n\n" + managed + "\n"
 
 
+def codex_configuration_state():
+    """Return configured, absent, or partial for this machine's Codex client.
+
+    Codex is optional on secondary machines.  The absence of both user-owned
+    files means there is no Codex surface to manage.  A hooks file without the
+    config file is different: silently skipping that partial surface could
+    leave a real client ungoverned, so callers must fail visibly.
+    """
+    has_hooks = os.path.exists(CODEX_HOOKS_SRC)
+    has_config = os.path.exists(CODEX_CONFIG)
+    if has_config:
+        return "configured"
+    if has_hooks:
+        return "partial"
+    return "absent"
+
+
 def pairs():
     """(label, live_text, repo_path) for every tracked item. live_text is
     already portable; repo contents are compared verbatim against it."""
@@ -414,9 +435,10 @@ def pairs():
     out.append(("hooks block (settings.json)",
                 None if hooks is None else portable(json.dumps(hooks, indent=2) + "\n"),
                 HOOKS_REPO))
-    out.append(("Codex CARR hooks (hooks.json)", live_codex_hooks(), CODEX_HOOKS_REPO))
-    out.append(("Codex CARR permissions (config.toml)", live_codex_permissions(),
-                CODEX_PERMISSIONS_REPO))
+    if codex_configuration_state() == "configured":
+        out.append(("Codex CARR hooks (hooks.json)", live_codex_hooks(), CODEX_HOOKS_REPO))
+        out.append(("Codex CARR permissions (config.toml)", live_codex_permissions(),
+                    CODEX_PERMISSIONS_REPO))
 
     seen = set()
     for name in sorted(os.listdir(TASKS_SRC)) if os.path.isdir(TASKS_SRC) else []:
@@ -458,6 +480,11 @@ def cmd_check():
     # is chronically red detects nothing, because a reader who has learned to
     # skip a red row will skip the one that matters. Keeping this row green when
     # nothing is wrong is therefore part of the control, not tidiness.
+    if codex_configuration_state() == "partial":
+        print(f"config-as-code: CODEX PARTIAL — {CODEX_HOOKS_SRC} exists but "
+              f"{CODEX_CONFIG} does not; refusing to treat this client as absent")
+        return 1
+
     missing, untracked, different = [], [], []
     for label, live, repo_path in pairs():
         have = read(repo_path)
@@ -514,6 +541,10 @@ def cmd_check():
 
 
 def cmd_pull(apply):
+    if codex_configuration_state() == "partial":
+        print(f"ERROR: partial Codex configuration — {CODEX_HOOKS_SRC} exists but "
+              f"{CODEX_CONFIG} does not; refusing to omit it from the captured baseline.")
+        return 1
     wrote = 0
     for label, live, repo_path in pairs():
         if live is None:
@@ -534,10 +565,10 @@ def cmd_pull(apply):
 
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
-    if not os.path.exists(SETTINGS):
-        print(f"ERROR: no settings file at {SETTINGS}")
-        return 1
-    raw = read(SETTINGS)
+    settings_existed = os.path.exists(SETTINGS)
+    raw = read(SETTINGS) if settings_existed else "{}"
+    if not settings_existed:
+        print(f"  Claude settings: WILL BE CREATED at {SETTINGS}")
     try:
         cfg = json.loads(raw)
     except Exception as exc:
@@ -560,50 +591,59 @@ def cmd_install(apply):
               f"{sum(len(v) for v in p.values() if isinstance(v, list))}")
         cfg["hooks"] = planned
 
-    codex_src = read(CODEX_HOOKS_REPO)
-    if codex_src is None:
-        print(f"ERROR: no tracked Codex hooks at {CODEX_HOOKS_REPO}. Run `pull` first.")
+    codex_state = codex_configuration_state()
+    merged_codex = permission_config = None
+    if codex_state == "partial":
+        print(f"ERROR: partial Codex configuration — {CODEX_HOOKS_SRC} exists but "
+              f"{CODEX_CONFIG} does not; refusing to skip or overwrite it.")
         return 1
-    codex_body = concrete(codex_src)
-    try:
-        desired_codex = json.loads(codex_body)
-    except Exception as exc:
-        print(f"ERROR: {CODEX_HOOKS_REPO} is not valid JSON ({exc}) — refusing to deploy it.")
-        return 1
-    live_codex_raw = read(CODEX_HOOKS_SRC)
-    try:
-        live_codex = json.loads(live_codex_raw) if live_codex_raw is not None else {}
-    except Exception as exc:
-        print(f"ERROR: {CODEX_HOOKS_SRC} is not valid JSON ({exc}) — refusing to touch it.")
-        return 1
-    merged_codex = merge_codex_carr_hooks(live_codex, desired_codex)
-    desired_events = (desired_codex.get("hooks") or {}).keys()
-    if carr_owned_hooks_document(live_codex, desired_events) == desired_codex:
-        print("  Codex CARR hooks already match the repo (unrelated hooks preserved)")
+    if codex_state == "absent":
+        print("  SKIP  Codex configuration (Codex is not configured on this machine)")
     else:
-        print("  Codex CARR hooks: WILL BE RECONCILED with the repo; unrelated hooks preserved")
+        codex_src = read(CODEX_HOOKS_REPO)
+        if codex_src is None:
+            print(f"ERROR: no tracked Codex hooks at {CODEX_HOOKS_REPO}. Run `pull` first.")
+            return 1
+        codex_body = concrete(codex_src)
+        try:
+            desired_codex = json.loads(codex_body)
+        except Exception as exc:
+            print(f"ERROR: {CODEX_HOOKS_REPO} is not valid JSON ({exc}) — refusing to deploy it.")
+            return 1
+        live_codex_raw = read(CODEX_HOOKS_SRC)
+        try:
+            live_codex = json.loads(live_codex_raw) if live_codex_raw is not None else {}
+        except Exception as exc:
+            print(f"ERROR: {CODEX_HOOKS_SRC} is not valid JSON ({exc}) — refusing to touch it.")
+            return 1
+        merged_codex = merge_codex_carr_hooks(live_codex, desired_codex)
+        desired_events = (desired_codex.get("hooks") or {}).keys()
+        if carr_owned_hooks_document(live_codex, desired_events) == desired_codex:
+            print("  Codex CARR hooks already match the repo (unrelated hooks preserved)")
+        else:
+            print("  Codex CARR hooks: WILL BE RECONCILED with the repo; unrelated hooks preserved")
 
-    try:
-        permission_source = codex_permissions_source()
-    except Exception as exc:
-        print(f"ERROR: {CODEX_PERMISSIONS_REPO} is invalid ({exc}) — refusing to deploy it.")
-        return 1
-    if permission_source is None:
-        print(f"ERROR: no tracked Codex permissions at {CODEX_PERMISSIONS_REPO}. Run `pull` first.")
-        return 1
-    code_config = read(CODEX_CONFIG)
-    if code_config is None:
-        print(f"ERROR: no Codex config at {CODEX_CONFIG}")
-        return 1
-    permission_default, permission_body = permission_source
-    permission_config = install_codex_permissions(
-        code_config, concrete(permission_default), concrete(permission_body)
-    )
-    if permission_config == code_config:
-        print("  Codex CARR permissions already match the repo")
-    else:
-        print("  Codex CARR permissions: WILL MAKE THE CURRENT WORKSPACE READ-ONLY")
+        try:
+            permission_source = codex_permissions_source()
+        except Exception as exc:
+            print(f"ERROR: {CODEX_PERMISSIONS_REPO} is invalid ({exc}) — refusing to deploy it.")
+            return 1
+        if permission_source is None:
+            print(f"ERROR: no tracked Codex permissions at {CODEX_PERMISSIONS_REPO}. Run `pull` first.")
+            return 1
+        code_config = read(CODEX_CONFIG)
+        permission_default, permission_body = permission_source
+        permission_config = install_codex_permissions(
+            code_config, concrete(permission_default), concrete(permission_body)
+        )
+        if permission_config == code_config:
+            print("  Codex CARR permissions already match the repo")
+        else:
+            print("  Codex CARR permissions: WILL MAKE THE CURRENT WORKSPACE READ-ONLY")
 
+    launchd_load_failures = []
+    if apply:
+        os.makedirs(LAUNCHD_SRC, exist_ok=True)
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
         if f in PRIMARY_ONLY and not IS_PRIMARY:
             print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
@@ -613,16 +653,21 @@ def cmd_install(apply):
             continue
         dest = os.path.join(LAUNCHD_SRC, f)
         body = concrete(read(os.path.join(LAUNCHD_REPO, f)))
-        if read(dest) == body:
+        body_matches = read(dest) == body
+        if body_matches and not apply:
             continue
         gone = missing_targets(body)
         if gone:
             print(f"  SKIP  {f} (not built on this machine: {gone[0]})")
             continue
-        print(f"  {'WRITE' if apply else 'would write'}  {dest}")
+        if body_matches:
+            print(f"  VERIFY LOADED  {dest}")
+        else:
+            print(f"  {'WRITE' if apply else 'would write'}  {dest}")
         if apply:
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write(body)
+            if not body_matches:
+                with open(dest, "w", encoding="utf-8") as fh:
+                    fh.write(body)
             # Load it, do not print a command for a human to paste (rule
             # e313a3ca). Writing the plist and stopping leaves the job on disk
             # and dead: on a fresh machine that means the nightly never runs,
@@ -638,7 +683,8 @@ def cmd_install(apply):
                 print("      loaded")
             else:
                 print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
-                      f"— run: launchctl load -w {dest}")
+                      f"— migration will remain incomplete")
+                launchd_load_failures.append(f)
 
     # Git hooks. Added 2026-08-03, when Dell was granted WRITE and it turned out
     # branch protection is unavailable on a private free-plan repo — so the pull
@@ -670,42 +716,53 @@ def cmd_install(apply):
         print("\nDRY RUN — nothing written. Re-run with --apply.")
         return 0
 
+    os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
     backup = SETTINGS + ".bak-config-as-code"
-    shutil.copy2(SETTINGS, backup)
+    if settings_existed:
+        shutil.copy2(SETTINGS, backup)
     with open(SETTINGS, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2)
         fh.write("\n")
     try:
         json.loads(read(SETTINGS))
     except Exception as exc:
-        shutil.copy2(backup, SETTINGS)
-        print(f"ERROR: write produced unparseable JSON ({exc}) — restored {backup}")
+        if settings_existed:
+            shutil.copy2(backup, SETTINGS)
+            remedy = f"restored {backup}"
+        else:
+            os.unlink(SETTINGS)
+            remedy = "removed the invalid new file"
+        print(f"ERROR: write produced unparseable JSON ({exc}) — {remedy}")
         return 1
-    os.makedirs(os.path.dirname(CODEX_HOOKS_SRC), exist_ok=True)
-    codex_backup = CODEX_HOOKS_SRC + ".bak-config-as-code"
-    if os.path.exists(CODEX_HOOKS_SRC):
-        shutil.copy2(CODEX_HOOKS_SRC, codex_backup)
-    with open(CODEX_HOOKS_SRC, "w", encoding="utf-8") as fh:
-        json.dump(merged_codex, fh, indent=2)
-        fh.write("\n")
-    try:
-        json.loads(read(CODEX_HOOKS_SRC))
-    except Exception as exc:
-        if os.path.exists(codex_backup):
-            shutil.copy2(codex_backup, CODEX_HOOKS_SRC)
-        print(f"ERROR: Codex hook write produced unparseable JSON ({exc}) — restored backup")
-        return 1
-    code_config_backup = CODEX_CONFIG + ".bak-config-as-code"
-    shutil.copy2(CODEX_CONFIG, code_config_backup)
-    with open(CODEX_CONFIG, "w", encoding="utf-8") as fh:
-        fh.write(permission_config)
-    try:
-        import tomllib
-        tomllib.loads(read(CODEX_CONFIG))
-    except Exception as exc:
-        shutil.copy2(code_config_backup, CODEX_CONFIG)
-        print(f"ERROR: Codex config write produced invalid TOML ({exc}) — restored backup")
-        return 1
+    written_backups = [backup] if settings_existed else []
+    if codex_state == "configured":
+        os.makedirs(os.path.dirname(CODEX_HOOKS_SRC), exist_ok=True)
+        codex_backup = CODEX_HOOKS_SRC + ".bak-config-as-code"
+        if os.path.exists(CODEX_HOOKS_SRC):
+            shutil.copy2(CODEX_HOOKS_SRC, codex_backup)
+            written_backups.append(codex_backup)
+        with open(CODEX_HOOKS_SRC, "w", encoding="utf-8") as fh:
+            json.dump(merged_codex, fh, indent=2)
+            fh.write("\n")
+        try:
+            json.loads(read(CODEX_HOOKS_SRC))
+        except Exception as exc:
+            if os.path.exists(codex_backup):
+                shutil.copy2(codex_backup, CODEX_HOOKS_SRC)
+            print(f"ERROR: Codex hook write produced unparseable JSON ({exc}) — restored backup")
+            return 1
+        code_config_backup = CODEX_CONFIG + ".bak-config-as-code"
+        shutil.copy2(CODEX_CONFIG, code_config_backup)
+        written_backups.append(code_config_backup)
+        with open(CODEX_CONFIG, "w", encoding="utf-8") as fh:
+            fh.write(permission_config)
+        try:
+            import tomllib
+            tomllib.loads(read(CODEX_CONFIG))
+        except Exception as exc:
+            shutil.copy2(code_config_backup, CODEX_CONFIG)
+            print(f"ERROR: Codex config write produced invalid TOML ({exc}) — restored backup")
+            return 1
     # NO RESTART NEEDED, and the old message here said otherwise for months.
     # Live-tested 2026-08-09 with two independent confirmations: git-writer-gate
     # and gate-edit-gate were both installed MID-SESSION and both fired in a
@@ -716,10 +773,17 @@ def cmd_install(apply):
     # running five sessions. The opposite is true: an install takes effect
     # everywhere immediately. Rule 97326357 — a claim about a surface becomes
     # doctrine only after a live test from that surface.
-    print(f"\nWROTE OK (backups: {backup}, {codex_backup}, {code_config_backup}). Claude Code reads its "
-          f"hooks block per tool call; Codex must trust a changed non-managed hook "
-          f"definition before it runs. Both clients are protected once their hook "
-          f"configuration is active.")
+    if launchd_load_failures:
+        print("ERROR: LaunchAgent load failed for: " + ", ".join(launchd_load_failures))
+        return 1
+    backup_note = ", ".join(written_backups) if written_backups else "none; new files"
+    if codex_state == "absent":
+        client_note = "Codex was not configured and was left absent."
+    else:
+        client_note = ("Codex must trust a changed non-managed hook definition before it "
+                       "runs. Both configured clients are protected.")
+    print(f"\nWROTE OK (backups: {backup_note}). Claude Code reads its hooks block "
+          f"per tool call; {client_note}")
     return 0
 
 

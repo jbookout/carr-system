@@ -27,6 +27,11 @@ asking follow-up questions. This authorization covers only the steps below; it
 does not waive Claude Code's own tool security, widen permissions, or authorize
 any unrelated production change.
 
+Dell's launch machine is Claude-only. The complete absence of `~/.codex` is an
+expected supported state, and the migration skips Codex-specific configuration
+without creating it. A partial Codex state fails visibly instead of being
+silently treated as absent.
+
 1. Run `./bin/migrate-dell.sh --apply </dev/null` yourself. Do not hand the
    command back to the human and do not use `AskUserQuestion` for an internal
    choice the script already settles.
