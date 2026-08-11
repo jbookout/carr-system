@@ -95,6 +95,16 @@
         "The Workspace council register OPEN-AUTH-KV-001 still presents paying for higher capacity as an undecided option."
       ],
       "canonical_correction_after_council": "Record Workers Paid as the chosen capacity tier; retain AUTH-KV-001 and AUTH-RECOVERY-001 as engineering evidence gates and retain alternate-state-store analysis only as a measured future redesign trigger."
+    },
+    {
+      "id": "FACT-007",
+      "topic": "dell_migration_runtime",
+      "settled_fact": "Dell's secondary-machine migration completed operationally on 2026-08-11. His Mac now uses ~/carr-system plus the live record/doctrine path, has no CARR AI vault mounted, and installs no primary-only CARR scheduled jobs. Drive code copies are no longer a Dell runtime dependency; they remain only for separately governed cloud-only/file-mode delivery until those paths are retired or repointed with evidence.",
+      "stale_claims": [
+        "Repository README and manifest language still describe Drive copies as Dell's runtime or Dell/cloud runtime.",
+        "Historical lead-board comments describe the shared Drive publish as Dell's copy rather than a cloud-only delivery fallback."
+      ],
+      "canonical_correction_after_council": "Describe both partner Macs as repo runtimes, retain Drive copies only for evidenced cloud-only/file-mode delivery, and do not retire the supported fallback before its separate gate. Dell's T69 checkout reconciliation remains a local closeout requirement; perform it first if Dell will do repo work, but do not treat it as a blocker to Joe's Phase 0 audit."
     }
   ],
   "proposed_rulings": [
@@ -176,7 +186,7 @@
     {
       "order": 1,
       "targets": ["all four canonical inputs"],
-      "change": "Apply FACT-001 through FACT-006 using fresh sanctioned reads where identified; do not turn snapshot observations into timeless claims."
+      "change": "Apply FACT-001 through FACT-007 using fresh sanctioned reads where identified; do not turn snapshot observations into timeless claims."
     },
     {
       "order": 2,

@@ -24,6 +24,22 @@ Historical roadmap text may say 143 shared rules or cite an old branch state.
 At the session start, call `standing-context` and record the returned counts.
 The current verified post-repair fact is 144 shared and 30 Joe-personal rules.
 
+## Dell migration boundary
+
+Dell's secondary-machine migration is operationally complete. His Mac now uses
+`~/carr-system` and the live record/doctrine path, has no CARR AI vault mounted,
+and does not install Joe-primary scheduled jobs. Do not treat the Drive code
+copies as a Dell dependency or ask Dell to validate the preconstruction audit.
+
+Keep the mapped Drive copies for the separately governed cloud-only/file-mode
+delivery path until its own retirement or repointing is evidenced. The compiled
+fallback remains supported through 2026-08-21; Dell's migration alone is not a
+retirement signal. Dell's open T69 closeout—reconciling two pre-PR6 local edits,
+updating to current `origin/main`, rerunning the idempotent migration/config
+checks, and confirming all 16 primary-only tasks are inactive and recoverably
+quarantined—must finish before T69 closes. If Dell will do repo work before then,
+perform that reconciliation first. It does not block Joe's Phase 0 audit or council.
+
 ## 15-minute technical preflight
 
 Run in the audit-release worktree. Stop before the council if any check fails,
@@ -43,6 +59,10 @@ the release SHA is blank, or it differs from the recorded audit release.
    production write route.
 8. Confirm the council inputs are the four roadmap files, both package manifests,
    both council registers, test output, and this completed evidence sheet.
+9. Verify the 07:15 CT preflight watcher observed the closed A15 record and
+   self-retired. If live record connectivity prevented retirement, record it as
+   stale automation evidence and preserve the watcher for its next sanctioned
+   retry; do not reinterpret it as a failed Dell migration.
 
 Preflight evidence: date/time ___ · executor ___ · BASE_SHA ___ · AUDIT_RELEASE_SHA ___ · origin/main ___ ·
 Workspace validation ___ · Workspace tests ___ · Control Room tests ___ ·

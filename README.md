@@ -13,8 +13,8 @@ Knowledge lives as markdown in the Google Drive vault (`My Drive/CARR AI/`) fore
   - `build-deal-room.py` — JSON→HTML Deal Room renderer. Reads `DNA/Team/live-boards/panhandle-team-deals.json`, writes `deal-room-panhandle.html`. NOT the Salesforce-export importer (that is a separate, still-open build — vault open-loops #84).
   - `build-lead-board.py` — the Lead Board builder. Writes `Automation/lead-board.html`.
   - `build-renewal-feed.py` — the renewal-radar feed builder. Writes `Automation/renewal-radar.json`.
-- `pipelines/` (+ `pipelines/radar/`) — the rest of the durable pipeline code, imported phase 3 (2026-07-24). REPOINTED to repo runtime (verified identical first): `corroborate.py`, `build-space-search.py` (+ its template asset). Still vault-runtime pending a verified run: `build-front-door.py` (writes beside the script — needs an output-path patch first), `build-search-map.py`, `dso-match.py`, and the input-gated radar scripts (PECOS/license pools/tax rolls/date-founders — verify on their next real run, PECOS gate is October). Deliberately left out of the repo: the demoted Firefly receiver, deal-specific research one-offs, launchd plists.
-- `shared/` — code on the shared DNA tier (Dell's lead-board template, the vendor intro-path tool, the fill-engine pair). Vault copies canonical for Dell's use; repo is version history + review.
+- `pipelines/` (+ `pipelines/radar/`) — the rest of the durable pipeline code, imported phase 3 (2026-07-24). Both partner Macs now use the repo runtime. Drive copies remain only where a cloud-only/file-mode delivery path still needs them; retire or repoint each copy only after its own verified cutover. Deliberately left out of the repo: the demoted Firefly receiver, deal-specific research one-offs, launchd plists.
+- `shared/` — code on the shared DNA tier (the lead-board template, the vendor intro-path tool, the fill-engine pair). The repo is the partner-Mac runtime and source of truth; mapped Drive copies remain cloud-only/file-mode delivery fallbacks until their separate retirement gates.
 - `video/` — the video lane's code, imported 2026-07-25 (it had been living untracked at `~/Movies/CARR Video Pipeline/Scripts` since it was built on Jul 22). AE ExtendScript comp builders + their shell/python drivers: lower thirds, stock b-roll clips, the animated-static builder, the watch-folder encoder, the Premiere XML cutter, and the parked CEP panel. Mapped by `manifest-video.tsv`, whose runtime root is `~/Movies/CARR Video Pipeline` rather than the vault — the pipeline lives outside Drive on purpose because media files are large and Drive sync would churn on them, but the CODE still belongs under version control. Repo is the source of truth, `~/Movies` is the runtime, and `run.sh check` now reports drift between them. No output baselines for this lane (video outputs are large binaries and do not belong in git); the review mechanism is the visual pass logged in the pipeline's own `CRITIQUE-LOG.md`. Reasoning and the exclusion list are recorded in the manifest header.
   - Animated statics: `make-animated-static.sh <layers> <name> [--concept K] [--sfx N] [--email] [--dry-run]`, planned by `plan-animated-static.py` against `choreography-log.tsv` so a recent shape is never repeated (7 concepts, 5 landing sounds; one sound per piece, varying between pieces). `--email` adds an Outlook-safe cut: legacy Outlook on Windows renders only a GIF's first frame, so that cut leads with the FINISHED card for one frame and does not loop. Social dosing doctrine lives in the vault at `Marketing/Social Media/social-media-workflow.md` (two per month, never consecutive weeks, IG/FB only, never X).
 - `bin/` — shell utilities (automation-Chrome launcher, calendar fetcher).
@@ -25,19 +25,19 @@ Knowledge lives as markdown in the Google Drive vault (`My Drive/CARR AI/`) fore
 
 ## Execution model (phase 2 live, 2026-07-24)
 
-**On Joe's Mac this repo IS the runtime.** SOPs call `./run.sh deal-room|lead-board|renewal-feed|all`, which runs the repo generators against the vault (override the vault path with `CARR_VAULT`). Repointed 2026-07-24 after each repo run was verified output-identical to its vault-copy run (deal-room byte-identical; renewal-feed and lead-board identical back-to-back).
+**On both partner Macs this repo IS the code runtime.** Joe's primary runs the sanctioned shared writers and scheduled jobs. Dell's migrated secondary runs its repo checkout and live record/doctrine path, with no CARR AI vault mounted and no primary-only scheduled jobs. SOPs call `./run.sh deal-room|lead-board|renewal-feed|all`, which runs the repo generators against the configured data source (override a file-mode vault path with `CARR_VAULT`).
 
-**The vault copies remain as the fallback + Dell's runtime** (cloud-only sessions, and Dell's side until his brain joins the repo). They must stay in sync with this repo. Change flow:
+**Mapped Drive copies remain only as the cloud-only/file-mode fallback.** Dell's completed 2026-08-11 migration no longer depends on them. Keep each required fallback synchronized until its separate cloud-runtime retirement or repointing is evidenced; do not delete it merely because Dell migrated. Change flow:
 
-1. Edit the script here (fork + PR if you're Dell's side — see access model).
+1. Edit the script here (branch + PR if you're Dell's side — see access model).
 2. Run `tools/check.sh` — it reports code drift (repo vs vault) and output drift (vault output vs baseline).
 3. When a change is accepted: run the pipeline via `run.sh`, verify the output diff is exactly the intended change, update the baseline, copy the script to its vault path (keeping the fallback in sync), commit baseline + code together.
 
 ## Access model (Joe's decision, 2026-07-24)
 
 - Joe: owner, merges everything. Joe is the code-savvy partner; every fix lands through him.
-- Dell's side: READ access via collaborator invite (when granted). Proposed changes come as pull requests from a fork — Dell's brain forks the repo, pushes the fix to its fork, opens a PR. GitHub notifies Joe automatically; Joe reviews the output diff and merges. Dell's side never pushes to this repo directly.
-- Why fork-PRs and not branch protection: platform-enforced branch protection on private repos requires a paid GitHub plan; the fork model gives hard enforcement (Dell physically cannot write here) at $0, and upgrading to GitHub Pro later just relaxes this to same-repo branches + protected main.
+- Dell's side: authenticated private-repo collaborator. Proposed changes use a non-main branch and pull request; the local pre-push guard blocks direct pushes to `main`. Joe reviews the output diff and merges.
+- Why the local guard: private-repo branch protection may depend on plan and repository settings. The checked-in pre-push policy preserves the branch-and-review workflow on both partner Macs without describing Dell as read-only.
 
 ## Boundaries
 
