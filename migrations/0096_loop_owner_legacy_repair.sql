@@ -12,8 +12,10 @@
 --     Dell's brain→Joe;
 --   * tools.js's documented legacy joint forms (Joe + Dell); and
 --   * 2026-08-11 read-only loop-board inventory: claude/joe, joe/claude,
---     joe + dell, joe→dell, dell→joe, dell's brain→joe, and the malformed
---     completed-label below.
+--     joe + dell, joe→dell, dell→joe, dell's brain→joe, joe's brain,
+--     joe's brain (cowork), and the malformed completed-label below. The last
+--     two were caught by the first disposable-branch rehearsal: loop-board's
+--     filtered inventory had not surfaced them, while the migration guard did.
 --
 -- Directional labels become the named recipient.  Slash/plus labels denote a
 -- multi-owner historic row and become `joint`, preserving the refusal rather
@@ -41,6 +43,8 @@ begin
            'dell''s brain→joe',
            'dell→joe',
            'joe + dell',
+           'joe''s brain',
+           'joe''s brain (cowork)',
            'joe/claude',
            'joe→dell',
            '✅ done 2026-07-29 (joe''s go) — dell''s brain→joe'
@@ -60,6 +64,8 @@ begin
       ('dell''s brain→joe', 'joe'),
       ('dell→joe', 'joe'),
       ('joe + dell', 'joint'),
+      ('joe''s brain', 'joe'),
+      ('joe''s brain (cowork)', 'joe'),
       ('joe/claude', 'joint'),
       ('joe→dell', 'dell'),
       ('✅ done 2026-07-29 (joe''s go) — dell''s brain→joe', 'joe')

@@ -9,6 +9,8 @@ const legacyOwnerMap = new Map([
   ["dell's brain→joe", "joe"],
   ["dell→joe", "joe"],
   ["joe + dell", "joint"],
+  ["joe's brain", "joe"],
+  ["joe's brain (cowork)", "joe"],
   ["joe/claude", "joint"],
   ["joe→dell", "dell"],
   ["✅ done 2026-07-29 (joe's go) — dell's brain→joe", "joe"],
