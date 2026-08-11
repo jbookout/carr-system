@@ -426,6 +426,33 @@ async function validateClaimType(c, slug) {
   return r.rows[0];
 }
 
+// vendor.stage is a FOREIGN KEY into vendor_stage(slug), and until now nothing
+// checked it before the insert — so a plausible label (`prospect`, `Prospect`,
+// `building`) came back as a bare "internal error" naming neither the field nor
+// the options. Measured live 2026-08-10 re-creating Carissa Adams: four calls
+// died that way before the pattern was readable. Same failure class as
+// new-lead's stage/lane and update-vendor's category_slug branch.
+//
+// Pre-validating rather than catching the FK matters: once the violation fires,
+// the transaction is poisoned and cannot even run the query that would list the
+// valid slugs, so the caller gets nothing to correct with.
+//
+// The slug is the FULL label, lowercased, every run of non-alphanumeric
+// characters collapsed to one underscore — which is why `building_working_on_it`
+// works and `building` does not. That is the rule the original import used to
+// seed the table, so it holds for any stage added later. Both are returned so a
+// caller who has the human label can map it without a second round trip.
+async function validateVendorStage(c, slug) {
+  const r = await c.query("select slug from vendor_stage where slug=$1", [slug]);
+  if (r.rows.length) return slug;
+  const all = await c.query("select slug, label from vendor_stage order by slug");
+  throw new ToolError({ error: "unknown_vendor_stage", got: slug, valid: all.rows,
+    hint: "stage is a foreign key into vendor_stage; pass one of the listed slugs, never " +
+          "the label. The slug is the label lowercased with each run of non-alphanumeric " +
+          "characters collapsed to a single underscore. A genuinely new stage is an INSERT " +
+          "into vendor_stage by a human, never a guess." });
+}
+
 // 0063 lands as a migration Joe applies by hand, and this Worker deploys
 // separately. Either order is possible, so the new arguments check for their own
 // schema and say which half is missing instead of surfacing an undefined_column
@@ -2672,8 +2699,11 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, party_id: { type: "string" },
       category: { type: "string" }, ref_code: { type: "string", description: "CPA / LEN / GC / ..." },
-      stage: { type: "string" } }, required: ["idempotency_key","party_id","category","ref_code","stage"] },
+      stage: { type: "string", description: "a vendor_stage SLUG, not the label — e.g. prospect_uncontacted, building_working_on_it. A wrong value comes back with the full valid list." } },
+      required: ["idempotency_key","party_id","category","ref_code","stage"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "new-vendor", args, async () => {
+      // Before the ref is minted: a rejected call must not burn a V-### number.
+      await validateVendorStage(c, args.stage);
       const ref = (await c.query(
         "select 'V-' || $1 || '-' || lpad(nextval('ref_vendor_seq')::text, 3, '0') as r",
         [args.ref_code.toUpperCase()])).rows[0].r;
@@ -2689,7 +2719,7 @@ export const TOOLS = {
 
   "update-vendor": {
     write: true,
-    description: "Field-level change to a vendor (stage, seeking, offers, referral_active, territory, out_of_market). base_version required.",
+    description: "Field-level change to a vendor (stage, seeking, offers, referral_active, territory, out_of_market). stage takes a vendor_stage SLUG, not the label; a wrong one comes back with the full valid list. base_version required.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, vendor: { type: "string" },
       base_version: { type: "integer" }, fields: { type: "object" } },
@@ -2714,6 +2744,8 @@ export const TOOLS = {
           throw new ToolError({ error: "unknown_category_slug", got: args.fields.category_slug, allowed: slugs,
             hint: "a rare type is an INSERT into vendor_category by a human, never a guess" });
       }
+      if (keys.includes("stage") && args.fields.stage !== null)
+        await validateVendorStage(c, args.fields.stage);
       if (keys.includes("verticals") && args.fields.verticals !== null &&
           !(Array.isArray(args.fields.verticals) && args.fields.verticals.every(v => typeof v === "string")))
         throw new ToolError({ error: "verticals_not_array", hint: 'pass an array of strings, e.g. ["dental","vet"]' });
