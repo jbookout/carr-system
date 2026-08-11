@@ -89,7 +89,7 @@ case "$1" in
     # refuse its own handiwork — caught on the first live removal. The -L test
     # means only a symlink is ever unlinked, so a worktree holding a genuine
     # out/ or .venv keeps it and is correctly reported dirty.
-    for l in .venv out; do
+    for l in .venv out mcp-server/node_modules; do
       [ -L "$wt/$l" ] && rm "$wt/$l"
     done
     # REFUSE ON DIRTY, always. A worktree exists to hold work in progress, so
@@ -140,6 +140,15 @@ fi
 
 link "$CANON/.venv" "$wt/.venv"
 link "$CANON/out"   "$wt/out"
+# The THIRD gitignored dependency, and it hides the same way the first two did.
+# `npm test` in a fresh worktree dies on ERR_MODULE_NOT_FOUND for
+# @neondatabase/serverless — which reads as a code failure, not a missing
+# checkout artifact, so a session can spend real time chasing a bug that is not
+# there. Hit live 2026-08-11 deploying the vendor-stage fix: the suite reported
+# 1 fail on a test that had nothing to do with the change. Linked, not
+# installed, because a per-worktree npm install would drift from the canonical
+# lockfile — the same reasoning as .venv.
+[ -d "$CANON/mcp-server/node_modules" ] && link "$CANON/mcp-server/node_modules" "$wt/mcp-server/node_modules"
 
 print -r -- ""
 print -r -- "worktree ready — your own tree, nobody else's files in it:"
