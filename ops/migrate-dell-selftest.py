@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Static contract test for Dell's zero-interaction Claude migration packet."""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "bin" / "migrate-dell.sh"
+CLAUDE = ROOT / "CLAUDE.md"
+
+script = SCRIPT.read_text(encoding="utf-8")
+claude = CLAUDE.read_text(encoding="utf-8")
+combined = script + "\n" + claude
+flat_script = re.sub(r"\s+", " ", script)
+flat_claude = re.sub(r"\s+", " ", claude)
+flat_combined = re.sub(r"\s+", " ", combined)
+failures: list[str] = []
+
+
+def require(name: str, condition: bool) -> None:
+    if condition:
+        print(f"PASS  {name}")
+    else:
+        print(f"FAIL  {name}")
+        failures.append(name)
+
+
+syntax = subprocess.run(
+    ["/bin/zsh", "-n", str(SCRIPT)], capture_output=True, text=True, check=False
+)
+require("migration shell parses", syntax.returncode == 0)
+require("migration script is executable", os.access(SCRIPT, os.X_OK))
+
+require(
+    "exact phrase is a Claude takeover trigger",
+    "ready for migration" in flat_claude.lower()
+    and "explicit authorization" in flat_claude
+    and "without asking follow-up questions" in flat_claude,
+)
+require(
+    "Claude runs the one bounded command itself",
+    "./bin/migrate-dell.sh --apply </dev/null" in claude
+    and "Do not hand the\n   command back to the human" in claude,
+)
+require(
+    "failure cannot close migration records",
+    "A nonzero exit is a visible blocker" in claude
+    and "Do not close any migration record after a failed run" in claude,
+)
+require(
+    "success requires the exact machine receipt status",
+    combined.count("machine_migrated_pending_record_closeout") >= 3
+    and "dell-migration-receipt.json" in combined
+    and '"exit_code"' in script
+    and '"source_commit"' in script
+    and '"record_closeout"' in script,
+)
+require(
+    "receipt is written atomically",
+    'tmp="$RECEIPT.tmp.$$"' in script and 'mv -f "$tmp" "$RECEIPT"' in script,
+)
+require(
+    "record closeout is exact",
+    all(token in combined for token in (
+        "fa0e6c92-8bc7-4e42-9970-0402914d6a19",
+        "deb4357e-801f-49f6-bc6c-4c884e3e1f7c",
+        '"required_after_success": ["A15", "A17"]',
+        '"must_remain_open": ["A11", "A12", "A13", "A16"]',
+    )),
+)
+require(
+    "live Dell identity and render parity are mandatory",
+    "server-derived sponsor is Dell" in flat_combined
+    and "dell-personal" in flat_combined
+    and "counts match the current generated" in flat_combined,
+)
+require(
+    "caller cannot select partner tenant or capability",
+    "Do not pass a partner, tenant, or capability selector" in flat_script
+    and "Never choose a partner, tenant, or capability through a caller-supplied argument" in flat_claude,
+)
+require(
+    "fallback remains supported through cutoff",
+    "2026-08-21 cutoff" in flat_combined
+    and "does not retire them early" in flat_script,
+)
+require(
+    "connector reconnect is not guessed",
+    "Do not disconnect or reconnect" in flat_script
+    and "Never reconnect merely as a guess" in flat_claude,
+)
+require(
+    "Claude security is not widened",
+    "does not waive Claude Code's own tool security, widen permissions" in claude
+    and "all other settings keys preserved" in script,
+)
+
+active_lines = [
+    line for line in script.splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+require(
+    "no sudo command exists",
+    not any(re.match(r"^\s*sudo(?:\s|$)", line) for line in active_lines),
+)
+require(
+    "no interactive shell read exists",
+    not any(re.match(r"^\s*read(?:\s|$)", line) for line in active_lines),
+)
+require(
+    "no raw git pull exists",
+    not any(re.search(r"\bgit\s+(?:-C\s+\S+\s+)?pull\b", line) for line in active_lines),
+)
+require(
+    "preflight executes this selftest from the pulled packet",
+    "context-handoff-gate corpus-render-gate migrate-dell" in script,
+)
+require(
+    "preflight defaults to origin main with an explicit commit-only test override",
+    'PREFLIGHT_REF="${CARR_PREFLIGHT_REF:-origin/main}"' in script
+    and '"$PREFLIGHT_REF^{commit}"' in script,
+)
+
+if failures:
+    print(f"\nFAILURES: {', '.join(failures)}")
+    sys.exit(1)
+
+print("\nmigrate-dell selftest: all takeover, safety, receipt, and closeout checks passed")
