@@ -1,0 +1,36 @@
+{
+  "contract": "carr-workspace-authority-risk-matrix",
+  "version": "1.0.0",
+  "status": "phase0_candidate",
+  "default": "deny",
+  "identity_boundary": {
+    "admitted_humans": ["Joe Bookout", "Dell McCraney"],
+    "initial_business_authority": "equal business-record operators",
+    "authentication": "verified Google identity",
+    "browser_session": ["Secure", "HttpOnly", "SameSite", "CSRF and origin validation"],
+    "native_session": ["authorization code with PKCE", "Keychain storage", "device revocation"],
+    "automation_rule": "Automation identities are separate actors and never impersonate or inherit a partner session."
+  },
+  "roles": [
+    {"role": "joe_partner", "principal": "Joe Bookout", "may": ["read authorized Workspace records", "create and confirm governed business writes", "review drafts", "submit engineering requests", "manage own device/session preferences"], "may_not": ["bypass human-only verbs", "convert a draft into an external send without a separate authorized system", "silently overwrite newer Dell work"]},
+    {"role": "dell_partner", "principal": "Dell McCraney", "may": ["read authorized Workspace records", "create and confirm governed business writes", "review drafts", "submit engineering requests", "manage own device/session preferences"], "may_not": ["bypass human-only verbs", "convert a draft into an external send without a separate authorized system", "silently overwrite newer Joe work"]},
+    {"role": "doc_assistant", "principal": "Doc", "may": ["read explicitly provided context", "create local capture", "produce typed proposals", "queue reviewed engineering requests"], "may_not": ["use a partner cookie", "send email", "publish", "spend", "change ownership", "move phases without confirmation", "merge identities", "deploy code", "claim completion without evidence"]},
+    {"role": "interactive_engineering_agent", "principal": "Claude Code or Codex session", "may": ["claim an engineering request under a bounded task contract", "read allowed sources", "propose changes", "return verification evidence"], "may_not": ["inherit reporter authority", "send externally", "use real recordings", "commit, deploy, migrate, or write production unless separately authorized"]},
+    {"role": "anonymous", "principal": "unauthenticated or future public visitor", "may": [], "may_not": ["receive private metadata", "receive record existence", "reuse a Workspace session across product boundaries"]}
+  ],
+  "risk_classes": [
+    {"id": "W0", "name": "read", "examples": ["authorized record read", "freshness view", "grounded explanation"], "required_gate": "authenticated principal plus record scope", "prototype_phase0": "synthetic only"},
+    {"id": "W1", "name": "local_capture", "examples": ["local note", "review question", "unsynced voice capture"], "required_gate": "visible local state and device attribution", "prototype_phase0": "simulated"},
+    {"id": "W2", "name": "proposal", "examples": ["candidate field update", "action candidate", "draft", "engineering request draft"], "required_gate": "typed schema, exact target, source evidence, Confirm/Edit/Skip", "prototype_phase0": "simulated"},
+    {"id": "W3", "name": "reversible_canonical_write", "examples": ["park or restore work record", "confirm call fact", "submit engineering request"], "required_gate": "human confirmation, version check, idempotency, attributed event, read-back, undo or compensating action", "prototype_phase0": "disabled"},
+    {"id": "W4", "name": "sensitive_or_identity_write", "examples": ["phase movement", "ownership change", "identity merge", "raw capture retention purge"], "required_gate": "named narrow human-only verb plus policy-specific preconditions and evidence", "prototype_phase0": "disabled"},
+    {"id": "W5", "name": "external_or_system_effect", "examples": ["email send", "publish", "media spend", "production deployment", "financial commitment"], "required_gate": "outside Workspace Phase 0 and structurally absent from Doc", "prototype_phase0": "refused"}
+  ],
+  "capability_ladder": [
+    {"level": 1, "name": "read", "risk": "W0", "gate": "citations, provenance, permissions"},
+    {"level": 2, "name": "capture", "risk": "W1", "gate": "visible local and sync state"},
+    {"level": 3, "name": "propose", "risk": "W2", "gate": "strict schema and exact targeting"},
+    {"level": 4, "name": "confirmed_write", "risk": "W3-W4", "gate": "per-action confirmation, idempotency, version check, read-back"},
+    {"level": 5, "name": "background_work", "risk": "W2", "gate": "durable lifecycle, executor attribution, evidence, no autonomous deployment"}
+  ]
+}

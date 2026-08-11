@@ -1,0 +1,65 @@
+{
+  "contract": "carr-workspace-domain-glossary",
+  "version": "1.0.0",
+  "status": "phase0_candidate",
+  "source": {
+    "doctrine_document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+    "doctrine_generation": 252,
+    "doctrine_section_count": 33,
+    "source_sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b",
+    "planning_baseline": "2026-08-11",
+    "provenance_status": "revised Word artifact read back from the durable doctrine record"
+  },
+  "north_star": "One place to run the business; one assistant that turns conversation into governed work.",
+  "operating_objective": {
+    "provenance_quote": "i feel like this list of what the system should do needs to be included in the roadmap. that really makes it clear what the objectives are",
+    "ai_session_displacement_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?",
+    "objectives": [
+      "Understand business and system state visually within seconds.",
+      "Perform routine work through straightforward controls.",
+      "Ask Doc for clarification without starting an engineering session.",
+      "See what agents are doing, which agent is acting, current phase, exact scope, and why.",
+      "Approve consequential changes through clear, exact action cards.",
+      "Queue improvements for Claude Code or Codex without supervising the entire build conversation.",
+      "Receive verified outcomes, evidence, blockers, and history back in the interface.",
+      "Open a heavy Claude Code or Codex session only when exploring, investigating a genuinely complex problem, or constructing something new."
+    ],
+    "interpretation": "Heavy engineering sessions remain available for genuine exploration, complex investigation, and new construction; routine operation should move into governed visual workflows and Doc."
+  },
+  "product_boundary": {
+    "product": "CARR Workspace",
+    "home": "The Command Center",
+    "users": ["Joe Bookout", "Dell McCraney"],
+    "canonical_truth": "Neon-backed CARR record layer",
+    "clients": ["responsive website", "installed Mac shell after website completion", "iPhone voice-first client", "iPad Tour Mode client"],
+    "separate_products": ["CARR Control Room", "future public marketing website"],
+    "non_goals": ["Android", "client portal", "third-party user roles", "Slack as operating system", "Hermes dependency", "automatic external sends", "automatic publishing or spend", "full transcript library", "wholesale Front Door port"]
+  },
+  "canonical_item_grammar": ["name", "explicit_state", "why_it_matters", "accountable_owner", "next_action", "source", "freshness_when_relevant"],
+  "terms": [
+    {"term": "CARR Workspace", "definition": "Run the business: the private Joe-and-Dell business operating application. Every client is a projection over one governed record layer."},
+    {"term": "The Command Center", "definition": "Business home: what changed, what needs attention, and what happens next, with deep links to owner modules."},
+    {"term": "CARR Control Room", "definition": "Run and observe the system: health, agents, automations, incidents, releases, and approvals under a separate operational security audience."},
+    {"term": "Lead", "definition": "A prospecting record that has not graduated into an active client or work relationship. Named outreach reminders live only on the Lead Board."},
+    {"term": "Client", "definition": "A party relationship recognized in the canonical record layer."},
+    {"term": "Work record", "definition": "The neutral unit for potential or active deal-related work. A Salesforce row alone does not imply an active transaction."},
+    {"term": "Active Work", "definition": "Current work included in operational focus, active counts, next-action pressure, gone-quiet logic, and weekly review."},
+    {"term": "Parked", "definition": "Preserved but inactive work excluded from active pressure and weekly review while retaining provenance, history, parties, documents, and reversibility."},
+    {"term": "Closed", "definition": "Completed or definitively ended work retained as read-only history unless a governed reopen action exists."},
+    {"term": "Call", "definition": "A governed capture and structured-review event linked to participants and records; it is not a permanent transcript library."},
+    {"term": "Call candidate", "definition": "A proposed fact, decision, action, deliverable, draft, or engineering request independently confirmed, edited, or skipped before promotion."},
+    {"term": "Tour", "definition": "An itinerary, locked and flexible stops, offline pack, property facts, notes, evidence, and post-tour review."},
+    {"term": "Action", "definition": "One accountable person's next work item with explicit lifecycle and destination."},
+    {"term": "Draft", "definition": "Prepared communication or content that has not been sent or published. Workspace contains no hidden send path."},
+    {"term": "Doc", "definition": "Human-friendly explanation, intake, and routing. Doc may read, capture, propose, and queue governed work but never inherits unrestricted partner authority."},
+    {"term": "Claude Code and Codex", "definition": "Heavy sessions for exploration, genuinely complex investigation, construction, and system improvement—not the routine operating interface."},
+    {"term": "CARR record layer", "definition": "The canonical source of truth for governed business records, decisions, provenance, and durable work history."},
+    {"term": "Engineering request", "definition": "A durable system-change request from a conversation, call, tour, screen, or manual report, claimed by a later interactive coding session and completed only with evidence."},
+    {"term": "Notification Center", "definition": "The authoritative inbox for unresolved human decisions and meaningful failures; operating modules remain the source of work."},
+    {"term": "Sterile mode", "definition": "A global client-facing presentation preference that suppresses internal notes, commissions, traces, system activity, and sensitive reasoning without changing authorization."},
+    {"term": "Color Assist", "definition": "A permanent explicit high-contrast product preference. Status is never conveyed by color alone."},
+    {"term": "Freshness", "definition": "An explicit observed-at and source condition. Cached, stale, missing, or unknown data may not be labeled Live and disables consequential edits."},
+    {"term": "Surface registry", "definition": "The required record of a surface's job, owner, canonical source, writers, freshness, migration class, parity evidence, rollback, observation period, and retirement decision."},
+    {"term": "Canonical JSON twin", "definition": "A versioned synthetic fixture that represents the exact data contract and every authored presentation state for a prototype surface."}
+  ]
+}

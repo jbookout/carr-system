@@ -1,0 +1,104 @@
+{
+  "contract": "carr-workspace-phase0-manifest",
+  "version": "1.0.0",
+  "status": "phase0_artifacts_independently_verified_pending_human_acceptance_and_council",
+  "source": {
+    "path": "/Users/booko/Desktop/CARR Workspace - BDUF and Implementation Roadmap.docx",
+    "original_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d",
+    "sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b",
+    "durable_doctrine_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+    "doctrine_generation": 252,
+    "doctrine_sections": 33,
+    "objective_section_id": "888131ae-9e0f-407f-9282-4dfafb70fb22",
+    "objective_section_version": 1
+  },
+  "settled_decisions": [
+    {"decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7", "subject": "Workspace and Control Room product and authority boundary"},
+    {"decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f", "subject": "Complete both Phase 0 preparations before Wednesday council; no construction before final approval"},
+    {"decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5", "subject": "Operating objective and AI-session displacement test controls both roadmaps and adoption"},
+    {"decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84", "subject": "Freeze independently verified Phase 0 artifacts pending human and council gates"}
+  ],
+  "repository": {
+    "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0",
+    "branch": "control-room-phase0",
+    "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253",
+    "canonical_dirty_checkout_modified": false
+  },
+  "artifact_groups": {
+    "contracts": [
+      "authority-risk-matrix.v1.json",
+      "business-entity-api-contracts.v1.json",
+      "council-review-register.v1.json",
+      "cross-reference-registry.v1.json",
+      "domain-glossary.v1.json",
+      "environment-release-process.v1.json",
+      "notification-event-taxonomy.v1.json",
+      "phase0-acceptance.v1.json",
+      "phase0-manifest.v1.json",
+      "phase0-traceability.v1.json",
+      "prototype-fixture-contract.v1.json",
+      "retention-redaction.v1.json",
+      "route-ia.v1.json",
+      "state-machines.v1.json",
+      "surface-registry-migration-map.v1.json",
+      "threat-model.v1.json"
+    ],
+    "canonical_twins": [
+      "call-review.v1.json",
+      "command-center.v1.json",
+      "deal-room.v1.json",
+      "doc-request.v1.json",
+      "lead-board.v1.json",
+      "marketing.v1.json",
+      "more.v1.json",
+      "notifications.v1.json",
+      "tour.v1.json"
+    ],
+    "prototype": ["public/index.html", "public/css/app.css", "public/js/app.js", "public/js/client.js", "public/server.mjs"],
+    "validators": ["contracts/validate.mjs", "contracts/schema-validator.mjs", "test/id-registry.mjs"],
+    "tests": ["test/contract-resolution.test.mjs", "test/fixtures.test.mjs", "test/prototype.test.mjs"]
+  },
+  "automated_evidence": {
+    "node_test_count": 28,
+    "node_test_passed": 28,
+    "registry_ids": 56,
+    "phase0_executable_registry_checks": 40,
+    "contracts_including_manifest": 16,
+    "canonical_twins": 9,
+    "authored_states_per_twin": 10,
+    "json_schema_compilation": "passed",
+    "syntax_checks": ["public/server.mjs", "public/js/app.js", "public/js/client.js", "contracts/schema-validator.mjs"],
+    "json_parse": "passed",
+    "future_only_unimplemented_gates": 16,
+    "mutation_routes": 0,
+    "external_effect_paths": 0,
+    "deployments": 0,
+    "migrations": 0
+  },
+  "runtime_evidence": {
+    "root": 200,
+    "css": 200,
+    "javascript": 200,
+    "tour_fixture": 200,
+    "package_json": 404,
+    "contract_file": 404,
+    "test_file": 404,
+    "unlisted_fixture": 404,
+    "options": 204,
+    "allow": "GET, HEAD, OPTIONS"
+  },
+  "exit_gates": {
+    "artifact_preparation": "passed independent re-verification with zero P0, P1, or P2 findings",
+    "interactive_visual_accessibility": "runtime entry verified; full visual, keyboard, and screen-reader review remains unverified",
+    "joe_and_dell_uncoached_five_journeys": "not performed",
+    "baseline_measurement": "all five values remain unknown pending instrumentation or interview",
+    "roadmap_final_approval": "scheduled for Wednesday council"
+  },
+  "prohibited_claims": [
+    "production Workspace implementation exists",
+    "production auth or authorization is enforced",
+    "business writes are enabled",
+    "website or native applications are deployed",
+    "Phase 0 exit is complete before human evidence and council approval"
+  ]
+}

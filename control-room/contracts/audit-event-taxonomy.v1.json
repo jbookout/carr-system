@@ -1,0 +1,19 @@
+{
+  "contract": "carr-control-room-audit-event-taxonomy",
+  "version": "1.0.0",
+  "status": "phase0_frozen",
+  "append_only": true,
+  "required_fields": ["event_id", "event_type", "occurred_at", "correlation_id", "causation_id", "actor", "sponsor_id", "service_id", "resource_id", "environment", "risk_class", "result", "failure_class", "redaction_class", "evidence_refs"],
+  "conditional_fields": ["work_request_id", "agent_session_id", "plan_id", "plan_revision", "plan_hash", "approval_id", "release_id", "deployment_id", "incident_id", "before_hash", "after_hash", "idempotency_key"],
+  "families": {
+    "authentication_access": ["auth.succeeded", "auth.failed", "auth.audience_refused", "reauth.completed", "authorization.allowed", "authorization.refused", "capability.proposed", "capability.approved", "capability.expired_revoked", "read_only_kill_switch.changed"],
+    "observation": ["collector.started", "collector.completed", "collector.failed", "freshness.became_stale", "health.changed", "check.completed", "job.completed", "redaction.applied"],
+    "work_session": ["request.captured", "request.deduplicated", "request.state_changed", "session.created", "session.scope_refused", "session.phase_changed", "session.blocked", "session.handed_off", "session.completed"],
+    "plan_approval": ["plan.revision_created", "plan.rehearsed", "plan.hash_frozen", "approval.proposed", "approval.approved", "approval.not_required", "approval.rejected", "approval.expired", "approval.invalidated"],
+    "release_deployment": ["release.assembled", "deployment.preflight_passed", "deployment.rehearsal_completed", "deployment.execution_started", "actuator.invoked", "deployment.reconnect_replayed", "deployment.verification_completed", "deployment.aborted", "deployment.rolled_back"],
+    "incident_recovery": ["incident.detected", "incident.deduplicated", "incident.fact_recorded", "incident.hypothesis_recorded", "incident.mitigation_proposed", "incident.resolved", "incident.reviewed", "recovery.rehearsed"],
+    "governance": ["feature_flag.evaluated", "feature_flag.changed", "schema.checksum_verified", "audit.exported", "retention.applied", "unsupported_action.refused", "state_transition.refused"]
+  },
+  "chain": ["origin", "agent_session", "plan_revision", "approval", "execution", "verification", "release_or_incident"],
+  "never_record": ["secret values", "DSNs", "bearer tokens", "cookies", "authorization headers", "raw OAuth claims", "raw client payloads", "raw transcripts", "unrestricted tool inputs or outputs", "prompt injection source text as instruction"]
+}

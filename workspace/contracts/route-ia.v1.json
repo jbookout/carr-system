@@ -1,0 +1,26 @@
+{
+  "contract": "carr-workspace-route-ia",
+  "version": "1.0.0",
+  "status": "phase0_candidate",
+  "primary_navigation": ["command-center", "leads", "deals", "calls", "marketing", "more"],
+  "persistent_controls": ["global-search", "single-call-mode-control", "notification-center", "doc-launcher", "partner-identity", "non-production-environment-indicator"],
+  "routes": [
+    {"id": "command-center", "path": "/", "label": "The Command Center", "owner_module": "command-center", "purpose": "What changed, what needs me, and what Doc is handling", "deep_links": ["/deals/:work_record_id", "/calls/:call_id", "/marketing/drafts/:draft_id", "/more/system-activity/requests/:request_id"], "forbidden_content": ["named lead outreach reminders", "raw model traces", "copied task queues", "uncited live claims"]},
+    {"id": "leads", "path": "/leads", "label": "The Lead Board", "owner_module": "leads", "children": ["my-queue", "hot", "this-week", "segments", "search-all", "decisions"], "exclusive_ownership": ["named lead outreach reminders"]},
+    {"id": "deals", "path": "/deals", "label": "The Deal Room", "owner_module": "deals", "children": ["active", "parked", "work-record-detail"], "sticky_controls": ["active-parked", "mine", "needs-attention", "gone-quiet", "missing-next-step", "changed-since-review", "search", "add-work-record"], "removed_controls": ["hero add work record", "duplicate hero Call Mode", "Start agenda"]},
+    {"id": "calls", "path": "/calls", "label": "Calls", "owner_module": "calls", "children": ["call-library", "call-detail", "review-pack"], "call_detail_sections": ["summary", "facts", "decisions", "objectives-and-deliverables", "joe-actions", "dell-actions", "outside-party-needs", "draft-communications", "agent-work-history", "related-records-and-files"], "forbidden_content": ["full transcript tab"]},
+    {"id": "marketing", "path": "/marketing", "label": "Marketing", "owner_module": "marketing", "children": ["overview", "drafts-to-review", "content-calendar", "campaigns", "performance", "ideas-and-assets"], "external_effects": "human-gated outside prototype"},
+    {"id": "more", "path": "/more", "label": "More", "owner_module": "workspace-shell", "children": ["people-and-network", "documents", "system-activity", "settings"]},
+    {"id": "doc", "path": "/doc", "label": "Doc", "owner_module": "doc", "presentation": {"desktop": "contextual right drawer", "narrow": "full-screen sheet with return path"}, "context_chip": "removable exact current object", "entry_actions": ["ask", "explain-this-page", "log-an-update", "draft-something", "report-problem-or-improvement"]},
+    {"id": "engineering-request", "path": "/more/system-activity/requests/:request_id", "label": "Engineering request", "owner_module": "system-activity", "origin_routes": ["Doc conversation", "Call review", "Tour review", "screen report", "manual report"]},
+    {"id": "tour", "path": "/tours/:tour_id", "label": "Tour", "owner_module": "tours", "presentation": {"web": "planning and review", "ipad": "native Tour Mode", "iphone": "supporting retrieval only"}}
+  ],
+  "responsive_contract": [
+    {"range": ">=1440px", "behavior": "full left navigation, max-width content, optional pinned Doc drawer"},
+    {"range": "1024-1439px", "behavior": "collapsed navigation, sticky table header and first column, Doc overlay"},
+    {"range": "768-1023px", "behavior": "adaptive master-detail at full, two-thirds, half, and one-third widths"},
+    {"range": "<=767px", "behavior": "bottom navigation for Home, Leads, Deals, Calls, More; cards replace tables; dialogs become full-height sheets"},
+    {"range": "200% zoom", "behavior": "no clipped controls or page-level horizontal scroll except intentional data tables"}
+  ],
+  "global_invariants": ["Exactly one Call Mode control exists", "Every metric deep-links to its owning filtered view", "Every object has a stable cross-device deep link", "Sterile mode is presentation suppression, never authorization", "No public-site route shares private session or data"]
+}

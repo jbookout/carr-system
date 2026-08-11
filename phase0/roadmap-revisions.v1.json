@@ -1,0 +1,46 @@
+{
+  "contract": "carr-roadmap-revisions",
+  "version": "1.0.0",
+  "status": "validated_and_durable",
+  "decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
+  "section_title": "Operating objective and AI-session displacement test",
+  "cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?",
+  "workspace": {
+    "desktop_path": "/Users/booko/Desktop/CARR Workspace - BDUF and Implementation Roadmap.docx",
+    "original_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d",
+    "revised_sha256": "e4370cbafcec21906cd38ad529f15fba35b2d54db5568f8b762f29e7ff65662b",
+    "pages": 45,
+    "body_text_words": 10617,
+    "docx_xsd_validation": "passed",
+    "zip_integrity": "passed",
+    "visual_pages_reviewed": 45,
+    "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+    "doctrine_generation": 252,
+    "doctrine_sections": 33,
+    "objective_section_id": "888131ae-9e0f-407f-9282-4dfafb70fb22",
+    "objective_section_version": 1,
+    "change_set_id": "3386522a-86f7-43bf-b2dd-f323c2158ef4"
+  },
+  "control_room": {
+    "desktop_path": "/Users/booko/Desktop/CARR Control Room - BDUF and Implementation Roadmap.docx",
+    "original_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada",
+    "revised_sha256": "b25cf6ca1c50998699f858322847b3911b96e322a34256068e88ece85af3c565",
+    "pages": 40,
+    "body_text_words": 8624,
+    "docx_xsd_validation": "passed",
+    "zip_integrity": "passed",
+    "visual_pages_reviewed": 40,
+    "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+    "doctrine_generation": 251,
+    "doctrine_sections": 38,
+    "objective_section_id": "fae3acb3-2efb-4b80-81f7-2b2d978c237a",
+    "objective_section_version": 1,
+    "change_set_id": "ddd4c32d-7611-46aa-9875-56ae3cb18b0b"
+  },
+  "validation_notes": [
+    "Both documents remain US Letter.",
+    "All 85 rendered pages were visually inspected after correcting list numbering and callout containment.",
+    "The revised Desktop binaries match the checksums recorded in the doctrine source-provenance sections.",
+    "No roadmap revision authorizes production construction, migration, deployment, or irreversible implementation before final council approval."
+  ]
+}

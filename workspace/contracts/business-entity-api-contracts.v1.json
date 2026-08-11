@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.doctorcre.com/workspace/business-entity-api-contracts.v1.json",
+  "contract": "carr-workspace-business-entity-api-contracts",
+  "version": "1.0.0",
+  "status": "phase0_prototype_only",
+  "api_policy": {
+    "base_path": "/api/v1",
+    "browser_api": "typed product API, not generic MCP passthrough",
+    "prototype_methods": ["GET", "HEAD", "OPTIONS"],
+    "prototype_data": "synthetic fixtures only",
+    "prototype_fixture_schema": "https://contracts.doctorcre.com/workspace/prototype-fixture-contract.v1.json",
+    "write_contract_rule": "Future product API and MCP adapters call one shared narrow business service; no duplicated business rules.",
+    "required_endpoint_declarations": ["authentication", "authorization", "request_schema", "response_schema", "idempotency", "typed_errors", "version_conflict", "telemetry", "rollback_implication"]
+  },
+  "domain_groups": [
+    {"group": "calls", "entities": ["CallSession", "CallParticipant", "CallRecordLink", "CallSummary", "CallFact", "CallDecision", "CallDeliverable", "CallCandidate", "CallRetentionReceipt"]},
+    {"group": "tours", "entities": ["Tour", "TourStop", "TourRouteVersion", "TourConstraint", "TourPack", "TourNotePage", "TourStrokeBatch", "TourMedia", "TourReviewItem"]},
+    {"group": "doc", "entities": ["DocConversation", "DocMessage", "DocContextLink", "DocActionCandidate", "EngineeringRequest", "EngineeringExecution", "EvidenceLink"]},
+    {"group": "notifications", "entities": ["Notification", "NotificationDelivery", "Acknowledgement", "Snooze", "DevicePreference"]},
+    {"group": "devices_and_sync", "entities": ["Device", "DeviceKey", "LocalOutboxItem", "SyncReceipt", "Conflict"]},
+    {"group": "product_delivery", "entities": ["Requirement", "AcceptanceCase", "FeatureFlag", "Release", "Deployment", "RollbackEvent"]}
+  ],
+  "endpoint_contract_defaults": {"authentication": "verified Workspace session for Joe or Dell", "request_schema": "path/query schema with additionalProperties false", "idempotency_or_read_semantics": "safe GET; no state change; cache identity includes authenticated principal and exact scope", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "OBJECT_NOT_FOUND", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"], "version_conflict": "reads return record version/ETag where applicable; future writes require If-Match", "telemetry": "safe operation ID, outcome, duration, freshness, correlation ID; no payload", "rollback_implication": "disable read-model feature flag or revert projection; canonical records unchanged"},
+  "prototype_read_routes": [
+    {"operation_id": "getWorkspaceMeta", "method": "GET", "path": "/api/v1/meta", "authentication": "verified Workspace session for Joe or Dell", "authorization": "authenticated product audience", "request_schema": "NoBodyNoQuery", "response_schema": "#/$defs/WorkspaceMeta", "idempotency_or_read_semantics": "safe configuration read", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "INTERNAL_ERROR"], "version_conflict": "not applicable; returns configuration fingerprint", "telemetry": "workspace.meta.read without payload", "rollback_implication": "disable shell flag; canonical records unchanged"},
+    {"operation_id": "getCommandCenter", "method": "GET", "path": "/api/v1/command-center", "authentication": "verified Workspace session for Joe or Dell", "authorization": "partner-specific projection", "request_schema": "CommandCenterQuery", "response_schema": "#/$defs/CommandCenterReadModel", "idempotency_or_read_semantics": "safe read; each card carries source freshness", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"], "version_conflict": "not applicable to aggregate; destination object versions included", "telemetry": "workspace.command_center.read with source outcomes only", "rollback_implication": "disable home read model; owner modules remain available"},
+    {"operation_id": "listLeads", "method": "GET", "path": "/api/v1/leads", "authentication": "verified Workspace session for Joe or Dell", "authorization": "authorized Lead Board scope", "request_schema": "LeadListQuery", "response_schema": "#/$defs/LeadListReadModel", "idempotency_or_read_semantics": "safe filtered read", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "FRESHNESS_UNKNOWN", "INTERNAL_ERROR"], "version_conflict": "each lead returns version", "telemetry": "workspace.leads.list without lead payload", "rollback_implication": "disable Lead module flag; source records unchanged"},
+    {"operation_id": "listWorkRecords", "method": "GET", "path": "/api/v1/work-records", "authentication": "verified Workspace session for Joe or Dell", "authorization": "authorized Team Book or National Accounts scope", "request_schema": "WorkRecordListQuery", "response_schema": "#/$defs/WorkRecordListReadModel", "idempotency_or_read_semantics": "safe filtered read; parked semantics server-derived", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "FRESHNESS_UNKNOWN", "INTERNAL_ERROR"], "version_conflict": "each record returns version", "telemetry": "workspace.work_records.list without business payload", "rollback_implication": "disable new Deal route; canonical records unchanged"},
+    {"operation_id": "getWorkRecord", "method": "GET", "path": "/api/v1/work-records/{work_record_id}", "authentication": "verified Workspace session for Joe or Dell", "authorization": "exact work-record scope", "request_schema": "UuidPath", "response_schema": "#/$defs/WorkRecord", "idempotency_or_read_semantics": "safe exact-object read", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "OBJECT_NOT_FOUND", "FRESHNESS_UNKNOWN", "INTERNAL_ERROR"], "version_conflict": "returns current version and ETag", "telemetry": "workspace.work_record.read with opaque ID", "rollback_implication": "disable detail route; canonical record unchanged"},
+    {"operation_id": "listCalls", "method": "GET", "path": "/api/v1/calls", "authentication": "verified Workspace session for Joe or Dell", "authorization": "authorized related-record scope", "request_schema": "CallListQuery", "response_schema": "#/$defs/CallListReadModel", "idempotency_or_read_semantics": "safe filtered structured-summary read; no transcript", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "FRESHNESS_UNKNOWN", "INTERNAL_ERROR"], "version_conflict": "each call returns version", "telemetry": "workspace.calls.list without raw capture", "rollback_implication": "disable Calls route; structured records unchanged"},
+    {"operation_id": "getCall", "method": "GET", "path": "/api/v1/calls/{call_id}", "authentication": "verified Workspace session for Joe or Dell", "authorization": "exact call and related-record scope", "request_schema": "UuidPath", "response_schema": "#/$defs/CallSummary", "idempotency_or_read_semantics": "safe structured-summary read; raw capture excluded", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "OBJECT_NOT_FOUND", "FRESHNESS_UNKNOWN", "INTERNAL_ERROR"], "version_conflict": "returns current call version and candidate versions", "telemetry": "workspace.call.read without transcript or evidence body", "rollback_implication": "disable Call detail flag; records unchanged"},
+    {"operation_id": "getDocContext", "method": "GET", "path": "/api/v1/doc/context", "authentication": "verified Workspace session for Joe or Dell", "authorization": "exact removable context links only", "request_schema": "DocContextQuery", "response_schema": "#/$defs/DocContext", "idempotency_or_read_semantics": "safe context projection; no chat shadow database", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "AMBIGUOUS_TARGET", "FRESHNESS_UNKNOWN", "INTERNAL_ERROR"], "version_conflict": "every context link returns source version", "telemetry": "workspace.doc.context.read with object types only", "rollback_implication": "remove context or disable Doc route"},
+    {"operation_id": "getEngineeringRequest", "method": "GET", "path": "/api/v1/engineering-requests/{request_id}", "authentication": "verified Workspace session for Joe or Dell", "authorization": "request reporter/owner business scope", "request_schema": "UuidPath", "response_schema": "#/$defs/EngineeringRequest", "idempotency_or_read_semantics": "safe event-derived lifecycle read", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "OBJECT_NOT_FOUND", "INTERNAL_ERROR"], "version_conflict": "returns immutable event cursor and current version", "telemetry": "workspace.engineering_request.read without diagnostics payload", "rollback_implication": "remove safe projection; request history unchanged"},
+    {"operation_id": "getTour", "method": "GET", "path": "/api/v1/tours/{tour_id}", "authentication": "verified Workspace session for Joe or Dell", "authorization": "exact tour and client/work-record scope", "request_schema": "UuidPath", "response_schema": "#/$defs/Tour", "idempotency_or_read_semantics": "safe server plus device-sync read", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "OBJECT_NOT_FOUND", "FRESHNESS_UNKNOWN", "INTERNAL_ERROR"], "version_conflict": "returns route, record, and device-sync versions", "telemetry": "workspace.tour.read without precise route or client payload", "rollback_implication": "disable tour route; local evidence remains preserved"},
+    {"operation_id": "listNotifications", "method": "GET", "path": "/api/v1/notifications", "authentication": "verified Workspace session for Joe or Dell", "authorization": "principal-specific unresolved decisions", "request_schema": "NotificationListQuery", "response_schema": "#/$defs/NotificationListReadModel", "idempotency_or_read_semantics": "safe read; opening does not acknowledge or resolve", "typed_errors": ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "INTERNAL_ERROR"], "version_conflict": "each notification returns version and owner-object state", "telemetry": "workspace.notifications.list with counts only", "rollback_implication": "disable delivery channel; in-app source truth unchanged"}
+  ],
+  "typed_errors": [
+    {"code": "AUTHENTICATION_REQUIRED", "http": 401, "safe_message": "Sign in to CARR Workspace.", "retryable": false},
+    {"code": "AUTHORIZATION_REFUSED", "http": 403, "safe_message": "This account cannot access that object.", "retryable": false},
+    {"code": "OBJECT_NOT_FOUND", "http": 404, "safe_message": "The requested object is unavailable.", "retryable": false, "privacy": "Do not distinguish nonexistent from unauthorized."},
+    {"code": "FRESHNESS_UNKNOWN", "http": 409, "safe_message": "Current data cannot be verified. Editing is disabled.", "retryable": true},
+    {"code": "VERSION_CONFLICT", "http": 409, "safe_message": "This item changed. Review the newer version before continuing.", "retryable": false},
+    {"code": "AMBIGUOUS_TARGET", "http": 422, "safe_message": "Choose the exact person or record before continuing.", "retryable": false},
+    {"code": "SCHEMA_REFUSED", "http": 422, "safe_message": "The proposed change is incomplete or unsupported.", "retryable": false},
+    {"code": "IDEMPOTENCY_CONFLICT", "http": 409, "safe_message": "This request key was already used for different content.", "retryable": false},
+    {"code": "METHOD_NOT_ALLOWED", "http": 405, "safe_message": "That action is unavailable in this prototype.", "retryable": false},
+    {"code": "DEPENDENCY_UNAVAILABLE", "http": 503, "safe_message": "A required service is unavailable. No change was made.", "retryable": true},
+    {"code": "INTERNAL_ERROR", "http": 500, "safe_message": "CARR could not complete the request. Use the correlation ID for support.", "retryable": true, "privacy": "No stack trace, secrets, record payload, or model prompt."}
+  ],
+  "$defs": {
+    "Uuid": {"type": "string", "format": "uuid"},
+    "IsoDateTime": {"type": "string", "format": "date-time"},
+    "NoBodyNoQuery": {"type": "object", "additionalProperties": false, "maxProperties": 0},
+    "UuidPath": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"$ref": "#/$defs/Uuid"}}},
+    "CommandCenterQuery": {"type": "object", "additionalProperties": false, "properties": {"viewer": {"enum": ["joe", "dell"]}}},
+    "LeadListQuery": {"type": "object", "additionalProperties": false, "properties": {"view": {"enum": ["my_queue", "hot", "this_week", "segments", "search_all", "decisions"]}, "cursor": {"type": ["string", "null"]}}},
+    "WorkRecordListQuery": {"type": "object", "additionalProperties": false, "properties": {"operating_state": {"enum": ["active", "parked", "closed"]}, "workspace": {"enum": ["team_book", "national_accounts"]}, "cursor": {"type": ["string", "null"]}}},
+    "CallListQuery": {"type": "object", "additionalProperties": false, "properties": {"type": {"enum": ["weekly_deal_review", "client", "vendor_or_listing_agent", "tour_debrief", "other"]}, "cursor": {"type": ["string", "null"]}}},
+    "DocContextQuery": {"type": "object", "additionalProperties": false, "required": ["context_refs"], "properties": {"context_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}}},
+    "NotificationListQuery": {"type": "object", "additionalProperties": false, "properties": {"state": {"enum": ["unresolved", "acknowledged", "snoozed", "resolved"]}, "cursor": {"type": ["string", "null"]}}},
+    "SourceEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "observed_at", "freshness", "correlation_id"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "source_ref": {"type": ["string", "null"]},
+        "observed_at": {"$ref": "#/$defs/IsoDateTime"},
+        "valid_until": {"type": ["string", "null"], "format": "date-time"},
+        "freshness": {"enum": ["fresh", "stale", "missing", "unknown", "local", "syncing"]},
+        "correlation_id": {"type": "string", "minLength": 1},
+        "safe_explanation": {"type": ["string", "null"]}
+      }
+    },
+    "CanonicalGrammar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "state", "why_it_matters", "accountable_owner_id", "next_action", "source"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "state": {"type": "string", "minLength": 1},
+        "why_it_matters": {"type": "string", "minLength": 1, "maxLength": 500},
+        "accountable_owner_id": {"$ref": "#/$defs/Uuid"},
+        "next_action": {"type": ["string", "null"], "maxLength": 500},
+        "source": {"$ref": "#/$defs/SourceEnvelope"}
+      }
+    },
+    "VersionedRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "created_at", "created_by", "updated_at", "updated_by", "provenance"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Uuid"},
+        "version": {"type": "integer", "minimum": 1},
+        "created_at": {"$ref": "#/$defs/IsoDateTime"},
+        "created_by": {"$ref": "#/$defs/Uuid"},
+        "updated_at": {"$ref": "#/$defs/IsoDateTime"},
+        "updated_by": {"$ref": "#/$defs/Uuid"},
+        "provenance": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "WorkRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record", "grammar", "operating_state", "workspace", "parking", "salesforce_ref", "participant_ids", "history_preserved"],
+      "properties": {
+        "record": {"$ref": "#/$defs/VersionedRecord"},
+        "grammar": {"$ref": "#/$defs/CanonicalGrammar"},
+        "operating_state": {"enum": ["active", "parked", "closed"]},
+        "workspace": {"enum": ["team_book", "national_accounts"]},
+        "parking": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["reason", "context", "parked_at", "parked_by"],
+          "properties": {
+            "reason": {"enum": ["client_paused", "prospect_did_not_progress", "timing_unknown", "duplicate_or_administrative", "other"]},
+            "context": {"type": ["string", "null"], "maxLength": 2000},
+            "parked_at": {"$ref": "#/$defs/IsoDateTime"},
+            "parked_by": {"$ref": "#/$defs/Uuid"}
+          }
+        },
+        "salesforce_ref": {"type": ["string", "null"]},
+        "participant_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Uuid"}},
+        "history_preserved": {"const": true}
+      }
+    },
+    "Lead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record", "grammar", "lead_state", "recommended_next_action", "dismissal", "conversion_links"],
+      "properties": {
+        "record": {"$ref": "#/$defs/VersionedRecord"},
+        "grammar": {"$ref": "#/$defs/CanonicalGrammar"},
+        "lead_state": {"enum": ["unclaimed", "claimed", "contacted", "next_touch_set", "not_now", "not_a_fit", "converted"]},
+        "recommended_next_action": {"type": ["string", "null"], "maxLength": 500},
+        "dismissal": {"type": ["object", "null"], "additionalProperties": false, "required": ["type", "reason"], "properties": {"type": {"enum": ["not_now", "not_a_fit"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 1000}, "revisit_at": {"type": ["string", "null"], "format": "date-time"}}},
+        "conversion_links": {"type": "array", "items": {"$ref": "#/$defs/Uuid"}, "uniqueItems": true}
+      }
+    },
+    "CallCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "state", "exact_target_id", "evidence_excerpt", "proposed_value", "risk", "write_destination"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Uuid"},
+        "kind": {"enum": ["fact", "decision", "objective", "deliverable", "joe_action", "dell_action", "outside_party_need", "draft_communication", "engineering_request"]},
+        "state": {"enum": ["proposed", "edited", "confirmed", "skipped", "rejected", "failed"]},
+        "exact_target_id": {"type": ["string", "null"], "format": "uuid"},
+        "evidence_excerpt": {"type": "string", "maxLength": 240, "pattern": "^(?:\\S+(?:\\s+|$)){1,15}$", "x-maxWords": 15},
+        "proposed_value": {},
+        "risk": {"enum": ["W1", "W2", "W3", "W4"]},
+        "write_destination": {"type": "string", "minLength": 1},
+        "review_question": {"type": ["string", "null"], "maxLength": 500}
+      }
+    },
+    "CallSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record", "grammar", "call_type", "participant_ids", "related_record_ids", "processing_state", "summary", "candidates", "agent_work_history", "raw_capture_retention"],
+      "properties": {
+        "record": {"$ref": "#/$defs/VersionedRecord"},
+        "grammar": {"$ref": "#/$defs/CanonicalGrammar"},
+        "call_type": {"enum": ["weekly_deal_review", "client", "vendor_or_listing_agent", "tour_debrief", "other"]},
+        "participant_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Uuid"}},
+        "related_record_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Uuid"}},
+        "processing_state": {"enum": ["preflight", "consent_confirmed", "recording", "paused", "processing", "review_ready", "partially_reviewed", "complete", "cancelled", "failed"]},
+        "needs_attention": {"type": "boolean"},
+        "summary": {"type": ["string", "null"], "maxLength": 10000},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/CallCandidate"}},
+        "agent_work_history": {"type": "array", "items": {"$ref": "#/$defs/Uuid"}},
+        "raw_capture_retention": {"enum": ["local_processing", "review_blocked", "purge_eligible", "purged", "legal_hold"]}
+      }
+    },
+    "EngineeringRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record", "grammar", "request", "acceptance_criteria", "origin", "reporter_id", "owner_id", "executor", "state", "affected_refs", "requirement_ids", "risk", "evidence", "blocker_or_decline_reason"],
+      "properties": {
+        "record": {"$ref": "#/$defs/VersionedRecord"},
+        "grammar": {"$ref": "#/$defs/CanonicalGrammar"},
+        "request": {"type": "string", "minLength": 1, "maxLength": 5000},
+        "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "origin": {"type": "object", "additionalProperties": false, "required": ["type", "ref"], "properties": {"type": {"enum": ["conversation", "call", "tour", "screen", "manual"]}, "ref": {"type": "string", "minLength": 1}}},
+        "reporter_id": {"$ref": "#/$defs/Uuid"},
+        "owner_id": {"$ref": "#/$defs/Uuid"},
+        "executor": {"type": ["object", "null"], "additionalProperties": false, "required": ["actor_id", "model", "tool"], "properties": {"actor_id": {"type": "string"}, "model": {"type": "string"}, "tool": {"type": "string"}}},
+        "state": {"enum": ["draft", "queued", "claimed", "in_progress", "needs_answer", "completed", "declined", "failed", "superseded"]},
+        "affected_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "requirement_ids": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z]+-[A-Z]+-[0-9]{3}$"}, "uniqueItems": true},
+        "risk": {"enum": ["W0", "W1", "W2", "W3", "W4", "W5"]},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "blocker_or_decline_reason": {"type": ["string", "null"]}
+      }
+    },
+    "Tour": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record", "grammar", "state", "client_or_work_record_id", "route_version", "stops", "offline_pack", "device_sync", "review_items"],
+      "properties": {
+        "record": {"$ref": "#/$defs/VersionedRecord"},
+        "grammar": {"$ref": "#/$defs/CanonicalGrammar"},
+        "state": {"enum": ["draft", "route_proposed", "confirmed", "in_progress", "paused", "review_ready", "complete", "cancelled", "failed"]},
+        "client_or_work_record_id": {"$ref": "#/$defs/Uuid"},
+        "route_version": {"type": "integer", "minimum": 1},
+        "stops": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["id", "order", "address", "locked_appointment", "visited_state", "note_page_id"], "properties": {"id": {"$ref": "#/$defs/Uuid"}, "order": {"type": "integer", "minimum": 1}, "address": {"type": "string", "minLength": 1}, "locked_appointment": {"type": ["string", "null"], "format": "date-time"}, "visited_state": {"enum": ["planned", "current", "visited", "skipped"]}, "note_page_id": {"$ref": "#/$defs/Uuid"}}}},
+        "offline_pack": {"type": "object", "additionalProperties": false, "required": ["state", "content_hash", "verified_at"], "properties": {"state": {"enum": ["not_requested", "downloading", "ready", "stale", "failed"]}, "content_hash": {"type": ["string", "null"]}, "verified_at": {"type": ["string", "null"], "format": "date-time"}}},
+        "device_sync": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["device_id", "state", "updated_at"], "properties": {"device_id": {"$ref": "#/$defs/Uuid"}, "state": {"enum": ["local", "uploading", "synced", "needs_review", "failed_retry", "superseded"]}, "updated_at": {"$ref": "#/$defs/IsoDateTime"}}}},
+        "review_items": {"type": "array", "items": {"$ref": "#/$defs/CallCandidate"}}
+      }
+    },
+    "WorkspaceMeta": {
+      "type": "object", "additionalProperties": false, "required": ["product", "home", "viewer", "environment", "configuration_fingerprint", "source"],
+      "properties": {"product": {"const": "CARR Workspace"}, "home": {"const": "The Command Center"}, "viewer": {"enum": ["joe", "dell"]}, "environment": {"enum": ["local", "preview", "staging", "production"]}, "configuration_fingerprint": {"type": "string", "minLength": 1}, "source": {"$ref": "#/$defs/SourceEnvelope"}}
+    },
+    "CommandCenterReadModel": {
+      "type": "object", "additionalProperties": false, "required": ["viewer", "needs_you_now", "this_week", "metrics", "recent_calls", "doc_at_work", "recent_activity", "source"],
+      "properties": {"viewer": {"enum": ["joe", "dell"]}, "needs_you_now": {"type": "array"}, "this_week": {"type": "array"}, "metrics": {"type": "array"}, "recent_calls": {"type": "array"}, "doc_at_work": {"type": "array"}, "recent_activity": {"type": "array"}, "source": {"$ref": "#/$defs/SourceEnvelope"}}
+    },
+    "LeadListReadModel": {"type": "object", "additionalProperties": false, "required": ["items", "source", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/Lead"}}, "source": {"$ref": "#/$defs/SourceEnvelope"}, "next_cursor": {"type": ["string", "null"]}}},
+    "WorkRecordListReadModel": {"type": "object", "additionalProperties": false, "required": ["items", "source", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/WorkRecord"}}, "source": {"$ref": "#/$defs/SourceEnvelope"}, "next_cursor": {"type": ["string", "null"]}}},
+    "CallListReadModel": {"type": "object", "additionalProperties": false, "required": ["items", "source", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/CallSummary"}}, "source": {"$ref": "#/$defs/SourceEnvelope"}, "next_cursor": {"type": ["string", "null"]}}},
+    "DocContext": {"type": "object", "additionalProperties": false, "required": ["viewer", "context_links", "source"], "properties": {"viewer": {"enum": ["joe", "dell"]}, "context_links": {"type": "array", "items": {"$ref": "#/$defs/DocContextLink"}}, "source": {"$ref": "#/$defs/SourceEnvelope"}}},
+    "NotificationListReadModel": {"type": "object", "additionalProperties": false, "required": ["items", "unresolved_count", "source", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/Notification"}}, "unresolved_count": {"type": "integer", "minimum": 0}, "source": {"$ref": "#/$defs/SourceEnvelope"}, "next_cursor": {"type": ["string", "null"]}}},
+    "Notification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record", "grammar", "class", "topic", "owner_object_ref", "why_interrupted", "state", "delivery_channels"],
+      "properties": {
+        "record": {"$ref": "#/$defs/VersionedRecord"},
+        "grammar": {"$ref": "#/$defs/CanonicalGrammar"},
+        "class": {"enum": ["urgent", "review_needed", "digest"]},
+        "topic": {"type": "string", "not": {"const": "named_lead_outreach"}},
+        "owner_object_ref": {"type": "string", "minLength": 1},
+        "why_interrupted": {"type": "string", "minLength": 1, "maxLength": 500},
+        "state": {"enum": ["unresolved", "acknowledged", "snoozed", "resolved", "expired", "superseded"]},
+        "delivery_channels": {"type": "array", "items": {"enum": ["in_app", "web_push", "apns", "digest"]}, "uniqueItems": true}
+      }
+    },
+    "CallSession": {"type": "object", "additionalProperties": false, "required": ["record", "call_type", "capture_state", "consent_receipt_id"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "call_type": {"enum": ["weekly_deal_review", "client", "vendor_or_listing_agent", "tour_debrief", "other"]}, "capture_state": {"enum": ["preflight", "recording", "paused", "stopped", "failed"]}, "consent_receipt_id": {"type": ["string", "null"], "format": "uuid"}}},
+    "CallParticipant": {"type": "object", "additionalProperties": false, "required": ["record", "call_id", "person_id", "speaker_status"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "call_id": {"$ref": "#/$defs/Uuid"}, "person_id": {"type": ["string", "null"], "format": "uuid"}, "speaker_status": {"enum": ["confirmed", "uncertain", "unmapped"]}}},
+    "CallRecordLink": {"type": "object", "additionalProperties": false, "required": ["record", "call_id", "target_ref", "link_role"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "call_id": {"$ref": "#/$defs/Uuid"}, "target_ref": {"type": "string", "minLength": 1}, "link_role": {"enum": ["active", "context", "parked_excluded"]}}},
+    "CallFact": {"type": "object", "additionalProperties": false, "required": ["record", "call_id", "target_ref", "text", "disposition"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "call_id": {"$ref": "#/$defs/Uuid"}, "target_ref": {"type": "string"}, "text": {"type": "string", "minLength": 1}, "disposition": {"enum": ["pending", "confirmed", "edited", "skipped"]}}},
+    "CallDecision": {"type": "object", "additionalProperties": false, "required": ["record", "call_id", "decision", "owner_id", "disposition"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "call_id": {"$ref": "#/$defs/Uuid"}, "decision": {"type": "string", "minLength": 1}, "owner_id": {"$ref": "#/$defs/Uuid"}, "disposition": {"enum": ["pending", "confirmed", "edited", "skipped"]}}},
+    "CallDeliverable": {"type": "object", "additionalProperties": false, "required": ["record", "call_id", "deliverable", "owner_id", "state"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "call_id": {"$ref": "#/$defs/Uuid"}, "deliverable": {"type": "string", "minLength": 1}, "owner_id": {"$ref": "#/$defs/Uuid"}, "state": {"enum": ["proposed", "confirmed", "complete", "skipped"]}}},
+    "CallRetentionReceipt": {"type": "object", "additionalProperties": false, "required": ["record", "call_id", "legal_hold", "policy_resolved", "recovery_window_elapsed", "all_candidates_dispositioned", "aggregate_confirmed", "purge_eligible"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "call_id": {"$ref": "#/$defs/Uuid"}, "legal_hold": {"type": "boolean"}, "policy_resolved": {"type": "boolean"}, "recovery_window_elapsed": {"type": "boolean"}, "all_candidates_dispositioned": {"type": "boolean"}, "aggregate_confirmed": {"type": "boolean"}, "purge_eligible": {"type": "boolean"}}},
+    "TourStop": {"type": "object", "additionalProperties": false, "required": ["record", "tour_id", "order", "marker", "locked_appointment", "note_page_id"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "tour_id": {"$ref": "#/$defs/Uuid"}, "order": {"type": "integer", "minimum": 1}, "marker": {"type": "integer", "minimum": 1}, "locked_appointment": {"type": ["string", "null"], "format": "date-time"}, "note_page_id": {"$ref": "#/$defs/Uuid"}}},
+    "TourRouteVersion": {"type": "object", "additionalProperties": false, "required": ["record", "tour_id", "route_version", "ordered_stop_ids", "confirmed_by"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "tour_id": {"$ref": "#/$defs/Uuid"}, "route_version": {"type": "integer", "minimum": 1}, "ordered_stop_ids": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Uuid"}}, "confirmed_by": {"type": ["string", "null"], "format": "uuid"}}},
+    "TourConstraint": {"type": "object", "additionalProperties": false, "required": ["record", "tour_id", "stop_id", "kind", "value"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "tour_id": {"$ref": "#/$defs/Uuid"}, "stop_id": {"$ref": "#/$defs/Uuid"}, "kind": {"enum": ["locked_appointment", "dwell", "buffer", "flexible"]}, "value": {}}},
+    "TourPack": {"type": "object", "additionalProperties": false, "required": ["record", "tour_id", "state", "content_hash", "verified_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "tour_id": {"$ref": "#/$defs/Uuid"}, "state": {"enum": ["not_requested", "downloading", "ready", "stale", "failed"]}, "content_hash": {"type": ["string", "null"]}, "verified_at": {"type": ["string", "null"], "format": "date-time"}}},
+    "TourNotePage": {"type": "object", "additionalProperties": false, "required": ["record", "tour_id", "stop_id", "page_version", "sync_state"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "tour_id": {"$ref": "#/$defs/Uuid"}, "stop_id": {"$ref": "#/$defs/Uuid"}, "page_version": {"type": "integer", "minimum": 1}, "sync_state": {"enum": ["local", "uploading", "synced", "needs_review", "failed_retry", "superseded"]}}},
+    "TourStrokeBatch": {"type": "object", "additionalProperties": false, "required": ["record", "note_page_id", "device_id", "sequence", "content_hash"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "note_page_id": {"$ref": "#/$defs/Uuid"}, "device_id": {"$ref": "#/$defs/Uuid"}, "sequence": {"type": "integer", "minimum": 1}, "content_hash": {"type": "string", "minLength": 1}}},
+    "TourMedia": {"type": "object", "additionalProperties": false, "required": ["record", "tour_id", "stop_id", "media_kind", "local_state", "redaction_reviewed"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "tour_id": {"$ref": "#/$defs/Uuid"}, "stop_id": {"$ref": "#/$defs/Uuid"}, "media_kind": {"enum": ["photo", "scan"]}, "local_state": {"enum": ["local", "uploading", "synced", "failed"]}, "redaction_reviewed": {"type": "boolean"}}},
+    "TourReviewItem": {"type": "object", "additionalProperties": false, "required": ["record", "tour_id", "kind", "text", "disposition"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "tour_id": {"$ref": "#/$defs/Uuid"}, "kind": {"enum": ["reaction", "follow_up", "fact", "decision", "draft"]}, "text": {"type": "string", "minLength": 1}, "disposition": {"enum": ["pending", "confirmed", "edited", "skipped"]}}},
+    "DocConversation": {"type": "object", "additionalProperties": false, "required": ["record", "viewer", "context_link_ids", "retention_class"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "viewer": {"enum": ["joe", "dell"]}, "context_link_ids": {"type": "array", "items": {"$ref": "#/$defs/Uuid"}}, "retention_class": {"enum": ["ephemeral", "promoted_only"]}}},
+    "DocMessage": {"type": "object", "additionalProperties": false, "required": ["record", "conversation_id", "role", "text", "source_refs"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "conversation_id": {"$ref": "#/$defs/Uuid"}, "role": {"enum": ["joe", "dell", "doc"]}, "text": {"type": "string", "minLength": 1}, "source_refs": {"type": "array", "items": {"type": "string"}}}},
+    "DocContextLink": {"type": "object", "additionalProperties": false, "required": ["record", "conversation_id", "object_type", "object_ref", "label", "removable", "included"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "conversation_id": {"$ref": "#/$defs/Uuid"}, "object_type": {"type": "string", "minLength": 1}, "object_ref": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}, "removable": {"const": true}, "included": {"type": "boolean"}}},
+    "DocActionCandidate": {"type": "object", "additionalProperties": false, "required": ["record", "conversation_id", "action_type", "exact_target_ref", "risk", "state"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "conversation_id": {"$ref": "#/$defs/Uuid"}, "action_type": {"type": "string"}, "exact_target_ref": {"type": ["string", "null"]}, "risk": {"enum": ["W0", "W1", "W2", "W3", "W4", "W5"]}, "state": {"enum": ["proposed", "confirmed", "refused", "expired"]}}},
+    "EngineeringExecution": {"type": "object", "additionalProperties": false, "required": ["record", "request_id", "executor", "scope", "phase", "status"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "request_id": {"$ref": "#/$defs/Uuid"}, "executor": {"type": "string", "minLength": 1}, "scope": {"type": "string", "minLength": 1}, "phase": {"type": "string"}, "status": {"enum": ["claimed", "in_progress", "needs_answer", "verified", "failed"]}}},
+    "EvidenceLink": {"type": "object", "additionalProperties": false, "required": ["record", "request_id", "kind", "safe_ref", "verified_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "request_id": {"$ref": "#/$defs/Uuid"}, "kind": {"enum": ["test", "read_back", "artifact", "blocker", "outcome"]}, "safe_ref": {"type": "string", "minLength": 1}, "verified_at": {"type": ["string", "null"], "format": "date-time"}}},
+    "NotificationDelivery": {"type": "object", "additionalProperties": false, "required": ["record", "notification_id", "channel", "state", "attempted_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "notification_id": {"$ref": "#/$defs/Uuid"}, "channel": {"enum": ["in_app", "web_push", "apns", "digest"]}, "state": {"enum": ["queued", "delivered", "failed", "suppressed"]}, "attempted_at": {"$ref": "#/$defs/IsoDateTime"}}},
+    "Acknowledgement": {"type": "object", "additionalProperties": false, "required": ["record", "notification_id", "actor_id", "acknowledged_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "notification_id": {"$ref": "#/$defs/Uuid"}, "actor_id": {"$ref": "#/$defs/Uuid"}, "acknowledged_at": {"$ref": "#/$defs/IsoDateTime"}}},
+    "Snooze": {"type": "object", "additionalProperties": false, "required": ["record", "notification_id", "actor_id", "until", "reason"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "notification_id": {"$ref": "#/$defs/Uuid"}, "actor_id": {"$ref": "#/$defs/Uuid"}, "until": {"$ref": "#/$defs/IsoDateTime"}, "reason": {"type": "string", "minLength": 1}}},
+    "DevicePreference": {"type": "object", "additionalProperties": false, "required": ["record", "device_id", "preference", "value"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "device_id": {"$ref": "#/$defs/Uuid"}, "preference": {"enum": ["sterile_mode", "color_assist", "quiet_hours"]}, "value": {}}},
+    "Device": {"type": "object", "additionalProperties": false, "required": ["record", "owner_id", "platform", "state", "last_seen_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "owner_id": {"$ref": "#/$defs/Uuid"}, "platform": {"enum": ["web", "mac", "iphone", "ipad"]}, "state": {"enum": ["active", "revoked", "lost"]}, "last_seen_at": {"$ref": "#/$defs/IsoDateTime"}}},
+    "DeviceKey": {"type": "object", "additionalProperties": false, "required": ["record", "device_id", "key_ref", "state", "expires_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "device_id": {"$ref": "#/$defs/Uuid"}, "key_ref": {"type": "string", "minLength": 1}, "state": {"enum": ["active", "rotated", "revoked"]}, "expires_at": {"$ref": "#/$defs/IsoDateTime"}}},
+    "LocalOutboxItem": {"type": "object", "additionalProperties": false, "required": ["record", "device_id", "idempotency_key", "object_ref", "operation", "state"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "device_id": {"$ref": "#/$defs/Uuid"}, "idempotency_key": {"type": "string", "minLength": 1}, "object_ref": {"type": "string", "minLength": 1}, "operation": {"type": "string", "minLength": 1}, "state": {"enum": ["local", "uploading", "synced", "needs_review", "failed_retry", "superseded"]}}},
+    "SyncReceipt": {"type": "object", "additionalProperties": false, "required": ["record", "outbox_item_id", "server_version", "received_at", "outcome"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "outbox_item_id": {"$ref": "#/$defs/Uuid"}, "server_version": {"type": "integer", "minimum": 1}, "received_at": {"$ref": "#/$defs/IsoDateTime"}, "outcome": {"enum": ["applied", "duplicate", "conflict", "refused"]}}},
+    "Conflict": {"type": "object", "additionalProperties": false, "required": ["record", "object_ref", "server_version", "device_version", "fields", "resolution_state"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "object_ref": {"type": "string", "minLength": 1}, "server_version": {"type": "integer", "minimum": 1}, "device_version": {"type": "integer", "minimum": 1}, "fields": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "resolution_state": {"enum": ["needs_review", "resolved_server", "resolved_device", "merged_append_only"]}}},
+    "Requirement": {"type": "object", "additionalProperties": false, "required": ["record", "requirement_id", "statement", "status", "acceptance_case_ids"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "requirement_id": {"type": "string", "pattern": "^[A-Z]+(?:-[A-Z]+)+-[0-9]{3}$"}, "statement": {"type": "string", "minLength": 1}, "status": {"enum": ["proposed", "approved", "deferred", "retired"]}, "acceptance_case_ids": {"type": "array", "items": {"type": "string"}}}},
+    "AcceptanceCase": {"type": "object", "additionalProperties": false, "required": ["record", "test_id", "requirement_ids", "layer", "expected_evidence"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "test_id": {"type": "string", "minLength": 1}, "requirement_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "layer": {"enum": ["unit", "contract", "integration", "browser_e2e", "security", "manual"]}, "expected_evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}}}},
+    "FeatureFlag": {"type": "object", "additionalProperties": false, "required": ["record", "key", "environment", "enabled_for", "rollback_owner"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "key": {"type": "string", "minLength": 1}, "environment": {"enum": ["local", "preview", "staging", "production"]}, "enabled_for": {"type": "array", "items": {"enum": ["joe", "dell"]}}, "rollback_owner": {"type": "string", "minLength": 1}}},
+    "Release": {"type": "object", "additionalProperties": false, "required": ["record", "artifact_hash", "source_commit", "environment", "approval_state"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "artifact_hash": {"type": "string", "minLength": 1}, "source_commit": {"type": "string", "minLength": 7}, "environment": {"enum": ["preview", "staging", "production"]}, "approval_state": {"enum": ["draft", "rehearsed", "approved", "invalidated"]}}},
+    "Deployment": {"type": "object", "additionalProperties": false, "required": ["record", "release_id", "environment", "state", "started_at", "verified_at"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "release_id": {"$ref": "#/$defs/Uuid"}, "environment": {"enum": ["preview", "staging", "production"]}, "state": {"enum": ["planned", "running", "deployed", "verified", "failed", "rolled_back"]}, "started_at": {"$ref": "#/$defs/IsoDateTime"}, "verified_at": {"type": ["string", "null"], "format": "date-time"}}},
+    "RollbackEvent": {"type": "object", "additionalProperties": false, "required": ["record", "deployment_id", "trigger", "owner", "state", "read_back_evidence"], "properties": {"record": {"$ref": "#/$defs/VersionedRecord"}, "deployment_id": {"$ref": "#/$defs/Uuid"}, "trigger": {"type": "string", "minLength": 1}, "owner": {"type": "string", "minLength": 1}, "state": {"enum": ["proposed", "approved", "executed", "verified", "failed"]}, "read_back_evidence": {"type": "array", "items": {"type": "string"}}}}
+  }
+}

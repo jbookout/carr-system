@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "fixture-incident",
+  "synthetic": true,
+  "surface": "incident",
+  "route": "/incidents/INC-SYNTH-002",
+  "default_scenario": "normal",
+  "meta": {
+    "environment_scope": "local",
+    "source": {"kind": "collector", "ref": "synthetic:managed-edge-heartbeat"},
+    "observed_at": "2026-08-10T22:00:00Z",
+    "freshness": {"state": "fresh", "expires_at": "2026-08-10T22:05:00Z"},
+    "redaction": {"classification": "O0_ops_safe", "fields_withheld": ["local_log_detail", "business_record_refs"]},
+    "correlation_id": "corr-synth-incident-002"
+  },
+  "data": {
+    "id": "INC-SYNTH-002",
+    "title": "Call capture heartbeat missing on one managed edge",
+    "severity": "SEV-2",
+    "state": "investigating",
+    "detected_at": "2026-08-10T21:42:00Z",
+    "detected_source": "Managed edge heartbeat",
+    "affected_services": ["Local call capture"],
+    "affected_environments": ["local"],
+    "affected_workflows": ["Call Mode post-call filing"],
+    "business_impact": "One operator may see delayed call filing. Existing business records remain available.",
+    "client_impact": "No confirmed client impact.",
+    "owner": "Doc · System Desk",
+    "next_action": "Verify whether the edge process or its heartbeat collector stopped",
+    "facts": [
+      {"id": "FACT-1", "text": "The last accepted heartbeat was at 21:41Z.", "source": "managed-edge-heartbeat", "recorded_at": "2026-08-10T21:44:00Z"},
+      {"id": "FACT-2", "text": "The server record gateway remains reachable.", "source": "synthetic worker gate", "recorded_at": "2026-08-10T21:46:00Z"}
+    ],
+    "hypotheses": [
+      {"id": "HYP-1", "text": "The local process may be asleep or logged out.", "confidence": "unconfirmed"},
+      {"id": "HYP-2", "text": "The heartbeat collector may have lost permission.", "confidence": "unconfirmed"}
+    ],
+    "timeline": [
+      {"at": "2026-08-10T21:42:00Z", "type": "incident.detected", "actor": "managed-edge collector", "evidence_ref": "EV-SYNTH-INC-01"},
+      {"at": "2026-08-10T21:44:00Z", "type": "incident.fact_recorded", "actor": "Doc · System Desk", "evidence_ref": "EV-SYNTH-INC-02"},
+      {"at": "2026-08-10T21:47:00Z", "type": "session.created", "actor": "Doc · System Desk", "evidence_ref": "SES-SYNTH-INC-01"}
+    ],
+    "related": {"release_id": null, "automation_id": "AUTO-SYNTH-CAPTURE", "work_request_id": "WR-SYNTH-INC-02"},
+    "workspace_banner": {"safe": true, "impact": "Call filing may be delayed.", "workaround": "Use the call review queue after the edge reconnects.", "status": "Investigating"},
+    "resolution_gate": {"monitoring_interval_required": "30 minutes", "recovery_evidence_required": true, "met": false},
+    "follow_ups": []
+  },
+  "scenarios": {
+    "normal": {"label": "Normal", "mode": "render_data"},
+    "loading": {"label": "Loading", "message": "Loading incident evidence…"},
+    "empty": {"label": "Empty", "message": "No active synthetic incidents match this view."},
+    "partial": {"label": "Partial", "message": "Impact and facts loaded; restricted diagnostics are withheld.", "withhold": ["hypotheses"]},
+    "stale": {"label": "Stale", "message": "The heartbeat evidence expired. Current service state is Unknown."},
+    "offline": {"label": "Offline", "message": "Showing a read-only incident cache. Resolution is unavailable."},
+    "unauthorized": {"label": "Unauthorized", "message": "Restricted incident evidence is outside the current role.", "error": "not_found"},
+    "conflict": {"label": "Conflict", "message": "A newer incident timeline exists.", "error": "base_version_conflict"},
+    "refusal": {"label": "Refusal", "message": "The incident cannot resolve without monitoring and recovery proof.", "error": "invalid_state_transition"},
+    "retry": {"label": "Retry", "message": "The incident source is temporarily unavailable.", "error": "collector_stale_or_offline", "action": "Retry the read"}
+  }
+}

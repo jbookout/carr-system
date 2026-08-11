@@ -1,0 +1,178 @@
+{
+  "contract": "carr-workspace-state-machines",
+  "version": "1.0.0",
+  "status": "phase0_candidate",
+  "transition_policy": {
+    "unlisted_transition": "refuse",
+    "allowed_match_semantics": "A transition matches only when its from value equals the current state or its from array explicitly contains the current state. Wildcards are forbidden in allowed transitions.",
+    "terminal_semantics": "A terminal state has no outgoing allowed transition. Reversible or recurring stable states must not be declared terminal.",
+    "refusal_precedence": "If no allowed transition and guard match exactly, refuse even when a UI proposes the destination.",
+    "server_enforcement": true,
+    "required_write_guards": ["authenticated_actor", "authorized_exact_target", "current_version", "idempotency_key", "attributed_event", "fresh_read_back"],
+    "refusal_event": "workspace.state_transition.refused",
+    "refusal_response_fields": ["code", "machine", "from", "requested_to", "safe_reason", "correlation_id", "next_allowed_actions"]
+  },
+  "machines": {
+    "work_record_operating_state": {
+      "initial": "active",
+      "terminal": [],
+      "states": ["active", "parked", "closed"],
+      "allowed": [
+        {"from": "active", "to": "parked", "risk": "W3", "guard": "controlled parking reason; other requires context; version current; confirm; preserve provenance and history"},
+        {"from": "parked", "to": "active", "risk": "W3", "guard": "restore confirmation; version current; attributed event"},
+        {"from": "active", "to": "closed", "risk": "W4", "guard": "approved close reason and governed lifecycle verb"},
+        {"from": "parked", "to": "closed", "risk": "W4", "guard": "approved close reason and governed lifecycle verb"},
+        {"from": "closed", "to": "active", "risk": "W4", "guard": "explicit governed reopen action exists and human confirms"}
+      ],
+      "refused": [
+        {"from": "active", "to": "active", "reason": "no-op state write"},
+        {"from": "parked", "to": "parked", "reason": "no-op state write"},
+        {"from": "closed", "to": "parked", "reason": "closed history cannot be parked"},
+        {"from": "*", "to": "deleted", "reason": "deletion is not an operating state"},
+        {"from": "*", "to": "*", "reason": "stale or unknown freshness disables edits", "condition": "freshness != fresh"}
+      ],
+      "invariants": ["Parked is excluded from active counts, focus, next-action pressure, gone-quiet, missing-next-step, and weekly call selection", "Parking never deletes Salesforce provenance, parties, history, documents, or prior actions"]
+    },
+    "lead": {
+      "initial": "unclaimed",
+      "terminal": ["not_now", "not_a_fit", "converted"],
+      "states": ["unclaimed", "claimed", "contacted", "next_touch_set", "not_now", "not_a_fit", "converted"],
+      "allowed": [
+        {"from": "unclaimed", "to": "claimed", "risk": "W3", "guard": "exact partner owner confirmed"},
+        {"from": "claimed", "to": "contacted", "risk": "W3", "guard": "touch and outcome recorded"},
+        {"from": "contacted", "to": "next_touch_set", "risk": "W3", "guard": "date and accountable owner recorded"},
+        {"from": ["claimed", "contacted", "next_touch_set"], "to": "not_now", "risk": "W3", "guard": "dismissal reason and optional revisit recorded"},
+        {"from": ["claimed", "contacted", "next_touch_set"], "to": "not_a_fit", "risk": "W3", "guard": "dismissal reason recorded"},
+        {"from": ["claimed", "contacted", "next_touch_set"], "to": "converted", "risk": "W4", "guard": "real engagement, duplicate check, exact client/work record links, human confirmation"}
+      ],
+      "refused": [
+        {"from": "unclaimed", "to": "converted", "reason": "claim, evidence review, and duplicate check required"},
+        {"from": "converted", "to": "claimed", "reason": "conversion is terminal; use linked canonical records"},
+        {"from": "not_a_fit", "to": "converted", "reason": "requires a governed reopen and new conversion review not defined in Phase 0"},
+        {"from": "*", "to": "dismissed", "reason": "ambiguous dismissal; use not_now or not_a_fit"}
+      ]
+    },
+    "call_session": {
+      "initial": "preflight",
+      "terminal": ["complete", "cancelled", "failed"],
+      "states": ["preflight", "consent_confirmed", "recording", "paused", "processing", "review_ready", "partially_reviewed", "complete", "cancelled", "failed"],
+      "allowed": [
+        {"from": "preflight", "to": "consent_confirmed", "risk": "W4", "guard": "operator confirms all participants were notified; sources and speaker mapping reviewed"},
+        {"from": "consent_confirmed", "to": "recording", "risk": "W4", "guard": "capture source healthy"},
+        {"from": "recording", "to": "paused", "risk": "W1", "guard": "local recorder acknowledges pause"},
+        {"from": "paused", "to": "recording", "risk": "W1", "guard": "local recorder acknowledges resume"},
+        {"from": ["recording", "paused"], "to": "processing", "risk": "W2", "guard": "stop acknowledged; local raw capture remains restricted"},
+        {"from": "processing", "to": "review_ready", "risk": "W2", "guard": "strict-schema extraction and local validation complete"},
+        {"from": "review_ready", "to": "partially_reviewed", "risk": "W2", "guard": "at least one candidate dispositioned and unresolved candidates remain"},
+        {"from": ["review_ready", "partially_reviewed"], "to": "complete", "risk": "W3", "guard": "every candidate dispositioned; aggregate summary and action history confirmed"},
+        {"from": ["preflight", "consent_confirmed"], "to": "cancelled", "risk": "W1", "guard": "reason recorded before capture"},
+        {"from": ["recording", "paused", "processing"], "to": "failed", "risk": "W1", "guard": "failure and raw-retention status recorded"}
+      ],
+      "refused": [
+        {"from": "preflight", "to": "recording", "reason": "consent gate must precede capture"},
+        {"from": "processing", "to": "complete", "reason": "human review and every candidate disposition are required"},
+        {"from": "partially_reviewed", "to": "complete", "reason": "unresolved candidates remain", "condition": "unresolved_count > 0"},
+        {"from": "recording", "to": "cancelled", "reason": "captured evidence requires explicit stop/failure handling"}
+      ]
+    },
+    "call_candidate": {
+      "initial": "proposed",
+      "terminal": ["confirmed", "skipped", "rejected", "failed"],
+      "states": ["proposed", "edited", "confirmed", "skipped", "rejected", "failed"],
+      "allowed": [
+        {"from": "proposed", "to": "edited", "risk": "W2", "guard": "edited schema validates; evidence and exact target retained"},
+        {"from": ["proposed", "edited"], "to": "confirmed", "risk": "W3", "guard": "human confirms exact destination; idempotent write and read-back succeed"},
+        {"from": ["proposed", "edited"], "to": "skipped", "risk": "W1", "guard": "disposition recorded"},
+        {"from": ["proposed", "edited"], "to": "rejected", "risk": "W1", "guard": "rejection reason recorded"},
+        {"from": ["proposed", "edited"], "to": "failed", "risk": "W2", "guard": "validation or confirmed write failed with retry-safe evidence"}
+      ],
+      "refused": [
+        {"from": "proposed", "to": "sent", "reason": "outside communication produces draft only; send is structurally absent"},
+        {"from": "proposed", "to": "confirmed", "reason": "invented or ambiguous target", "condition": "exact_current_record_id missing"},
+        {"from": "confirmed", "to": "edited", "reason": "confirmed candidate is immutable; create a compensating proposal"}
+      ]
+    },
+    "engineering_request": {
+      "initial": "draft",
+      "terminal": ["completed", "declined", "failed", "superseded"],
+      "states": ["draft", "queued", "claimed", "in_progress", "needs_answer", "completed", "declined", "failed", "superseded"],
+      "allowed": [
+        {"from": "draft", "to": "queued", "risk": "W3", "guard": "Joe or Dell reviews exact request, acceptance criteria, origin, diagnostics, and screenshot"},
+        {"from": "queued", "to": "claimed", "risk": "W2", "guard": "eligible interactive executor and task contract recorded"},
+        {"from": "claimed", "to": "in_progress", "risk": "W2", "guard": "allowed paths, cannot-write boundaries, requirements, tests, and rollback recorded"},
+        {"from": "in_progress", "to": "needs_answer", "risk": "W2", "guard": "material unresolved decision and exact question recorded"},
+        {"from": "needs_answer", "to": "in_progress", "risk": "W2", "guard": "authorized answer recorded"},
+        {"from": "in_progress", "to": "completed", "risk": "W2", "guard": "fresh tests and read-back; commit/deployment evidence when relevant; requester-visible outcome"},
+        {"from": ["queued", "claimed", "in_progress", "needs_answer"], "to": "declined", "risk": "W2", "guard": "authorized reason recorded"},
+        {"from": ["queued", "claimed", "in_progress", "needs_answer"], "to": "failed", "risk": "W2", "guard": "failure evidence and safe next action recorded"},
+        {"from": ["draft", "queued", "claimed", "in_progress", "needs_answer"], "to": "superseded", "risk": "W2", "guard": "replacement request linked"}
+      ],
+      "refused": [
+        {"from": "draft", "to": "claimed", "reason": "human-reviewed submission required"},
+        {"from": "in_progress", "to": "completed", "reason": "no fresh verification evidence"},
+        {"from": "completed", "to": "in_progress", "reason": "create a new linked request"},
+        {"from": "*", "to": "deployed", "reason": "deployment is evidence, not a request lifecycle state"}
+      ]
+    },
+    "tour": {
+      "initial": "draft",
+      "terminal": ["complete", "cancelled", "failed"],
+      "states": ["draft", "route_proposed", "confirmed", "in_progress", "paused", "review_ready", "complete", "cancelled", "failed"],
+      "allowed": [
+        {"from": "draft", "to": "route_proposed", "risk": "W2", "guard": "validated addresses, dwell, buffers, locked appointments, flexible stops"},
+        {"from": "route_proposed", "to": "confirmed", "risk": "W3", "guard": "changed order, travel time, and warnings shown to human"},
+        {"from": "confirmed", "to": "in_progress", "risk": "W1", "guard": "offline_pack.state is ready, completeness and hash are verified, and exact resume cursor is established"},
+        {"from": "in_progress", "to": "paused", "risk": "W1", "guard": "local state durably acknowledged"},
+        {"from": "paused", "to": "in_progress", "risk": "W1", "guard": "exact stop and notebook resume"},
+        {"from": ["in_progress", "paused"], "to": "review_ready", "risk": "W2", "guard": "visited/skipped status and local outbox durably preserved"},
+        {"from": "review_ready", "to": "complete", "risk": "W3", "guard": "every structured update confirmed, edited, or skipped; sync receipts visible"},
+        {"from": ["draft", "route_proposed", "confirmed"], "to": "cancelled", "risk": "W1", "guard": "reason recorded"},
+        {"from": ["draft", "route_proposed", "confirmed", "in_progress", "paused", "review_ready"], "to": "failed", "risk": "W1", "guard": "failure, preserved local evidence, and recovery action recorded"}
+      ],
+      "refused": [
+        {"from": "route_proposed", "to": "in_progress", "reason": "human route confirmation and offline-pack verification required"},
+        {"from": "in_progress", "to": "complete", "reason": "post-tour review required"},
+        {"from": "review_ready", "to": "complete", "reason": "undispositioned proposals or unsynced acknowledged evidence remain"},
+        {"from": "*", "to": "goodnotes_managed", "reason": "Goodnotes is optional share interoperability, not a managed runtime state"}
+      ]
+    },
+    "sync_item": {
+      "initial": "local",
+      "terminal": ["synced", "superseded"],
+      "states": ["local", "uploading", "synced", "needs_review", "failed_retry", "superseded"],
+      "allowed": [
+        {"from": "local", "to": "uploading", "risk": "W1", "guard": "encrypted outbox item has stable client-generated idempotency key and device attribution"},
+        {"from": "uploading", "to": "synced", "risk": "W3", "guard": "server receipt and read-back match"},
+        {"from": "uploading", "to": "needs_review", "risk": "W2", "guard": "field-aware version conflict or ambiguous target"},
+        {"from": "uploading", "to": "failed_retry", "risk": "W1", "guard": "typed retryable failure"},
+        {"from": "failed_retry", "to": "uploading", "risk": "W1", "guard": "same idempotency key and unchanged payload"},
+        {"from": "needs_review", "to": "uploading", "risk": "W2", "guard": "human resolves structured conflict into a new versioned payload"},
+        {"from": ["local", "uploading", "needs_review", "failed_retry"], "to": "superseded", "risk": "W1", "guard": "replacement outbox item linked"}
+      ],
+      "refused": [
+        {"from": "local", "to": "synced", "reason": "server receipt and read-back required"},
+        {"from": "needs_review", "to": "synced", "reason": "human conflict resolution required"},
+        {"from": "synced", "to": "uploading", "reason": "synced payload is immutable; create a new item"},
+        {"from": "*", "to": "saved", "reason": "ambiguous saved state is forbidden"}
+      ]
+    },
+    "notification": {
+      "initial": "unresolved",
+      "terminal": ["resolved", "expired", "superseded"],
+      "states": ["unresolved", "acknowledged", "snoozed", "resolved", "expired", "superseded"],
+      "allowed": [
+        {"from": "unresolved", "to": "acknowledged", "risk": "W3", "guard": "principal attribution and owner-object deep link retained"},
+        {"from": ["unresolved", "acknowledged"], "to": "snoozed", "risk": "W3", "guard": "resume time and principal preference recorded"},
+        {"from": "snoozed", "to": "unresolved", "risk": "W0", "guard": "resume time reached and source condition remains unresolved"},
+        {"from": ["unresolved", "acknowledged", "snoozed"], "to": "resolved", "risk": "W0", "guard": "source decision or failure is resolved"},
+        {"from": ["unresolved", "acknowledged", "snoozed"], "to": "expired", "risk": "W0", "guard": "source object policy expiry"},
+        {"from": ["unresolved", "acknowledged", "snoozed"], "to": "superseded", "risk": "W0", "guard": "deduplicated canonical notification linked"}
+      ],
+      "refused": [
+        {"from": "unresolved", "to": "resolved", "reason": "opening or dismissing a delivery channel does not resolve the owner object"},
+        {"from": "*", "to": "pushed", "reason": "push is a delivery event, not notification truth"},
+        {"from": "*", "to": "resolved", "reason": "named lead outreach remains owned by Lead Board", "condition": "notification_topic == named_lead_outreach"}
+      ]
+    }
+  }
+}

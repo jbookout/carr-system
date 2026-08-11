@@ -1,0 +1,37 @@
+{
+  "contract": "carr-workspace-control-room-boundary",
+  "version": "1.0.0",
+  "status": "phase0_frozen",
+  "decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7",
+  "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
+  "conceptual_roles": {
+    "carr_workspace": "Run the business.",
+    "the_command_center": "Business home—what changed, what needs attention, and what happens next.",
+    "carr_control_room": "Run and observe the system—health, agents, automations, incidents, releases, and approvals.",
+    "doc": "Human-friendly explanation, intake, and routing.",
+    "claude_code_and_codex": "Exploration, complex investigation, construction, and system improvement.",
+    "carr_record_layer": "Canonical source of truth."
+  },
+  "ai_session_displacement": {
+    "cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?",
+    "adoption_gate": "A claimed replacement must pass the cutover test and have an explicit retirement or cutover path for the old session-driven ritual.",
+    "baseline_rule": "Instrument or interview the five approved baseline measures; never invent a value.",
+    "cross_product_trace": "Every routine must trace through its owning product screen, canonical record or data contract, governed action, evidence return, test, post-launch comparison, and cutover state."
+  },
+  "principles": ["Workspace is the business system; Control Room is the operations and evidence plane.", "Each product has a separate browser origin, audience, and session namespace.", "Shared components and identity infrastructure do not imply shared authorization.", "Business payloads remain in Workspace; Control Room receives opaque origin references and safe labels only.", "Operational diagnostics and restricted audit evidence do not flow back to Workspace.", "Agents may extract, draft, propose, queue, and return evidence; consequential or external effects retain human gates."],
+  "workspace_to_control_room": {
+    "typed_object": "EngineeringWorkRequestOrigin",
+    "allowed_fields": ["request_id", "origin_type", "origin_ref", "safe_label", "desired_outcome", "acceptance_criteria_refs", "requester_id", "created_at"],
+    "forbidden_fields": ["client_payload", "transcript", "raw_audio", "raw_email_body", "unrestricted_doc_context", "browser_cookie", "OAuth bearer", "partner credential"],
+    "authority_effect": "none; receipt creates a candidate Work Request and no operational capability"
+  },
+  "control_room_to_workspace": {
+    "typed_object": "SafeOperationalReturn",
+    "allowed_fields": ["request_id", "state", "plain_status", "safe_impact", "release_note", "verified_at", "evidence_summary_ref", "next_human_action"],
+    "forbidden_fields": ["restricted_diagnostics", "secret_metadata", "raw_tool_output", "model_prompt", "capability_grant", "approval_material", "audit_actor_security_detail"],
+    "authority_effect": "none; Workspace renders status and requires its own business-rule checks for any write"
+  },
+  "shared_identifiers": {"format": "opaque stable IDs", "record_resolution": "server-side exact current record only", "invented_or_ambiguous_id": "refuse", "correlation": "one correlation ID may link safe projections without copying payloads"},
+  "crosswalk": {"workspace_capability_ladder": ["read", "local_capture", "propose", "confirmed_narrow_write", "background_engineering_request"], "control_room_risk_classes": ["R0", "R1", "R2", "R3", "R4", "R5", "R6"], "rule": "The ladders must be explicitly cross-walked before implementation; neither silently replaces the other.", "status": "open_for_wednesday_council"},
+  "tests": ["XP-BND-001 separate audience and cookie replay refusal", "XP-BND-002 safe origin contains no business payload", "XP-BND-003 safe return contains no restricted diagnostics", "XP-BND-004 bridge creates no capability", "XP-BND-005 invented or ambiguous record ID refused", "XP-BND-006 correlation reconstructs the request without payload duplication"]
+}

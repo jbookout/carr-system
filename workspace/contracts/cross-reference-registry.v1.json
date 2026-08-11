@@ -1,0 +1,167 @@
+{
+  "contract": "carr-workspace-cross-reference-registry",
+  "version": "1.0.0",
+  "status": "phase0_candidate",
+  "validator": "workspace/contracts/validate.mjs",
+  "namespaces": {
+    "requirements": {
+      "definitions": "phase0-traceability.v1.json#/entries/*/id",
+      "references": [
+        "workspace/fixtures/*.json#/requirement_ids",
+        "phase0-acceptance.v1.json#/primary_uncoached_journeys/*/requirements"
+      ],
+      "aliases": "#/requirement_aliases"
+    },
+    "tests": {
+      "definitions": "#/test_ids",
+      "references": [
+        "phase0-traceability.v1.json#/entries/*/tests",
+        "threat-model.v1.json#/threats/*/tests",
+        "notification-event-taxonomy.v1.json#/events/*/test_ids"
+      ]
+    },
+    "events": {
+      "definitions": "notification-event-taxonomy.v1.json#/events/*/name",
+      "references": [
+        "phase0-traceability.v1.json#/entries/*/event"
+      ]
+    },
+    "council": {
+      "definitions": [
+        "council-review-register.v1.json#/review_event/id",
+        "council-review-register.v1.json#/open_items/*/id"
+      ],
+      "references": [
+        "phase0-traceability.v1.json#/entries/*/open_decisions"
+      ]
+    },
+    "baselines": {
+      "definitions": "phase0-acceptance.v1.json#/baseline_measure_plan/*/id",
+      "references": [
+        "phase0-traceability.v1.json#/entries[id=OPERATING-OBJECTIVE-001]/evidence",
+        "surface-registry-migration-map.v1.json#/baseline_measure_ids"
+      ]
+    },
+    "threats": {
+      "definitions": "threat-model.v1.json#/threats/*/id",
+      "references": []
+    },
+    "fixtures": {
+      "definitions": "prototype-fixture-contract.v1.json#/required_surfaces",
+      "references": [
+        "workspace/fixtures/*.json#/surface"
+      ]
+    }
+  },
+  "requirement_aliases": [
+    {
+      "id": "CALL-RETENTION-001",
+      "canonical": "CALL-RET-001"
+    },
+    {
+      "id": "DEAL-RESTORE-001",
+      "canonical": "DEAL-PARK-001"
+    },
+    {
+      "id": "HOME-SOURCE-001",
+      "canonical": "CC-HOME-001"
+    },
+    {
+      "id": "LEAD-CONVERT-001",
+      "canonical": "LEAD-OWNER-001"
+    },
+    {
+      "id": "MKT-APPROVE-001",
+      "canonical": "MKT-GATE-001"
+    },
+    {
+      "id": "MORE-REGISTRY-001",
+      "canonical": "WEB-SHELL-001"
+    },
+    {
+      "id": "NOTIFY-INBOX-001",
+      "canonical": "NOTIFY-001"
+    },
+    {
+      "id": "TOUR-OFFLINE-001",
+      "canonical": "TOUR-SYNC-001"
+    },
+    {
+      "id": "TOUR-REVIEW-001",
+      "canonical": "TOUR-SYNC-001"
+    },
+    {
+      "id": "WEB-IA-001",
+      "canonical": "WEB-SHELL-001"
+    }
+  ],
+  "test_ids": [
+    "A11Y-001",
+    "AI-AUTH-001",
+    "AI-DISPLACEMENT-001",
+    "AI-INJECT-001",
+    "AI-LEAK-001",
+    "AI-SAFE-001",
+    "AI-TARGET-001",
+    "AUTH-KV-001",
+    "AUTH-RECOVERY-001",
+    "BRIDGE-SAFE-001",
+    "CALL-CAPTURE-001",
+    "CALL-CONSENT-001",
+    "CALL-RET-001",
+    "CALL-REVIEW-001",
+    "CALL-REVIEW-002",
+    "CALL-SPEAKER-001",
+    "CC-FLOW-001",
+    "CC-NO-LEAD-001",
+    "CONTRACT-WRITE-001",
+    "DEAL-PARK-001",
+    "DEAL-PARK-002",
+    "DEAL-RESTORE-001",
+    "DEAL-UX-001",
+    "DOC-ENG-001",
+    "DOC-PROP-001",
+    "EXT-NO-PUBLISH-001",
+    "EXT-NO-SEND-001",
+    "FLOW-WS-01",
+    "FLOW-WS-02",
+    "FLOW-WS-03",
+    "FLOW-WS-04",
+    "FLOW-WS-05",
+    "FRONTDOOR-USAGE-001",
+    "LEAD-CONVERT-001",
+    "LEAD-TOUCH-001",
+    "MKT-DECISION-001",
+    "NOTIFY-001",
+    "OBS-ROUTE-001",
+    "OFFLINE-TRUTH-001",
+    "PRIV-REDACT-001",
+    "PRIV-STERILE-001",
+    "RELEASE-GATE-001",
+    "RESPONSIVE-001",
+    "SEC-AUTH-001",
+    "SEC-AUTHZ-001",
+    "SEC-CSRF-001",
+    "SEC-DEVICE-001",
+    "SEC-PUBLIC-001",
+    "SEC-REPLAY-001",
+    "SEC-SECRET-001",
+    "STATE-REFUSE-001",
+    "SURFACE-PARITY-001",
+    "SURFACE-WRITER-001",
+    "SYNC-CONFLICT-001",
+    "TOUR-ROUTE-001",
+    "TOUR-SYNC-001"
+  ],
+  "validation_rules": [
+    "Every reference resolves in its namespace or through one explicit canonical alias",
+    "Aliases may not chain",
+    "Every API response and domain-group entity resolves to one strict schema definition",
+    "Every allowed transition names defined nonterminal source states and defined destinations",
+    "Every terminal state has no outgoing allowed transition",
+    "Fixture surfaces and state sets equal the contract exactly",
+    "Fixture top-level and per-surface/state keys are exact",
+    "Evidence excerpts contain no more than fifteen whitespace-delimited words",
+    "Baseline values remain absent until instrumented or interviewed"
+  ]
+}

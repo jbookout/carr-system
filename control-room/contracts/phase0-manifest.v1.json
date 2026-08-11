@@ -1,0 +1,27 @@
+{
+  "contract": "carr-control-room-phase0-manifest",
+  "version": "1.0.0",
+  "status": "phase0_artifacts_independently_verified_pending_human_acceptance_and_council",
+  "source": {"path": "/Users/booko/Desktop/CARR Control Room - BDUF and Implementation Roadmap.docx", "original_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "sha256": "b25cf6ca1c50998699f858322847b3911b96e322a34256068e88ece85af3c565", "durable_doctrine_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 251, "doctrine_sections": 38, "objective_section_id": "fae3acb3-2efb-4b80-81f7-2b2d978c237a", "objective_section_version": 1},
+  "settled_decisions": [
+    {"decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7", "subject": "Workspace and Control Room product and authority boundary"},
+    {"decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f", "subject": "Complete both Phase 0 preparations before Wednesday council; no construction before final approval"},
+    {"decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5", "subject": "Operating objective and AI-session displacement test controls both roadmaps and adoption"},
+    {"decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84", "subject": "Freeze independently verified Phase 0 artifacts pending human and council gates"}
+  ],
+  "repository": {"isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0", "branch": "control-room-phase0", "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253", "canonical_dirty_checkout_modified": false},
+  "artifact_groups": {
+    "contracts": ["domain-terms.v1.json", "operating-objective.v1.json", "state-machines.v1.json", "authority-risk-matrix.v1.json", "security-redaction.v1.json", "ops-v1-read-contract.v1.json", "entity-schemas.v1.json", "audit-event-taxonomy.v1.json", "threat-model.v1.json", "feature-flags.v1.json", "phase0-acceptance.v1.json", "phase0-traceability.v1.json", "fixture-schema.v1.json", "council-review.v1.json"],
+    "canonical_twins": ["overview.v1.json", "service.v1.json", "work-request.v1.json", "plan-approval.v1.json", "deployment.v1.json", "incident.v1.json", "audit.v1.json"],
+    "prototype": ["public/index.html", "public/css/app.css", "public/js/app.js", "public/js/client.js"],
+    "tests": ["test/contracts.test.mjs", "test/prototype.test.mjs", "test/acceptance-ids.test.mjs"]
+  },
+  "automated_evidence": {"node_test_count": 74, "node_test_passed": 74, "syntax_checks": ["public/js/app.js", "public/js/client.js"], "json_parse": "passed", "mutation_routes": 0, "production_actions": 0, "deployments": 0, "migrations": 0},
+  "exit_gates": {
+    "artifact_preparation": "passed independent re-verification with zero P0, P1, or P2 findings",
+    "browser_runtime_visual_accessibility": "loopback HTTP entry, CSS, JavaScript, and fixture fetch returned 200; interactive visual and accessibility review remains unverified",
+    "joe_uncoached_six_flows": "not performed",
+    "roadmap_final_approval": "scheduled for Wednesday council"
+  },
+  "prohibited_claims": ["production implementation exists", "Control Room auth is enforced", "ops.doctorcre.com is deployed", "collectors are live", "action broker exists", "Phase 0 exit gate is complete before independent and human evidence"]
+}

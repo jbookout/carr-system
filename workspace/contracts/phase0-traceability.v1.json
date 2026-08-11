@@ -1,0 +1,907 @@
+{
+  "contract": "carr-workspace-phase0-traceability",
+  "version": "1.0.0",
+  "status": "phase0_candidate",
+  "source_doctrine_document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+  "columns": [
+    "requirement",
+    "source_sections",
+    "screen",
+    "business_entity",
+    "api_or_action",
+    "authority",
+    "event",
+    "evidence",
+    "rollback",
+    "tests",
+    "open_decisions"
+  ],
+  "entries": [
+    {
+      "id": "WEB-SHELL-001",
+      "requirement": "Workspace is one private Joe/Dell product with The Command Center as home, one record layer, and no shared public boundary.",
+      "source_sections": [
+        1,
+        2,
+        3,
+        14,
+        15,
+        17
+      ],
+      "screen": [
+        "global-shell",
+        "command-center"
+      ],
+      "business_entity": [
+        "WorkspaceMeta",
+        "SourceEnvelope"
+      ],
+      "api_or_action": [
+        "GET /api/v1/meta",
+        "GET /api/v1/command-center"
+      ],
+      "authority": [
+        "Joe or Dell authenticated",
+        "anonymous default deny"
+      ],
+      "event": [
+        "workspace.session.authenticated",
+        "workspace.authorization.refused"
+      ],
+      "evidence": [
+        "audience",
+        "principal",
+        "source",
+        "configuration fingerprint"
+      ],
+      "rollback": [
+        "disable Workspace shell feature flag",
+        "revoke sessions"
+      ],
+      "tests": [
+        "SEC-AUTH-001",
+        "SEC-PUBLIC-001",
+        "FLOW-WS-01"
+      ],
+      "open_decisions": [
+        "OPEN-URL-001"
+      ]
+    },
+    {
+      "id": "CC-HOME-001",
+      "requirement": "Command Center answers what changed, what needs the signed-in partner, and what Doc is handling in under fifteen seconds without duplicating named lead outreach.",
+      "source_sections": [
+        3,
+        4,
+        19,
+        23
+      ],
+      "screen": [
+        "command-center"
+      ],
+      "business_entity": [
+        "CommandCenterReadModel",
+        "Notification",
+        "EngineeringRequest"
+      ],
+      "api_or_action": [
+        "GET /api/v1/command-center"
+      ],
+      "authority": [
+        "partner-specific W0"
+      ],
+      "event": [
+        "workspace.route.viewed",
+        "workspace.metric.deep_linked"
+      ],
+      "evidence": [
+        "owner",
+        "why_it_matters",
+        "next_action",
+        "deep_link",
+        "source freshness"
+      ],
+      "rollback": [
+        "disable home read-model flag"
+      ],
+      "tests": [
+        "FLOW-WS-01",
+        "CC-NO-LEAD-001",
+        "OFFLINE-TRUTH-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "DEAL-PARK-001",
+      "requirement": "Parking preserves provenance and history, requires controlled reason/context, is reversible, and removes the record from every active pressure surface.",
+      "source_sections": [
+        5,
+        16,
+        18,
+        23
+      ],
+      "screen": [
+        "deal-list",
+        "work-record-detail"
+      ],
+      "business_entity": [
+        "WorkRecord"
+      ],
+      "api_or_action": [
+        "future narrow park business service",
+        "future narrow restore business service"
+      ],
+      "authority": [
+        "Joe or Dell W3 confirmation"
+      ],
+      "event": [
+        "workspace.work_record.parked",
+        "workspace.work_record.restored",
+        "workspace.write.verified"
+      ],
+      "evidence": [
+        "version",
+        "parking reason",
+        "attributed event",
+        "read-back",
+        "preserved-history assertion"
+      ],
+      "rollback": [
+        "restore work record",
+        "feature flag disable"
+      ],
+      "tests": [
+        "FLOW-WS-02",
+        "DEAL-PARK-002",
+        "DEAL-RESTORE-001",
+        "CONTRACT-WRITE-001"
+      ],
+      "open_decisions": [
+        "OPEN-LIFECYCLE-001"
+      ]
+    },
+    {
+      "id": "DEAL-UX-001",
+      "requirement": "Deal Room has sticky operating controls, one Add control, one global Call Mode control, no Start agenda, responsive tables/cards, and permanent Color Assist.",
+      "source_sections": [
+        2,
+        3,
+        5,
+        20,
+        23
+      ],
+      "screen": [
+        "deal-list",
+        "global-shell"
+      ],
+      "business_entity": [
+        "WorkRecordListReadModel"
+      ],
+      "api_or_action": [
+        "GET /api/v1/work-records"
+      ],
+      "authority": [
+        "W0 prototype"
+      ],
+      "event": [
+        "workspace.route.viewed"
+      ],
+      "evidence": [
+        "visual regression",
+        "DOM uniqueness",
+        "responsive matrix",
+        "accessibility audit"
+      ],
+      "rollback": [
+        "disable new Deal Room route flag"
+      ],
+      "tests": [
+        "DEAL-UX-001",
+        "A11Y-001",
+        "RESPONSIVE-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "LEAD-OWNER-001",
+      "requirement": "Lead Board solely owns named outreach, preserves Not now/Not a fit/Converted, and prevents duplicate conversion.",
+      "source_sections": [
+        4,
+        6,
+        19,
+        23
+      ],
+      "screen": [
+        "lead-board"
+      ],
+      "business_entity": [
+        "Lead"
+      ],
+      "api_or_action": [
+        "GET /api/v1/leads",
+        "future narrow touch/disposition/convert services"
+      ],
+      "authority": [
+        "Joe or Dell W3/W4 confirmation"
+      ],
+      "event": [
+        "workspace.lead.touch_logged",
+        "workspace.lead.converted"
+      ],
+      "evidence": [
+        "dismissal persistence",
+        "probable matches",
+        "conversion links",
+        "reminder removal"
+      ],
+      "rollback": [
+        "disable module flag",
+        "compensating conversion review"
+      ],
+      "tests": [
+        "LEAD-TOUCH-001",
+        "LEAD-CONVERT-001",
+        "CC-NO-LEAD-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "CALL-CONSENT-001",
+      "requirement": "Call capture begins only after consent, source, and speaker-mapping preflight, and one persistent recorder survives route navigation.",
+      "source_sections": [
+        3,
+        8,
+        17
+      ],
+      "screen": [
+        "global-call-control",
+        "call-preflight"
+      ],
+      "business_entity": [
+        "CallSummary"
+      ],
+      "api_or_action": [
+        "local Call Mode bridge",
+        "typed sanitized capture API"
+      ],
+      "authority": [
+        "Joe or Dell W4 consent"
+      ],
+      "event": [
+        "workspace.call.consent_confirmed",
+        "workspace.call.capture_state_changed"
+      ],
+      "evidence": [
+        "consent receipt",
+        "source health",
+        "manual speaker map",
+        "capture state"
+      ],
+      "rollback": [
+        "stop capture",
+        "preserve restricted local recovery evidence"
+      ],
+      "tests": [
+        "FLOW-WS-03",
+        "CALL-CONSENT-001",
+        "CALL-CAPTURE-001"
+      ],
+      "open_decisions": [
+        "OPEN-LEGAL-001"
+      ]
+    },
+    {
+      "id": "CALL-REVIEW-001",
+      "requirement": "A call completes only after structured facts, decisions, deliverables, partner actions, outside-party needs, drafts, and agent work are independently dispositioned.",
+      "source_sections": [
+        8,
+        10,
+        16,
+        23
+      ],
+      "screen": [
+        "call-detail",
+        "call-review-pack"
+      ],
+      "business_entity": [
+        "CallSummary",
+        "CallCandidate",
+        "EngineeringRequest"
+      ],
+      "api_or_action": [
+        "GET /api/v1/calls/{call_id}",
+        "future narrow candidate confirmation services"
+      ],
+      "authority": [
+        "Doc W2 propose",
+        "Joe or Dell W3 confirm"
+      ],
+      "event": [
+        "workspace.call.review_ready",
+        "workspace.call.candidate_dispositioned"
+      ],
+      "evidence": [
+        "exact target",
+        "short evidence",
+        "candidate disposition",
+        "aggregate confirmation",
+        "agent work history"
+      ],
+      "rollback": [
+        "compensating proposal; immutable disposition history"
+      ],
+      "tests": [
+        "FLOW-WS-03",
+        "CALL-REVIEW-001",
+        "CALL-SPEAKER-001",
+        "AI-TARGET-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "CALL-RET-001",
+      "requirement": "Raw call capture is temporary restricted evidence and purge is mechanically blocked until complete review and policy gates pass.",
+      "source_sections": [
+        8,
+        17,
+        24
+      ],
+      "screen": [
+        "call-retention"
+      ],
+      "business_entity": [
+        "CallSummary",
+        "retention receipt"
+      ],
+      "api_or_action": [
+        "future human-only retention verb"
+      ],
+      "authority": [
+        "W4 human-only"
+      ],
+      "event": [
+        "workspace.call.retention_changed"
+      ],
+      "evidence": [
+        "aggregate report",
+        "all candidate dispositions",
+        "legal hold check",
+        "purge receipt"
+      ],
+      "rollback": [
+        "no destructive purge until gate; legal hold blocks"
+      ],
+      "tests": [
+        "FLOW-WS-03",
+        "CALL-RET-001",
+        "PRIV-REDACT-001"
+      ],
+      "open_decisions": [
+        "OPEN-RET-001",
+        "OPEN-LEGAL-001"
+      ]
+    },
+    {
+      "id": "DOC-CONTEXT-001",
+      "requirement": "Doc keeps a stable identity, shows exact removable context, answers with provenance, and never inherits unrestricted partner authority.",
+      "source_sections": [
+        9,
+        15,
+        17
+      ],
+      "screen": [
+        "doc-drawer",
+        "doc-sheet"
+      ],
+      "business_entity": [
+        "DocContext",
+        "CallCandidate"
+      ],
+      "api_or_action": [
+        "GET /api/v1/doc/context",
+        "model gateway"
+      ],
+      "authority": [
+        "Doc W0-W2 only without human confirmation"
+      ],
+      "event": [
+        "workspace.doc.proposal_created",
+        "workspace.authorization.refused"
+      ],
+      "evidence": [
+        "context links",
+        "citations",
+        "model route",
+        "risk and gate"
+      ],
+      "rollback": [
+        "remove context",
+        "disable model route",
+        "discard proposal"
+      ],
+      "tests": [
+        "FLOW-WS-04",
+        "AI-AUTH-001",
+        "AI-INJECT-001",
+        "AI-LEAK-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "DOC-ENG-001",
+      "requirement": "Problem/improvement intake creates one durable engineering request with origin and lifecycle; Completed requires fresh evidence.",
+      "source_sections": [
+        9,
+        10,
+        16,
+        23
+      ],
+      "screen": [
+        "doc-intake",
+        "engineering-request",
+        "command-center",
+        "system-activity"
+      ],
+      "business_entity": [
+        "EngineeringRequest"
+      ],
+      "api_or_action": [
+        "GET /api/v1/engineering-requests/{request_id}",
+        "future narrow submit service"
+      ],
+      "authority": [
+        "Joe or Dell W3 submit",
+        "bounded interactive agent W2 execute"
+      ],
+      "event": [
+        "workspace.engineering_request.state_changed"
+      ],
+      "evidence": [
+        "request ID",
+        "origin ref",
+        "executor",
+        "tests",
+        "record IDs",
+        "commit/deployment/live proof when relevant"
+      ],
+      "rollback": [
+        "decline or supersede",
+        "separate product rollback path"
+      ],
+      "tests": [
+        "FLOW-WS-04",
+        "DOC-ENG-001",
+        "BRIDGE-SAFE-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "MKT-GATE-001",
+      "requirement": "Marketing surfaces are decision-oriented and publishing, spend, audience, and outbound effects remain explicit human gates outside Doc.",
+      "source_sections": [
+        7,
+        9,
+        23
+      ],
+      "screen": [
+        "marketing-overview",
+        "drafts-to-review",
+        "performance"
+      ],
+      "business_entity": [
+        "Draft",
+        "campaign read model"
+      ],
+      "api_or_action": [
+        "prototype reads only"
+      ],
+      "authority": [
+        "W0-W2 prototype; W5 refused"
+      ],
+      "event": [
+        "workspace.doc.proposal_created",
+        "workspace.state_transition.refused"
+      ],
+      "evidence": [
+        "source facts",
+        "audience",
+        "owner",
+        "state",
+        "decision link"
+      ],
+      "rollback": [
+        "disable Marketing module flag"
+      ],
+      "tests": [
+        "MKT-DECISION-001",
+        "EXT-NO-PUBLISH-001"
+      ],
+      "open_decisions": [
+        "OPEN-MARKETING-001"
+      ]
+    },
+    {
+      "id": "TOUR-ROUTE-001",
+      "requirement": "Tour route preserves locked appointments and buffers, exposes matching map/list order, and requires confirmation for material reroute.",
+      "source_sections": [
+        13,
+        15
+      ],
+      "screen": [
+        "tour-planning",
+        "tour-mode"
+      ],
+      "business_entity": [
+        "Tour"
+      ],
+      "api_or_action": [
+        "GET /api/v1/tours/{tour_id}",
+        "Google route adapter prototype"
+      ],
+      "authority": [
+        "Joe or Dell W3 route confirmation"
+      ],
+      "event": [
+        "workspace.tour.route_proposed"
+      ],
+      "evidence": [
+        "route version",
+        "constraints",
+        "changed order",
+        "warnings",
+        "confirmation"
+      ],
+      "rollback": [
+        "restore prior immutable route version"
+      ],
+      "tests": [
+        "FLOW-WS-05",
+        "TOUR-ROUTE-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "TOUR-SYNC-001",
+      "requirement": "iPad Tour Mode works offline with encrypted pack/outbox, exact resume, durable acknowledged strokes, and no silent conflict overwrite.",
+      "source_sections": [
+        13,
+        14,
+        18,
+        20
+      ],
+      "screen": [
+        "tour-mode",
+        "sync-status",
+        "post-tour-review"
+      ],
+      "business_entity": [
+        "Tour",
+        "sync item"
+      ],
+      "api_or_action": [
+        "device outbox",
+        "future typed sync API"
+      ],
+      "authority": [
+        "W1 local",
+        "Joe or Dell W3 conflict resolution"
+      ],
+      "event": [
+        "workspace.tour.sync_state_changed"
+      ],
+      "evidence": [
+        "device ID",
+        "pack hash",
+        "outbox key",
+        "sync receipt",
+        "conflict disposition"
+      ],
+      "rollback": [
+        "retain local evidence",
+        "supersede outbox item",
+        "restore prior server version"
+      ],
+      "tests": [
+        "FLOW-WS-05",
+        "TOUR-SYNC-001",
+        "SYNC-CONFLICT-001",
+        "OFFLINE-TRUTH-001"
+      ],
+      "open_decisions": [
+        "OPEN-RET-003"
+      ]
+    },
+    {
+      "id": "NOTIFY-001",
+      "requirement": "Notification Center is authoritative, deduplicated, quiet, deep-linked, and counts unresolved decisions; named lead outreach never escapes the Lead Board.",
+      "source_sections": [
+        3,
+        6,
+        19
+      ],
+      "screen": [
+        "notification-center"
+      ],
+      "business_entity": [
+        "Notification"
+      ],
+      "api_or_action": [
+        "GET /api/v1/notifications"
+      ],
+      "authority": [
+        "partner-specific W0; preference changes future W3"
+      ],
+      "event": [
+        "workspace.notification.delivery_attempted"
+      ],
+      "evidence": [
+        "dedupe key",
+        "why interrupted",
+        "deep link",
+        "source-resolution state"
+      ],
+      "rollback": [
+        "disable push channel; in-app remains authoritative"
+      ],
+      "tests": [
+        "NOTIFY-001",
+        "CC-NO-LEAD-001"
+      ],
+      "open_decisions": [
+        "OPEN-NOTIFY-001"
+      ]
+    },
+    {
+      "id": "SURFACE-PARITY-001",
+      "requirement": "No legacy surface enters Workspace or retires until source, writers, freshness, parity, rollback, and observation evidence are complete.",
+      "source_sections": [
+        1,
+        3,
+        6,
+        7,
+        21,
+        22,
+        26
+      ],
+      "screen": [
+        "surface-registry"
+      ],
+      "business_entity": [
+        "surface registry row"
+      ],
+      "api_or_action": [
+        "read-only live inventory",
+        "feature flags"
+      ],
+      "authority": [
+        "integration owner",
+        "Joe/Dell cutover approval"
+      ],
+      "event": [
+        "workspace.route.viewed",
+        "workspace.write.verified"
+      ],
+      "evidence": [
+        "writer inventory",
+        "parity results",
+        "two-week observation",
+        "old-write removal",
+        "rollback proof"
+      ],
+      "rollback": [
+        "feature flag disable",
+        "restore compatibility entry"
+      ],
+      "tests": [
+        "SURFACE-PARITY-001",
+        "SURFACE-WRITER-001",
+        "FRONTDOOR-USAGE-001"
+      ],
+      "open_decisions": [
+        "OPEN-FRONTDOOR-001",
+        "OPEN-SURFACE-001",
+        "OPEN-SURFACE-002",
+        "OPEN-SURFACE-003"
+      ]
+    },
+    {
+      "id": "OFFLINE-TRUTH-001",
+      "requirement": "Cached and offline surfaces disclose exact time and source and never show Live or saved without verified evidence.",
+      "source_sections": [
+        2,
+        18,
+        20
+      ],
+      "screen": [
+        "all"
+      ],
+      "business_entity": [
+        "SourceEnvelope",
+        "sync item"
+      ],
+      "api_or_action": [
+        "cached reads",
+        "device outbox"
+      ],
+      "authority": [
+        "read-only web/desktop offline",
+        "explicit local mobile capture"
+      ],
+      "event": [
+        "workspace.route.viewed",
+        "workspace.tour.sync_state_changed"
+      ],
+      "evidence": [
+        "observed_at",
+        "freshness",
+        "device attribution",
+        "server receipt"
+      ],
+      "rollback": [
+        "clear cache",
+        "retain unsynced local evidence"
+      ],
+      "tests": [
+        "OFFLINE-TRUTH-001",
+        "SYNC-CONFLICT-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "A11Y-001",
+      "requirement": "Every surface supports WCAG 2.2 AA, non-color status, keyboard and assistive technology, 200 percent zoom, 44-pixel targets, reduced motion, and equivalent map/list and Pencil alternatives.",
+      "source_sections": [
+        2,
+        3,
+        8,
+        13,
+        20
+      ],
+      "screen": [
+        "all"
+      ],
+      "business_entity": [
+        "presentation state"
+      ],
+      "api_or_action": [
+        "fixture selector"
+      ],
+      "authority": [
+        "local presentation only"
+      ],
+      "event": [
+        "workspace.route.viewed"
+      ],
+      "evidence": [
+        "automated scan",
+        "manual audit",
+        "responsive matrix",
+        "assistive-tech notes"
+      ],
+      "rollback": [
+        "disable inaccessible prototype route until corrected"
+      ],
+      "tests": [
+        "A11Y-001",
+        "RESPONSIVE-001"
+      ],
+      "open_decisions": []
+    },
+    {
+      "id": "RELEASE-001",
+      "requirement": "Construction starts only after final council approval and Phase 0 exit; release uses immutable evidence, sanctioned gates, rollback, and live read-back.",
+      "source_sections": [
+        21,
+        22,
+        23,
+        28,
+        30
+      ],
+      "screen": [
+        "none in prototype"
+      ],
+      "business_entity": [
+        "requirement",
+        "acceptance case",
+        "feature flag",
+        "release",
+        "deployment",
+        "rollback event"
+      ],
+      "api_or_action": [
+        "sanctioned release wrappers after approval"
+      ],
+      "authority": [
+        "outside tonight's preparation-only authority"
+      ],
+      "event": [
+        "workspace.engineering_request.state_changed",
+        "workspace.write.verified"
+      ],
+      "evidence": [
+        "roadmap approval",
+        "Phase 0 exit",
+        "commit",
+        "checks",
+        "deployment",
+        "live proof",
+        "rollback status"
+      ],
+      "rollback": [
+        "feature flag disable",
+        "named schema/data boundary",
+        "verified rollback or forward fix"
+      ],
+      "tests": [
+        "RELEASE-GATE-001",
+        "CONTRACT-WRITE-001"
+      ],
+      "open_decisions": [
+        "COUNCIL-ROADMAP-001"
+      ]
+    },
+    {
+      "id": "OPERATING-OBJECTIVE-001",
+      "requirement": "Routine business and system operation moves into visual controls, Doc clarification, visible agent scope, exact approvals, durable queues, and returned evidence; heavy AI sessions remain for exploration, genuinely complex investigation, and new construction.",
+      "source_sections": [
+        1,
+        2,
+        4,
+        9,
+        10,
+        21,
+        23
+      ],
+      "screen": [
+        "all Workspace surfaces",
+        "Control Room safe bridge"
+      ],
+      "business_entity": [
+        "CommandCenterReadModel",
+        "DocContext",
+        "EngineeringRequest",
+        "Notification",
+        "safe agent-work projection"
+      ],
+      "api_or_action": [
+        "prototype reads",
+        "future governed action cards",
+        "future engineering-request queue"
+      ],
+      "authority": [
+        "Joe and Dell",
+        "Doc W0-W2",
+        "human confirmation for consequential changes"
+      ],
+      "event": [
+        "workspace.route.viewed",
+        "workspace.doc.proposal_created",
+        "workspace.engineering_request.state_changed",
+        "workspace.write.verified"
+      ],
+      "evidence": [
+        "BASE-AI-TIME-001",
+        "BASE-AI-QUESTIONS-001",
+        "BASE-VISUAL-ACTIONS-001",
+        "BASE-STATE-TIME-001",
+        "BASE-HANDCARRY-001",
+        "post-launch comparisons",
+        "uncoached cutover answer"
+      ],
+      "rollback": [
+        "do not retire prior routine surface",
+        "record missing capability",
+        "route genuinely complex work to a bounded engineering request"
+      ],
+      "tests": [
+        "AI-DISPLACEMENT-001",
+        "FLOW-WS-01",
+        "FLOW-WS-04",
+        "SURFACE-PARITY-001"
+      ],
+      "open_decisions": [
+        "COUNCIL-ROADMAP-001"
+      ]
+    }
+  ]
+}

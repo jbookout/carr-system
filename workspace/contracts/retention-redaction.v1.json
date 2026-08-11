@@ -1,0 +1,30 @@
+{
+  "contract": "carr-workspace-retention-redaction",
+  "version": "1.0.0",
+  "status": "phase0_candidate_with_open_durations",
+  "classification": [
+    {"class": "public", "examples": ["approved public marketing copy", "public property facts"], "default_handling": "May leave the private boundary only through a separate human-reviewed publish path.", "sterile_mode": "visible if contextually relevant"},
+    {"class": "internal", "examples": ["ordinary operational status", "tasks", "structured call summaries"], "default_handling": "Authenticated Workspace only.", "sterile_mode": "suppress internal system activity and agent details"},
+    {"class": "confidential", "examples": ["client strategy", "commissions", "private contacts", "documents", "draft communications"], "default_handling": "Least privilege, encrypted transport and storage, scoped model disclosure.", "sterile_mode": "suppress by default"},
+    {"class": "restricted", "examples": ["raw recordings", "raw transcripts", "precise location", "credentials", "security diagnostics", "device keys"], "default_handling": "Minimal collection, local or temporary where possible, explicit access log and mechanically gated retention.", "sterile_mode": "always suppress"}
+  ],
+  "retention_sets": [
+    {"data": "canonical business records and append-only audit events", "class": "internal_or_confidential", "duration": "durable per business and legal policy", "status": "policy_owner_and_legal_hold_process_open", "purge_gate": "never inferred from inactivity", "evidence": ["retention policy version", "authorized disposition event"]},
+    {"data": "raw call audio", "class": "restricted", "duration": null, "status": "OPEN-RET-001", "proposed_boundary": "temporary processing evidence only", "purge_gate": "consent receipt exists; aggregate report filed; every candidate dispositioned; legal hold checked; purge receipt created", "automation": "disabled until duration and legal/privacy owner are approved"},
+    {"data": "raw call transcript", "class": "restricted", "duration": null, "status": "OPEN-RET-001", "proposed_boundary": "temporary processing evidence; never a library tab", "purge_gate": "same as raw call audio", "automation": "disabled until duration and legal/privacy owner are approved"},
+    {"data": "structured call summary, facts, decisions, deliverables, actions, drafts, and agent work history", "class": "internal_or_confidential", "duration": "durable record-layer content", "status": "settled", "purge_gate": "governed business/legal disposition"},
+    {"data": "Doc conversation messages", "class": "internal_or_confidential", "duration": null, "status": "OPEN-RET-002", "proposed_boundary": "conversation is not a shadow database; promote durable facts into records", "purge_gate": "policy and legal hold review"},
+    {"data": "local iPhone voice capture", "class": "restricted", "duration": "until processed, explicitly discarded, or policy timeout", "status": "timeout_open", "purge_gate": "upload receipt or human discard; failure remains visible"},
+    {"data": "iPad offline tour pack, notes, photos, and voice", "class": "confidential_or_restricted", "duration": "device-scoped until verified sync and approved cache policy", "status": "OPEN-RET-003", "purge_gate": "sync receipt, device policy, legal hold check"},
+    {"data": "telemetry and safe diagnostics", "class": "internal", "duration": null, "status": "OPEN-RET-004", "proposed_boundary": "shortest operationally useful window", "purge_gate": "approved observability policy"},
+    {"data": "engineering request screenshot", "class": "confidential_or_restricted", "duration": null, "status": "OPEN-RET-005", "proposed_boundary": "optional and reviewed before upload", "purge_gate": "request closure plus policy and legal hold review"}
+  ],
+  "redaction_profiles": [
+    {"profile": "workspace_default", "remove": ["credentials", "tokens", "raw security diagnostics", "model hidden reasoning"], "mask": ["sensitive contact fields when not required"], "retain": ["safe correlation IDs", "attributed actor", "source and freshness"]},
+    {"profile": "sterile_mode", "remove": ["internal notes", "commissions", "debugging", "model traces", "system activity", "sensitive reasoning", "restricted data"], "retain": ["client-safe property facts", "agenda and route controls", "approved documents"]},
+    {"profile": "telemetry", "remove": ["secrets", "raw audio", "raw transcript", "email bodies", "document bodies", "client strategy", "precise location unless required for tour metric"], "retain": ["event name", "pseudonymous actor", "object type", "safe outcome", "duration", "correlation ID", "redaction declaration"]},
+    {"profile": "doc_model_context", "remove": ["unrelated records", "credentials", "raw unrestricted verb payload", "more raw capture than task requires"], "retain": ["exact context links", "minimum scoped facts", "source citations", "allowed action schema"]},
+    {"profile": "workspace_control_room_bridge", "remove": ["client payload", "call body", "document body", "private contact details", "business strategy", "model prompt"], "retain": ["opaque request or incident ID", "safe label", "lifecycle", "plain impact or result", "verified time", "safe next action"]}
+  ],
+  "hard_rules": ["Sterile mode never expands authorization", "Redaction happens before logs, telemetry, screenshots, or model calls leave the owning boundary", "Purge is a typed audited action, never a UI-only disappearance", "No automatic deletion while a duration, legal hold owner, or purge gate is unresolved"]
+}

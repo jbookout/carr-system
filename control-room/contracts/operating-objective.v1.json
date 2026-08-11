@@ -1,0 +1,37 @@
+{
+  "contract": "carr-operating-objective-and-ai-session-displacement-test",
+  "version": "1.0.0",
+  "status": "phase0_frozen",
+  "applies_to": ["CARR Workspace", "CARR Control Room"],
+  "objectives": [
+    "Understand business and system state visually within seconds.",
+    "Perform routine work through straightforward controls.",
+    "Ask Doc for clarification without starting an engineering session.",
+    "See what agents are doing, which agent is acting, current phase, exact scope, and why.",
+    "Approve consequential changes through clear, exact action cards.",
+    "Queue improvements for Claude Code or Codex without supervising the entire build conversation.",
+    "Receive verified outcomes, evidence, blockers, and history back in the interface.",
+    "Open a heavy Claude Code or Codex session only when exploring, investigating a genuinely complex problem, or constructing something new."
+  ],
+  "conceptual_roles": {
+    "CARR Workspace": "run the business",
+    "The Command Center": "business home—what changed, what needs attention, what happens next",
+    "CARR Control Room": "run and observe the system—health, agents, automations, incidents, releases, approvals",
+    "Doc": "human-friendly explanation, intake, and routing",
+    "Claude Code and Codex": "exploration, complex investigation, construction, and system improvement",
+    "CARR record layer": "canonical source of truth"
+  },
+  "controlling_cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?",
+  "adoption_rule": "A feature is not successfully adopted until the controlling cutover test is true for the routine it claims to replace.",
+  "retirement_rule": "Every displaced session-driven operating ritual has an owner, replacement route, parity evidence, observation window, rollback path, retirement criterion, and retirement event; otherwise the UI is another system to manage.",
+  "phase0_baselines": [
+    {"id": "BASE-AI-TIME", "measure": "Joe's current weekly time spent using heavy AI sessions for routine system or business operation", "baseline": null, "collection": "structured interview plus one representative-week time diary; never infer from token use alone", "bound_product_action": "replace the highest-time routine with a deep-linked visual/control flow", "post_launch_comparison": "same-person weekly minutes on the same routine and measurement window"},
+    {"id": "BASE-AI-QUESTIONS", "measure": "Count and categories of routine questions that require Claude or Codex explanation", "baseline": null, "collection": "tag questions during the representative week by surface, intent, and missing explanation", "bound_product_action": "add source-grounded Doc explanation or visible evidence to the owning screen", "post_launch_comparison": "same category counts and percent answered without a heavy session"},
+    {"id": "BASE-NONVISUAL-ACTIONS", "measure": "Count and categories of recurring actions that cannot be completed visually", "baseline": null, "collection": "interview Joe and Dell and observe a representative week; record exact routine and current workaround", "bound_product_action": "add a typed straightforward control or explicitly keep the routine heavy-session-only", "post_launch_comparison": "same routine inventory and percent safely completed in-product"},
+    {"id": "BASE-STATE-TIME", "measure": "Median time to determine business state and system health", "baseline": null, "collection": "timed uncoached tasks from a cold start across representative days", "bound_product_action": "improve Command Center or Control Room overview source, freshness, priority, and deep links", "post_launch_comparison": "same cold-start tasks, operators, and timing method"},
+    {"id": "BASE-HAND-CARRIED-CONTEXT", "measure": "Number of hand-carried context transfers between sessions", "baseline": null, "collection": "count manual copy, relay, and return-to-old-task events during the representative week", "bound_product_action": "add durable request context, task-to-task handoff, and verified outcome history", "post_launch_comparison": "same categories and count per week"}
+  ],
+  "measurement_gate": "No baseline value may be invented. Phase 0 is prepared when instruments/interview prompts and bound actions exist; implementation prioritization requires observed values; post-launch adoption requires a like-for-like comparison.",
+  "council_criterion": "The Wednesday Fable 5 / GPT-5.6 Sol / SuperGrok 4.5 council must reject any roadmap slice that lacks a named routine, baseline plan, bound product action, displacement test, and explicit old-ritual cutover or retention decision.",
+  "tests": ["ai_session_displacement_gate", "baseline_measure_integrity", "routine_retirement_path"]
+}

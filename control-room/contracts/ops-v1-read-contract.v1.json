@@ -1,0 +1,68 @@
+{
+  "contract": "carr-control-room-ops-v1-read-api",
+  "version": "1.0.0",
+  "status": "phase0_frozen_not_implemented",
+  "base_path": "/ops/v1",
+  "audience": "carr-control-room-web",
+  "allowed_methods": ["GET", "HEAD", "OPTIONS"],
+  "other_method_response": {"status": 405, "allow": "GET, HEAD, OPTIONS", "audit_event": "unsupported_action.refused"},
+  "prohibitions": ["no mutation route", "no action broker route", "no actuator route", "no raw SQL", "no arbitrary command string", "no generic MCP passthrough", "no profile parameter in authorization"],
+  "schema_catalog": "entity-schemas.v1.json",
+  "response_envelope": {
+    "data": {"oneOf": ["ControlRoomMetadata", "OverviewReadModel", "ServiceList", "Service", "ServiceEnvironment", "CheckRunList", "JobRunList", "WorkRequestList", "WorkRequest", "AgentSessionList", "AgentSession", "PlanRevision", "ApprovalList", "ReleaseList", "Release", "DeploymentList", "Deployment", "IncidentList", "Incident", "AuditEventList", "AuditEvent", "EventReplay"]},
+    "meta": {
+      "request_id": "opaque",
+      "environment_scope": "local|rehearsal|staging|production",
+      "source": {"kind": "collector|registry|wrapper|operator", "ref": "opaque"},
+      "observed_at": "RFC3339",
+      "freshness": {"state": "fresh|stale|missing|unknown", "expires_at": "RFC3339_or_null"},
+      "redaction": {"classification": "O0_ops_safe|O1_restricted_operations|O2_business_link_only|O3_security_restricted", "fields_withheld": []},
+      "server_cursor": "opaque_or_null"
+    },
+    "links": []
+  },
+  "routes": [
+    {"method": "GET", "path": "/ops/v1/meta", "entity": "ControlRoomMetadata", "response_schema": "entity-schemas.v1.json#/$defs/ControlRoomMetadata", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/overview", "entity": "OverviewReadModel", "response_schema": "entity-schemas.v1.json#/$defs/OverviewReadModel", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/services", "entity": "ServiceList", "response_schema": "entity-schemas.v1.json#/$defs/ServiceList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/services/{service_id}", "entity": "Service", "response_schema": "entity-schemas.v1.json#/$defs/Service", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/services/{service_id}/environments/{environment_id}", "entity": "ServiceEnvironment", "response_schema": "entity-schemas.v1.json#/$defs/ServiceEnvironment", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/check-runs", "entity": "CheckRunList", "response_schema": "entity-schemas.v1.json#/$defs/CheckRunList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/job-runs", "entity": "JobRunList", "response_schema": "entity-schemas.v1.json#/$defs/JobRunList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/work-requests", "entity": "WorkRequestList", "response_schema": "entity-schemas.v1.json#/$defs/WorkRequestList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/work-requests/{request_id}", "entity": "WorkRequest", "response_schema": "entity-schemas.v1.json#/$defs/WorkRequest", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/agent-sessions", "entity": "AgentSessionList", "response_schema": "entity-schemas.v1.json#/$defs/AgentSessionList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/agent-sessions/{session_id}", "entity": "AgentSession", "response_schema": "entity-schemas.v1.json#/$defs/AgentSession", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/plans/{plan_id}/revisions/{revision}", "entity": "PlanRevision", "response_schema": "entity-schemas.v1.json#/$defs/PlanRevision", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/approvals", "entity": "ApprovalList", "response_schema": "entity-schemas.v1.json#/$defs/ApprovalList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/releases", "entity": "ReleaseList", "response_schema": "entity-schemas.v1.json#/$defs/ReleaseList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/releases/{release_id}", "entity": "Release", "response_schema": "entity-schemas.v1.json#/$defs/Release", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/deployments", "entity": "DeploymentList", "response_schema": "entity-schemas.v1.json#/$defs/DeploymentList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/deployments/{deployment_id}", "entity": "Deployment", "response_schema": "entity-schemas.v1.json#/$defs/Deployment", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/incidents", "entity": "IncidentList", "response_schema": "entity-schemas.v1.json#/$defs/IncidentList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/incidents/{incident_id}", "entity": "Incident", "response_schema": "entity-schemas.v1.json#/$defs/Incident", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/audit-events", "entity": "AuditEventList", "response_schema": "entity-schemas.v1.json#/$defs/AuditEventList", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/audit-events/{event_id}", "entity": "AuditEvent", "response_schema": "entity-schemas.v1.json#/$defs/AuditEvent", "risk": "R0"},
+    {"method": "GET", "path": "/ops/v1/event-stream?after={opaque_cursor}", "entity": "EventReplay", "response_schema": "entity-schemas.v1.json#/$defs/EventReplay", "risk": "R0"}
+  ],
+  "rules": [
+    "Schemas are strict and IDs and cursors are opaque.",
+    "Pagination uses stable snapshot and cursor semantics.",
+    "Environment is required on each operational object and never inferred.",
+    "Event replay contains server-stored redacted events only.",
+    "Reconnect reports continued server state and cannot imply browser ownership.",
+    "The browser session uses a distinct audience and cookie from Workspace, Deal Room, and MCP."
+  ],
+  "errors": {
+    "invalid_request": 400,
+    "unauthenticated": 401,
+    "wrong_audience": 401,
+    "not_found": 404,
+    "method_not_allowed": 405,
+    "version_conflict": 409,
+    "collector_unavailable": 503,
+    "freshness_unknown": 503,
+    "rate_limited": 429,
+    "internal_error": 500
+  }
+}

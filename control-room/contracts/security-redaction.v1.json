@@ -1,0 +1,50 @@
+{
+  "contract": "carr-control-room-security-redaction",
+  "version": "1.0.0",
+  "status": "phase0_frozen",
+  "session": {
+    "origin": "https://ops.doctorcre.com",
+    "audience": "carr-control-room-web",
+    "cookie": "__Host-ops_session",
+    "oauth_pending_cookie": "__Host-ops_oauth",
+    "cookie_requirements": ["opaque random session ID only; server stores the hash", "Secure", "HttpOnly", "Path=/", "no Domain attribute", "session SameSite=Strict", "OAuth pending cookie SameSite=Lax"],
+    "recommended_expiry": {"idle_hours": 4, "absolute_hours": 24, "production_reauth_max_age_minutes": 10},
+    "protections": ["no credentialed CORS sharing", "unsafe requests require exact Origin, synchronizer CSRF token, JSON content type, and Fetch Metadata validation", "event cursors are opaque and never carry a bearer or capability", "logout and revocation invalidate all outstanding ops sessions and capabilities"]
+  },
+  "classifications": {
+    "O0_ops_safe": "health state, safe request lifecycle, safe release note, and safe labels",
+    "O1_restricted_operations": "redacted diagnostics, correlation IDs, configuration fingerprints, and scoped evidence",
+    "O2_business_link_only": "authorized business reference and safe label only; details stay in Workspace",
+    "O3_security_restricted": "access and audit detail, grant metadata, and secret metadata",
+    "O4_never_store": "secret values, DSNs, tokens, cookies, authorization headers, raw OAuth claims, raw transcripts, raw client payloads, arbitrary terminal output, and untrusted prompt text as instruction"
+  },
+  "redaction_rules": [
+    "Redact before persistence, display, export, model context, and telemetry.",
+    "Every evidence item declares its redaction profile and withheld paths.",
+    "SecretReference stores provider, location, version, owner, rotation, and test metadata only.",
+    "Logs, documents, issue text, and business content are untrusted data and cannot alter capability, target, plan, tool choice, or approval.",
+    "Unauthorized object lookup returns not_found unless the caller already has authorized existence context."
+  ],
+  "phase0_executable_boundary": {
+    "proven": ["every nested fixture object is closed by additionalProperties false", "undeclared nested fields fail synthetic pre-persistence fixture validation", "prototype presentation models are serialized only through contract-declared fields", "secret-shaped values in declared strings are redacted", "prototype telemetry is a closed seven-field projection"],
+    "not_yet_proven": ["production persistence", "production typed API serialization", "audit export", "model-context assembly", "browser DOM canary scan", "telemetry sink ingestion"],
+    "future_gate": "No implementation may claim redaction complete until a single injected canary is absent from storage, typed API responses, audit exports, model packets, rendered DOM, and the telemetry sink."
+  },
+  "freshness": {
+    "required_fields": ["source_id", "target_id", "observed_at", "received_at", "valid_until", "collector_state", "result", "evidence_ref"],
+    "healthy_only_when": "Every required authoritative signal for the displayed target is successful, in scope, and fresh before valid_until.",
+    "unknown_when": ["no authoritative sample exists", "required collector is offline or unauthenticated", "required collector is unavailable or stale", "sample covers another resource or environment", "required source cannot be reached"],
+    "forbidden": ["cached Healthy without a fresh source", "inferring Healthy from lack of error", "planned Staging as Empty or Healthy", "browser cache as authority"],
+    "offline": "Cached views are read-only and visibly timestamped. Offline approval, action, grant, repair, and automation change do not exist."
+  },
+  "retention": {
+    "status": "phase0_proposed_safe_default_no_deletion_enforcement",
+    "audit_and_approval_chain": "7 years append-only",
+    "redacted_execution_evidence": "90 days hot, then purge unless under incident, release, or audit hold",
+    "aggregated_health_metrics": "13 months",
+    "agent_tool_summaries": "90 days",
+    "raw_sensitive_artifacts": "never persist",
+    "implementation_gate": "No deletion automation ships until Joe accepts durations and legal-hold ownership."
+  },
+  "errors": ["unauthenticated", "wrong_audience", "csrf_or_origin_mismatch", "forbidden_role", "scope_violation", "capability_missing", "capability_expired_or_revoked", "reauth_required", "target_ambiguous", "environment_mismatch", "base_version_conflict", "idempotency_replay", "idempotency_key_reuse", "invalid_state_transition", "plan_hash_mismatch", "approval_missing_rejected_or_expired", "kill_switch_active", "unregistered_actuator", "collector_stale_or_offline", "verification_partial_or_failed", "event_cursor_expired", "upstream_timeout_or_unavailable", "redacted_internal_error"]
+}
