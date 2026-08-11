@@ -165,7 +165,7 @@ def store_context(session_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
     old = read_json(session_dir / CONTEXT_FILE) or {}
     # Retain physical-channel labels written at recording start; only Deal Room's
     # exact index becomes available to the model, and it is consumed on success.
-    stored = {key: old[key] for key in ("schema", "mode", "started_at", "recorder", "speaker_labels", "speaker_method") if key in old}
+    stored: dict[str, Any] = {key: old[key] for key in ("schema", "mode", "started_at", "recorder", "speaker_labels", "speaker_method") if key in old}
     stored["call_context"] = context
     write_private(session_dir / CONTEXT_FILE, stored)
     return context
@@ -267,7 +267,7 @@ def normalize_distillation(value: Any, context: dict[str, Any], session: str) ->
         return good
 
     report = dict(raw["report"])
-    result = {
+    result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION, "session": session, "generated_at": now(), "report": report,
         "joe_tasks": clean(raw["joe_tasks"], "joe_task"), "dell_tasks": clean(raw["dell_tasks"], "dell_task"),
         "deal_updates": clean(raw["deal_updates"], "deal_update"), "draft_proposals": clean(raw["draft_proposals"], "draft_proposal"),
@@ -338,13 +338,28 @@ def merge_chunk_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
     if not outputs:
         raise ContractError("local post-call model returned no chunk outputs")
     checked = [_validate_distillation(output) for output in outputs]
-    result = {"schema_version": SCHEMA_VERSION, "report": {"summary": "\n\n".join(item["report"]["summary"] for item in checked if item["report"]["summary"]), "decisions": [], "open_questions": []}, "joe_tasks": [], "dell_tasks": [], "deal_updates": [], "draft_proposals": [], "review_questions": []}
+    result: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "report": {"summary": "\n\n".join(item["report"]["summary"] for item in checked if item["report"]["summary"]), "decisions": [], "open_questions": []}, "joe_tasks": [], "dell_tasks": [], "deal_updates": [], "draft_proposals": [], "review_questions": []}
     for key in ("decisions", "open_questions"):
         seen: set[str] = set()
-        result["report"][key] = [entry for item in checked for entry in item["report"][key] if not (entry in seen or seen.add(entry))]
+        merged: list[Any] = []
+        for item in checked:
+            for entry in item["report"][key]:
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                merged.append(entry)
+        result["report"][key] = merged
     for key in ("joe_tasks", "dell_tasks", "deal_updates", "draft_proposals", "review_questions"):
         seen_items: set[str] = set()
-        result[key] = [entry for item in checked for entry in item[key] if not (json.dumps(entry, sort_keys=True) in seen_items or seen_items.add(json.dumps(entry, sort_keys=True)))]
+        merged_items: list[Any] = []
+        for item in checked:
+            for entry in item[key]:
+                fingerprint = json.dumps(entry, sort_keys=True)
+                if fingerprint in seen_items:
+                    continue
+                seen_items.add(fingerprint)
+                merged_items.append(entry)
+        result[key] = merged_items
     return result
 
 

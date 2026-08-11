@@ -521,11 +521,13 @@ def poll_cmd(cfg: dict[str, str], session_dir: Path) -> int:
             log_line(f"POLL session={name} post_call local report unavailable — holding recordings")
             return 0
         sync_candidate_statuses(session_dir, resp)
-        candidates = resp.get("candidates") if isinstance(resp.get("candidates"), dict) else {}
-        pending = candidates.get("pending")
+        raw_candidates = resp.get("candidates")
+        post_call_candidates: dict[str, Any] = raw_candidates if isinstance(raw_candidates, dict) else {}
+        pending = post_call_candidates.get("pending")
         statuses = resp.get("candidate_statuses")
         candidate_count = len(statuses) if isinstance(statuses, list) else None
-        report = resp.get("post_call_report") if isinstance(resp.get("post_call_report"), dict) else {}
+        raw_report = resp.get("post_call_report")
+        report: dict[str, Any] = raw_report if isinstance(raw_report, dict) else {}
         remote_hash = str(report.get("sha256") or "").strip()
         if report.get("filed") is not True:
             if pending != 0 or candidate_count is None:

@@ -34,3 +34,15 @@ tools/dictation-rig/dictate/.build/
 # A bare .venv is usually a symlink into the primary checkout; the trailing-slash
 # patterns above match directories only, so name it explicitly too.
 .venv
+
+# Claude Code worktrees — each is a live CHECKOUT of this repo (it carries its
+# own .git file), not content of it. Untracked, they sat one `git add .` away
+# from a nested-checkout commit, which is the sweep rule 308ef1de exists to
+# stop. Added 2026-08-11 after two appeared during a live two-writer session.
+.claude/worktrees/
+
+# doc-convo run artifacts — a server log and a session id, regenerated on every
+# run. The harvest-* corpus files beside them are deliberately NOT listed: that
+# lane owns the call on whether they are source or output.
+tools/doc-convo/assets/whisper-server.log
+tools/doc-convo/assets/.harvest-brain-session-id

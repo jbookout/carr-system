@@ -8,6 +8,7 @@
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
 import { stripDealPlaceholders } from "./dealroom.js";
+import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
 // ---------- envelope helpers ----------
 
@@ -39,6 +40,16 @@ async function requestHash(args) {
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+export function auditIdentity(actor) {
+  const scope = personalScopeForActor(actor);
+  return {
+    organization_tenant_id: organizationTenantForActor(actor),
+    sponsoring_human_slug: scope.status === "personal" ? scope.sponsor : null,
+    personal_scope: scope.status === "personal" ? `${scope.sponsor}-personal` : "none",
+    authorization_class: actor.authorization_class || authorizationClassForActor(actor),
+  };
+}
+
 async function withEnvelope(client, actor, verb, args, fn) {
   const key = args.idempotency_key;
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
@@ -50,21 +61,29 @@ async function withEnvelope(client, actor, verb, args, fn) {
     return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction
+  const identity = auditIdentity(actor);
   await client.query(
-    "insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id) values ($1,$2,$3,$4,$5,$6,$7)",
-    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null]);
+    `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null,
+     identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
+     identity.authorization_class]);
   return result;
 }
 
 async function writeEvent(client, actor, verb, subjectType, subjectId, fields = {}) {
+  const identity = auditIdentity(actor);
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
-       old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11, $12, $13)`,
+       old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
+     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
-     actor.via || null, actor.client_id || null]);
+     actor.via || null, actor.client_id || null, identity.organization_tenant_id,
+     identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
 }
 
 // [loop #278] The ONE place a decision gets mirrored onto the record it governs.
@@ -424,6 +443,33 @@ async function validateClaimType(c, slug) {
             "one fact is the 0045 fault. 'deadline' IS negotiation_round.expires_on — pass " +
             "expires_on on this same call instead." });
   return r.rows[0];
+}
+
+// vendor.stage is a FOREIGN KEY into vendor_stage(slug), and until now nothing
+// checked it before the insert — so a plausible label (`prospect`, `Prospect`,
+// `building`) came back as a bare "internal error" naming neither the field nor
+// the options. Measured live 2026-08-10 re-creating Carissa Adams: four calls
+// died that way before the pattern was readable. Same failure class as
+// new-lead's stage/lane and update-vendor's category_slug branch.
+//
+// Pre-validating rather than catching the FK matters: once the violation fires,
+// the transaction is poisoned and cannot even run the query that would list the
+// valid slugs, so the caller gets nothing to correct with.
+//
+// The slug is the FULL label, lowercased, every run of non-alphanumeric
+// characters collapsed to one underscore — which is why `building_working_on_it`
+// works and `building` does not. That is the rule the original import used to
+// seed the table, so it holds for any stage added later. Both are returned so a
+// caller who has the human label can map it without a second round trip.
+async function validateVendorStage(c, slug) {
+  const r = await c.query("select slug from vendor_stage where slug=$1", [slug]);
+  if (r.rows.length) return slug;
+  const all = await c.query("select slug, label from vendor_stage order by slug");
+  throw new ToolError({ error: "unknown_vendor_stage", got: slug, valid: all.rows,
+    hint: "stage is a foreign key into vendor_stage; pass one of the listed slugs, never " +
+          "the label. The slug is the label lowercased with each run of non-alphanumeric " +
+          "characters collapsed to a single underscore. A genuinely new stage is an INSERT " +
+          "into vendor_stage by a human, never a guess." });
 }
 
 // 0063 lands as a migration Joe applies by hand, and this Worker deploys
@@ -2672,8 +2718,11 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, party_id: { type: "string" },
       category: { type: "string" }, ref_code: { type: "string", description: "CPA / LEN / GC / ..." },
-      stage: { type: "string" } }, required: ["idempotency_key","party_id","category","ref_code","stage"] },
+      stage: { type: "string", description: "a vendor_stage SLUG, not the label — e.g. prospect_uncontacted, building_working_on_it. A wrong value comes back with the full valid list." } },
+      required: ["idempotency_key","party_id","category","ref_code","stage"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "new-vendor", args, async () => {
+      // Before the ref is minted: a rejected call must not burn a V-### number.
+      await validateVendorStage(c, args.stage);
       const ref = (await c.query(
         "select 'V-' || $1 || '-' || lpad(nextval('ref_vendor_seq')::text, 3, '0') as r",
         [args.ref_code.toUpperCase()])).rows[0].r;
@@ -2689,7 +2738,7 @@ export const TOOLS = {
 
   "update-vendor": {
     write: true,
-    description: "Field-level change to a vendor (stage, seeking, offers, referral_active, territory, out_of_market). base_version required.",
+    description: "Field-level change to a vendor (stage, seeking, offers, referral_active, territory, out_of_market). stage takes a vendor_stage SLUG, not the label; a wrong one comes back with the full valid list. base_version required.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, vendor: { type: "string" },
       base_version: { type: "integer" }, fields: { type: "object" } },
@@ -2714,6 +2763,8 @@ export const TOOLS = {
           throw new ToolError({ error: "unknown_category_slug", got: args.fields.category_slug, allowed: slugs,
             hint: "a rare type is an INSERT into vendor_category by a human, never a guess" });
       }
+      if (keys.includes("stage") && args.fields.stage !== null)
+        await validateVendorStage(c, args.fields.stage);
       if (keys.includes("verticals") && args.fields.verticals !== null &&
           !(Array.isArray(args.fields.verticals) && args.fields.verticals.every(v => typeof v === "string")))
         throw new ToolError({ error: "verticals_not_array", hint: 'pass an array of strings, e.g. ["dental","vet"]' });
@@ -3823,11 +3874,13 @@ export const TOOLS = {
           got: costDelta ? "cost_delta only" : "quality_delta only",
           hint: "pass cost_delta AND quality_delta together, or neither. What a build cost is only meaningful beside what it bought, and a quality claim with no cost beside it is unfalsifiable. If the other half genuinely is not known yet, log the decision unpriced and add both later with update-decision." });
       const decisionId = (await c.query("select gen_random_uuid() as id")).rows[0].id;
+      const identity = auditIdentity(actor);
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
-           new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id)
+           new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
+           organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
          values (coalesce($1::timestamptz, now()), $2, 'log-decision', 'decision', $3,
-                 $4, 'human_stated', $5, $6, $7, $8, $9)
+                 $4, 'human_stated', $5, $6, $7, $8, $9, $10, $11, $12, $13)
          -- to_char, not ::date: node-postgres hands a ::date back as a JS Date, and
          -- interpolating that into session_key produced
          -- "Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated Universal Time)-joe"
@@ -3844,7 +3897,8 @@ export const TOOLS = {
                           ...(costDelta ? { cost_delta: costDelta,
                                             quality_delta: qualityDelta } : {}) }),
          args.human_quote || null, args.rationale, args.idempotency_key,
-         actor.via || null, actor.client_id || null]);
+         actor.via || null, actor.client_id || null, identity.organization_tenant_id,
+         identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
 
       const ev = r.rows[0];
       const sessionKey = args.session_key || `${ev.entry_date}-${actor.slug}`;

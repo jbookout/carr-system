@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,10 +56,24 @@ REVOKE = re.compile(
     re.I,
 )
 EXECUTOR = re.compile(
-    r"(?im)^\s*executor:\s*(?:T3(?:-inline)?|top(?:\s+seat)?|Fable|Opus|inline|"
+    r"(?im)^\s*(?:#|//)?\s*executor:\s*(?:T3(?:-inline)?|top(?:\s+seat)?|main(?:\s+seat)?|"
+    r"orchestrator|Fable|Opus|inline|"
     r"Terra(?:\s+(?:peer|agent|specialist))?|peer(?:\s+Terra)?)\b[^\n]{0,180}"
     r"(?:because|\u2014|--|:)\s*\S+"
 )
+# The deny message must name every label the regex accepts.  A session that
+# substitutes its own word gets silently rejected, which is how a valid-looking
+# declaration failed three times on 2026-08-11.  The selftest asserts this
+# string appears in the message so the two can never drift apart again.
+EXECUTOR_LABELS = (
+    "main seat, top seat, inline, orchestrator, T3, Fable, Opus, Terra peer"
+)
+
+# A denial re-reads the transcript this many times before it is final.  The
+# harness writes the assistant text block and the tool_use it accompanies as
+# separate records, so a single synchronous read can land in the gap and miss a
+# declaration that was already made.  Paid only on the about-to-deny path.
+RETRY_DELAYS = (0.12, 0.25, 0.4)
 RESUME_LINE = re.compile(
     r"(?im)^\s*delegation resume:\s*(dg-[0-9a-f]{16})\s*$"
 )
@@ -96,15 +111,27 @@ def in_carr_scope(cwd: str) -> bool:
     return any(marker in path for marker in VAULT_MARKERS)
 
 
+_LAST_DROPPED_LINES = 0
+
+
 def records(path: str) -> list[dict]:
-    """Read the whole transcript: a 500-record tail loses active task authority."""
+    """Read the whole transcript: a 500-record tail loses active task authority.
+
+    A partially written trailing line is skipped rather than fatal, but the
+    count is kept: silently discarding it is what made the 2026-08-11 race
+    undiagnosable from the audit log.
+    """
+    global _LAST_DROPPED_LINES
     out = []
+    dropped = 0
     with open(path, "r", errors="replace") as fh:
         for line in fh:
             try:
                 out.append(json.loads(line))
             except Exception:
+                dropped += 1
                 continue
+    _LAST_DROPPED_LINES = dropped
     return out
 
 
@@ -388,8 +415,60 @@ def sticky_task(session_id: str, recs: list[dict]) -> str | None:
         return task_id
 
 
-def deny(payload: dict, reason: str, task_id: str | None, count: int) -> int:
-    audit({
+def declared_on_the_call(payload: dict) -> bool:
+    """A declaration carried by the tool call itself cannot race the transcript.
+
+    The transcript channel depends on the harness having flushed the assistant
+    text block before the hook runs, which is exactly what failed on
+    2026-08-11.  A Bash `description`, or a leading `# executor: ...` comment on
+    the command, arrives inside this hook's own stdin payload, so it is visible
+    at the only moment that matters.  It is also visible to the partner in the
+    UI, attached to the call it justifies.
+    """
+    tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
+    if not isinstance(tool_input, dict):
+        return False
+    for key in ("description", "command"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and EXECUTOR.search(value):
+            return True
+    return False
+
+
+def executor_scan(path: str) -> dict | None:
+    """Re-read the transcript from disk and look for a declaration.
+
+    Deliberately re-reads rather than reusing the caller's records: the point is
+    to see writes that landed after the first read.
+    """
+    recs = records(path)
+    dropped = _LAST_DROPPED_LINES
+    index, _ = latest_human(recs)
+    if index is None:
+        return None
+    window = recs[index + 1:]
+    text = "\n".join(
+        chunk for rec in window
+        if (chunk := text_blocks(rec, ("assistant",)))
+    )
+    return {
+        "found": bool(EXECUTOR.search(text)),
+        "assistant_chars": len(text),
+        "record_count": len(recs),
+        "window_size": len(window),
+        "dropped_lines": dropped,
+    }
+
+
+def deny(
+    payload: dict,
+    reason: str,
+    task_id: str | None,
+    count: int,
+    scan: dict | None = None,
+    attempts: int = 1,
+) -> int:
+    record = {
         "ts": now(),
         "hook": "delegation-gate",
         "session": payload.get("session_id") or payload.get("sessionId"),
@@ -397,7 +476,19 @@ def deny(payload: dict, reason: str, task_id: str | None, count: int) -> int:
         "task_id": task_id,
         "mechanical_calls_before_denial": count,
         "tool": payload.get("tool_name") or payload.get("toolName"),
-    })
+    }
+    if scan is not None:
+        # What the hook actually saw, so the next failure is readable from the
+        # log instead of reconstructed from the transcript by hand.
+        record.update({
+            "executor_seen": scan["found"],
+            "assistant_chars": scan["assistant_chars"],
+            "record_count": scan["record_count"],
+            "window_size": scan["window_size"],
+            "dropped_lines": scan["dropped_lines"],
+            "retry_attempts": attempts,
+        })
+    audit(record)
     # Codex requires structured JSON to block a PreToolUse invocation. Claude
     # Code blocks command hooks on exit 2 and stderr. Both paths are hard.
     if payload.get("hook_event_name") == "PreToolUse":
@@ -432,6 +523,7 @@ def main() -> int:
         if f"{os.sep}subagents{os.sep}" in os.path.realpath(path):
             return 0
         recs = records(path)
+        dropped_lines = _LAST_DROPPED_LINES
         last_human_idx, last_human = latest_human(recs)
         if last_human_idx is None:
             return 0
@@ -469,19 +561,58 @@ def main() -> int:
             text for rec in window
             if (text := text_blocks(rec, ("assistant",)))
         )
-        if EXECUTOR.search(assistant_text):
+        scan = {
+            "found": bool(EXECUTOR.search(assistant_text)),
+            "assistant_chars": len(assistant_text),
+            "record_count": len(recs),
+            "window_size": len(window),
+            "dropped_lines": dropped_lines,
+        }
+        if scan["found"] or declared_on_the_call(payload):
             return 0
+
+        # The first read can race the harness still writing the assistant text
+        # record that carries the declaration.  On 2026-08-11 that cost three
+        # denials of a call the gate's own logic would have allowed, so a denial
+        # is never decided on a single read.
+        attempts = 1
+        for delay in RETRY_DELAYS:
+            time.sleep(delay)
+            attempts += 1
+            rescan = executor_scan(path)
+            if rescan is None:
+                continue
+            scan = rescan
+            if scan["found"]:
+                audit({
+                    "ts": now(),
+                    "hook": "delegation-gate",
+                    "session": payload.get("session_id") or payload.get("sessionId"),
+                    "class": "executor_allowed_after_retry",
+                    "task_id": None,
+                    "attempt": attempts,
+                    "assistant_chars": scan["assistant_chars"],
+                    "dropped_lines": scan["dropped_lines"],
+                    "tool": payload.get("tool_name") or payload.get("toolName"),
+                })
+                return 0
+
         return deny(
             payload,
-            "DELEGATION TRIPWIRE — this is the second mechanical tool call on the same "
-            "turn and no executor has been declared. Before continuing, either spawn a "
-            "qualified Agent on the cheapest model that can do the subtask correctly "
-            "(a Terra peer is valid when required) or state a transcript-visible line "
-            "`executor: Terra peer — because <specific allowed reason>` for work that "
-            "truly belongs to orchestration, judgment, verification, or is too small to "
-            "brief. Do not silently absorb the sweep.",
+            "DELEGATION TRIPWIRE — second mechanical tool call this turn and no executor "
+            "declared. Either spawn the cheapest Agent qualified to do the subtask "
+            "correctly (a Terra peer counts), or START A LINE with `executor: <label> — "
+            "because <specific reason>`. The label must be one of: " + EXECUTOR_LABELS +
+            ". Any other word is rejected. Most reliable channel: put that same line in the "
+            "Bash `description`, or as a leading `# executor: ...` comment on the command, "
+            "which this hook reads directly and cannot miss. "
+            "Declare it only for work that truly belongs to "
+            "orchestration, judgment, verification, or is too small to brief. Do not "
+            "silently absorb the sweep.",
             None,
             mechanical_count,
+            scan,
+            attempts,
         )
     except Exception:
         return 0  # conduct/cost gate fails open; it must never wedge the session

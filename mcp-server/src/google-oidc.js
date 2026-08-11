@@ -356,7 +356,11 @@ export async function handleCallback(request, env) {
     // actorFromProps carries it through) even though the write attributes
     // to codex/grok.
     props.human = false;
-    props.human_slug = humanSlug;
+    // This is the only OAuth path that creates a personal-brain sponsor for a
+    // runtime agent. humanSlug came from Google's verified allow-listed email;
+    // neither the OAuth client, model, nor an MCP tool argument can choose it.
+    props.sponsoring_human_slug = humanSlug;
+    props.sponsor_required = true;
   }
 
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
