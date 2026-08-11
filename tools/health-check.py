@@ -203,8 +203,13 @@ WATCH = [
      "FL DOR x out-of-state DOH join, quarterly-ish; board ingests it (corrective 2026-07-25)"),
     ("National accounts", "DNA/Team/national-accounts.json", None,  [],
      "curated shared feed, human-review cadence — existence/readability watch only (corrective 2026-07-25)"),
-    ("Radar digest",      "Automation/radar/radar-digest-2*.md", 9, [],
-     "Monday radar run (radar-digest-sop.md)"),
+    ("Radar digest",      "Automation/radar/radar-digest-latest.md", 9, [],
+     "Monday radar run (radar-digest-sop.md). Glob corrected 2026-08-11: this row read "
+     "radar-digest-2*.md, the dated convention that stopped on 2026-07-27 when the digest "
+     "became a generated render at radar-digest-latest.md. radar-digest-latest.md cannot "
+     "match a 2* glob, so the row was structurally unable to go green and had been reporting "
+     "STALE against a lane that was in fact regenerating — a permanently amber check that "
+     "detects nothing, which is the failure mode this file exists to catch."),
     ("PECOS pool",        "Automation/radar/upstream/pecos.json", 100, [],
      "quarterly (Jan/Apr/Jul/Oct; next diff vs the Q1 baseline in Oct)"),
     ("Section index",     "Automation/section-index.tsv", 9, [],
