@@ -343,6 +343,94 @@ const assertions = {
     assert.ok(maintenance.integrity_rules.some(rule => /typed, tenant-bound, idempotent, allow-listed, bounded, observable.*outcome verification/i.test(rule)));
     assert.ok(maintenance.integrity_rules.some(rule => /binds a named remedy or work request/i.test(rule)));
   },
+  sponsor_agent_identity_separation: () => {
+    const contract = read("contracts/identity-sponsorship.v1.json");
+    const value = read("fixtures/identity-sponsorship.v1.json");
+    assert.deepEqual(Object.keys(contract.immutable_dimensions), ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count"]);
+    for (const scenario of value.scenarios.filter(item => item.sponsoring_human_id)) {
+      assert.equal(scenario.partner_id, scenario.sponsoring_human_id);
+      assert.equal(scenario.personal_brain_scope, scenario.sponsoring_human_id);
+      assert.notEqual(scenario.agent_principal_id, scenario.sponsoring_human_id);
+    }
+    assert.match(contract.audit_projection.attribution_rule, /actor\/agent.*executor.*sponsor.*human origin/i);
+  },
+  joe_sponsored_personal_rules: () => {
+    const value = read("fixtures/identity-sponsorship.v1.json").scenarios.find(item => item.id === "joe-codex");
+    assert.equal(value.sponsoring_human_id, "joe");
+    assert.equal(value.agent_principal_id, "codex");
+    assert.deepEqual(value.expected, {result: "resolved", shared_rule_count: 143, personal_rule_count: 30, human_only: false});
+  },
+  dell_sponsored_personal_rules: () => {
+    const value = read("fixtures/identity-sponsorship.v1.json").scenarios.find(item => item.id === "dell-codex");
+    assert.equal(value.sponsoring_human_id, "dell");
+    assert.equal(value.agent_principal_id, "codex");
+    assert.deepEqual(value.expected, {result: "resolved", shared_rule_count: 143, personal_rule_count: 0, human_only: false});
+  },
+  cross_brain_personal_read_denied: () => {
+    const attempt = read("fixtures/identity-sponsorship.v1.json").denial_attempts.find(item => item.id === "joe-requests-dell-brain");
+    assert.notEqual(attempt.server_sponsor, attempt.requested_personal_brain_scope);
+    assert.equal(attempt.expected_result, "personal_scope_mismatch");
+    assert.equal(attempt.expected_status, 403);
+    assert.equal(attempt.rule_bodies_returned, false);
+    assert.ok(authority.explicit_denies.some(item => item.id === "D-CROSS-BRAIN"));
+  },
+  unattended_agent_humanonly_denied: () => {
+    const value = read("fixtures/identity-sponsorship.v1.json");
+    const background = value.scenarios.find(item => item.id === "unsponsored-background");
+    const impersonation = value.denial_attempts.find(item => item.id === "background-claims-joe");
+    assert.equal(background.sponsoring_human_id, null);
+    assert.equal(background.personal_brain_scope, null);
+    assert.equal(background.expected.result, "task_scoped_only");
+    assert.equal(background.expected.human_only, false);
+    assert.equal(impersonation.expected_result, "sponsor_impersonation_refused");
+    assert.ok(authority.explicit_denies.some(item => item.id === "D-UNSPONSORED-HUMAN-ONLY"));
+  },
+  personal_scope_unknown_not_zero: () => {
+    const contract = read("contracts/identity-sponsorship.v1.json");
+    const missing = read("fixtures/identity-sponsorship.v1.json").scenarios.find(item => item.id === "missing-scope");
+    assert.equal(missing.expected.result, "identity_scope_unknown");
+    assert.equal(missing.expected.personal_rule_count, null);
+    assert.equal(contract.failure_contract.missing_or_ambiguous_sponsor.counts, null);
+    assert.equal(contract.failure_contract.missing_or_ambiguous_sponsor.success, false);
+  },
+  connector_render_brain_parity: () => {
+    const parity = read("fixtures/identity-sponsorship.v1.json").source_parity;
+    for (const partner of ["joe", "dell"]) {
+      assert.deepEqual(parity[partner].connector, parity[partner].generated_render);
+      assert.equal(parity[partner].expected_result, "parity");
+    }
+    assert.notDeepEqual(parity.mismatch.connector, parity.mismatch.generated_render);
+    assert.equal(parity.mismatch.expected_result, "identity_source_mismatch");
+    assert.equal(parity.mismatch.success, false);
+  },
+  personal_rules_cannot_widen_authority: () => {
+    const value = read("fixtures/identity-sponsorship.v1.json");
+    const tenantAttempt = value.denial_attempts.find(item => item.id === "personal-rule-selects-tenant");
+    const capabilityAttempt = value.denial_attempts.find(item => item.id === "personal-rule-widens-capability");
+    assert.notEqual(tenantAttempt.requested_tenant_from_personal_rule, tenantAttempt.effective_tenant);
+    assert.equal(tenantAttempt.effective_tenant, tenantAttempt.server_tenant);
+    assert.notEqual(capabilityAttempt.requested_capability_from_personal_rule, capabilityAttempt.effective_capability);
+    assert.equal(capabilityAttempt.effective_capability, capabilityAttempt.server_capability);
+    assert.ok(authority.enforcement.never_authoritative.includes("personal rule tenant claim"));
+    assert.ok(authority.enforcement.never_authoritative.includes("personal rule capability claim"));
+  },
+  audit_agent_and_sponsor_attribution: () => {
+    const projection = read("fixtures/identity-sponsorship.v1.json").audit_projection;
+    const chain = fixture("audit").data.chain;
+    const taxonomy = read("contracts/audit-event-taxonomy.v1.json");
+    assert.equal(projection.agent_principal_id, "codex");
+    assert.equal(projection.sponsoring_human_id, "joe");
+    assert.notEqual(projection.agent_principal_id, projection.sponsoring_human_id);
+    for (const event of chain) for (const field of ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "session_capability_profile"]) assert.ok(Object.hasOwn(event, field), `${event.event_id}.${field}`);
+    const codex = chain.find(event => event.event_id === "AUD-SYNTH-002");
+    assert.equal(codex.agent_principal_id, "codex");
+    assert.equal(codex.sponsoring_human_id, "joe");
+    assert.equal(codex.personal_rule_count, 30);
+    for (const field of taxonomy.identity_attribution.scope_rule.match(/organization tenant|sponsor|agent|runtime|personal-brain scope\/version\/count|capability profile|result/gi) || []) assert.ok(field);
+    assert.equal(projection.rule_bodies, null);
+    assert.ok(taxonomy.never_record.includes("personal rule bodies"));
+    assert.ok(taxonomy.never_record.includes("personal human quotes"));
+  },
   plan_hash_format: () => {
     const pattern = /^sha256:[a-f0-9]{64}$/;
     assert.match(fixture("plan-approval").data.current_revision.hash, pattern);

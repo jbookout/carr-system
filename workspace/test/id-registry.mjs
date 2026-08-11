@@ -165,6 +165,29 @@ const checks = {
     const maintenanceGate = context.environment.runtime_verification_gates.find(item => item.test_id === "MAINTENANCE-MEASURE-001");
     requireCondition(maintenanceGate.required_evidence.some(item => item.includes("each of two consecutive months") && item.includes("prioritized toil-reduction work")) && maintenanceGate.required_evidence.some(item => item.includes("three complete consecutive normal months") && item.includes("three to five hours")) && maintenanceGate.required_evidence.some(item => item.includes("tenant, authorization, approval, audit, backup/restore, release/rollback, workflow, retention, and exception evidence")), "maintenance runtime gate drift");
   },
+  sponsorRuntimeIdentity(context) {
+    const fixture = context.sponsorIdentity;
+    const cases = new Map(fixture.cases.map(item => [item.id, item]));
+    const dimensions = ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version"];
+    requireCondition(fixture.status.includes("reproduced_runtime_defect_open"), "identity runtime defect must remain visibly open");
+    requireCondition(JSON.stringify(fixture.immutable_dimensions) === JSON.stringify(dimensions), "identity dimensions drift");
+    for (const id of ["joe_codex_rules", "joe_claude_rules"]) {
+      requireCondition(cases.get(id).expected.shared_rule_count === 143 && cases.get(id).expected.personal_rule_count === 30, `${id} counts drift`);
+      requireCondition(cases.get(id).server_context.personal_brain_scope === "joe-personal", `${id} brain drift`);
+    }
+    requireCondition(cases.get("dell_codex_rules").expected.personal_rule_count_source === "fresh_resolved_dell_personal_artifact", "Dell count must be fresh-derived");
+    requireCondition(cases.get("dell_codex_rules").expected.zero_requires_explicit_resolved_scope === true, "Dell zero semantics missing");
+    requireCondition(cases.get("cross_brain_read").expected.safe_error_code === "PERSONAL_SCOPE_REFUSED", "cross-brain read not refused");
+    requireCondition(cases.get("unattended_agent").expected.human_only_capability === false && cases.get("unattended_agent").expected.may_claim_human_sponsor === false, "unattended impersonation remains");
+    requireCondition(cases.get("missing_scope").expected.status === "Unknown" && cases.get("missing_scope").expected.personal_rule_count === null && cases.get("missing_scope").expected.successful_zero === false, "missing scope must be Unknown, not zero");
+    requireCondition(cases.get("connector_fallback_parity").expected.connector_scope_equals_fallback_scope === true && cases.get("connector_fallback_parity").expected.connector_counts_equal_fallback_counts === true, "connector/fallback parity missing");
+    const nonEscalation = cases.get("personal_rules_non_escalation");
+    requireCondition(nonEscalation.expected.organization_tenant_id === nonEscalation.server_context.organization_tenant_id && nonEscalation.expected.session_capability_profile === nonEscalation.server_context.session_capability_profile && nonEscalation.expected.personal_brain_scope === nonEscalation.server_context.personal_brain_scope, "personal rule changed immutable identity");
+    requireCondition(fixture.audit_expectation.forbidden_fields.includes("personal_rule_bodies") && fixture.audit_expectation.required_safe_fields.includes("agent_principal_id") && fixture.audit_expectation.required_safe_fields.includes("sponsoring_human_id"), "safe identity audit contract missing");
+    requireCondition(context.api.sponsor_runtime_identity_policy.failure_semantics.includes("Unknown") && context.api.sponsor_runtime_identity_policy.non_escalation.includes("cannot select tenant"), "API identity policy missing");
+    requireCondition(context.authority.identity_boundary.personal_rule_resolution.unsponsored_background.includes("Task-scoped rules only"), "authority unsponsored rule missing");
+    requireCondition(context.acceptance.sponsor_runtime_identity_acceptance.current_gate_status.startsWith("open_reproduced_defect"), "acceptance incorrectly claims identity complete");
+  },
   surface(context) {
     requireCondition(context.fixtures.size === 9, "surface count mismatch");
     requireCondition(context.app.includes("surface-registry") || context.app.includes("registry destinations"), "surface registry/cutover disclosure missing");
@@ -207,6 +230,7 @@ const groups = {
   roadmapHarmony: ["ROADMAP-HARMONY-001"],
   security: ["PRIV-REDACT-001", "PRIV-STERILE-001", "SEC-AUTH-001", "SEC-AUTHZ-001", "SEC-CSRF-001", "SEC-DEVICE-001", "SEC-PUBLIC-001", "SEC-REPLAY-001", "SEC-SECRET-001"],
   tenantGovernance: ["TENANT-CONTRACT-001", "TENANT-DENIAL-FIXTURE-001", "WORKFLOW-CONTRACT-001", "MAINTENANCE-CONTRACT-001", "OWNER-CONTROL-001"],
+  sponsorRuntimeIdentity: ["IDENTITY-CONTRACT-001", "IDENTITY-FIXTURE-001"],
   surface: ["SURFACE-PARITY-001", "SURFACE-WRITER-001"],
   tour: ["FLOW-WS-05", "TOUR-ROUTE-001", "TOUR-SYNC-001"]
 };
@@ -219,6 +243,7 @@ export const futureGateIds = new Set([
   "SEC-AUTH-001", "SEC-AUTHZ-001", "SEC-CSRF-001", "SEC-DEVICE-001", "SEC-REPLAY-001",
   "AUTH-KV-001", "AUTH-RECOVERY-001", "RELEASE-GATE-001"
   , "TENANT-CROSS-DENIAL-001", "WORKFLOW-PROMOTION-001", "MAINTENANCE-MEASURE-001"
+  , "IDENTITY-JOE-RULES-001", "IDENTITY-DELL-RULES-001", "IDENTITY-CROSS-BRAIN-001", "IDENTITY-AUDIT-001", "IDENTITY-UNSPONSORED-001", "IDENTITY-SCOPE-UNKNOWN-001", "IDENTITY-CONNECTOR-PARITY-001", "IDENTITY-NONESCALATION-001"
 ]);
 for (const id of futureGateIds) testRegistry.delete(id);
 testRegistry.set("SEC-PUBLIC-001", publicBoundary);

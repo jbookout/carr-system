@@ -67,7 +67,7 @@
       "invalidated_at": "2026-08-10T21:48:00Z",
       "reason": "Plan revision changed materially"
     },
-    "session_scope": {"session_id": "SES-SYNTH-004", "sponsor": "Joe", "capability": "read_and_propose", "resources": ["svc-workspace"], "environment": "rehearsal", "expires_at": "2026-08-10T23:00:00Z"},
+    "session_scope": {"session_id": "SES-SYNTH-004", "organization_tenant_id": "tenant-carr-internal", "sponsoring_human_id": "joe", "partner_id": "joe", "agent_principal_id": "codex", "runtime_principal": "codex-oauth-runtime", "session_capability_profile": "read_and_propose-non-humanOnly", "personal_brain_scope": "joe", "personal_brain_version": "compiled-rules-joe@2026-08-11T12:00:05Z", "personal_rule_count": 30, "resources": ["svc-workspace"], "environment": "rehearsal", "expires_at": "2026-08-10T23:00:00Z"},
     "phase0_notice": "Read-only prototype. No Approve, Deploy, Grant, or Execute route exists."
   },
   "scenarios": {

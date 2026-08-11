@@ -1,7 +1,7 @@
 {
   "contract": "carr-workspace-control-room-boundary",
-  "version": "1.1.0",
-  "status": "phase0_amended_pending_lane_validation_human_acceptance_and_council",
+  "version": "1.2.0",
+  "status": "tenant_workflow_maintenance_validated_identity_boundary_reopened_pending_lane_validation_human_acceptance_and_council",
   "decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7",
   "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
   "conceptual_roles": {
@@ -26,6 +26,23 @@
     "enforcement": "Every read, write, event, evidence reference, work request, job, and automation is tenant-scoped and denies an otherwise-valid foreign-tenant identifier before resolving or projecting payload data.",
     "future_licensing": "Future seats remain owner-controlled and customer-scoped; tenant readiness does not authorize public signup, self-service tenant creation, a public SaaS, or transfer of platform control or intellectual property.",
     "owner": "Joe retains platform ownership, intellectual property, and control; a corporation may only license seats as a customer."
+  },
+  "sponsor_agent_personal_brain_boundary": {
+    "independent_dimensions": ["organization_tenant_id", "sponsoring_human_id_or_partner_id", "agent_principal_id_or_runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count"],
+    "derivation": "Tenant, sponsor, runtime agent, capability profile, and personal-brain scope are derived or validated by the server from authenticated grants, session binding, membership, and job provenance. Browser, model, bridge, and job input cannot select or widen them.",
+    "sponsored_session": "A Joe- or Dell-sponsored Codex or Claude session loads shared rules plus only that verified sponsor's personal rules. Runtime actions remain attributed to Codex or Claude; audit separately preserves the sponsoring human.",
+    "unsponsored_session": "A background agent without a verified sponsor receives only task-scoped rules, cannot claim Joe or Dell personal scope, and is ineligible for humanOnly capabilities.",
+    "cross_brain_rule": "A personal-brain read for someone other than the verified sponsor is denied before rule bodies or private metadata are projected.",
+    "fail_visible_rule": "Missing, ambiguous, stale, inconsistent, or unavailable personal scope returns explicit failure or Unknown and cannot be rendered as successful zero personal rules.",
+    "parity_rule": "The connector/store and generated fallback must resolve the same partner brain, version, rule membership, and counts; parity failure is observable drift.",
+    "personal_rule_non_authority": "A personal rule cannot choose or change tenant, grant or widen capability, change runtime attribution, cross-load to another brain, or silently promote itself.",
+    "audit_projection": "Audit stores organization tenant, runtime agent, sponsoring human when present, personal-brain scope/version/count, and session capability profile, but never personal rule bodies.",
+    "current_defect": {
+      "open_loop_id": "162c8d3a-a673-425c-aa18-cc9d4bcf949f",
+      "open_loop_number": 319,
+      "observed": "Joe's live Codex standing-context returned 143 shared and 0 codex-personal while the current Joe render declared 30 active Joe-personal rules.",
+      "rule_id": "4f7c348f"
+    }
   },
   "workflow_governance": {
     "lifecycle": ["experimental", "pilot", "approved", "standard", "retired"],
@@ -56,5 +73,5 @@
   },
   "shared_identifiers": {"format": "opaque stable IDs", "record_resolution": "server-side exact current record only", "invented_or_ambiguous_id": "refuse", "correlation": "one correlation ID may link safe projections without copying payloads"},
   "crosswalk": {"workspace_capability_ladder": ["read", "local_capture", "propose", "confirmed_narrow_write", "background_engineering_request"], "control_room_risk_classes": ["R0", "R1", "R2", "R3", "R4", "R5", "R6"], "rule": "The ladders must be explicitly cross-walked before implementation; neither silently replaces the other.", "status": "open_for_wednesday_council"},
-  "tests": ["XP-BND-001 separate audience and cookie replay refusal", "XP-BND-002 safe origin contains no business payload", "XP-BND-003 safe return contains no restricted diagnostics", "XP-BND-004 bridge creates no capability", "XP-BND-005 invented or ambiguous record ID refused", "XP-BND-006 correlation reconstructs the request without payload duplication", "XP-BND-007 server derives tenant context and ignores authority claims in payloads", "XP-BND-008 valid foreign-tenant record ID is denied before payload projection", "XP-BND-009 workflow version remains pinned across request and evidence return", "XP-BND-010 maintenance time is attributed once with exceptions reported separately", "XP-BND-011 five-business-day trial creates no new source of truth, destructive migration, parallel writer, or generic workflow engine", "XP-BND-012 two-month toil trigger and three-month mature claim gate remain cross-product requirements"]
+  "tests": ["XP-BND-001 separate audience and cookie replay refusal", "XP-BND-002 safe origin contains no business payload", "XP-BND-003 safe return contains no restricted diagnostics", "XP-BND-004 bridge creates no capability", "XP-BND-005 invented or ambiguous record ID refused", "XP-BND-006 correlation reconstructs the request without payload duplication", "XP-BND-007 server derives tenant context and ignores authority claims in payloads", "XP-BND-008 valid foreign-tenant record ID is denied before payload projection", "XP-BND-009 workflow version remains pinned across request and evidence return", "XP-BND-010 maintenance time is attributed once with exceptions reported separately", "XP-BND-011 five-business-day trial creates no new source of truth, destructive migration, parallel writer, or generic workflow engine", "XP-BND-012 two-month toil trigger and three-month mature claim gate remain cross-product requirements", "XP-BND-013 Joe-sponsored Codex or Claude resolves shared plus Joe-personal while retaining agent attribution", "XP-BND-014 Dell-sponsored Codex or Claude resolves shared plus Dell-personal while retaining agent attribution", "XP-BND-015 cross-brain personal reads deny before body projection", "XP-BND-016 unsponsored background agent remains task-scoped and cannot use humanOnly capabilities", "XP-BND-017 missing or ambiguous personal scope returns explicit failure or Unknown rather than successful zero", "XP-BND-018 connector and generated render agree on partner brain, version, and counts", "XP-BND-019 personal rules cannot change tenant or capability", "XP-BND-020 audit preserves tenant, agent, sponsor, personal-brain scope/version/count, and capability without rule bodies"]
 }

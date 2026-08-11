@@ -19,6 +19,13 @@
     ],
     "phase0_status": "schema and acceptance contract only; production middleware and storage constraints not implemented"
   },
+  "identity_context_policy": {
+    "applies_to": "every agent session, rule briefing, capability evaluation, action attribution, and audit projection",
+    "binding_location": "server session envelope before personal-rule selection or authorization",
+    "independent_dimensions": ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count"],
+    "failure_rule": "missing or ambiguous personal scope is identity_scope_unknown; zero is emitted only for a resolved brain whose connector and render agree",
+    "phase0_status": "schema and acceptance contract only; production identity and standing-context repair not implemented"
+  },
   "$defs": {
     "OpaqueId": {
       "type": "string",
@@ -426,13 +433,29 @@
         "$ref": "#/$defs/WorkRequest"
       }
     },
+    "IdentityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "resolution"],
+      "properties": {
+        "organization_tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "sponsoring_human_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "partner_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "agent_principal_id": {"$ref": "#/$defs/OpaqueId"},
+        "runtime_principal": {"$ref": "#/$defs/OpaqueId"},
+        "session_capability_profile": {"$ref": "#/$defs/OpaqueId"},
+        "personal_brain_scope": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_version": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "personal_rule_count": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "resolution": {"enum": ["resolved", "task_scoped_only", "identity_scope_unknown"]}
+      }
+    },
     "AgentSession": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id",
-        "principal_id",
-        "sponsor_id",
+        "identity_context",
         "parent_request_id",
         "state",
         "capabilities",
@@ -444,12 +467,7 @@
         "id": {
           "$ref": "#/$defs/OpaqueId"
         },
-        "principal_id": {
-          "$ref": "#/$defs/OpaqueId"
-        },
-        "sponsor_id": {
-          "$ref": "#/$defs/OpaqueId"
-        },
+        "identity_context": {"$ref": "#/$defs/IdentityContext"},
         "parent_request_id": {
           "$ref": "#/$defs/OpaqueId"
         },
@@ -771,7 +789,15 @@
         "event_id",
         "event_type",
         "occurred_at",
-        "actor_id",
+        "organization_tenant_id",
+        "agent_principal_id",
+        "runtime_principal",
+        "sponsoring_human_id",
+        "partner_id",
+        "personal_brain_scope",
+        "personal_brain_version",
+        "personal_rule_count",
+        "session_capability_profile",
         "resource_id",
         "environment",
         "risk_class",
@@ -790,9 +816,15 @@
         "occurred_at": {
           "$ref": "#/$defs/Timestamp"
         },
-        "actor_id": {
-          "$ref": "#/$defs/OpaqueId"
-        },
+        "organization_tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "agent_principal_id": {"$ref": "#/$defs/OpaqueId"},
+        "runtime_principal": {"$ref": "#/$defs/OpaqueId"},
+        "sponsoring_human_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "partner_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_scope": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_version": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "personal_rule_count": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "session_capability_profile": {"$ref": "#/$defs/OpaqueId"},
         "resource_id": {
           "$ref": "#/$defs/OpaqueId"
         },

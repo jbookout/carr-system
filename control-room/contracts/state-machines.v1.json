@@ -137,6 +137,32 @@
         }
       ]
     },
+    "identity_resolution": {
+      "initial": "unresolved",
+      "terminal": ["resolved", "task_scoped_only", "identity_scope_unknown", "refused"],
+      "main": ["unresolved", "runtime_validated", "tenant_bound", "sponsor_resolved", "brain_resolved", "capability_bound", "resolved"],
+      "side": ["task_scoped_only", "identity_scope_unknown", "refused"],
+      "invariants": [
+        "organization tenant, sponsoring human, partner, agent principal, runtime principal, capability profile, and personal brain scope are separate immutable dimensions",
+        "agent principal receives action attribution while sponsoring human remains additional audit provenance",
+        "personal brain scope derives only from verified sponsoring human and cannot select tenant or capability",
+        "missing or ambiguous personal scope ends identity_scope_unknown and never resolved with zero personal rules",
+        "an unsponsored runtime ends task_scoped_only and cannot claim a human sponsor or humanOnly capability",
+        "connector and generated render must resolve the same partner brain version and counts before resolved"
+      ],
+      "transitions": [
+        {"from": "unresolved", "to": "runtime_validated", "guard": "registered runtime principal authenticates and maps one agent principal"},
+        {"from": "runtime_validated", "to": "tenant_bound", "guard": "server derives immutable organization tenant and environment"},
+        {"from": "tenant_bound", "to": "sponsor_resolved", "guard": "verified Joe or Dell sponsor resolves from server grant metadata"},
+        {"from": "tenant_bound", "to": "task_scoped_only", "guard": "registered unattended job has no human sponsor; only exact task rules and non-humanOnly capability remain"},
+        {"from": "tenant_bound", "to": "identity_scope_unknown", "guard": "interactive agent sponsor is missing or ambiguous; no personal counts are claimed"},
+        {"from": "sponsor_resolved", "to": "brain_resolved", "guard": "personal brain equals verified sponsor and connector/store and generated render versions and counts agree"},
+        {"from": "sponsor_resolved", "to": "refused", "guard": "foreign brain requested or source parity fails"},
+        {"from": "brain_resolved", "to": "capability_bound", "guard": "server issues independent exact capability profile; personal rules cannot widen it"},
+        {"from": "capability_bound", "to": "resolved", "guard": "redacted audit projection binds tenant, agent, runtime, sponsor, partner, brain scope/version/count, capability, and result"},
+        {"from": "*", "to": "refused", "guard": "caller, browser, model, job, or personal rule attempts to select or widen tenant, sponsor, agent, runtime, brain, or capability"}
+      ]
+    },
     "agent_session": {
       "initial": "created_read_only",
       "terminal": [
@@ -167,7 +193,10 @@
       "invariants": [
         "every session starts read only",
         "mutation requires a parent request, exact scope, capability, and expiry",
-        "a replacement session never inherits production capability"
+        "a replacement session never inherits production capability",
+        "session creation requires a terminal identity_resolution result before any rule briefing or authorization",
+        "agent attribution and verified human sponsorship remain distinct through audit",
+        "unsponsored sessions are task scoped and never humanOnly"
       ],
       "transitions": [
         {
@@ -758,7 +787,8 @@
         "superseded"
       ],
       "invariants": [
-        "grant scope names exact principal, resource, environment, and capability",
+        "grant scope names exact organization tenant, agent principal, runtime principal, resource, environment, capability, and expiry",
+        "sponsoring human and personal brain do not grant, widen, or transfer capability",
         "only the unchanged failed step may retry",
         "grant revokes automatically at expiry",
         "an agent cannot approve or grant itself"

@@ -1469,16 +1469,20 @@
         "session_scope": {
           "type": "object",
           "additionalProperties": false,
+          "required": ["session_id", "organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "resources", "environment", "expires_at"],
           "properties": {
             "session_id": {
               "type": "string"
             },
-            "sponsor": {
-              "type": "string"
-            },
-            "capability": {
-              "type": "string"
-            },
+            "organization_tenant_id": {"type": "string"},
+            "sponsoring_human_id": {"enum": ["joe", "dell"]},
+            "partner_id": {"enum": ["joe", "dell"]},
+            "agent_principal_id": {"type": "string"},
+            "runtime_principal": {"type": "string"},
+            "session_capability_profile": {"type": "string"},
+            "personal_brain_scope": {"enum": ["joe", "dell"]},
+            "personal_brain_version": {"type": "string"},
+            "personal_rule_count": {"type": "integer"},
             "resources": {
               "type": "array",
               "items": {
@@ -1916,7 +1920,15 @@
         "occurred_at",
         "correlation_id",
         "actor",
-        "sponsor_id",
+        "organization_tenant_id",
+        "agent_principal_id",
+        "runtime_principal",
+        "sponsoring_human_id",
+        "partner_id",
+        "personal_brain_scope",
+        "personal_brain_version",
+        "personal_rule_count",
+        "session_capability_profile",
         "service_id",
         "resource_id",
         "environment",
@@ -1946,9 +1958,15 @@
         "actor": {
           "type": "string"
         },
-        "sponsor_id": {
-          "type": "string"
-        },
+        "organization_tenant_id": {"type": "string"},
+        "agent_principal_id": {"type": "string"},
+        "runtime_principal": {"type": "string"},
+        "sponsoring_human_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "partner_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_scope": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_version": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "personal_rule_count": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+        "session_capability_profile": {"type": "string"},
         "service_id": {
           "type": "string"
         },

@@ -91,7 +91,7 @@
       "operational_entity": ["AgentSession", "CapabilityGrant"],
       "api_or_action": ["GET /ops/v1/agent-sessions/{session_id}"],
       "authority": ["parent request", "exact resources", "exact environment", "expiring capability"],
-      "evidence": ["sponsor_id", "scope", "expiry", "phase", "session.created"],
+      "evidence": ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "session_capability_profile", "scope", "expiry", "phase", "session.created"],
       "rollback": ["expire or revoke scope"],
       "tests": ["self_escalation", "agent_new_session", "wrong_environment_or_target"]
     },
@@ -302,6 +302,45 @@
       "evidence": ["measured_minutes", "normal_or_exception", "category", "evidence_ref", "two-month trigger evaluation", "three-month mature-claim window", "deduplicated actionable alerts", "verified deterministic safe-automation outcomes", "named remedy"],
       "rollback": ["correct by append-only accounting adjustment; never recategorize exceptions to change the normal target silently"],
       "tests": ["maintenance_accounting_gate", "actionable_alert_and_safe_automation"]
+    },
+    {
+      "id": "P0-025",
+      "requirement": "Every interactive or unattended agent session separately binds immutable organization tenant, verified sponsoring human and partner or explicit unsponsored status, agent principal, runtime principal, session capability profile, and personal-brain scope/version/count. Joe-sponsored Codex or Claude loads shared plus Joe-personal; Dell-sponsored loads shared plus Dell-personal; an unsponsored agent receives task-scoped rules only and never humanOnly capability.",
+      "source_sections": [6, 19, 20, 33, 37],
+      "source_refs": ["carr-control-room-bduf#s19", "carr-control-room-bduf#s20", "carr-control-room-bduf#s37", "system-loop:319"],
+      "screen": ["agent sessions", "audit", "identity status", "council review"],
+      "operational_entity": ["IdentityContext", "AgentSession", "CapabilityGrant", "AuditEvent"],
+      "api_or_action": ["future server identity-resolution envelope before standing-context or authorization; absent from Phase 0 production runtime"],
+      "authority": ["server derives tenant, sponsor, agent, runtime, brain, and capability independently", "agent remains action actor", "verified Joe or Dell is sponsor provenance only", "unsponsored agent cannot impersonate a human"],
+      "evidence": ["Joe current 143 shared plus 30 Joe-personal", "Dell current 143 shared plus 0 explicitly resolved Dell-personal", "identity-sponsorship.v1.json synthetic scenarios", "identity_resolution state machine", "humanOnly denial"],
+      "rollback": ["return identity_scope_unknown and withhold personal briefing and humanOnly authority; never fall back from sponsor to agent slug"],
+      "tests": ["sponsor_agent_identity_separation", "joe_sponsored_personal_rules", "dell_sponsored_personal_rules", "unattended_agent_humanonly_denied"]
+    },
+    {
+      "id": "P0-026",
+      "requirement": "Personal brains are isolated and non-authoritative: cross-brain reads deny, missing or ambiguous scope is visible Unknown rather than successful zero, connector/store and generated render resolve the same partner brain and counts, and personal rules cannot choose tenant, capability, identity, or silent shared promotion.",
+      "source_sections": [6, 19, 20, 33, 37],
+      "source_refs": ["carr-control-room-bduf#s19", "carr-control-room-bduf#s20", "system-loop:319", "shared-rule:4f7c348f"],
+      "screen": ["identity status", "agent sessions", "audit", "council review"],
+      "operational_entity": ["IdentityContext", "PersonalBrainScope", "RuleSourceParity", "CapabilityGrant"],
+      "api_or_action": ["future standing-context partner resolution and generated-render parity gate; no production connector mutation in Phase 0"],
+      "authority": ["verified sponsor alone selects its matching personal brain", "personal rules shape behavior but grant no tenant, identity, role, risk, capability, or promotion authority"],
+      "evidence": ["cross-brain denial fixture", "identity_scope_unknown fixture", "same-partner connector/render comparison", "tenant and capability widening denial fixtures"],
+      "rollback": ["fail closed with personal_scope_mismatch, identity_scope_unknown, or identity_source_mismatch and disclose no foreign rule bodies"],
+      "tests": ["cross_brain_personal_read_denied", "personal_scope_unknown_not_zero", "connector_render_brain_parity", "personal_rules_cannot_widen_authority"]
+    },
+    {
+      "id": "P0-027",
+      "requirement": "Identity audit preserves both agent/runtime attribution and verified human sponsorship, together with organization tenant, personal-brain scope/version/count, capability profile, and result, while excluding personal rule bodies and quotes.",
+      "source_sections": [17, 20, 26, 33, 37],
+      "source_refs": ["carr-control-room-bduf#s20", "carr-control-room-bduf#s26", "system-loop:319"],
+      "screen": ["audit", "agent sessions"],
+      "operational_entity": ["AuditEvent", "IdentityContext"],
+      "api_or_action": ["GET /ops/v1/audit-events", "future append-only identity.context_bound event"],
+      "authority": ["server records identity projection", "agent remains actor", "sponsoring human remains provenance", "browser receives only redacted fields"],
+      "evidence": ["identity fixture audit projection", "audit-event required fields", "personal rule body and quote deny list"],
+      "rollback": ["withhold incomplete audit projection and mark identity evidence Unknown; never substitute human as actor or emit rule content"],
+      "tests": ["audit_agent_and_sponsor_attribution"]
     }
   ]
 }

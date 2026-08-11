@@ -25,6 +25,7 @@ const surfaceMap = contracts["surface-registry-migration-map.v1.json"];
 const manifest = contracts["phase0-manifest.v1.json"];
 const tenantGovernance = contracts["tenant-workflow-governance.v1.json"];
 const tenantDenialFixture = await readJson(new URL("test/fixtures/", workspaceDir), "tenant-boundary-denials.v1.json");
+const sponsorIdentityFixture = await readJson(new URL("test/fixtures/", workspaceDir), "sponsor-runtime-identity.v1.json");
 const exact = (actual, expected, label) => assert.deepEqual([...actual].sort(), [...expected].sort(), label);
 const validateFixture = compileSchema(fixtureContract);
 assert.equal(api.api_policy.prototype_fixture_schema, fixtureContract.$id, "prototype fixture/API schema linkage");
@@ -140,6 +141,36 @@ assert.equal(tenantGovernance.maintenance_accounting_contract.low_toil_mature_cl
 assert.equal(tenantGovernance.maintenance_accounting_contract.required_control_evidence_for_claim.length, 7, "maintenance claim control evidence");
 assert.equal(api.tenant_context_policy.client_tenant_fields_authoritative, false, "client tenant authority");
 assert(api.$defs.VersionedRecord.required.includes("tenant_id"), "tenant ID on versioned records");
+exact(sponsorIdentityFixture.immutable_dimensions, ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version"], "sponsor/runtime identity dimensions");
+assert.match(sponsorIdentityFixture.status, /reproduced_runtime_defect_open/, "identity defect gate must remain open");
+const identityCases = new Map(sponsorIdentityFixture.cases.map(item => [item.id, item]));
+assert.equal(identityCases.size, 8, "identity fixture case count");
+const validatePrincipalExecutionContext = compileSchema(api, api.$defs.PrincipalExecutionContext);
+for (const [id, item] of identityCases) {
+  const validation = validatePrincipalExecutionContext(item.server_context);
+  assert.equal(validation.valid, true, `${id} PrincipalExecutionContext schema errors: ${validation.errors.join("; ")}`);
+}
+for (const id of ["joe_codex_rules", "joe_claude_rules"]) {
+  assert.equal(identityCases.get(id).expected.shared_rule_count, 143, `${id} shared count`);
+  assert.equal(identityCases.get(id).expected.personal_rule_count, 30, `${id} Joe-personal count`);
+}
+assert.equal(identityCases.get("dell_codex_rules").expected.personal_rule_count_source, "fresh_resolved_dell_personal_artifact", "Dell count source");
+assert.equal(identityCases.get("dell_codex_rules").expected.zero_requires_explicit_resolved_scope, true, "Dell explicit zero resolution semantics");
+assert.equal(identityCases.get("cross_brain_read").expected.safe_error_code, "PERSONAL_SCOPE_REFUSED", "cross-brain refusal");
+assert.equal(identityCases.get("unattended_agent").expected.human_only_capability, false, "unattended humanOnly refusal");
+assert.equal(identityCases.get("unattended_agent").server_context.personal_brain_scope, null, "unattended personal brain scope");
+assert.equal(identityCases.get("unattended_agent").server_context.personal_rule_count, null, "unattended personal count");
+assert.equal(identityCases.get("dell_codex_rules").server_context.personal_rule_count, 0, "resolved Dell explicit zero");
+assert.equal(identityCases.get("missing_scope").expected.status, "Unknown", "missing scope status");
+assert.equal(identityCases.get("missing_scope").expected.personal_rule_count, null, "missing scope null count");
+assert.equal(identityCases.get("connector_fallback_parity").expected.connector_counts_equal_fallback_counts, true, "connector fallback count parity");
+assert.equal(identityCases.get("personal_rules_non_escalation").expected.silent_promotion, false, "personal rule silent promotion");
+assert.equal(api.sponsor_runtime_identity_policy.failure_semantics.includes("successful zero"), true, "identity failure semantics");
+assert(api.$defs.PrincipalExecutionContext.required.includes("sponsoring_human_id") && api.$defs.PrincipalExecutionContext.required.includes("agent_principal_id") && api.$defs.PrincipalExecutionContext.required.includes("personal_brain_scope"), "principal execution context fields");
+const identityEnvelopeFields = new Set(events.event_envelope.required);
+for (const field of ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "shared_rule_count", "personal_rule_count", "session_capability_profile", "identity_resolution_status"]) assert(identityEnvelopeFields.has(field), `identity audit field ${field}`);
+assert(events.event_envelope.forbidden.includes("personal_rule_bodies") && events.event_envelope.forbidden.includes("shared_rule_bodies"), "identity audit body exclusion");
+assert.match(acceptance.sponsor_runtime_identity_acceptance.current_gate_status, /^open_reproduced_defect/, "identity acceptance must remain open");
 
 const endpointFields = api.api_policy.required_endpoint_declarations.map(field => field === "idempotency" ? "idempotency_or_read_semantics" : field === "response_schema" ? "response_schema" : field);
 for (const endpoint of api.prototype_read_routes) for (const field of endpointFields) assert(field in endpoint, `${endpoint.operation_id}.${field}`);

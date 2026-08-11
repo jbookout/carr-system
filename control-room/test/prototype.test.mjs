@@ -30,11 +30,11 @@ test("exactly seven canonical synthetic twins exist", () => {
   }
 });
 
-test("tenant denial fixture is classified separately from the seven canonical twins", () => {
+test("security-boundary fixtures are classified separately from the seven canonical twins", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "contracts", "phase0-manifest.v1.json"), "utf8"));
   const canonicalFiles = expectedSurfaces.map(surface => `${surface}.v1.json`).sort();
   assert.deepEqual([...manifest.artifact_groups.canonical_twins].sort(), canonicalFiles);
-  assert.deepEqual(manifest.artifact_groups.security_fixtures, ["tenant-boundary.v1.json"]);
+  assert.deepEqual(manifest.artifact_groups.security_fixtures, ["tenant-boundary.v1.json", "identity-sponsorship.v1.json"]);
   assert.deepEqual(fs.readdirSync(FIXTURE_DIR).filter(name => name.endsWith(".json")).sort(), [...canonicalFiles, ...manifest.artifact_groups.security_fixtures].sort());
 });
 

@@ -17,9 +17,9 @@
     {"class": "digest", "topics": ["weekday_summary", "calm_change_summary", "nonurgent_failures"], "default_channels": ["in_app", "weekday_digest"], "requires": ["deduplicated owner-module groups"], "weekend": "suppressed"}
   ],
   "event_envelope": {
-    "required": ["event_id", "event_name", "occurred_at", "tenant_id", "actor_id", "actor_type", "object_type", "object_id", "correlation_id", "source", "environment", "outcome", "redaction_profile"],
+    "required": ["event_id", "event_name", "occurred_at", "tenant_id", "organization_tenant_id", "actor_id", "actor_type", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "shared_rule_count", "personal_rule_count", "session_capability_profile", "identity_resolution_status", "object_type", "object_id", "correlation_id", "source", "environment", "outcome", "redaction_profile"],
     "optional": ["causation_id", "requirement_ids", "risk_class", "previous_state", "new_state", "workflow_id", "workflow_version_id", "freshness", "safe_error_code", "duration_ms", "device_class"],
-    "forbidden": ["secret", "credential", "raw_audio", "raw_transcript", "email_body", "document_body", "hidden_reasoning"]
+    "forbidden": ["secret", "credential", "raw_audio", "raw_transcript", "email_body", "document_body", "prompt_body", "hidden_reasoning", "shared_rule_bodies", "personal_rule_bodies"]
   },
   "events": [
     {"name": "workspace.session.authenticated", "category": "security", "outcomes": ["success", "refused"], "test_ids": ["SEC-AUTH-001"]},
@@ -48,6 +48,8 @@
     {"name": "workspace.workflow.retired", "category": "workflow_governance", "outcomes": ["retired", "refused"], "test_ids": ["WORKFLOW-CONTRACT-001", "WORKFLOW-PROMOTION-001"]},
     {"name": "workspace.maintenance.time_recorded", "category": "maintenance_accounting", "outcomes": ["normal_internal", "exception", "classification_corrected"], "test_ids": ["MAINTENANCE-CONTRACT-001", "MAINTENANCE-MEASURE-001"]},
     {"name": "workspace.maintenance.toil_triggered", "category": "maintenance_accounting", "outcomes": ["triggered_after_two_consecutive_over_five_normal_months"], "test_ids": ["MAINTENANCE-CONTRACT-001", "MAINTENANCE-MEASURE-001"]},
-    {"name": "workspace.maintenance.remedy_opened", "category": "maintenance_accounting", "outcomes": ["prioritized_toil_reduction_work_opened"], "test_ids": ["MAINTENANCE-CONTRACT-001", "MAINTENANCE-MEASURE-001"]}
+    {"name": "workspace.maintenance.remedy_opened", "category": "maintenance_accounting", "outcomes": ["prioritized_toil_reduction_work_opened"], "test_ids": ["MAINTENANCE-CONTRACT-001", "MAINTENANCE-MEASURE-001"]},
+    {"name": "workspace.identity.context_resolved", "category": "identity_authority", "outcomes": ["resolved", "task_scoped_only", "Unknown"], "test_ids": ["IDENTITY-CONTRACT-001", "IDENTITY-FIXTURE-001", "IDENTITY-AUDIT-001", "IDENTITY-SCOPE-UNKNOWN-001"]},
+    {"name": "workspace.identity.personal_scope_refused", "category": "identity_authority", "outcomes": ["cross_brain_refused", "ambiguous_refused", "human_impersonation_refused", "capability_escalation_refused"], "test_ids": ["IDENTITY-CROSS-BRAIN-001", "IDENTITY-UNSPONSORED-001", "IDENTITY-NONESCALATION-001"]}
   ]
 }

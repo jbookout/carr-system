@@ -89,7 +89,7 @@ test("every test ID resolves to either an executed check or an explicit future g
 });
 
 test("every registered contract test executes against the prototype and planning evidence", async () => {
-  const [fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial] = await Promise.all([
+  const [fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial, sponsorIdentity, api, authority] = await Promise.all([
     loadFixtures(),
     readText("public/index.html"),
     readText("public/css/app.css"),
@@ -105,10 +105,42 @@ test("every registered contract test executes against the prototype and planning
     readJson("contracts/threat-model.v1.json"),
     readJson("contracts/notification-event-taxonomy.v1.json"),
     readJson("contracts/state-machines.v1.json"),
-    readJson("test/fixtures/tenant-boundary-denials.v1.json")
+    readJson("test/fixtures/tenant-boundary-denials.v1.json"),
+    readJson("test/fixtures/sponsor-runtime-identity.v1.json"),
+    readJson("contracts/business-entity-api-contracts.v1.json"),
+    readJson("contracts/authority-risk-matrix.v1.json")
   ]);
-  const context = { fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial };
+  const context = { fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial, sponsorIdentity, api, authority };
   for (const [id, check] of testRegistry) assert.doesNotThrow(() => check(context), id);
+});
+
+test("sponsor and runtime identity fixture covers every required identity outcome without claiming runtime completion", async () => {
+  const [fixture, acceptance, events, api] = await Promise.all([
+    readJson("test/fixtures/sponsor-runtime-identity.v1.json"),
+    readJson("contracts/phase0-acceptance.v1.json"),
+    readJson("contracts/notification-event-taxonomy.v1.json"),
+    readJson("contracts/business-entity-api-contracts.v1.json")
+  ]);
+  assert.deepEqual(fixture.cases.map(item => item.id), ["joe_codex_rules", "joe_claude_rules", "dell_codex_rules", "cross_brain_read", "unattended_agent", "missing_scope", "connector_fallback_parity", "personal_rules_non_escalation"]);
+  assert.equal(fixture.reproduced_evidence.standing_context_result.shared_rule_count, 143);
+  assert.equal(fixture.reproduced_evidence.standing_context_result.personal_rule_count, 0);
+  assert.equal(fixture.reproduced_evidence.joe_personal_artifact.active_rule_count, 30);
+  const validatePrincipalExecutionContext = compileSchema(api, api.$defs.PrincipalExecutionContext);
+  for (const item of fixture.cases) {
+    const validation = validatePrincipalExecutionContext(item.server_context);
+    assert.equal(validation.valid, true, `${item.id}: ${validation.errors.join("; ")}`);
+  }
+  const unattended = fixture.cases.find(item => item.id === "unattended_agent");
+  assert.equal(unattended.server_context.personal_brain_scope, null);
+  assert.equal(unattended.server_context.personal_rule_count, null);
+  const dell = fixture.cases.find(item => item.id === "dell_codex_rules");
+  assert.equal(dell.server_context.resolution_status, "resolved");
+  assert.equal(dell.server_context.personal_rule_count, 0);
+  assert.match(acceptance.sponsor_runtime_identity_acceptance.current_gate_status, /^open_reproduced_defect/);
+  const required = new Set(events.event_envelope.required);
+  for (const field of fixture.audit_expectation.required_safe_fields) assert.ok(required.has(field === "resolution_status" ? "identity_resolution_status" : field), field);
+  const forbidden = new Set(events.event_envelope.forbidden);
+  for (const field of fixture.audit_expectation.forbidden_fields) assert.ok(forbidden.has(field), field);
 });
 
 test("all baseline IDs render with unknown values and an instrumentation or interview action", async () => {
@@ -289,7 +321,7 @@ test("domain entities are complete typed objects rather than generic record alia
     assert.equal(schema.type, "object", entity);
     assert.equal(schema.additionalProperties, false, entity);
     assert.ok(schema.required.length >= 3, entity);
-    assert.ok(schema.properties.record || ["CallSummary", "CallCandidate", "EngineeringRequest", "Tour", "Notification", "TenantContext"].includes(entity), entity);
+    assert.ok(schema.properties.record || ["CallSummary", "CallCandidate", "EngineeringRequest", "Tour", "Notification", "TenantContext", "PrincipalExecutionContext"].includes(entity), entity);
   }
   assert.ok(api.$defs.Tour.properties.device_sync.items.properties.state.enum.includes("superseded"));
 });

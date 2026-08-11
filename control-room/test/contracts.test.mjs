@@ -74,6 +74,10 @@ test("authorization defaults deny and never trusts profile", () => {
   assert.match(authority.roles.joe_owner_production_approver.R5, /approve exact production plan hash/i);
   assert.equal(authority.authority_planes.platform_administration.customer_delegable, false);
   assert.equal(authority.authority_planes.platform_administration.launch_holder, "Joe");
+  assert.deepEqual(Object.keys(authority.identity_dimensions), ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version_and_count", "independence"]);
+  assert.ok(authority.explicit_denies.some(item => item.id === "D-UNSPONSORED-HUMAN-ONLY"));
+  assert.ok(authority.explicit_denies.some(item => item.id === "D-CROSS-BRAIN"));
+  assert.ok(authority.explicit_denies.some(item => item.id === "D-PERSONAL-RULE-AUTHORITY"));
 });
 
 test("security contract separates audience, session, data, and freshness", () => {
@@ -105,7 +109,7 @@ test("acceptance freezes six critical flows and all adversarial gates", () => {
   assert.equal(acceptance.flows.length, 6);
   assert.deepEqual(acceptance.presentation_states, ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"]);
   const ids = new Set(acceptance.adversarial_tests.map(item => item.id));
-  for (const required of ["cross_audience_replay", "profile_not_auth", "self_escalation", "stale_approval", "wrong_environment_or_target", "injection_is_data", "secret_canary", "offline_or_stale_collector", "reconnect_authority", "agent_new_session", "audit_chain", "server_derived_tenant_context", "cross_tenant_denial_fixture", "platform_tenant_authority_split", "workflow_lifecycle_governance", "doc_outage_operability", "maintenance_accounting_gate", "tenant_config_allowlist", "actionable_alert_and_safe_automation"]) {
+  for (const required of ["cross_audience_replay", "profile_not_auth", "self_escalation", "stale_approval", "wrong_environment_or_target", "injection_is_data", "secret_canary", "offline_or_stale_collector", "reconnect_authority", "agent_new_session", "audit_chain", "server_derived_tenant_context", "cross_tenant_denial_fixture", "platform_tenant_authority_split", "workflow_lifecycle_governance", "doc_outage_operability", "maintenance_accounting_gate", "tenant_config_allowlist", "actionable_alert_and_safe_automation", "sponsor_agent_identity_separation", "joe_sponsored_personal_rules", "dell_sponsored_personal_rules", "cross_brain_personal_read_denied", "unattended_agent_humanonly_denied", "personal_scope_unknown_not_zero", "connector_render_brain_parity", "personal_rules_cannot_widen_authority", "audit_agent_and_sponsor_attribution"]) {
     assert.ok(ids.has(required), required);
   }
 });
@@ -115,5 +119,7 @@ test("audit taxonomy is append only and reconstructable", () => {
   assert.equal(audit.append_only, true);
   assert.deepEqual(audit.chain, ["origin", "agent_session", "plan_revision", "approval", "execution", "verification", "release_or_incident"]);
   assert.ok(audit.never_record.includes("secret values"));
+  assert.ok(audit.never_record.includes("personal rule bodies"));
+  for (const field of ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "session_capability_profile"]) assert.ok(audit.required_fields.includes(field), field);
   assert.ok(audit.families.governance.includes("unsupported_action.refused"));
 });

@@ -136,6 +136,16 @@
     "FLOW-WS-04",
     "FLOW-WS-05",
     "FRONTDOOR-USAGE-001",
+    "IDENTITY-AUDIT-001",
+    "IDENTITY-CONNECTOR-PARITY-001",
+    "IDENTITY-CONTRACT-001",
+    "IDENTITY-CROSS-BRAIN-001",
+    "IDENTITY-DELL-RULES-001",
+    "IDENTITY-FIXTURE-001",
+    "IDENTITY-JOE-RULES-001",
+    "IDENTITY-NONESCALATION-001",
+    "IDENTITY-SCOPE-UNKNOWN-001",
+    "IDENTITY-UNSPONSORED-001",
     "LEAD-CONVERT-001",
     "LEAD-TOUCH-001",
     "MKT-DECISION-001",
@@ -182,6 +192,10 @@
     "Authoritative tenant context is server-derived and immutable for the request; no client tenant selector exists",
     "Every cross-tenant denial fixture channel returns privacy-safe nonexistent parity without object metadata or business payload",
     "Workflow lifecycle is exactly experimental, pilot, approved, standard, retired and calendar passage never promotes",
-    "Maintenance target is distinct from the null observed baseline and exceptions are separately attributed"
+    "Maintenance target is distinct from the null observed baseline and exceptions are separately attributed",
+    "Organization tenant, human sponsor, partner, runtime agent, capability profile, and personal brain scope/version are separate immutable server-derived dimensions",
+    "Missing or ambiguous personal scope is failure or Unknown with null count, never successful zero",
+    "Personal rules cannot cross-load, choose tenant, grant capability, silently promote, or replace runtime-agent attribution",
+    "Identity audit retains safe tenant, agent, sponsor, brain scope/version/counts, and capability fields without rule bodies"
   ]
 }
