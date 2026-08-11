@@ -13,9 +13,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "bin" / "migrate-dell.sh"
 CLAUDE = ROOT / "CLAUDE.md"
+CONFIG_AS_CODE = ROOT / "ops" / "config-as-code.py"
 
 script = SCRIPT.read_text(encoding="utf-8")
 claude = CLAUDE.read_text(encoding="utf-8")
+config_as_code = CONFIG_AS_CODE.read_text(encoding="utf-8")
 combined = script + "\n" + claude
 flat_script = re.sub(r"\s+", " ", script)
 flat_claude = re.sub(r"\s+", " ", claude)
@@ -119,7 +121,35 @@ require(
 )
 require(
     "preflight executes this selftest from the pulled packet",
-    "context-handoff-gate corpus-render-gate migrate-dell" in script,
+    "context-handoff-gate corpus-render-gate config-as-code migrate-dell" in script,
+)
+require(
+    "fresh-machine preflight exercises the actual Claude-only installer",
+    "actual installer, with empty Claude settings and no Codex client" in script
+    and "HOME=\"$TMP/home\"" in script
+    and "python3 ops/config-as-code.py install" in script
+    and "Claude-only config install dry run" in script,
+)
+require(
+    "Dell's missing Codex client is an explicit supported state",
+    "Dell's launch machine is Claude-only" in flat_claude
+    and "complete absence of `~/.codex` is an expected supported state" in flat_claude
+    and "partial Codex state fails visibly" in flat_claude,
+)
+require(
+    "fresh Claude settings are created rather than contradicted",
+    'raw = read(SETTINGS) if settings_existed else "{}"' in config_as_code
+    and "Claude settings: WILL BE CREATED" in config_as_code,
+)
+require(
+    "LaunchAgent load failure cannot report migration success",
+    "launchd_load_failures.append" in config_as_code
+    and "ERROR: LaunchAgent load failed" in config_as_code,
+)
+require(
+    "migration dry run propagates installer failure",
+    "hook install dry run failed" in script
+    and 'if $PY "$REPO/ops/config-as-code.py" install </dev/null >/tmp/mig-hooks.log 2>&1; then' in script,
 )
 require(
     "preflight defaults to origin main with an explicit commit-only test override",
@@ -132,6 +162,14 @@ require(
     and 'if [ "$FETCHED" != "$REF" ]' in script
     and 'if [ "$CHECKED_OUT" != "$REF" ]' in script
     and 'checkout --quiet --detach "$REF"' in script,
+)
+require(
+    "every executable-mode preflight failure increments the result",
+    script.index("PFAIL=0") < script.index('MODE=$(git -C "$TMP/home/carr-system"')
+    and 'PFAIL=$((PFAIL+1))' in script[
+        script.index('MODE=$(git -C "$TMP/home/carr-system"'):
+        script.index('say "  gates, as Dell will run them:"')
+    ],
 )
 
 if failures:
