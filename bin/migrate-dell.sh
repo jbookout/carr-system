@@ -95,7 +95,29 @@ if [ "${1:-}" = "--preflight" ]; then
   if ! git clone --quiet --no-local "$REPO" "$TMP/home/carr-system" </dev/null 2>&1; then
     say "  FAIL  clone failed"; exit 1
   fi
-  git -C "$TMP/home/carr-system" checkout --quiet "$REF" </dev/null 2>/dev/null
+  # A local clone transfers branch refs, not the source repo's remote-tracking
+  # refs. After a GitHub merge, origin/main can therefore name an object the
+  # clone did not receive. The old checkout suppressed that failure and tested
+  # the feature-branch HEAD while labelling it origin/main. Fetch the selected
+  # source ref explicitly, compare its object ID, and refuse any mismatch.
+  if ! git -C "$TMP/home/carr-system" fetch --quiet "$REPO" "$PREFLIGHT_REF" </dev/null 2>/dev/null; then
+    say "  FAIL  could not fetch exact preflight ref '$PREFLIGHT_REF' into scratch clone"
+    exit 1
+  fi
+  FETCHED=$(git -C "$TMP/home/carr-system" rev-parse FETCH_HEAD 2>/dev/null || print -r -- "")
+  if [ "$FETCHED" != "$REF" ]; then
+    say "  FAIL  requested $REF but scratch fetch returned ${FETCHED:-nothing}"
+    exit 1
+  fi
+  if ! git -C "$TMP/home/carr-system" checkout --quiet --detach "$REF" </dev/null 2>/dev/null; then
+    say "  FAIL  could not check out exact preflight commit $REF"
+    exit 1
+  fi
+  CHECKED_OUT=$(git -C "$TMP/home/carr-system" rev-parse HEAD 2>/dev/null || print -r -- "")
+  if [ "$CHECKED_OUT" != "$REF" ]; then
+    say "  FAIL  scratch checkout is ${CHECKED_OUT:-nothing}, expected $REF"
+    exit 1
+  fi
   git -C "$TMP/home/carr-system" config user.email "preflight@example.com"
 
   say "testing $(git -C "$TMP/home/carr-system" rev-parse --short HEAD) ($PREFLIGHT_REF)"

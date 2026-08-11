@@ -126,6 +126,13 @@ require(
     'PREFLIGHT_REF="${CARR_PREFLIGHT_REF:-origin/main}"' in script
     and '"$PREFLIGHT_REF^{commit}"' in script,
 )
+require(
+    "scratch preflight proves the exact selected commit was fetched and checked out",
+    'fetch --quiet "$REPO" "$PREFLIGHT_REF"' in script
+    and 'if [ "$FETCHED" != "$REF" ]' in script
+    and 'if [ "$CHECKED_OUT" != "$REF" ]' in script
+    and 'checkout --quiet --detach "$REF"' in script,
+)
 
 if failures:
     print(f"\nFAILURES: {', '.join(failures)}")
