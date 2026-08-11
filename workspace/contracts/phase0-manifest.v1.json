@@ -95,6 +95,26 @@
       "high_intentional_use": {"min": 300, "max": 500}
     }
   },
+  "hardware_program_gate": {
+    "workspace_section": {"section_key": "s33-carr-local-edge-node-and-mac-hardware-requirements", "section_id": "8f6edd0f-08a3-4012-92fc-e46640323fde"},
+    "control_room_section": {"section_key": "s38-local-edge-node-mac-hardware-and-operational-controls", "section_id": "7f263925-5939-44bf-98ca-e4c0054e63c8"},
+    "mature_end_state_section": {"section_key": "s41-carr-local-edge-node-and-hardware-purchase-decision", "section_id": "87eca39b-e83c-457e-adaa-75c5f0b086ef"},
+    "purchase_requires_joe": true,
+    "activation_requires_acceptance_evidence": true,
+    "required_acceptance_evidence": [
+      "authoritative host identity and Local Edge Node inventory",
+      "FileVault, login, keychain, application permission, lock-state, and background-task checks",
+      "network outage recovery and idempotent queued replay",
+      "UPS shutdown, startup, and power-return verification",
+      "encrypted cloud backup restore and replacement-Mac clean rebuild",
+      "Control Room Unknown, degraded, permission-denied, offline, and recovery evidence",
+      "adapter actions remain behind the human gate"
+    ],
+    "required_audit_events": ["edge_node.state_changed", "edge_node.permission_denied", "edge_node.power_recovery_verified", "edge_node.backup_restore_verified"],
+    "timeline_expansion_authorized": false,
+    "adoption_credit_authorized": false,
+    "production_authorization": false
+  },
   "settled_decisions": [
     {"decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7", "subject": "Workspace and Control Room product and authority boundary"},
     {"decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f", "subject": "Complete both Phase 0 preparations before Wednesday council; no construction before Joe approves the council output"},
@@ -110,7 +130,24 @@
     "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0",
     "branch": "control-room-phase0",
     "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253",
-    "canonical_dirty_checkout_modified": false
+    "canonical_dirty_checkout_modified": true,
+    "canonical_checkout_observation": {
+      "observed_on": "2026-08-11",
+      "status": "dirty_untracked_assets_present",
+      "tracked_modified_paths": [],
+      "untracked_paths": [
+        "tools/doc-convo/assets/harvest-curated-seed.json",
+        "tools/doc-convo/assets/harvest-factual.txt",
+        "tools/doc-convo/assets/harvest-frames.txt",
+        "tools/doc-convo/assets/harvest-questions-curated.json",
+        "tools/doc-convo/assets/harvest-questions.json",
+        "tools/doc-convo/assets/harvest-replies.jsonl",
+        "tools/doc-convo/assets/harvest-sentences.jsonl",
+        "tools/doc-convo/assets/turn-timings.jsonl"
+      ],
+      "earlier_reported_tracked_path": "pipelines/doctrine_inventory.py",
+      "earlier_report_reproduced_by_fresh_status": false
+    }
   },
   "artifact_groups": {
     "contracts": [
@@ -149,8 +186,8 @@
     "tests": ["test/contract-resolution.test.mjs", "test/fixtures.test.mjs", "test/prototype.test.mjs"]
   },
   "automated_evidence": {
-    "node_test_count": 31,
-    "node_test_passed": 31,
+    "node_test_count": 32,
+    "node_test_passed": 32,
     "registry_ids": 75,
     "phase0_executable_registry_checks": 48,
     "contracts_including_manifest": 17,
@@ -179,7 +216,7 @@
   },
   "exit_gates": {
     "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning contracts passed fresh-context independent verification with P0/P1/P2 all zero; the separately authorized narrow connector repair also passed live verification",
-    "sponsor_runtime_identity": "machine gate passed: the current Joe-sponsored Codex read returns 144 shared and 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner=dell is refused before rule arrays; runtime tests passed 73/73 and loop 319 is done",
+    "sponsor_runtime_identity": "machine gate passed: the current Joe-sponsored Codex read returns 144 shared and 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner=dell is refused before rule arrays; runtime tests passed 75/75 and loop 319 is done",
     "interactive_visual_accessibility": "runtime entry verified; full visual, keyboard, and screen-reader review remains unverified",
     "joe_and_dell_uncoached_five_journeys": "not performed",
     "baseline_measurement": "all five values remain unknown pending instrumentation or interview",

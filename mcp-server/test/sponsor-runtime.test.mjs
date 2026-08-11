@@ -15,7 +15,10 @@ import { doctrineTools, generatedRuleCount } from "../src/doctrine.js";
 import { ToolError, auditIdentity } from "../src/tools.js";
 import { callTool } from "../src/mcp.js";
 
-const shared = Array.from({ length: 143 }, (_, n) => ({
+// A deliberately non-production-sized corpus proves count derivation without
+// turning today's live rule count into a fixture contract.
+const SAMPLE_SHARED_RULE_COUNT = 7;
+const shared = Array.from({ length: SAMPLE_SHARED_RULE_COUNT }, (_, n) => ({
   id: `shared-${n}`, statement: `Shared rule ${n} carries enough text for a gist response.`,
   human_quote: null, taught_by: "joe", personal_to: null, scope: {},
 }));
@@ -51,11 +54,11 @@ function mockClient() {
 
 const standing = doctrineTools({ withEnvelope: async () => {}, writeEvent: async () => {}, ToolError })["standing-context"].handler;
 
-test("Joe-sponsored Codex receives 143 shared plus 30 Joe-personal rules", async () => {
+test("Joe-sponsored Codex receives the complete sample shared corpus plus Joe-personal rules", async () => {
   const result = await standing(mockClient(), actor("codex", "joe"), {});
-  assert.equal(result.shared_rules.length, 143);
+  assert.equal(result.shared_rules.length, SAMPLE_SHARED_RULE_COUNT);
   assert.equal(result.personal_rules.length, 30);
-  assert.equal(result.recite, "Rules loaded: 143 shared, 30 joe-personal");
+  assert.equal(result.recite, `Rules loaded: ${SAMPLE_SHARED_RULE_COUNT} shared, 30 joe-personal`);
   assert.deepEqual(result.identity, {
     organization_tenant_id: "carr-internal", sponsoring_human_id: "joe",
     agent_principal_id: "codex", runtime_principal: "codex", personal_brain_scope: "joe-personal",
@@ -67,7 +70,7 @@ test("Joe-sponsored Codex receives 143 shared plus 30 Joe-personal rules", async
 test("connector counts match the exact shared, Joe, and Dell generated-render headers", async () => {
   // These are the two render header forms emitted today: section headers for
   // non-empty brains and the export footer for Dell's empty brain.
-  const sharedRender = "**143 active rule(s), by section.** Recite the total; read the section";
+  const sharedRender = `**${SAMPLE_SHARED_RULE_COUNT} active rule(s), by section.** Recite the total; read the section`;
   const joeRender = "**30 active rule(s), by section.** Recite the total; read the section";
   const dellRender = "*Exported: 2026-08-11T12:00:06.876927+00:00 · 0 active rule(s)*";
   const joe = await standing(mockClient(), actor("codex", "joe"), {});
@@ -85,14 +88,14 @@ test("Joe-sponsored Claude and a future approved runtime use Joe's verified brai
     assert.deepEqual(scope, { status: "personal", sponsor: "joe", source: "verified_grant_sponsor" });
   }
   const claude = await standing(mockClient(), actor("claude", "joe"), {});
-  assert.equal(claude.recite, "Rules loaded: 143 shared, 30 joe-personal");
+  assert.equal(claude.recite, `Rules loaded: ${SAMPLE_SHARED_RULE_COUNT} shared, 30 joe-personal`);
 });
 
 test("Dell-sponsored Codex selects Dell only, even when Dell currently has zero personal rules", async () => {
   const result = await standing(mockClient(), actor("codex", "dell"), {});
-  assert.equal(result.shared_rules.length, 143);
+  assert.equal(result.shared_rules.length, SAMPLE_SHARED_RULE_COUNT);
   assert.equal(result.personal_rules.length, 0);
-  assert.equal(result.recite, "Rules loaded: 143 shared, 0 dell-personal");
+  assert.equal(result.recite, `Rules loaded: ${SAMPLE_SHARED_RULE_COUNT} shared, 0 dell-personal`);
   assert.equal(result.identity.personal_brain_scope, "dell-personal");
 });
 

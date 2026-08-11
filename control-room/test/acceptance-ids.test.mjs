@@ -433,6 +433,30 @@ const assertions = {
     assert.ok(taxonomy.never_record.includes("personal rule bodies"));
     assert.ok(taxonomy.never_record.includes("personal human quotes"));
   },
+  hardware_local_edge_gate: () => {
+    const manifest = read("contracts/phase0-manifest.v1.json");
+    const acceptance = read("contracts/phase0-acceptance.v1.json");
+    const trace = read("contracts/phase0-traceability.v1.json");
+    const threat = read("contracts/threat-model.v1.json");
+    const taxonomy = read("contracts/audit-event-taxonomy.v1.json");
+    const gate = manifest.hardware_program_gate;
+    assert.deepEqual(gate.workspace_section, {section_key: "s33-carr-local-edge-node-and-mac-hardware-requirements", section_id: "8f6edd0f-08a3-4012-92fc-e46640323fde"});
+    assert.deepEqual(gate.control_room_section, {section_key: "s38-local-edge-node-mac-hardware-and-operational-controls", section_id: "7f263925-5939-44bf-98ca-e4c0054e63c8"});
+    assert.deepEqual(gate.mature_end_state_section, {section_key: "s41-carr-local-edge-node-and-hardware-purchase-decision", section_id: "87eca39b-e83c-457e-adaa-75c5f0b086ef"});
+    assert.equal(gate.purchase_requires_joe, true);
+    assert.equal(gate.activation_requires_acceptance_evidence, true);
+    assert.deepEqual([gate.timeline_expansion_authorized, gate.adoption_credit_authorized, gate.production_authorization], [false, false, false]);
+    const programTrace = trace.entries.find(item => item.id === "P0-021");
+    for (const source of ["carr-workspace-bduf#s33", "carr-control-room-bduf#s38", "carr-mature-software-end-state-bduf#s41"]) assert.ok(programTrace.source_refs.includes(source));
+    for (const pattern of [/FileVault/i, /permission/i, /network outage/i, /UPS/i, /backup restore/i, /replacement-Mac clean rebuild/i, /Unknown/i, /human gate/i]) assert.match(gate.required_acceptance_evidence.join(" "), pattern);
+    const nodeThreat = threat.threats.find(item => item.id === "T08");
+    assert.match(nodeThreat.abuse_case, /FileVault-locked.*logged out.*permission-denied.*offline.*power loss/i);
+    assert.match(nodeThreat.mitigations.join(" "), /stale or missing required input forces Unknown.*Local Edge Node state, permission, login\/unlock, power, backup, queue, and heartbeat evidence/i);
+    assert.deepEqual(gate.required_audit_events, ["edge_node.state_changed", "edge_node.permission_denied", "edge_node.power_recovery_verified", "edge_node.backup_restore_verified"]);
+    for (const event of gate.required_audit_events) assert.ok(taxonomy.families.observation.includes(event), event);
+    assert.match(acceptance.exit_gate, /No Local Edge Node purchase or activation.*evidence is captured/i);
+    assert.match(manifest.integrated_delivery_program.construction_gate, /No production construction.*Joe approves.*council output/i);
+  },
   plan_hash_format: () => {
     const pattern = /^sha256:[a-f0-9]{64}$/;
     assert.match(fixture("plan-approval").data.current_revision.hash, pattern);

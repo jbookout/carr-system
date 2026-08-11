@@ -320,6 +320,50 @@ test("tenant, workflow, maintenance, and owner-control amendments are executable
   assert.deepEqual(eventMap.get("workspace.maintenance.remedy_opened"), ["prioritized_toil_reduction_work_opened"]);
 });
 
+test("Local Edge Node hardware receipts and gates remain executable and non-authorizing", async () => {
+  const [manifest, trace, acceptance, threat] = await Promise.all([
+    readJson("contracts/phase0-manifest.v1.json"),
+    readJson("contracts/phase0-traceability.v1.json"),
+    readJson("contracts/phase0-acceptance.v1.json"),
+    readJson("contracts/threat-model.v1.json")
+  ]);
+  const gate = manifest.hardware_program_gate;
+  assert.deepEqual(gate.workspace_section, {
+    section_key: "s33-carr-local-edge-node-and-mac-hardware-requirements",
+    section_id: "8f6edd0f-08a3-4012-92fc-e46640323fde"
+  });
+  assert.deepEqual(gate.control_room_section, {
+    section_key: "s38-local-edge-node-mac-hardware-and-operational-controls",
+    section_id: "7f263925-5939-44bf-98ca-e4c0054e63c8"
+  });
+  assert.deepEqual(gate.mature_end_state_section, {
+    section_key: "s41-carr-local-edge-node-and-hardware-purchase-decision",
+    section_id: "87eca39b-e83c-457e-adaa-75c5f0b086ef"
+  });
+  assert.equal(gate.purchase_requires_joe, true);
+  assert.equal(gate.activation_requires_acceptance_evidence, true);
+  assert.deepEqual(
+    [gate.timeline_expansion_authorized, gate.adoption_credit_authorized, gate.production_authorization],
+    [false, false, false]
+  );
+  assert.deepEqual(gate.required_audit_events, [
+    "edge_node.state_changed",
+    "edge_node.permission_denied",
+    "edge_node.power_recovery_verified",
+    "edge_node.backup_restore_verified"
+  ]);
+  const programTrace = trace.entries.find(item => item.id === "PROGRAM-SEQUENCE-001");
+  for (const source of ["Workspace s33", "Control Room s38", "Mature End State s41"]) assert.ok(programTrace.source_sections.includes(source));
+  for (const pattern of [/FileVault/i, /permission/i, /network outage/i, /UPS/i, /backup restore/i, /replacement-Mac clean rebuild/i, /Unknown/i, /human gate/i]) {
+    assert.match(gate.required_acceptance_evidence.join(" "), pattern);
+  }
+  const nodeThreat = threat.threats.find(item => item.id === "T17");
+  assert.match(nodeThreat.abuse, /shadow source of truth.*Healthy.*timeline expansion.*adoption credit.*production authorization/i);
+  assert.match(nodeThreat.mitigations.join(" "), /FileVault.*UPS.*Unknown.*Joe alone approves purchase.*no timeline expansion, adoption credit, or production authorization/i);
+  assert.ok(acceptance.phase0_exit.manual_checks.some(item => /Local Edge Node purchase\/activation remains blocked/i.test(item)));
+  assert.match(manifest.integrated_delivery_program.construction_gate, /No production construction.*Joe approves.*council output/i);
+});
+
 test("domain entities are complete typed objects rather than generic record aliases", async () => {
   const api = await readJson("contracts/business-entity-api-contracts.v1.json");
   for (const group of api.domain_groups) for (const entity of group.entities) {
