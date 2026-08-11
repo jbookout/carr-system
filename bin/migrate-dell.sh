@@ -87,14 +87,18 @@ if [ "${1:-}" = "--preflight" ]; then
   if ! git -C "$REPO" fetch --quiet </dev/null 2>/dev/null; then
     say "  note  could not fetch; testing the local main instead"
   fi
-  REF=$(git -C "$REPO" rev-parse --verify --quiet origin/main || echo main)
+  PREFLIGHT_REF="${CARR_PREFLIGHT_REF:-origin/main}"
+  if ! REF=$(git -C "$REPO" rev-parse --verify --quiet "$PREFLIGHT_REF^{commit}"); then
+    say "  FAIL  preflight ref '$PREFLIGHT_REF' is not a commit"
+    exit 1
+  fi
   if ! git clone --quiet --no-local "$REPO" "$TMP/home/carr-system" </dev/null 2>&1; then
     say "  FAIL  clone failed"; exit 1
   fi
   git -C "$TMP/home/carr-system" checkout --quiet "$REF" </dev/null 2>/dev/null
   git -C "$TMP/home/carr-system" config user.email "preflight@example.com"
 
-  say "testing $(git -C "$TMP/home/carr-system" rev-parse --short HEAD) (origin/main)"
+  say "testing $(git -C "$TMP/home/carr-system" rev-parse --short HEAD) ($PREFLIGHT_REF)"
   MODE=$(git -C "$TMP/home/carr-system" ls-files -s bin/migrate-dell.sh | cut -d' ' -f1)
   if [ "$MODE" = "100755" ]; then
     say "  ok    bin/migrate-dell.sh is executable as pulled"
@@ -107,7 +111,7 @@ if [ "${1:-}" = "--preflight" ]; then
   say "  gates, as Dell will run them:"
   PFAIL=0
   for t in guard conduct-gate escalation-gate gate-edit-gate git-writer-gate \
-           context-handoff-gate corpus-render-gate; do
+           context-handoff-gate corpus-render-gate migrate-dell; do
     F="$TMP/home/carr-system/ops/$t-selftest.py"
     [ -f "$F" ] || { print -r -- "    note  $t — not in the clone"; continue; }
     # CARR_VAULT is passed through deliberately. The scratch HOME has no Drive
@@ -158,10 +162,65 @@ if [ "${1:-}" = "--preflight" ]; then
     say "PREFLIGHT FAILED — $PFAIL item(s). Dell's migration would not be clean."
     exit 1
   fi
-  say "PREFLIGHT CLEAN — the packet on origin/main works on a fresh Mac."
-  say "On Dell's machine: ~/carr-system/bin/migrate-dell.sh --apply"
+  say "PREFLIGHT CLEAN — the packet at $PREFLIGHT_REF works on a fresh Mac."
+  say "On Dell's machine: start Claude Code in ~/carr-system and type: ready for migration"
   exit 0
 fi
+
+# An apply run always leaves a machine-readable receipt, including on failure.
+# The session uses this as the boundary between machine work and record writes:
+# only the exact success status below permits the latter. Atomic rename prevents
+# a killed process from leaving a half-written receipt that looks authoritative.
+RECEIPT="$REPO/out/dell-migration-receipt.json"
+migration_receipt() {
+  local rc="${1:-1}"
+  trap - EXIT
+  [ $APPLY -eq 1 ] || return 0
+  mkdir -p "$REPO/out" 2>/dev/null || return 0
+  local status="migration_incomplete"
+  [ "$rc" -eq 0 ] && status="machine_migrated_pending_record_closeout"
+  local commit branch tmp
+  commit=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || print -r -- "unknown")
+  branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || print -r -- "unknown")
+  tmp="$RECEIPT.tmp.$$"
+  /usr/bin/python3 -c '
+import datetime, json, sys
+path, status, commit, branch, rc, ok, note, fail = sys.argv[1:]
+receipt = {
+  "schema_version": 1,
+  "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+  "status": status,
+  "exit_code": int(rc),
+  "source_commit": commit,
+  "source_branch": branch,
+  "counts": {"ok": int(ok), "note": int(note), "fail": int(fail)},
+  "machine_checks": [
+    "preconditions", "fast_forward_only", "python_environment",
+    "config_as_code_install", "derived_fetch_allowlist", "gate_selftests",
+    "config_drift_check"
+  ],
+  "record_closeout": {
+    "performed_by_script": False,
+    "required_after_success": ["A15", "A17"],
+    "must_remain_open": ["A11", "A12", "A13", "A16"]
+  },
+  "live_identity_verification_required": True,
+  "logs": [
+    "/tmp/mig-pull.log", "/tmp/mig-venv.log", "/tmp/mig-pip.log",
+    "/tmp/mig-hooks.log", "/tmp/mig-allow.log", "/tmp/mig-check.log",
+    "/tmp/mig-drift.log"
+  ]
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(receipt, handle, indent=2, sort_keys=True)
+    handle.write("\\n")
+' "$tmp" "$status" "$commit" "$branch" "$rc" "$ok" "$warn" "$fail" \
+    && mv -f "$tmp" "$RECEIPT" \
+    && say "receipt: $RECEIPT" \
+    || { rm -f "$tmp"; say "  FAIL  could not write migration receipt: $RECEIPT"; }
+  return 0
+}
+trap 'migration_receipt $?' EXIT
 
 PY="python3"
 [ -x "$REPO/.venv/bin/python" ] && PY="$REPO/.venv/bin/python"
@@ -399,16 +458,24 @@ without a restart (verified 2026-08-09).
 THE SESSION'S HALF — the driving session does these, not this script, because
 they are record writes and records go through verbs:
 
-  1. Call standing-context. It should return the shared rules and Dell's
-     inbound queue. If it answers, the doctrine store is live for him and the
-     old markdown boot path is no longer needed.
+  1. Require out/dell-migration-receipt.json to report
+     machine_migrated_pending_record_closeout. Then call standing-context and
+     verify its server-derived sponsor is Dell, its personal brain is
+     dell-personal, and its shared/personal counts match the current generated
+     fallback headers. Do not pass a partner, tenant, or capability selector.
 
-  2. Close these inbound items for Dell, since this script just did them:
-       - the repo-pull item (guard protections, host allowlist, egress rebuild)
-       - the doctrine-store item (his sessions now boot from the store)
-     Leave the three protocol-adoption items open — those need Dell to actually
-     read and agree, which no script can do for him.
+  2. Fresh-read, close with a concrete verified outcome, and read back exactly:
+       - A15 / fa0e6c92-8bc7-4e42-9970-0402914d6a19 (machine migration)
+       - A17 / deb4357e-801f-49f6-bc6c-4c884e3e1f7c (doctrine-store readiness)
+     Leave A11, A12 and A13 open: Dell must actually read and agree to those
+     protocol changes. Leave A16 open because the dictation rig is unrelated.
 
-  3. Tell Dell what changed on his machine, in plain words, not item numbers.
+  3. Run ./run.sh health and ops/config-as-code.py check, then tell Dell what
+     changed on his machine in plain words, not item numbers.
+
+The compiled shared and Dell-personal files remain the supported local fallback
+through the 2026-08-21 cutoff. A live doctrine-store read does not retire them
+early. Do not disconnect or reconnect the connector unless the deployed tool
+registry proves that is required.
 NEXT
 exit 0
