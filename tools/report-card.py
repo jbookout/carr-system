@@ -114,8 +114,20 @@ def validate(spec):
         for field in ("label", "kind", "added_on"):
             if not c.get(field):
                 errs.append(f"category {key}: missing required field '{field}'")
-        if c.get("kind") not in ("business", "structural"):
-            errs.append(f"category {key}: kind must be business|structural")
+        if c.get("kind") not in ("business", "structural", "gate"):
+            errs.append(f"category {key}: kind must be business|structural|gate")
+        # A GATE is a precondition, not a peer of the scored categories, and it
+        # must never reach the aggregator (ruled 2026-08-10, scope item 9). It
+        # therefore has to declare which way it fails and what a FAIL does —
+        # rule 590b11e1 applied to the gate itself, since a gate with no bound
+        # action is the same undefined-response defect as an unbound metric.
+        if c.get("kind") == "gate":
+            if c.get("trend_carries"):
+                errs.append(f"category {key}: a gate cannot carry a trend — it has "
+                            f"no score to trend")
+            for field in ("gate_polarity", "gate_bound_action"):
+                if not c.get(field):
+                    errs.append(f"category {key}: gate must declare '{field}'")
         # trend_carries is a claim about comparability and must be explicit.
         # v1's Aug 6 column silently inherited a rubric change and produced an
         # 88 -> 69 delta that reads as collapse and is not one.
@@ -213,6 +225,15 @@ def validate(spec):
     # silently would be the rebuild repeating v1's mistake in one edit.
     if "measurement_integrity" not in cats:
         errs.append("no measurement_integrity category — scope item 4 requires it")
+    # And it must stay a GATE. Ruled 2026-08-10 (scope item 9): scored and
+    # averaged, a run with a corrupt instrument still publishes an authoritative
+    # overall diluted across the other cells, which is exactly what Aug 6 did.
+    # Promoting it back to a scored category would re-open that hole in one edit,
+    # so the validator refuses it rather than trusting a comment to hold.
+    elif cats["measurement_integrity"].get("kind") != "gate":
+        errs.append("measurement_integrity must be kind='gate' — it is a precondition "
+                    "for the other scores, not a peer of them (ruled 2026-08-10); "
+                    "a corrupt instrument must BLOCK publication, not average into it")
 
     # DIMENSION COVERAGE. Which axes actually have a sourced number behind them,
     # and which are pure judgment? This is the audit's own "coverage of the
@@ -430,13 +451,18 @@ def main():
         cats = spec.get("category", [])
         print(f"structure: {len(cats)} categories "
               f"({sum(1 for c in cats if c.get('kind')=='business')} business, "
-              f"{sum(1 for c in cats if c.get('kind')=='structural')} structural) · "
+              f"{sum(1 for c in cats if c.get('kind')=='structural')} structural, "
+              f"{sum(1 for c in cats if c.get('kind')=='gate')} gate) · "
               f"{len(spec.get('lane',[]))} lanes · "
               f"{len(spec.get('dimension',[]))} dimensions · "
               f"{len(spec.get('metric',[]))} metrics · "
               f"{len(spec.get('judgment',[]))} judgment rows · "
               f"{len(spec.get('tombstone',[]))} tombstones")
-        scores = sum(len(c.get("dimensions", [])) for c in cats)
+        # A gate produces no score, so its axes must not be counted as scores.
+        # Counting them would inflate the very number this rubric exists to make
+        # honest, and "34 scores per run" is exactly the figure a reader quotes.
+        scores = sum(len(c.get("dimensions", []))
+                     for c in cats if c.get("kind") != "gate")
         print(f"scoreboard: {scores} category-by-dimension scores per run "
               f"(not {len(cats)*len(spec.get('dimension',[]))} — categories declare "
               f"only the axes that apply)")

@@ -13,8 +13,19 @@ python3 - "$REPO" << 'EOF'
 import sys, os, py_compile
 repo = sys.argv[1]
 n = 0
+SKIP = (".git", "__pycache__", "baselines", "node_modules", ".build", ".direnv")
+def skip(d):
+    # Vendored virtualenvs carry third-party code we neither wrote nor ship —
+    # including Python 2 files that can never compile under 3.14. Walking into
+    # them made this suite exit 1 at its FIRST step under `set -eu`, so the
+    # safety nets, the schema contract, retrieval and check.sh below had not run
+    # in any invocation since a venv first appeared. .venv*/ is already
+    # gitignored (A15); os.walk does not read gitignore, so it is repeated here.
+    # A submodule like tools/dictation-rig/vendor/quill is OURS to compile and
+    # is deliberately NOT excluded.
+    return d in SKIP or d == "venv" or d.startswith(".venv")
 for dp, dn, fn in os.walk(repo):
-    dn[:] = [d for d in dn if d not in (".git", "__pycache__", "baselines")]
+    dn[:] = [d for d in dn if not skip(d)]
     for f in fn:
         if f.endswith(".py"):
             py_compile.compile(os.path.join(dp, f), doraise=True); n += 1
@@ -41,6 +52,15 @@ wb = openpyxl.load_workbook(os.path.join(vault, "DNA", "Leads", "lead-registry.x
 header_map(wb["Registry"], REGISTRY_REQUIRED, "registry"); wb.close()
 print("  OK  both workbook schemas validate")
 EOF
+
+echo "== smoke: report-card rubric validates =="
+# Loop #220 recorded this as already wired. It was not — smoke.sh had no
+# report-card line at all, and the suite was dying at step 1 before it could
+# have reached one. Wired here for real, 2026-08-10, and verified by sabotage:
+# promoting measurement_integrity off kind='gate', blanking its bound action, or
+# giving it a trend each exit 1.
+python3 "$REPO/tools/report-card.py" --validate > /dev/null || { echo "  FAIL: rubric validation"; exit 1; }
+echo "  OK  rubric-v2 validates"
 
 echo "== smoke: retrieval answers =="
 CARR_VAULT="$VAULT" python3 "$REPO/tools/retrieve.py" -n 1 "monthly health audit procedure" | head -2
