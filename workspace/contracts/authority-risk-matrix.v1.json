@@ -22,7 +22,7 @@
       "personal_brain_version_and_counts": "resolved source version plus shared and personal rule counts; bodies are excluded from audit"
     },
     "personal_rule_resolution": {
-      "joe_sponsored": "Codex or Claude loads shared plus Joe-personal; current evidence is 143 shared plus 30 Joe-personal.",
+      "joe_sponsored": "Codex or Claude loads shared plus Joe-personal; current evidence is 144 shared plus 30 Joe-personal. A Local Edge Node may be a bounded service but cannot select sponsor, tenant, personal brain, or capability.",
       "dell_sponsored": "Codex or Claude loads shared plus the fresh resolved Dell-personal artifact; a declared zero is valid only when scope and source version resolved successfully.",
       "unsponsored_background": "Shared rules and/or server-attached task-scoped rules are the only rule sources, with personal brain scope none and personal count zero; no human sponsor claim, partner brain, partner cookie, or humanOnly capability.",
       "cross_brain": "deny without returning personal rule bodies or counts",

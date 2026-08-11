@@ -124,7 +124,7 @@ test("sponsor and runtime identity fixture covers every required identity outcom
   assert.deepEqual(fixture.cases.map(item => item.id), ["joe_codex_rules", "joe_claude_rules", "dell_codex_rules", "cross_brain_read", "unattended_agent", "missing_scope", "connector_fallback_parity", "personal_rules_non_escalation"]);
   assert.equal(fixture.reproduced_evidence.original_standing_context_result.shared_rule_count, 143);
   assert.equal(fixture.reproduced_evidence.original_standing_context_result.personal_rule_count, 0);
-  assert.equal(fixture.reproduced_evidence.verified_live_result.shared_rule_count, 143);
+  assert.equal(fixture.reproduced_evidence.verified_live_result.shared_rule_count, 144);
   assert.equal(fixture.reproduced_evidence.verified_live_result.personal_rule_count, 30);
   assert.equal(fixture.reproduced_evidence.verified_live_result.sponsoring_human_id, "joe");
   assert.equal(fixture.reproduced_evidence.verified_live_result.agent_principal_id, "codex");
@@ -138,7 +138,7 @@ test("sponsor and runtime identity fixture covers every required identity outcom
   const unattended = fixture.cases.find(item => item.id === "unattended_agent");
   assert.equal(unattended.server_context.personal_brain_scope, "none");
   assert.equal(unattended.server_context.personal_rule_count, 0);
-  assert.equal(unattended.server_context.shared_rule_count, 143);
+  assert.equal(unattended.server_context.shared_rule_count, 144);
   const dell = fixture.cases.find(item => item.id === "dell_codex_rules");
   assert.equal(dell.server_context.resolution_status, "resolved");
   assert.equal(dell.server_context.personal_rule_count, 0);
@@ -191,12 +191,12 @@ test("baseline presentation exposes the bound action and like-for-like compariso
 
 test("glossary provenance and all six conceptual operating roles are explicit", async () => {
   const glossary = await readJson("contracts/domain-glossary.v1.json");
-  assert.equal(glossary.source.source_sha256, "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16");
+  assert.equal(glossary.source.source_sha256, "cb7733ae8f85eb1847b2b67ee6801b048494102b7e49857dda5d91b90bec8935");
   assert.equal(glossary.source.doctrine_document_id, "c7f31740-7f4b-47e9-ab93-c7f2854bacc6");
-  assert.equal(glossary.source.doctrine_generation, 334);
-  assert.equal(glossary.source.doctrine_section_count, 34);
+  assert.equal(glossary.source.doctrine_generation, 344);
+  assert.equal(glossary.source.doctrine_section_count, 35);
   assert.equal(glossary.source.timing_section_key, "s23");
-  assert.equal(glossary.source.timing_section_version, 3);
+  assert.equal(glossary.source.timing_section_version, 4);
   const terms = new Set(glossary.terms.map(item => item.term));
   for (const role of ["CARR Workspace", "The Command Center", "CARR Control Room", "Doc", "Claude Code and Codex", "CARR record layer"]) assert.ok(terms.has(role), role);
 });
@@ -217,9 +217,9 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.deepEqual(manifest.canonical_planning_sources.map(item => item.document_id).sort(), expectedIds);
   assert.deepEqual(trace.canonical_planning_set.map(item => item.document_id).sort(), expectedIds);
   for (const id of expectedIds) assert.ok(council.review_event.inputs.some(item => item.includes(id)), id);
-  assert.equal(manifest.source.doctrine_generation, 334);
-  assert.equal(manifest.source.timing_section_version, 3);
-  assert.equal(manifest.source.desktop_artifact_matches_current_doctrine_generation, "verified_at_generation_334");
+  assert.equal(manifest.source.doctrine_generation, 344);
+  assert.equal(manifest.source.timing_section_version, 4);
+  assert.equal(manifest.source.desktop_artifact_matches_current_doctrine_generation, "verified_at_generation_344");
   const program = manifest.integrated_delivery_program;
   assert.equal(program.mature_foundation_v1.target_date, "2026-10-05");
   assert.equal(program.workspace_web_timing.evidence_range, "12–16 weeks");
@@ -255,7 +255,7 @@ test("tenant, workflow, maintenance, and owner-control amendments are executable
   const expectedTenantClasses = ["records", "events", "search", "files_and_attachments", "calls", "ai_memory_and_retrieval", "queues", "integrations", "audit", "offline_packs"];
   const expectedTrialSafety = ["trial creates no new source of truth", "trial performs no destructive migration", "trial creates no parallel writer", "trial does not introduce or depend on a generic workflow engine"];
   const requiredExclusions = ["generic workflow engine", "plugin marketplace", "customer scripting"];
-  assert.equal(governance.canonical_sources.find(item => item.document_id === manifest.source.durable_doctrine_id).generation, 334);
+  assert.equal(governance.canonical_sources.find(item => item.document_id === manifest.source.durable_doctrine_id).generation, 344);
   assert.deepEqual(governance.tenant_context_contract.propagation_channels, expectedChannels);
   assert.equal(governance.tenant_context_contract.immutable_per_request, true);
   assert.match(governance.tenant_context_contract.authoritative_source, /^server derives/);

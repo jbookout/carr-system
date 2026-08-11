@@ -13,7 +13,7 @@
       "personal_brain_scope": "joe",
       "personal_brain_version": "compiled-rules-joe@2026-08-11T12:00:05Z",
       "session_capability_profile": "full-agent-non-humanOnly",
-      "expected": {"result": "resolved", "shared_rule_count": 143, "personal_rule_count": 30, "human_only": false}
+      "expected": {"result": "resolved", "shared_rule_count": 144, "personal_rule_count": 30, "human_only": false}
     },
     {
       "id": "dell-codex",
@@ -24,7 +24,7 @@
       "personal_brain_scope": "dell",
       "personal_brain_version": "compiled-rules-dell@2026-08-11T12:00:06Z",
       "session_capability_profile": "full-agent-non-humanOnly",
-      "expected": {"result": "resolved", "shared_rule_count": 143, "personal_rule_count": 0, "human_only": false}
+      "expected": {"result": "resolved", "shared_rule_count": 144, "personal_rule_count": 0, "human_only": false}
     },
     {
       "id": "unsponsored-background",
@@ -35,7 +35,7 @@
       "personal_brain_scope": "none",
       "personal_brain_version": null,
       "session_capability_profile": "task-scoped-background",
-      "expected": {"result": "task_scoped_only", "shared_rule_count": 143, "personal_rule_count": 0, "human_only": false}
+      "expected": {"result": "task_scoped_only", "shared_rule_count": 144, "personal_rule_count": 0, "human_only": false}
     },
     {
       "id": "missing-scope",
@@ -56,9 +56,9 @@
     {"id": "personal-rule-widens-capability", "server_capability": "read_ops_safe", "requested_capability_from_personal_rule": "execute_registered_actuator", "expected_result": "capability_claim_ignored_and_refused", "effective_capability": "read_ops_safe"}
   ],
   "source_parity": {
-    "joe": {"connector": {"shared": 143, "personal": 30}, "generated_render": {"shared": 143, "personal": 30}, "expected_result": "parity"},
-    "dell": {"connector": {"shared": 143, "personal": 0}, "generated_render": {"shared": 143, "personal": 0}, "expected_result": "parity"},
-    "mismatch": {"connector": {"shared": 143, "personal": 0}, "generated_render": {"shared": 143, "personal": 30}, "expected_result": "identity_source_mismatch", "success": false}
+    "joe": {"connector": {"shared": 144, "personal": 30}, "generated_render": {"shared": 144, "personal": 30}, "expected_result": "parity"},
+    "dell": {"connector": {"shared": 144, "personal": 0}, "generated_render": {"shared": 144, "personal": 0}, "expected_result": "parity"},
+    "mismatch": {"connector": {"shared": 144, "personal": 0}, "generated_render": {"shared": 144, "personal": 30}, "expected_result": "identity_source_mismatch", "success": false}
   },
   "audit_projection": {
     "organization_tenant_id": "tenant-carr-internal",

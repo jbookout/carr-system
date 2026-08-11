@@ -216,10 +216,10 @@ const assertions = {
     const council = read("contracts/council-review.v1.json");
     const trace = read("contracts/phase0-traceability.v1.json");
     assert.deepEqual(manifest.governing_sources.map(item => [item.document_id, item.generation, item.active_sections]), [
-      ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 334, 34],
-      ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 335, 39],
-      ["15d2250c-4821-4f83-9dc5-063f9470139d", 330, 41],
-      ["10d25f48-916b-4a7f-a1a6-d231274fed4b", 326, 28]
+      ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 344, 35],
+      ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 345, 40],
+      ["15d2250c-4821-4f83-9dc5-063f9470139d", 346, 42],
+      ["10d25f48-916b-4a7f-a1a6-d231274fed4b", 336, 28]
     ]);
     assert.ok(manifest.governing_sources.every(item => item.receipt === "fresh_read_verified"));
     assert.equal(manifest.integrated_delivery_program.october_5_2026_milestone.not_full_mature_end_state, true);
@@ -237,7 +237,7 @@ const assertions = {
     assert.ok(council.settled_inputs.some(item => item.id === "CR-S09" && /Mature Foundation v1/.test(item.decision)));
     assert.ok(council.settled_inputs.some(item => item.id === "CR-S12" && /\$5–20/.test(item.decision)));
     assert.deepEqual(trace.governing_sources.map(item => item.document_id), manifest.governing_sources.map(item => item.document_id));
-    assert.ok(trace.entries.some(item => item.id === "P0-021" && item.tests.includes("no_mutation_route") && item.source_refs.includes("carr-workspace-bduf#s23@v3")));
+    assert.ok(trace.entries.some(item => item.id === "P0-021" && item.tests.includes("no_mutation_route") && item.source_refs.includes("carr-workspace-bduf#s23@v4") && item.source_refs.includes("carr-control-room-bduf#s38")));
     assert.ok(trace.entries.some(item => item.id === "P0-022" && item.source_refs.includes("carr-control-room-bduf#s37")));
     assert.equal(api.routes.some(route => route.method !== "GET"), false);
   },
@@ -358,13 +358,13 @@ const assertions = {
     const value = read("fixtures/identity-sponsorship.v1.json").scenarios.find(item => item.id === "joe-codex");
     assert.equal(value.sponsoring_human_id, "joe");
     assert.equal(value.agent_principal_id, "codex");
-    assert.deepEqual(value.expected, {result: "resolved", shared_rule_count: 143, personal_rule_count: 30, human_only: false});
+    assert.deepEqual(value.expected, {result: "resolved", shared_rule_count: 144, personal_rule_count: 30, human_only: false});
   },
   dell_sponsored_personal_rules: () => {
     const value = read("fixtures/identity-sponsorship.v1.json").scenarios.find(item => item.id === "dell-codex");
     assert.equal(value.sponsoring_human_id, "dell");
     assert.equal(value.agent_principal_id, "codex");
-    assert.deepEqual(value.expected, {result: "resolved", shared_rule_count: 143, personal_rule_count: 0, human_only: false});
+    assert.deepEqual(value.expected, {result: "resolved", shared_rule_count: 144, personal_rule_count: 0, human_only: false});
   },
   cross_brain_personal_read_denied: () => {
     const attempt = read("fixtures/identity-sponsorship.v1.json").denial_attempts.find(item => item.id === "joe-requests-dell-brain");
@@ -381,7 +381,7 @@ const assertions = {
     assert.equal(background.sponsoring_human_id, null);
     assert.equal(background.personal_brain_scope, "none");
     assert.equal(background.expected.result, "task_scoped_only");
-    assert.equal(background.expected.shared_rule_count, 143);
+    assert.equal(background.expected.shared_rule_count, 144);
     assert.equal(background.expected.personal_rule_count, 0);
     assert.equal(background.expected.human_only, false);
     assert.equal(impersonation.expected_result, "sponsor_impersonation_refused");

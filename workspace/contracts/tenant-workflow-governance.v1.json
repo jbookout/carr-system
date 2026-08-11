@@ -5,19 +5,19 @@
   "canonical_sources": [
     {
       "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-      "generation": 334,
+      "generation": 344,
       "section_key": "s32-tenant-ready-workspace-and-evolving-workflows",
       "section_id": "8eb8136e-9657-473d-98d1-54b809b956df"
     },
     {
       "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
-      "generation": 326,
+      "generation": 336,
       "section_key": "s27-owner-controlled-tenant-readiness-workflow-evolution-and-maintenance-budget",
       "section_id": "a4864ee7-e0a4-4b36-848f-5aa134989796"
     },
     {
       "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
-      "generation": 330,
+      "generation": 346,
       "section_key": "s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state",
       "section_id": "4552de91-0806-47ae-ae02-6ea313b90d72"
     }

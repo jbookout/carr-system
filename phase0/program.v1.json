@@ -1,6 +1,6 @@
 {
   "contract": "carr-integrated-phase0-program",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "status": "phase0_planning_and_sponsor_identity_machine_gates_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
   "decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f",
   "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
@@ -19,65 +19,68 @@
       "title": "CARR Workspace — Big Design Up Front",
       "slug": "carr-workspace-bduf",
       "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-      "generation": 334,
-      "active_sections": 34,
+      "generation": 344,
+      "active_sections": 35,
       "receipt": "fresh_read_verified",
       "material_revision": "s32 adds tenant-ready Workspace boundaries and evolving-workflow governance without changing the approved timing or commercial scope.",
       "new_section": {
         "section_key": "s32-tenant-ready-workspace-and-evolving-workflows",
         "section_id": "8eb8136e-9657-473d-98d1-54b809b956df"
       },
-      "document_control_version": 3,
+      "document_control_version": 4,
+      "hardware_section": {"section_key": "s33-carr-local-edge-node-and-mac-hardware-requirements", "section_id": "8f6edd0f-08a3-4012-92fc-e46640323fde", "version": 1},
       "word_artifact": {
         "path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
-        "sha256": "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16",
-        "pages": 47
+        "sha256": "cb7733ae8f85eb1847b2b67ee6801b048494102b7e49857dda5d91b90bec8935",
+        "pages": 48
       }
     },
     {
       "title": "CARR Control Room — Big Design Up Front",
       "slug": "carr-control-room-bduf",
       "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
-      "generation": 335,
-      "active_sections": 39,
+      "generation": 345,
+      "active_sections": 40,
       "receipt": "fresh_read_verified",
       "material_revision": "s37 adds tenant operations, workflow governance, and lean-maintenance controls without changing the approved timing or commercial scope.",
       "new_section": {
         "section_key": "s37-tenant-operations-workflow-governance-and-lean-maintenance",
         "section_id": "e6892082-fc29-47a3-a6ad-25080a8fac17"
       },
-      "document_control_version": 3,
+      "document_control_version": 4,
+      "hardware_section": {"section_key": "s38-local-edge-node-mac-hardware-and-operational-controls", "section_id": "7f263925-5939-44bf-98ca-e4c0054e63c8", "version": 2},
       "word_artifact": {
         "path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx",
-        "sha256": "b504da8b9e06cb5a291c8f4fb00ad0f8d410d2415ade668a79251d6b1b3ff5cc",
-        "pages": 42
+        "sha256": "4ed1984275278fd1142df326ed830403cd27e63f2043aac9f40d91df60e2588a",
+        "pages": 43
       }
     },
     {
       "title": "CARR Mature Software End State — Big Design Up Front",
       "slug": "carr-mature-software-end-state-bduf",
       "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
-      "generation": 330,
-      "active_sections": 41,
-      "ordinal_range": [0, 40],
+      "generation": 346,
+      "active_sections": 42,
+      "ordinal_range": [0, 41],
       "receipt": "fresh_read_verified",
       "dependency_edges": ["CARR Workspace — Big Design Up Front", "CARR Control Room — Big Design Up Front", "CARR Production Maturity Baseline"],
       "new_section": {
         "section_key": "s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state",
         "section_id": "4552de91-0806-47ae-ae02-6ea313b90d72"
       },
-      "document_control_version": 4,
+      "document_control_version": 5,
+      "hardware_section": {"section_key": "s41-carr-local-edge-node-and-hardware-purchase-decision", "section_id": "87eca39b-e83c-457e-adaa-75c5f0b086ef", "version": 1},
       "word_artifact": {
         "path": "/Users/booko/Desktop/System Road Maps/CARR Mature Software End State - BDUF and Implementation Roadmap.docx",
-        "sha256": "db14da9c7d5b6b2cd5cdec27a10290bfa67f59ee2271eca109e53560db69b23d",
-        "pages": 49
+        "sha256": "b062e6aea084990383af0fe0040df45d30a8cedf7624da6563bfb427aff4556b",
+        "pages": 52
       }
     },
     {
       "title": "CARR Production Maturity Baseline",
       "slug": "carr-production-maturity-baseline",
       "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
-      "generation": 326,
+      "generation": 336,
       "active_sections": 28,
       "role": "governing production source",
       "receipt": "fresh_read_verified",
@@ -88,8 +91,8 @@
     }
   ],
   "lanes": [
-    {"product": "CARR Workspace", "role": "main private business product", "root": "workspace", "original_source_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d", "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx", "current_word_artifact_sha256": "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16", "current_word_artifact_pages": 47, "word_artifact_status": "verified_current_doctrine_export_generation_334", "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "doctrine_generation": 334, "doctrine_sections": 34, "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"},
-    {"product": "CARR Control Room", "role": "operational safety and evidence counterpart", "root": "control-room", "original_source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx", "current_word_artifact_sha256": "b504da8b9e06cb5a291c8f4fb00ad0f8d410d2415ade668a79251d6b1b3ff5cc", "current_word_artifact_pages": 42, "word_artifact_status": "verified_current_doctrine_export_generation_335", "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 335, "doctrine_sections": 39, "phase0_exit": "artifact preparation plus Joe's six uncoached flows and authority/evidence mapping acceptance"}
+    {"product": "CARR Workspace", "role": "main private business product", "root": "workspace", "original_source_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d", "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx", "current_word_artifact_sha256": "cb7733ae8f85eb1847b2b67ee6801b048494102b7e49857dda5d91b90bec8935", "current_word_artifact_pages": 48, "word_artifact_status": "verified_current_doctrine_export_generation_344", "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "doctrine_generation": 344, "doctrine_sections": 35, "hardware_section": "s33-carr-local-edge-node-and-mac-hardware-requirements", "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"},
+    {"product": "CARR Control Room", "role": "operational safety and evidence counterpart", "root": "control-room", "original_source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx", "current_word_artifact_sha256": "4ed1984275278fd1142df326ed830403cd27e63f2043aac9f40d91df60e2588a", "current_word_artifact_pages": 43, "word_artifact_status": "verified_current_doctrine_export_generation_345", "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 345, "doctrine_sections": 40, "hardware_section": "s38-local-edge-node-mac-hardware-and-operational-controls", "phase0_exit": "artifact preparation plus Joe's six uncoached flows and authority/evidence mapping acceptance"}
   ],
   "integrated_delivery": {
     "ruling": "Eight weeks is the CARR Mature Foundation milestone, not the full native mature end state.",
@@ -159,7 +162,7 @@
     },
     "source_evidence": {
       "original_live_standing_context": "Before repair, Joe's Codex session returned 143 shared and 0 codex-personal.",
-      "verified_live_standing_context": "After deployment, Joe-sponsored Codex returned 143 shared and 30 Joe-personal with organization tenant carr-internal, sponsoring human joe, runtime and agent principal codex, personal scope joe-personal, and humanOnly authority false.",
+      "verified_live_standing_context": "After deployment, and on the current fresh read, Joe-sponsored Codex returns 144 shared and 30 Joe-personal with organization tenant carr-internal, sponsoring human joe, runtime and agent principal codex, personal scope joe-personal, and humanOnly authority false.",
       "live_cross_brain_spoof": "A caller-supplied partner=dell request was refused as partner_not_selectable before any shared or personal rule arrays were returned.",
       "joe_generated_render": {
         "path": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/00_Context/compiled-rules-joe.md",

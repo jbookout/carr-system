@@ -5,46 +5,50 @@
   "source": {
     "path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
     "original_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d",
-    "sha256": "de8d09f5d4742d3a660622ad3dafc447916ddaf0198b75350d15737f3067ac16",
+    "sha256": "cb7733ae8f85eb1847b2b67ee6801b048494102b7e49857dda5d91b90bec8935",
     "durable_doctrine_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-    "doctrine_generation": 334,
-    "doctrine_sections": 34,
+    "doctrine_generation": 344,
+    "doctrine_sections": 35,
     "timing_section_key": "s23",
-    "timing_section_version": 3,
+    "timing_section_version": 4,
     "objective_section_id": "888131ae-9e0f-407f-9282-4dfafb70fb22",
     "objective_section_version": 1,
-    "document_control_section_version": 3,
-    "page_count": 47,
+    "document_control_section_version": 4,
+    "page_count": 48,
     "tenant_workflow_section_id": "8eb8136e-9657-473d-98d1-54b809b956df",
     "tenant_workflow_section_key": "s32-tenant-ready-workspace-and-evolving-workflows",
-    "desktop_artifact_matches_current_doctrine_generation": "verified_at_generation_334"
+    "hardware_section": {"section_key": "s33-carr-local-edge-node-and-mac-hardware-requirements", "section_id": "8f6edd0f-08a3-4012-92fc-e46640323fde", "version": 1},
+    "desktop_artifact_matches_current_doctrine_generation": "verified_at_generation_344"
   },
   "canonical_planning_sources": [
     {
       "role": "workspace_product_roadmap",
       "slug": "carr-workspace-bduf",
       "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
-      "verified_generation": 334,
-      "active_unique_sections": 34,
+      "verified_generation": 344,
+      "active_unique_sections": 35,
       "receipt_status": "read_back_by_main_seat",
-      "timing_section": {"section_key": "s23", "version": 3}
+      "timing_section": {"section_key": "s23", "version": 4},
+      "hardware_section": "s33-carr-local-edge-node-and-mac-hardware-requirements"
     },
     {
       "role": "operations_and_safety_roadmap",
       "slug": "carr-control-room-bduf",
       "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
-      "verified_generation": 335,
-      "active_unique_sections": 39,
-      "receipt_status": "read_back_by_main_seat"
+      "verified_generation": 345,
+      "active_unique_sections": 40,
+      "receipt_status": "read_back_by_main_seat",
+      "hardware_section": "s38-local-edge-node-mac-hardware-and-operational-controls"
     },
     {
       "role": "integrated_mature_end_state_roadmap",
       "slug": "carr-mature-software-end-state-bduf",
       "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
-      "verified_generation": 330,
-      "active_unique_sections": 41,
-      "ordinal_range": [0, 40],
+      "verified_generation": 346,
+      "active_unique_sections": 42,
+      "ordinal_range": [0, 41],
       "receipt_status": "read_back_by_main_seat",
+      "hardware_section": "s41-carr-local-edge-node-and-hardware-purchase-decision",
       "dependency_section": {
         "section_key": "s05",
         "verified_edges": [
@@ -58,7 +62,7 @@
       "role": "governing_production_baseline",
       "slug": "carr-production-maturity-baseline",
       "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
-      "verified_generation": 326,
+      "verified_generation": 336,
       "active_unique_sections": 28,
       "receipt_status": "read_back_by_main_seat"
     }
@@ -175,7 +179,7 @@
   },
   "exit_gates": {
     "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning contracts passed fresh-context independent verification with P0/P1/P2 all zero; the separately authorized narrow connector repair also passed live verification",
-    "sponsor_runtime_identity": "machine gate passed: Joe-sponsored Codex returned 143 shared and 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner=dell was refused before rule arrays; runtime tests passed 73/73 and loop 319 is done",
+    "sponsor_runtime_identity": "machine gate passed: the current Joe-sponsored Codex read returns 144 shared and 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner=dell is refused before rule arrays; runtime tests passed 73/73 and loop 319 is done",
     "interactive_visual_accessibility": "runtime entry verified; full visual, keyboard, and screen-reader review remains unverified",
     "joe_and_dell_uncoached_five_journeys": "not performed",
     "baseline_measurement": "all five values remain unknown pending instrumentation or interview",

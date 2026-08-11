@@ -74,12 +74,12 @@ const checks = {
   roadmapHarmony(context) {
     const sources = new Map(context.manifest.canonical_planning_sources.map(item => [item.slug, item]));
     requireCondition(sources.size === 4, "canonical planning source count mismatch");
-    requireCondition(sources.get("carr-workspace-bduf")?.verified_generation === 334, "Workspace doctrine generation mismatch");
-    requireCondition(sources.get("carr-workspace-bduf")?.active_unique_sections === 34, "Workspace doctrine section count mismatch");
-    requireCondition(sources.get("carr-workspace-bduf")?.timing_section?.version === 3, "Workspace s23 version mismatch");
-    requireCondition(sources.get("carr-control-room-bduf")?.verified_generation === 335, "Control Room doctrine generation mismatch");
-    requireCondition(sources.get("carr-mature-software-end-state-bduf")?.verified_generation === 330, "mature roadmap generation mismatch");
-    requireCondition(sources.get("carr-production-maturity-baseline")?.verified_generation === 326, "production baseline generation mismatch");
+    requireCondition(sources.get("carr-workspace-bduf")?.verified_generation === 344, "Workspace doctrine generation mismatch");
+    requireCondition(sources.get("carr-workspace-bduf")?.active_unique_sections === 35, "Workspace doctrine section count mismatch");
+    requireCondition(sources.get("carr-workspace-bduf")?.timing_section?.version === 4, "Workspace s23 version mismatch");
+    requireCondition(sources.get("carr-control-room-bduf")?.verified_generation === 345, "Control Room doctrine generation mismatch");
+    requireCondition(sources.get("carr-mature-software-end-state-bduf")?.verified_generation === 346, "mature roadmap generation mismatch");
+    requireCondition(sources.get("carr-production-maturity-baseline")?.verified_generation === 336, "production baseline generation mismatch");
     const program = context.manifest.integrated_delivery_program;
     requireCondition(program.mature_foundation_v1.target_date === "2026-10-05", "foundation target mismatch");
     requireCondition(program.workspace_web_timing.planning_estimate === "approximately 12 weeks", "Workspace web plan mismatch");
@@ -172,7 +172,7 @@ const checks = {
     requireCondition(fixture.status.includes("reconciled_to_verified_runtime_repair"), "identity runtime evidence status drift");
     requireCondition(JSON.stringify(fixture.immutable_dimensions) === JSON.stringify(dimensions), "identity dimensions drift");
     for (const id of ["joe_codex_rules", "joe_claude_rules"]) {
-      requireCondition(cases.get(id).expected.shared_rule_count === 143 && cases.get(id).expected.personal_rule_count === 30, `${id} counts drift`);
+      requireCondition(cases.get(id).expected.shared_rule_count === 144 && cases.get(id).expected.personal_rule_count === 30, `${id} counts drift`);
       requireCondition(cases.get(id).server_context.personal_brain_scope === "joe-personal", `${id} brain drift`);
     }
     requireCondition(cases.get("dell_codex_rules").expected.personal_rule_count_source === "fresh_resolved_dell_personal_artifact", "Dell count must be fresh-derived");

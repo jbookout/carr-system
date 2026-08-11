@@ -42,7 +42,7 @@
       "loop_number": 319,
       "loop_status": "done at version 2",
       "original_observation": "Before repair, Joe's live Codex standing-context returned 143 shared and 0 codex-personal while the current Joe render declared 30 active Joe-personal rules.",
-      "verified_observation": "After commit e88299c78bf8df29786e435a91e8b9b94f14da8a and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377, Joe-sponsored Codex returned 143 shared plus 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner was refused.",
+      "verified_observation": "After commit e88299c78bf8df29786e435a91e8b9b94f14da8a and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377 repaired the defect, the current fresh read returns 144 shared plus 30 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; caller-selected partner is refused.",
       "rule_id": "4f7c348f",
       "decision_id": "0da54973-10c7-4d38-9e10-bdf62c227874"
     }

@@ -28,14 +28,14 @@
       "eligible_agents": ["Codex", "Claude", "Doc"],
       "personal_brain_scope": "joe",
       "loads": ["active shared rules", "active Joe-personal rules"],
-      "current_observed_counts_2026_08_11": {"shared": 143, "personal": 30},
+      "current_observed_counts_2026_08_11": {"shared": 144, "personal": 30},
       "acceptance": "A Joe-sponsored Codex or Claude session cannot report success until the Joe connector/store set and generated Joe render resolve to the same version and counts."
     },
     "dell_sponsored_agent": {
       "eligible_agents": ["Codex", "Claude", "Doc"],
       "personal_brain_scope": "dell",
       "loads": ["active shared rules", "active Dell-personal rules"],
-      "current_observed_counts_2026_08_11": {"shared": 143, "personal": 0},
+      "current_observed_counts_2026_08_11": {"shared": 144, "personal": 0},
       "acceptance": "A Dell-sponsored session may report zero Dell-personal only after Dell scope resolves explicitly and connector/store and generated Dell render agree."
     },
     "unsponsored_background_agent": {
@@ -65,7 +65,7 @@
     "comparison": ["partner scope", "active shared count", "active personal count", "personal-brain version or export timestamp"],
     "rule": "Both surfaces resolve the same partner brain. A mismatch is visible Unknown and cannot degrade to a successful partial load.",
     "known_reproduced_defect": "Before repair on 2026-08-11, Joe-sponsored Codex resolved runtime actor codex as the personal scope and returned 143 shared plus 0 codex-personal while the Joe generated render declared 30 active Joe-personal rules.",
-    "verified_repair": "Commit e88299c78bf8df29786e435a91e8b9b94f14da8a and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377 returned live 143 shared plus 30 Joe-personal with distinct sponsor and runtime metadata; caller-selected partner was refused."
+    "verified_repair": "Commit e88299c78bf8df29786e435a91e8b9b94f14da8a and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377 repaired the identity defect; the current live fresh read returns 144 shared plus 30 Joe-personal with distinct sponsor and runtime metadata; caller-selected partner is refused."
   },
   "audit_projection": {
     "required": ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "session_capability_profile", "result"],

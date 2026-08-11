@@ -73,19 +73,19 @@ const expectedPlanningSourceIds = new Set([
 exact(manifest.canonical_planning_sources.map(item => item.document_id), expectedPlanningSourceIds, "manifest canonical planning sources");
 exact(trace.canonical_planning_set.map(item => item.document_id), expectedPlanningSourceIds, "trace canonical planning sources");
 for (const id of expectedPlanningSourceIds) assert(council.review_event.inputs.some(item => item.includes(id)), `council input ${id}`);
-assert.equal(manifest.source.doctrine_generation, 334, "Workspace doctrine generation");
-assert.equal(manifest.source.doctrine_sections, 34, "Workspace doctrine section count");
+assert.equal(manifest.source.doctrine_generation, 344, "Workspace doctrine generation");
+assert.equal(manifest.source.doctrine_sections, 35, "Workspace doctrine section count");
 assert.equal(manifest.source.timing_section_key, "s23", "Workspace timing section key");
-assert.equal(manifest.source.timing_section_version, 3, "Workspace timing section version");
+assert.equal(manifest.source.timing_section_version, 4, "Workspace timing section version");
 const matureSource = manifest.canonical_planning_sources.find(item => item.role === "integrated_mature_end_state_roadmap");
 const controlRoomSource = manifest.canonical_planning_sources.find(item => item.role === "operations_and_safety_roadmap");
 const productionBaselineSource = manifest.canonical_planning_sources.find(item => item.role === "governing_production_baseline");
-assert.equal(controlRoomSource.verified_generation, 335, "Control Room roadmap generation");
-assert.equal(controlRoomSource.active_unique_sections, 39, "Control Room roadmap section count");
-assert.equal(matureSource.verified_generation, 330, "mature roadmap generation");
-assert.equal(matureSource.active_unique_sections, 41, "mature roadmap section count");
+assert.equal(controlRoomSource.verified_generation, 345, "Control Room roadmap generation");
+assert.equal(controlRoomSource.active_unique_sections, 40, "Control Room roadmap section count");
+assert.equal(matureSource.verified_generation, 346, "mature roadmap generation");
+assert.equal(matureSource.active_unique_sections, 42, "mature roadmap section count");
 exact(matureSource.dependency_section.verified_edges, ["carr-workspace-bduf", "carr-control-room-bduf", "carr-production-maturity-baseline"], "mature roadmap dependency edges");
-assert.equal(productionBaselineSource.verified_generation, 326, "production baseline generation");
+assert.equal(productionBaselineSource.verified_generation, 336, "production baseline generation");
 assert.equal(productionBaselineSource.active_unique_sections, 28, "production baseline section count");
 const program = manifest.integrated_delivery_program;
 assert.equal(program.decision_id, "69512a40-99ec-483f-8528-5e05a4969551", "integrated delivery decision");
@@ -115,7 +115,7 @@ assert.equal(cutoverOwners.size, 5, "five explicit surface cutover owner assignm
 for (const surface of surfaceMap.surfaces.filter(item => item.cutover_owner.startsWith("OPEN-SURFACE-OWNER-"))) assert.equal(cutoverOwners.get(surface.cutover_owner)?.surface_id, surface.id, `surface owner ${surface.cutover_owner}`);
 assert(testIds.has("FRONTDOOR-USAGE-001"), "Front Door usage gate test ID");
 assert.equal(tenantGovernance.status, "phase0_contract_only_no_production_enforcement_claim", "tenant governance Phase 0 status");
-assert.equal(tenantGovernance.canonical_sources.find(item => item.document_id === manifest.source.durable_doctrine_id).generation, 334, "tenant governance Workspace generation");
+assert.equal(tenantGovernance.canonical_sources.find(item => item.document_id === manifest.source.durable_doctrine_id).generation, 344, "tenant governance Workspace generation");
 exact(tenantGovernance.tenant_context_contract.propagation_channels, ["browser", "api", "background_job", "local_edge_sync", "search", "export", "attachment", "doc", "ai"], "tenant propagation channels");
 exact(tenantGovernance.tenant_context_contract.scoped_resource_classes, ["records", "events", "search", "files_and_attachments", "calls", "ai_memory_and_retrieval", "queues", "integrations", "audit", "offline_packs"], "tenant scoped resource classes");
 exact(tenantDenialFixture.cases.map(item => item.channel), tenantGovernance.cross_tenant_denial_contract.required_channels, "tenant denial fixture channels");
@@ -151,7 +151,7 @@ for (const [id, item] of identityCases) {
   assert.equal(validation.valid, true, `${id} PrincipalExecutionContext schema errors: ${validation.errors.join("; ")}`);
 }
 for (const id of ["joe_codex_rules", "joe_claude_rules"]) {
-  assert.equal(identityCases.get(id).expected.shared_rule_count, 143, `${id} shared count`);
+  assert.equal(identityCases.get(id).expected.shared_rule_count, 144, `${id} shared count`);
   assert.equal(identityCases.get(id).expected.personal_rule_count, 30, `${id} Joe-personal count`);
 }
 assert.equal(identityCases.get("dell_codex_rules").expected.personal_rule_count_source, "fresh_resolved_dell_personal_artifact", "Dell count source");
@@ -160,7 +160,7 @@ assert.equal(identityCases.get("cross_brain_read").expected.safe_error_code, "PE
 assert.equal(identityCases.get("unattended_agent").expected.human_only_capability, false, "unattended humanOnly refusal");
 assert.equal(identityCases.get("unattended_agent").server_context.personal_brain_scope, "none", "unattended personal brain scope");
 assert.equal(identityCases.get("unattended_agent").server_context.personal_rule_count, 0, "unattended explicit no-personal count");
-assert.equal(identityCases.get("unattended_agent").server_context.shared_rule_count, 143, "unattended shared rule count");
+assert.equal(identityCases.get("unattended_agent").server_context.shared_rule_count, 144, "unattended shared rule count");
 assert.equal(identityCases.get("dell_codex_rules").server_context.personal_rule_count, 0, "resolved Dell explicit zero");
 assert.equal(identityCases.get("missing_scope").expected.status, "Unknown", "missing scope status");
 assert.equal(identityCases.get("missing_scope").expected.personal_rule_count, null, "missing scope null count");
