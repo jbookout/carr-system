@@ -68,6 +68,9 @@ assert.deepEqual(councilLaunch.forks_to_disposition.map(item => item.id), ["PROP
 assert.equal(councilLaunch.uniform_review_rubric.dimensions.filter(item => item.critical).length, 4, "critical objections cannot be averaged away");
 assert.match(councilLaunch.authority.construction_gate, /Joe must approve.*durably/i, "council remains advisory");
 assert.match(councilLaunch.copy_paste_prompts.independent_reviewer.join(" "), /Do not ask for or read another member's review.*uniform_independent_review_form/i, "independent prompt is sealed and uniform");
+assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"], "full roadmap review follows dependency order");
+assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"], "cross-cutting proposals follow identity then data boundary then runtime");
+assert.match(councilLaunch.progressive_disclosure_review_order.anti_anchoring_rules.join(" "), /No score.*pass 0.*No reviewer may skip.*Hermes and Portal are evaluated after naming and workspace isolation/i, "review order prevents anchoring and runtime-defined authority");
 assert.deepEqual(councilLedger.allowed_dispositions, ["accept", "modify", "defer_with_named_reopen_trigger", "reject"], "closed disposition vocabulary");
 assert.equal(councilLedger.fork_dispositions.length, 9, "ledger covers every fork");
 assert.ok(councilLedger.fork_dispositions.every(item => item.disposition === null && item.dissent.length === 0), "ledger is an honest blank template");

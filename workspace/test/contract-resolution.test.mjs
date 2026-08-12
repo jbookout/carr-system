@@ -311,6 +311,9 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.match(councilLaunch.facilitation_rules.join(" "), /not a fourth vote.*majority does not override.*Dissent is preserved/i);
   assert.equal(councilLaunch.explicit_non_goals.some(item => /onboarding CARR's other 150-plus agents/i.test(item)), true);
   assert.equal(councilLaunch.known_open_evidence.some(item => /five uncoached Workspace journeys are not performed/i.test(item)), true);
+  assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"]);
+  assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"]);
+  assert.match(councilLaunch.copy_paste_prompts.independent_reviewer.join(" "), /Follow progressive_disclosure_review_order exactly.*do not score.*Baseline, Workspace, Control Room, and Mature End State/i);
   assert.deepEqual(councilLedger.fork_dispositions.map(item => item.fork_id), councilLaunch.forks_to_disposition.map(item => item.id));
   assert.equal(councilLedger.joe_approval_card.status, "not_presented");
   assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);

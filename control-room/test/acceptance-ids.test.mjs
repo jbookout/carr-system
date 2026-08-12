@@ -304,6 +304,9 @@ const assertions = {
     assert.deepEqual(councilLaunch.forks_to_disposition.map(item => item.id), councilLedger.fork_dispositions.map(item => item.fork_id));
     assert.match(councilLaunch.uniform_review_rubric.use_rule, /do not decide.*arithmetic.*critical-dimension objection/i);
     assert.match(councilLaunch.copy_paste_prompts.synthesis_facilitator.join(" "), /non-voting facilitator.*Preserve dissent.*Joe approves/i);
+    assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"]);
+    assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"]);
+    assert.match(councilLaunch.progressive_disclosure_review_order.review_completion_checkpoint, /pass 0.*orientation.*pass-1 source.*declared order/i);
     assert.equal(councilLedger.phase0_exit_evidence.workspace_five_uncoached_journeys, null);
     assert.equal(councilLedger.phase0_exit_evidence.control_room_six_uncoached_flows, null);
     assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);

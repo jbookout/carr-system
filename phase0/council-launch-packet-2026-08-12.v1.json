@@ -49,6 +49,37 @@
     "conflict_hierarchy": ["Joe's exact current ruling", "current authoritative doctrine generation", "frozen repo contract at the declared commit", "verified current target evidence", "older artifact or proposal"],
     "claim_labels": ["current_verified", "implemented_not_deployed", "approved_design", "proposed_for_council", "future_evidence_gate", "unknown"]
   },
+  "progressive_disclosure_review_order": {
+    "guiding_principle": "Orient first, then review in dependency order. The short Mature End State orientation supplies a common map, but the full Mature End State is reviewed only after its Production Maturity Baseline, Workspace, and Control Room dependencies so it cannot anchor or pre-decide them.",
+    "pass_0_orientation": [
+      {"position": 1, "source": "phase0/council-launch-packet-2026-08-12.v1.json", "scope": "full", "purpose": "Establish authority, source versions, reviewer lenses, claim labels, rubric, non-goals, meeting procedure, and output contract."},
+      {"position": 2, "source_slug": "carr-mature-software-end-state-bduf", "scope": "executive decision, north star, integrated product roles, Mature Foundation milestone, four-to-six-month mature horizon, and evidence-gated framing only", "purpose": "Give every reviewer the same whole-system map before detailed reading.", "restriction": "orientation_only_no_scoring_disposition_or_dependency_conclusion"}
+    ],
+    "pass_1_full_dependency_review": [
+      {"position": 1, "source_slug": "carr-production-maturity-baseline", "reason": "The governing production, evidence, security, release, restore, and Unknown-semantics floor constrains every product decision."},
+      {"position": 2, "source_slug": "carr-workspace-bduf", "reason": "The primary business product establishes the people, routines, records, surfaces, adoption obligations, and business outcomes the rest of the system serves."},
+      {"position": 3, "source_slug": "carr-control-room-bduf", "reason": "The operational and safety counterpart is intelligible only after the business system it observes, explains, protects, approves, and verifies is understood."},
+      {"position": 4, "source_slug": "carr-mature-software-end-state-bduf", "reason": "The umbrella end state depends on the other three and is reviewed last as a synthesis and contradiction check, not as an anchoring answer."}
+    ],
+    "pass_2_cross_cutting_proposals": [
+      {"position": 1, "source": "phase0/platform-naming-council-candidate.v1.json", "reason": "Set the independent owner-controlled platform-versus-tenant identity before evaluating scaled access or runtime branding."},
+      {"position": 2, "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "reason": "Set the human seat, workspace, membership, and business-data isolation model before evaluating any runtime that acts inside it."},
+      {"position": 3, "source": "phase0/hermes-runtime-council-candidate.v1.json", "reason": "Evaluate Hermes and Portal only after platform identity, workspace isolation, authority, source-truth, and risk boundaries are known."}
+    ],
+    "pass_3_machine_evidence_and_reconciliation": [
+      {"position": 1, "source": "Workspace Phase 0 contracts, fixtures, prototype, validator, tests, and verifier evidence", "purpose": "Test roadmap claims against the prepared business-product contracts and runnable evidence."},
+      {"position": 2, "source": "Control Room Phase 0 contracts, fixtures, prototype, validator, tests, and verifier evidence", "purpose": "Test roadmap claims against the prepared operational, identity, authority, audit, and safety contracts."},
+      {"position": 3, "source": "phase0/council-reconciliation-2026-08-12.v1.json", "purpose": "Resolve cross-roadmap contradictions and disposition PROP-001 through PROP-009 only after the full source and evidence passes."}
+    ],
+    "anti_anchoring_rules": [
+      "No score, fork disposition, roadmap amendment, or proceed verdict may be recorded during pass 0.",
+      "No reviewer may skip, reorder, or substitute a summary for a full pass-1 source.",
+      "A reviewer may take provisional notes during reading, but must revisit them after completing pass 1 before submitting the sealed review.",
+      "Hermes and Portal are evaluated after naming and workspace isolation because a runtime cannot define its own platform identity, data boundary, authority, or source of truth.",
+      "The full Mature End State must be checked against the Baseline, Workspace, and Control Room; a conflict is not resolved merely because the umbrella document states a preference."
+    ],
+    "review_completion_checkpoint": "Before scoring or disposition, each reviewer must attest that pass 0 was used only for orientation and that every pass-1 source was read in the declared order at the exact frozen version."
+  },
   "delivery_instructions": {
     "repo_and_connector_capable_session": ["check out or open the recorded launch-packet commit", "read this packet first", "read every required repo input", "fresh-read all four doctrine documents at the declared generations", "record the assigned reviewer seat and append its seat_prompt_suffix to the independent_reviewer prompt"],
     "document_upload_session": ["attach the three exact Word roadmap artifacts, this launch packet, the blank ledger, and every JSON candidate listed in required_repo_inputs", "provide the Production Maturity Baseline only through an authorized exact-generation export or cited read-doctrine extracts", "if the full baseline or another required source is unavailable, mark it missing and abstain from dependent claims rather than reviewing a summary as the source"],
@@ -101,8 +132,8 @@
     {"id": "PROP-009", "topic": "pre-engineered human-seat and isolated-workspace structure without commercial rollout", "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json"}
   ],
   "meeting_protocol": [
-    {"stage": 0, "name": "facilitator preflight", "procedure": ["verify exact commit and doctrine generations", "verify all required sources are readable", "record missing evidence", "confirm Workspace 32/32 and Control Room 94/94 or record changed evidence", "confirm no proposal is represented as approved"], "exit": "one frozen evidence manifest"},
-    {"stage": 1, "name": "sealed independent reviews", "procedure": ["each reviewer works without seeing another review", "each reviews all nine forks through its assigned primary lens and every critical rubric dimension", "each submits the uniform review form", "facilitator locks the three outputs before disclosure"], "exit": "three complete independent reviews"},
+    {"stage": 0, "name": "facilitator preflight", "procedure": ["verify exact commit and doctrine generations", "verify all required sources are readable", "record missing evidence", "confirm Workspace 32/32 and Control Room 94/94 or record changed evidence", "confirm no proposal is represented as approved", "require each reviewer to acknowledge the progressive-disclosure order and its no-scoring orientation restriction"], "exit": "one frozen evidence manifest and three review-order acknowledgements"},
+    {"stage": 1, "name": "sealed independent reviews", "procedure": ["each reviewer works without seeing another review", "each follows pass 0 through pass 3 in the declared order without scoring or disposition during orientation", "each reviews all nine forks through its assigned primary lens and every critical rubric dimension", "each submits the uniform review form", "facilitator locks the three outputs before disclosure"], "exit": "three complete independent reviews with source-order attestations"},
     {"stage": 2, "name": "evidence normalization", "procedure": ["facilitator extracts agreements, disagreements, missing evidence, and source contradictions", "no reviewer changes a position during normalization", "facts are cited to exact source and claim label"], "exit": "one disagreement and evidence matrix"},
     {"stage": 3, "name": "fork rounds", "procedure": ["review PROP-001 through PROP-009 in order", "lead reviewer is the seat whose lens is most material", "other seats challenge once each", "facilitator records proposed disposition, contract changes, safe interim default, and dissent"], "exit": "nine candidate dispositions"},
     {"stage": 4, "name": "cross-roadmap contradiction sweep", "procedure": ["test every candidate disposition against all three roadmaps and the Production Maturity Baseline", "check terminology, roles, states, authority, data, timelines, costs, platform order, hardware, Hermes, human-workspace scaling, and adoption gates", "do not repair one roadmap while leaving another contradictory"], "exit": "contradiction register with exact amendments"},
@@ -148,6 +179,7 @@
     "independent_reviewer": [
       "You are one of three independent members of the CARR roadmap council. Do not ask for or read another member's review until your sealed review is complete.",
       "Read phase0/council-launch-packet-2026-08-12.v1.json first, then every canonical and repo source it requires at the exact versions declared.",
+      "Follow progressive_disclosure_review_order exactly. Use the limited Mature End State excerpt only as pass-0 orientation; do not score, disposition a fork, or form a proceed verdict until the complete Baseline, Workspace, Control Room, and Mature End State pass is finished in that order.",
       "Your assigned seat and primary lens are provided separately. Apply that lens deeply, but also evaluate every critical rubric dimension and all nine PROP forks.",
       "Label every claim current_verified, implemented_not_deployed, approved_design, proposed_for_council, future_evidence_gate, or unknown.",
       "Return exactly the uniform_independent_review_form defined by the packet. Cite underlying sources, preserve uncertainty, and do not represent council proposals as approved.",
@@ -164,6 +196,7 @@
   },
   "completion_definition": [
     "all required sources were read at exact declared versions",
+    "all three reviewers attested to the declared progressive-disclosure order and no decision was taken from the orientation pass",
     "three sealed independent reviews exist",
     "all nine forks have valid dispositions",
     "every critical objection is resolved, modified, or safely deferred",
