@@ -50,6 +50,13 @@
     {"name": "workspace.maintenance.toil_triggered", "category": "maintenance_accounting", "outcomes": ["triggered_after_two_consecutive_over_five_normal_months"], "test_ids": ["MAINTENANCE-CONTRACT-001", "MAINTENANCE-MEASURE-001"]},
     {"name": "workspace.maintenance.remedy_opened", "category": "maintenance_accounting", "outcomes": ["prioritized_toil_reduction_work_opened"], "test_ids": ["MAINTENANCE-CONTRACT-001", "MAINTENANCE-MEASURE-001"]},
     {"name": "workspace.identity.context_resolved", "category": "identity_authority", "outcomes": ["resolved", "task_scoped_only", "Unknown"], "test_ids": ["IDENTITY-CONTRACT-001", "IDENTITY-FIXTURE-001", "IDENTITY-AUDIT-001", "IDENTITY-SCOPE-UNKNOWN-001"]},
-    {"name": "workspace.identity.personal_scope_refused", "category": "identity_authority", "outcomes": ["cross_brain_refused", "ambiguous_refused", "human_impersonation_refused", "capability_escalation_refused"], "test_ids": ["IDENTITY-CROSS-BRAIN-001", "IDENTITY-UNSPONSORED-001", "IDENTITY-NONESCALATION-001"]}
+    {"name": "workspace.identity.personal_scope_refused", "category": "identity_authority", "outcomes": ["cross_brain_refused", "ambiguous_refused", "human_impersonation_refused", "capability_escalation_refused"], "test_ids": ["IDENTITY-CROSS-BRAIN-001", "IDENTITY-UNSPONSORED-001", "IDENTITY-NONESCALATION-001"]},
+    {"name": "workspace.market_map.viewed", "category": "spatial_product", "outcomes": ["rendered", "Mixed/Partial", "Unknown", "sterile_refused", "failed"], "test_ids": ["MAP-COVERAGE-001", "MAP-TRUTH-001", "MAP-TENANT-001", "MAP-PRIVACY-001"]},
+    {"name": "workspace.market_map.selection_changed", "category": "spatial_product", "outcomes": ["selected", "cleared", "list_synchronized", "refused"], "test_ids": ["MAP-PARITY-001", "MAP-A11Y-001"]},
+    {"name": "workspace.market_map.redaction_applied", "category": "privacy", "outcomes": ["exact", "approximated", "withheld", "sterile_refused"], "test_ids": ["MAP-PRIVACY-001", "PRIV-REDACT-001", "PRIV-STERILE-001"]},
+    {"name": "workspace.day_trip.proposed", "category": "trip_planning", "outcomes": ["proposed", "partial_with_exclusions", "infeasible", "provider_failed"], "test_ids": ["MAP-TRIP-001", "TOUR-ROUTE-001"]},
+    {"name": "workspace.day_trip.confirmed", "category": "trip_planning", "outcomes": ["confirmed", "refused", "version_conflict"], "test_ids": ["MAP-TRIP-001", "STATE-REFUSE-001"]},
+    {"name": "workspace.day_trip.invalidated", "category": "trip_planning", "outcomes": ["appointment_changed", "location_changed", "freshness_changed", "provider_evidence_changed", "input_changed"], "test_ids": ["MAP-TRIP-001", "STATE-REFUSE-001"]},
+    {"name": "workspace.day_trip.handed_to_tour", "category": "trip_planning", "outcomes": ["verified", "read_back_mismatch", "refused", "failed"], "test_ids": ["MAP-TRIP-001", "TOUR-ROUTE-001"]}
   ]
 }

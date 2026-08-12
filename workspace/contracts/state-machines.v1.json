@@ -184,6 +184,27 @@
         "a flexible change touching a locked rail is a material revision and invalidates approval"
       ]
     },
+    "day_trip_proposal": {
+      "initial": "draft",
+      "terminal": ["handed_to_tour", "discarded", "failed"],
+      "states": ["draft", "route_proposed", "confirmed", "invalidated", "handed_to_tour", "discarded", "failed"],
+      "allowed": [
+        {"from": "draft", "to": "route_proposed", "risk": "W2", "guard": "at least two current exact authorized visit stops remain eligible for a multi-stop proposal; locked appointments, dwell, buffers, start/end, provider/time/model inputs, skipped stops and reasons, alternatives, route version, and planning fingerprint are visible"},
+        {"from": "route_proposed", "to": "confirmed", "risk": "W3", "guard": "Joe or Dell confirms exact proposal version; no stale, Unknown, unlocated, approximate, or infeasible stop is included; no optimal or Live claim lacks evidence"},
+        {"from": ["route_proposed", "confirmed"], "to": "invalidated", "risk": "W1", "guard": "material appointment, availability, location, freshness, provider evidence, or route-input change is detected and prior confirmation is visibly revoked"},
+        {"from": "invalidated", "to": "route_proposed", "risk": "W2", "guard": "proposal rebuilt from fresh exact inputs with new version and fingerprint"},
+        {"from": "confirmed", "to": "handed_to_tour", "risk": "W3", "guard": "governed Tour service accepts exact version idempotently and fresh read-back preserves locked/flexible stops and source links"},
+        {"from": ["draft", "route_proposed", "invalidated"], "to": "discarded", "risk": "W1", "guard": "reason recorded; canonical business records remain unchanged"},
+        {"from": ["draft", "route_proposed", "confirmed", "invalidated"], "to": "failed", "risk": "W1", "guard": "provider or validation failure and safe retry/degraded path recorded"}
+      ],
+      "refused": [
+        {"from": "draft", "to": "confirmed", "reason": "route proposal and visible assumptions required"},
+        {"from": "route_proposed", "to": "confirmed", "reason": "stale, Unknown, unlocated, approximate, or infeasible included stop"},
+        {"from": "confirmed", "to": "handed_to_tour", "reason": "material input changed or exact Tour handoff/read-back unavailable"},
+        {"from": "*", "to": "calendar_updated", "reason": "calendar, navigation, messaging, and appointment effects require separate governed actions"}
+      ],
+      "invariants": ["route proposal is not canonical business truth", "a multi-stop route proposal contains at least two eligible exact/current stops", "ineligible stops remain visible with reasons while eligible stops may still form a proposal", "target-area and city-centroid locations never become waypoints", "locked appointments are never displaced by flexible stops"]
+    },
     "notification": {
       "initial": "unresolved",
       "terminal": ["resolved", "expired", "superseded"],

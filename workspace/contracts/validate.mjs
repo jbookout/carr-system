@@ -72,18 +72,18 @@ assert.equal(councilLaunch.frozen_source_snapshot.content_commit, "acd33fe4a5e7b
 assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10", "council format is durably decided");
 assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"], "three distinct council seats");
 assert.equal(councilLaunch.meeting_protocol.length, 8, "eight-stage meeting protocol");
-assert.deepEqual(councilLaunch.forks_to_disposition.map(item => item.id), ["PROP-001", "PROP-002", "PROP-003", "PROP-004", "PROP-005", "PROP-006", "PROP-007", "PROP-008", "PROP-009", "PROP-010"], "ten ordered council forks");
+assert.deepEqual(councilLaunch.forks_to_disposition.map(item => item.id), ["PROP-001", "PROP-002", "PROP-003", "PROP-004", "PROP-005", "PROP-006", "PROP-007", "PROP-008", "PROP-009", "PROP-010", "PROP-011"], "eleven ordered council forks");
 assert.equal(councilLaunch.uniform_review_rubric.dimensions.filter(item => item.critical).length, 4, "critical objections cannot be averaged away");
 assert.match(councilLaunch.authority.construction_gate, /Joe must approve.*durably/i, "council remains advisory");
 assert.match(councilLaunch.copy_paste_prompts.independent_reviewer.join(" "), /Do not ask for or read another member's review.*uniform_independent_review_form/i, "independent prompt is sealed and uniform");
 assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"], "full roadmap review follows dependency order");
-assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/drive-free-system-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"], "cross-cutting proposals follow identity, data boundary, platform independence, then runtime");
+assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/drive-free-system-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json", "phase0/workspace-market-map-council-candidate.v1.json"], "cross-cutting proposals include market-map amendment after system boundaries");
 assert.match(councilLaunch.progressive_disclosure_review_order.anti_anchoring_rules.join(" "), /No score.*pass 0.*No reviewer may skip.*Hermes and Portal are evaluated after naming, workspace isolation, and Drive independence/i, "review order prevents anchoring and runtime-defined authority");
 assert.match(councilLaunch.single_session_council_orchestration.controlling_mode, /One human-visible Claude Fable 5 session.*GPT-5\.6 Sol.*SuperGrok 4\.5.*fresh isolated CLI/i, "one-session council uses isolated CLI reviewer contexts");
 assert.match(councilLaunch.single_session_council_orchestration.execution_order.map(item => item.action).join(" "), /complete the Claude Fable 5.*before.*reading either external review.*Freeze the Fable review.*separate fresh CLI contexts.*Cross-disclose/i, "Fable review is sealed before joint deliberation");
 assert.match(councilLaunch.single_session_council_orchestration.stop_condition, /cannot prove fresh-context isolation.*stop and restart/i, "one-session orchestration fails closed");
 assert.deepEqual(councilLedger.allowed_dispositions, ["accept", "modify", "defer_with_named_reopen_trigger", "reject"], "closed disposition vocabulary");
-assert.equal(councilLedger.fork_dispositions.length, 10, "ledger covers every fork");
+assert.equal(councilLedger.fork_dispositions.length, 11, "ledger covers every fork");
 assert.ok(councilLedger.fork_dispositions.every(item => item.disposition === null && item.dissent.length === 0), "ledger is an honest blank template");
 assert.ok(hermesCandidate.stop_conditions.some(item => /cross-brain.*cross-tenant.*capability/i.test(item)), "identity stop condition");
 assert.equal(hermesFixture.synthetic, true, "Hermes fixture is synthetic");
@@ -279,6 +279,7 @@ const stateKeys = {
   "deal-room": { normal: ["freshness", "record", "parking_reasons"], partial: ["freshness", "message", "record"], conflict: ["freshness", "message", "conflict"] },
   "doc-request": { normal: ["freshness", "context", "answer", "request"] },
   "lead-board": { normal: ["freshness", "items"] },
+  "market-map": { normal: ["freshness", "market"] },
   marketing: { normal: ["freshness", "items"] },
   more: { normal: ["freshness", "destinations", "registry_only"] },
   notifications: { normal: ["freshness", "items"] },

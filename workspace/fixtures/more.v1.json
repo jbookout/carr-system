@@ -14,6 +14,11 @@
       },
       "destinations": [
         {
+          "route": "market-map",
+          "title": "Market Map & Trip Planner",
+          "text": "See the full supported market, compare work visually, and prepare a multi-stop day-trip proposal."
+        },
+        {
           "route": "tour",
           "title": "Tour Mode",
           "text": "Prepare and run the synthetic locked-appointment, offline, and post-tour journey."

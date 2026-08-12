@@ -14,6 +14,7 @@ test("global shell has the settled modules and exactly one Call Mode control", a
   assert.match(app, /Calls/);
   assert.match(app, /Marketing/);
   assert.match(app, /More/);
+  assert.match(app, /Market Map & Trip Planner/);
   assert.doesNotMatch(`${html}\n${app}`, /Start agenda/i);
 });
 
@@ -55,6 +56,52 @@ test("tour journey covers route parity, capture, offline exact resume, conflict,
   for (const text of ["Map/list parity", "Pencil-equivalent note", "Add synthetic photo", "Exact resume", "No last-write-wins", "Post-tour proposal"]) assert.match(app, new RegExp(text));
 });
 
+test("market map is an interactive visual planning surface with map/list parity", async () => {
+  const [app, css, fixtureText] = await Promise.all([read("public/js/app.js"), read("public/css/app.css"), read("fixtures/market-map.v1.json")]);
+  const market = JSON.parse(fixtureText).states.normal.market;
+  const mapped = market.records.flatMap(record => record.locations).filter(location => location.position);
+  assert.ok(mapped.length > 4);
+  const implementation = `${app}\n${fixtureText}`;
+  for (const text of ["Prospects", "Active clients", "Projects in process", "Visits / appointments", "All layers", "unlocated / needs location", "Map/list parity", "Location role", "Open Lead Board source", "Open Deal Room source"]) assert.match(implementation, new RegExp(text));
+  assert.match(app, /class="market-marker/);
+  assert.match(app, /aria-label="\$\{escape\(record\.record_type_label\)\}/);
+  assert.match(app, /data-market-filter/);
+  assert.match(app, /data-market-location/);
+  assert.match(app, /data-market-stop/);
+  assert.match(app, /data-market-preset/);
+  assert.match(app, /data-market-list-location/);
+  assert.match(app, /data-market-row/);
+  assert.match(app, /CSS\.escape/);
+  assert.match(css, /\.market-visual-grid/);
+  assert.match(css, /\.market-marker/);
+  assert.match(css, /body\.color-assist \.market-marker/);
+  for (const truth of ["Mixed / Partial", "current records", "stale records", "Unknown records", "Planning horizon", "Whole-market view refused in Sterile mode", "dense-point clustering and pan/zoom are not simulated", "keyboard-focusable 48-pixel control"]) assert.match(app, new RegExp(truth));
+  for (const insight of ["Travel opportunity", "explainable cross-layer match", "Exact source rows", "No opaque score"]) assert.match(implementation, new RegExp(insight));
+  assert.match(app, /every\(layer => model\.marketFilters\[layer\]\)/);
+});
+
+test("trip planner preserves locked appointments and does not overclaim routing", async () => {
+  const [app, fixtureText] = await Promise.all([read("public/js/app.js"), read("fixtures/market-map.v1.json")]);
+  const market = JSON.parse(fixtureText).states.normal.market;
+  assert.ok(market.visit_appointments.some(item => item.locked));
+  for (const action of ["prepare-market-trip", "confirm-market-trip", "edit-market-trip"]) assert.match(app, new RegExp(action));
+  for (const boundary of ["not a live or optimal route", "no live traffic", "Locked schedule anchors", "sequence pending verified travel estimates", "preserves locked appointments"]) assert.match(app, new RegExp(boundary, "i"));
+  assert.match(app, /Planning refused/);
+  assert.match(app, /stale, Unknown, or unmapped/);
+  assert.match(app, /omitted because/);
+  assert.match(app, /!candidate\?\.location\.trip_eligible/);
+  assert.match(app, /candidate\?\.location\.trip_eligibility_reason/);
+  for (const input of ["trip-start", "trip-end", "trip-dwell", "trip-buffer"]) assert.match(app, new RegExp(input));
+  for (const evidence of ["provider", "method", "input_as_of", "skipped_stops", "live_traffic", "optimality_claim"]) assert.match(app, new RegExp(evidence));
+  for (const canonical of ["map_item_id", "business_workspace_id", "record_type", "record_id", "location_source", "location_projection_version", "location_precision", "redaction_profile"]) assert.match(fixtureText, new RegExp(canonical));
+  for (const filter of ["data-market-control=\\\"scope", "data-market-control=\\\"horizon", "data-market-control=\\\"freshness", "data-market-control=\\\"changed"]) assert.match(app, new RegExp(filter));
+  assert.match(app, /model\.marketSelectedLocationIds = \[\]/);
+  assert.match(app, /model\.marketDetailLocationId = null/);
+  assert.match(app, /Alternative route comparison, route version, and planning fingerprint are future construction gates/);
+  assert.match(app, /Open separate Tour Mode for downstream execution/);
+  assert.match(app, /Tour Mode is separate/);
+});
+
 test("prototype has no mutation transport or external-effect button", async () => {
   const [html, app, client] = await Promise.all([read("public/index.html"), read("public/js/app.js"), read("public/js/client.js")]);
   assert.doesNotMatch(`${app}\n${client}`, /method:\s*["'](?:POST|PUT|PATCH|DELETE)["']/i);
@@ -93,7 +140,7 @@ test("local server is loopback-only and path traversal guarded", async () => {
 });
 
 test("advertised root and its assets resolve while internal workspace files remain unreachable", async () => {
-  for (const path of ["/", "/index.html", "/css/app.css", "/js/app.js", "/js/client.js", "/fixtures/tour.v1.json"]) {
+  for (const path of ["/", "/index.html", "/css/app.css", "/js/app.js", "/js/client.js", "/fixtures/market-map.v1.json", "/fixtures/tour.v1.json"]) {
     const resolved = resolvePrototypePath(path);
     assert.ok(resolved, path);
     await assert.doesNotReject(() => readFile(resolved));

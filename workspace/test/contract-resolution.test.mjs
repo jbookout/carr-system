@@ -29,6 +29,7 @@ test("all fixture twins conform to the finalized exact-key contract", async () =
     "deal-room": ["freshness", "record", "parking_reasons"],
     "doc-request": ["freshness", "context", "answer", "request"],
     "lead-board": ["freshness", "items"],
+    "market-map": ["freshness", "market"],
     marketing: ["freshness", "items"],
     more: ["freshness", "destinations", "registry_only"],
     notifications: ["freshness", "items"],
@@ -89,7 +90,7 @@ test("every test ID resolves to either an executed check or an explicit future g
 });
 
 test("every registered contract test executes against the prototype and planning evidence", async () => {
-  const [fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial, sponsorIdentity, api, authority] = await Promise.all([
+  const [fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial, sponsorIdentity, api, authority, marketMapContract] = await Promise.all([
     loadFixtures(),
     readText("public/index.html"),
     readText("public/css/app.css"),
@@ -108,9 +109,10 @@ test("every registered contract test executes against the prototype and planning
     readJson("test/fixtures/tenant-boundary-denials.v1.json"),
     readJson("test/fixtures/sponsor-runtime-identity.v1.json"),
     readJson("contracts/business-entity-api-contracts.v1.json"),
-    readJson("contracts/authority-risk-matrix.v1.json")
+    readJson("contracts/authority-risk-matrix.v1.json"),
+    readJson("contracts/market-map-route-planning.v1.json")
   ]);
-  const context = { fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial, sponsorIdentity, api, authority };
+  const context = { fixtures, html, css, app, client, server, environment, manifest, council, trace, acceptance, governance, threat, events, machines, tenantDenial, sponsorIdentity, api, authority, marketMapContract };
   for (const [id, check] of testRegistry) assert.doesNotThrow(() => check(context), id);
 });
 
@@ -318,9 +320,9 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.match(councilLaunch.meeting_protocol[1].name, /sealed independent reviews/i);
   assert.match(councilLaunch.facilitation_rules.join(" "), /not a fourth vote.*majority does not override.*Dissent is preserved/i);
   assert.equal(councilLaunch.explicit_non_goals.some(item => /onboarding CARR's other 150-plus agents/i.test(item)), true);
-  assert.equal(councilLaunch.known_open_evidence.some(item => /five uncoached Workspace journeys are not performed/i.test(item)), true);
+  assert.equal(councilLaunch.known_open_evidence.some(item => /six uncoached Workspace journeys are not performed/i.test(item)), true);
   assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"]);
-  assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/drive-free-system-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"]);
+  assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/drive-free-system-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json", "phase0/workspace-market-map-council-candidate.v1.json"]);
   assert.match(councilLaunch.copy_paste_prompts.independent_reviewer.join(" "), /Follow progressive_disclosure_review_order exactly.*do not score.*Baseline, Workspace, Control Room, and Mature End State/i);
   assert.match(councilLaunch.copy_paste_prompts.single_session_council_chair.join(" "), /one-session council chair.*freeze your own.*separate fresh CLI contexts.*Do not reveal any review.*all three validate/i);
   assert.equal(councilLaunch.single_session_council_orchestration.execution_order.length, 7);

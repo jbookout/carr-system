@@ -7,6 +7,7 @@ const surfaces = {
   "call-review": { label: "Calls", short: "Calls", icon: "◉", fixture: "call-review", description: "Structured facts, decisions, deliverables, drafts, and agent work history—not a transcript library." },
   "marketing": { label: "Marketing", short: "Marketing", icon: "◇", fixture: "marketing", description: "Human-reviewed content and performance decisions." },
   "more": { label: "More", short: "More", icon: "•••", fixture: "more", description: "Tours, notifications, people, documents, activity, and settings." },
+  "market-map": { label: "Market Map & Trip Planner", short: "Map", icon: "⌖", fixture: "market-map", description: "See prospects, active clients, and in-process projects across the supported market, then prepare a governed day-trip proposal." },
   "doc-request": { label: "Doc · Improvement request", short: "Doc", icon: "D", fixture: "doc-request", description: "Conversation becomes a governed request, never a direct production change." },
   "tour": { label: "Tour Mode", short: "Tour", icon: "⌖", fixture: "tour", description: "Locked appointments, ordered route, offline pack, notes, and post-tour review." },
   "notifications": { label: "Notification Center", short: "Notices", icon: "◎", fixture: "notifications", description: "The authoritative inbox for unresolved human decisions and failures." }
@@ -28,6 +29,17 @@ const model = {
   callSession: null,
   engineeringRequest: null,
   tourSession: null,
+  marketFilters: { prospect: true, active_client: true, project_in_process: true, active_project: true, visits: true },
+  marketSelectedLocationIds: [],
+  marketDetailLocationId: null,
+  marketTrip: null,
+  marketTripConfirmed: false,
+  marketPlanError: "",
+  marketTripInputs: { start: "Mobile office demo", end: "Mobile office demo", dwell_minutes: 45, buffer_minutes: 20 },
+  marketScope: "all",
+  marketHorizonDays: 30,
+  marketFreshness: "all",
+  marketChangedDays: 30,
   docOpen: false,
   docContextIncluded: true,
   docContextResult: "Page context is included. Remove it at any time.",
@@ -52,7 +64,7 @@ function formatState(state) {
 function navMarkup(routes) {
   return routes.map(route => {
     const item = surfaces[route];
-    return `<a class="nav-link" href="#${route}" data-route="${route}" ${route === model.route || (route === "more" && ["tour", "notifications", "doc-request"].includes(model.route)) ? 'aria-current="page"' : ""}><span class="nav-icon" aria-hidden="true">${item.icon}</span><span class="nav-label">${item.short}</span></a>`;
+    return `<a class="nav-link" href="#${route}" data-route="${route}" ${route === model.route || (route === "more" && ["market-map", "tour", "notifications", "doc-request"].includes(model.route)) ? 'aria-current="page"' : ""}><span class="nav-icon" aria-hidden="true">${item.icon}</span><span class="nav-label">${item.short}</span></a>`;
   }).join("");
 }
 
@@ -161,6 +173,94 @@ function renderTour(data) {
   return `${journeySteps(["Confirm route", "Download and verify pack", "Capture note/photo", "Offline exact resume/conflict", "Review proposals", "Finish"], stageMap[tour.stage])}<section class="card"><h2>${escape(tour.name)}</h2><p>Offline pack: ${escape(tour.offline_pack.status)} and ${tour.offline_pack.verified ? "verified" : "unverified"} · includes ${escape(tour.offline_pack.includes.join(", "))}.</p>${controls}</section><section style="margin-top:20px"><h2>Map/list parity</h2><p class="source-line">Synthetic map markers and the equivalent ordered itinerary share the same marker, stop ID, and order.</p><div class="synthetic-map" role="img" aria-label="Synthetic map showing the same three numbered stops as the itinerary"><span class="map-route" aria-hidden="true"></span>${mapMarkers}</div><div class="grid">${stops}</div></section>`;
 }
 
+function marketLocations(records) {
+  return records.flatMap(record => record.locations.map(location => ({ record, location })));
+}
+
+function marketKindCode(kind) {
+  return { prospect: "P", active_client: "C", project_in_process: "J", active_project: "A", visits: "V" }[kind] ?? "?";
+}
+
+function marketLocationVisible(record, location) {
+  return location.location_role === "appointment_or_visit_stop" ? model.marketFilters.visits : model.marketFilters[record.record_type];
+}
+
+function marketAppointment(market, location) {
+  return market.visit_appointments.find(item => item.map_item_id === location.map_item_id) ?? { locked: false, label: "No appointment", sort_minutes: null };
+}
+
+function renderMarketMap(data) {
+  const market = data.market;
+  const allLocations = marketLocations(market.records);
+  const filteredRecords = market.records.filter(record =>
+    (model.marketScope === "all" || record.business_scope === model.marketScope) &&
+    record.planning_day_offset <= model.marketHorizonDays &&
+    record.changed_days_ago <= model.marketChangedDays &&
+    (model.marketFreshness === "all" || record.freshness.status === model.marketFreshness)
+  );
+  const visibleLocations = marketLocations(filteredRecords).filter(({ record, location }) => marketLocationVisible(record, location));
+  const visibleRecords = market.records.filter(record => visibleLocations.some(item => item.record.record_id === record.record_id));
+  const mappedLocations = visibleLocations.filter(item => item.location.position);
+  const unmappedLocations = visibleLocations.filter(item => !item.location.position);
+  const currentRecords = visibleRecords.filter(record => record.freshness.status === "fresh");
+  const staleRecords = visibleRecords.filter(record => record.freshness.status === "stale");
+  const unknownRecords = visibleRecords.filter(record => record.freshness.status === "unknown");
+  const mixedTruth = staleRecords.length || unknownRecords.length || unmappedLocations.length;
+  if (!model.marketDetailLocationId) model.marketDetailLocationId = mappedLocations[0]?.location.map_item_id ?? unmappedLocations[0]?.location.map_item_id ?? null;
+  const detail = allLocations.find(item => item.location.map_item_id === model.marketDetailLocationId) ?? null;
+  const selected = model.marketSelectedLocationIds.map(id => allLocations.find(item => item.location.map_item_id === id)).filter(Boolean);
+  const selectedHasUnreadyEvidence = selected.some(item => ["stale", "unknown"].includes(item.location.freshness) || !item.location.position);
+  const excludedSelected = selected.filter(item => ["stale", "unknown"].includes(item.location.freshness) || !item.location.position);
+
+  const filters = [
+    ["prospect", "Prospects"],
+    ["active_client", "Active clients"],
+    ["project_in_process", "Projects in process"],
+    ["active_project", "Active projects"],
+    ["visits", "Visits / appointments"]
+  ].map(([kind, label]) => `<label class="market-filter"><input type="checkbox" data-market-filter="${kind}" ${model.marketFilters[kind] ? "checked" : ""}> <span class="legend-code kind-${kind}" aria-hidden="true">${marketKindCode(kind)}</span>${label}</label>`).join("");
+  const planningControls = `<fieldset class="market-filterbar"><legend>Planning controls</legend><label>Scope<select data-market-control="scope"><option value="all" ${model.marketScope === "all" ? "selected" : ""}>Team Book + National Accounts</option><option value="team_book" ${model.marketScope === "team_book" ? "selected" : ""}>Team Book</option><option value="national_accounts" ${model.marketScope === "national_accounts" ? "selected" : ""}>National Accounts</option></select></label><label>Horizon<select data-market-control="horizon"><option value="0" ${model.marketHorizonDays === 0 ? "selected" : ""}>Today</option><option value="7" ${model.marketHorizonDays === 7 ? "selected" : ""}>7 days</option><option value="30" ${model.marketHorizonDays === 30 ? "selected" : ""}>30 days</option></select></label><label>Freshness<select data-market-control="freshness"><option value="all">All truth states</option><option value="fresh" ${model.marketFreshness === "fresh" ? "selected" : ""}>Fresh only</option><option value="stale" ${model.marketFreshness === "stale" ? "selected" : ""}>Stale only</option><option value="unknown" ${model.marketFreshness === "unknown" ? "selected" : ""}>Unknown only</option></select></label><label>Changed since<select data-market-control="changed"><option value="0" ${model.marketChangedDays === 0 ? "selected" : ""}>Today</option><option value="7" ${model.marketChangedDays === 7 ? "selected" : ""}>7 days</option><option value="30" ${model.marketChangedDays === 30 ? "selected" : ""}>30 days</option></select></label></fieldset>`;
+
+  const presets = [["all", "All layers"], ["prospect", "Prospects"], ["active_client", "Clients"], ["project_in_process", "Projects in process"], ["active_project", "Active projects"], ["visits", "Visits"]]
+    .map(([preset, label]) => `<button class="button ghost market-preset" type="button" data-market-preset="${preset}">${label}</button>`).join("");
+  const visibleMapItemIds = new Set(visibleLocations.map(item => item.location.map_item_id));
+  const crossLayerReady = ["prospect", "active_client", "project_in_process", "active_project", "visits"].every(layer => model.marketFilters[layer]);
+  const visibleOpportunities = market.travel_opportunities.filter(opportunity => opportunity.source_rows.every(row => visibleMapItemIds.has(row.location_id)));
+  const travelInsight = crossLayerReady && visibleOpportunities.length ? visibleOpportunities.map(opportunity => `<section class="card travel-opportunity"><div><p class="eyebrow">Travel opportunity · explainable cross-layer match</p><h2>${escape(opportunity.area)}</h2><p><strong>${escape(opportunity.label)}</strong></p><p>${escape(opportunity.rationale)}</p><p class="source-line">${escape(opportunity.score_note)}</p></div><div><h3>Exact source rows</h3><ul>${opportunity.source_rows.map(row => `<li><button class="location-detail" type="button" data-market-list-location="${escape(row.location_id)}"><strong>${escape(row.layer)}</strong><span>${escape(row.label)}</span><small>${escape(row.source)} · ${escape(row.record_id)} · ${escape(row.location_id)}</small></button></li>`).join("")}</ul></div></section>`).join("") : '<p class="source-line">Travel opportunity unavailable: every cited source row must remain visible under the current layer, scope, horizon, freshness, and Changed Since filters.</p>';
+
+  const markers = mappedLocations.map(({ record, location }) => {
+    const selectedClass = model.marketSelectedLocationIds.includes(location.map_item_id) ? " selected" : "";
+    const detailClass = model.marketDetailLocationId === location.map_item_id ? " active-detail" : "";
+    const roleLabel = formatState(location.location_role);
+    return `<button class="market-marker kind-${location.location_role === "appointment_or_visit_stop" ? "visits" : record.record_type}${selectedClass}${detailClass}" type="button" data-market-location="${escape(location.map_item_id)}" style="left:${location.position.x}%;top:${location.position.y}%" aria-current="${model.marketDetailLocationId === location.map_item_id ? "location" : "false"}" aria-label="${escape(record.record_type_label)}: ${escape(record.display_label)}. ${escape(roleLabel)} at ${escape(location.display_label)}. Open details."><span aria-hidden="true">${location.location_role === "appointment_or_visit_stop" ? "V" : marketKindCode(record.record_type)}</span><small aria-hidden="true">${escape(roleLabel.split(" ")[0])}</small></button>`;
+  }).join("");
+
+  const list = visibleRecords.map(record => {
+    const locations = record.locations.filter(location => marketLocationVisible(record, location)).map(location => {
+      const selectedStop = model.marketSelectedLocationIds.includes(location.map_item_id);
+      const detailSelected = model.marketDetailLocationId === location.map_item_id;
+      return `<li class="market-location-row ${detailSelected ? "active-detail" : ""}" data-market-row="${escape(location.map_item_id)}" tabindex="-1"><button class="location-detail" type="button" data-market-list-location="${escape(location.map_item_id)}" aria-current="${detailSelected ? "location" : "false"}"><strong>${escape(formatState(location.location_role))}</strong><span>${escape(location.display_label)}</span><small>${location.position ? `Mapped · ${escape(formatState(location.location_precision))}` : "Unmapped · needs location"} · ${escape(formatState(location.freshness))}${location.observed_at ? ` at ${escape(location.observed_at)}` : " · as-of Unknown"}</small><small>Source: ${escape(location.location_source.type)} · ${escape(location.location_source.id)} · v${escape(location.location_source.version)} · projection ${location.location_projection_version === null ? "Unknown" : `v${escape(location.location_projection_version)}`} · ${escape(location.redaction_profile)}</small><small>Trip ${location.trip_eligible ? "eligible" : "ineligible"}: ${escape(location.trip_eligibility_reason)}</small></button><a class="button ghost" href="${escape(location.deep_link)}">Open source</a><button class="button ${selectedStop ? "secondary" : "ghost"}" type="button" data-market-stop="${escape(location.map_item_id)}" aria-pressed="${selectedStop}" ${selectedStop || location.trip_eligible ? "" : 'aria-describedby="trip-ineligible-note"'}>${selectedStop ? "Remove visit stop" : "Add visit stop"}</button></li>`;
+    }).join("");
+    return `<article class="card market-record" data-kind="${escape(record.record_type)}"><header><span class="tag kind-label">${marketKindCode(record.record_type)} · ${escape(record.record_type_label)}</span><span class="freshness" data-status="${escape(record.freshness.status)}">${escape(formatState(record.freshness.status))}</span></header><h3>${escape(record.display_label)}</h3><p>${escape(record.summary)}</p><p class="meta">${escape(record.market)} · Owner: ${escape(record.owner)}</p><ul class="market-locations">${locations}</ul><button class="button ghost" type="button" data-route="${escape(record.source.surface)}">${escape(record.source.label)}</button></article>`;
+  }).join("");
+
+  const detailAppointment = detail ? marketAppointment(market, detail.location) : null;
+  const detailPanel = detail ? `<aside class="card market-detail" aria-live="polite"><p class="eyebrow">Selected map detail</p><span class="tag">${marketKindCode(detail.record.record_type)} · ${escape(detail.record.record_type_label)}</span><h2>${escape(detail.record.display_label)}</h2><dl><dt>Location role</dt><dd>${escape(formatState(detail.location.location_role))}</dd><dt>Location</dt><dd>${escape(detail.location.display_label)}</dd><dt>Appointment</dt><dd>${escape(detailAppointment.label)}${detailAppointment.locked ? " · cannot be moved by planner" : ""}</dd><dt>Record identity</dt><dd>${escape(detail.location.record_type)} · ${escape(detail.location.record_id)} · v${escape(detail.location.record_version)}</dd><dt>Location source</dt><dd>${escape(detail.location.location_source.type)} · ${escape(detail.location.location_source.id)} · v${escape(detail.location.location_source.version)}</dd><dt>Projection</dt><dd>${detail.location.location_projection_version === null ? "Unknown" : `v${escape(detail.location.location_projection_version)}`} · ${escape(formatState(detail.location.location_precision))} · ${escape(detail.location.redaction_profile)}</dd><dt>Location freshness</dt><dd>${escape(formatState(detail.location.freshness))}${detail.location.observed_at ? ` · ${escape(detail.location.observed_at)}` : " · as-of Unknown"}</dd></dl><p><strong>Next:</strong> ${escape(detail.record.next_step)}</p><a class="button ghost" href="${escape(detail.location.deep_link)}">Open exact owning record</a></aside>` : `<aside class="card market-detail"><h2>No visible location</h2><p>Change the filters or resolve an unmapped record.</p></aside>`;
+
+  let planner = `<p>Select at least two eligible location markers or list rows to prepare one day-trip proposal.</p>`;
+  if (model.marketPlanError) planner += `<div class="notice error" role="alert"><strong>Visit stop not added</strong><p>${escape(model.marketPlanError)}</p></div>`;
+  if (selected.length) planner = `<ol class="selected-stops">${selected.map(({ record, location }, index) => `<li><span class="route-order">${index + 1}</span><div><strong>${escape(record.display_label)}</strong><span>${escape(formatState(location.location_role))} · ${escape(location.display_label)}</span><small>${escape(marketAppointment(market, location).label)} · ${escape(formatState(location.freshness))}</small></div></li>`).join("")}</ol><p class="source-line">Selection order is not a routing claim. Locked appointments remain fixed anchors.</p>`;
+  const canPrepare = selected.length >= 2 && !selectedHasUnreadyEvidence && selected.every(item => item.location.trip_eligible);
+  if (!model.marketTrip) planner += `${selectedHasUnreadyEvidence ? `<div class="notice error" role="alert"><strong>Planning refused</strong><p>Resolve every selected stale, Unknown, or unmapped location before preparing travel.</p><ul>${excludedSelected.map(item => `<li>${escape(item.record.display_label)} · ${escape(item.location.display_label)} · omitted because ${!item.location.position ? "location is unmapped" : `location is ${item.location.freshness}`}</li>`).join("")}</ul></div>` : ""}<div class="trip-inputs"><label>Start<input id="trip-start" value="${escape(model.marketTripInputs.start)}"></label><label>End<input id="trip-end" value="${escape(model.marketTripInputs.end)}"></label><label>Visit duration (minutes)<input id="trip-dwell" type="number" min="15" step="5" value="${escape(model.marketTripInputs.dwell_minutes)}"></label><label>Travel buffer (minutes)<input id="trip-buffer" type="number" min="0" step="5" value="${escape(model.marketTripInputs.buffer_minutes)}"></label></div><button class="button secondary" type="button" data-action="prepare-market-trip" ${canPrepare ? "" : "disabled"}>Prepare multi-stop day-trip proposal</button>`;
+  if (model.marketTrip) {
+    const locked = model.marketTrip.stops.filter(item => marketAppointment(market, item.location).locked).sort((a, b) => marketAppointment(market, a.location).sort_minutes - marketAppointment(market, b.location).sort_minutes);
+    const flexible = model.marketTrip.stops.filter(item => !marketAppointment(market, item.location).locked);
+    planner = `<div class="notice"><strong>${model.marketTripConfirmed ? "Trip proposal confirmed" : "Trip proposal ready for human review"}</strong><p>This is a proposal, not a live or optimal route. It uses no live traffic or verified travel-time service.</p></div><dl><dt>Start</dt><dd>${escape(model.marketTrip.inputs.start)}</dd><dt>End</dt><dd>${escape(model.marketTrip.inputs.end)}</dd><dt>Default visit duration</dt><dd>${escape(model.marketTrip.inputs.dwell_minutes)} minutes</dd><dt>Travel buffer</dt><dd>${escape(model.marketTrip.inputs.buffer_minutes)} minutes</dd><dt>Route evidence</dt><dd>Provider: ${escape(model.marketTrip.provider)} · method: ${escape(model.marketTrip.method)} · inputs as of ${escape(model.marketTrip.input_as_of)}</dd></dl><h3>Locked schedule anchors</h3>${locked.length ? `<ol class="trip-schedule">${locked.map(item => `<li><strong>${escape(marketAppointment(market, item.location).label)}</strong> · ${escape(item.record.display_label)} · ${escape(item.location.display_label)}</li>`).join("")}</ol>` : "<p>No locked appointments selected.</p>"}<h3>Flexible visit stops</h3>${flexible.length ? `<ul class="detail-list">${flexible.map(item => `<li>${escape(item.record.display_label)} · ${escape(item.location.display_label)} · sequence pending verified travel estimates</li>`).join("")}</ul>` : "<p>No flexible stops selected.</p>"}<h3>Omitted or infeasible stops</h3><ul>${model.marketTrip.skipped_stops.map(item => `<li>${escape(item.map_item_id)} · ${escape(item.reason)}</li>`).join("")}</ul><p class="source-line">Alternative route comparison, route version, and planning fingerprint are future construction gates. This synthetic prototype does not claim or fabricate them.</p><p class="boundary-note">The proposal preserves locked appointments. A routing provider or human must verify drive time, opening hours, and feasibility before departure.</p>${model.marketTripConfirmed ? '<button class="button secondary" type="button" data-route="tour">Open separate Tour Mode for downstream execution</button>' : '<button class="button secondary" type="button" data-action="confirm-market-trip">Confirm this planning proposal</button> <button class="button ghost" type="button" data-action="edit-market-trip">Edit selected stops</button>'}`;
+  }
+
+  return `${journeySteps(["See the whole market", "Filter and inspect", "Select visit stops", "Review proposal", "Confirm for Tour Mode"], model.marketTripConfirmed ? 4 : model.marketTrip ? 3 : selected.length ? 2 : 0)}${document.body.classList.contains("sterile") ? '<div class="notice error" role="alert"><strong>Whole-market view refused in Sterile mode</strong><p>This internal planning surface may expose prospect, client, appointment, and travel-pattern context. Exit Sterile mode to use it.</p></div>' : `<section class="market-summary card"><div><p class="eyebrow">Supported market · ${mixedTruth ? "Mixed / Partial" : "Current"}</p><h2>${escape(market.name)}</h2><p>${escape(market.coverage_note)}</p><p><strong>Planning horizon:</strong> ${escape(market.planning_horizon)}</p><p class="source-line">Source: ${escape(market.source)} · projection v${escape(market.source_version)}</p></div><div class="market-counts" aria-label="Visible map coverage"><span><strong>${currentRecords.length}</strong> current records</span><span><strong>${staleRecords.length}</strong> stale records</span><span><strong>${unknownRecords.length}</strong> Unknown records</span><span><strong>${mappedLocations.length}</strong> mapped markers</span><span class="unmapped-count"><strong>${unmappedLocations.length}</strong> unlocated / needs location</span></div></section><div class="market-presets" aria-label="Layer presets">${presets}</div><fieldset class="market-filterbar"><legend>Business record layers</legend>${filters}</fieldset>${planningControls}${travelInsight}<div class="market-visual-grid"><section><div class="market-map" aria-label="Interactive synthetic supported-market map. Use Tab to reach every marker."><span class="market-water" aria-hidden="true"></span><span class="market-corridor corridor-one" aria-hidden="true"></span><span class="market-corridor corridor-two" aria-hidden="true"></span><span class="market-label label-mobile" aria-hidden="true">Mobile</span><span class="market-label label-pensacola" aria-hidden="true">Pensacola</span><span class="market-label label-dothan" aria-hidden="true">Dothan</span><span class="market-label label-panama" aria-hidden="true">Panama City</span>${markers}</div><div class="map-legend" aria-label="Map symbol legend"><span><b class="legend-code kind-prospect">P</b> Prospect</span><span><b class="legend-code kind-active_client">C</b> Active client</span><span><b class="legend-code kind-project_in_process">J</b> Project in process</span><span><b class="legend-code kind-active_project">A</b> Active project</span><span><b class="legend-code kind-visits">V</b> Visit / appointment</span><span><b class="legend-lock">▣</b> Locked appointment appears in details</span></div><p class="source-line">Map/list parity: every mapped marker appears in the list with the same map item ID, role, source, and business record. Unmapped locations remain counted and visible below.</p><p class="source-line">Phase 0 limitation: dense-point clustering and pan/zoom are not simulated. Every synthetic marker remains an individual keyboard-focusable 48-pixel control and its synchronized list row remains available.</p></section>${detailPanel}</div><section class="market-workspace"><div><h2>Visible records and sourced locations</h2><p id="trip-ineligible-note" class="source-line">Trip-ineligible locations stay visible for market context; their reason appears on the location row.</p><div class="market-record-list">${list || '<div class="notice">No business record layers selected.</div>'}</div></div><aside class="card trip-planner"><p class="eyebrow">Planning only</p><h2>Day-trip proposal</h2>${planner}</aside></section><p class="boundary-note">Tour Mode is separate. It executes only a confirmed trip with its own offline pack, route confirmation, notes, and review gates.</p>`}`;
+}
+
 function renderLeadBoard(data) {
   return `<div class="grid">${data.items.map(item => `<article class="card"><span class="tag">${escape(item.state)}</span><h2>${escape(item.name)}</h2><p>${escape(item.why)}</p><p class="meta">Owner: ${escape(item.owner)} · Next: ${escape(item.next_action)}</p><footer><button class="button ghost" type="button">Review evidence</button><button class="button" type="button">Log synthetic outcome</button></footer></article>`).join("")}</div><p class="boundary-note">Named lead outreach reminders appear only here. Conversion requires duplicate review and a human confirmation.</p>`;
 }
@@ -185,6 +285,7 @@ function normalContent(surface, data) {
   if (surface === "call-review") return renderCall(data);
   if (surface === "doc-request") return renderDocRequest(data);
   if (surface === "tour") return renderTour(data);
+  if (surface === "market-map") return renderMarketMap(data);
   if (surface === "lead-board") return renderLeadBoard(data);
   if (surface === "marketing") return renderMarketing(data);
   if (surface === "notifications") return renderNotifications(data);
@@ -327,6 +428,36 @@ function handleAction(action, element) {
   } else if (action === "tour-resume" && model.tourSession.stage === "paused" && model.tourSession.sync_state === "Local") model.tourSession.stage = "in_progress";
   else if (action === "finish-tour" && ["in_progress", "paused"].includes(model.tourSession.stage)) model.tourSession.stage = "review_ready";
   else if (action === "complete-tour-review" && model.tourSession.stage === "review_ready" && model.tourSession.review_items.every(item => item.disposition !== "pending")) model.tourSession.stage = "complete";
+  else if (action === "prepare-market-trip") {
+    const fixture = model.fixtureCache.get("market-map");
+    const allLocations = marketLocations(fixture.states.normal.market.records);
+    const stops = model.marketSelectedLocationIds.map(id => allLocations.find(item => item.location.map_item_id === id)).filter(Boolean);
+    const invalid = stops.some(item => !item.location.trip_eligible || ["stale", "unknown"].includes(item.location.freshness) || !item.location.position);
+    if (stops.length >= 2 && !invalid) {
+      model.marketTripInputs = {
+        start: document.querySelector("#trip-start")?.value.trim() || "Unknown start",
+        end: document.querySelector("#trip-end")?.value.trim() || "Unknown end",
+        dwell_minutes: Number(document.querySelector("#trip-dwell")?.value) || 45,
+        buffer_minutes: Number(document.querySelector("#trip-buffer")?.value) || 20
+      };
+      model.marketTrip = {
+        stops,
+        inputs: structuredClone(model.marketTripInputs),
+        provider: fixture.states.normal.market.route_evidence.provider,
+        method: fixture.states.normal.market.route_evidence.method,
+        input_as_of: fixture.states.normal.market.route_evidence.input_as_of,
+        live_traffic: false,
+        optimality_claim: false,
+        skipped_stops: fixture.states.normal.market.route_evidence.skipped_stops
+      };
+      model.marketTripConfirmed = false;
+      model.marketPlanError = "";
+    }
+  } else if (action === "confirm-market-trip" && model.marketTrip) model.marketTripConfirmed = true;
+  else if (action === "edit-market-trip") {
+    model.marketTrip = null;
+    model.marketTripConfirmed = false;
+  }
   render();
 }
 
@@ -346,6 +477,61 @@ function bindActions() {
   main.querySelectorAll("[data-tour-review]").forEach(element => element.addEventListener("click", () => {
     const reviewItem = model.tourSession.review_items.find(item => item.id === element.dataset.tourReview);
     if (reviewItem && model.tourSession.stage === "review_ready") reviewItem.disposition = element.dataset.disposition;
+    render();
+  }));
+  main.querySelectorAll("[data-market-filter]").forEach(element => element.addEventListener("change", () => {
+    model.marketFilters[element.dataset.marketFilter] = element.checked;
+    model.marketSelectedLocationIds = [];
+    model.marketDetailLocationId = null;
+    model.marketTrip = null;
+    model.marketTripConfirmed = false;
+    render();
+  }));
+  main.querySelectorAll("[data-market-control]").forEach(element => element.addEventListener("change", () => {
+    const control = element.dataset.marketControl;
+    if (control === "scope") model.marketScope = element.value;
+    if (control === "horizon") model.marketHorizonDays = Number(element.value);
+    if (control === "freshness") model.marketFreshness = element.value;
+    if (control === "changed") model.marketChangedDays = Number(element.value);
+    model.marketSelectedLocationIds = [];
+    model.marketDetailLocationId = null;
+    model.marketTrip = null;
+    model.marketTripConfirmed = false;
+    render();
+  }));
+  main.querySelectorAll("[data-market-preset]").forEach(element => element.addEventListener("click", () => {
+    const preset = element.dataset.marketPreset;
+    for (const key of Object.keys(model.marketFilters)) model.marketFilters[key] = preset === "all" || key === preset;
+    model.marketSelectedLocationIds = [];
+    model.marketDetailLocationId = null;
+    model.marketTrip = null;
+    model.marketTripConfirmed = false;
+    render();
+  }));
+  main.querySelectorAll("[data-market-location]").forEach(element => element.addEventListener("click", () => {
+    model.marketDetailLocationId = element.dataset.marketLocation;
+    render().then(() => main.querySelector(`[data-market-row="${CSS.escape(model.marketDetailLocationId)}"]`)?.focus());
+  }));
+  main.querySelectorAll("[data-market-list-location]").forEach(element => element.addEventListener("click", () => {
+    model.marketDetailLocationId = element.dataset.marketListLocation;
+    render().then(() => main.querySelector(`[data-market-location="${CSS.escape(model.marketDetailLocationId)}"]`)?.focus());
+  }));
+  main.querySelectorAll("[data-market-stop]").forEach(element => element.addEventListener("click", () => {
+    const id = element.dataset.marketStop;
+    const fixture = model.fixtureCache.get("market-map");
+    const candidate = marketLocations(fixture.states.normal.market.records).find(item => item.location.map_item_id === id);
+    const alreadySelected = model.marketSelectedLocationIds.includes(id);
+    if (!alreadySelected && (!candidate?.location.trip_eligible || !candidate.location.position || ["stale", "unknown"].includes(candidate.location.freshness))) {
+      model.marketPlanError = candidate?.location.trip_eligibility_reason ?? "This location is not eligible for a visit stop.";
+    } else {
+      model.marketSelectedLocationIds = alreadySelected
+        ? model.marketSelectedLocationIds.filter(selectedId => selectedId !== id)
+        : [...model.marketSelectedLocationIds, id];
+      model.marketPlanError = "";
+    }
+    model.marketDetailLocationId = id;
+    model.marketTrip = null;
+    model.marketTripConfirmed = false;
     render();
   }));
 }
@@ -405,6 +591,7 @@ function initialize() {
   document.querySelector("#sterile-mode").addEventListener("click", event => {
     const active = document.body.classList.toggle("sterile");
     event.currentTarget.setAttribute("aria-pressed", String(active));
+    render();
   });
   model.route = surfaces[location.hash.slice(1)] ? location.hash.slice(1) : "command-center";
   render();

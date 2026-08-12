@@ -152,7 +152,7 @@
       "status": "proposed_for_council_not_approved",
       "conflict": "Mature End State snapshot lines 897-900 define G0 as Approved and Ready and G1 as Trustworthy foundation; its Phase 0 action register at lines 1028-1045 mixes preconstruction planning with release-truth construction. Workspace snapshot lines 942-954 treat Phase 0 as the program/readiness gate and Phase 1 as website foundation acceptance.",
       "recommended_ruling": "Reserve Phase 0 for planning, inventories, contracts, runnable synthetic prototypes, council reconciliation, and Joe approval through G0. Rename baseline P0 construction programs as Foundation work packages. Phase 1 begins at G1 with clean release truth, isolated staging, CI, artifact provenance, environment auth, audit correlation, and restore rehearsal before product vertical slices.",
-      "entry_rule": "Phase 1 may start immediately after council recommendation, Joe approval, all Phase 0 machine checks, Joe's five uncoached Workspace journeys and six uncoached Control Room flows, five baseline collection methods ready without invented values, and every material fork either decided or deferred with a named reopen trigger."
+      "entry_rule": "Phase 1 may start immediately after council recommendation, Joe approval, all Phase 0 machine checks, Joe's six uncoached Workspace journeys and six uncoached Control Room flows, five baseline collection methods ready without invented values, and every material fork either decided or deferred with a named reopen trigger."
     },
     {
       "id": "PROP-003",
@@ -166,14 +166,15 @@
       "id": "PROP-004",
       "topic": "canonical_prototype_suite",
       "status": "proposed_for_council_not_approved",
-      "conflict": "Mature End State snapshot lines 745-746 and 1041-1042 describe six synthetic integrated prototypes, Workspace defines five primary journeys, and Control Room snapshot lines 839-841 says six flows while nearby concept lists can be mistaken for seven separate acceptance journeys.",
-      "recommended_ruling": "Make the executable acceptance contracts canonical: five Workspace journeys plus six Control Room flows. Screen concepts are supporting views, not additional human exit journeys.",
+      "conflict": "Mature End State snapshot lines 745-746 and 1041-1042 describe six synthetic integrated prototypes, the pre-map Workspace contract defined five primary journeys, and Control Room snapshot lines 839-841 says six flows while nearby concept lists can be mistaken for seven separate acceptance journeys. PROP-011 introduces a materially distinct whole-market-to-trip routine that cannot be truthfully hidden inside Tour Mode.",
+      "recommended_ruling": "Make the executable acceptance contracts canonical: six Workspace journeys plus six Control Room flows. FLOW-WS-06 is the distinct whole-market visual-planning-to-governed-trip journey; FLOW-WS-05 remains execution in Tour Mode. Screen concepts are supporting views, not additional human exit journeys.",
       "workspace_journeys": [
         "FLOW-WS-01 Command Center to source",
         "FLOW-WS-02 Park and restore Myrick",
         "FLOW-WS-03 Weekly Deal Room call",
         "FLOW-WS-04 Doc context and engineering request",
-        "FLOW-WS-05 Multi-stop Tour Mode"
+        "FLOW-WS-05 Multi-stop Tour Mode",
+        "FLOW-WS-06 Whole-market visual planning to governed day trip"
       ],
       "control_room_flows": [
         "flow-01-honest-health Collector failure is honest",
@@ -243,6 +244,14 @@
       "recommended_ruling": "Approve the Drive-free target defined in phase0/drive-free-system-council-candidate.v1.json. No Drive file may be required to boot, authorize, schedule, operate, observe, recover, or reconstruct the platform. Retire Cowork as an operational dependency. Put deterministic recurring work in repo-defined code on registered Local Edge Nodes; make Hermes the preferred persistent routine-operations and Doc orchestrator after its graduated gates; reserve Claude Code and Codex for engineering. Preserve Google Drive only as an optional user-selected human document destination whose absence cannot degrade core system health.",
       "joe_position": "Hermes is the game-changing cloud orchestration layer that makes the Drive-free, Cowork-independent direction practical.",
       "preserved_boundary": "Drive independence is a property of Neon, GitHub, Cloudflare/KV/R2, typed MCP, and registered Local Edge Nodes, not a dependency on Hermes. A Hermes or Portal outage cannot force Drive fallback, change authority, or impair canonical recovery. Do not silently expand the August 21 doctrine cutoff or delete transitional consumers before inventory, parity, rollback, and disconnected-operation evidence passes."
+    },
+    {
+      "id": "PROP-011",
+      "topic": "whole_market_visual_operations_and_governed_day_trip_planning",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Workspace and Tour Mode define business records, locked appointments, routing, and offline tours, but the canonical Workspace roadmap does not yet define one whole-market spatial operating surface across prospects, active clients, in-process and active projects, and visits. Without a location-role model, records with several sites, unlocated records, geocode vendor terms, and route proposals can become silent omissions or a shadow source of truth.",
+      "recommended_ruling": "Approve phase0/workspace-market-map-council-candidate.v1.json as a formal Workspace roadmap amendment. Create one tenant- and workspace-scoped Market Map and Day-Trip Planner with exact accessible map/list parity; separate entity class from practice/current, target area, candidate, confirmed-site, and visit-stop location roles; report current/stale/Unknown/unlocated component counts; keep vendor-derived geocodes and routes isolated and versioned; preserve locked appointments; exclude ineligible stops with reasons while routing eligible stops; and require Joe or Dell confirmation before the existing Tour lifecycle.",
+      "preserved_boundary": "The map is a read projection and planning workspace, never a canonical record writer. Whole-market access is absent in sterile/client-facing mode. Google remains only the preferred measured routing direction until terms, retention, map compatibility, attribution, portability, price, usage caps, tenant/workspace denial, accessibility, and Joe/Dell uncoached adoption pass. Phase 0 uses synthetic data and grants no production construction or vendor-purchase authority."
     }
   ],
   "canonical_amendments_after_approval": [
@@ -269,7 +278,7 @@
     {
       "order": 5,
       "targets": ["Mature End State weekly plan and Phase 0 action register", "Workspace prototype/acceptance sections", "Control Room BDUF and phase0-acceptance contract"],
-      "change": "Apply PROP-004: enumerate the canonical 5+6 human suite and distinguish journeys from supporting screens."
+      "change": "Apply PROP-004: enumerate the canonical 6+6 human suite and distinguish whole-market planning, Tour execution, and supporting screens."
     },
     {
       "order": 6,
@@ -283,6 +292,11 @@
     },
     {
       "order": 8,
+      "targets": ["Workspace BDUF near the operating objective, route/IA, Tour Mode, entity contracts, privacy/security, acceptance, and timing/cost sections", "Mature End State Workspace capability and cost/operations cross-references", "Control Room dependency, vendor, cost, freshness, and redaction observation requirements", "Production Maturity Baseline geospatial vendor, data retention, Unknown, and release gates"],
+      "change": "Apply PROP-011: add the whole-market visual and governed day-trip capability, domain/location contract, provider terms and pricing gates, exact acceptance journeys, and explicit non-authority boundary without expanding the October milestone."
+    },
+    {
+      "order": 9,
       "targets": ["all amended canonical doctrine records and generated Word artifacts"],
       "change": "Re-render sanctioned artifacts, record new generations and checksums, run cross-roadmap contradiction checks, and obtain Joe's explicit approval before opening Phase 1 construction."
     }
@@ -297,17 +311,18 @@
       "PROP-001 Dell gating",
       "PROP-002 phase numbering and Phase 1 entry",
       "PROP-003 persistent Staging",
-      "PROP-004 canonical 5+6 prototype suite",
+      "PROP-004 canonical 6+6 prototype suite",
       "PROP-005 delegation and commit rule",
       "PROP-006 deferral schema",
       "PROP-007 Hermes Agent and Nous Portal constrained evaluation",
       "PROP-008 independent platform name with CARR as launch tenant",
       "PROP-009 human real estate agent seats and isolated solo-agent or team workspaces",
       "PROP-010 Drive-free system operation, Cowork retirement, and Hermes-enabled orchestration"
+      ,"PROP-011 whole-market visual operations and governed day-trip planning"
     ],
     "phase0_exit_evidence": [
       "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",
-      "Joe completes all five Workspace journeys and all six Control Room flows without coaching under the approved PROP-001 ruling.",
+      "Joe completes all six Workspace journeys and all six Control Room flows without coaching under the approved PROP-001 ruling.",
       "Responsive, keyboard, screen-reader, sterile-mode, and Color Assist checks are captured.",
       "Collection methods for all five operating baselines and maintenance time exist; no measured value is invented.",
       "Live service, surface, writer, route, job, identity, vendor, migration, and environment inventories are reconciled or explicitly deferred with named reopen triggers.",

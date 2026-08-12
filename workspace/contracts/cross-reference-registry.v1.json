@@ -135,6 +135,7 @@
     "FLOW-WS-03",
     "FLOW-WS-04",
     "FLOW-WS-05",
+    "FLOW-WS-06",
     "FRONTDOOR-USAGE-001",
     "IDENTITY-AUDIT-001",
     "IDENTITY-CONNECTOR-PARITY-001",
@@ -151,6 +152,14 @@
     "MKT-DECISION-001",
     "MAINTENANCE-CONTRACT-001",
     "MAINTENANCE-MEASURE-001",
+    "MAP-A11Y-001",
+    "MAP-ADOPTION-001",
+    "MAP-COVERAGE-001",
+    "MAP-PARITY-001",
+    "MAP-PRIVACY-001",
+    "MAP-TENANT-001",
+    "MAP-TRIP-001",
+    "MAP-TRUTH-001",
     "NOTIFY-001",
     "OBS-ROUTE-001",
     "OFFLINE-TRUTH-001",
@@ -197,5 +206,8 @@
     "Missing or ambiguous personal scope is failure or Unknown with null count, never successful zero",
     "Personal rules cannot cross-load, choose tenant, grant capability, silently promote, or replace runtime-agent attribution",
     "Identity audit retains safe tenant, agent, sponsor, brain scope/version/counts, and capability fields without rule bodies"
+    ,"Market map entity class and location role remain separate; records may be unlocated or contribute multiple versioned locations"
+    ,"Market aggregates report current, stale, Unknown, and unlocated children and never render Fresh when any child is unresolved"
+    ,"Map/list parity, server-derived tenant/workspace scope, sterile-mode denial, and provider-isolated geocode/route evidence are load-bearing"
   ]
 }

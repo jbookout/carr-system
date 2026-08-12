@@ -1177,6 +1177,48 @@
       "rollback": ["fail closed before loading personal rules", "retain active shared rules and/or explicit server-attached task rules for unsponsored work", "surface Unknown and preserve prior audit evidence"],
       "tests": ["IDENTITY-CONTRACT-001", "IDENTITY-FIXTURE-001", "IDENTITY-JOE-RULES-001", "IDENTITY-DELL-RULES-001", "IDENTITY-CROSS-BRAIN-001", "IDENTITY-AUDIT-001", "IDENTITY-UNSPONSORED-001", "IDENTITY-SCOPE-UNKNOWN-001", "IDENTITY-CONNECTOR-PARITY-001", "IDENTITY-NONESCALATION-001"],
       "open_decisions": []
+    },
+    {
+      "id": "MARKET-MAP-001",
+      "requirement": "Workspace provides a tenant- and workspace-scoped whole-market visual projection across prospects, active clients, projects in process, active projects, and visit/appointment stops. Entity class remains separate from location role; one record may produce zero or many versioned locations; unlocated records remain counted and listed; aggregate freshness is Mixed/Partial when any child is stale, Unknown, unlocated, or unavailable; and the map never writes canonical truth.",
+      "source_sections": ["Joe market-map proposal 2026-08-12", "Workspace Tour Mode", "Workspace operating objective"],
+      "screen": ["Market Map and Day-Trip Planner", "equivalent accessible list", "unlocated verification queue"],
+      "business_entity": ["MarketMapItem", "RecordLocation", "GeocodeProjection", "MarketAggregate"],
+      "api_or_action": ["future tenant-scoped whole-market read model", "future exact-record deep link", "no Phase 0 production mutation"],
+      "authority": ["server-derived tenant and active business workspace", "Team Book or National Accounts exact scope", "map is not a writer"],
+      "event": ["workspace.market_map.viewed", "workspace.market_map.selection_changed", "workspace.market_map.redaction_applied", "workspace.authorization.refused"],
+      "evidence": ["located/current/stale/Unknown/unlocated component counts", "record-versus-location cluster parity", "source/version/freshness/precision/redaction/deep link", "sterile-mode denial", "Joe and Dell uncoached visual adoption"],
+      "rollback": ["disable map read-model flag", "retain canonical business records and manual owning-module access"],
+      "tests": ["FLOW-WS-06", "MAP-COVERAGE-001", "MAP-TRUTH-001", "MAP-PARITY-001", "MAP-A11Y-001", "MAP-TENANT-001", "MAP-PRIVACY-001", "MAP-ADOPTION-001"],
+      "open_decisions": ["OPEN-MARKET-MAP-001"]
+    },
+    {
+      "id": "TRIP-PLANNER-001",
+      "requirement": "The day-trip planner combines eligible exact/current visit stops around locked appointments, availability, dwell, buffers, start/end, and provider evidence; excludes stale, Unknown, unlocated, approximate, and infeasible stops with reasons while retaining other eligible stops; shows provider, observed time, declared model inputs, skipped stops, route alternatives, version, and planning fingerprint; makes no optimal or Live claim; and requires human confirmation before governed Tour handoff.",
+      "source_sections": ["Joe market-map proposal 2026-08-12", "Workspace Tour Mode"],
+      "screen": ["Market Map trip-builder", "route comparison", "Tour handoff card"],
+      "business_entity": ["DayTripProposal", "DayTripStop", "RouteOption", "Tour"],
+      "api_or_action": ["future provider-backed route proposal", "future versioned Tour handoff", "no calendar/navigation/message side effect"],
+      "authority": ["Joe or Dell confirms exact proposal version", "locked appointments cannot be displaced", "material input change invalidates confirmation"],
+      "event": ["workspace.day_trip.proposed", "workspace.day_trip.confirmed", "workspace.day_trip.invalidated", "workspace.day_trip.handed_to_tour", "workspace.state_transition.refused"],
+      "evidence": ["eligible and excluded stop matrix", "infeasible trip case", "provider/time/model inputs", "price/usage caps", "terms/retention/attribution/portability gate"],
+      "rollback": ["discard unconfirmed proposal", "keep existing Tour workflow and canonical records unchanged"],
+      "tests": ["MAP-TRIP-001", "TOUR-ROUTE-001", "STATE-REFUSE-001"],
+      "open_decisions": ["OPEN-MARKET-MAP-001"]
+    },
+    {
+      "id": "VISUAL-OPERATIONS-001",
+      "requirement": "Because Joe and Dell are strongly visual, high-quality information design and interactive components are core adoption requirements: map/list/filter/focus/selection parity, non-color encoding, keyboard and screen-reader equivalence, responsive desktop/tablet/phone layouts, explicit Mixed/Partial truth, and a structurally absent whole-market screen in sterile/client-facing mode.",
+      "source_sections": ["Joe market-map proposal 2026-08-12", "Workspace operating objective", "WCAG acceptance"],
+      "screen": ["Market Map and Day-Trip Planner", "all visual Workspace summaries"],
+      "business_entity": ["presentation state", "MarketAggregate"],
+      "api_or_action": ["client presentation only", "server-authorized field projection"],
+      "authority": ["presentation never widens access", "client-scoped tour pins only in client-facing mode"],
+      "event": ["workspace.market_map.viewed", "workspace.market_map.selection_changed", "workspace.market_map.redaction_applied", "workspace.authorization.refused"],
+      "evidence": ["six uncoached map journeys", "manual keyboard/screen-reader/zoom review", "cluster/list parity", "sterile and vendor-egress denial"],
+      "rollback": ["disable inaccessible market-map route until corrected"],
+      "tests": ["MAP-A11Y-001", "MAP-PARITY-001", "MAP-ADOPTION-001", "PRIV-STERILE-001", "RESPONSIVE-001"],
+      "open_decisions": ["OPEN-MARKET-MAP-001"]
     }
   ]
 }

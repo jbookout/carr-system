@@ -1,5 +1,6 @@
 const knownSurfaces = new Set([
   "command-center",
+  "market-map",
   "deal-room",
   "call-review",
   "doc-request",

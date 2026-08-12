@@ -60,6 +60,23 @@ const checks = {
   marketing(context) {
     requireCondition(context.app.includes("Publishing, media spend, audience changes, and outbound action are structurally unavailable"), "marketing gate missing");
   },
+  marketMap(context) {
+    const contract = context.marketMapContract;
+    const fixture = context.fixtures.get("market-map").states.normal.market;
+    requireCondition(contract.status.includes("not_implemented"), "market-map contract must not claim production implementation");
+    requireCondition(contract.authority_and_truth.map_role.includes("read projection") && contract.authority_and_truth.writer_rule.includes("never becomes a source of truth"), "map authority boundary missing");
+    requireCondition(["practice_or_current_site", "target_market_or_search_area", "candidate_property", "confirmed_project_site", "appointment_or_visit_stop"].every(role => contract.location_contract.location_roles.includes(role)), "location-role contract incomplete");
+    requireCondition(contract.location_contract.cardinality_rule.includes("zero, one, or many") && contract.location_contract.unlocated_rule.includes("never silently omits"), "multi-location or unlocated semantics missing");
+    requireCondition(["organization_tenant_id", "business_workspace_id", "record_type", "record_id", "record_version", "location_role", "location_source", "location_projection_version", "location_precision", "position", "observed_at", "freshness", "redaction_profile", "deep_link", "trip_eligible", "trip_eligibility_reason"].every(field => contract.location_contract.required_fields.includes(field)), "critical map-item field contract missing");
+    requireCondition(contract.visual_layers.includes("Visits and appointments"), "visit/appointment visual layer missing");
+    requireCondition(contract.authority_and_truth.freshness_rule.includes("Mixed/Partial") && ["current", "stale", "Unknown", "unlocated"].every(label => contract.authority_and_truth.freshness_rule.includes(label)), "mixed aggregate truth missing");
+    requireCondition(contract.visual_interaction_contract.map_list_parity.includes("bidirectionally synchronized") && contract.visual_interaction_contract.cluster_rule.includes("only after tenant/workspace authorization"), "authorized map/list/cluster parity missing");
+    requireCondition(contract.visual_interaction_contract.temporal_filter_rule.includes("Today, 7 days, 30 days") && contract.visual_interaction_contract.temporal_filter_rule.includes("separate from record freshness"), "planning-horizon/freshness separation missing");
+    requireCondition(contract.day_trip_planning_contract.guards.some(item => item.includes("Unknown or unauthorized locations are excluded")) && contract.day_trip_planning_contract.guards.some(item => item.includes("flexible stop cannot displace a locked appointment")), "trip exclusion or locked-stop guard missing");
+    requireCondition(contract.privacy_and_security.sterile_mode.includes("structurally unavailable") && contract.provider_portability_and_terms_gate.construction_gate.length >= 7, "sterile/provider terms gate missing");
+    requireCondition(["prospect", "active_client", "project_in_process", "active_project"].every(type => fixture.records.some(record => record.record_type === type)), "market coverage fixture incomplete");
+    requireCondition(fixture.records.some(record => record.locations.length > 1) && fixture.records.some(record => record.locations.some(location => location.position === null)), "multi-location or unlocated fixture case missing");
+  },
   notification(context) {
     const notices = context.fixtures.get("notifications").states.normal.items;
     requireCondition(notices.every(item => item.destination), "notification deep link missing");
@@ -224,6 +241,7 @@ const groups = {
   fixtureContract: ["CONTRACT-WRITE-001"],
   lead: ["LEAD-CONVERT-001", "LEAD-TOUCH-001"],
   marketing: ["MKT-DECISION-001"],
+  marketMap: ["FLOW-WS-06", "MAP-COVERAGE-001", "MAP-PARITY-001", "MAP-TRUTH-001"],
   notification: ["NOTIFY-001"],
   offline: ["OFFLINE-TRUTH-001", "SYNC-CONFLICT-001"],
   release: ["AUTH-KV-001", "AUTH-RECOVERY-001", "RELEASE-GATE-001"],
@@ -238,6 +256,12 @@ const groups = {
 export const testRegistry = new Map(Object.entries(groups).flatMap(([checkName, ids]) => ids.map(id => [id, checks[checkName]])));
 export const futureGateIds = new Set([
   "FRONTDOOR-USAGE-001",
+  "MAP-A11Y-001",
+  "MAP-ADOPTION-001",
+  "MAP-PRIVACY-001",
+  "MAP-TENANT-001",
+  "MAP-TRIP-001",
+  "FLOW-WS-06",
   "AI-INJECT-001", "AI-LEAK-001", "AI-TARGET-001", "CALL-SPEAKER-001", "CONTRACT-WRITE-001",
   "SURFACE-PARITY-001", "SURFACE-WRITER-001",
   "SEC-AUTH-001", "SEC-AUTHZ-001", "SEC-CSRF-001", "SEC-DEVICE-001", "SEC-REPLAY-001",

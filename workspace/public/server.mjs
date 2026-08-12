@@ -16,7 +16,7 @@ const publicFiles = new Map([
 ]);
 const fixtureFiles = new Set([
   "call-review", "command-center", "deal-room", "doc-request", "lead-board",
-  "marketing", "more", "notifications", "tour"
+  "market-map", "marketing", "more", "notifications", "tour"
 ]);
 
 export function resolvePrototypePath(pathname) {
