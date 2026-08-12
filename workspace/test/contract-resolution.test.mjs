@@ -202,7 +202,7 @@ test("glossary provenance and all six conceptual operating roles are explicit", 
 });
 
 test("integrated planning sources, milestone timing, predecessors, and cost bands stay harmonized", async () => {
-  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation, naming, humanSeat, humanSeatFixture, crossBoundary, councilLaunch, councilLedger] = await Promise.all([
+  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation, naming, humanSeat, humanSeatFixture, driveFree, crossBoundary, councilLaunch, councilLedger] = await Promise.all([
     readJson("contracts/phase0-manifest.v1.json"),
     readJson("contracts/phase0-traceability.v1.json"),
     readJson("contracts/council-review-register.v1.json"),
@@ -213,6 +213,7 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
     readJson("../phase0/platform-naming-council-candidate.v1.json"),
     readJson("../phase0/human-seat-workspace-isolation-council-candidate.v1.json"),
     readJson("../phase0/human-seat-workspace-isolation-fixtures.v1.json"),
+    readJson("../phase0/drive-free-system-council-candidate.v1.json"),
     readJson("../phase0/cross-product-boundary.v1.json"),
     readJson("../phase0/council-launch-packet-2026-08-12.v1.json"),
     readJson("../phase0/council-disposition-ledger-template.v1.json")
@@ -304,6 +305,13 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.match(crossBoundary.human_seat_workspace_boundary.workspace_rule, /Panhandle Team.*Joe and Dell.*solo agent.*team workspace/i);
   assert.ok(council.open_items.some(item => item.id === "OPEN-HUMAN-WORKSPACE-001" && /Pre-engineer one CARR company tenant.*workspace membership.*operate only Panhandle Team/i.test(item.recommended_direction)));
   assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-009" && /Panhandle Team.*human seat grants authentication.*zero business-data access/i.test(item.recommended_ruling)));
+  assert.equal(driveFree.status, "proposed_for_council_not_approved");
+  assert.match(driveFree.source_context.joe_human_quotes.join(" "), /Hermes.*real game changer.*need hermes in our system/i);
+  assert.match(driveFree.recommendation, /No Google Drive file may be required.*Retire Cowork.*Hermes.*persistent routine operations.*Claude Code or Codex.*engineering/i);
+  assert.match(driveFree.joe_proposed_direction.protective_boundary, /Drive independence belongs to the governed platform, not to Hermes.*Hermes or Portal outage/i);
+  assert.deepEqual(driveFree.acceptance_tests.map(item => item.id), ["DRIVE-FREE-001", "DRIVE-FREE-002", "DRIVE-FREE-003", "DRIVE-FREE-004", "DRIVE-FREE-005", "DRIVE-FREE-006"]);
+  assert.ok(council.open_items.some(item => item.id === "OPEN-DRIVE-FREE-001" && /Drive-free.*Cowork.*Hermes/i.test(`${item.fork} ${item.recommended_direction}`)));
+  assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-010" && /No Drive file may be required.*Hermes.*routine-operations.*Claude Code and Codex.*engineering/i.test(item.recommended_ruling)));
   assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"]);
   assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10");
   assert.deepEqual(councilLaunch.meeting_protocol.map(item => item.stage), [0, 1, 2, 3, 4, 5, 6, 7]);
@@ -312,7 +320,7 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.equal(councilLaunch.explicit_non_goals.some(item => /onboarding CARR's other 150-plus agents/i.test(item)), true);
   assert.equal(councilLaunch.known_open_evidence.some(item => /five uncoached Workspace journeys are not performed/i.test(item)), true);
   assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"]);
-  assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"]);
+  assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/drive-free-system-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"]);
   assert.match(councilLaunch.copy_paste_prompts.independent_reviewer.join(" "), /Follow progressive_disclosure_review_order exactly.*do not score.*Baseline, Workspace, Control Room, and Mature End State/i);
   assert.match(councilLaunch.copy_paste_prompts.single_session_council_chair.join(" "), /one-session council chair.*freeze your own.*separate fresh CLI contexts.*Do not reveal any review.*all three validate/i);
   assert.equal(councilLaunch.single_session_council_orchestration.execution_order.length, 7);

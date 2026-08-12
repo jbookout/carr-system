@@ -220,6 +220,7 @@ const assertions = {
     const naming = read("../phase0/platform-naming-council-candidate.v1.json");
     const humanSeat = read("../phase0/human-seat-workspace-isolation-council-candidate.v1.json");
     const humanSeatFixture = read("../phase0/human-seat-workspace-isolation-fixtures.v1.json");
+    const driveFree = read("../phase0/drive-free-system-council-candidate.v1.json");
     const councilLaunch = read("../phase0/council-launch-packet-2026-08-12.v1.json");
     const councilLedger = read("../phase0/council-disposition-ledger-template.v1.json");
     assert.deepEqual(manifest.governing_sources.map(item => [item.document_id, item.generation, item.active_sections]), [
@@ -296,6 +297,12 @@ const assertions = {
     assert.equal(humanSeatFixture.cases.find(item => item.id === "HUMAN-SCOPE-008").expected.reason, "runtime_cannot_widen_human_workspace");
     assert.ok(humanSeatFixture.cases.slice(10).every(item => item.expected.effect === "privacy_safe_not_found" && item.expected.reason === "cross_workspace"));
     assert.ok(council.unresolved_forks.some(item => item.id === "CR-U08" && /Pre-engineer one CARR company-tenant.*Panhandle Team.*future solo agents.*future teams/i.test(item.recommendation)));
+    assert.equal(driveFree.status, "proposed_for_council_not_approved");
+    assert.match(driveFree.source_context.joe_human_quotes.join(" "), /Hermes.*real game changer.*need hermes in our system/i);
+    assert.match(driveFree.recommendation, /No Google Drive file may be required.*Retire Cowork.*Hermes.*persistent routine operations.*Claude Code or Codex.*engineering/i);
+    assert.match(driveFree.joe_proposed_direction.protective_boundary, /Drive independence belongs to the governed platform, not to Hermes.*Hermes or Portal outage/i);
+    assert.deepEqual(driveFree.acceptance_tests.map(item => item.id), ["DRIVE-FREE-001", "DRIVE-FREE-002", "DRIVE-FREE-003", "DRIVE-FREE-004", "DRIVE-FREE-005", "DRIVE-FREE-006"]);
+    assert.ok(council.unresolved_forks.some(item => item.id === "CR-U09" && /Drive-free.*Cowork.*Hermes/i.test(`${item.question} ${item.recommendation}`)));
     assert.equal(councilLaunch.authority.council_role, "advisory review and recommendation");
     assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10");
     assert.equal(councilLaunch.authority.final_approver, "Joe Bookout");
@@ -305,7 +312,7 @@ const assertions = {
     assert.match(councilLaunch.uniform_review_rubric.use_rule, /do not decide.*arithmetic.*critical-dimension objection/i);
     assert.match(councilLaunch.copy_paste_prompts.synthesis_facilitator.join(" "), /non-voting facilitator.*Preserve dissent.*Joe approves/i);
     assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"]);
-    assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"]);
+    assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/drive-free-system-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json"]);
     assert.match(councilLaunch.progressive_disclosure_review_order.review_completion_checkpoint, /pass 0.*orientation.*pass-1 source.*declared order/i);
     assert.match(councilLaunch.single_session_council_orchestration.role_boundary, /chair session also supplies.*Fable 5 reviewer.*no fourth vote.*approval authority/i);
     assert.ok(councilLaunch.single_session_council_orchestration.isolation_requirements.every(item => typeof item === "string" && item.length > 40));

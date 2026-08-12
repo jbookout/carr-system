@@ -61,7 +61,7 @@
     "joe_uncoached_six_flows": "not performed",
     "roadmap_final_approval": "Joe's approval is required after the Wednesday council produces its recommendation",
     "integrated_program_reconciliation": "tenant, workflow, maintenance, and sponsor/runtime identity machine gates passed cold-context verification; identity sponsorship separates tenant, sponsor, agent, runtime, brain, and capability",
-    "production_identity_repair": "verified narrow bugfix: commit e88299c78bf8df29786e435a91e8b9b94f14da8a, migration 0095, Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377, 75/75 runtime tests, current live read 144 shared plus 30 Joe-personal, partner spoof refusal, and loop 319 done; no Control Room Phase 0 files were deployed"
+    "production_identity_repair": "verified narrow bugfix: commit e88299c78bf8df29786e435a91e8b9b94f14da8a, migration 0095, Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377, 75/75 runtime tests, repair verification at 144 shared plus 30 Joe-personal, council-packet preflight on 2026-08-12 at 146 shared plus 31 Joe-personal, partner spoof refusal, and loop 319 done; counts are dated evidence and no Control Room Phase 0 files were deployed"
   },
   "prohibited_claims": ["production implementation exists", "Control Room auth is enforced", "ops.doctorcre.com is deployed", "collectors are live", "action broker exists", "Phase 0 exit gate is complete before independent and human evidence"]
 }

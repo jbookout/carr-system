@@ -17,7 +17,7 @@
     "content_commit": "daacb3d73949dc708172f77d626b4f3eaa430a70",
     "launch_packet_commit": "Record the final commit containing this packet in the disposition ledger at meeting preflight; it must descend from content_commit and contain only launch-procedure, reference, validation, or test changes unless the content snapshot is deliberately re-frozen.",
     "rule": "Every reviewer evaluates the exact content snapshot plus the recorded launch-packet commit. If any source differs, stop and reconcile the version before review.",
-    "live_rule_counts_at_preparation": {"shared": 144, "joe_personal": 30},
+    "live_rule_counts_at_packet_revision": {"shared": 146, "joe_personal": 31, "observed_at": "2026-08-12", "rule": "Preflight must call standing-context again and record the returned counts; these values are evidence, not constants."},
     "machine_evidence": {"workspace_tests": "32/32", "control_room_tests": "94/94", "workspace_validator": "green", "independent_human_workspace_review": "clean_p0_0_p1_0_p2_0"}
   },
   "canonical_sources": [
@@ -34,6 +34,7 @@
     "phase0/platform-naming-council-candidate.v1.json",
     "phase0/human-seat-workspace-isolation-council-candidate.v1.json",
     "phase0/human-seat-workspace-isolation-fixtures.v1.json",
+    "phase0/drive-free-system-council-candidate.v1.json",
     "phase0/cross-product-boundary.v1.json",
     "workspace/contracts/council-review-register.v1.json",
     "workspace/contracts/phase0-acceptance.v1.json",
@@ -64,18 +65,19 @@
     "pass_2_cross_cutting_proposals": [
       {"position": 1, "source": "phase0/platform-naming-council-candidate.v1.json", "reason": "Set the independent owner-controlled platform-versus-tenant identity before evaluating scaled access or runtime branding."},
       {"position": 2, "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "reason": "Set the human seat, workspace, membership, and business-data isolation model before evaluating any runtime that acts inside it."},
-      {"position": 3, "source": "phase0/hermes-runtime-council-candidate.v1.json", "reason": "Evaluate Hermes and Portal only after platform identity, workspace isolation, authority, source-truth, and risk boundaries are known."}
+      {"position": 3, "source": "phase0/drive-free-system-council-candidate.v1.json", "reason": "Set the system-file placement and Cowork-retirement boundary before deciding which persistent runtime orchestrates the Drive-free system."},
+      {"position": 4, "source": "phase0/hermes-runtime-council-candidate.v1.json", "reason": "Evaluate Hermes and Portal only after platform identity, workspace isolation, Drive independence, authority, source-truth, and risk boundaries are known."}
     ],
     "pass_3_machine_evidence_and_reconciliation": [
       {"position": 1, "source": "Workspace Phase 0 contracts, fixtures, prototype, validator, tests, and verifier evidence", "purpose": "Test roadmap claims against the prepared business-product contracts and runnable evidence."},
       {"position": 2, "source": "Control Room Phase 0 contracts, fixtures, prototype, validator, tests, and verifier evidence", "purpose": "Test roadmap claims against the prepared operational, identity, authority, audit, and safety contracts."},
-      {"position": 3, "source": "phase0/council-reconciliation-2026-08-12.v1.json", "purpose": "Resolve cross-roadmap contradictions and disposition PROP-001 through PROP-009 only after the full source and evidence passes."}
+      {"position": 3, "source": "phase0/council-reconciliation-2026-08-12.v1.json", "purpose": "Resolve cross-roadmap contradictions and disposition PROP-001 through PROP-010 only after the full source and evidence passes."}
     ],
     "anti_anchoring_rules": [
       "No score, fork disposition, roadmap amendment, or proceed verdict may be recorded during pass 0.",
       "No reviewer may skip, reorder, or substitute a summary for a full pass-1 source.",
       "A reviewer may take provisional notes during reading, but must revisit them after completing pass 1 before submitting the sealed review.",
-      "Hermes and Portal are evaluated after naming and workspace isolation because a runtime cannot define its own platform identity, data boundary, authority, or source of truth.",
+      "Hermes and Portal are evaluated after naming, workspace isolation, and Drive independence because a runtime cannot define its own platform identity, data boundary, system-file placement, authority, recovery plane, or source of truth.",
       "The full Mature End State must be checked against the Baseline, Workspace, and Control Room; a conflict is not resolved merely because the umbrella document states a preference."
     ],
     "review_completion_checkpoint": "Before scoring or disposition, each reviewer must attest that pass 0 was used only for orientation and that every pass-1 source was read in the declared order at the exact frozen version."
@@ -94,7 +96,7 @@
       {"step": 3, "action": "Freeze the Fable review with a content hash or immutable transcript location."},
       {"step": 4, "action": "Invoke GPT-5.6 Sol and SuperGrok 4.5 in separate fresh CLI contexts. Give each the identical source manifest, generic independent-review prompt, exact launch-packet commit, output form, and only its own seat_prompt_suffix. Do not include the Fable review or the other external review."},
       {"step": 5, "action": "Validate and freeze both returned review forms before exposing any review to another seat or beginning deliberation."},
-      {"step": 6, "action": "Cross-disclose the three sealed reviews, normalize evidence and disagreements, then conduct PROP-001 through PROP-009 using the meeting protocol."},
+      {"step": 6, "action": "Cross-disclose the three sealed reviews, normalize evidence and disagreements, then conduct PROP-001 through PROP-010 using the meeting protocol."},
       {"step": 7, "action": "As non-voting chair, write the disposition ledger and Joe approval card without inventing consensus, erasing dissent, or treating the council as final authority."}
     ],
     "isolation_requirements": [
@@ -114,6 +116,7 @@
     "starting native Mac, iPhone, or iPad construction before predecessor gates",
     "treating a Mac mini purchase as adoption, timeline expansion, or production authority",
     "executing the doctrine Markdown cutoff without its separate evidence and Joe-approval gates",
+    "deleting Drive system files or forcing complete Drive retirement into the August 21 cutoff without complete consumer, parity, rollback, and disconnected-operation evidence",
     "choosing a final independent platform name without the bounded evidence sprint",
     "treating council recommendation as Joe approval"
   ],
@@ -149,13 +152,14 @@
     {"id": "PROP-006", "topic": "defer with named reopen trigger", "source": "phase0/council-reconciliation-2026-08-12.v1.json"},
     {"id": "PROP-007", "topic": "Hermes and Nous Portal evaluation plus mature orchestrator role", "source": "phase0/hermes-runtime-council-candidate.v1.json"},
     {"id": "PROP-008", "topic": "independent platform name with CARR as launch tenant", "source": "phase0/platform-naming-council-candidate.v1.json"},
-    {"id": "PROP-009", "topic": "pre-engineered human-seat and isolated-workspace structure without commercial rollout", "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json"}
+    {"id": "PROP-009", "topic": "pre-engineered human-seat and isolated-workspace structure without commercial rollout", "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json"},
+    {"id": "PROP-010", "topic": "Drive-free system operation, Cowork operational retirement, and Hermes-enabled persistent orchestration", "source": "phase0/drive-free-system-council-candidate.v1.json"}
   ],
   "meeting_protocol": [
     {"stage": 0, "name": "facilitator preflight", "procedure": ["verify exact commit and doctrine generations", "verify all required sources are readable", "record missing evidence", "confirm Workspace 32/32 and Control Room 94/94 or record changed evidence", "confirm no proposal is represented as approved", "require each reviewer to acknowledge the progressive-disclosure order and its no-scoring orientation restriction"], "exit": "one frozen evidence manifest and three review-order acknowledgements"},
-    {"stage": 1, "name": "sealed independent reviews", "procedure": ["each reviewer works without seeing another review", "each follows pass 0 through pass 3 in the declared order without scoring or disposition during orientation", "each reviews all nine forks through its assigned primary lens and every critical rubric dimension", "each submits the uniform review form", "facilitator locks the three outputs before disclosure"], "exit": "three complete independent reviews with source-order attestations"},
+    {"stage": 1, "name": "sealed independent reviews", "procedure": ["each reviewer works without seeing another review", "each follows pass 0 through pass 3 in the declared order without scoring or disposition during orientation", "each reviews all ten forks through its assigned primary lens and every critical rubric dimension", "each submits the uniform review form", "facilitator locks the three outputs before disclosure"], "exit": "three complete independent reviews with source-order attestations"},
     {"stage": 2, "name": "evidence normalization", "procedure": ["facilitator extracts agreements, disagreements, missing evidence, and source contradictions", "no reviewer changes a position during normalization", "facts are cited to exact source and claim label"], "exit": "one disagreement and evidence matrix"},
-    {"stage": 3, "name": "fork rounds", "procedure": ["review PROP-001 through PROP-009 in order", "lead reviewer is the seat whose lens is most material", "other seats challenge once each", "facilitator records proposed disposition, contract changes, safe interim default, and dissent"], "exit": "nine candidate dispositions"},
+    {"stage": 3, "name": "fork rounds", "procedure": ["review PROP-001 through PROP-010 in order", "lead reviewer is the seat whose lens is most material", "other seats challenge once each", "facilitator records proposed disposition, contract changes, safe interim default, and dissent"], "exit": "ten candidate dispositions"},
     {"stage": 4, "name": "cross-roadmap contradiction sweep", "procedure": ["test every candidate disposition against all three roadmaps and the Production Maturity Baseline", "check terminology, roles, states, authority, data, timelines, costs, platform order, hardware, Hermes, human-workspace scaling, and adoption gates", "do not repair one roadmap while leaving another contradictory"], "exit": "contradiction register with exact amendments"},
     {"stage": 5, "name": "program and evidence gate review", "procedure": ["separate current verified state from approved design, proposed design, and future evidence", "confirm Phase 0 exit evidence", "confirm Phase 1 entry order", "preserve elapsed observation windows and human acceptance gates"], "exit": "ordered work packages and gate ledger"},
     {"stage": 6, "name": "dissent and compression round", "procedure": ["each reviewer states the strongest remaining objection in no more than three items", "each states what evidence would change its view", "facilitator preserves minority positions and removes duplicate prose without deleting disagreement"], "exit": "bounded dissent register"},
@@ -167,7 +171,7 @@
     "executive_verdict": "proceed | proceed_with_modifications | not_ready",
     "top_findings": [{"severity": "P0 | P1 | P2", "claim": "one sentence", "source": "exact citation", "required_change": "specific correction"}],
     "rubric_scores": [{"rubric_id": "RUB-*", "score": "0-4", "reason": "source-grounded reason"}],
-    "fork_reviews": [{"fork_id": "PROP-001..009", "disposition": "accept | modify | defer_with_named_reopen_trigger | reject", "rationale": "why", "evidence": ["exact citations"], "contract_changes": ["exact targets"], "interim_default": "safe state", "reopen_trigger": "required if deferred", "blocked_scope": ["what remains closed"], "confidence": "high | medium | low"}],
+    "fork_reviews": [{"fork_id": "PROP-001..010", "disposition": "accept | modify | defer_with_named_reopen_trigger | reject", "rationale": "why", "evidence": ["exact citations"], "contract_changes": ["exact targets"], "interim_default": "safe state", "reopen_trigger": "required if deferred", "blocked_scope": ["what remains closed"], "confidence": "high | medium | low"}],
     "cross_roadmap_contradictions": [{"claim_a": "source", "claim_b": "source", "recommended_resolution": "one canonical rule"}],
     "strongest_remaining_objections": ["maximum three"],
     "evidence_that_would_change_view": ["specific evidence"]
@@ -194,13 +198,14 @@
     "Hermes R0 is only a proposed constrained evaluation; live data, scheduling, delivery, durable request creation, dispatch, mutation, and external effects remain separately gated.",
     "A final independent platform name has not been selected.",
     "Mac mini purchase and activation remain separate evidence-gated decisions."
+    ,"Drive-free system operation is proposed, not yet proven; the complete executable and installed-consumer inventory plus the 48-hour disconnected-Drive test remain open."
   ],
   "copy_paste_prompts": {
     "independent_reviewer": [
       "You are one of three independent members of the CARR roadmap council. Do not ask for or read another member's review until your sealed review is complete.",
       "Read phase0/council-launch-packet-2026-08-12.v1.json first, then every canonical and repo source it requires at the exact versions declared.",
       "Follow progressive_disclosure_review_order exactly. Use the limited Mature End State excerpt only as pass-0 orientation; do not score, disposition a fork, or form a proceed verdict until the complete Baseline, Workspace, Control Room, and Mature End State pass is finished in that order.",
-      "Your assigned seat and primary lens are provided separately. Apply that lens deeply, but also evaluate every critical rubric dimension and all nine PROP forks.",
+      "Your assigned seat and primary lens are provided separately. Apply that lens deeply, but also evaluate every critical rubric dimension and all ten PROP forks.",
       "Label every claim current_verified, implemented_not_deployed, approved_design, proposed_for_council, future_evidence_gate, or unknown.",
       "Return exactly the uniform_independent_review_form defined by the packet. Cite underlying sources, preserve uncertainty, and do not represent council proposals as approved.",
       "The council is advisory. Do not authorize construction, deployment, commercial rollout, purchase, or roadmap amendment."
@@ -208,7 +213,7 @@
     "synthesis_facilitator": [
       "You are the non-voting facilitator for the CARR roadmap council.",
       "Verify all three independent reviews were completed and sealed before cross-disclosure. Read the frozen source packet yourself; reviewer summaries are not source evidence.",
-      "Normalize agreements, disagreements, missing evidence, and contradictions, then run PROP-001 through PROP-009 in order using the meeting protocol.",
+      "Normalize agreements, disagreements, missing evidence, and contradictions, then run PROP-001 through PROP-010 in order using the meeting protocol.",
       "Do not use simple majority to erase a substantiated critical objection. Resolve it, modify the proposal, or defer it with an owner, reopen trigger, safe interim default, and blocked scope.",
       "Fill phase0/council-disposition-ledger-template.v1.json completely. Preserve dissent. Separate current state, approved design, proposed design, future gates, and Unknown.",
       "End with one concise Joe approval card listing recommendations, modifications, deferrals, blocked scopes, Phase 0 exit evidence, and the exact first Phase 1 work packages. The council recommends; Joe approves."
@@ -225,7 +230,7 @@
     "all required sources were read at exact declared versions",
     "all three reviewers attested to the declared progressive-disclosure order and no decision was taken from the orientation pass",
     "three sealed independent reviews exist",
-    "all nine forks have valid dispositions",
+    "all ten forks have valid dispositions",
     "every critical objection is resolved, modified, or safely deferred",
     "cross-roadmap contradictions have exact amendment targets",
     "human and elapsed evidence gates remain open where unperformed",

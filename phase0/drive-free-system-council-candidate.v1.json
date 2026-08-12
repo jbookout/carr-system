@@ -1,0 +1,91 @@
+{
+  "contract": "carr-drive-free-system-and-cowork-retirement-council-candidate",
+  "version": 1,
+  "status": "proposed_for_council_not_approved",
+  "prepared_at": "2026-08-12",
+  "source_context": {
+    "session_title": "Explain LibreOffice crash",
+    "thread_id": "019fee58-5034-7d71-ac2a-21ff5588e032",
+    "clarification": "The LibreOffice startup crash was not evidence that Google Drive damaged a document. The subsequent architecture discussion established that MCP-connected clients do not need Drive for records or doctrine and that Cowork is not intended to remain an operating dependency.",
+    "joe_human_quotes": [
+      "my understanding was that Google Drive will not have any system files.",
+      "in the end state, we won't even be looking at cowork so its pointless to even have things set up on cowork. they might as well just fully go to claude code where they can be accessed with the other files. and then i can use hermes in the cloud when im on my phone or ipad",
+      "hermes in my opinion, is the real game changer on this matter. This only solidifies that we need hermes in our system"
+    ]
+  },
+  "council_question": "Should the roadmaps adopt Drive-free system operation, retire Cowork as an operational dependency, and treat Hermes as the preferred persistent cloud operations and Doc runtime while preserving a Hermes-independent authority and recovery plane?",
+  "crux": "The current transition has already moved authority into Neon and code into GitHub, but Drive-synchronized skills, task prompts, launchers, projections, calendars, fallbacks, and file-mode consumers can still make Google Drive an accidental runtime dependency. Removing Markdown authority alone does not finish the architecture if system operation still depends on a mounted Drive tree.",
+  "recommendation": "Adopt Drive-free system operation as the mature target. No Google Drive file may be required to boot, authorize, schedule, operate, observe, recover, or reconstruct the platform. Retire Cowork as a scheduled or required operating runtime. Use repository-defined deterministic jobs on registered Local Edge Nodes, Hermes behind Workspace, Control Room, and Doc for persistent routine operations after its graduated gates, and Claude Code or Codex for engineering construction, complex investigation, features, migrations, and reviewed repairs. Google Drive may remain only an optional user-selected human document exchange destination whose absence does not degrade system health.",
+  "joe_proposed_direction": {
+    "status": "explicit_council_position_not_final_approval",
+    "position": "Hermes is the game-changing persistent cloud orchestration and Doc layer that makes a Drive-free, Cowork-independent operating model practical.",
+    "protective_boundary": "Drive independence belongs to the governed platform, not to Hermes. Neon, GitHub, Cloudflare/R2, typed MCP, and registered Local Edge Nodes remain sufficient to preserve authority, data, recovery, and core operation during a Hermes or Portal outage."
+  },
+  "system_file_definition": {
+    "system_file": "Any file whose presence, contents, path, synchronization, or availability is required to boot, authorize, configure, schedule, execute, observe, recover, or reconstruct CARR operations.",
+    "optional_human_document": "A user-owned input, editable deliverable, or convenience copy that can be absent or deleted without changing canonical state, permissions, scheduled execution, evidence, recovery, or system health.",
+    "drive_rule": "Google Drive may contain optional human documents only. It must contain no system file and must never become an implicit fallback authority."
+  },
+  "authoritative_placement": {
+    "neon_postgres": ["business records", "doctrine", "rules", "decisions", "loops", "audit", "workflow and system state", "searchable authoritative metadata"],
+    "github_and_local_git_clones": ["code", "migrations", "tests", "skills", "task definitions", "hooks", "machine-readable configuration", "deployment and recovery definitions"],
+    "cloudflare_worker_and_kv": ["typed MCP and API execution", "server-derived identity and authority", "OAuth and bounded runtime state"],
+    "cloudflare_r2": ["encrypted backups", "durable system-managed binaries", "archives", "retained generated artifacts where policy requires durability"],
+    "registered_local_edge_nodes": ["local application adapters", "credential-bound execution", "temporary working files", "caches", "deterministic scheduled execution", "Mac-only services"],
+    "google_drive": ["optional user-selected document exchange or convenience copy only"]
+  },
+  "runtime_role_split": {
+    "deterministic_recurring_work": "Versioned repo code executed by a registered Local Edge Node through launchd or another governed scheduler; do not spend a model session on deterministic work.",
+    "routine_agentic_operations": "Hermes is the preferred persistent orchestrator behind Workspace, Control Room, and Doc after identity, capability, evidence, outage, cost, and approval gates pass.",
+    "engineering": "Claude Code and Codex handle construction, complex investigation, new features, migrations, and reviewed repairs.",
+    "cowork": "Optional MCP-connected interactive client only. No scheduled job, bootstrap, skill, record, doctrine, recovery path, or product routine may require Cowork or a Drive-mounted Cowork project.",
+    "human_products": "Joe and Dell normally operate through Workspace, Control Room, and Doc rather than supervising model sessions."
+  },
+  "hermes_boundary": {
+    "why_material": ["persistent cloud presence without a Drive-mounted project", "phone and iPad access through typed MCP", "routine monitoring and orchestration", "Doc runtime candidate", "model routing and lower-cost routine execution"],
+    "not_authority": ["not a source of truth", "not a tenant or workspace selector", "not an approval boundary", "not a substitute for typed MCP", "not required for restore", "not a universal path to the Local Edge Node"],
+    "outage_rule": "A Hermes or Portal outage may pause Hermes-mediated routine automation and Doc responses, but it must not corrupt, hide, or prevent direct recovery of canonical state or make Drive necessary again."
+  },
+  "transition_inventory": [
+    {"class": "bootstrap_and_context", "examples": ["CLAUDE.md", "AGENTS.md", "compiled rule projections"], "target": "standing-context plus repo-owned machine adapters; no Drive bootstrap"},
+    {"class": "skills_and_agent_definitions", "examples": ["Drive-synchronized SKILL.md and agent copies"], "target": "Git canonical with governed installation to local runtime paths; no Drive execution copy"},
+    {"class": "scheduled_task_prompts", "examples": ["Cowork scheduled-task definitions"], "target": "repo-defined deterministic job, Hermes routine, or explicit engineering task according to runtime role"},
+    {"class": "front_door_and_cowork_links", "examples": ["claude://cowork launchers with Drive folder paths"], "target": "Workspace, Control Room, Doc, or optional generic MCP-connected client without Drive dependency"},
+    {"class": "calendar_and_local_app_inputs", "examples": ["Drive calendar exchange files", "local application adapter files"], "target": "typed integration or registered Local Edge Node queue with canonical record write and evidence"},
+    {"class": "repo_to_vault_mirrors", "examples": ["manifest.tsv mappings", "cloud-only or file-mode code fallbacks"], "target": "retire after supported consumers are repointed and parity is proven"},
+    {"class": "generated_operational_projections", "examples": ["Markdown renders", "Drive dashboards and intermediate files"], "target": "product view, local disposable render, or policy-governed R2 artifact"},
+    {"class": "vault_specific_hooks_and_health", "examples": ["Drive write gates", "vault render checks", "Drive-path health rows"], "target": "retire or convert to migration-only checks once the disconnected-Drive gate passes"}
+  ],
+  "acceptance_tests": [
+    {"id": "DRIVE-FREE-001", "name": "forty-eight-hour disconnected-Drive operation", "required": "Unmount or disconnect Google Drive from Joe's primary Local Edge Node for 48 continuous hours. Standing context, records, doctrine, product reads, deterministic scheduled jobs, allowed local adapters, output generation, audit, health, backup, and recovery evidence must remain functional without Drive reads or writes."},
+    {"id": "DRIVE-FREE-002", "name": "clean reconstruction", "required": "Rebuild a replacement Local Edge Node from Git, server-derived configuration, approved credentials, Neon, Cloudflare/KV/R2, and documented installation procedures without mounting Google Drive."},
+    {"id": "DRIVE-FREE-003", "name": "consumer inventory zero", "required": "Executable source, installed scheduled tasks, installed skills, launchd definitions, health checks, restore procedures, and product launchers contain zero required CARR AI Drive paths."},
+    {"id": "DRIVE-FREE-004", "name": "optional document semantics", "required": "A user-selected Drive export can fail or be absent without changing canonical state or rendering core system health degraded; the interface reports only that optional delivery failed."},
+    {"id": "DRIVE-FREE-005", "name": "Hermes outage independence", "required": "Disable Hermes and Portal in a rehearsal environment. Canonical reads, direct approved writes, audit, backup, restore, and Local Edge Node operation remain available without Drive fallback; Hermes-mediated routines report paused or Unknown honestly."},
+    {"id": "DRIVE-FREE-006", "name": "Cowork non-dependency", "required": "No production or recovery procedure requires a Cowork session. If Cowork is used interactively, it operates through MCP and optional local repo access and can be removed without loss of capability or data."}
+  ],
+  "transition_rules": [
+    "Do not delete or disconnect a Drive consumer until its authoritative replacement, parity evidence, rollback path, and observation window are recorded.",
+    "Do not silently expand the August 21 doctrine Markdown cutoff into complete Drive retirement unless the full executable and installed-consumer inventory proves both cutovers can safely coincide.",
+    "Until DRIVE-FREE-001 through DRIVE-FREE-006 pass, describe Drive as transitional and non-authoritative, not retired.",
+    "A generated Word, PDF, spreadsheet, image, or other deliverable may be copied to Drive only as an optional user document; its canonical business facts and provenance remain in the record layer.",
+    "Removal of Drive-specific gates occurs only after the paths they protect are absent and the disconnected-Drive proof passes."
+  ],
+  "roadmap_amendments_after_approval": [
+    {"target": "CARR Production Maturity Baseline", "change": "Add Drive independence, complete system-file placement, clean reconstruction, disconnected-Drive operation, and optional-document semantics to production maturity evidence."},
+    {"target": "CARR Workspace BDUF", "change": "Require every routine and export to work without a Drive-mounted project; represent Drive only as an optional user-selected document destination."},
+    {"target": "CARR Control Room BDUF", "change": "Add a transitional Drive-dependency inventory and evidence view; after cutover, Drive absence is not a health dependency while optional delivery failure remains visible."},
+    {"target": "CARR Mature Software End State BDUF", "change": "Declare Neon, GitHub, Cloudflare/KV/R2, and registered Local Edge Nodes as the complete governed topology; make Hermes the preferred persistent orchestrator behind product controls and Drive an optional external document integration."}
+  ],
+  "non_goals": [
+    "Deleting Joe's ordinary personal or client document folders from Google Drive",
+    "Treating optional Drive document delivery as canonical storage",
+    "Making Hermes or Nous Portal the source of truth, authorization boundary, or restore dependency",
+    "Moving deterministic jobs into expensive model sessions merely to remove Cowork",
+    "Forcing complete Drive retirement into the August 21 cutoff without consumer and rollback evidence",
+    "Authorizing Hermes mutation, messaging, scheduling, engineering dispatch, or external effects beyond its separately approved gates"
+  ],
+  "safe_interim_default": "Drive remains mounted and supported only for explicitly inventoried transitional consumers and optional human document exchange. It is non-authoritative. No new Drive system dependency may be created.",
+  "blocked_until_council_and_joe_approval": ["canonical roadmap amendment", "Cowork retirement", "Drive system-file deletion", "Drive-specific gate removal", "Hermes production adoption or capability expansion"],
+  "timing_boundary": "This architecture decision does not expand the October Mature Foundation commitment, accelerate native platform construction, authorize public commercialization, or claim that complete Drive retirement occurs on August 21."
+}

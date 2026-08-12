@@ -56,6 +56,11 @@
       "status": "proposed_for_council_not_approved"
     },
     {
+      "name": "Drive-free system and Cowork-retirement council candidate",
+      "source": "phase0/drive-free-system-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
+    },
+    {
       "name": "Council launch procedure and uniform output contract",
       "source": "phase0/council-launch-packet-2026-08-12.v1.json",
       "ledger_template": "phase0/council-disposition-ledger-template.v1.json",
@@ -66,13 +71,13 @@
     {
       "id": "FACT-001",
       "topic": "standing_context_counts",
-      "settled_fact": "The current declared standing-context count is 144 shared rules and 30 Joe-personal rules.",
+      "settled_fact": "The council-packet preflight on 2026-08-12 returned 146 shared rules and 31 Joe-personal rules. Earlier 143 and 144 shared counts and the earlier 30 Joe-personal count are point-in-time evidence, not contract constants.",
       "stale_claims": [
         "Workspace review snapshot lines 85 and 1099 say 143 shared rules.",
         "Control Room review snapshot line 90 says 143 shared rules.",
         "Mature End State review snapshot line 22 says 143 shared rules."
       ],
-      "canonical_correction_after_council": "Replace fixed 143 counts with 144 as the current preparation fact and retain the instruction to report future live counts when they change."
+      "canonical_correction_after_council": "Remove fixed rule counts from timeless roadmap assertions. Record 146 shared and 31 Joe-personal only as the dated council-preflight observation and require every operating preflight to report its fresh server-derived counts."
     },
     {
       "id": "FACT-002",
@@ -124,12 +129,12 @@
     {
       "id": "FACT-007",
       "topic": "dell_migration_runtime",
-      "settled_fact": "Dell's secondary-machine migration completed operationally on 2026-08-11. His Mac now uses ~/carr-system plus the live record/doctrine path, has no CARR AI vault mounted, and installs no primary-only CARR scheduled jobs. Drive code copies are no longer a Dell runtime dependency; they remain only for separately governed cloud-only/file-mode delivery until those paths are retired or repointed with evidence.",
+      "settled_fact": "Dell's secondary-machine migration completed operationally on 2026-08-11. His Mac now uses ~/carr-system plus the live record/doctrine path, has no CARR AI vault mounted, and installs no primary-only CARR scheduled jobs. Drive code copies are no longer a Dell runtime dependency. Their remaining cloud-only/file-mode role is transitional and is now explicitly proposed for complete retirement under PROP-010 after consumer, parity, rollback, and disconnected-operation evidence.",
       "stale_claims": [
         "Repository README and manifest language still describe Drive copies as Dell's runtime or Dell/cloud runtime.",
         "Historical lead-board comments describe the shared Drive publish as Dell's copy rather than a cloud-only delivery fallback."
       ],
-      "canonical_correction_after_council": "Describe both partner Macs as repo runtimes, retain Drive copies only for evidenced cloud-only/file-mode delivery, and do not retire the supported fallback before its separate gate. Dell's T69 checkout reconciliation remains a local closeout requirement; perform it first if Dell will do repo work, but do not treat it as a blocker to Joe's Phase 0 audit."
+      "canonical_correction_after_council": "Describe both partner Macs as repo runtimes. During transition, retain an inventoried Drive fallback only until its consumer is repointed and parity, rollback, and observation evidence passes. If PROP-010 is approved, the mature target contains no Drive system files and Drive remains only an optional human document exchange integration. Dell's T69 checkout reconciliation remains a local closeout requirement; perform it first if Dell will do repo work, but do not treat it as a blocker to Joe's Phase 0 audit."
     }
   ],
   "proposed_rulings": [
@@ -229,6 +234,15 @@
       "conflict": "CARR has more than 150 human real estate agents, including solo agents and teams. Treating a CARR company-tenant seat as tenant-wide business-data authority would expose Panhandle-specific or other agents' records, search, files, calls, memory, queues, integrations, audit, exports, offline packs, and product projections.",
       "recommended_ruling": "Pre-engineer one CARR company-tenant architecture with isolated business workspaces while only Joe and Dell operate Panhandle Team. A human seat grants authentication and licensed modules but zero business-data access. A future solo agent could receive a private workspace; a future real estate team could receive a workspace with explicit individual memberships and attribution. Every request is bound to one server-derived active workspace, and cross-workspace collaboration uses typed minimum-field shares rather than ambient visibility.",
       "preserved_boundary": "This is cheap structural preparation, not a rollout or commercialization decision. Tenant administration grants no business-data access; Doc and Hermes cannot widen the human's active workspace; company reporting is purpose-built and minimum-field. No additional CARR user onboarding, public SaaS, signup, billing, client portal, or tenant-wide book search is authorized."
+    },
+    {
+      "id": "PROP-010",
+      "topic": "drive_free_system_operation_cowork_retirement_and_hermes_enabled_orchestration",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "The mature architecture places authority in Neon and system definitions in Git, and Dell already operates without a CARR AI vault. Yet README, repo-to-vault mappings, Drive-synchronized skills, Cowork launchers, calendar exchange files, compiled projections, hooks, health checks, and other file-mode consumers still preserve Google Drive as a transitional runtime dependency. The existing reconciliation describes some Drive fallbacks as continuing without naming their final retirement target.",
+      "recommended_ruling": "Approve the Drive-free target defined in phase0/drive-free-system-council-candidate.v1.json. No Drive file may be required to boot, authorize, schedule, operate, observe, recover, or reconstruct the platform. Retire Cowork as an operational dependency. Put deterministic recurring work in repo-defined code on registered Local Edge Nodes; make Hermes the preferred persistent routine-operations and Doc orchestrator after its graduated gates; reserve Claude Code and Codex for engineering. Preserve Google Drive only as an optional user-selected human document destination whose absence cannot degrade core system health.",
+      "joe_position": "Hermes is the game-changing cloud orchestration layer that makes the Drive-free, Cowork-independent direction practical.",
+      "preserved_boundary": "Drive independence is a property of Neon, GitHub, Cloudflare/KV/R2, typed MCP, and registered Local Edge Nodes, not a dependency on Hermes. A Hermes or Portal outage cannot force Drive fallback, change authority, or impair canonical recovery. Do not silently expand the August 21 doctrine cutoff or delete transitional consumers before inventory, parity, rollback, and disconnected-operation evidence passes."
     }
   ],
   "canonical_amendments_after_approval": [
@@ -288,7 +302,8 @@
       "PROP-006 deferral schema",
       "PROP-007 Hermes Agent and Nous Portal constrained evaluation",
       "PROP-008 independent platform name with CARR as launch tenant",
-      "PROP-009 human real estate agent seats and isolated solo-agent or team workspaces"
+      "PROP-009 human real estate agent seats and isolated solo-agent or team workspaces",
+      "PROP-010 Drive-free system operation, Cowork retirement, and Hermes-enabled orchestration"
     ],
     "phase0_exit_evidence": [
       "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",
