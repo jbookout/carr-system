@@ -3,7 +3,7 @@
   "version": 1,
   "event": "PreToolUse",
   "matcher": "Bash|Read|Grep|Glob|WebFetch|WebSearch",
-  "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/delegation-gate.py",
+  "command": "/usr/bin/env python3 \"${HOME}/carr-system/hooks/delegation-gate.py\"",
   "timeout": 10,
   "known_read_sweep_tools": [
     "Bash",

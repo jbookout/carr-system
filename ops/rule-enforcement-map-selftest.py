@@ -25,8 +25,8 @@ BASE = {
 SOURCE = {"shared": ["aaaaaaaa"], "joe": ["bbbbbbbb"]}
 
 
-def case(name, data, passes):
-    got = mod.validate(data, SOURCE)
+def case(name, data, passes, source_ids=SOURCE):
+    got = mod.validate(data, source_ids)
     ok = (not got) == passes
     print(f"{'PASS' if ok else 'FAIL'}  {name}: {got or 'valid'}")
     return ok
@@ -36,7 +36,11 @@ def main():
     import copy
     cases = [
         case("exact coverage", copy.deepcopy(BASE), True),
+        case("zero-render machine validates versioned local contract",
+             copy.deepcopy(BASE), True, None),
         case("missing active id", {**copy.deepcopy(BASE), "active_rule_ids": {"shared": [], "joe": ["bbbbbbbb"]}}, False),
+        case("malformed local inventory id", {**copy.deepcopy(BASE), "active_rule_ids": {"shared": ["not-an-id"], "joe": ["bbbbbbbb"]}}, False, None),
+        case("extra scope fails render parity", {**copy.deepcopy(BASE), "active_rule_ids": {"shared": ["aaaaaaaa"], "joe": ["bbbbbbbb"], "dell": []}}, False),
         case("duplicate scope id", {**copy.deepcopy(BASE), "active_rule_ids": {"shared": ["aaaaaaaa"], "joe": ["aaaaaaaa"]}}, False),
         case("unknown override", {**copy.deepcopy(BASE), "category_overrides": {"hard_pre_action": ["cccccccc"]}}, False),
         case("double classification", {**copy.deepcopy(BASE), "category_overrides": {"hard_pre_action": ["aaaaaaaa"], "session_task_rail": ["aaaaaaaa"]}}, False),

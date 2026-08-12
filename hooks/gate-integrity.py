@@ -65,6 +65,7 @@ DELEGATION_HOOK_CONFIG = os.path.join(
 )
 CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
 CODEX_HOOKS_LIVE = os.path.expanduser("~/.codex/hooks.json")
+CODEX_CONFIG_LIVE = os.path.expanduser("~/.codex/config.toml")
 RULE_ENFORCEMENT_MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 RULE_ENFORCEMENT_MAP_CHECK = os.path.join(REPO, "ops", "rule-enforcement-map-check.py")
 CONTRACTS = {
@@ -73,10 +74,38 @@ CONTRACTS = {
     "rule-enforcement-map.json": RULE_ENFORCEMENT_MAP,
 }
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
-CARR_PROJECT_SETTINGS = os.path.expanduser(
-    "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
-    "My Drive/CARR AI/.claude/settings.json"
-)
+
+
+def project_settings_path(project_dir=None):
+    """Settings for the project that launched this session, not Joe's Drive.
+
+    Claude exposes CLAUDE_PROJECT_DIR to hooks.  The explicit argument keeps the
+    resolver testable; REPO is the safe fallback for direct/manual invocation.
+    """
+    root = project_dir or os.environ.get("CLAUDE_PROJECT_DIR") or REPO
+    return os.path.join(os.path.abspath(os.path.expanduser(root)),
+                        ".claude", "settings.json")
+
+
+def classify_codex_configuration(config_exists, hooks_exist):
+    """Classify one optional Codex adapter; hooks-only is a broken adapter."""
+    if config_exists:
+        return "configured"
+    if hooks_exist:
+        return "partial"
+    return "absent"
+
+
+def codex_configuration_state(config_path=CODEX_CONFIG_LIVE,
+                              hooks_path=CODEX_HOOKS_LIVE):
+    return classify_codex_configuration(
+        os.path.exists(config_path), os.path.exists(hooks_path)
+    )
+
+
+def claude_configuration_state(settings_path=SETTINGS):
+    """Claude is an optional client adapter, not a CARR system dependency."""
+    return "configured" if os.path.isfile(settings_path) else "absent"
 
 # The files whose contents ARE the enforcement. Anything that can refuse, block,
 # or classify belongs here.
@@ -261,6 +290,8 @@ def delegation_hook_contract():
     if (not isinstance(contract["command"], str)
             or not isinstance(contract["timeout"], int)):
         return None, "delegation hook contract command/timeout is malformed"
+    if "/Users/" in contract["command"] or "${HOME}/carr-system/" not in contract["command"]:
+        return None, "delegation hook contract is not machine-portable"
     return contract, None
 
 
@@ -287,15 +318,16 @@ def validate_delegation_wiring(live, contract):
     return True, None
 
 
-def project_delegation_wired():
+def project_delegation_wired(settings_path=None):
     """The delegation gate is CARR-project-only, never a global Claude hook."""
     contract, err = delegation_hook_contract()
     if err:
         return False, err
+    settings_path = settings_path or project_settings_path()
     try:
-        live = json.load(open(CARR_PROJECT_SETTINGS)).get("hooks", {})
+        live = json.load(open(settings_path)).get("hooks", {})
     except Exception as exc:
-        return False, f"CARR project settings unreadable: {exc}"
+        return False, f"CARR project settings unreadable at {settings_path}: {exc}"
     return validate_delegation_wiring(live, contract)
 
 
@@ -426,6 +458,28 @@ def delegation_wiring_selftest():
         ok = (not validate_carr_owned_wiring(live, codex_expected)) == expected_ok
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         outcomes.append(ok)
+    role_cases = [
+        ("machine without Codex adapter accepted", False, False, "absent"),
+        ("Codex configured machine detected", True, True, "configured"),
+        ("Codex config without hooks still requires repair", True, False, "configured"),
+        ("Codex hooks-only half-install rejected", False, True, "partial"),
+    ]
+    for name, config_exists, hooks_exist, expected in role_cases:
+        ok = classify_codex_configuration(config_exists, hooks_exist) == expected
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        outcomes.append(ok)
+    resolved = project_settings_path("/Users/dell/carr-system")
+    ok = resolved == "/Users/dell/carr-system/.claude/settings.json"
+    print(f"{'PASS' if ok else 'FAIL'}  active project settings are machine-neutral")
+    outcomes.append(ok)
+    claude_cases = [
+        ("machine without Claude adapter accepted", "/__carr_missing__/settings.json", "absent"),
+        ("Claude adapter detected", __file__, "configured"),
+    ]
+    for name, path, expected in claude_cases:
+        ok = claude_configuration_state(path) == expected
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        outcomes.append(ok)
     class Result:
         def __init__(self, returncode=0, stdout="", stderr=""):
             self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
@@ -492,30 +546,42 @@ def main():
     if not map_valid:
         problems.append(f"RULE ENFORCEMENT MAP: {map_err}")
 
-    codex_wired, codex_err = codex_wiring_matches_repo()
-    if codex_err:
-        problems.append(f"CODEX WIRING: {codex_err}")
-    elif not codex_wired:
+    codex_state = codex_configuration_state()
+    if codex_state == "partial":
         problems.append(
-            "NOT WIRED UP: Codex does not run the tracked hooks contract — "
-            "the CARR-scoped Codex boundary is not active"
+            "CODEX WIRING: hooks.json exists without config.toml — this is a "
+            "broken optional client adapter, not a CARR core dependency"
         )
+    elif codex_state == "configured":
+        codex_wired, codex_err = codex_wiring_matches_repo()
+        if codex_err:
+            problems.append(f"CODEX WIRING: {codex_err}")
+        elif not codex_wired:
+            problems.append(
+                "NOT WIRED UP: Codex does not run the tracked hooks contract — "
+                "the CARR-scoped Codex boundary is not active"
+            )
 
-    wiring_errors, err = settings_matches_repo()
-    if err:
-        problems.append(f"WIRING: {err}")
-    elif wiring_errors:
-        problems.append("CLAUDE WIRING: " + "; ".join(sorted(set(wiring_errors))))
+    claude_state = claude_configuration_state()
+    if claude_state == "configured":
+        wiring_errors, err = settings_matches_repo()
+        if err:
+            problems.append(f"CLAUDE ADAPTER WIRING: {err}")
+        elif wiring_errors:
+            problems.append("CLAUDE ADAPTER WIRING: "
+                            + "; ".join(sorted(set(wiring_errors))))
 
-    delegation_wired, delegation_err = project_delegation_wired()
-    if delegation_err:
-        problems.append(f"CARR DELEGATION WIRING: {delegation_err}")
-    elif not delegation_wired:
-        problems.append(
-            "NOT WIRED UP: CARR project delegation matcher/command/timeout drifted "
-            "from ops/config/delegation-gate-hook.json — its script may exist but "
-            "CARR sessions are not guaranteed to run the exact boundary"
-        )
+    project_adapter = project_settings_path()
+    project_adapter_state = "available" if os.path.isfile(project_adapter) else "absent"
+    if project_adapter_state == "available":
+        delegation_wired, delegation_err = project_delegation_wired(project_adapter)
+        if delegation_err:
+            problems.append(f"CARR CLAUDE PROJECT ADAPTER: {delegation_err}")
+        elif not delegation_wired:
+            problems.append(
+                "CLAUDE PROJECT ADAPTER DRIFT: CARR delegation matcher/command/timeout "
+                "does not match ops/config/delegation-gate-hook.json"
+            )
 
     unhardened = [n for n in GATED
                   if os.path.exists(os.path.join(HOOKS, n))
@@ -542,9 +608,10 @@ def main():
         note = (f" · {len(unhardened)}/{len(GATED)} gates still user-writable "
                 f"(run ops/harden-gates.sh with sudo to make tampering "
                 f"impossible rather than merely detectable)")
-    print(f"GATE INTEGRITY: {len(base)} gates match baseline; config wiring exact{note}")
-    print("CODEX RUNTIME STATUS: installed config equality does not prove trust or invocation; "
-          "a live negative blocked-call smoke is still required.")
+    print(f"GATE INTEGRITY: {len(base)} gates match baseline; installed adapter wiring exact{note}")
+    print(f"CLIENT ADAPTERS: Claude={claude_state}; Codex={codex_state}; "
+          f"Claude-project={project_adapter_state}. CARR core is client-independent; "
+          "adapter equality does not prove runtime invocation.")
     return 0
 
 

@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/delegation-gate.py",
+            "command": "/usr/bin/env python3 \"${HOME}/carr-system/hooks/delegation-gate.py\"",
             "timeout": 10
           }
         ]
