@@ -1,10 +1,10 @@
 {
   "contract": "carr-roadmap-council-disposition-ledger",
-  "version": 1,
+  "version": 2,
   "status": "blank_template_not_council_output",
   "allowed_dispositions": ["accept", "modify", "defer_with_named_reopen_trigger", "reject"],
   "packet": "phase0/council-launch-packet-2026-08-12.v1.json",
-  "source_snapshot": {"content_commit": "d22409ad2cff4b00660a7cb439d8b3aa46c85c71", "launch_packet_commit": null, "doctrine_generations_verified": false, "all_required_sources_read": false},
+  "source_snapshot": {"content_commit": "d68226178866528c0f403891dedf581b4bcedb17", "launch_packet_commit": null, "doctrine_generations_verified": false, "all_required_sources_read": false},
   "council": {
     "reviewers": [
       {"seat": "Claude frontier seat", "runtime_family": "Claude", "resolved_model_id": null, "reasoning_effort": null, "latest_frontier_verified": false, "high_effort_verified": false, "above_high_refused": false, "independent_review_complete": false, "sealed_before_disclosure": false},

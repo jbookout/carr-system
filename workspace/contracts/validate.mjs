@@ -69,6 +69,7 @@ assert.deepEqual(driveFreeCandidate.acceptance_tests.map(item => item.id), ["DRI
 assert.deepEqual(driveFreeCandidate.authoritative_placement.google_drive, ["optional user-selected document exchange or convenience copy only"], "Drive is optional document exchange only");
 assert.match(driveFreeCandidate.timing_boundary, /does not expand the October Mature Foundation commitment.*claim that complete Drive retirement occurs on August 21/i, "Drive retirement does not silently widen delivery scope");
 assert.equal(councilLaunch.frozen_source_snapshot.content_commit, "d68226178866528c0f403891dedf581b4bcedb17", "council source snapshot is exact");
+assert.equal(councilLedger.source_snapshot.content_commit, councilLaunch.frozen_source_snapshot.content_commit, "council ledger and launch packet share the frozen content snapshot");
 assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10", "council format is durably decided");
 assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude frontier seat", "Codex frontier seat", "Grok frontier seat"], "three distinct runtime-family council seats");
 assert.deepEqual(councilLaunch.model_selection_policy.seats.map(item => item.runtime_family), ["Claude", "Codex", "Grok"], "model selection is runtime-family based, not version pinned");
