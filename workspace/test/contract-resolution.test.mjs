@@ -202,7 +202,7 @@ test("glossary provenance and all six conceptual operating roles are explicit", 
 });
 
 test("integrated planning sources, milestone timing, predecessors, and cost bands stay harmonized", async () => {
-  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation, naming, humanSeat, humanSeatFixture, crossBoundary] = await Promise.all([
+  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation, naming, humanSeat, humanSeatFixture, crossBoundary, councilLaunch, councilLedger] = await Promise.all([
     readJson("contracts/phase0-manifest.v1.json"),
     readJson("contracts/phase0-traceability.v1.json"),
     readJson("contracts/council-review-register.v1.json"),
@@ -213,7 +213,9 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
     readJson("../phase0/platform-naming-council-candidate.v1.json"),
     readJson("../phase0/human-seat-workspace-isolation-council-candidate.v1.json"),
     readJson("../phase0/human-seat-workspace-isolation-fixtures.v1.json"),
-    readJson("../phase0/cross-product-boundary.v1.json")
+    readJson("../phase0/cross-product-boundary.v1.json"),
+    readJson("../phase0/council-launch-packet-2026-08-12.v1.json"),
+    readJson("../phase0/council-disposition-ledger-template.v1.json")
   ]);
   const expectedIds = [
     "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
@@ -302,6 +304,15 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.match(crossBoundary.human_seat_workspace_boundary.workspace_rule, /Panhandle Team.*Joe and Dell.*solo agent.*team workspace/i);
   assert.ok(council.open_items.some(item => item.id === "OPEN-HUMAN-WORKSPACE-001" && /Pre-engineer one CARR company tenant.*workspace membership.*operate only Panhandle Team/i.test(item.recommended_direction)));
   assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-009" && /Panhandle Team.*human seat grants authentication.*zero business-data access/i.test(item.recommended_ruling)));
+  assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"]);
+  assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10");
+  assert.deepEqual(councilLaunch.meeting_protocol.map(item => item.stage), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.match(councilLaunch.meeting_protocol[1].name, /sealed independent reviews/i);
+  assert.match(councilLaunch.facilitation_rules.join(" "), /not a fourth vote.*majority does not override.*Dissent is preserved/i);
+  assert.equal(councilLaunch.explicit_non_goals.some(item => /onboarding CARR's other 150-plus agents/i.test(item)), true);
+  assert.equal(councilLaunch.known_open_evidence.some(item => /five uncoached Workspace journeys are not performed/i.test(item)), true);
+  assert.deepEqual(councilLedger.fork_dispositions.map(item => item.fork_id), councilLaunch.forks_to_disposition.map(item => item.id));
+  assert.equal(councilLedger.joe_approval_card.status, "not_presented");
   assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);
   assert.deepEqual(hermesFixture.capability_manifest.exclude_classes, hermes.machine_evaluable_contract.absent_capability_classes);
   assert.deepEqual([hermesFixture.capability_manifest.scheduler_present, hermesFixture.capability_manifest.channel_delivery_present, hermesFixture.capability_manifest.personal_rule_bodies_returned], [false, false, false]);

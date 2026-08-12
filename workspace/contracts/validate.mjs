@@ -31,6 +31,8 @@ const hermesFixture = await readJson(new URL("../../phase0/", contractDir), "her
 const namingCandidate = await readJson(new URL("../../phase0/", contractDir), "platform-naming-council-candidate.v1.json");
 const humanSeatCandidate = await readJson(new URL("../../phase0/", contractDir), "human-seat-workspace-isolation-council-candidate.v1.json");
 const humanSeatFixture = await readJson(new URL("../../phase0/", contractDir), "human-seat-workspace-isolation-fixtures.v1.json");
+const councilLaunch = await readJson(new URL("../../phase0/", contractDir), "council-launch-packet-2026-08-12.v1.json");
+const councilLedger = await readJson(new URL("../../phase0/", contractDir), "council-disposition-ledger-template.v1.json");
 const exact = (actual, expected, label) => assert.deepEqual([...actual].sort(), [...expected].sort(), label);
 const validateFixture = compileSchema(fixtureContract);
 assert.equal(hermesCandidate.status, "proposed_for_council_not_approved", "Hermes candidate remains advisory");
@@ -58,6 +60,17 @@ assert.equal(humanSeatCandidate.panhandle_isolation.protected_surfaces.length, 1
 assert.equal(humanSeatFixture.synthetic, true, "human workspace isolation fixture is synthetic");
 assert.equal(new Set(humanSeatFixture.cases.map(item => item.id)).size, 18, "eighteen unique human workspace isolation cases");
 assert.deepEqual(humanSeatFixture.cases.map(item => item.expected.effect), ["privacy_safe_not_found", "allow_role_fields", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "refuse", "allow_shared_fields_only", "privacy_safe_not_found", "refuse", "refuse", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found"], "exact human workspace isolation outcomes");
+assert.equal(councilLaunch.frozen_source_snapshot.content_commit, "daacb3d73949dc708172f77d626b4f3eaa430a70", "council source snapshot is exact");
+assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10", "council format is durably decided");
+assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"], "three distinct council seats");
+assert.equal(councilLaunch.meeting_protocol.length, 8, "eight-stage meeting protocol");
+assert.deepEqual(councilLaunch.forks_to_disposition.map(item => item.id), ["PROP-001", "PROP-002", "PROP-003", "PROP-004", "PROP-005", "PROP-006", "PROP-007", "PROP-008", "PROP-009"], "nine ordered council forks");
+assert.equal(councilLaunch.uniform_review_rubric.dimensions.filter(item => item.critical).length, 4, "critical objections cannot be averaged away");
+assert.match(councilLaunch.authority.construction_gate, /Joe must approve.*durably/i, "council remains advisory");
+assert.match(councilLaunch.copy_paste_prompts.independent_reviewer.join(" "), /Do not ask for or read another member's review.*uniform_independent_review_form/i, "independent prompt is sealed and uniform");
+assert.deepEqual(councilLedger.allowed_dispositions, ["accept", "modify", "defer_with_named_reopen_trigger", "reject"], "closed disposition vocabulary");
+assert.equal(councilLedger.fork_dispositions.length, 9, "ledger covers every fork");
+assert.ok(councilLedger.fork_dispositions.every(item => item.disposition === null && item.dissent.length === 0), "ledger is an honest blank template");
 assert.ok(hermesCandidate.stop_conditions.some(item => /cross-brain.*cross-tenant.*capability/i.test(item)), "identity stop condition");
 assert.equal(hermesFixture.synthetic, true, "Hermes fixture is synthetic");
 assert.equal(hermesFixture.status, "phase0_candidate_not_deployed", "Hermes fixture is not deployment evidence");

@@ -2,9 +2,9 @@
   "contract": "carr-phase0-council-reconciliation",
   "version": "1.0.0",
   "status": "prepared_for_council_not_approved",
-  "prepared_at": "2026-08-11",
+  "prepared_at": "2026-08-12",
   "review_event_date": "2026-08-12",
-  "base_commit": "d4e0f67259d633bfe16272e070530ea81f08a4a9",
+  "base_commit": "daacb3d73949dc708172f77d626b4f3eaa430a70",
   "scope": {
     "purpose": "Give the three-model council one explicit reconciliation packet without silently changing canonical doctrine or approving disputed roadmap choices.",
     "authority": "This artifact records settled factual corrections and partner-confirmed decisions. Every item marked proposed_for_council_not_approved requires council disposition and Joe approval before canonical BDUF amendment or production construction.",
@@ -16,25 +16,29 @@
       "name": "CARR Workspace BDUF and Implementation Roadmap",
       "doctrine_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
       "generation": 344,
-      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-workspace-bduf.md"
+      "review_artifact": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
+      "review_rule": "Fresh-read doctrine generation 344; the Word file is a verified human-readable export, not authority."
     },
     {
       "name": "CARR Control Room BDUF and Implementation Roadmap",
       "doctrine_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
       "generation": 345,
-      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-control-room-bduf.md"
+      "review_artifact": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx",
+      "review_rule": "Fresh-read doctrine generation 345; the Word file is a verified human-readable export, not authority."
     },
     {
       "name": "CARR Mature Software End State BDUF",
       "doctrine_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
       "generation": 346,
-      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-mature-software-end-state-bduf.md"
+      "review_artifact": "/Users/booko/Desktop/System Road Maps/CARR Mature Software End State - BDUF and Implementation Roadmap.docx",
+      "review_rule": "Fresh-read doctrine generation 346; the Word file is a verified human-readable export, not authority."
     },
     {
       "name": "CARR Production Maturity Baseline",
       "doctrine_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
       "generation": 336,
-      "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-production-maturity-baseline.md"
+      "review_artifact": null,
+      "review_rule": "Read through the CARR Cloudflare read-doctrine verb at generation 336; do not substitute a Markdown projection."
     },
     {
       "name": "Hermes Agent and Nous Portal council candidate",
@@ -50,6 +54,12 @@
       "name": "Human real estate agent seat and workspace-isolation council candidate",
       "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json",
       "status": "proposed_for_council_not_approved"
+    },
+    {
+      "name": "Council launch procedure and uniform output contract",
+      "source": "phase0/council-launch-packet-2026-08-12.v1.json",
+      "ledger_template": "phase0/council-disposition-ledger-template.v1.json",
+      "status": "controlling_meeting_procedure_not_a_roadmap_decision"
     }
   ],
   "settled_fact_corrections": [

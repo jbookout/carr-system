@@ -220,6 +220,8 @@ const assertions = {
     const naming = read("../phase0/platform-naming-council-candidate.v1.json");
     const humanSeat = read("../phase0/human-seat-workspace-isolation-council-candidate.v1.json");
     const humanSeatFixture = read("../phase0/human-seat-workspace-isolation-fixtures.v1.json");
+    const councilLaunch = read("../phase0/council-launch-packet-2026-08-12.v1.json");
+    const councilLedger = read("../phase0/council-disposition-ledger-template.v1.json");
     assert.deepEqual(manifest.governing_sources.map(item => [item.document_id, item.generation, item.active_sections]), [
       ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 344, 35],
       ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 345, 40],
@@ -294,6 +296,16 @@ const assertions = {
     assert.equal(humanSeatFixture.cases.find(item => item.id === "HUMAN-SCOPE-008").expected.reason, "runtime_cannot_widen_human_workspace");
     assert.ok(humanSeatFixture.cases.slice(10).every(item => item.expected.effect === "privacy_safe_not_found" && item.expected.reason === "cross_workspace"));
     assert.ok(council.unresolved_forks.some(item => item.id === "CR-U08" && /Pre-engineer one CARR company-tenant.*Panhandle Team.*future solo agents.*future teams/i.test(item.recommendation)));
+    assert.equal(councilLaunch.authority.council_role, "advisory review and recommendation");
+    assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10");
+    assert.equal(councilLaunch.authority.final_approver, "Joe Bookout");
+    assert.equal(councilLaunch.reviewer_lenses.length, 3);
+    assert.equal(new Set(councilLaunch.reviewer_lenses.map(item => item.primary_lens)).size, 3);
+    assert.deepEqual(councilLaunch.forks_to_disposition.map(item => item.id), councilLedger.fork_dispositions.map(item => item.fork_id));
+    assert.match(councilLaunch.uniform_review_rubric.use_rule, /do not decide.*arithmetic.*critical-dimension objection/i);
+    assert.match(councilLaunch.copy_paste_prompts.synthesis_facilitator.join(" "), /non-voting facilitator.*Preserve dissent.*Joe approves/i);
+    assert.equal(councilLedger.phase0_exit_evidence.workspace_five_uncoached_journeys, null);
+    assert.equal(councilLedger.phase0_exit_evidence.control_room_six_uncoached_flows, null);
     assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);
     assert.deepEqual(hermesFixture.capability_manifest.exclude_classes, hermes.machine_evaluable_contract.absent_capability_classes);
     assert.deepEqual([hermesFixture.capability_manifest.scheduler_present, hermesFixture.capability_manifest.channel_delivery_present], [false, false]);
