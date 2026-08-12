@@ -29,6 +29,8 @@ const sponsorIdentityFixture = await readJson(new URL("test/fixtures/", workspac
 const hermesCandidate = await readJson(new URL("../../phase0/", contractDir), "hermes-runtime-council-candidate.v1.json");
 const hermesFixture = await readJson(new URL("../../phase0/", contractDir), "hermes-runtime-evaluation-fixtures.v1.json");
 const namingCandidate = await readJson(new URL("../../phase0/", contractDir), "platform-naming-council-candidate.v1.json");
+const humanSeatCandidate = await readJson(new URL("../../phase0/", contractDir), "human-seat-workspace-isolation-council-candidate.v1.json");
+const humanSeatFixture = await readJson(new URL("../../phase0/", contractDir), "human-seat-workspace-isolation-fixtures.v1.json");
 const exact = (actual, expected, label) => assert.deepEqual([...actual].sort(), [...expected].sort(), label);
 const validateFixture = compileSchema(fixtureContract);
 assert.equal(hermesCandidate.status, "proposed_for_council_not_approved", "Hermes candidate remains advisory");
@@ -47,6 +49,15 @@ assert.equal(namingCandidate.status, "proposed_for_council_not_approved", "platf
 assert.equal(namingCandidate.options.filter(item => item.recommendation === true).length, 1, "one naming architecture recommendation");
 assert.match(namingCandidate.recommendation, /independent platform name.*CARR as the launch tenant/i, "independent platform naming recommendation");
 assert.equal(namingCandidate.selection_gate.do_not_invent_or_select_in_this_packet, true, "no unevidenced platform name");
+assert.equal(humanSeatCandidate.status, "proposed_for_council_not_approved", "human-seat architecture remains advisory");
+assert.equal(humanSeatCandidate.decision_record_id, "8d27333b-6544-4117-b6bd-e9b86d1b1c89", "human-seat ruling is durably linked");
+assert.match(humanSeatCandidate.clarification, /human real estate professional.*not an AI agent/i, "agent vocabulary is unambiguous");
+assert.match(humanSeatCandidate.recommendation, /more than 150.*human users.*Panhandle Team.*solo real estate agent.*team workspace.*zero business-workspace access/i, "CARR company-scale workspace architecture");
+assert.match(humanSeatCandidate.seat_contract.seat_effect, /verified human.*licensed modules.*no business workspace.*by itself/i, "seat is not business-data authority");
+assert.equal(humanSeatCandidate.panhandle_isolation.protected_surfaces.length, 10, "ten protected workspace surfaces");
+assert.equal(humanSeatFixture.synthetic, true, "human workspace isolation fixture is synthetic");
+assert.equal(new Set(humanSeatFixture.cases.map(item => item.id)).size, 18, "eighteen unique human workspace isolation cases");
+assert.deepEqual(humanSeatFixture.cases.map(item => item.expected.effect), ["privacy_safe_not_found", "allow_role_fields", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "refuse", "allow_shared_fields_only", "privacy_safe_not_found", "refuse", "refuse", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found", "privacy_safe_not_found"], "exact human workspace isolation outcomes");
 assert.ok(hermesCandidate.stop_conditions.some(item => /cross-brain.*cross-tenant.*capability/i.test(item)), "identity stop condition");
 assert.equal(hermesFixture.synthetic, true, "Hermes fixture is synthetic");
 assert.equal(hermesFixture.status, "phase0_candidate_not_deployed", "Hermes fixture is not deployment evidence");

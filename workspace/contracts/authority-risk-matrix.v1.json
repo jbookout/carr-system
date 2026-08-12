@@ -36,6 +36,17 @@
     "dell_launch_role": "equal business-record operator inside the CARR tenant; no platform ownership transfer is implied",
     "corporate_boundary": "customer seat licensee only; no platform, intellectual-property, source, infrastructure, security-policy, or roadmap control"
   },
+  "human_seat_workspace_boundary": {
+    "company_shape": "CARR has more than 150 human real estate agents, including solo agents and multi-agent teams.",
+    "human_seat": "A verified human CARR seat grants authentication and licensed modules only; it grants no business data by itself.",
+    "business_authority": "Every business read or write requires a server-derived active workspace membership, workspace role, module entitlement, resource visibility, purpose, session freshness, and current revocation version.",
+    "panhandle_workspace": "Panhandle Team is an isolated workspace whose initial members are Joe and Dell. No other CARR seat, team, administrator, Doc session, Hermes runtime, or corporate search inherits its data.",
+    "solo_and_team_rule": "A solo agent receives a private workspace. A real estate team receives a workspace with explicit individual memberships and attribution; shared logins and permission pooling are prohibited.",
+    "tenant_administration": "Seat and module administration grants no automatic business-record, search, file, call, memory, integration, export, offline-pack, or workspace access.",
+    "sharing_rule": "Cross-workspace sharing or referral is a typed minimum-field object with explicit recipient, purpose, expiry, revocation, and provenance; it does not expose the source workspace.",
+    "rollout_rule": "Only Joe and Dell in Panhandle Team are planned to operate the system. Company-scale structure is pre-engineered now to avoid later redesign; no additional CARR-user onboarding, commercialization, public SaaS, or company-wide rollout is authorized.",
+    "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json"
+  },
   "roles": [
     {"role": "joe_partner", "principal": "Joe Bookout", "may": ["read authorized Workspace records", "create and confirm governed business writes", "review drafts", "submit engineering requests", "manage own device/session preferences"], "may_not": ["bypass human-only verbs", "convert a draft into an external send without a separate authorized system", "silently overwrite newer Dell work"]},
     {"role": "dell_partner", "principal": "Dell McCraney", "may": ["read authorized Workspace records", "create and confirm governed business writes", "review drafts", "submit engineering requests", "manage own device/session preferences"], "may_not": ["bypass human-only verbs", "convert a draft into an external send without a separate authorized system", "silently overwrite newer Joe work"]},

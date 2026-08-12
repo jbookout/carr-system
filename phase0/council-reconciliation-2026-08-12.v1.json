@@ -45,6 +45,11 @@
       "name": "Independent platform naming council candidate",
       "source": "phase0/platform-naming-council-candidate.v1.json",
       "status": "proposed_for_council_not_approved"
+    },
+    {
+      "name": "Human real estate agent seat and workspace-isolation council candidate",
+      "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
     }
   ],
   "settled_fact_corrections": [
@@ -206,6 +211,14 @@
       "conflict": "CARR is Joe's current employer and launch organization, while the mature software and IP are intended to remain owner-controlled and potentially licensable to other isolated tenants. Retaining CARR as the permanent platform identity would bind Joe-owned software to one employer and deepen rename debt during construction.",
       "recommended_ruling": "Approve the independent naming architecture in phase0/platform-naming-council-candidate.v1.json: choose a distinct platform name before production construction, preserve CARR as the launch tenant and familiar branding configuration, and run a bounded evidence-backed name-selection sprint after Joe approves the council output. Do not choose or propagate a final name without trademark, domain, registry, app-store, similarity, usability, and migration checks.",
       "preserved_boundary": "Renaming does not authorize public SaaS, billing, signup, a tenant selector, source transfer, commercial rollout, or construction. Joe retains platform/IP/root/release/licensing authority, and tenant identity remains server-derived."
+    },
+    {
+      "id": "PROP-009",
+      "topic": "human_real_estate_agent_seats_and_within_tenant_workspace_isolation",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "CARR has more than 150 human real estate agents, including solo agents and teams. Treating a CARR company-tenant seat as tenant-wide business-data authority would expose Panhandle-specific or other agents' records, search, files, calls, memory, queues, integrations, audit, exports, offline packs, and product projections.",
+      "recommended_ruling": "Pre-engineer one CARR company-tenant architecture with isolated business workspaces while only Joe and Dell operate Panhandle Team. A human seat grants authentication and licensed modules but zero business-data access. A future solo agent could receive a private workspace; a future real estate team could receive a workspace with explicit individual memberships and attribution. Every request is bound to one server-derived active workspace, and cross-workspace collaboration uses typed minimum-field shares rather than ambient visibility.",
+      "preserved_boundary": "This is cheap structural preparation, not a rollout or commercialization decision. Tenant administration grants no business-data access; Doc and Hermes cannot widen the human's active workspace; company reporting is purpose-built and minimum-field. No additional CARR user onboarding, public SaaS, signup, billing, client portal, or tenant-wide book search is authorized."
     }
   ],
   "canonical_amendments_after_approval": [
@@ -264,7 +277,8 @@
       "PROP-005 delegation and commit rule",
       "PROP-006 deferral schema",
       "PROP-007 Hermes Agent and Nous Portal constrained evaluation",
-      "PROP-008 independent platform name with CARR as launch tenant"
+      "PROP-008 independent platform name with CARR as launch tenant",
+      "PROP-009 human real estate agent seats and isolated solo-agent or team workspaces"
     ],
     "phase0_exit_evidence": [
       "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",

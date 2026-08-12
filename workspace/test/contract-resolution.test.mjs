@@ -202,7 +202,7 @@ test("glossary provenance and all six conceptual operating roles are explicit", 
 });
 
 test("integrated planning sources, milestone timing, predecessors, and cost bands stay harmonized", async () => {
-  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation, naming] = await Promise.all([
+  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation, naming, humanSeat, humanSeatFixture, crossBoundary] = await Promise.all([
     readJson("contracts/phase0-manifest.v1.json"),
     readJson("contracts/phase0-traceability.v1.json"),
     readJson("contracts/council-review-register.v1.json"),
@@ -210,7 +210,10 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
     readJson("../phase0/hermes-runtime-council-candidate.v1.json"),
     readJson("../phase0/hermes-runtime-evaluation-fixtures.v1.json"),
     readJson("../phase0/council-reconciliation-2026-08-12.v1.json"),
-    readJson("../phase0/platform-naming-council-candidate.v1.json")
+    readJson("../phase0/platform-naming-council-candidate.v1.json"),
+    readJson("../phase0/human-seat-workspace-isolation-council-candidate.v1.json"),
+    readJson("../phase0/human-seat-workspace-isolation-fixtures.v1.json"),
+    readJson("../phase0/cross-product-boundary.v1.json")
   ]);
   const expectedIds = [
     "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
@@ -283,6 +286,22 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.match(naming.cutover_contract.before_approval, /Do not rename canonical roadmap records.*production domains.*repository/i);
   assert.ok(council.open_items.some(item => item.id === "OPEN-PLATFORM-NAME-001" && /independent platform name/i.test(item.recommended_direction)));
   assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-008" && /CARR as the launch tenant/i.test(item.recommended_ruling)));
+  assert.equal(humanSeat.status, "proposed_for_council_not_approved");
+  assert.equal(humanSeat.decision_record_id, "8d27333b-6544-4117-b6bd-e9b86d1b1c89");
+  assert.match(humanSeat.clarification, /human real estate professional.*not an AI agent/i);
+  assert.match(humanSeat.scale_and_rollout.known_company_shape, /more than 150.*solo.*teams/i);
+  assert.match(humanSeat.seat_contract.seat_effect, /licensed modules.*no business workspace.*by itself/i);
+  assert.match(humanSeat.seat_contract.solo_agent_default, /private business workspace/i);
+  assert.match(humanSeat.seat_contract.team_agent_default, /explicitly approved team workspace/i);
+  assert.equal(humanSeat.panhandle_isolation.protected_surfaces.length, 10);
+  assert.deepEqual(humanSeatFixture.cases.slice(10).map(item => item.id), ["HUMAN-SCOPE-011", "HUMAN-SCOPE-012", "HUMAN-SCOPE-013", "HUMAN-SCOPE-014", "HUMAN-SCOPE-015", "HUMAN-SCOPE-016", "HUMAN-SCOPE-017", "HUMAN-SCOPE-018"]);
+  assert.ok(humanSeatFixture.cases.slice(10).every(item => item.expected.effect === "privacy_safe_not_found" && item.expected.reason === "cross_workspace"));
+  assert.equal(humanSeatFixture.cases.find(item => item.id === "HUMAN-SCOPE-005").expected.reason, "admin_has_no_business_data_authority");
+  assert.equal(humanSeatFixture.cases.find(item => item.id === "HUMAN-SCOPE-008").expected.reason, "runtime_cannot_widen_human_workspace");
+  assert.equal(humanSeatFixture.cases.find(item => item.id === "HUMAN-SCOPE-009").expected.reason, "membership_revoked");
+  assert.match(crossBoundary.human_seat_workspace_boundary.workspace_rule, /Panhandle Team.*Joe and Dell.*solo agent.*team workspace/i);
+  assert.ok(council.open_items.some(item => item.id === "OPEN-HUMAN-WORKSPACE-001" && /Pre-engineer one CARR company tenant.*workspace membership.*operate only Panhandle Team/i.test(item.recommended_direction)));
+  assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-009" && /Panhandle Team.*human seat grants authentication.*zero business-data access/i.test(item.recommended_ruling)));
   assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);
   assert.deepEqual(hermesFixture.capability_manifest.exclude_classes, hermes.machine_evaluable_contract.absent_capability_classes);
   assert.deepEqual([hermesFixture.capability_manifest.scheduler_present, hermesFixture.capability_manifest.channel_delivery_present, hermesFixture.capability_manifest.personal_rule_bodies_returned], [false, false, false]);

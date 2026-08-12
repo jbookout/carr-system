@@ -45,6 +45,7 @@
     "tenant_branding": "CARR may remain visible as the organization, tenant, and familiar launch configuration without being the underlying software name",
     "product_pattern": ["<Independent Platform> Workspace", "<Independent Platform> Control Room", "Doc as the human-facing assistant identity unless separately renamed"],
     "runtime_pattern": "Hermes may power Doc and routine orchestration, but runtime/vendor names do not become the platform name or source of truth",
+    "human_seat_pattern": "CARR is the company tenant for more than 150 human real estate agents. A seat grants authentication and licensed modules only; business data is isolated by explicit solo-agent or team-workspace membership under phase0/human-seat-workspace-isolation-council-candidate.v1.json, so CARR tenant membership never grants Panhandle or another agent's book.",
     "commercial_boundary": "No public SaaS, signup, billing, tenant selector, marketplace, or commercial rollout is authorized by renaming"
   },
   "selection_gate": {

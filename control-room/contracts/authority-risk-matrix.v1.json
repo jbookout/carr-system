@@ -31,6 +31,19 @@
     "personal_brain_version_and_count": "resolved connector/render version and count; missing scope is Unknown, not successful zero",
     "independence": "Tenant, sponsor, agent, runtime, capability, and brain scope are validated separately. No personal rule or caller field may choose or widen another dimension."
   },
+  "human_workspace_dimensions": {
+    "company_shape": "CARR has more than 150 human real estate agents operating as solo agents or members of explicit team workspaces.",
+    "human_user_id": "verified individual identity; team work never uses a shared login",
+    "seat_status": "licensed authentication and module entitlement only; no business-data authority",
+    "active_workspace_id": "server-derived workspace context for one request, screen, job, search, Doc interaction, or Hermes operation",
+    "workspace_membership_id": "current explicit membership binding the human to the active solo-agent or team workspace",
+    "workspace_role": "role inside one workspace; never inherited from company-tenant administration",
+    "resource_visibility": "private_user, workspace, exact explicit_share, or intentionally promoted corporate_shared",
+    "grant_rule": "effective access is the intersection of active seat, exact active workspace membership, workspace role, module entitlement, resource and field policy, purpose, environment, session freshness, and revocation state",
+    "administration_rule": "tenant seat administration has no automatic access to business records; any compliance or supervisory view is separately purpose-bound, minimum-field, and audited",
+    "runtime_rule": "Doc or Hermes receives the exact human and workspace context from the server and cannot widen it through prompts, memory, jobs, URLs, or payload fields",
+    "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json"
+  },
   "authority_planes": {
     "platform_administration": {"capability": "administer_platform", "launch_holder": "Joe", "scope": "platform code, intellectual property, tenant provisioning, licensing, release governance, and platform-wide controls", "customer_delegable": false},
     "tenant_administration": {"capability": "administer_tenant", "launch_holder": "Joe", "scope": "the single CARR tenant only; future seat licenses may grant narrow tenant-local capabilities without platform ownership", "customer_delegable": "only by Joe through an owner-controlled typed grant after implementation approval"},
