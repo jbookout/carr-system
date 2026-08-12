@@ -314,7 +314,12 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.deepEqual(driveFree.acceptance_tests.map(item => item.id), ["DRIVE-FREE-001", "DRIVE-FREE-002", "DRIVE-FREE-003", "DRIVE-FREE-004", "DRIVE-FREE-005", "DRIVE-FREE-006"]);
   assert.ok(council.open_items.some(item => item.id === "OPEN-DRIVE-FREE-001" && /Drive-free.*Cowork.*Hermes/i.test(`${item.fork} ${item.recommended_direction}`)));
   assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-010" && /No Drive file may be required.*Hermes.*routine-operations.*Claude Code and Codex.*engineering/i.test(item.recommended_ruling)));
-  assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"]);
+  assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude frontier seat", "Codex frontier seat", "Grok frontier seat"]);
+  assert.deepEqual(councilLaunch.model_selection_policy.seats.map(item => item.runtime_family), ["Claude", "Codex", "Grok"]);
+  assert.match(councilLaunch.model_selection_policy.rule, /Do not hardcode model versions.*latest, most advanced generally available frontier model/i);
+  assert.match(councilLaunch.model_selection_policy.reasoning_effort, /exactly.*high.*floor and a ceiling.*below high.*max, ultra.*above high/i);
+  assert.match(councilLaunch.model_selection_policy.fail_closed, /exactly high.*stop.*below high.*max\/ultra/i);
+  assert.ok(councilLaunch.meeting_protocol[0].procedure.some(item => /exactly.*high.*neither lower nor max\/ultra/i.test(item)));
   assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10");
   assert.deepEqual(councilLaunch.meeting_protocol.map(item => item.stage), [0, 1, 2, 3, 4, 5, 6, 7]);
   assert.match(councilLaunch.meeting_protocol[1].name, /sealed independent reviews/i);
@@ -324,7 +329,8 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_1_full_dependency_review.map(item => item.source_slug), ["carr-production-maturity-baseline", "carr-workspace-bduf", "carr-control-room-bduf", "carr-mature-software-end-state-bduf"]);
   assert.deepEqual(councilLaunch.progressive_disclosure_review_order.pass_2_cross_cutting_proposals.map(item => item.source), ["phase0/platform-naming-council-candidate.v1.json", "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "phase0/drive-free-system-council-candidate.v1.json", "phase0/hermes-runtime-council-candidate.v1.json", "phase0/workspace-market-map-council-candidate.v1.json"]);
   assert.match(councilLaunch.copy_paste_prompts.independent_reviewer.join(" "), /Follow progressive_disclosure_review_order exactly.*do not score.*Baseline, Workspace, Control Room, and Mature End State/i);
-  assert.match(councilLaunch.copy_paste_prompts.single_session_council_chair.join(" "), /one-session council chair.*freeze your own.*separate fresh CLI contexts.*Do not reveal any review.*all three validate/i);
+  assert.match(councilLaunch.copy_paste_prompts.single_session_council_chair.join(" "), /latest, most advanced.*exactly.*high.*below high.*above high.*one-session council chair.*freeze your own.*separate fresh CLI contexts.*Do not reveal any review.*all three validate/i);
+  assert.ok(councilLedger.council.reviewers.every(item => item.latest_frontier_verified === false && item.high_effort_verified === false && item.above_high_refused === false));
   assert.equal(councilLaunch.single_session_council_orchestration.execution_order.length, 7);
   assert.deepEqual(councilLedger.fork_dispositions.map(item => item.fork_id), councilLaunch.forks_to_disposition.map(item => item.id));
   assert.equal(councilLedger.joe_approval_card.status, "not_presented");

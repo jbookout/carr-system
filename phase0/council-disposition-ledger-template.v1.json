@@ -7,9 +7,9 @@
   "source_snapshot": {"content_commit": "d22409ad2cff4b00660a7cb439d8b3aa46c85c71", "launch_packet_commit": null, "doctrine_generations_verified": false, "all_required_sources_read": false},
   "council": {
     "reviewers": [
-      {"seat": "Claude Fable 5", "independent_review_complete": false, "sealed_before_disclosure": false},
-      {"seat": "GPT-5.6 Sol", "independent_review_complete": false, "sealed_before_disclosure": false},
-      {"seat": "SuperGrok 4.5", "independent_review_complete": false, "sealed_before_disclosure": false}
+      {"seat": "Claude frontier seat", "runtime_family": "Claude", "resolved_model_id": null, "reasoning_effort": null, "latest_frontier_verified": false, "high_effort_verified": false, "above_high_refused": false, "independent_review_complete": false, "sealed_before_disclosure": false},
+      {"seat": "Codex frontier seat", "runtime_family": "Codex", "resolved_model_id": null, "reasoning_effort": null, "latest_frontier_verified": false, "high_effort_verified": false, "above_high_refused": false, "independent_review_complete": false, "sealed_before_disclosure": false},
+      {"seat": "Grok frontier seat", "runtime_family": "Grok", "resolved_model_id": null, "reasoning_effort": null, "latest_frontier_verified": false, "high_effort_verified": false, "above_high_refused": false, "independent_review_complete": false, "sealed_before_disclosure": false}
     ],
     "facilitator": null,
     "started_at": null,

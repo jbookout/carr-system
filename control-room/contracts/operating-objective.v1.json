@@ -32,6 +32,6 @@
     {"id": "BASE-HAND-CARRIED-CONTEXT", "measure": "Number of hand-carried context transfers between sessions", "baseline": null, "collection": "count manual copy, relay, and return-to-old-task events during the representative week", "bound_product_action": "add durable request context, task-to-task handoff, and verified outcome history", "post_launch_comparison": "same categories and count per week"}
   ],
   "measurement_gate": "No baseline value may be invented. Phase 0 is prepared when instruments/interview prompts and bound actions exist; implementation prioritization requires observed values; post-launch adoption requires a like-for-like comparison.",
-  "council_criterion": "The Wednesday Fable 5 / GPT-5.6 Sol / SuperGrok 4.5 council must reject any roadmap slice that lacks a named routine, baseline plan, bound product action, displacement test, and explicit old-ritual cutover or retention decision.",
+  "council_criterion": "The frontier-model council—latest qualified Claude, Codex, and Grok models, each at exactly high effort—must reject any roadmap slice that lacks a named routine, baseline plan, bound product action, displacement test, and explicit old-ritual cutover or retention decision.",
   "tests": ["ai_session_displacement_gate", "baseline_measure_integrity", "routine_retirement_path"]
 }

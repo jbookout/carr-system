@@ -4,7 +4,8 @@
   "status": "phase0_prepared_for_council",
   "review_event": {
     "timing": "Wednesday night after Joe's Claude usage reset",
-    "participants": ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"],
+    "participants": ["Claude frontier seat", "Codex frontier seat", "Grok frontier seat"],
+    "model_selection": "At preflight select the latest, most advanced generally available qualified frontier model for each runtime family and run each at exactly high effort—neither lower nor max/ultra.",
     "purpose": "Audit the Workspace, Control Room, and Mature Software End State BDUFs against the Production Maturity Baseline and produce a recommended integrated roadmap set for Joe's approval before construction.",
     "review_order_source": "phase0/council-launch-packet-2026-08-12.v1.json#progressive_disclosure_review_order",
     "additional_input": ["Hermes Agent and Nous Portal candidate analysis at phase0/hermes-runtime-council-candidate.v1.json", "Independent platform naming candidate at phase0/platform-naming-council-candidate.v1.json", "Human real estate agent seat and workspace-isolation candidate at phase0/human-seat-workspace-isolation-council-candidate.v1.json", "Drive-free system and Cowork-retirement candidate at phase0/drive-free-system-council-candidate.v1.json", "Controlling launch procedure at phase0/council-launch-packet-2026-08-12.v1.json", "Uniform output template at phase0/council-disposition-ledger-template.v1.json"],

@@ -12,7 +12,7 @@
   "integrated_delivery_program": {
     "october_5_2026_milestone": {"name": "CARR Mature Foundation v1", "not_full_mature_end_state": true, "scope": ["Production Maturity Level 1 plus selected Level 2 controls", "core CARR Workspace and Command Center web milestone", "Calls and Doc request loop", "thin authoritative read-first CARR Control Room"]},
     "full_mature_end_state": {"planning_horizon": "4–6 months", "delivery_model": "evidence-gated", "scope": ["production-mature web operations", "installed Mac parity after Website Completion", "iPhone after installed Mac parity", "iPad Tour Mode after iPhone", "safely mutable Production AgentOps after read-first operational evidence and its authority gates"]},
-    "construction_gate": "No production construction, migration, deployment, or irreversible implementation before Joe approves the Fable 5, GPT-5.6 Sol, and SuperGrok 4.5 council output.",
+    "construction_gate": "No production construction, migration, deployment, or irreversible implementation before Joe approves the frontier-model council output from the latest qualified Claude, Codex, and Grok models run at exactly high effort.",
     "phase0_boundary": "Discovery, contracts, prototypes, inventories, validation, and council preparation only; zero production mutation routes or actions."
   },
   "hardware_program_gate": {
