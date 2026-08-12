@@ -68,7 +68,7 @@ assert.match(driveFreeCandidate.joe_proposed_direction.protective_boundary, /Dri
 assert.deepEqual(driveFreeCandidate.acceptance_tests.map(item => item.id), ["DRIVE-FREE-001", "DRIVE-FREE-002", "DRIVE-FREE-003", "DRIVE-FREE-004", "DRIVE-FREE-005", "DRIVE-FREE-006"], "six Drive-free acceptance tests");
 assert.deepEqual(driveFreeCandidate.authoritative_placement.google_drive, ["optional user-selected document exchange or convenience copy only"], "Drive is optional document exchange only");
 assert.match(driveFreeCandidate.timing_boundary, /does not expand the October Mature Foundation commitment.*claim that complete Drive retirement occurs on August 21/i, "Drive retirement does not silently widen delivery scope");
-assert.equal(councilLaunch.frozen_source_snapshot.content_commit, "acd33fe4a5e7b51412d958137449e7b65aaff382", "council source snapshot is exact");
+assert.equal(councilLaunch.frozen_source_snapshot.content_commit, "d22409ad2cff4b00660a7cb439d8b3aa46c85c71", "council source snapshot is exact");
 assert.equal(councilLaunch.meeting_method_decision_id, "6b4feb08-7b82-4351-9173-98d7b4239b10", "council format is durably decided");
 assert.deepEqual(councilLaunch.reviewer_lenses.map(item => item.seat), ["Claude Fable 5", "GPT-5.6 Sol", "SuperGrok 4.5"], "three distinct council seats");
 assert.equal(councilLaunch.meeting_protocol.length, 8, "eight-stage meeting protocol");
