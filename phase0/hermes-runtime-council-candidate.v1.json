@@ -2,6 +2,11 @@
   "contract": "carr-hermes-runtime-council-candidate",
   "version": 1,
   "prepared_at": "2026-08-12",
+  "decision_record_ids": [
+    "94c0206f-910f-4059-b0b3-24d67b05027c",
+    "715d95e0-09e6-4138-a3d2-d1ff4d3b2983",
+    "4cbcc9dd-dcc7-4522-8dd9-6f86022b8056"
+  ],
   "status": "proposed_for_council_not_approved",
   "authority": "This is a council-review input requesting a bounded Portal Cloud evaluation and a staged minimum-necessary live-read allowance. It is not itself approval. Only the council recommendation plus Joe's approval may authorize the evaluation, its vendor spend, or its named live-data phase. It does not authorize production adoption, unrestricted CARR data, MCP mutation, messaging delivery, unattended external effects, migration, or deployment.",
   "proposal": {
@@ -18,6 +23,40 @@
     "gap": "CARR lacks a durable, low-friction agent runtime and interaction layer that can remain available across sessions without making Joe or Dell supervise engineering conversations.",
     "crux": "The opportunity is persistent presence, not a second memory or authority system. Hermes is useful only if its local memory, skills, schedules, profiles, and channels remain subordinate to server-derived CARR identity, authority, evidence, and source truth.",
     "recommendation": "Approve a constrained technical evaluation of Hermes Agent on Nous Portal Cloud. Treat the always-on hosted runtime and economical model catalog as the main value proposition, while withholding production adoption, shared full MCP access, external delivery, and real-deal mutation until evidence passes."
+  },
+  "proposed_end_state_role_split": {
+    "status": "proposed_for_council_not_approved",
+    "human_quote": "My thoughts are - in the end state of this system Hermes earns its keep as and orchestrator of the OS while codex and Claude code are reserved for coding and adding system features /repairs",
+    "scope_clarification": "OS means the governed CARR business and system operating environment, not unrestricted macOS, shell, filesystem, browser, credential, or infrastructure access.",
+    "carr_core": "Neon, Doctrine, the CARR record layer, CARR MCP, identity, authority, approval, audit, and evidence contracts are the kernel and control plane. They own truth and enforce every consequential boundary.",
+    "hermes": "Hermes is the persistent operations orchestrator and dispatcher. It observes current CARR state, explains what needs attention, runs approved routine workflows through typed capabilities, coordinates qualified agents, preserves execution continuity, and returns evidence and blockers to Workspace and Control Room. It does not own truth, self-authorize, or repair production code directly.",
+    "doc": "Doc remains the human-friendly Workspace and System Desk identity, and Hermes may be the default runtime behind Doc for routine explanation, intake, routing, monitoring, and approved orchestration. Joe and Dell interact with Doc and straightforward controls while the interface visibly discloses Hermes or any other actual executor. Complex investigation, construction, and repair escalate to Claude Code or Codex without changing Doc's user-facing identity.",
+    "claude_code_and_codex": "Claude Code and Codex are the engineering escalation plane for constructing new capabilities, adding system features, modifying schemas or MCP contracts, diagnosing genuinely complex defects, and implementing reviewed repairs. They are not the normal interface for routine business or system operation.",
+    "control_room": "CARR Control Room exposes which executor is acting, exact scope, phase, authority, cost, evidence, blockers, approval state, and verified outcome across Hermes, Claude Code, Codex, and deterministic actuators.",
+    "human_authority": "Joe and Dell remain the business authorities within their roles, and Joe remains the production approver. Hermes may propose and route; consequential or external effects remain plan-bound, human-approved, audited, and freshly verified.",
+    "graduation_path": "The initial read-only evaluation proves identity, isolation, truth, evidence, cost, and routine displacement. Later risk-class gates may add approved routine orchestration. Durable work-request creation, engineering dispatch, production mutation, scheduling, and external delivery graduate separately and never arrive by implication from evaluation success.",
+    "adoption_test": "A mature Hermes capability earns its keep only when Joe or Dell can complete and understand the claimed routine through Workspace, Control Room, or Doc without opening or supervising Claude Code or Codex, while executor, authority, evidence, cost, and outcome remain visible. During R0, Hermes may only render a synthetic engineering-handoff rehearsal and cannot create or dispatch a durable request. After the separately approved request-creation and dispatch gates, a missing capability or real defect can become a typed, evidence-rich engineering work request; Claude Code or Codex performs the construction or repair; the verified result returns to the interface."
+  },
+  "engineering_handoff_graduation": {
+    "evaluation_r0": {
+      "status": "current_candidate",
+      "allowed": ["render synthetic engineering work-request preview from synthetic evidence"],
+      "durable_request_create": false,
+      "engineering_dispatch": false,
+      "expected_refusals": ["carr.engineering_work_request.create_v1", "carr.engineering_dispatch.execute_v1"]
+    },
+    "request_create_r1": {
+      "status": "future_separate_gate",
+      "capability": "carr.engineering_work_request.create_v1",
+      "effect": "create one typed, auditable, non-executing engineering request with source, exact scope, target, acceptance evidence, risk, cost bound, and origin; no agent is started",
+      "entry_evidence": ["R0 truth and identity gates pass", "request schema and duplicate control pass", "Joe approves the capability grant", "Control Room renders the request and refusal states"]
+    },
+    "engineering_dispatch_r2": {
+      "status": "future_separate_gate",
+      "capability": "carr.engineering_dispatch.execute_v1",
+      "effect": "dispatch an approved, plan-bound request to a qualified Claude Code or Codex runtime with exact repo, branch, environment, scope, budget, expiry, and acceptance evidence; it grants no production approval",
+      "entry_evidence": ["R1 request creation is proven", "qualified-executor routing passes", "material-cost and environment policy pass", "Joe approves the dispatch class", "result and failure return to the originating interface"]
+    }
   },
   "candidate_location_map": [
     {
@@ -151,6 +190,8 @@
       "cron_or_scheduler",
       "deploy",
       "migration"
+      ,"engineering_request_create"
+      ,"engineering_dispatch"
     ],
     "personal_rule_bodies_returned": false,
     "client_can_select_identity_or_capability": false,
@@ -309,7 +350,12 @@
       "id": "HERMES-FORK-004",
       "decision": "Keep the first deal-health skill read-only and synthetic; require a later server-enforced approval-token design before any real mutation",
       "recommendation": "accept"
+    },
+    {
+      "id": "HERMES-FORK-005",
+      "decision": "Adopt the proposed mature role split: Hermes orchestrates routine CARR operations while Claude Code and Codex remain the engineering construction and repair plane",
+      "recommendation": "accept with the explicit boundary that CARR remains the kernel, source of truth, authority, approval, audit, and evidence plane"
     }
   ],
-  "proposed_council_language": "Approve a controlled technical evaluation of Hermes Agent on Nous Portal Cloud as a candidate always-on runtime, economical model router, and internal attention surface. Joe accepts the incremental model-data exposure because CARR already uses Claude, OpenAI, and Grok. Phase A uses synthetic data. After its isolation, identity, retention, credential, audit, export, deletion, and rebuild gates pass, Phase B may use the exact server-allow-listed live read fields in this candidate under Privacy Mode. This approval does not authorize production adoption, unrestricted CARR data, personal-profile consolidation, messaging delivery, unattended external effects, or MCP mutations."
+  "proposed_council_language": "Approve a controlled technical evaluation of Hermes Agent on Nous Portal Cloud as a candidate always-on runtime, economical model router, and internal attention surface. The proposed mature role is Hermes as the orchestrator of routine business and system operations and the default runtime behind Doc, while Doc remains the human-facing identity and Claude Code and Codex are reserved for engineering construction, complex investigation, new features, and reviewed repairs. CARR remains the source-of-truth, authority, approval, audit, and evidence plane; OS does not mean unrestricted host access. Joe accepts the incremental model-data exposure because the system already uses Claude, OpenAI, and Grok. Phase A uses synthetic data. After its isolation, identity, retention, credential, audit, export, deletion, and rebuild gates pass, Phase B may use the exact server-allow-listed live read fields in this candidate under Privacy Mode. This approval does not authorize production adoption, unrestricted data, personal-profile consolidation, messaging delivery, scheduling, unattended external effects, MCP mutations, durable engineering-request creation, or engineering dispatch. Those capabilities require their named later gates."
 }

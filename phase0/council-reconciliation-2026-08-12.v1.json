@@ -40,6 +40,11 @@
       "name": "Hermes Agent and Nous Portal council candidate",
       "source": "phase0/hermes-runtime-council-candidate.v1.json",
       "status": "proposed_for_council_not_approved"
+    },
+    {
+      "name": "Independent platform naming council candidate",
+      "source": "phase0/platform-naming-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
     }
   ],
   "settled_fact_corrections": [
@@ -191,8 +196,16 @@
       "topic": "hermes_agent_and_nous_portal",
       "status": "proposed_for_council_not_approved",
       "conflict": "Joe's proposal correctly identifies the need for persistent agent presence, but it also gives Hermes durable memory, self-modifying skills, shared full MCP access, multi-channel delivery, scheduling, and Portal hosting before CARR's server-side authority, privacy, retention, isolation, and evidence gates have been proven for that runtime.",
-      "recommended_ruling": "Approve the constrained Nous Portal Cloud-hosted, dedicated-container, R0 read-only Hermes evaluation defined in phase0/hermes-runtime-council-candidate.v1.json. Treat Hermes memory and skills as non-authoritative working state, enable Privacy Mode, send only minimum-necessary data, and keep scheduling, delivery, and mutation absent. Joe accepts the incremental model-data exposure; persistent credential, execution, retention, recovery, export, and cost gates remain load-bearing. Expansion requires observed 30, 60, and 90-day like-for-like cost, quality, toil, and routine-displacement evidence; forecast ROI is not adoption evidence.",
-      "preserved_boundary": "CARR MCP, Doctrine, Neon, and the record layer remain authoritative; Doc remains the human-facing product identity; Claude Code and Codex remain the engineering plane; every later mutation or external effect remains server-authorized, plan-bound, human-approved, audited, and freshly verified."
+      "recommended_ruling": "Approve the constrained Nous Portal Cloud-hosted, dedicated-container, R0 read-only Hermes evaluation defined in phase0/hermes-runtime-council-candidate.v1.json and accept its proposed mature role split: Hermes orchestrates routine CARR operations behind Doc and product controls, while Claude Code and Codex are reserved for construction, complex investigation, new features, and reviewed repairs. Treat Hermes memory and skills as non-authoritative working state, enable Privacy Mode, send only minimum-necessary data, and keep scheduling, engineering dispatch, delivery, and mutation absent from the evaluation. Joe accepts the incremental model-data exposure; persistent credential, execution, retention, recovery, export, and cost gates remain load-bearing. Expansion requires observed 30, 60, and 90-day like-for-like cost, quality, toil, and routine-displacement evidence; forecast ROI is not adoption evidence.",
+      "preserved_boundary": "CARR MCP, Doctrine, Neon, and the record layer remain the kernel, source of truth, and authority plane; Doc remains the human-facing product identity; Hermes may orchestrate only through typed graduated capabilities; Claude Code and Codex remain the engineering plane; every later mutation or external effect remains server-authorized, plan-bound, human-approved, audited, and freshly verified."
+    },
+    {
+      "id": "PROP-008",
+      "topic": "independent_platform_name_and_carr_launch_tenant",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "CARR is Joe's current employer and launch organization, while the mature software and IP are intended to remain owner-controlled and potentially licensable to other isolated tenants. Retaining CARR as the permanent platform identity would bind Joe-owned software to one employer and deepen rename debt during construction.",
+      "recommended_ruling": "Approve the independent naming architecture in phase0/platform-naming-council-candidate.v1.json: choose a distinct platform name before production construction, preserve CARR as the launch tenant and familiar branding configuration, and run a bounded evidence-backed name-selection sprint after Joe approves the council output. Do not choose or propagate a final name without trademark, domain, registry, app-store, similarity, usability, and migration checks.",
+      "preserved_boundary": "Renaming does not authorize public SaaS, billing, signup, a tenant selector, source transfer, commercial rollout, or construction. Joe retains platform/IP/root/release/licensing authority, and tenant identity remains server-derived."
     }
   ],
   "canonical_amendments_after_approval": [
@@ -250,7 +263,8 @@
       "PROP-004 canonical 5+6 prototype suite",
       "PROP-005 delegation and commit rule",
       "PROP-006 deferral schema",
-      "PROP-007 Hermes Agent and Nous Portal constrained evaluation"
+      "PROP-007 Hermes Agent and Nous Portal constrained evaluation",
+      "PROP-008 independent platform name with CARR as launch tenant"
     ],
     "phase0_exit_evidence": [
       "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",

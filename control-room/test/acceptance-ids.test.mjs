@@ -217,6 +217,7 @@ const assertions = {
     const trace = read("contracts/phase0-traceability.v1.json");
     const hermes = read("../phase0/hermes-runtime-council-candidate.v1.json");
     const hermesFixture = read("../phase0/hermes-runtime-evaluation-fixtures.v1.json");
+    const naming = read("../phase0/platform-naming-council-candidate.v1.json");
     assert.deepEqual(manifest.governing_sources.map(item => [item.document_id, item.generation, item.active_sections]), [
       ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 344, 35],
       ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 345, 40],
@@ -243,6 +244,16 @@ const assertions = {
     assert.ok(trace.entries.some(item => item.id === "P0-022" && item.source_refs.includes("carr-control-room-bduf#s37")));
     assert.equal(api.routes.some(route => route.method !== "GET"), false);
     assert.equal(hermes.status, "proposed_for_council_not_approved");
+    assert.deepEqual(hermes.decision_record_ids, ["94c0206f-910f-4059-b0b3-24d67b05027c", "715d95e0-09e6-4138-a3d2-d1ff4d3b2983", "4cbcc9dd-dcc7-4522-8dd9-6f86022b8056"]);
+    assert.equal(hermes.proposed_end_state_role_split.status, "proposed_for_council_not_approved");
+    assert.match(hermes.proposed_end_state_role_split.carr_core, /kernel and control plane.*truth.*consequential boundary/i);
+    assert.match(hermes.proposed_end_state_role_split.hermes, /orchestrator and dispatcher.*typed capabilities.*does not own truth/i);
+    assert.match(hermes.proposed_end_state_role_split.claude_code_and_codex, /engineering escalation plane.*complex defects.*reviewed repairs/i);
+    assert.match(hermes.proposed_end_state_role_split.control_room, /executor.*scope.*authority.*cost.*evidence.*verified outcome/i);
+    assert.match(hermes.proposed_end_state_role_split.doc, /Hermes may be the default runtime behind Doc.*actual executor/i);
+    assert.deepEqual([hermes.engineering_handoff_graduation.evaluation_r0.durable_request_create, hermes.engineering_handoff_graduation.evaluation_r0.engineering_dispatch], [false, false]);
+    assert.equal(hermes.engineering_handoff_graduation.request_create_r1.capability, "carr.engineering_work_request.create_v1");
+    assert.equal(hermes.engineering_handoff_graduation.engineering_dispatch_r2.capability, "carr.engineering_dispatch.execute_v1");
     assert.match(hermes.recommended_evaluation.runtime, /Nous Portal Cloud.*Small.*Medium/i);
     assert.match(hermes.recommended_evaluation.mcp_surface, /R0 read-only.*mutation.*absent/i);
     assert.match(hermes.non_negotiable_architecture.identity, /server-derived.*cannot be selected/i);
@@ -261,12 +272,19 @@ const assertions = {
     assert.ok(hermes.acceptance_tests.some(item => /hostile prompt.*cannot escape whole-process isolation/i.test(item)));
     assert.ok(hermes.stop_conditions.some(item => /cross-brain.*cross-tenant.*capability/i.test(item)));
     assert.ok(council.unresolved_forks.some(item => item.id === "CR-U06" && /Portal Cloud/i.test(item.recommendation)));
+    assert.ok(council.unresolved_forks.some(item => item.id === "CR-U06" && /Hermes orchestrates routine operations.*Claude Code and Codex.*engineering construction/i.test(item.recommendation)));
+    assert.equal(naming.status, "proposed_for_council_not_approved");
+    assert.equal(naming.decision_record_id, "27a297b3-dafb-428b-ba1e-62a804b518bb");
+    assert.match(naming.proposed_identity_architecture.platform_owner, /Joe retains platform.*IP.*root.*release.*licensing/i);
+    assert.equal(naming.proposed_identity_architecture.launch_tenant, "CARR");
+    assert.equal(naming.selection_gate.do_not_invent_or_select_in_this_packet, true);
+    assert.ok(council.unresolved_forks.some(item => item.id === "CR-U07" && /independent-name architecture/i.test(item.recommendation)));
     assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);
     assert.deepEqual(hermesFixture.capability_manifest.exclude_classes, hermes.machine_evaluable_contract.absent_capability_classes);
     assert.deepEqual([hermesFixture.capability_manifest.scheduler_present, hermesFixture.capability_manifest.channel_delivery_present], [false, false]);
     assert.equal(hermesFixture.authoritative_server_context.humanOnly_authority, false);
-    assert.deepEqual(hermesFixture.cases.filter(item => item.expected.effect === "refuse").map(item => item.id), ["HERMES-CASE-002", "HERMES-CASE-003", "HERMES-CASE-004", "HERMES-CASE-005", "HERMES-CASE-006", "HERMES-CASE-007", "HERMES-CASE-008", "HERMES-CASE-009"]);
-    assert.deepEqual(hermesFixture.cases.map(item => item.expected.humanOnly), Array(10).fill(false));
+    assert.deepEqual(hermesFixture.cases.filter(item => item.expected.effect === "refuse").map(item => item.id), ["HERMES-CASE-002", "HERMES-CASE-003", "HERMES-CASE-004", "HERMES-CASE-005", "HERMES-CASE-006", "HERMES-CASE-007", "HERMES-CASE-008", "HERMES-CASE-009", "HERMES-CASE-011", "HERMES-CASE-012"]);
+    assert.deepEqual(hermesFixture.cases.map(item => item.expected.humanOnly), Array(12).fill(false));
     assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-002").expected.reason, "client_identity_selection_forbidden");
     assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-003").expected.reason, "client_identity_selection_forbidden");
     assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-004").expected.reason, "client_capability_selection_forbidden");
@@ -274,6 +292,8 @@ const assertions = {
     assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-007").expected.reason, "humanOnly_denied_to_agent");
     assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-008").expected.reason, "channel_delivery_absent");
     assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-009").expected.reason, "scheduler_absent");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-011").expected.reason, "engineering_request_create_absent_in_r0");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-012").expected.reason, "engineering_dispatch_absent_in_r0");
   },
   server_derived_tenant_context: () => {
     const tenant = read("contracts/tenant-workflow-maintenance.v1.json");

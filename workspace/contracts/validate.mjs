@@ -28,6 +28,7 @@ const tenantDenialFixture = await readJson(new URL("test/fixtures/", workspaceDi
 const sponsorIdentityFixture = await readJson(new URL("test/fixtures/", workspaceDir), "sponsor-runtime-identity.v1.json");
 const hermesCandidate = await readJson(new URL("../../phase0/", contractDir), "hermes-runtime-council-candidate.v1.json");
 const hermesFixture = await readJson(new URL("../../phase0/", contractDir), "hermes-runtime-evaluation-fixtures.v1.json");
+const namingCandidate = await readJson(new URL("../../phase0/", contractDir), "platform-naming-council-candidate.v1.json");
 const exact = (actual, expected, label) => assert.deepEqual([...actual].sort(), [...expected].sort(), label);
 const validateFixture = compileSchema(fixtureContract);
 assert.equal(hermesCandidate.status, "proposed_for_council_not_approved", "Hermes candidate remains advisory");
@@ -35,7 +36,17 @@ assert.match(hermesCandidate.recommended_evaluation.runtime, /Nous Portal Cloud.
 assert.match(hermesCandidate.non_negotiable_architecture.source_truth, /CARR record layer remain authoritative/i, "Hermes cannot become source truth");
 assert.match(hermesCandidate.non_negotiable_architecture.authorization, /not authorization boundaries.*default-deny/i, "Hermes filters cannot authorize");
 assert.match(hermesCandidate.non_negotiable_architecture.portal, /incremental.*Privacy Mode.*minimum-necessary/i, "Joe's Portal risk weighting is preserved");
-assert.equal(hermesCandidate.council_decisions_requested.length, 4, "four Hermes council forks");
+assert.equal(hermesCandidate.council_decisions_requested.length, 5, "five Hermes council forks");
+assert.match(hermesCandidate.proposed_end_state_role_split.hermes, /operations orchestrator and dispatcher.*typed capabilities.*does not own truth/i, "Hermes mature role is bounded orchestration");
+assert.match(hermesCandidate.proposed_end_state_role_split.claude_code_and_codex, /engineering escalation plane.*new capabilities.*reviewed repairs/i, "Claude Code and Codex remain engineering");
+assert.equal(hermesCandidate.engineering_handoff_graduation.evaluation_r0.durable_request_create, false, "R0 cannot create engineering request");
+assert.equal(hermesCandidate.engineering_handoff_graduation.evaluation_r0.engineering_dispatch, false, "R0 cannot dispatch engineering work");
+assert.equal(hermesCandidate.engineering_handoff_graduation.request_create_r1.status, "future_separate_gate", "request creation is future gated");
+assert.equal(hermesCandidate.engineering_handoff_graduation.engineering_dispatch_r2.status, "future_separate_gate", "engineering dispatch is future gated");
+assert.equal(namingCandidate.status, "proposed_for_council_not_approved", "platform naming remains advisory");
+assert.equal(namingCandidate.options.filter(item => item.recommendation === true).length, 1, "one naming architecture recommendation");
+assert.match(namingCandidate.recommendation, /independent platform name.*CARR as the launch tenant/i, "independent platform naming recommendation");
+assert.equal(namingCandidate.selection_gate.do_not_invent_or_select_in_this_packet, true, "no unevidenced platform name");
 assert.ok(hermesCandidate.stop_conditions.some(item => /cross-brain.*cross-tenant.*capability/i.test(item)), "identity stop condition");
 assert.equal(hermesFixture.synthetic, true, "Hermes fixture is synthetic");
 assert.equal(hermesFixture.status, "phase0_candidate_not_deployed", "Hermes fixture is not deployment evidence");
@@ -45,8 +56,8 @@ assert.equal(hermesFixture.capability_manifest.scheduler_present, false, "Hermes
 assert.equal(hermesFixture.capability_manifest.channel_delivery_present, false, "Hermes channel delivery absent");
 assert.equal(hermesFixture.capability_manifest.personal_rule_bodies_returned, false, "Hermes personal rule bodies absent");
 assert.equal(hermesFixture.authoritative_server_context.humanOnly_authority, false, "Hermes humanOnly absent");
-assert.equal(new Set(hermesFixture.cases.map(item => item.id)).size, 10, "ten unique Hermes policy cases");
-assert.deepEqual(hermesFixture.cases.map(item => item.expected.effect), ["allow", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "allow_shared_metadata_only"], "Hermes exact policy outcomes");
+assert.equal(new Set(hermesFixture.cases.map(item => item.id)).size, 12, "twelve unique Hermes policy cases");
+assert.deepEqual(hermesFixture.cases.map(item => item.expected.effect), ["allow", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "refuse", "allow_shared_metadata_only", "refuse", "refuse"], "Hermes exact policy outcomes");
 assert.equal(api.api_policy.prototype_fixture_schema, fixtureContract.$id, "prototype fixture/API schema linkage");
 exact(api.api_policy.prototype_methods, ["GET", "HEAD", "OPTIONS"], "prototype method contract");
 for (const schema of Object.values(api.$defs)) compileSchema(api, schema);

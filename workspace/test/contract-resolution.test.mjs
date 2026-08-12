@@ -202,14 +202,15 @@ test("glossary provenance and all six conceptual operating roles are explicit", 
 });
 
 test("integrated planning sources, milestone timing, predecessors, and cost bands stay harmonized", async () => {
-  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation] = await Promise.all([
+  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation, naming] = await Promise.all([
     readJson("contracts/phase0-manifest.v1.json"),
     readJson("contracts/phase0-traceability.v1.json"),
     readJson("contracts/council-review-register.v1.json"),
     readJson("contracts/phase0-acceptance.v1.json"),
     readJson("../phase0/hermes-runtime-council-candidate.v1.json"),
     readJson("../phase0/hermes-runtime-evaluation-fixtures.v1.json"),
-    readJson("../phase0/council-reconciliation-2026-08-12.v1.json")
+    readJson("../phase0/council-reconciliation-2026-08-12.v1.json"),
+    readJson("../phase0/platform-naming-council-candidate.v1.json")
   ]);
   const expectedIds = [
     "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
@@ -236,6 +237,17 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   });
   assert.match(acceptance.integrated_program_acceptance.construction_gate, /Joe approves.*council output/);
   assert.equal(hermes.status, "proposed_for_council_not_approved");
+  assert.deepEqual(hermes.decision_record_ids, ["94c0206f-910f-4059-b0b3-24d67b05027c", "715d95e0-09e6-4138-a3d2-d1ff4d3b2983", "4cbcc9dd-dcc7-4522-8dd9-6f86022b8056"]);
+  assert.equal(hermes.proposed_end_state_role_split.status, "proposed_for_council_not_approved");
+  assert.match(hermes.proposed_end_state_role_split.scope_clarification, /CARR business and system operating environment.*not unrestricted macOS.*shell.*filesystem/i);
+  assert.match(hermes.proposed_end_state_role_split.hermes, /persistent operations orchestrator and dispatcher.*does not own truth.*repair production code/i);
+  assert.match(hermes.proposed_end_state_role_split.claude_code_and_codex, /engineering escalation plane.*new capabilities.*system features.*reviewed repairs/i);
+  assert.match(hermes.proposed_end_state_role_split.adoption_test, /without opening or supervising Claude Code or Codex.*typed, evidence-rich engineering work request.*verified result returns/i);
+  assert.match(hermes.proposed_end_state_role_split.doc, /Hermes may be the default runtime behind Doc.*visibly discloses.*executor/i);
+  assert.deepEqual(hermes.engineering_handoff_graduation.evaluation_r0.expected_refusals, ["carr.engineering_work_request.create_v1", "carr.engineering_dispatch.execute_v1"]);
+  assert.deepEqual([hermes.engineering_handoff_graduation.evaluation_r0.durable_request_create, hermes.engineering_handoff_graduation.evaluation_r0.engineering_dispatch], [false, false]);
+  assert.equal(hermes.engineering_handoff_graduation.request_create_r1.status, "future_separate_gate");
+  assert.equal(hermes.engineering_handoff_graduation.engineering_dispatch_r2.status, "future_separate_gate");
   assert.match(hermes.crux.crux, /persistent presence, not a second memory or authority system/i);
   assert.match(hermes.recommended_evaluation.runtime, /dedicated Nous Portal Cloud.*Small.*Medium/i);
   assert.match(hermes.recommended_evaluation.mcp_surface, /R0 read-only.*mutation.*absent/i);
@@ -262,6 +274,15 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
   assert.ok(hermes.stop_conditions.some(item => /outside the approved versioned minimum-data allow-list/i.test(item)));
   assert.ok(council.open_items.some(item => item.id === "OPEN-HERMES-001" && /Portal Cloud evaluation/i.test(item.recommended_direction)));
   assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-007" && /Portal Cloud-hosted/i.test(item.recommended_ruling)));
+  assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-007" && /Hermes orchestrates routine CARR operations.*Claude Code and Codex.*construction.*reviewed repairs/i.test(item.recommended_ruling)));
+  assert.equal(naming.status, "proposed_for_council_not_approved");
+  assert.equal(naming.decision_record_id, "27a297b3-dafb-428b-ba1e-62a804b518bb");
+  assert.match(naming.recommendation, /independent platform name.*CARR as the launch tenant/i);
+  assert.equal(naming.options.find(item => item.id === "NAME-OPT-002").recommendation, true);
+  assert.deepEqual(naming.proposed_identity_architecture.tenant_members, ["Joe", "Dell"]);
+  assert.match(naming.cutover_contract.before_approval, /Do not rename canonical roadmap records.*production domains.*repository/i);
+  assert.ok(council.open_items.some(item => item.id === "OPEN-PLATFORM-NAME-001" && /independent platform name/i.test(item.recommended_direction)));
+  assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-008" && /CARR as the launch tenant/i.test(item.recommended_ruling)));
   assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);
   assert.deepEqual(hermesFixture.capability_manifest.exclude_classes, hermes.machine_evaluable_contract.absent_capability_classes);
   assert.deepEqual([hermesFixture.capability_manifest.scheduler_present, hermesFixture.capability_manifest.channel_delivery_present, hermesFixture.capability_manifest.personal_rule_bodies_returned], [false, false, false]);
@@ -276,11 +297,15 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
     "HERMES-CASE-007": "refuse",
     "HERMES-CASE-008": "refuse",
     "HERMES-CASE-009": "refuse",
-    "HERMES-CASE-010": "allow_shared_metadata_only"
+    "HERMES-CASE-010": "allow_shared_metadata_only",
+    "HERMES-CASE-011": "refuse",
+    "HERMES-CASE-012": "refuse"
   });
   for (const item of hermesFixture.cases) assert.equal(item.expected.humanOnly, false, item.id);
   assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-009").request.tool, "cron.create");
   assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-009").expected.reason, "scheduler_absent");
+  assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-011").expected.reason, "engineering_request_create_absent_in_r0");
+  assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-012").expected.reason, "engineering_dispatch_absent_in_r0");
 });
 
 test("tenant, workflow, maintenance, and owner-control amendments are executable Phase 0 contracts without production claims", async () => {

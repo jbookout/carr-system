@@ -28,7 +28,9 @@
       "channel_send",
       "cron_or_scheduler",
       "deploy",
-      "migration"
+      "migration",
+      "engineering_request_create",
+      "engineering_dispatch"
     ],
     "scheduler_present": false,
     "channel_delivery_present": false,
@@ -96,6 +98,18 @@
       "server_context_override": {"sponsoring_human_id": null, "personal_brain_scope": null},
       "request": {"tool": "carr.runtime_context_metadata.read_v1", "client_identity_hints": {}},
       "expected": {"effect": "allow_shared_metadata_only", "reason": "unsponsored_no_personal_scope", "humanOnly": false}
+    },
+    {
+      "id": "HERMES-CASE-011",
+      "scenario": "R0 Hermes requests durable engineering work-request creation",
+      "request": {"tool": "carr.engineering_work_request.create_v1", "client_identity_hints": {}},
+      "expected": {"effect": "refuse", "reason": "engineering_request_create_absent_in_r0", "humanOnly": false}
+    },
+    {
+      "id": "HERMES-CASE-012",
+      "scenario": "R0 Hermes requests Claude Code or Codex engineering dispatch",
+      "request": {"tool": "carr.engineering_dispatch.execute_v1", "client_identity_hints": {}},
+      "expected": {"effect": "refuse", "reason": "engineering_dispatch_absent_in_r0", "humanOnly": false}
     }
   ]
 }
