@@ -1,0 +1,454 @@
+{
+  "reviewer": "Grok frontier seat",
+  "model_receipt": {
+    "runtime_family": "Grok",
+    "resolved_model_id": "grok-4.6",
+    "selection_verified_at": "2026-08-12T23:55:00Z",
+    "reasoning_effort": "high",
+    "above_high_refused": true,
+    "availability_evidence": "live invocation in fresh grok CLI context; effort flag strictly validated by CLI enum"
+  },
+  "review_order_attestation": {
+    "pass_0": "Orientation only. Read the full launch packet, then only the Mature End State excerpt named by progressive_disclosure_review_order.pass_0_orientation (executive feasibility, north star, product planes/roles, Mature Foundation v1, four-to-six-month horizon, evidence-gated framing). No score, fork disposition, roadmap amendment, or proceed verdict was formed in pass 0.",
+    "pass_1_order": [
+      "carr-production-maturity-baseline generation 336 (all 28 sections)",
+      "carr-workspace-bduf generation 344 (all 35 sections)",
+      "carr-control-room-bduf generation 345 (all 40 sections)",
+      "carr-mature-software-end-state-bduf generation 346 (all 42 sections, full read after the other three)"
+    ],
+    "pass_2_order": [
+      "phase0/platform-naming-council-candidate.v1.json",
+      "phase0/human-seat-workspace-isolation-council-candidate.v1.json",
+      "phase0/drive-free-system-council-candidate.v1.json",
+      "phase0/hermes-runtime-council-candidate.v1.json",
+      "phase0/workspace-market-map-council-candidate.v1.json"
+    ],
+    "pass_3": "Workspace and Control Room Phase 0 contracts, fixtures, prototype, validator, and tests; then phase0/council-reconciliation-2026-08-12.v1.json. Scoring and PROP-001..011 dispositions were recorded only after pass 1 completed in the declared order.",
+    "compliance": "Pass 0 was used only as a common map. No reviewer output from another seat was requested or read. Council output is advisory only."
+  },
+  "source_access": [
+    {"source": "phase0/council-launch-packet-2026-08-12.v1.json", "status": "read", "version": "packet_v2 launch_packet_commit 66bccd3447b6a2ec63097d05f1c22bcb0af1d792"},
+    {"source": "carr-production-maturity-baseline document_id 10d25f48-916b-4a7f-a1a6-d231274fed4b", "status": "read", "version": "authorized exact-generation export generation 336 (28 sections); store_generation on receipt 347"},
+    {"source": "carr-workspace-bduf document_id c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "status": "read", "version": "authorized exact-generation export generation 344 (35 sections); Word SHA-256 cb7733ae8f85eb1847b2b67ee6801b048494102b7e49857dda5d91b90bec8935"},
+    {"source": "carr-control-room-bduf document_id 11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "status": "read", "version": "authorized exact-generation export generation 345 (40 sections); Word SHA-256 4ed1984275278fd1142df326ed830403cd27e63f2043aac9f40d91df60e2588a"},
+    {"source": "carr-mature-software-end-state-bduf document_id 15d2250c-4821-4f83-9dc5-063f9470139d", "status": "read", "version": "authorized exact-generation export generation 346 (42 sections); Word SHA-256 b062e6aea084990383af0fe0040df45d30a8cedf7624da6563bfb427aff4556b"},
+    {"source": "phase0/program.v1.json", "status": "conflicting", "version": "1.4.0 at 66bccd3; stale artifact_verification.workspace.current_node_tests=32 versus 35/35 at this commit"},
+    {"source": "phase0/council-reconciliation-2026-08-12.v1.json", "status": "read", "version": "1.0.0 prepared_for_council_not_approved"},
+    {"source": "phase0/hermes-runtime-council-candidate.v1.json", "status": "read", "version": "1 proposed_for_council_not_approved"},
+    {"source": "phase0/hermes-runtime-evaluation-fixtures.v1.json", "status": "read", "version": "1 phase0_candidate_not_deployed"},
+    {"source": "phase0/platform-naming-council-candidate.v1.json", "status": "read", "version": "1 proposed_for_council_not_approved"},
+    {"source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json", "status": "read", "version": "1 proposed_for_council_not_approved"},
+    {"source": "phase0/human-seat-workspace-isolation-fixtures.v1.json", "status": "read", "version": "1 phase0_candidate_not_deployed"},
+    {"source": "phase0/drive-free-system-council-candidate.v1.json", "status": "read", "version": "1 proposed_for_council_not_approved"},
+    {"source": "phase0/workspace-market-map-council-candidate.v1.json", "status": "read", "version": "1.0.0 proposed_for_council_not_approved"},
+    {"source": "workspace/contracts/market-map-route-planning.v1.json", "status": "conflicting", "version": "1.0.0 phase0_candidate_not_implemented; required_fields include work_class/owner/lifecycle_state absent from fixture location keys"},
+    {"source": "workspace/fixtures/market-map.v1.json", "status": "read", "version": "workspace-fixture/v1 synthetic"},
+    {"source": "workspace/public/js/app.js", "status": "read", "version": "66bccd3 prototype"},
+    {"source": "workspace/public/css/app.css", "status": "read", "version": "66bccd3 prototype"},
+    {"source": "workspace/test/fixtures.test.mjs", "status": "read", "version": "66bccd3"},
+    {"source": "workspace/test/prototype.test.mjs", "status": "read", "version": "66bccd3; still titles the five BDUF prototype journeys after FLOW-WS-06 was added"},
+    {"source": "phase0/cross-product-boundary.v1.json", "status": "read", "version": "1.2.0"},
+    {"source": "workspace/contracts/council-review-register.v1.json", "status": "read", "version": "1.0.1"},
+    {"source": "workspace/contracts/phase0-acceptance.v1.json", "status": "read", "version": "1.0.0"},
+    {"source": "workspace/contracts/phase0-manifest.v1.json", "status": "read", "version": "1.0.0"},
+    {"source": "control-room/contracts/council-review.v1.json", "status": "read", "version": "1.0.0"},
+    {"source": "control-room/contracts/phase0-acceptance.v1.json", "status": "read", "version": "1.0.0"},
+    {"source": "control-room/contracts/phase0-manifest.v1.json", "status": "read", "version": "1.0.0"},
+    {"source": "phase0/council-disposition-ledger-template.v1.json", "status": "read", "version": "2 blank_template_not_council_output"},
+    {"source": "phase0/audit/2026-08-12-council-preflight-manifest.v1.json", "status": "read", "version": "1 frozen; cited only for facilitator machine/model receipts"},
+    {"source": "carr__standing-context", "status": "read", "version": "this unsponsored grok runtime: 146 shared, 0 personal, doctrine generation hint 347; facilitator-verified Joe-sponsored preflight 146/31 dated 2026-08-12"}
+  ],
+  "executive_verdict": "proceed_with_modifications",
+  "top_findings": [
+    {
+      "severity": "P0",
+      "claim": "PROP-002's Phase 1 entry rule plus PROP-004's 6+6 human suite would block G1 release-truth work on later-native Tour Mode and a still-proposed Market Map, contradicting website-first sequencing.",
+      "source": "phase0/council-reconciliation-2026-08-12.v1.json PROP-002.entry_rule and PROP-004; carr-workspace-bduf gen344 §23 (Tour is Phase 8 after Website Completion); carr-mature-software-end-state-bduf gen346 §29–§34; phase0/workspace-market-map-council-candidate.v1.json status proposed_for_council_not_approved",
+      "required_change": "Start Phase 1 at G1 after Joe approval and machine checks. Attach uncoached journeys to the slice they belong to. FLOW-WS-05 and FLOW-WS-06 cannot be Phase 1 entry blockers."
+    },
+    {
+      "severity": "P0",
+      "claim": "The R0–R6 authority taxonomy is load-bearing and currently means three different ladders; implementing both would make approvals, audit, and AgentOps untestable.",
+      "source": "carr-production-maturity-baseline gen336 §13; carr-mature-software-end-state-bduf gen346 §6 and §13; carr-control-room-bduf gen345 §7; phase0/cross-product-boundary.v1.json crosswalk.status=open_for_wednesday_council",
+      "required_change": "Pick one server-enforced risk/authority grammar, publish an explicit Workspace-capability to Control-Room-risk crosswalk, and amend all four canonical records together before any mutation UI."
+    },
+    {
+      "severity": "P1",
+      "claim": "Hermes/Portal is being asked to become the mature OS orchestrator and the hinge for Drive-free operation on preview hosting, non-sandbox profiles, and self-contradictory ROI arithmetic.",
+      "source": "phase0/hermes-runtime-council-candidate.v1.json HERMES-EVID-002/005/011, cost_hypothesis, roi_hypothesis.top_down_arithmetic_check; phase0/drive-free-system-council-candidate.v1.json joe_proposed_direction; carr-workspace-bduf gen344 §9.6; carr-mature-software-end-state-bduf gen346 §4 exclusions",
+      "required_change": "Authorize only the constrained R0 evaluation after Joe approval. Keep Hermes non-required until a measured unique-need gate. Decouple Drive-free from Hermes. Treat $2,975–$5,250 / 17–30 hours as disproven-as-stated, not planning input."
+    },
+    {
+      "severity": "P1",
+      "claim": "Pre-engineering a 150-agent company-tenant with solo/team workspaces, tenant-admin roles, and corporate shares is commercial-scope leakage and premature abstraction for a two-seat launch.",
+      "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json; carr-workspace-bduf gen344 §1.2 and §32; carr-production-maturity-baseline gen336 §27; packet explicit_non_goals",
+      "required_change": "Lock deny-by-default, server-derived context, and new-seat-zero-data now. Defer workspace catalogs, provisioning, multi-workspace switching, and firm reporting until a named opportunity exists. One tenant, one Panhandle workspace, two seats is the launch architecture."
+    },
+    {
+      "severity": "P1",
+      "claim": "Cost, maintenance, and ROI claims are hypotheses sitting on unknown baselines; incremental bands also omit Portal, Maps, and Mini capital.",
+      "source": "carr-mature-software-end-state-bduf gen346 §25–§28 and §37; workspace/contracts/phase0-acceptance.v1.json baseline_measure_plan and maintenance_measure_plan.observed_baseline_hours=null; phase0/hermes-runtime-council-candidate.v1.json roi_hypothesis; packet known_open_evidence",
+      "required_change": "Keep every dollar and hour labeled future_evidence_gate. Instrument the five baselines and maintenance diary before any spend, seat, or low-toil claim."
+    },
+    {
+      "severity": "P2",
+      "claim": "Market Map contract required location fields do not match the synthetic fixture keys the tests enforce, so the Phase 0 twin is not a faithful machine contract.",
+      "source": "workspace/contracts/market-map-route-planning.v1.json location_contract.required_fields; workspace/test/fixtures.test.mjs exactLocationKeys",
+      "required_change": "Reconcile work_class, owner, and lifecycle_state before any implementation or vendor evaluation."
+    },
+    {
+      "severity": "P2",
+      "claim": "Canonical BDUFs still freeze stale rule counts, Drive-first boot instructions, and an 0001–0094 migration inventory; loop 315 duplicate ordinal-2 remains unrepaired.",
+      "source": "FACT-001/004 in phase0/council-reconciliation-2026-08-12.v1.json; carr-workspace-bduf gen344 §0 fresh-session instructions; phase0/program.v1.json doctrine_metadata_integrity loop 315",
+      "required_change": "Apply FACT-001–007 as editorial corrections after Joe approval; do not represent ordinal repair as done."
+    }
+  ],
+  "rubric_scores": [
+    {
+      "rubric_id": "RUB-AUTH",
+      "score": 3,
+      "reason": "approved_design: separate Workspace/Control Room audiences, Joe-only Production approval, and server-derived tenant/sponsor/runtime dimensions are coherent. proposed_for_council: 150-agent workspace hierarchy and Hermes identity add unproven planes. current_verified: live partner-spoof refusal and 146/31 Joe-sponsored preflight. Gap: open R0–R6 crosswalk is a critical-dimension defect until resolved."
+    },
+    {
+      "rubric_id": "RUB-TRUTH",
+      "score": 3,
+      "reason": "approved_design: Neon/record verbs canonical, Salesforce provenance-only, Unknown ≠ Healthy, map-is-not-writer. proposed_for_council: Drive-free target is right but unproven. future_evidence_gate: Hermes memory/skills remain rebuildable only if evaluation discipline holds. current_verified: prototypes have no mutation transport."
+    },
+    {
+      "rubric_id": "RUB-ADOPT",
+      "score": 2,
+      "reason": "approved_design: AI-session displacement test is the right product law. unknown: five baselines unset; Joe/Dell uncoached six+six not performed; accessibility/sterile/Color Assist incomplete. proposed_for_council: Market Map visual-adoption claim is a synthetic prototype only. A second operating surface that partners do not use would fail the BDUF premortem."
+    },
+    {
+      "rubric_id": "RUB-BUILD",
+      "score": 3,
+      "reason": "approved_design: website-first, read-first Control Room, existing deploy/migrate wrappers, isolated worktrees. implemented_not_deployed: 35/35, 94/94, validator green at 66bccd3. proposed_for_council: Phase 1 entry overloaded by later journeys. current_verified: no CI/staging/release manifest yet (baseline §22)."
+    },
+    {
+      "rubric_id": "RUB-EVID",
+      "score": 3,
+      "reason": "current_verified: this seat re-ran workspace 35/35, control-room 94/94, validator ok. implemented_not_deployed: Phase 0 twins and denial fixtures. future_evidence_gate: restore RPO/RTO, Drive-free 48h, Portal isolation, uncoached journeys. unknown: ordinal-2 still broken; program.v1.json test counts stale."
+    },
+    {
+      "rubric_id": "RUB-COST",
+      "score": 2,
+      "reason": "approved_design: dated Aug 10 list-price bands $5–20 / $28–50 / $62–84 are internally consistent for the web stack. future_evidence_gate: 3–5h maintenance, Maps SKUs, Mini capital, Portal Plus+Small. proposed_for_council: Hermes ROI 17–30h vs 7.79–21.65h from the same assumptions is not a baseline. Hidden assumption: cheapest-qualified routing will stay cheap once always-on hosting and tool credits exist."
+    },
+    {
+      "rubric_id": "RUB-SCALE",
+      "score": 2,
+      "reason": "approved_design: one tenant, Joe/Dell only, no public SaaS is the launch law. proposed_for_council: independent platform name and deny-default seats are cheap now; 150-agent workspace/licensing/isolated-deployment productization is not. Simpler architecture wins: two-seat allow-list plus synthetic second-tenant denial, not a company OS."
+    }
+  ],
+  "fork_reviews": [
+    {
+      "fork_id": "PROP-001",
+      "disposition": "accept",
+      "rationale": "System-design sequencing is not partner-status equality. Dell-gating Phase 0 would convert calendar availability into an architecture lock. The preserved boundary already keeps Dell as equal business operator and later adoption validator. claim_label: proposed_for_council; rule 3d185f2b and Mature End State §6 already distinguish Joe design finish from Dell finished-workflow validation.",
+      "evidence": [
+        "phase0/council-reconciliation-2026-08-12.v1.json PROP-001",
+        "carr-workspace-bduf gen344 §23.1 Joe/Dell prototype journeys",
+        "carr-mature-software-end-state-bduf gen346 §6 and §30 week-6",
+        "carr-control-room-bduf gen345 §6.1"
+      ],
+      "contract_changes": [
+        "Workspace §23.1 and workspace/contracts/phase0-acceptance.v1.json manual_checks: Joe is Phase 0/system-design exit approver; Dell validation remains required before two-partner adoption or old-path retirement"
+      ],
+      "interim_default": "Joe may complete council and G0 without Dell present; no two-partner cutover or maturity claim without Dell validation.",
+      "reopen_trigger": null,
+      "blocked_scope": ["claiming shared-business adoption", "retiring old Deal Room/Lead Board/Front Door writers"],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-002",
+      "disposition": "modify",
+      "rationale": "Splitting planning (Phase 0/G0) from Foundation construction (G1) is the only way the Baseline P0-1..P0-4 programs do not pretend to be pre-approval work. The recommended entry_rule overreaches: requiring all six Workspace journeys and all six Control Room flows before G1 would stall release truth on Tour Mode and an unapproved map. That is a timing/feasibility failure, not ambition with real gates.",
+      "evidence": [
+        "phase0/council-reconciliation-2026-08-12.v1.json PROP-002",
+        "carr-production-maturity-baseline gen336 §26 P0-1 first construction slice",
+        "carr-mature-software-end-state-bduf gen346 §34 G0/G1",
+        "carr-workspace-bduf gen344 §23 Phases 6–8 after Website Completion"
+      ],
+      "contract_changes": [
+        "Rename Baseline P0 construction programs to Foundation work packages after G0",
+        "Phase 1 entry = Joe approval + machine checks + every material fork decided or deferred; G1 rails start immediately",
+        "Uncoached journeys bind to their vertical slice, not to G1 start"
+      ],
+      "interim_default": "No production construction. After Joe approval, Foundation/G1 may start without FLOW-WS-05/06 human evidence.",
+      "reopen_trigger": null,
+      "blocked_scope": ["product vertical-slice production construction before the matching uncoached journey", "any Production mutation"],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-003",
+      "disposition": "accept",
+      "rationale": "A two-person company still needs one persistent production-like proving ground that cannot touch Production credentials. Relabeling Rehearsal as Staging is how false health happens. Do not overbuild: one isolated Staging, published drift, no second ops organization.",
+      "evidence": [
+        "carr-production-maturity-baseline gen336 §5, §21 Staging=Not implemented, §26 P0-2",
+        "carr-mature-software-end-state-bduf gen346 §16 and §30 week 2",
+        "carr-control-room-bduf gen345 §11 and §34 Staging planned / rehearsal first"
+      ],
+      "contract_changes": [
+        "Control Room §11 and §34: Staging is a G1 requirement, shown Planned/Unknown until it exists; Rehearsal remains a distinct disposable safety environment"
+      ],
+      "interim_default": "Until Staging exists, UI shows Planned/Unknown; Production mutation remains closed.",
+      "reopen_trigger": null,
+      "blocked_scope": ["Production mutation", "calling Rehearsal Staging", "displaying Staging as Healthy"],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-004",
+      "disposition": "modify",
+      "rationale": "A single 6+6 catalog is useful so screens do not become extra exit tests. Making FLOW-WS-05 and FLOW-WS-06 Phase 0 human-exit obligations is incoherent with the same BDUFs: Tour Mode is a later native phase, and Market Map is only proposed. Prototype tests still describe five BDUF journeys while also implementing a synthetic map. Keep the catalog; shrink the current human-exit suite.",
+      "evidence": [
+        "phase0/council-reconciliation-2026-08-12.v1.json PROP-004",
+        "workspace/contracts/phase0-acceptance.v1.json FLOW-WS-01..06",
+        "control-room/contracts/phase0-acceptance.v1.json flow-01..06",
+        "workspace/test/prototype.test.mjs the five BDUF prototype journeys",
+        "carr-workspace-bduf gen344 §13 and §23.7"
+      ],
+      "contract_changes": [
+        "Canonical product catalog = 6 WS + 6 CR",
+        "Current human-exit suite = FLOW-WS-01..04 plus CR flow-01..06",
+        "FLOW-WS-05 remains a later native gate",
+        "FLOW-WS-06 exists only if PROP-011 is accepted and is not a G0/G1 blocker"
+      ],
+      "interim_default": "Phase 0 machine suite remains the current synthetic prototypes. Human exit for construction of G1 does not wait on Tour or Market Map.",
+      "reopen_trigger": null,
+      "blocked_scope": ["retiring old travel-planning rituals", "native Tour construction", "production geocoding"],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-005",
+      "disposition": "accept",
+      "rationale": "A commit is evidence packaging. The standing rule already separates commit/push from merge, deploy, and production writes. The obsolete no-commit wording is the defect. Hidden assumption to reject: auto-commit does not imply auto-merge by a cheap model.",
+      "evidence": [
+        "phase0/council-reconciliation-2026-08-12.v1.json PROP-005",
+        "carr-workspace-bduf gen344 §21.5 subagents do not commit unless authorized",
+        "standing rule gist bc9188b4 every session commits its own work"
+      ],
+      "contract_changes": [
+        "Workspace §21.5 and workspace/contracts/environment-release-process.v1.json: isolated worktree, explicit paths, proportional tests, commit/push own branch; merge/deploy/external send remain separately authorized"
+      ],
+      "interim_default": "Delegated sessions commit explicit paths on isolated branches only; no merge or deploy from that authority.",
+      "reopen_trigger": null,
+      "blocked_scope": ["merge to protected trunk", "deploy", "production writes", "external communication"],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-006",
+      "disposition": "accept",
+      "rationale": "Internal measurement deferrals are real (baselines, restore, Drive-free 48h, Portal isolation). accept_recommendation / choose_alternative / external-blocker cannot express them without pretending approval.",
+      "evidence": [
+        "control-room/contracts/council-review.v1.json allowed_dispositions",
+        "phase0/council-disposition-ledger-template.v1.json already includes defer_with_named_reopen_trigger",
+        "packet facilitation_rules"
+      ],
+      "contract_changes": [
+        "control-room/contracts/council-review.v1.json and Workspace council register: add defer_with_named_reopen_trigger with owner, trigger, interim_default, blocked_scope"
+      ],
+      "interim_default": "Use the ledger template schema for this council; do not treat a deferral as approval.",
+      "reopen_trigger": null,
+      "blocked_scope": ["silent construction of a deferred fork"],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-007",
+      "disposition": "modify",
+      "rationale": "The unique-need case for a persistent attention surface is plausible, and the R0 contract is actually gated. That is not enough to promote Hermes to mature OS orchestrator or Doc runtime. Official docs say profiles are not sandboxes and in-process controls are heuristics; Cloud is labeled preview; hardened-container is a provider claim; 315-model catalog is a live marketing number; Joe's confidentiality weighting covers inference increment, not persistent credentials, tool history, or rebuild. The packet's own ROI math does not add: 6–10 weekly hours × 30–50% capture is 7.79–21.65 hours/month, not 17–30 / $2,975–$5,250. Workspace §9.6 and Mature §4 still say Hermes has no required role without a proven unique need. Simpler alternative: ship Workspace/Control Room/Doc on CARR MCP and keep Claude/Codex as engineering; add Hermes only if R0 proves a routine no existing plane can do.",
+      "evidence": [
+        "phase0/hermes-runtime-council-candidate.v1.json HERMES-EVID-001..011, proposed_end_state_role_split, roi_hypothesis.top_down_arithmetic_check, current_carr_baselines all null",
+        "phase0/hermes-runtime-evaluation-fixtures.v1.json HERMES-CASE-001..012",
+        "carr-workspace-bduf gen344 §9.6 Slack and Hermes decision",
+        "carr-mature-software-end-state-bduf gen346 §4 Explicit exclusions and §24 no unattended consumer CLI",
+        "carr-control-room-bduf gen345 §34 Nuphos adoption = borrow patterns, no dependency"
+      ],
+      "contract_changes": [
+        "Authorize only the 3–5 day R0 Portal Small evaluation after Joe approval: Privacy Mode, memory disabled or write-reviewed, no cron/channels/mutation/request-create/dispatch",
+        "Do not amend roadmaps to name Hermes as default orchestrator or Doc runtime",
+        "Preserve Workspace §9.6 / Mature §4 until unique-need plus 30/60/90-day like-for-like evidence",
+        "Self-host remains the documented fallback if isolation/export/rebuild/cost fail",
+        "Forecast ROI and subscription-displacement claims stay unlabeled as evidence"
+      ],
+      "interim_default": "No Hermes in production, no Portal account from council authority, no MCP grant, Doc/System Desk remain CARR-native.",
+      "reopen_trigger": null,
+      "blocked_scope": [
+        "production Hermes adoption",
+        "Doc runtime cutover",
+        "MCP mutation",
+        "scheduling",
+        "channels",
+        "durable engineering-request create",
+        "engineering dispatch",
+        "personal-profile consolidation",
+        "any spend above a Joe-approved evaluation budget"
+      ],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-008",
+      "disposition": "accept",
+      "rationale": "Joe's employer-name lock-in is a real IP/exit problem and is cheapest to decide before construction multiplies prefixes. The packet already refuses to invent the name. Do not stall G1 waiting for trademark theater; aliases can carry CARR through the sprint. Renaming is not commercialization.",
+      "evidence": [
+        "phase0/platform-naming-council-candidate.v1.json NAME-OPT-002 and selection_gate",
+        "carr-mature-software-end-state-bduf gen346 §40 owner-controlled platform",
+        "packet explicit_non_goals choosing a final name without the bounded sprint"
+      ],
+      "contract_changes": [
+        "After Joe approval: one bounded name-selection sprint; no rename of domains, cookies, OAuth, repo, or doctrine until the gate list passes",
+        "New Phase 0 contracts must not treat CARR as immutable platform identity; launch tenant remains CARR"
+      ],
+      "interim_default": "Keep CARR-prefixed current artifacts. No public rename. No new CARR-as-platform commitments in fresh contracts.",
+      "reopen_trigger": null,
+      "blocked_scope": ["final name selection", "production domain cutover", "package/app-store identifiers", "public SaaS"],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-009",
+      "disposition": "modify",
+      "rationale": "The crux is correct: a company seat must not be a tenant-wide data role. The recommended build is not cheap. Wiring workspace membership through search, embeddings, calls, files, queues, Doc, Hermes, Control Room, offline packs, and audit is a third isolation plane on top of tenant + two-seat allow-list. Launch law is still Joe/Dell only. Baseline §27 already requires a synthetic second tenant before any external seat. Building 150-agent provisioning, solo/team catalogs, tenant-admin, and corporate shares now is commercial leakage dressed as rails. Simpler architecture: one tenant, one Panhandle workspace, two enabled seats, deny everyone else with privacy-safe not-found, keep the 18 denial fixtures as future twins.",
+      "evidence": [
+        "phase0/human-seat-workspace-isolation-council-candidate.v1.json scale_and_rollout and hierarchy",
+        "phase0/human-seat-workspace-isolation-fixtures.v1.json HUMAN-SCOPE-001..018",
+        "carr-workspace-bduf gen344 §1.2 Joe and Dell only / §32 launch UI has no tenant selector",
+        "carr-production-maturity-baseline gen336 §27 synthetic second tenant before any external seat",
+        "packet explicit_non_goals onboarding 150-plus agents"
+      ],
+      "contract_changes": [
+        "Lock now: server-derived tenant+active workspace, new-seat-zero-data, no tenant-wide search, tenant admin ≠ data access, client cannot select workspace",
+        "Launch binding: organization=CARR, workspace=Panhandle Team, seats=Joe+Dell",
+        "Defer: solo/team provisioning product, multi-workspace switcher, corporate-shared views, firm reporting, 150-seat administration",
+        "Keep HUMAN-SCOPE fixtures as future denial twins, not an implementation backlog"
+      ],
+      "interim_default": "Two-seat allow-list. Any other authenticated identity sees privacy-safe empty/not-found. No onboarding path exists.",
+      "reopen_trigger": null,
+      "blocked_scope": [
+        "onboarding any additional CARR agent",
+        "public signup/billing",
+        "tenant-wide book search",
+        "workspace administration UI",
+        "corporate reporting"
+      ],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-010",
+      "disposition": "modify",
+      "rationale": "Drive as accidental runtime is a real architecture bug; Dell already runs without a vault. Cowork as a required operating runtime should die. Those wins do not require Hermes. Joe's quote that Hermes is the game-changer that makes Drive-free practical is the hidden coupling to reject: Drive independence must hold when Portal is down, which the candidate itself states and then undermines by making Hermes the preferred orchestrator in the same ruling. Deterministic jobs belong on registered Local Edge Nodes and repo code. Do not absorb this into the August 21 Markdown cutoff.",
+      "evidence": [
+        "phase0/drive-free-system-council-candidate.v1.json system_file_definition, DRIVE-FREE-001..006, joe_proposed_direction, timing_boundary",
+        "FACT-007 Dell migration runtime",
+        "carr-workspace-bduf gen344 §0 still instructs loading Drive CLAUDE.md",
+        "carr-production-maturity-baseline gen336 §15 Markdown only where a machine requires a file",
+        "packet known_open_evidence Drive-free not yet proven"
+      ],
+      "contract_changes": [
+        "Adopt Drive-free and Cowork-non-dependency as the mature target with the six acceptance tests",
+        "Authoritative placement: Neon, Git, Cloudflare/KV/R2, registered Local Edge Nodes",
+        "Remove Hermes-as-preferred-orchestrator from this fork; leave runtime preference to PROP-007",
+        "Do not expand August 21 cutoff; do not delete consumers before inventory/parity/rollback/48h"
+      ],
+      "interim_default": "Drive remains mounted only for inventoried transitional consumers and optional human documents. No new Drive system dependency. Cowork is optional MCP client only.",
+      "reopen_trigger": null,
+      "blocked_scope": [
+        "Drive system-file deletion",
+        "Drive-specific gate removal",
+        "Cowork operational retirement claim",
+        "Hermes production orchestration",
+        "August 21 complete Drive retirement"
+      ],
+      "confidence": "high"
+    },
+    {
+      "fork_id": "PROP-011",
+      "disposition": "modify",
+      "rationale": "Joe and Dell being visual is a real adoption constraint, and Tour Mode already owns governed trips, so a second travel system would be the wrong build. The location-role / unlocated / vendor-isolated-geocode rails should be locked now because current schema has addresses and no lat/long. First-class Market Map as a committed Workspace module and FLOW-WS-06 as a Phase 0 exit is unnecessary complexity before Command Center and Deal Room displace any measured session hours. Google SKUs and geocode storage/attribution terms are lock-in, not a free map. World Monitor is AGPL-3.0 inspiration only. Phase 0 fixture honestly does not simulate clustering, live traffic, or optimality. Contract/fixture field mismatch must be fixed first.",
+      "evidence": [
+        "phase0/workspace-market-map-council-candidate.v1.json recommendation, provider_evidence, design_reference.license_boundary, phase_boundary",
+        "workspace/contracts/market-map-route-planning.v1.json authority_and_truth and phase0_fixture_claim",
+        "workspace/fixtures/market-map.v1.json synthetic; route_evidence.provider=none",
+        "workspace/test/fixtures.test.mjs vs market-map required_fields",
+        "carr-workspace-bduf gen344 §13 Tour Mode already defines locked appointments and route confirmation",
+        "carr-mature-software-end-state-bduf gen346 §25–§27 Maps purchase gates"
+      ],
+      "contract_changes": [
+        "Lock Phase 0 rails: entity ≠ location role, multi-location records, explicit unlocated counts, geocode as expiring projection, map never writes, sterile-mode hides whole-market, Tour confirmation required",
+        "Do not add Market Map to October Mature Foundation committed scope or primary nav",
+        "FLOW-WS-06 is a later adoption journey, not a G0/G1 blocker",
+        "Google remains preferred measured direction only; no SKU purchase or stored Google geocode as canonical",
+        "Reconcile contract required_fields with fixture keys before implementation"
+      ],
+      "interim_default": "Synthetic read-only prototype may remain under More. No production geocoding, routing vendor, or map-triggered Tour create.",
+      "reopen_trigger": null,
+      "blocked_scope": [
+        "production map vendor selection",
+        "production route optimization",
+        "canonical lat/long overwrite of addresses",
+        "retirement of manual trip planning",
+        "October Mature Foundation expansion"
+      ],
+      "confidence": "medium"
+    }
+  ],
+  "cross_roadmap_contradictions": [
+    {
+      "claim_a": "carr-control-room-bduf gen345 §7 R0–R6 = Observe / Personal presentation / Additive / Material operating / High-consequence record / Control plane / External effect",
+      "claim_b": "carr-production-maturity-baseline gen336 §13 and carr-mature-software-end-state-bduf gen346 §6/§13 R0–R6 = Observe / Explain / Propose / Draft-rehearse / Human-confirmed business mutation / Joe Production mutation / Break glass; Workspace uses a 1–5 Doc capability ladder",
+      "recommended_resolution": "One server-enforced authority grammar plus a published Workspace-capability ↔ Control-Room-risk crosswalk. Until then no mutation UI. phase0/cross-product-boundary.v1.json already marks this open."
+    },
+    {
+      "claim_a": "carr-workspace-bduf gen344 §9.6 and carr-mature-software-end-state-bduf gen346 §4: Hermes has no required role without a measured unique need",
+      "claim_b": "PROP-007/010 and drive-free-system-council-candidate: Hermes is the preferred persistent orchestrator and Doc runtime that makes Drive-free practical",
+      "recommended_resolution": "Canonical default remains no required Hermes role. Evaluation is a separate gated experiment. Drive-free must be Hermes-independent. Do not amend BDUFs to the mature role until unique-need evidence exists."
+    },
+    {
+      "claim_a": "carr-control-room-bduf gen345 §11/§34: Staging is Planned; use rehearsal branches first",
+      "claim_b": "carr-production-maturity-baseline gen336 §5/§21/§26 and Mature End State gen346 §16/§30: isolated persistent Staging is a G1/Week-2 requirement",
+      "recommended_resolution": "PROP-003: Staging is required at G1; Rehearsal stays distinct; Planned/Unknown until deployed."
+    },
+    {
+      "claim_a": "carr-workspace-bduf gen344 §28.1 and older text: five prototype journeys; prototype.test.mjs still says five",
+      "claim_b": "PROP-004 / phase0-acceptance FLOW-WS-01..06 adds whole-market planning as a sixth human exit",
+      "recommended_resolution": "Catalog may be 6+6. Current human-exit and G1 entry use FLOW-WS-01..04 + CR six. FLOW-WS-05/06 stay later."
+    },
+    {
+      "claim_a": "carr-workspace-bduf gen344 §23: website ~12 weeks (12–16 evidence); desktop after Website Completion",
+      "claim_b": "Eight-week October 5 Mature Foundation v1 includes core Workspace web milestone and can be misread as website-complete",
+      "recommended_resolution": "Keep SET-011: October 5 is Mature Foundation, not Website Completion or native maturity. Do not pull Market Map, Hermes adoption, Mini purchase, or desktop into that claim."
+    },
+    {
+      "claim_a": "carr-workspace-bduf gen344 §0 fresh-session instructions: load Drive CLAUDE.md and compiled rule files",
+      "claim_b": "Live standing-context + FACT-003 connector restored + PROP-010 Drive-free target; doctrine store generation 347",
+      "recommended_resolution": "Rewrite boot instructions to standing-context first. Drive files are migration evidence only. Do not treat 143/30 as constants (FACT-001)."
+    },
+    {
+      "claim_a": "carr-control-room-bduf gen345 §27 migration inventory 0001–0094",
+      "claim_b": "FACT-004 repository files through 0097 including duplicate 0095 names; applied Production set requires a fresh sanctioned read",
+      "recommended_resolution": "Separate repository inventory from applied Production migrations; never freeze a range in timeless prose."
+    },
+    {
+      "claim_a": "phase0/program.v1.json artifact_verification.workspace.current_node_tests=32",
+      "claim_b": "This seat current_verified 35/35 workspace and 94/94 control-room at 66bccd3; packet and preflight say 35/35 and 94/94",
+      "recommended_resolution": "Treat program.v1.json counts as stale dated evidence. Machine evidence is the live test run, not the program file."
+    },
+    {
+      "claim_a": "Incremental cost bands $5–20 / $62–84 exclude capital Mini, Portal hosting, Maps SKUs, and legal/design labor (Mature §27–§28, §41)",
+      "claim_b": "PROP-007/010/011 and hardware sections introduce those costs as if inside the same operating budget",
+      "recommended_resolution": "Keep Mini as separately approved capital. Portal and Maps are evaluation/SKU gates outside the web-ops band. No blended ROI."
+    }
+  ],
+  "strongest_remaining_objections": [
+    "The packet is building a licensable multi-workspace platform and a third-party persistent agent OS before two partners have completed one uncoached visual journey or produced a single measured baseline hour.",
+    "Hermes/Portal preview hosting is treated as the hinge for Drive-free operation despite official non-sandbox profiles, preview status, and ROI arithmetic the candidate itself falsifies.",
+    "Phase 0/Phase 1 entry is overloaded with later-native Tour Mode and a still-proposed Market Map, which can stall the only work that reduces operational risk: release truth, isolated Staging, and CI."
+  ],
+  "evidence_that_would_change_view": [
+    "The five operating baselines measured by diary/interview, not invented, showing routine heavy-session hours large enough that a thin read-only attention surface is the cheapest qualified fix.",
+    "Portal hardened-container negative tests plus export, deletion, rebuild, and Hermes-outage-without-Drive-fallback evidence that survive HERMES-CASE and DRIVE-FREE-005.",
+    "Joe completing FLOW-WS-01..04 and the six Control Room flows uncoached; Dell validating the finished shared-business paths.",
+    "A complete executable/installed Drive-consumer inventory with replacement, parity, rollback, and a passing 48-hour disconnected-Drive run.",
+    "A named, dated opportunity to license seats to other CARR agents that makes workspace-membership rails cheaper than a later retrofit; absent that, keep two-seat deny-default.",
+    "Counsel-approved recording/retention policy and a Google geocode/route terms review that includes storage, attribution, and a tested provider-exit path.",
+    "Three consecutive normal months at 3–5 maintenance hours with restore/audit/SLO evidence intact before any low-toil claim."
+  ]
+}
