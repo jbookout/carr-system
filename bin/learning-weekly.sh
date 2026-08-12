@@ -44,10 +44,21 @@ mkdir -p "$REPO/out" "$LEARN_DIR"
 
 # The metrics pull WRITES, so the exporter URL cannot run it. SETTLED by ORDER
 # 19a: the single name is CARR_DB_JOBS_URL, the one nightly-jobs role, and the
-# python reads it directly and prefers it over everything below. These two lines
-# stay for the older names, so a Mac carrying only CARR_DB_WRITER_URL or
+# python reads it directly and prefers it over everything below. The older names
+# stay in the chain, so a Mac carrying only CARR_DB_WRITER_URL or
 # CARR_DB_CADENCE_URL keeps working exactly as it did.
-: "${DATABASE_URL:=${CARR_DB_WRITER_URL:-${CARR_DB_CADENCE_URL:-}}}"
+#
+# CARR_DB_JOBS_URL leads the chain as of 2026-08-12. It was missing here, and the
+# omission was silent and total: this file decides the --apply branch below on
+# DATABASE_URL alone, so a Mac carrying ONLY the ORDER 19a name took the DRY RUN
+# arm and logged "no writer credential" while the python, one process later,
+# connected with that very credential and reported "read OK". Every weekly run
+# since the rename read the whole Blotato history and wrote none of it: 33
+# content_piece, 33 placement and 90 placement_metric rows pending on 2026-08-12,
+# with all 42 X placements unmeasured. The python's own preference order is
+# unchanged by this line, so which connection gets used is exactly what it was;
+# what changes is that the branch below can now see the credential.
+: "${DATABASE_URL:=${CARR_DB_JOBS_URL:-${CARR_DB_WRITER_URL:-${CARR_DB_CADENCE_URL:-}}}}"
 [ -n "$DATABASE_URL" ] && export DATABASE_URL || unset DATABASE_URL
 
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
