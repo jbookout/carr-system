@@ -85,6 +85,26 @@
     "document_upload_session": ["attach the three exact Word roadmap artifacts, this launch packet, the blank ledger, and every JSON candidate listed in required_repo_inputs", "provide the Production Maturity Baseline only through an authorized exact-generation export or cited read-doctrine extracts", "if the full baseline or another required source is unavailable, mark it missing and abstain from dependent claims rather than reviewing a summary as the source"],
     "uniformity_rule": "All three seats receive the same source set, content commit, launch-packet commit, generic independent-review prompt, and output form. Only the declared seat_prompt_suffix differs."
   },
+  "single_session_council_orchestration": {
+    "controlling_mode": "One human-visible Claude Fable 5 session may chair the entire council and invoke GPT-5.6 Sol and SuperGrok 4.5 through fresh isolated CLI reviewer contexts.",
+    "role_boundary": "The chair session also supplies the Claude Fable 5 reviewer contribution, but facilitation grants no fourth vote, tie-break, approval authority, or permission to rewrite another seat's sealed output.",
+    "execution_order": [
+      {"step": 1, "action": "Run facilitator preflight, verify the frozen commit and source generations, confirm CLI access to both external reviewer seats, and record the evidence manifest."},
+      {"step": 2, "action": "Follow the progressive-disclosure source order and complete the Claude Fable 5 uniform review form before requesting, displaying, or reading either external review."},
+      {"step": 3, "action": "Freeze the Fable review with a content hash or immutable transcript location."},
+      {"step": 4, "action": "Invoke GPT-5.6 Sol and SuperGrok 4.5 in separate fresh CLI contexts. Give each the identical source manifest, generic independent-review prompt, exact launch-packet commit, output form, and only its own seat_prompt_suffix. Do not include the Fable review or the other external review."},
+      {"step": 5, "action": "Validate and freeze both returned review forms before exposing any review to another seat or beginning deliberation."},
+      {"step": 6, "action": "Cross-disclose the three sealed reviews, normalize evidence and disagreements, then conduct PROP-001 through PROP-009 using the meeting protocol."},
+      {"step": 7, "action": "As non-voting chair, write the disposition ledger and Joe approval card without inventing consensus, erasing dissent, or treating the council as final authority."}
+    ],
+    "isolation_requirements": [
+      "Each CLI reviewer starts with a fresh context and receives no prior reviewer output.",
+      "Each seat reads the same exact sources in the same progressive-disclosure order and returns the same schema.",
+      "Tool or subprocess logs must distinguish reviewer identity, model, prompt version, source commit, start and finish time, and output hash.",
+      "A failed, truncated, source-missing, or schema-invalid review is rerun in a fresh context or recorded as missing evidence; the chair may not complete it on that reviewer's behalf."
+    ],
+    "stop_condition": "If the Fable session cannot prove fresh-context isolation for Codex and Grok, cannot give them the exact frozen source set, or sees one review before its own is frozen, stop and restart the affected sealed-review stage rather than improvising consensus."
+  },
   "explicit_non_goals": [
     "public SaaS, public signup, billing, client portal, or tenant selector",
     "onboarding CARR's other 150-plus agents or launching commercially",
@@ -192,6 +212,13 @@
       "Do not use simple majority to erase a substantiated critical objection. Resolve it, modify the proposal, or defer it with an owner, reopen trigger, safe interim default, and blocked scope.",
       "Fill phase0/council-disposition-ledger-template.v1.json completely. Preserve dissent. Separate current state, approved design, proposed design, future gates, and Unknown.",
       "End with one concise Joe approval card listing recommendations, modifications, deferrals, blocked scopes, Phase 0 exit evidence, and the exact first Phase 1 work packages. The council recommends; Joe approves."
+    ],
+    "single_session_council_chair": [
+      "Start the council preflight. Call standing-context, then read phase0/council-launch-packet-2026-08-12.v1.json at the recorded launch-packet commit and follow it exactly.",
+      "Operate as the one-session council chair and the Claude Fable 5 reviewer seat. Facilitation gives you no extra vote or approval authority.",
+      "Follow the progressive-disclosure order. Complete and freeze your own uniform Fable review before requesting, displaying, or reading another review.",
+      "Then invoke GPT-5.6 Sol and SuperGrok 4.5 through separate fresh CLI contexts using the identical source manifest, independent-review prompt, output form, and their respective seat suffixes. Do not reveal any review to another seat until all three validate and are frozen.",
+      "After cross-disclosure, conduct the ordered fork rounds and create the disposition ledger plus Joe approval card. Preserve dissent and do not authorize construction or amend the roadmaps on council authority alone."
     ]
   },
   "completion_definition": [
