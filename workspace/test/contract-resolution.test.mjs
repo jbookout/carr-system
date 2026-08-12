@@ -202,11 +202,14 @@ test("glossary provenance and all six conceptual operating roles are explicit", 
 });
 
 test("integrated planning sources, milestone timing, predecessors, and cost bands stay harmonized", async () => {
-  const [manifest, trace, council, acceptance] = await Promise.all([
+  const [manifest, trace, council, acceptance, hermes, hermesFixture, reconciliation] = await Promise.all([
     readJson("contracts/phase0-manifest.v1.json"),
     readJson("contracts/phase0-traceability.v1.json"),
     readJson("contracts/council-review-register.v1.json"),
-    readJson("contracts/phase0-acceptance.v1.json")
+    readJson("contracts/phase0-acceptance.v1.json"),
+    readJson("../phase0/hermes-runtime-council-candidate.v1.json"),
+    readJson("../phase0/hermes-runtime-evaluation-fixtures.v1.json"),
+    readJson("../phase0/council-reconciliation-2026-08-12.v1.json")
   ]);
   const expectedIds = [
     "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
@@ -232,6 +235,52 @@ test("integrated planning sources, milestone timing, predecessors, and cost band
     high_intentional_use: {min: 300, max: 500}
   });
   assert.match(acceptance.integrated_program_acceptance.construction_gate, /Joe approves.*council output/);
+  assert.equal(hermes.status, "proposed_for_council_not_approved");
+  assert.match(hermes.crux.crux, /persistent presence, not a second memory or authority system/i);
+  assert.match(hermes.recommended_evaluation.runtime, /dedicated Nous Portal Cloud.*Small.*Medium/i);
+  assert.match(hermes.recommended_evaluation.mcp_surface, /R0 read-only.*mutation.*absent/i);
+  assert.match(hermes.joe_risk_weighting.interpretation, /always-on hosted compute.*economical model access.*primary product value/i);
+  assert.match(hermes.non_negotiable_architecture.portal, /incremental.*Privacy Mode.*minimum-necessary/i);
+  assert.equal(hermes.live_data_gate.status, "requested_for_council_and_joe_approval_not_yet_authorized");
+  assert.match(hermes.live_data_gate.phase_a, /Synthetic fixtures only until/i);
+  assert.match(hermes.live_data_gate.phase_b_entry, /council recommendation and Joe's approval.*time-bounded live read-only/i);
+  assert.ok(hermes.live_data_gate.allowed_minimum_fields.some(item => /human-readable client or deal label/i.test(item)));
+  assert.ok(hermes.live_data_gate.excluded_payloads.some(item => /raw email bodies.*call audio.*transcripts/i.test(item)));
+  assert.match(hermes.live_data_gate.enforcement, /purpose-built read model.*cannot widen/i);
+  assert.match(hermes.cost_hypothesis.pilot_budget_hypothesis, /Start Small.*roughly \$13\.30.*model and tool use/i);
+  assert.match(hermes.cost_hypothesis.claim_boundary, /not an observed CARR monthly cost/i);
+  assert.match(hermes.cost_hypothesis.credit_mechanics_correction, /not automatically \$29.*\$20.*\$22.*\$8\.70.*\$13\.30/i);
+  assert.deepEqual(hermes.cost_hypothesis.official_cloud_sizes.map(item => item.thirty_day_running_usd), [8.70, 16.80, 32.70]);
+  assert.deepEqual(hermes.cost_hypothesis.existing_seat_comparison.map(item => item.monthly_price_usd), [20, 100, 200, 20, 100, 200]);
+  assert.equal(hermes.roi_hypothesis.status, "illustrative_sensitivity_model_not_observed_carr_baseline");
+  assert.ok(Object.values(hermes.roi_hypothesis.current_carr_baselines).every(value => value === null));
+  assert.deepEqual(hermes.roi_hypothesis.top_down_arithmetic_check.hours_saved_per_month_from_6_to_10_hours_week_and_30_to_50_percent, {low: 7.79, high: 21.65});
+  assert.match(hermes.roi_hypothesis.top_down_arithmetic_check.finding, /17–30.*do not follow.*upside case/i);
+  assert.ok(hermes.roi_hypothesis.bound_actions.some(item => /Do not claim payback.*net \$2,900–\$5,200/i.test(item)));
+  assert.ok(hermes.acceptance_tests.some(item => /Deleting and rebuilding.*loses no authoritative/i.test(item)));
+  assert.ok(hermes.stop_conditions.some(item => /local memory or skill treated as authoritative/i.test(item)));
+  assert.ok(hermes.stop_conditions.some(item => /outside the approved versioned minimum-data allow-list/i.test(item)));
+  assert.ok(council.open_items.some(item => item.id === "OPEN-HERMES-001" && /Portal Cloud evaluation/i.test(item.recommended_direction)));
+  assert.ok(reconciliation.proposed_rulings.some(item => item.id === "PROP-007" && /Portal Cloud-hosted/i.test(item.recommended_ruling)));
+  assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);
+  assert.deepEqual(hermesFixture.capability_manifest.exclude_classes, hermes.machine_evaluable_contract.absent_capability_classes);
+  assert.deepEqual([hermesFixture.capability_manifest.scheduler_present, hermesFixture.capability_manifest.channel_delivery_present, hermesFixture.capability_manifest.personal_rule_bodies_returned], [false, false, false]);
+  assert.equal(hermesFixture.authoritative_server_context.humanOnly_authority, false);
+  assert.deepEqual(Object.fromEntries(hermesFixture.cases.map(item => [item.id, item.expected.effect])), {
+    "HERMES-CASE-001": "allow",
+    "HERMES-CASE-002": "refuse",
+    "HERMES-CASE-003": "refuse",
+    "HERMES-CASE-004": "refuse",
+    "HERMES-CASE-005": "refuse",
+    "HERMES-CASE-006": "refuse",
+    "HERMES-CASE-007": "refuse",
+    "HERMES-CASE-008": "refuse",
+    "HERMES-CASE-009": "refuse",
+    "HERMES-CASE-010": "allow_shared_metadata_only"
+  });
+  for (const item of hermesFixture.cases) assert.equal(item.expected.humanOnly, false, item.id);
+  assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-009").request.tool, "cron.create");
+  assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-009").expected.reason, "scheduler_absent");
 });
 
 test("tenant, workflow, maintenance, and owner-control amendments are executable Phase 0 contracts without production claims", async () => {

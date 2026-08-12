@@ -35,6 +35,11 @@
       "doctrine_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
       "generation": 336,
       "review_snapshot": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror/md/reference/carr-production-maturity-baseline.md"
+    },
+    {
+      "name": "Hermes Agent and Nous Portal council candidate",
+      "source": "phase0/hermes-runtime-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
     }
   ],
   "settled_fact_corrections": [
@@ -180,6 +185,14 @@
         "interim_default",
         "blocked_scope"
       ]
+    },
+    {
+      "id": "PROP-007",
+      "topic": "hermes_agent_and_nous_portal",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Joe's proposal correctly identifies the need for persistent agent presence, but it also gives Hermes durable memory, self-modifying skills, shared full MCP access, multi-channel delivery, scheduling, and Portal hosting before CARR's server-side authority, privacy, retention, isolation, and evidence gates have been proven for that runtime.",
+      "recommended_ruling": "Approve the constrained Nous Portal Cloud-hosted, dedicated-container, R0 read-only Hermes evaluation defined in phase0/hermes-runtime-council-candidate.v1.json. Treat Hermes memory and skills as non-authoritative working state, enable Privacy Mode, send only minimum-necessary data, and keep scheduling, delivery, and mutation absent. Joe accepts the incremental model-data exposure; persistent credential, execution, retention, recovery, export, and cost gates remain load-bearing. Expansion requires observed 30, 60, and 90-day like-for-like cost, quality, toil, and routine-displacement evidence; forecast ROI is not adoption evidence.",
+      "preserved_boundary": "CARR MCP, Doctrine, Neon, and the record layer remain authoritative; Doc remains the human-facing product identity; Claude Code and Codex remain the engineering plane; every later mutation or external effect remains server-authorized, plan-bound, human-approved, audited, and freshly verified."
     }
   ],
   "canonical_amendments_after_approval": [
@@ -236,7 +249,8 @@
       "PROP-003 persistent Staging",
       "PROP-004 canonical 5+6 prototype suite",
       "PROP-005 delegation and commit rule",
-      "PROP-006 deferral schema"
+      "PROP-006 deferral schema",
+      "PROP-007 Hermes Agent and Nous Portal constrained evaluation"
     ],
     "phase0_exit_evidence": [
       "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",

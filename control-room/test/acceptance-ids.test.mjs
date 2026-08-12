@@ -215,6 +215,8 @@ const assertions = {
     const manifest = read("contracts/phase0-manifest.v1.json");
     const council = read("contracts/council-review.v1.json");
     const trace = read("contracts/phase0-traceability.v1.json");
+    const hermes = read("../phase0/hermes-runtime-council-candidate.v1.json");
+    const hermesFixture = read("../phase0/hermes-runtime-evaluation-fixtures.v1.json");
     assert.deepEqual(manifest.governing_sources.map(item => [item.document_id, item.generation, item.active_sections]), [
       ["c7f31740-7f4b-47e9-ab93-c7f2854bacc6", 344, 35],
       ["11fdc56f-9af5-47c9-92a7-bb392ca60bd6", 345, 40],
@@ -240,6 +242,38 @@ const assertions = {
     assert.ok(trace.entries.some(item => item.id === "P0-021" && item.tests.includes("no_mutation_route") && item.source_refs.includes("carr-workspace-bduf#s23@v4") && item.source_refs.includes("carr-control-room-bduf#s38")));
     assert.ok(trace.entries.some(item => item.id === "P0-022" && item.source_refs.includes("carr-control-room-bduf#s37")));
     assert.equal(api.routes.some(route => route.method !== "GET"), false);
+    assert.equal(hermes.status, "proposed_for_council_not_approved");
+    assert.match(hermes.recommended_evaluation.runtime, /Nous Portal Cloud.*Small.*Medium/i);
+    assert.match(hermes.recommended_evaluation.mcp_surface, /R0 read-only.*mutation.*absent/i);
+    assert.match(hermes.non_negotiable_architecture.identity, /server-derived.*cannot be selected/i);
+    assert.match(hermes.non_negotiable_architecture.authorization, /not authorization boundaries.*default-deny/i);
+    assert.match(hermes.non_negotiable_architecture.portal, /incremental.*Privacy Mode.*minimum-necessary/i);
+    assert.equal(hermes.live_data_gate.status, "requested_for_council_and_joe_approval_not_yet_authorized");
+    assert.match(hermes.live_data_gate.phase_b_entry, /council recommendation and Joe's approval.*live read-only/i);
+    assert.match(hermes.live_data_gate.enforcement, /server-derived tenant, sponsor, runtime, and capability.*cannot widen/i);
+    assert.ok(hermes.live_data_gate.excluded_payloads.some(item => /credentials.*private keys.*cookies/i.test(item)));
+    assert.match(hermes.cost_hypothesis.bound_action, /Small instance.*Medium.*self-hosting.*pause expansion/i);
+    assert.match(hermes.cost_hypothesis.seat_comparison_boundary, /does not replace Claude Code or Codex.*only if measured/i);
+    assert.equal(hermes.roi_hypothesis.status, "illustrative_sensitivity_model_not_observed_carr_baseline");
+    assert.ok(Object.values(hermes.roi_hypothesis.current_carr_baselines).every(value => value === null));
+    assert.deepEqual(hermes.roi_hypothesis.top_down_arithmetic_check.value_at_175_usd_per_hour, {low: 1364, high: 3789});
+    assert.ok(hermes.roi_hypothesis.measurement_plan.some(item => /30, 60, and 90 days/i.test(item)));
+    assert.ok(hermes.acceptance_tests.some(item => /hostile prompt.*cannot escape whole-process isolation/i.test(item)));
+    assert.ok(hermes.stop_conditions.some(item => /cross-brain.*cross-tenant.*capability/i.test(item)));
+    assert.ok(council.unresolved_forks.some(item => item.id === "CR-U06" && /Portal Cloud/i.test(item.recommendation)));
+    assert.deepEqual(hermesFixture.capability_manifest.include, hermes.machine_evaluable_contract.exact_proposed_read_tools);
+    assert.deepEqual(hermesFixture.capability_manifest.exclude_classes, hermes.machine_evaluable_contract.absent_capability_classes);
+    assert.deepEqual([hermesFixture.capability_manifest.scheduler_present, hermesFixture.capability_manifest.channel_delivery_present], [false, false]);
+    assert.equal(hermesFixture.authoritative_server_context.humanOnly_authority, false);
+    assert.deepEqual(hermesFixture.cases.filter(item => item.expected.effect === "refuse").map(item => item.id), ["HERMES-CASE-002", "HERMES-CASE-003", "HERMES-CASE-004", "HERMES-CASE-005", "HERMES-CASE-006", "HERMES-CASE-007", "HERMES-CASE-008", "HERMES-CASE-009"]);
+    assert.deepEqual(hermesFixture.cases.map(item => item.expected.humanOnly), Array(10).fill(false));
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-002").expected.reason, "client_identity_selection_forbidden");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-003").expected.reason, "client_identity_selection_forbidden");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-004").expected.reason, "client_capability_selection_forbidden");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-005").expected.reason, "cross_brain_scope");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-007").expected.reason, "humanOnly_denied_to_agent");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-008").expected.reason, "channel_delivery_absent");
+    assert.equal(hermesFixture.cases.find(item => item.id === "HERMES-CASE-009").expected.reason, "scheduler_absent");
   },
   server_derived_tenant_context: () => {
     const tenant = read("contracts/tenant-workflow-maintenance.v1.json");
