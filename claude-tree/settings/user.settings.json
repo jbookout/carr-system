@@ -1,0 +1,209 @@
+{
+  "extraKnownMarketplaces": {
+    "runpod": {
+      "source": {
+        "source": "github",
+        "repo": "runpod/runpod-plugins-official"
+      }
+    }
+  },
+  "theme": "dark",
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true,
+  "enabledPlugins": {
+    "runpod@runpod": true
+  },
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(cd *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(find *)",
+      "Bash(awk *)",
+      "Bash(sed *)",
+      "Bash(cut *)",
+      "Bash(sort *)",
+      "Bash(uniq *)",
+      "Bash(wc *)",
+      "Bash(diff *)",
+      "Bash(echo *)",
+      "Bash(printf *)",
+      "Bash(date *)",
+      "Bash(stat *)",
+      "Bash(file *)",
+      "Bash(which *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(chmod *)",
+      "Bash(touch *)",
+      "Bash(ln *)",
+      "Bash(shasum *)",
+      "Bash(md5 *)",
+      "Bash(basename *)",
+      "Bash(dirname *)",
+      "Bash(realpath *)",
+      "Bash(seq *)",
+      "Bash(tr *)",
+      "Bash(tee *)",
+      "Bash(xargs *)",
+      "Bash(jq *)",
+      "Bash(curl *)",
+      "Bash(python3 *)",
+      "Bash(pip3 *)",
+      "Bash(node *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(brew list *)",
+      "Bash(psql *)",
+      "Bash(pg_dump *)",
+      "Bash(age *)",
+      "Bash(zip *)",
+      "Bash(unzip *)",
+      "Bash(ffmpeg *)",
+      "Bash(ffprobe *)",
+      "Bash(yt-dlp *)",
+      "Bash(whisper-cli *)",
+      "Bash(textutil *)",
+      "Bash(open *)",
+      "Bash(launchctl list *)",
+      "Bash(bash *)",
+      "Bash(zsh *)",
+      "Bash(sh *)",
+      "Bash(~/carr-system/*)",
+      "Bash(/Users/booko/carr-system/*)",
+      "Bash(./run.sh *)",
+      "Bash(./bin/*)",
+      "Bash(./mcp-server/*)",
+      "Bash(.venv/bin/python *)",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(diskutil *)",
+      "Bash(dd if=*)"
+    ]
+  },
+  "skipWorkflowUsageWarning": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/guard-unattended.py",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__teach",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/rule-shape-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/record-home-gate.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/gate-edit-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/escalation-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/git-writer-gate.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/lint-gate.py",
+            "timeout": 40
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/conduct-stop-gate.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/completion-evidence-gate.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/ledger-sweep.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/context-handoff-gate.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/gate-integrity.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

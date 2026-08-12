@@ -163,6 +163,18 @@ BACKUP_RC=$LAST_STEP_RC
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 
+# Added 2026-08-12 (Joe's go, "put settings in the repo"): mirror the Claude Code
+# permission surface — the three settings.json files carrying the allow list, the
+# hook wiring, and the autoMode clearances — into claude-tree/settings/. Those
+# files live in Google Drive and were tracked NOWHERE, so on 2026-08-08 a plugin
+# install could delete an entire hooks block and leave five gates off for a day
+# with no diff to find it by. Runs --apply on purpose: the mirror's job is
+# HISTORY, and the diff surfaces in this chain's own backup commit rather than by
+# failing the chain every time Joe approves a permission interactively. The
+# printed diff lands in nightly.log either way. Direction is Drive -> repo (the
+# opposite of sync-skills.sh) because Claude Code itself writes these files.
+step "settings mirror (permission surface -> git)"   ./bin/sync-settings.sh --apply
+
 # Added 2026-08-06 (Joe's go, the Python-native answer to the Rust question,
 # loop #218): mypy over the whole repo, lenient config in mypy.ini, 19 legacy
 # files grandfathered with self-removing headers. Catches shape mistakes in
