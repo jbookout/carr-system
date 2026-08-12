@@ -257,47 +257,114 @@
   "canonical_amendments_after_approval": [
     {
       "order": 1,
-      "targets": ["all four canonical inputs"],
+      "targets": [
+        "all four canonical inputs"
+      ],
       "change": "Apply FACT-001 through FACT-007 using fresh sanctioned reads where identified; do not turn snapshot observations into timeless claims."
     },
     {
       "order": 2,
-      "targets": ["Workspace section 23.1 and its Phase 0 acceptance contract", "Mature End State week-4 acceptance and Phase 0 action register"],
+      "targets": [
+        "Workspace section 23.1 and its Phase 0 acceptance contract",
+        "Mature End State week-4 acceptance and Phase 0 action register"
+      ],
       "change": "Apply PROP-001: Joe owns preconstruction exit; Dell validates finished shared workflows at the later adoption gate."
     },
     {
       "order": 3,
-      "targets": ["Mature End State sections 30, 36, and Phase 0 action register", "Workspace sections 23.1 and 23.2", "Production Maturity Baseline Phase 0 action register"],
+      "targets": [
+        "Mature End State sections 30, 36, and Phase 0 action register",
+        "Workspace sections 23.1 and 23.2",
+        "Production Maturity Baseline Phase 0 action register"
+      ],
       "change": "Apply PROP-002: Phase 0 ends at G0; rename construction-bearing P0 programs as Foundation work packages; Phase 1 starts with G1 trust foundation."
     },
     {
       "order": 4,
-      "targets": ["Mature End State week-2 and G1", "Production Maturity Baseline environment and Phase 0 action-register sections", "Control Room environment-state and delivery sections"],
+      "targets": [
+        "Mature End State week-2 and G1",
+        "Production Maturity Baseline environment and Phase 0 action-register sections",
+        "Control Room environment-state and delivery sections"
+      ],
       "change": "Apply PROP-003: persistent isolated Staging is required at G1; Rehearsal remains separate; Planned/Unknown is shown until deployment exists."
     },
     {
       "order": 5,
-      "targets": ["Mature End State weekly plan and Phase 0 action register", "Workspace prototype/acceptance sections", "Control Room BDUF and phase0-acceptance contract"],
+      "targets": [
+        "Mature End State weekly plan and Phase 0 action register",
+        "Workspace prototype/acceptance sections",
+        "Control Room BDUF and phase0-acceptance contract"
+      ],
       "change": "Apply PROP-004: enumerate the canonical 6+6 human suite and distinguish whole-market planning, Tour execution, and supporting screens."
     },
     {
       "order": 6,
-      "targets": ["Workspace section 21.3", "workspace/contracts/environment-release-process.v1.json", "receiving-session prompts in all roadmaps"],
+      "targets": [
+        "Workspace section 21.3",
+        "workspace/contracts/environment-release-process.v1.json",
+        "receiving-session prompts in all roadmaps"
+      ],
       "change": "Apply PROP-005: align delegation with explicit-path commit/push discipline while retaining separate authorization for merge, deploy, production writes, and external communication."
     },
     {
       "order": 7,
-      "targets": ["control-room/contracts/council-review.v1.json", "Workspace council review register", "council output templates in all roadmaps"],
+      "targets": [
+        "control-room/contracts/council-review.v1.json",
+        "Workspace council review register",
+        "council output templates in all roadmaps"
+      ],
       "change": "Apply PROP-006: add the named-reopen-trigger disposition and its required fields."
     },
     {
       "order": 8,
-      "targets": ["Workspace BDUF near the operating objective, route/IA, Tour Mode, entity contracts, privacy/security, acceptance, and timing/cost sections", "Mature End State Workspace capability and cost/operations cross-references", "Control Room dependency, vendor, cost, freshness, and redaction observation requirements", "Production Maturity Baseline geospatial vendor, data retention, Unknown, and release gates"],
+      "targets": [
+        "Workspace BDUF near the operating objective, route/IA, Tour Mode, entity contracts, privacy/security, acceptance, and timing/cost sections",
+        "Mature End State Workspace capability and cost/operations cross-references",
+        "Control Room dependency, vendor, cost, freshness, and redaction observation requirements",
+        "Production Maturity Baseline geospatial vendor, data retention, Unknown, and release gates"
+      ],
       "change": "Apply PROP-011: add the whole-market visual and governed day-trip capability, domain/location contract, provider terms and pricing gates, exact acceptance journeys, and explicit non-authority boundary without expanding the October milestone."
     },
     {
+      "order": "8a",
+      "targets": [
+        "all four canonical inputs",
+        "control-room contracts (executor disclosure, runtime kill switch, deletion/export receipt, credential revocation, rebuild, outage, evidence parity, cost caps)"
+      ],
+      "change": "Apply the Hermes ruling as modified by council: define Hermes as an optional registered runtime behind typed CARR services, never authority, source of truth, or recovery plane; R0 evaluation synthetic and read-only; live data requires a new Joe decision; no doctrine names Hermes preferred or default until measured unique-need plus 30/60/90-day displacement evidence."
+    },
+    {
+      "order": "8b",
+      "targets": [
+        "all four canonical inputs",
+        "new Phase 0 contracts"
+      ],
+      "change": "Apply the independent-naming ruling: distinguish platform identity, organization tenant, business workspace, product surface, assistant identity, and runtime; no new contract assumes CARR is the immutable platform identity; the rename classification pass explicitly covers machine identifiers (verb namespaces, tenant ids, contract names), which may remain carr-prefixed as internal compatibility identifiers."
+    },
+    {
+      "order": "8c",
+      "targets": [
+        "tenant and data contracts",
+        "database/API design rules",
+        "domain glossary",
+        "audit contract"
+      ],
+      "change": "Apply the workspace-isolation ruling as modified: lock the scope model (seat grants zero business data; server-derived active-workspace membership is the business-data boundary; denial fixtures are canonical future twins; revocation SLO; payload-free audit) while deferring provisioning, multi-workspace switching, administration surfaces, and corporate reporting to a named licensing opportunity; adopt a human-facing term for people distinct from 'agent' (reserved for AI principals)."
+    },
+    {
+      "order": "8d",
+      "targets": [
+        "all four canonical inputs",
+        "repo and installed-runtime inventory",
+        "recovery contracts"
+      ],
+      "change": "Apply the Drive-free ruling as modified: adopt the Drive-free and Cowork-non-dependency target with its six acceptance tests, with Hermes-preference language removed (runtime preference lives in the Hermes fork); no consumer deleted before inventory, parity, rollback, and observation evidence; the August 21 cutoff is not expanded."
+    },
+    {
       "order": 9,
-      "targets": ["all amended canonical doctrine records and generated Word artifacts"],
+      "targets": [
+        "all amended canonical doctrine records and generated Word artifacts"
+      ],
       "change": "Re-render sanctioned artifacts, record new generations and checksums, run cross-roadmap contradiction checks, and obtain Joe's explicit approval before opening Phase 1 construction."
     }
   ],
@@ -317,8 +384,8 @@
       "PROP-007 Hermes Agent and Nous Portal constrained evaluation",
       "PROP-008 independent platform name with CARR as launch tenant",
       "PROP-009 human real estate agent seats and isolated solo-agent or team workspaces",
-      "PROP-010 Drive-free system operation, Cowork retirement, and Hermes-enabled orchestration"
-      ,"PROP-011 whole-market visual operations and governed day-trip planning"
+      "PROP-010 Drive-free system operation, Cowork retirement, and Hermes-enabled orchestration",
+      "PROP-011 whole-market visual operations and governed day-trip planning"
     ],
     "phase0_exit_evidence": [
       "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",

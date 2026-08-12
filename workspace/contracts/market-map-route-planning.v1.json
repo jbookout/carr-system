@@ -59,9 +59,6 @@
       "location_source",
       "location_projection_version",
       "display_label",
-      "work_class",
-      "owner",
-      "lifecycle_state",
       "location_precision",
       "position",
       "observed_at",
@@ -91,7 +88,8 @@
     "unknown_semantics": "A missing, disputed, unauthorized, or unverified location renders Unknown with the reason and safe record link. It never receives a plausible synthetic coordinate in a live view.",
     "geocode_rule": "Building and prospect-pool address fields do not currently provide canonical latitude/longitude. Geocoding is a derived, versioned projection tied to canonical address version, provider, confidence, and observed time. A geocode result never overwrites the canonical address.",
     "unlocated_rule": "Every filter and total reports located and unlocated counts. Unlocated records enter an explicit verification queue and stay available through the equivalent list; the map never silently omits them.",
-    "redaction_rule": "Exact coordinates, addresses, client identity, and appointment details are returned only when the authenticated workspace role and redaction profile allow them. Unauthorized requests use privacy-safe not-found parity without approximate leakage."
+    "redaction_rule": "Exact coordinates, addresses, client identity, and appointment details are returned only when the authenticated workspace role and redaction profile allow them. Unauthorized requests use privacy-safe not-found parity without approximate leakage.",
+    "record_level_fields_note": "work_class, accountable owner, and lifecycle_state are carried by the owning business record (one accountable owner plus a collaborators collection per the canonical item grammar), not duplicated on each location object; reconciled by the council Market Map ruling 2026-08-12 after the contract/fixture field mismatch was verified."
   },
   "visual_interaction_contract": {
     "default_view": "whole-market extent with a visible legend, summary counts, freshness summary, and map/list split view",

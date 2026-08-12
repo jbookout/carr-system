@@ -18,7 +18,7 @@ test("global shell has the settled modules and exactly one Call Mode control", a
   assert.doesNotMatch(`${html}\n${app}`, /Start agenda/i);
 });
 
-test("the five BDUF prototype journeys are implemented as local interactions", async () => {
+test("the six BDUF prototype journeys are implemented as local interactions", async () => {
   const app = await read("public/js/app.js");
   for (const action of ["confirm-park", "restore-record", "begin-recording", "complete-call", "request-queue", "request-add-evidence", "request-complete", "confirm-route", "capture-note", "capture-photo", "tour-offline", "resolve-tour-conflict", "tour-resume", "complete-tour-review"]) {
     assert.match(app, new RegExp(action));

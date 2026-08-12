@@ -5,33 +5,178 @@
   "version": "1.1.0",
   "status": "phase0_candidate",
   "synthetic_only": true,
-  "required_surfaces": ["call-review", "command-center", "deal-room", "doc-request", "lead-board", "market-map", "marketing", "more", "notifications", "tour"],
-  "required_states": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
+  "required_surfaces": [
+    "call-review",
+    "command-center",
+    "deal-room",
+    "doc-request",
+    "lead-board",
+    "market-map",
+    "marketing",
+    "more",
+    "notifications",
+    "tour"
+  ],
+  "required_states": [
+    "normal",
+    "loading",
+    "empty",
+    "partial",
+    "stale",
+    "offline",
+    "unauthorized",
+    "conflict",
+    "refusal",
+    "retry"
+  ],
   "fixture_identity_rule": "Every person, client, contact, address, message, ID, and document is synthetic. Myrick is a fictionalized scenario with no production payload.",
   "canonical_twin_rule": "Each surface has one versioned fixture containing all ten authored states. HTML and JavaScript may not embed an alternate data truth.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "surface", "requirement_ids", "synthetic", "states"],
+  "required": [
+    "schema_version",
+    "surface",
+    "requirement_ids",
+    "synthetic",
+    "states"
+  ],
   "properties": {
-    "schema_version": {"const": "workspace-fixture/v1"},
-    "surface": {"enum": ["call-review", "command-center", "deal-room", "doc-request", "lead-board", "market-map", "marketing", "more", "notifications", "tour"]},
-    "requirement_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[0-9]{3}$"}},
-    "synthetic": {"const": true},
-    "states": {"type": "object"}
+    "schema_version": {
+      "const": "workspace-fixture/v1"
+    },
+    "surface": {
+      "enum": [
+        "call-review",
+        "command-center",
+        "deal-room",
+        "doc-request",
+        "lead-board",
+        "market-map",
+        "marketing",
+        "more",
+        "notifications",
+        "tour"
+      ]
+    },
+    "requirement_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[0-9]{3}$"
+      }
+    },
+    "synthetic": {
+      "const": true
+    },
+    "states": {
+      "type": "object"
+    }
   },
   "allOf": [
     {
       "oneOf": [
-        {"properties": {"surface": {"const": "call-review"}, "states": {"$ref": "#/$defs/CallReviewStates"}}},
-        {"properties": {"surface": {"const": "command-center"}, "states": {"$ref": "#/$defs/CommandCenterStates"}}},
-        {"properties": {"surface": {"const": "deal-room"}, "states": {"$ref": "#/$defs/DealRoomStates"}}},
-        {"properties": {"surface": {"const": "doc-request"}, "states": {"$ref": "#/$defs/DocRequestStates"}}},
-        {"properties": {"surface": {"const": "lead-board"}, "states": {"$ref": "#/$defs/ItemSurfaceStates"}}},
-        {"properties": {"surface": {"const": "market-map"}, "states": {"$ref": "#/$defs/MarketMapStates"}}},
-        {"properties": {"surface": {"const": "marketing"}, "states": {"$ref": "#/$defs/ItemSurfaceStates"}}},
-        {"properties": {"surface": {"const": "more"}, "states": {"$ref": "#/$defs/MoreStates"}}},
-        {"properties": {"surface": {"const": "notifications"}, "states": {"$ref": "#/$defs/ItemSurfaceStates"}}},
-        {"properties": {"surface": {"const": "tour"}, "states": {"$ref": "#/$defs/TourStates"}}}
+        {
+          "properties": {
+            "surface": {
+              "const": "call-review"
+            },
+            "states": {
+              "$ref": "#/$defs/CallReviewStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "command-center"
+            },
+            "states": {
+              "$ref": "#/$defs/CommandCenterStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "deal-room"
+            },
+            "states": {
+              "$ref": "#/$defs/DealRoomStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "doc-request"
+            },
+            "states": {
+              "$ref": "#/$defs/DocRequestStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "lead-board"
+            },
+            "states": {
+              "$ref": "#/$defs/ItemSurfaceStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "market-map"
+            },
+            "states": {
+              "$ref": "#/$defs/MarketMapStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "marketing"
+            },
+            "states": {
+              "$ref": "#/$defs/ItemSurfaceStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "more"
+            },
+            "states": {
+              "$ref": "#/$defs/MoreStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "notifications"
+            },
+            "states": {
+              "$ref": "#/$defs/ItemSurfaceStates"
+            }
+          }
+        },
+        {
+          "properties": {
+            "surface": {
+              "const": "tour"
+            },
+            "states": {
+              "$ref": "#/$defs/TourStates"
+            }
+          }
+        }
       ]
     }
   ],
@@ -39,168 +184,1514 @@
     "Freshness": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "as_of"],
+      "required": [
+        "status",
+        "as_of"
+      ],
       "properties": {
-        "status": {"enum": ["checking", "fresh", "partial", "stale", "offline", "unknown"]},
-        "as_of": {"type": ["string", "null"], "format": "date-time"}
+        "status": {
+          "enum": [
+            "checking",
+            "fresh",
+            "partial",
+            "stale",
+            "offline",
+            "unknown"
+          ]
+        },
+        "as_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
       }
     },
     "MessageState": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["freshness", "message"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "message": {"type": "string", "minLength": 1}}
+      "required": [
+        "freshness",
+        "message"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     },
     "CommandMessageState": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["freshness", "message", "items"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "message": {"type": "string", "minLength": 1}, "items": {"type": "array"}}
-    },
-    "CallNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "call"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "call": {"type": "object"}}
-    },
-    "CommandNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "headline", "items", "metrics"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "headline": {"type": "string"}, "items": {"type": "array"}, "metrics": {"type": "array"}}
-    },
-    "DealNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "record", "parking_reasons"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "record": {"type": "object"}, "parking_reasons": {"type": "array", "minItems": 1}}
-    },
-    "DealPartial": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "message", "record"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "message": {"type": "string"}, "record": {"type": "object"}}
-    },
-    "DealConflict": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "message", "conflict"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "message": {"type": "string"}, "conflict": {"type": "object"}}
-    },
-    "DocNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "context", "answer", "request"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "context": {"type": "object"}, "answer": {"type": "object"}, "request": {"type": "object"}}
-    },
-    "ItemsNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "items"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "items": {"type": "array"}}
-    },
-    "MoreNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "destinations", "registry_only"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "destinations": {"type": "array"}, "registry_only": {"type": "array"}}
-    },
-    "MarketMapNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "market"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "market": {"$ref": "#/$defs/MarketMapPrototype"}}
-    },
-    "MarketMapPrototype": {
-      "type": "object", "additionalProperties": false,
-      "required": ["name", "coverage_note", "source", "source_version", "planning_horizon", "organization_tenant_id", "business_workspace_id", "aggregate_counts", "route_evidence", "travel_opportunities", "visit_appointments", "records"],
+      "required": [
+        "freshness",
+        "message",
+        "items"
+      ],
       "properties": {
-        "name": {"type": "string", "minLength": 1}, "coverage_note": {"type": "string", "minLength": 1}, "source": {"type": "string", "minLength": 1}, "source_version": {"type": "integer", "minimum": 1}, "planning_horizon": {"type": "string", "minLength": 1}, "organization_tenant_id": {"type": "string", "minLength": 1}, "business_workspace_id": {"type": "string", "minLength": 1}, "aggregate_counts": {"$ref": "#/$defs/MarketAggregateCounts"}, "route_evidence": {"$ref": "#/$defs/MarketRouteEvidence"}, "travel_opportunities": {"type": "array", "items": {"$ref": "#/$defs/MarketTravelOpportunity"}}, "visit_appointments": {"type": "array", "items": {"$ref": "#/$defs/MarketVisitAppointment"}}, "records": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/MarketRecord"}}
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "items": {
+          "type": "array"
+        }
       }
     },
-    "MarketAggregateCounts": {"type": "object", "additionalProperties": false, "required": ["business_records", "current_records", "stale_records", "unknown_records", "locations", "mapped_locations", "unlocated_locations", "trip_eligible_locations", "trip_ineligible_locations"], "properties": {"business_records": {"type": "integer", "minimum": 0}, "current_records": {"type": "integer", "minimum": 0}, "stale_records": {"type": "integer", "minimum": 0}, "unknown_records": {"type": "integer", "minimum": 0}, "locations": {"type": "integer", "minimum": 0}, "mapped_locations": {"type": "integer", "minimum": 0}, "unlocated_locations": {"type": "integer", "minimum": 0}, "trip_eligible_locations": {"type": "integer", "minimum": 0}, "trip_ineligible_locations": {"type": "integer", "minimum": 0}}},
-    "MarketRouteEvidence": {"type": "object", "additionalProperties": false, "required": ["provider", "method", "input_as_of", "live_traffic", "optimality_claim", "planning_fingerprint", "alternatives", "skipped_stops"], "properties": {"provider": {"type": "string"}, "method": {"type": "string"}, "input_as_of": {"$ref": "#/$defs/IsoDateTimeOrNull"}, "live_traffic": {"const": false}, "optimality_claim": {"const": false}, "planning_fingerprint": {"type": "string", "minLength": 1}, "alternatives": {"type": "array", "items": {"type": "object"}}, "skipped_stops": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["map_item_id", "reason"], "properties": {"map_item_id": {"type": "string"}, "reason": {"type": "string"}}}}}},
-    "MarketTravelOpportunity": {"type": "object", "additionalProperties": false, "required": ["id", "area", "label", "rationale", "score", "score_note", "source_rows"], "properties": {"id": {"type": "string"}, "area": {"type": "string"}, "label": {"type": "string"}, "rationale": {"type": "string"}, "score": {"type": "null"}, "score_note": {"type": "string"}, "source_rows": {"type": "array", "minItems": 1, "items": {"type": "object"}}}},
-    "MarketVisitAppointment": {"type": "object", "additionalProperties": false, "required": ["map_item_id", "locked", "label", "sort_minutes"], "properties": {"map_item_id": {"type": "string", "minLength": 1}, "locked": {"type": "boolean"}, "label": {"type": "string", "minLength": 1}, "sort_minutes": {"type": ["integer", "null"], "minimum": 0, "maximum": 1439}}},
-    "MarketRecord": {"type": "object", "additionalProperties": false, "required": ["record_id", "display_label", "record_type", "record_type_label", "business_scope", "planning_day_offset", "changed_days_ago", "market", "locations", "summary", "next_step", "owner", "source", "freshness"], "properties": {"record_id": {"type": "string"}, "display_label": {"type": "string"}, "record_type": {"enum": ["prospect", "active_client", "project_in_process", "active_project"]}, "record_type_label": {"type": "string"}, "business_scope": {"enum": ["team_book", "national_accounts"]}, "planning_day_offset": {"type": "integer", "minimum": 0, "maximum": 30}, "changed_days_ago": {"type": "integer", "minimum": 0}, "market": {"type": "string"}, "locations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/MarketLocation"}}, "summary": {"type": "string"}, "next_step": {"type": "string"}, "owner": {"type": "string"}, "source": {"type": "object"}, "freshness": {"$ref": "#/$defs/Freshness"}}},
-    "MarketLocationSource": {"type": "object", "additionalProperties": false, "required": ["type", "id", "version"], "properties": {"type": {"type": "string", "minLength": 1}, "id": {"type": "string", "minLength": 1}, "version": {"type": "integer", "minimum": 1}}},
-    "MarketLocation": {"type": "object", "additionalProperties": false, "required": ["map_item_id", "organization_tenant_id", "business_workspace_id", "record_type", "record_id", "record_version", "location_role", "location_source", "location_projection_version", "display_label", "location_precision", "position", "observed_at", "freshness", "redaction_profile", "deep_link", "trip_eligible", "trip_eligibility_reason"], "properties": {"map_item_id": {"type": "string", "minLength": 1}, "organization_tenant_id": {"type": "string", "minLength": 1}, "business_workspace_id": {"type": "string", "minLength": 1}, "record_type": {"enum": ["prospect", "active_client", "project_in_process", "active_project"]}, "record_id": {"type": "string", "minLength": 1}, "record_version": {"type": "integer", "minimum": 1}, "location_role": {"enum": ["practice_or_current_site", "target_market_or_search_area", "candidate_property", "confirmed_project_site", "appointment_or_visit_stop"]}, "location_source": {"$ref": "#/$defs/MarketLocationSource"}, "location_projection_version": {"type": ["integer", "null"], "minimum": 1}, "display_label": {"type": "string", "minLength": 1}, "location_precision": {"enum": ["authorized_exact", "parcel_centroid", "street_segment", "postal_centroid", "city_or_market_centroid", "region_only", "unknown"]}, "position": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["x", "y"], "properties": {"x": {"type": "number", "minimum": 0, "maximum": 100}, "y": {"type": "number", "minimum": 0, "maximum": 100}}}]}, "observed_at": {"$ref": "#/$defs/IsoDateTimeOrNull"}, "freshness": {"enum": ["fresh", "stale", "unknown"]}, "redaction_profile": {"type": "string", "minLength": 1}, "deep_link": {"type": "string", "minLength": 1}, "trip_eligible": {"type": "boolean"}, "trip_eligibility_reason": {"type": "string", "minLength": 1}}},
-    "IsoDateTimeOrNull": {"type": ["string", "null"], "format": "date-time"},
+    "CallNormal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "call"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "call": {
+          "type": "object"
+        }
+      }
+    },
+    "CommandNormal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "headline",
+        "items",
+        "metrics"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "headline": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array"
+        },
+        "metrics": {
+          "type": "array"
+        }
+      }
+    },
+    "DealNormal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "record",
+        "parking_reasons"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "record": {
+          "type": "object"
+        },
+        "parking_reasons": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    },
+    "DealPartial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "message",
+        "record"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "message": {
+          "type": "string"
+        },
+        "record": {
+          "type": "object"
+        }
+      }
+    },
+    "DealConflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "message",
+        "conflict"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "message": {
+          "type": "string"
+        },
+        "conflict": {
+          "type": "object"
+        }
+      }
+    },
+    "DocNormal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "context",
+        "answer",
+        "request"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "context": {
+          "type": "object"
+        },
+        "answer": {
+          "type": "object"
+        },
+        "request": {
+          "type": "object"
+        }
+      }
+    },
+    "ItemsNormal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "items"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "items": {
+          "type": "array"
+        }
+      }
+    },
+    "MoreNormal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "destinations",
+        "registry_only"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "destinations": {
+          "type": "array"
+        },
+        "registry_only": {
+          "type": "array"
+        }
+      }
+    },
+    "MarketMapNormal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "market"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "market": {
+          "$ref": "#/$defs/MarketMapPrototype"
+        }
+      }
+    },
+    "MarketMapPrototype": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "coverage_note",
+        "source",
+        "source_version",
+        "planning_horizon",
+        "organization_tenant_id",
+        "business_workspace_id",
+        "aggregate_counts",
+        "route_evidence",
+        "travel_opportunities",
+        "visit_appointments",
+        "records"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coverage_note": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "planning_horizon": {
+          "type": "string",
+          "minLength": 1
+        },
+        "organization_tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "business_workspace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregate_counts": {
+          "$ref": "#/$defs/MarketAggregateCounts"
+        },
+        "route_evidence": {
+          "$ref": "#/$defs/MarketRouteEvidence"
+        },
+        "travel_opportunities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MarketTravelOpportunity"
+          }
+        },
+        "visit_appointments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MarketVisitAppointment"
+          }
+        },
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/MarketRecord"
+          }
+        }
+      }
+    },
+    "MarketAggregateCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "business_records",
+        "current_records",
+        "stale_records",
+        "unknown_records",
+        "locations",
+        "mapped_locations",
+        "unlocated_locations",
+        "trip_eligible_locations",
+        "trip_ineligible_locations"
+      ],
+      "properties": {
+        "business_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stale_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_records": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "locations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mapped_locations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unlocated_locations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "trip_eligible_locations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "trip_ineligible_locations": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "MarketRouteEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "method",
+        "input_as_of",
+        "live_traffic",
+        "optimality_claim",
+        "planning_fingerprint",
+        "alternatives",
+        "skipped_stops"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "input_as_of": {
+          "$ref": "#/$defs/IsoDateTimeOrNull"
+        },
+        "live_traffic": {
+          "const": false
+        },
+        "optimality_claim": {
+          "const": false
+        },
+        "planning_fingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "alternatives": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "skipped_stops": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "map_item_id",
+              "reason"
+            ],
+            "properties": {
+              "map_item_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "MarketTravelOpportunity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "area",
+        "label",
+        "rationale",
+        "score",
+        "score_note",
+        "source_rows"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "area": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "score": {
+          "type": "null"
+        },
+        "score_note": {
+          "type": "string"
+        },
+        "source_rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "MarketVisitAppointment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "map_item_id",
+        "locked",
+        "label",
+        "sort_minutes"
+      ],
+      "properties": {
+        "map_item_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sort_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1439
+        }
+      }
+    },
+    "MarketRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_id",
+        "display_label",
+        "record_type",
+        "record_type_label",
+        "business_scope",
+        "planning_day_offset",
+        "changed_days_ago",
+        "market",
+        "locations",
+        "summary",
+        "next_step",
+        "owner",
+        "source",
+        "freshness"
+      ],
+      "properties": {
+        "record_id": {
+          "type": "string"
+        },
+        "display_label": {
+          "type": "string"
+        },
+        "record_type": {
+          "enum": [
+            "prospect",
+            "active_client",
+            "project_in_process",
+            "active_project"
+          ]
+        },
+        "record_type_label": {
+          "type": "string"
+        },
+        "business_scope": {
+          "enum": [
+            "team_book",
+            "national_accounts"
+          ]
+        },
+        "planning_day_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30
+        },
+        "changed_days_ago": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "market": {
+          "type": "string"
+        },
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/MarketLocation"
+          }
+        },
+        "summary": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "source": {
+          "type": "object"
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "collaborators": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Non-accountable participants. The accountable owner is exactly one person per the canonical item grammar; added by the council Market Map ruling 2026-08-12."
+        }
+      }
+    },
+    "MarketLocationSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "version"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "MarketLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "map_item_id",
+        "organization_tenant_id",
+        "business_workspace_id",
+        "record_type",
+        "record_id",
+        "record_version",
+        "location_role",
+        "location_source",
+        "location_projection_version",
+        "display_label",
+        "location_precision",
+        "position",
+        "observed_at",
+        "freshness",
+        "redaction_profile",
+        "deep_link",
+        "trip_eligible",
+        "trip_eligibility_reason"
+      ],
+      "properties": {
+        "map_item_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "organization_tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "business_workspace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "record_type": {
+          "enum": [
+            "prospect",
+            "active_client",
+            "project_in_process",
+            "active_project"
+          ]
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "location_role": {
+          "enum": [
+            "practice_or_current_site",
+            "target_market_or_search_area",
+            "candidate_property",
+            "confirmed_project_site",
+            "appointment_or_visit_stop"
+          ]
+        },
+        "location_source": {
+          "$ref": "#/$defs/MarketLocationSource"
+        },
+        "location_projection_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "display_label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location_precision": {
+          "enum": [
+            "authorized_exact",
+            "parcel_centroid",
+            "street_segment",
+            "postal_centroid",
+            "city_or_market_centroid",
+            "region_only",
+            "unknown"
+          ]
+        },
+        "position": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "x",
+                "y"
+              ],
+              "properties": {
+                "x": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "y": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              }
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "#/$defs/IsoDateTimeOrNull"
+        },
+        "freshness": {
+          "enum": [
+            "fresh",
+            "stale",
+            "unknown"
+          ]
+        },
+        "redaction_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deep_link": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trip_eligible": {
+          "type": "boolean"
+        },
+        "trip_eligibility_reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "IsoDateTimeOrNull": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
     "TourPrototype": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "stage", "route_version", "route_confirmed", "sync_state", "resume", "stops", "offline_pack", "review_items", "conflict"],
+      "required": [
+        "id",
+        "name",
+        "stage",
+        "route_version",
+        "route_confirmed",
+        "sync_state",
+        "resume",
+        "stops",
+        "offline_pack",
+        "review_items",
+        "conflict"
+      ],
       "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
-        "stage": {"enum": ["draft", "route_proposed", "confirmed", "in_progress", "paused", "review_ready", "complete", "cancelled", "failed"]},
-        "route_version": {"type": "integer", "minimum": 1},
-        "route_confirmed": {"type": "boolean"},
-        "sync_state": {"enum": ["Synced", "Local", "Needs review", "Failed retry"]},
-        "resume": {"type": "object", "additionalProperties": false, "required": ["stop_id", "note_cursor", "acknowledged_strokes", "photos"], "properties": {"stop_id": {"type": "string", "minLength": 1}, "note_cursor": {"type": "string", "minLength": 1}, "acknowledged_strokes": {"type": "integer", "minimum": 0}, "photos": {"type": "integer", "minimum": 0}}},
-        "stops": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/TourPrototypeStop"}},
-        "offline_pack": {"$ref": "#/$defs/TourPrototypePack"},
-        "review_items": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/TourPrototypeReviewItem"}},
-        "conflict": {"type": "object", "additionalProperties": false, "required": ["server_route_version", "local_route_version", "resolution"], "properties": {"server_route_version": {"type": "integer", "minimum": 1}, "local_route_version": {"type": "integer", "minimum": 1}, "resolution": {"type": ["string", "null"]}}}
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage": {
+          "enum": [
+            "draft",
+            "route_proposed",
+            "confirmed",
+            "in_progress",
+            "paused",
+            "review_ready",
+            "complete",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "route_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "route_confirmed": {
+          "type": "boolean"
+        },
+        "sync_state": {
+          "enum": [
+            "Synced",
+            "Local",
+            "Needs review",
+            "Failed retry"
+          ]
+        },
+        "resume": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stop_id",
+            "note_cursor",
+            "acknowledged_strokes",
+            "photos"
+          ],
+          "properties": {
+            "stop_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "note_cursor": {
+              "type": "string",
+              "minLength": 1
+            },
+            "acknowledged_strokes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "photos": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "stops": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/TourPrototypeStop"
+          }
+        },
+        "offline_pack": {
+          "$ref": "#/$defs/TourPrototypePack"
+        },
+        "review_items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/TourPrototypeReviewItem"
+          }
+        },
+        "conflict": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "server_route_version",
+            "local_route_version",
+            "resolution"
+          ],
+          "properties": {
+            "server_route_version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "local_route_version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "resolution": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
       }
     },
     "TourPrototypeStop": {
-      "type": "object", "additionalProperties": false, "required": ["id", "marker", "order", "name", "appointment", "locked", "status", "facts"],
-      "properties": {"id": {"type": "string", "minLength": 1}, "marker": {"type": "integer", "minimum": 1}, "order": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 1}, "appointment": {"type": "string", "minLength": 1}, "locked": {"type": "boolean"}, "status": {"enum": ["ready", "visited", "skipped"]}, "facts": {"type": "array", "items": {"type": "string"}}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "marker",
+        "order",
+        "name",
+        "appointment",
+        "locked",
+        "status",
+        "facts"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "marker": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "appointment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "visited",
+            "skipped"
+          ]
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "TourPrototypePack": {
-      "type": "object", "additionalProperties": false, "required": ["status", "verified", "content_hash", "includes"],
-      "properties": {"status": {"enum": ["not_requested", "downloading", "ready", "stale", "failed"]}, "verified": {"type": "boolean"}, "content_hash": {"type": ["string", "null"]}, "includes": {"type": "array", "minItems": 1, "items": {"type": "string"}}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "verified",
+        "content_hash",
+        "includes"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_requested",
+            "downloading",
+            "ready",
+            "stale",
+            "failed"
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "content_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "includes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "TourPrototypeReviewItem": {
-      "type": "object", "additionalProperties": false, "required": ["id", "type", "text", "disposition"],
-      "properties": {"id": {"type": "string", "minLength": 1}, "type": {"enum": ["reaction", "follow_up", "fact", "decision", "draft"]}, "text": {"type": "string", "minLength": 1}, "disposition": {"enum": ["pending", "confirmed", "edited", "skipped"]}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "text",
+        "disposition"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "reaction",
+            "follow_up",
+            "fact",
+            "decision",
+            "draft"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "disposition": {
+          "enum": [
+            "pending",
+            "confirmed",
+            "edited",
+            "skipped"
+          ]
+        }
+      }
     },
     "TourNormal": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "tour"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "tour": {"$ref": "#/$defs/TourPrototype"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "tour"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "tour": {
+          "$ref": "#/$defs/TourPrototype"
+        }
+      }
     },
     "TourOffline": {
-      "type": "object", "additionalProperties": false, "required": ["freshness", "message", "tour"],
-      "properties": {"freshness": {"$ref": "#/$defs/Freshness"}, "message": {"type": "string"}, "tour": {"type": "object"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freshness",
+        "message",
+        "tour"
+      ],
+      "properties": {
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        },
+        "message": {
+          "type": "string"
+        },
+        "tour": {
+          "type": "object"
+        }
+      }
     },
-    "CallReviewStates": {"$ref": "#/$defs/TenStatesCall"},
+    "CallReviewStates": {
+      "$ref": "#/$defs/TenStatesCall"
+    },
     "TenStatesCall": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/CallNormal"}, "loading": {"$ref": "#/$defs/MessageState"}, "empty": {"$ref": "#/$defs/MessageState"}, "partial": {"$ref": "#/$defs/MessageState"}, "stale": {"$ref": "#/$defs/MessageState"}, "offline": {"$ref": "#/$defs/MessageState"}, "unauthorized": {"$ref": "#/$defs/MessageState"}, "conflict": {"$ref": "#/$defs/MessageState"}, "refusal": {"$ref": "#/$defs/MessageState"}, "retry": {"$ref": "#/$defs/MessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/CallNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "stale": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "refusal": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/MessageState"
+        }
+      }
     },
     "CommandCenterStates": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/CommandNormal"}, "loading": {"$ref": "#/$defs/CommandMessageState"}, "empty": {"$ref": "#/$defs/CommandMessageState"}, "partial": {"$ref": "#/$defs/CommandMessageState"}, "stale": {"$ref": "#/$defs/CommandMessageState"}, "offline": {"$ref": "#/$defs/CommandMessageState"}, "unauthorized": {"$ref": "#/$defs/CommandMessageState"}, "conflict": {"$ref": "#/$defs/CommandMessageState"}, "refusal": {"$ref": "#/$defs/CommandMessageState"}, "retry": {"$ref": "#/$defs/CommandMessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/CommandNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "stale": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "refusal": {
+          "$ref": "#/$defs/CommandMessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/CommandMessageState"
+        }
+      }
     },
     "DealRoomStates": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/DealNormal"}, "loading": {"$ref": "#/$defs/MessageState"}, "empty": {"$ref": "#/$defs/MessageState"}, "partial": {"$ref": "#/$defs/DealPartial"}, "stale": {"$ref": "#/$defs/MessageState"}, "offline": {"$ref": "#/$defs/MessageState"}, "unauthorized": {"$ref": "#/$defs/MessageState"}, "conflict": {"$ref": "#/$defs/DealConflict"}, "refusal": {"$ref": "#/$defs/MessageState"}, "retry": {"$ref": "#/$defs/MessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/DealNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/DealPartial"
+        },
+        "stale": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/DealConflict"
+        },
+        "refusal": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/MessageState"
+        }
+      }
     },
-    "DocRequestStates": {"$ref": "#/$defs/TenStatesDoc"},
+    "DocRequestStates": {
+      "$ref": "#/$defs/TenStatesDoc"
+    },
     "TenStatesDoc": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/DocNormal"}, "loading": {"$ref": "#/$defs/MessageState"}, "empty": {"$ref": "#/$defs/MessageState"}, "partial": {"$ref": "#/$defs/MessageState"}, "stale": {"$ref": "#/$defs/MessageState"}, "offline": {"$ref": "#/$defs/MessageState"}, "unauthorized": {"$ref": "#/$defs/MessageState"}, "conflict": {"$ref": "#/$defs/MessageState"}, "refusal": {"$ref": "#/$defs/MessageState"}, "retry": {"$ref": "#/$defs/MessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/DocNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "stale": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "refusal": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/MessageState"
+        }
+      }
     },
-    "ItemSurfaceStates": {"$ref": "#/$defs/TenStatesItems"},
+    "ItemSurfaceStates": {
+      "$ref": "#/$defs/TenStatesItems"
+    },
     "TenStatesItems": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/ItemsNormal"}, "loading": {"$ref": "#/$defs/MessageState"}, "empty": {"$ref": "#/$defs/MessageState"}, "partial": {"$ref": "#/$defs/MessageState"}, "stale": {"$ref": "#/$defs/MessageState"}, "offline": {"$ref": "#/$defs/MessageState"}, "unauthorized": {"$ref": "#/$defs/MessageState"}, "conflict": {"$ref": "#/$defs/MessageState"}, "refusal": {"$ref": "#/$defs/MessageState"}, "retry": {"$ref": "#/$defs/MessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/ItemsNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "stale": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "refusal": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/MessageState"
+        }
+      }
     },
-    "MoreStates": {"$ref": "#/$defs/TenStatesMore"},
+    "MoreStates": {
+      "$ref": "#/$defs/TenStatesMore"
+    },
     "MarketMapStates": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/MarketMapNormal"}, "loading": {"$ref": "#/$defs/MessageState"}, "empty": {"$ref": "#/$defs/MessageState"}, "partial": {"$ref": "#/$defs/MessageState"}, "stale": {"$ref": "#/$defs/MessageState"}, "offline": {"$ref": "#/$defs/MessageState"}, "unauthorized": {"$ref": "#/$defs/MessageState"}, "conflict": {"$ref": "#/$defs/MessageState"}, "refusal": {"$ref": "#/$defs/MessageState"}, "retry": {"$ref": "#/$defs/MessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/MarketMapNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "stale": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "refusal": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/MessageState"
+        }
+      }
     },
     "TenStatesMore": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/MoreNormal"}, "loading": {"$ref": "#/$defs/MessageState"}, "empty": {"$ref": "#/$defs/MessageState"}, "partial": {"$ref": "#/$defs/MessageState"}, "stale": {"$ref": "#/$defs/MessageState"}, "offline": {"$ref": "#/$defs/MessageState"}, "unauthorized": {"$ref": "#/$defs/MessageState"}, "conflict": {"$ref": "#/$defs/MessageState"}, "refusal": {"$ref": "#/$defs/MessageState"}, "retry": {"$ref": "#/$defs/MessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/MoreNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "stale": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "refusal": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/MessageState"
+        }
+      }
     },
     "TourStates": {
-      "type": "object", "additionalProperties": false,
-      "required": ["normal", "loading", "empty", "partial", "stale", "offline", "unauthorized", "conflict", "refusal", "retry"],
-      "properties": {"normal": {"$ref": "#/$defs/TourNormal"}, "loading": {"$ref": "#/$defs/MessageState"}, "empty": {"$ref": "#/$defs/MessageState"}, "partial": {"$ref": "#/$defs/MessageState"}, "stale": {"$ref": "#/$defs/MessageState"}, "offline": {"$ref": "#/$defs/TourOffline"}, "unauthorized": {"$ref": "#/$defs/MessageState"}, "conflict": {"$ref": "#/$defs/MessageState"}, "refusal": {"$ref": "#/$defs/MessageState"}, "retry": {"$ref": "#/$defs/MessageState"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normal",
+        "loading",
+        "empty",
+        "partial",
+        "stale",
+        "offline",
+        "unauthorized",
+        "conflict",
+        "refusal",
+        "retry"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/TourNormal"
+        },
+        "loading": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "empty": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "partial": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "stale": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "offline": {
+          "$ref": "#/$defs/TourOffline"
+        },
+        "unauthorized": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "conflict": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "refusal": {
+          "$ref": "#/$defs/MessageState"
+        },
+        "retry": {
+          "$ref": "#/$defs/MessageState"
+        }
+      }
     }
   },
   "state_invariants": [
-    {"state": "normal", "required": ["freshness", "surface-specific canonical payload"]},
-    {"state": "loading", "required": ["named loading purpose", "no false empty state"]},
-    {"state": "empty", "required": ["what is empty", "safe next action when applicable"]},
-    {"state": "partial", "required": ["loaded and unavailable scope", "no aggregate over missing source"]},
-    {"state": "stale", "required": ["observed time", "stale label", "edits disabled"]},
-    {"state": "offline", "required": ["last safe snapshot time", "read/local truth", "no fabricated answer"]},
-    {"state": "unauthorized", "required": ["no private metadata", "safe return or sign-in action"]},
-    {"state": "conflict", "required": ["review path", "no silent overwrite"]},
-    {"state": "refusal", "required": ["safe reason", "allowed alternative"]},
-    {"state": "retry", "required": ["typed retry-safe failure", "no duplicate effect"]}
+    {
+      "state": "normal",
+      "required": [
+        "freshness",
+        "surface-specific canonical payload"
+      ]
+    },
+    {
+      "state": "loading",
+      "required": [
+        "named loading purpose",
+        "no false empty state"
+      ]
+    },
+    {
+      "state": "empty",
+      "required": [
+        "what is empty",
+        "safe next action when applicable"
+      ]
+    },
+    {
+      "state": "partial",
+      "required": [
+        "loaded and unavailable scope",
+        "no aggregate over missing source"
+      ]
+    },
+    {
+      "state": "stale",
+      "required": [
+        "observed time",
+        "stale label",
+        "edits disabled"
+      ]
+    },
+    {
+      "state": "offline",
+      "required": [
+        "last safe snapshot time",
+        "read/local truth",
+        "no fabricated answer"
+      ]
+    },
+    {
+      "state": "unauthorized",
+      "required": [
+        "no private metadata",
+        "safe return or sign-in action"
+      ]
+    },
+    {
+      "state": "conflict",
+      "required": [
+        "review path",
+        "no silent overwrite"
+      ]
+    },
+    {
+      "state": "refusal",
+      "required": [
+        "safe reason",
+        "allowed alternative"
+      ]
+    },
+    {
+      "state": "retry",
+      "required": [
+        "typed retry-safe failure",
+        "no duplicate effect"
+      ]
+    }
   ]
 }

@@ -18,14 +18,34 @@
         "coverage_note": "The full supported practice area is shown. Positions are illustrative, not navigation coordinates.",
         "source": "Synthetic CARR record projections",
         "source_version": 1,
-        "planning_horizon": "Next 30 days · planning filter only, not a freshness claim",
+        "planning_horizon": "Next 30 days \u00b7 planning filter only, not a freshness claim",
         "organization_tenant_id": "tenant-synthetic-carr",
         "business_workspace_id": "workspace-synthetic-panhandle",
         "visit_appointments": [
-          { "map_item_id": "location-demo-c01-visit", "locked": true, "label": "9:30 AM locked", "sort_minutes": 570 },
-          { "map_item_id": "location-demo-c02-visit", "locked": false, "label": "Flexible visit", "sort_minutes": null },
-          { "map_item_id": "location-demo-j01-candidate", "locked": false, "label": "Flexible candidate stop", "sort_minutes": null },
-          { "map_item_id": "location-demo-j01-visit", "locked": true, "label": "2:00 PM locked", "sort_minutes": 840 }
+          {
+            "map_item_id": "location-demo-c01-visit",
+            "locked": true,
+            "label": "9:30 AM locked",
+            "sort_minutes": 570
+          },
+          {
+            "map_item_id": "location-demo-c02-visit",
+            "locked": false,
+            "label": "Flexible visit",
+            "sort_minutes": null
+          },
+          {
+            "map_item_id": "location-demo-j01-candidate",
+            "locked": false,
+            "label": "Flexible candidate stop",
+            "sort_minutes": null
+          },
+          {
+            "map_item_id": "location-demo-j01-visit",
+            "locked": true,
+            "label": "2:00 PM locked",
+            "sort_minutes": 840
+          }
         ],
         "aggregate_counts": {
           "business_records": 6,
@@ -47,27 +67,69 @@
           "planning_fingerprint": "not_simulated_future_gate",
           "alternatives": [],
           "skipped_stops": [
-            { "map_item_id": "location-demo-p01-target", "reason": "target-area centroid is not a navigation-grade arrival point" },
-            { "map_item_id": "location-demo-p02-target", "reason": "unmapped and Unknown" },
-            { "map_item_id": "location-demo-c01-current", "reason": "current practice site is context, not a confirmed visit stop" },
-            { "map_item_id": "location-demo-c01-target", "reason": "target-area centroid is not a navigation-grade arrival point" },
-            { "map_item_id": "location-demo-c02-current", "reason": "current practice site is context, not a confirmed visit stop" },
-            { "map_item_id": "location-demo-j02-confirmed", "reason": "owning record is stale" }
+            {
+              "map_item_id": "location-demo-p01-target",
+              "reason": "target-area centroid is not a navigation-grade arrival point"
+            },
+            {
+              "map_item_id": "location-demo-p02-target",
+              "reason": "unmapped and Unknown"
+            },
+            {
+              "map_item_id": "location-demo-c01-current",
+              "reason": "current practice site is context, not a confirmed visit stop"
+            },
+            {
+              "map_item_id": "location-demo-c01-target",
+              "reason": "target-area centroid is not a navigation-grade arrival point"
+            },
+            {
+              "map_item_id": "location-demo-c02-current",
+              "reason": "current practice site is context, not a confirmed visit stop"
+            },
+            {
+              "map_item_id": "location-demo-j02-confirmed",
+              "reason": "owning record is stale"
+            }
           ]
         },
         "travel_opportunities": [
           {
             "id": "travel-opportunity-demo-01",
-            "area": "Mobile–Pensacola synthetic corridor",
+            "area": "Mobile\u2013Pensacola synthetic corridor",
             "label": "Combine a locked Pensacola visit with fresh work along the same planning corridor",
             "rationale": "One fresh prospect target, one active-client record, one fresh candidate property, and one locked visit are visible in the selected corridor. A person must still decide whether the flexible stops are appropriate and verify travel time.",
             "score": null,
             "score_note": "No opaque score. This insight is a deterministic cross-layer match on visible source rows.",
             "source_rows": [
-              { "layer": "Prospect", "record_id": "market-demo-prospect-01", "location_id": "location-demo-p01-target", "label": "Pine Health Prospect · West Mobile demo area", "source": "Lead Board record v4" },
-              { "layer": "Active client", "record_id": "market-demo-client-01", "location_id": "location-demo-c01-current", "label": "Harbor Pediatrics Client · Central Pensacola demo practice site", "source": "Deal Room record v7" },
-              { "layer": "Project in process", "record_id": "market-demo-project-01", "location_id": "location-demo-j01-candidate", "label": "Gulf Clinic Search · Central Baldwin demo candidate property", "source": "Deal Room record v9" },
-              { "layer": "Visit / appointment", "record_id": "market-demo-client-01", "location_id": "location-demo-c01-visit", "label": "Harbor Pediatrics Client · 9:30 AM locked", "source": "Synthetic locked appointment v2" }
+              {
+                "layer": "Prospect",
+                "record_id": "market-demo-prospect-01",
+                "location_id": "location-demo-p01-target",
+                "label": "Pine Health Prospect \u00b7 West Mobile demo area",
+                "source": "Lead Board record v4"
+              },
+              {
+                "layer": "Active client",
+                "record_id": "market-demo-client-01",
+                "location_id": "location-demo-c01-current",
+                "label": "Harbor Pediatrics Client \u00b7 Central Pensacola demo practice site",
+                "source": "Deal Room record v7"
+              },
+              {
+                "layer": "Project in process",
+                "record_id": "market-demo-project-01",
+                "location_id": "location-demo-j01-candidate",
+                "label": "Gulf Clinic Search \u00b7 Central Baldwin demo candidate property",
+                "source": "Deal Room record v9"
+              },
+              {
+                "layer": "Visit / appointment",
+                "record_id": "market-demo-client-01",
+                "location_id": "location-demo-c01-visit",
+                "label": "Harbor Pediatrics Client \u00b7 9:30 AM locked",
+                "source": "Synthetic locked appointment v2"
+              }
             ]
           }
         ],
@@ -82,13 +144,46 @@
             "changed_days_ago": 0,
             "market": "Mobile area",
             "locations": [
-              { "map_item_id": "location-demo-p01-target", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "prospect", "record_id": "market-demo-prospect-01", "record_version": 4, "location_role": "target_market_or_search_area", "location_source": { "type": "discovery_fact", "id": "source-demo-p01-target", "version": 4 }, "location_projection_version": 1, "display_label": "West Mobile demo area", "location_precision": "city_or_market_centroid", "position": { "x": 18, "y": 64 }, "observed_at": "2026-08-12T14:40:00Z", "freshness": "fresh", "redaction_profile": "internal_approved_approximate", "deep_link": "#lead-board", "trip_eligible": false, "trip_eligibility_reason": "Target areas are planning context, not navigation-grade arrival points." }
+              {
+                "map_item_id": "location-demo-p01-target",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "prospect",
+                "record_id": "market-demo-prospect-01",
+                "record_version": 4,
+                "location_role": "target_market_or_search_area",
+                "location_source": {
+                  "type": "discovery_fact",
+                  "id": "source-demo-p01-target",
+                  "version": 4
+                },
+                "location_projection_version": 1,
+                "display_label": "West Mobile demo area",
+                "location_precision": "city_or_market_centroid",
+                "position": {
+                  "x": 18,
+                  "y": 64
+                },
+                "observed_at": "2026-08-12T14:40:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_approved_approximate",
+                "deep_link": "#lead-board",
+                "trip_eligible": false,
+                "trip_eligibility_reason": "Target areas are planning context, not navigation-grade arrival points."
+              }
             ],
             "summary": "Initial market conversation with a synthetic healthcare prospect.",
             "next_step": "Review discovery evidence",
             "owner": "Joe",
-            "source": { "surface": "lead-board", "label": "Open Lead Board source", "record_version": 4 },
-            "freshness": { "status": "fresh", "as_of": "2026-08-12T14:40:00Z" }
+            "source": {
+              "surface": "lead-board",
+              "label": "Open Lead Board source",
+              "record_version": 4
+            },
+            "freshness": {
+              "status": "fresh",
+              "as_of": "2026-08-12T14:40:00Z"
+            }
           },
           {
             "record_id": "market-demo-prospect-02",
@@ -100,13 +195,43 @@
             "changed_days_ago": 6,
             "market": "Dothan area",
             "locations": [
-              { "map_item_id": "location-demo-p02-target", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "prospect", "record_id": "market-demo-prospect-02", "record_version": 2, "location_role": "target_market_or_search_area", "location_source": { "type": "missing_location_evidence", "id": "source-demo-p02-target", "version": 1 }, "location_projection_version": null, "display_label": "Dothan area not yet mapped", "location_precision": "unknown", "position": null, "observed_at": null, "freshness": "unknown", "redaction_profile": "internal_location_unavailable", "deep_link": "#lead-board", "trip_eligible": false, "trip_eligibility_reason": "No authorized navigation-grade location is available." }
+              {
+                "map_item_id": "location-demo-p02-target",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "prospect",
+                "record_id": "market-demo-prospect-02",
+                "record_version": 2,
+                "location_role": "target_market_or_search_area",
+                "location_source": {
+                  "type": "missing_location_evidence",
+                  "id": "source-demo-p02-target",
+                  "version": 1
+                },
+                "location_projection_version": null,
+                "display_label": "Dothan area not yet mapped",
+                "location_precision": "unknown",
+                "position": null,
+                "observed_at": null,
+                "freshness": "unknown",
+                "redaction_profile": "internal_location_unavailable",
+                "deep_link": "#lead-board",
+                "trip_eligible": false,
+                "trip_eligibility_reason": "No authorized navigation-grade location is available."
+              }
             ],
             "summary": "Synthetic prospect with an unverified travel window.",
             "next_step": "Confirm whether a visit is appropriate",
             "owner": "Dell",
-            "source": { "surface": "lead-board", "label": "Open Lead Board source", "record_version": 2 },
-            "freshness": { "status": "unknown", "as_of": null }
+            "source": {
+              "surface": "lead-board",
+              "label": "Open Lead Board source",
+              "record_version": 2
+            },
+            "freshness": {
+              "status": "unknown",
+              "as_of": null
+            }
           },
           {
             "record_id": "market-demo-client-01",
@@ -118,15 +243,103 @@
             "changed_days_ago": 0,
             "market": "Pensacola area",
             "locations": [
-              { "map_item_id": "location-demo-c01-current", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "active_client", "record_id": "market-demo-client-01", "record_version": 7, "location_role": "practice_or_current_site", "location_source": { "type": "client_profile", "id": "source-demo-c01-current", "version": 7 }, "location_projection_version": 2, "display_label": "Central Pensacola demo practice site", "location_precision": "authorized_exact", "position": { "x": 54, "y": 56 }, "observed_at": "2026-08-12T15:05:00Z", "freshness": "fresh", "redaction_profile": "internal_authorized_exact", "deep_link": "#deal-room", "trip_eligible": false, "trip_eligibility_reason": "A current practice site is context unless it is separately confirmed as a visit stop." },
-              { "map_item_id": "location-demo-c01-target", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "active_client", "record_id": "market-demo-client-01", "record_version": 7, "location_role": "target_market_or_search_area", "location_source": { "type": "search_criteria", "id": "source-demo-c01-target", "version": 3 }, "location_projection_version": 3, "display_label": "North Pensacola demo target area", "location_precision": "city_or_market_centroid", "position": { "x": 57, "y": 45 }, "observed_at": "2026-08-12T15:02:00Z", "freshness": "fresh", "redaction_profile": "internal_approved_approximate", "deep_link": "#deal-room", "trip_eligible": false, "trip_eligibility_reason": "Target areas are planning context, not navigation-grade arrival points." },
-              { "map_item_id": "location-demo-c01-visit", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "active_client", "record_id": "market-demo-client-01", "record_version": 7, "location_role": "appointment_or_visit_stop", "location_source": { "type": "locked_appointment", "id": "source-demo-c01-visit", "version": 2 }, "location_projection_version": 2, "display_label": "Pensacola demo visit stop", "location_precision": "authorized_exact", "position": { "x": 52, "y": 60 }, "observed_at": "2026-08-12T15:05:00Z", "freshness": "fresh", "redaction_profile": "internal_authorized_exact", "deep_link": "#deal-room", "trip_eligible": true, "trip_eligibility_reason": "Confirmed arrival point with an authorized exact location." }
+              {
+                "map_item_id": "location-demo-c01-current",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "active_client",
+                "record_id": "market-demo-client-01",
+                "record_version": 7,
+                "location_role": "practice_or_current_site",
+                "location_source": {
+                  "type": "client_profile",
+                  "id": "source-demo-c01-current",
+                  "version": 7
+                },
+                "location_projection_version": 2,
+                "display_label": "Central Pensacola demo practice site",
+                "location_precision": "authorized_exact",
+                "position": {
+                  "x": 54,
+                  "y": 56
+                },
+                "observed_at": "2026-08-12T15:05:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_authorized_exact",
+                "deep_link": "#deal-room",
+                "trip_eligible": false,
+                "trip_eligibility_reason": "A current practice site is context unless it is separately confirmed as a visit stop."
+              },
+              {
+                "map_item_id": "location-demo-c01-target",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "active_client",
+                "record_id": "market-demo-client-01",
+                "record_version": 7,
+                "location_role": "target_market_or_search_area",
+                "location_source": {
+                  "type": "search_criteria",
+                  "id": "source-demo-c01-target",
+                  "version": 3
+                },
+                "location_projection_version": 3,
+                "display_label": "North Pensacola demo target area",
+                "location_precision": "city_or_market_centroid",
+                "position": {
+                  "x": 57,
+                  "y": 45
+                },
+                "observed_at": "2026-08-12T15:02:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_approved_approximate",
+                "deep_link": "#deal-room",
+                "trip_eligible": false,
+                "trip_eligibility_reason": "Target areas are planning context, not navigation-grade arrival points."
+              },
+              {
+                "map_item_id": "location-demo-c01-visit",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "active_client",
+                "record_id": "market-demo-client-01",
+                "record_version": 7,
+                "location_role": "appointment_or_visit_stop",
+                "location_source": {
+                  "type": "locked_appointment",
+                  "id": "source-demo-c01-visit",
+                  "version": 2
+                },
+                "location_projection_version": 2,
+                "display_label": "Pensacola demo visit stop",
+                "location_precision": "authorized_exact",
+                "position": {
+                  "x": 52,
+                  "y": 60
+                },
+                "observed_at": "2026-08-12T15:05:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_authorized_exact",
+                "deep_link": "#deal-room",
+                "trip_eligible": true,
+                "trip_eligibility_reason": "Confirmed arrival point with an authorized exact location."
+              }
             ],
             "summary": "Synthetic active client preparing for a location review.",
             "next_step": "Review shortlisted areas",
-            "owner": "Joe and Dell",
-            "source": { "surface": "deal-room", "label": "Open Deal Room source", "record_version": 7 },
-            "freshness": { "status": "fresh", "as_of": "2026-08-12T15:05:00Z" }
+            "owner": "Joe",
+            "source": {
+              "surface": "deal-room",
+              "label": "Open Deal Room source",
+              "record_version": 7
+            },
+            "freshness": {
+              "status": "fresh",
+              "as_of": "2026-08-12T15:05:00Z"
+            },
+            "collaborators": [
+              "Dell"
+            ]
           },
           {
             "record_id": "market-demo-client-02",
@@ -138,14 +351,73 @@
             "changed_days_ago": 2,
             "market": "Fort Walton area",
             "locations": [
-              { "map_item_id": "location-demo-c02-current", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "active_client", "record_id": "market-demo-client-02", "record_version": 5, "location_role": "practice_or_current_site", "location_source": { "type": "client_profile", "id": "source-demo-c02-current", "version": 5 }, "location_projection_version": 1, "display_label": "Fort Walton demo practice site", "location_precision": "authorized_exact", "position": { "x": 68, "y": 61 }, "observed_at": "2026-08-12T14:55:00Z", "freshness": "fresh", "redaction_profile": "internal_authorized_exact", "deep_link": "#deal-room", "trip_eligible": false, "trip_eligibility_reason": "A current practice site is context unless it is separately confirmed as a visit stop." },
-              { "map_item_id": "location-demo-c02-visit", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "active_client", "record_id": "market-demo-client-02", "record_version": 5, "location_role": "appointment_or_visit_stop", "location_source": { "type": "visit_proposal", "id": "source-demo-c02-visit", "version": 1 }, "location_projection_version": 1, "display_label": "Fort Walton demo visit stop", "location_precision": "authorized_exact", "position": { "x": 71, "y": 58 }, "observed_at": "2026-08-12T14:55:00Z", "freshness": "fresh", "redaction_profile": "internal_authorized_exact", "deep_link": "#deal-room", "trip_eligible": true, "trip_eligibility_reason": "Authorized exact arrival point for a proposed visit." }
+              {
+                "map_item_id": "location-demo-c02-current",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "active_client",
+                "record_id": "market-demo-client-02",
+                "record_version": 5,
+                "location_role": "practice_or_current_site",
+                "location_source": {
+                  "type": "client_profile",
+                  "id": "source-demo-c02-current",
+                  "version": 5
+                },
+                "location_projection_version": 1,
+                "display_label": "Fort Walton demo practice site",
+                "location_precision": "authorized_exact",
+                "position": {
+                  "x": 68,
+                  "y": 61
+                },
+                "observed_at": "2026-08-12T14:55:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_authorized_exact",
+                "deep_link": "#deal-room",
+                "trip_eligible": false,
+                "trip_eligibility_reason": "A current practice site is context unless it is separately confirmed as a visit stop."
+              },
+              {
+                "map_item_id": "location-demo-c02-visit",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "active_client",
+                "record_id": "market-demo-client-02",
+                "record_version": 5,
+                "location_role": "appointment_or_visit_stop",
+                "location_source": {
+                  "type": "visit_proposal",
+                  "id": "source-demo-c02-visit",
+                  "version": 1
+                },
+                "location_projection_version": 1,
+                "display_label": "Fort Walton demo visit stop",
+                "location_precision": "authorized_exact",
+                "position": {
+                  "x": 71,
+                  "y": 58
+                },
+                "observed_at": "2026-08-12T14:55:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_authorized_exact",
+                "deep_link": "#deal-room",
+                "trip_eligible": true,
+                "trip_eligibility_reason": "Authorized exact arrival point for a proposed visit."
+              }
             ],
             "summary": "Synthetic client record with a flexible planning stop.",
             "next_step": "Compare two demo corridors",
             "owner": "Dell",
-            "source": { "surface": "deal-room", "label": "Open Deal Room source", "record_version": 5 },
-            "freshness": { "status": "fresh", "as_of": "2026-08-12T14:55:00Z" }
+            "source": {
+              "surface": "deal-room",
+              "label": "Open Deal Room source",
+              "record_version": 5
+            },
+            "freshness": {
+              "status": "fresh",
+              "as_of": "2026-08-12T14:55:00Z"
+            }
           },
           {
             "record_id": "market-demo-project-01",
@@ -157,14 +429,73 @@
             "changed_days_ago": 1,
             "market": "Baldwin County area",
             "locations": [
-              { "map_item_id": "location-demo-j01-candidate", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "project_in_process", "record_id": "market-demo-project-01", "record_version": 9, "location_role": "candidate_property", "location_source": { "type": "property_shortlist", "id": "source-demo-j01-candidate", "version": 9 }, "location_projection_version": 4, "display_label": "Central Baldwin demo candidate property", "location_precision": "authorized_exact", "position": { "x": 33, "y": 58 }, "observed_at": "2026-08-12T15:12:00Z", "freshness": "fresh", "redaction_profile": "internal_authorized_exact", "deep_link": "#deal-room", "trip_eligible": true, "trip_eligibility_reason": "Authorized exact candidate-property arrival point." },
-              { "map_item_id": "location-demo-j01-visit", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "project_in_process", "record_id": "market-demo-project-01", "record_version": 9, "location_role": "appointment_or_visit_stop", "location_source": { "type": "locked_appointment", "id": "source-demo-j01-visit", "version": 3 }, "location_projection_version": 3, "display_label": "Central Baldwin locked site visit", "location_precision": "authorized_exact", "position": { "x": 36, "y": 61 }, "observed_at": "2026-08-12T15:12:00Z", "freshness": "fresh", "redaction_profile": "internal_authorized_exact", "deep_link": "#deal-room", "trip_eligible": true, "trip_eligibility_reason": "Confirmed arrival point with a locked appointment." }
+              {
+                "map_item_id": "location-demo-j01-candidate",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "project_in_process",
+                "record_id": "market-demo-project-01",
+                "record_version": 9,
+                "location_role": "candidate_property",
+                "location_source": {
+                  "type": "property_shortlist",
+                  "id": "source-demo-j01-candidate",
+                  "version": 9
+                },
+                "location_projection_version": 4,
+                "display_label": "Central Baldwin demo candidate property",
+                "location_precision": "authorized_exact",
+                "position": {
+                  "x": 33,
+                  "y": 58
+                },
+                "observed_at": "2026-08-12T15:12:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_authorized_exact",
+                "deep_link": "#deal-room",
+                "trip_eligible": true,
+                "trip_eligibility_reason": "Authorized exact candidate-property arrival point."
+              },
+              {
+                "map_item_id": "location-demo-j01-visit",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "project_in_process",
+                "record_id": "market-demo-project-01",
+                "record_version": 9,
+                "location_role": "appointment_or_visit_stop",
+                "location_source": {
+                  "type": "locked_appointment",
+                  "id": "source-demo-j01-visit",
+                  "version": 3
+                },
+                "location_projection_version": 3,
+                "display_label": "Central Baldwin locked site visit",
+                "location_precision": "authorized_exact",
+                "position": {
+                  "x": 36,
+                  "y": 61
+                },
+                "observed_at": "2026-08-12T15:12:00Z",
+                "freshness": "fresh",
+                "redaction_profile": "internal_authorized_exact",
+                "deep_link": "#deal-room",
+                "trip_eligible": true,
+                "trip_eligibility_reason": "Confirmed arrival point with a locked appointment."
+              }
             ],
             "summary": "Synthetic search project with a locked site visit.",
             "next_step": "Prepare site facts",
             "owner": "Joe",
-            "source": { "surface": "deal-room", "label": "Open Deal Room source", "record_version": 9 },
-            "freshness": { "status": "fresh", "as_of": "2026-08-12T15:12:00Z" }
+            "source": {
+              "surface": "deal-room",
+              "label": "Open Deal Room source",
+              "record_version": 9
+            },
+            "freshness": {
+              "status": "fresh",
+              "as_of": "2026-08-12T15:12:00Z"
+            }
           },
           {
             "record_id": "market-demo-project-02",
@@ -176,51 +507,114 @@
             "changed_days_ago": 3,
             "market": "Panama City area",
             "locations": [
-              { "map_item_id": "location-demo-j02-confirmed", "organization_tenant_id": "tenant-synthetic-carr", "business_workspace_id": "workspace-synthetic-panhandle", "record_type": "active_project", "record_id": "market-demo-project-02", "record_version": 3, "location_role": "confirmed_project_site", "location_source": { "type": "project_decision", "id": "source-demo-j02-confirmed", "version": 3 }, "location_projection_version": 1, "display_label": "Panama City demo confirmed project site", "location_precision": "authorized_exact", "position": { "x": 91, "y": 70 }, "observed_at": "2026-08-09T16:00:00Z", "freshness": "stale", "redaction_profile": "internal_authorized_exact", "deep_link": "#deal-room", "trip_eligible": false, "trip_eligibility_reason": "The owning record is stale; refresh it before travel planning." }
+              {
+                "map_item_id": "location-demo-j02-confirmed",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "active_project",
+                "record_id": "market-demo-project-02",
+                "record_version": 3,
+                "location_role": "confirmed_project_site",
+                "location_source": {
+                  "type": "project_decision",
+                  "id": "source-demo-j02-confirmed",
+                  "version": 3
+                },
+                "location_projection_version": 1,
+                "display_label": "Panama City demo confirmed project site",
+                "location_precision": "authorized_exact",
+                "position": {
+                  "x": 91,
+                  "y": 70
+                },
+                "observed_at": "2026-08-09T16:00:00Z",
+                "freshness": "stale",
+                "redaction_profile": "internal_authorized_exact",
+                "deep_link": "#deal-room",
+                "trip_eligible": false,
+                "trip_eligibility_reason": "The owning record is stale; refresh it before travel planning."
+              }
             ],
             "summary": "Synthetic expansion project for cross-market planning.",
             "next_step": "Verify property availability",
-            "owner": "Joe and Dell",
-            "source": { "surface": "deal-room", "label": "Open Deal Room source", "record_version": 3 },
-            "freshness": { "status": "stale", "as_of": "2026-08-09T16:00:00Z" }
+            "owner": "Joe",
+            "source": {
+              "surface": "deal-room",
+              "label": "Open Deal Room source",
+              "record_version": 3
+            },
+            "freshness": {
+              "status": "stale",
+              "as_of": "2026-08-09T16:00:00Z"
+            },
+            "collaborators": [
+              "Dell"
+            ]
           }
         ]
       }
     },
     "loading": {
-      "freshness": { "status": "checking", "as_of": null },
-      "message": "Loading the supported market and reconciling map/list records…"
+      "freshness": {
+        "status": "checking",
+        "as_of": null
+      },
+      "message": "Loading the supported market and reconciling map/list records\u2026"
     },
     "empty": {
-      "freshness": { "status": "fresh", "as_of": "2026-08-12T15:30:00Z" },
+      "freshness": {
+        "status": "fresh",
+        "as_of": "2026-08-12T15:30:00Z"
+      },
       "message": "No prospects, active clients, or in-process projects match the current market view."
     },
     "partial": {
-      "freshness": { "status": "partial", "as_of": "2026-08-12T15:22:00Z" },
+      "freshness": {
+        "status": "partial",
+        "as_of": "2026-08-12T15:22:00Z"
+      },
       "message": "Lead records loaded. Active-client and project sources are incomplete, so trip planning is unavailable."
     },
     "stale": {
-      "freshness": { "status": "stale", "as_of": "2026-08-09T16:00:00Z" },
+      "freshness": {
+        "status": "stale",
+        "as_of": "2026-08-09T16:00:00Z"
+      },
       "message": "The market snapshot is stale. View it read-only and refresh owning records before preparing travel."
     },
     "offline": {
-      "freshness": { "status": "offline", "as_of": "2026-08-12T14:00:00Z" },
+      "freshness": {
+        "status": "offline",
+        "as_of": "2026-08-12T14:00:00Z"
+      },
       "message": "Offline. The last safe market snapshot is read-only; a new day-trip proposal cannot be created."
     },
     "unauthorized": {
-      "freshness": { "status": "unknown", "as_of": null },
+      "freshness": {
+        "status": "unknown",
+        "as_of": null
+      },
       "message": "This session cannot read the market projection or its owning business records."
     },
     "conflict": {
-      "freshness": { "status": "fresh", "as_of": "2026-08-12T15:31:00Z" },
+      "freshness": {
+        "status": "fresh",
+        "as_of": "2026-08-12T15:31:00Z"
+      },
       "message": "A locked appointment changed after selection. Preserve both versions and review before rebuilding the proposal."
     },
     "refusal": {
-      "freshness": { "status": "fresh", "as_of": "2026-08-12T15:30:00Z" },
+      "freshness": {
+        "status": "fresh",
+        "as_of": "2026-08-12T15:30:00Z"
+      },
       "message": "The planner refuses to move a locked appointment or claim an optimal route without verified routing evidence."
     },
     "retry": {
-      "freshness": { "status": "unknown", "as_of": null },
+      "freshness": {
+        "status": "unknown",
+        "as_of": null
+      },
       "message": "Owning records could not be reconciled. Retry the safe read; no trip proposal was changed."
     }
   }
