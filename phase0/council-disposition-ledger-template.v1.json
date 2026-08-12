@@ -4,7 +4,7 @@
   "status": "blank_template_not_council_output",
   "allowed_dispositions": ["accept", "modify", "defer_with_named_reopen_trigger", "reject"],
   "packet": "phase0/council-launch-packet-2026-08-12.v1.json",
-  "source_snapshot": {"content_commit": "daacb3d73949dc708172f77d626b4f3eaa430a70", "launch_packet_commit": null, "doctrine_generations_verified": false, "all_required_sources_read": false},
+  "source_snapshot": {"content_commit": "acd33fe4a5e7b51412d958137449e7b65aaff382", "launch_packet_commit": null, "doctrine_generations_verified": false, "all_required_sources_read": false},
   "council": {
     "reviewers": [
       {"seat": "Claude Fable 5", "independent_review_complete": false, "sealed_before_disclosure": false},

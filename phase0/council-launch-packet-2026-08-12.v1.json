@@ -14,7 +14,7 @@
   },
   "frozen_source_snapshot": {
     "branch": "control-room-phase0",
-    "content_commit": "daacb3d73949dc708172f77d626b4f3eaa430a70",
+    "content_commit": "acd33fe4a5e7b51412d958137449e7b65aaff382",
     "launch_packet_commit": "Record the final commit containing this packet in the disposition ledger at meeting preflight; it must descend from content_commit and contain only launch-procedure, reference, validation, or test changes unless the content snapshot is deliberately re-frozen.",
     "rule": "Every reviewer evaluates the exact content snapshot plus the recorded launch-packet commit. If any source differs, stop and reconcile the version before review.",
     "live_rule_counts_at_packet_revision": {"shared": 146, "joe_personal": 31, "observed_at": "2026-08-12", "rule": "Preflight must call standing-context again and record the returned counts; these values are evidence, not constants."},

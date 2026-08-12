@@ -4,7 +4,7 @@
   "status": "prepared_for_council_not_approved",
   "prepared_at": "2026-08-12",
   "review_event_date": "2026-08-12",
-  "base_commit": "daacb3d73949dc708172f77d626b4f3eaa430a70",
+  "base_commit": "acd33fe4a5e7b51412d958137449e7b65aaff382",
   "scope": {
     "purpose": "Give the three-model council one explicit reconciliation packet without silently changing canonical doctrine or approving disputed roadmap choices.",
     "authority": "This artifact records settled factual corrections and partner-confirmed decisions. Every item marked proposed_for_council_not_approved requires council disposition and Joe approval before canonical BDUF amendment or production construction.",
