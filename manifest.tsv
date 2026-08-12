@@ -1,7 +1,7 @@
 # repo-path <TAB> vault-path (relative to CARR AI). One row per synced code file.
-# check.sh reads this for the code-drift pass. Drive copies are the cloud-only/file-mode
-# fallback for mapped generators and pipelines. Both partner Macs use repo code; retire or
-# repoint each Drive copy only after that cloud delivery path has separate evidence.
+# check.sh reads this for the code-drift pass. Dell's migrated Mac uses this repo
+# and the live record/doctrine store, not these Drive copies. Vault copies remain
+# only for cloud-only delivery/runtime until that surface is separately retired.
 # FORKED BY DESIGN 2026-07-31 (ORDER 29a ratification): repo copy reads record views
 # (records-mode default); the vault copy is the cloud-only FILE-mode runtime and stays so
 # per the ORDER 28 finding (no DB path off this Mac). The two can never match again, so
