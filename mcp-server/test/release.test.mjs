@@ -134,8 +134,8 @@ test("buildRelease: never returns a secret — env is never echoed back, whateve
   ]);
   const env = {
     GIT_SHA: "e".repeat(40),
-    DATABASE_URL_READER: "postgres://reader:supersecret@db.example/carr",
-    DATABASE_URL_WRITER: "postgres://writer:evensecreter@db.example/carr",
+    DATABASE_URL_READER: "postgres://reader:supersecret@db.example/carr", // ci-secret-scan: allow — canary, db.example is RFC 2606 reserved
+    DATABASE_URL_WRITER: "postgres://writer:evensecreter@db.example/carr", // ci-secret-scan: allow — canary, db.example is RFC 2606 reserved
     INGEST_TOKENS: '{"some-source":"top-secret-token"}',
     PROBE_TOKENS: '{"smoke-probe":"another-secret"}',
     REVIEW_TOKENS: '{"codex-reviewer":"yet-another-secret"}',
