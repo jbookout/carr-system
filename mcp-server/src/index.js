@@ -41,6 +41,11 @@
 //   /.well-known/oauth-authorization-server        provider (RFC 8414)
 //   /.well-known/oauth-protected-resource[/path]   provider (RFC 9728)
 //   /health     unchanged, unauthenticated dead-man probe
+//   /release    unauthenticated, added Phase 1 2026-08-13 (deploy-provenance
+//               gap): what code this deploy is running — Git SHA (stamped at
+//               deploy time, see release.js), the schema_migrations ledger's
+//               claim, doctrine generation, live verb count. No secret in
+//               the response, same posture as /health.
 //   /ingest     unchanged, INGEST_TOKENS bearer — deliberately OUTSIDE the OAuth wrap
 //   /capture/*  capture rig bridge, CAPTURE_TOKENS claim then opaque session token
 //
@@ -54,6 +59,8 @@ import { actorFromProps, agentActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
 import { createCaptureHandler } from "./capture.js";
+import { TOOLS } from "./tools.js";
+import { buildRelease } from "./release.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -81,6 +88,23 @@ async function health(env) {
       503,
     );
   }
+}
+
+// ---------- release (Phase 1, 2026-08-13 — closes the deploy-provenance gap)
+//
+// Unauthenticated, deliberately, same reasoning as /health: it exposes no
+// secret, only the identity of the code that is running (a Git SHA, a
+// migration filename, a generation number, a verb count). Anyone who can
+// already read this repo can already see all of that; the value here is
+// that a SESSION can ask the deployed Worker directly instead of trusting a
+// local marker file that can go stale silently (mcp-server/.last-deployed-
+// verb-count did exactly that on 2026-08-13 — see bin/deploy-worker.sh).
+// See release.js for why the payload-building logic lives in its own file
+// and how each field degrades honestly when it cannot be read.
+async function release(env) {
+  const sql = neon(env.DATABASE_URL_READER);
+  const body = await buildRelease({ env, sql, verbCount: Object.keys(TOOLS).length });
+  return json(body);
 }
 
 async function ingest(request, env) {
@@ -133,10 +157,11 @@ const defaultHandler = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/health") return health(env);
+    if (url.pathname === "/release") return release(env);
     if (url.pathname === "/ingest" && request.method === "POST") return ingest(request, env);
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
-    return json({ service: "carr-mcp", surfaces: ["/health", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
+    return json({ service: "carr-mcp", surfaces: ["/health", "/release", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
   },
 };
 

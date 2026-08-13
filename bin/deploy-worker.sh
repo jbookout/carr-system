@@ -41,6 +41,41 @@
 #
 # Per rule a8c55a47, this is the same code the manual path and any automated
 # path both run. There is no second way to deploy.
+#
+# DEPLOY PROVENANCE (Phase 1, 2026-08-13). The deployed Worker could not say
+# what code it was running: no Git SHA, no schema range, no policy
+# generation, in its responses or its deploy metadata. The only local signal
+# was mcp-server/.last-deployed-verb-count, and on 2026-08-13 it sat un-
+# bumped for ~2h after a real deploy (a Worker deploy happened ~15:21 while
+# the marker's last write was ~13:23) — a verification pass very nearly
+# concluded, wrongly, that the code was unshipped. A signal that can go
+# silently stale is worse than none.
+#
+# TWO HALVES to closing it:
+#   1. THE SHA IS STAMPED HERE, at deploy time, via `--var GIT_SHA:<sha>` —
+#      not a [vars] line in wrangler.toml. wrangler.toml is a tracked file;
+#      writing a commit's SHA into it would mean either committing a new
+#      value on every deploy (noise, and a race with whatever else is
+#      touching main) or leaving it perpetually stale between deploys. A CLI
+#      --var is scoped to exactly this invocation, requires no commit, and
+#      --keep-vars defaults to false — so a deploy that does NOT pass it
+#      (i.e. `wrangler deploy` run directly, bypassing this script) drops
+#      GIT_SHA from that version. That is a feature, not a gap: THE VAR
+#      BEING ABSENT IS THE HONEST SIGNAL THAT THIS SCRIPT WAS BYPASSED,
+#      which is exactly what /release reports (see mcp-server/src/release.js
+#      — null value, "not stamped: deployed outside bin/deploy-worker.sh").
+#   2. THE MARKER WRITE IS PART OF THIS SAME STEP (see postflight below) —
+#      it always was, but that only protects a deploy that goes THROUGH this
+#      script. Grep the repo: `wrangler deploy` is also called directly
+#      (ops/completion-evidence-gate-selftest.py's own test fixture models
+#      exactly that as a plausible session action), and a local file cannot
+#      detect being bypassed — there is no hook a bypassed script can run.
+#      So the marker is necessary-but-not-sufficient, and this script does
+#      not pretend otherwise: /release, read live off the deployed Worker
+#      (mcp-server/src/index.js), is the AUTHORITATIVE signal now.
+#      tools/health-check.py's release check reads /release, not this file,
+#      for exactly that reason — this marker remains only as a fast local
+#      sanity check for a session that already trusts its own history.
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -175,15 +210,27 @@ fi
 echo ""
 echo "== deploy =="
 cd "$WORKER_DIR"
-"$WRANGLER" deploy
+# RELEASE_SHA: whichever of the two preflight branches ran above, HEAD_SHA is
+# already proven equal to it (the pinned branch fails otherwise), so it is
+# always the right value to stamp — no separate variable to keep in sync.
+"$WRANGLER" deploy --var "GIT_SHA:$HEAD_SHA"
 
 # ---------- postflight ----------
+# THE MARKER WRITE IS PART OF THE SAME STEP THAT DEPLOYS, deliberately: there
+# is no separate "record the deploy" invocation to forget or skip. This is
+# necessary but not sufficient (see the DEPLOY PROVENANCE note above) — a
+# `wrangler deploy` run outside this script writes nothing here, which is
+# exactly why /release, not this file, is the signal a verification pass
+# should trust.
 echo ""
 echo "== postflight =="
 printf '%s\n' "$SHIPPING" > "$COUNT_FILE"
 echo "  recorded $SHIPPING verbs in $(basename "$COUNT_FILE")"
+echo "  stamped GIT_SHA=$HEAD_SHA into this deploy (see /release)"
 echo "  COMMIT THAT FILE — it is the baseline the next deploy is measured against."
 echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
 echo "  confirm it reports $SHIPPING. A deploy that returns success and a"
 echo "  registry that answers are two different claims (rule c53beeaa)."
+echo "  Then curl https://api.doctorcre.com/release and confirm git_sha.value"
+echo "  is $HEAD_SHA — that is the authoritative provenance check, not this file."

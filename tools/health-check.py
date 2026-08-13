@@ -1449,4 +1449,102 @@ except Exception as e:
     print(f"  ⚠︎ vault-drift-watch check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# --- deploy provenance: does production run code this repo has a record of? (Phase 1, 2026-08-13) ---
+# THE GAP THIS CLOSES. Before mcp-server/src/release.js existed, the deployed
+# Worker could not say what it was running AT ALL — no Git SHA, no schema
+# range, no policy generation, anywhere in its responses or its deploy
+# metadata. The only local signal was mcp-server/.last-deployed-verb-count, a
+# bookkeeping file the deploy script writes, and on 2026-08-13 it sat
+# un-bumped for roughly two hours after a real deploy (a Worker deploy
+# happened ~15:21 while the marker's last write was ~13:23) — a verification
+# pass very nearly concluded the code was unshipped, and only a live
+# database query settled it. A marker that can go silently stale is worse
+# than none.
+#
+# THIS ROW READS THE WORKER ITSELF, not the local marker — that is the whole
+# point (see bin/deploy-worker.sh's DEPLOY PROVENANCE note: the marker only
+# ever protects a deploy that goes through the script, and `wrangler deploy`
+# is also called directly elsewhere in this repo's own history). The Git SHA
+# is stamped into the Worker at deploy time (`wrangler deploy --var
+# GIT_SHA:<sha>`) and comes back null with a stated reason when a deploy
+# bypassed that script — reported here honestly, not treated as "probably
+# fine".
+#
+# A PRODUCTION SHA THAT IS NOT AN ANCESTOR OF LOCAL HEAD IS THE LOUD FINDING
+# THIS ROW EXISTS FOR: it means production is running code this checkout has
+# no record of — this checkout is behind, or someone deployed from a branch
+# or a force-pushed-away commit. That is loop #276's failure mode (a verb
+# silently vanishing from production because the wrong tree shipped),
+# checked independently of whether bin/deploy-worker.sh's own preflight ran.
+print("\ndeploy provenance (/release)")
+RELEASE_URL = os.environ.get("CARR_RELEASE_URL", "https://api.doctorcre.com/release")
+try:
+    import urllib.request
+    import urllib.error
+
+    try:
+        _req = urllib.request.Request(RELEASE_URL, headers={"user-agent": "carr-health-check"})
+        with urllib.request.urlopen(_req, timeout=15) as _resp:
+            _rel = json.loads(_resp.read().decode())
+    except Exception as e:
+        print(f"  ⚠︎ release UNREACHABLE — cannot verify what production is running "
+              f"({type(e).__name__}: {e}) · on breach: curl -fsS {RELEASE_URL} by hand")
+        rc = 1
+        _rel = None
+
+    if _rel is not None:
+        _sha_obj = _rel.get("git_sha") or {}
+        _sha = _sha_obj.get("value")
+        _verbs = _rel.get("verb_count")
+        _gen = (_rel.get("doctrine_generation") or {}).get("value")
+        _schema = _rel.get("schema") or {}
+
+        if not _sha:
+            _reason = _sha_obj.get("reason") or "no reason given"
+            print(f"  ⚠︎ release       git_sha NOT STAMPED — {_reason} · production's "
+                  f"provenance cannot be checked against this checkout until the next "
+                  f"deploy goes through bin/deploy-worker.sh ({_verbs} verbs reported)")
+            rc = 1
+        else:
+            # The commit may not exist in this checkout's object database yet (a
+            # teammate's deploy, or this clone simply has not fetched). Try once
+            # locally, fetch once if that fails, then judge — never report "not an
+            # ancestor" for a SHA this checkout has just never heard of.
+            _known = subprocess.run(["git", "cat-file", "-e", _sha + "^{commit}"],
+                                     cwd=REPO_ROOT, capture_output=True, text=True, timeout=15)
+            _fetched = False
+            if _known.returncode != 0:
+                subprocess.run(["git", "fetch", "origin", "--quiet"],
+                                cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+                _fetched = True
+                _known = subprocess.run(["git", "cat-file", "-e", _sha + "^{commit}"],
+                                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=15)
+            if _known.returncode != 0:
+                print(f"  ✗✗ release       production SHA {_sha[:12]} is UNKNOWN to this "
+                      f"checkout even after git fetch — this repo has NO record of the "
+                      f"commit production is running ({_verbs} verbs reported). Check "
+                      f"whether it exists on another remote/branch or was force-pushed away")
+                rc = 1
+            else:
+                _anc = subprocess.run(["git", "merge-base", "--is-ancestor", _sha, "HEAD"],
+                                       cwd=REPO_ROOT, capture_output=True, text=True, timeout=15)
+                _fetch_note = " (needed a git fetch to find it)" if _fetched else ""
+                if _anc.returncode == 0:
+                    print(f"  OK release       production is running {_sha[:12]}{_fetch_note} — "
+                          f"an ancestor of local HEAD ({_verbs} verbs, schema "
+                          f"{_schema.get('highest_applied_migration') or '?'}, doctrine gen {_gen})")
+                else:
+                    print(f"  ✗✗ release       production SHA {_sha[:12]} EXISTS in this repo's "
+                          f"history but is NOT an ancestor of local HEAD{_fetch_note} — "
+                          f"production is off main, or main has been rewritten since it "
+                          f"shipped ({_verbs} verbs reported)")
+                    rc = 1
+
+        if _schema.get("reason"):
+            print(f"  ⚠︎ release       schema unreadable from production: {_schema['reason']}")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ deploy provenance check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
