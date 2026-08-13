@@ -610,11 +610,39 @@ def main():
         print("=" * 70)
         return 0
 
+    # THE BANNER STATES THE RULING, IT DOES NOT NAG FOR A REJECTED OPTION.
+    #
+    # This line used to read "run ops/harden-gates.sh with sudo to make
+    # tampering impossible rather than merely detectable", printed at every
+    # single session start. That was a standing recommendation to redo
+    # something Joe had already considered, authorized, tested, and then
+    # deliberately REVERSED on 2026-08-10, in his own words: "man honestly i
+    # disagree with hardening at all. i think the council went overboard on
+    # that. youre not going to rewrite hooks anyway without a good reason. if
+    # anything, you can just ask me if i approve writing hooks instead of
+    # requiring a password." The cost he named was concrete: a buggy gate
+    # wrongly blocking legitimate work stays broken until he is available to
+    # authenticate.
+    #
+    # IT COST A REAL ERROR, 2026-08-13. A session read this banner plus
+    # harden-gates.sh's "0 hardened · 18 unprotected" as evidence of DRIFT,
+    # filed a defect asserting that a completed loop had been closed without
+    # its work landing, and put a hot item in front of Joe asking him to run
+    # the very thing he had ruled against. Both were wrong. Prompting for a
+    # settled decision does not read as a neutral status line; it reads as an
+    # unmet obligation, which is exactly the "dated artifact read as present
+    # state" failure this system already logs more than any other.
+    #
+    # So the unhardened count is still REPORTED, because it is true and it is
+    # the actual security posture, but it is stated as the decision it is.
     note = ""
     if unhardened:
-        note = (f" · {len(unhardened)}/{len(GATED)} gates still user-writable "
-                f"(run ops/harden-gates.sh with sudo to make tampering "
-                f"impossible rather than merely detectable)")
+        note = (f" · OS hardening OFF by Joe's ruling 2026-08-10 "
+                f"({len(unhardened)}/{len(GATED)} gates user-writable): tampering is "
+                f"DETECTABLE here, not prevented, and that trade was chosen on purpose "
+                f"so a buggy gate never needs a password to fix. In-session gate edits "
+                f"are approved through gate-edit-gate.py instead. Do NOT propose "
+                f"ops/harden-gates.sh as a fix; it is kept only for a deliberate reversal")
     print(f"GATE INTEGRITY: {len(base)} gates match baseline; installed adapter wiring exact{note}")
     print(f"CLIENT ADAPTERS: Claude={claude_state}; Codex={codex_state}; "
           f"Claude-project={project_adapter_state}. CARR core is client-independent; "
