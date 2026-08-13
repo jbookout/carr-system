@@ -52,6 +52,11 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/git-writer-gate.py",
           "timeout": 20
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/staging-attribution-gate.py",
+          "timeout": 20
         }
       ]
     },
