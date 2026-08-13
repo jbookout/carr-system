@@ -5881,6 +5881,69 @@ Object.assign(TOOLS, {
                  inputSchema: TOOLS[n].inputSchema || null })) };
     },
   },
+  "record-defect": {
+    write: true,
+    description: "File ONE defect: a claim the system made that was not true, with what WAS true beside it. This is the record layer's only RETROSPECTIVE mechanism — every other safeguard here (a hook, a gate, a registry) is prospective and guesses in advance at what will go wrong; this one gets better as failures accumulate. NOT record-finding: a finding is something learned about a client, a commit or a platform, while a defect is something the system itself got wrong. NOT a loop either, and that distinction is the reason this verb exists — a loop is a TO-DO, so it gets closed and disappears, while a defect must ACCUMULATE to be worth anything. The four load-bearing fields are claimed / actual / source_unread / rule_violated, and claimed and actual are both required and must actually differ: a row that does not state a contradiction is a note, not a defect. detected_by is required and closed-vocabulary because it is the most diagnostic field in the table — a log where every row reads 'human' is a log saying the self-checks do not work, and that is only visible if it is counted. FILE ONE THE MOMENT IT IS FOUND, including when the session filing it is the one that erred; a defect caught and not recorded is the failure this whole mechanism exists to stop. Read them back through v_defect and v_defect_class; standing-context surfaces the class counts at session start.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      defect_class: { type: "string", description: "the KIND of failure, lowercase, kebab-ish — e.g. 'dated-artifact-read-as-present-state', 'success-signal-from-the-wrong-function'. Free text on purpose: the classes are not known in advance and a fixed vocabulary would force every new failure into an old bucket. Reuse an existing class where one fits — call this verb's read side (v_defect_class) or catch-me-up first — because the count per class is the entire point." },
+      claimed: { type: "string", description: "REQUIRED. What the system asserted, in the words it asserted it." },
+      actual: { type: "string", description: "REQUIRED. What was true. Must differ from claimed — the pair is what makes the row reviewable later." },
+      source_unread: { type: "string", description: "the artifact that would have shown it and was not opened, or was opened partially. This is the field that turns a defect log into a reading list." },
+      rule_violated: { type: "string", description: "the rule this broke — the 8-character short id is fine and is what a session can actually quote; the read view resolves it to the rule's statement." },
+      detected_by: { type: "string", enum: ["human","self","gate","check","peer_review","downstream"],
+        description: "who caught it. 'human' means a partner had to find it, which is the most expensive kind and the one worth counting." },
+      occurred_on: { type: "string", description: "date it happened (ISO); defaults today. Pass it when filing an OLD defect — a backfilled row dated today would make the trend line lie." },
+      session_key: { type: "string" },
+      cost_note: { type: "string", description: "what it cost, in whatever unit is true: tokens, a wrong deliverable, a partner's evening." } },
+      required: ["idempotency_key","defect_class","claimed","actual","detected_by"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "record-defect", args, async () => {
+      const present = await c.query("select to_regclass('public.defect') is not null as t");
+      if (!present.rows[0].t)
+        throw new ToolError({ error: "migration_not_applied", migration: "0103_defect_log",
+          hint: "the defect log needs 0103. Apply it (`~/carr-system/run.sh migrate --apply --yes`) and retry. NOTHING was written." });
+      const cls = String(args.defect_class || "").trim().toLowerCase().replace(/\s+/g, " ");
+      const claimed = String(args.claimed || "").trim();
+      const actualTxt = String(args.actual || "").trim();
+      if (!cls) throw new ToolError({ error: "defect_class_required",
+        hint: "name the KIND of failure, not this one instance — the count per class is what makes the log useful" });
+      if (!claimed || !actualTxt || claimed.toLowerCase() === actualTxt.toLowerCase())
+        throw new ToolError({ error: "no_contradiction_stated", claimed, actual: actualTxt,
+          hint: "a defect states what was CLAIMED and what was TRUE, and they must differ. If they do not, this is a note — log-decision or add-loop is its home, not the defect log." });
+      const r = await c.query(
+        `insert into defect (occurred_on, defect_class, claimed, actual, source_unread,
+                             rule_violated, detected_by, session_key, cost_note, created_by)
+         values (coalesce($1::date, current_date), $2,$3,$4,$5,$6,$7,$8,$9,$10)
+         returning id, occurred_on`,
+        [args.occurred_on || null, cls, claimed, actualTxt,
+         args.source_unread || null, args.rule_violated || null, args.detected_by,
+         args.session_key || null, args.cost_note || null, actor.id]);
+      // The event is what makes a defect show up in catch-me-up without a second read
+      // surface — the same reason record-finding writes one.
+      await writeEvent(c, actor, "record-defect", "defect", r.rows[0].id, {
+        field: cls,
+        new: { detected_by: args.detected_by, rule_violated: args.rule_violated || null,
+               source_unread: args.source_unread || null },
+        agent_rationale: claimed.slice(0, 300),
+        idempotency_key: args.idempotency_key });
+      const cnt = await c.query(
+        "select occurrences, caught_by_human, first_seen from v_defect_class where defect_class=$1", [cls]);
+      const row = cnt.rows[0] || {};
+      // A date rendered through JS's default toString comes out as
+      // "Tue Aug 04 2026 00:00:00 GMT-0500 (Central Daylight Time)", which is noise in
+      // a sentence a session is meant to read at a glance (rule 80def9d2).
+      const asDate = v => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10));
+      return { ok: true, defect_id: r.rows[0].id, defect_class: cls,
+               occurred_on: asDate(r.rows[0].occurred_on),
+               class_occurrences: row.occurrences, class_caught_by_human: row.caught_by_human,
+               class_first_seen: row.first_seen ? asDate(row.first_seen) : null,
+               note: row.occurrences > 1
+                 ? `this class has now failed ${row.occurrences} times since ${asDate(row.first_seen)} — ` +
+                   `${row.caught_by_human} of them caught by a human. A repeat class is a design ` +
+                   "problem, not a lapse: say so rather than filing the next one quietly."
+                 : "first of its class." };
+    }),
+  },
   "call-verb": {
     write: true,   // rides the writer path so inner writes work; inner reads work there too
     description: "Invoke ANY live verb by name — the deploy-gap passthrough. A freshly deployed verb is callable here the moment the Worker ships, no connector reconnect needed; its first-class tool appears at your next session start. Takes {verb, args} where args is the inner verb's own argument object (including its idempotency_key for writes). All profile and permission checks apply to the inner verb exactly as a direct call.",

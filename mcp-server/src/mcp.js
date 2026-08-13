@@ -55,6 +55,11 @@ const PROFILES = {
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-signal", "record-branch-evidence",
+    // record-defect (0103) belongs in the NARROWEST writing profile, not the widest.
+    // An unattended run is exactly where an error is least likely to be caught by a
+    // human, so it is the seat that most needs to be able to file its own — and the
+    // verb is purely additive, keyed, and cannot touch any other record.
+    "record-defect",
   ]),
 
   // AWAY MODE, added 2026-08-03 on Joe's ruling. The scheduled CEO session that
@@ -89,7 +94,7 @@ const PROFILES = {
     // everything capture holds
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
-    "record-signal", "record-branch-evidence",
+    "record-signal", "record-branch-evidence", "record-defect",
     // plus: close what it opened, advance the book, draft, and keep the record honest
     "close-loop", "update-deal", "add-premises", "record-counter",
     "prepare-document", "update-document-status",

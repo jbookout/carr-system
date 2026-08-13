@@ -857,6 +857,22 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             where status = 'proposed'
               and (personal_to is null or ($1::text is not null and personal_to = $1))
             order by created_at`, [who]).catch(() => ({ rows: [] }))).rows;
+        // THE DEFECT CLASSES (0103, loop #185). Surfaced HERE for the same reason the
+        // proposed rules are: this verb is the opening act of every session, and the
+        // loop's acceptance criterion is literally "a session can be told at start
+        // 'this class has failed N times, here are the artifacts that were stale'"
+        // rather than being handed the prose rules and trusted.
+        //
+        // Ranked by how many a HUMAN had to catch, not by raw count. A class the system
+        // catches itself is working as designed; a class a partner keeps finding is the
+        // one that should change how this session reads today. Capped at five, because a
+        // wall at session start is skimmed like every other wall.
+        const defectClasses = (await c.query(
+          `select defect_class, occurrences, caught_by_human, first_seen, last_seen,
+                  sources_unread
+             from v_defect_class
+            order by caught_by_human desc, occurrences desc, last_seen desc
+            limit 5`).catch(() => ({ rows: [] }))).rows;
         const gen = (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
         // PAYLOAD NOTE (2026-08-08, Joe's yes): detail=full returned ~183KB at
         // 147 rules and overflowed the tool-result limit on the very first live
@@ -919,6 +935,24 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             "One line per rule. NEVER quote a gist as the rule — call standing-context again with rule_ids:['<id>',…] for the binding text before acting on one." } : {}),
           shared_rules: shared.map(r => shape(r, true)),
           personal_rules: personal.map(r => shape(r, false)),
+          ...(defectClasses.length ? { known_failure_classes: {
+            say: "ways this system has actually been wrong before, worst first — " +
+                 "not a warning, a reading list",
+            classes: defectClasses.map(d => ({
+              defect_class: d.defect_class,
+              occurrences: d.occurrences,
+              caught_by_human: d.caught_by_human,
+              // A bare date, not a timestamp with a timezone name in it — this is read
+              // at a glance at session start (rule 80def9d2).
+              last_seen: d.last_seen instanceof Date
+                ? d.last_seen.toISOString().slice(0, 10)
+                : String(d.last_seen).slice(0, 10),
+              sources_that_went_unread: d.sources_unread || [],
+            })),
+            hint: "before asserting the state of anything dated, check whether you are " +
+                  "about to repeat one of these. File a new one with record-defect the " +
+                  "moment you or a partner catches an error — including your own.",
+          } } : {}),
           ...(proposedRules.length ? { awaiting_activation: {
             count: proposedRules.length,
             say: `${proposedRules.length} rule(s) are written and waiting on a yes — they bind nobody until activated`,
