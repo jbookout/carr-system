@@ -281,6 +281,51 @@ def exchange_touches_carr(text, response_blob=""):
     return bool(response_blob and CARR_WORK.search(response_blob))
 
 
+# --- Scope-gate NARROWING (2026-08-13, regression suite tools/test-ledger-
+# sweep.py caught it) ---------------------------------------------------------
+# The scope gate above went into main() applied to EVERY trigger, and that was
+# wrong. Its own justification (block above) names exactly ONE real live false
+# positive it was needed for: trigger 4's bare "i want" ("i want it to be
+# fully apple keyboard"). The other named example, "okay i think it worked",
+# was already handled by is_past_outcome_report() and never needed the gate.
+#
+# Applied blanket-wide, the gate went on to silently swallow FIVE pinned
+# regression cases that carry no CARR-specific noun because they are written
+# with placeholders on purpose — including the flagship case this whole hook
+# exists to catch: "from now on always do X". That is not a narrow miss, it
+# is the exact trigger named in rule bbffc139 and in this file's own
+# docstring, going dark. A gate that blocks its own headline case is broken,
+# not conservative.
+#
+# The fix narrows the gate to the ONE register that actually caused a real
+# false positive: trigger 4 mixes STRONG standing-rule markers ("from now
+# on", "going forward", "always", "never", "lets X", "go with", "make
+# it/that/this" — this is literally the phrasing CLAUDE.md itself names as
+# the taught-rule markers, '"always X", "never Y", "from now on"') with WEAK,
+# topic-agnostic markers ("we should", "we need to", "i want") that show up
+# in any ordinary sentence, CARR or not. Only the WEAK register, and only
+# when it is the sole hit, needs topic evidence before firing. Every other
+# trigger, and trigger 4's STRONG register, already carries enough of its own
+# specificity that gating it behind a CARR-noun lexicon caused five confirmed
+# live misses for one prevented false positive — a bad trade, and precisely
+# the "cries wolf both ways" failure this file's own docstring warns against.
+TRIGGER_4_NAME = "4 · RULED ON HOW SOMETHING IS STRUCTURED"
+TRIGGER_4_STRONG = re.compile(
+    r"\b(from now on|going forward|always|never|lets? (do|go|use|make|build|"
+    r"split|keep|move)|go with|make (it|that|this))\b", re.I)
+TRIGGER_4_WEAK = re.compile(r"\b(we (should|need to)|i want)\b", re.I)
+
+
+def is_weak_trigger4_only(hits, text):
+    """True only when trigger 4 is the SOLE hit and it fired on the
+    topic-agnostic register (no strong standing-rule marker present). This is
+    the sole case that still needs `exchange_touches_carr` evidence before
+    firing."""
+    return (hits == [TRIGGER_4_NAME]
+            and bool(TRIGGER_4_WEAK.search(text))
+            and not TRIGGER_4_STRONG.search(text))
+
+
 # A past-tense report of an outcome is not a prediction. Rule bbffc139's own
 # trigger 2 is about "how something WILL behave, what WILL work, or how long
 # something WILL take", captured AT DECISION TIME "because a prediction logged
@@ -395,16 +440,19 @@ def main():
         if not hits:
             sys.exit(0)
 
-        # SCOPE GATE. Everything after the last human turn is what the session
-        # actually did in response; it is the second of the two signals that can
-        # put this exchange inside the work. Serialised whole rather than walked,
-        # because tool names and paths land in several shapes across record
-        # formats and a substring test reads all of them.
-        response_blob = json.dumps(recs[last_human_idx + 1:])
-        if not exchange_touches_carr(last_human, response_blob):
-            log(f"SILENT(out-of-scope) {hits} :: "
-                f"{' '.join(last_human.split())[:100]}")
-            sys.exit(0)
+        # SCOPE GATE — narrowed 2026-08-13 to trigger 4's weak register only
+        # (see is_weak_trigger4_only). Everything after the last human turn is
+        # what the session actually did in response; it is the second of the
+        # two signals that can put this exchange inside the work. Serialised
+        # whole rather than walked, because tool names and paths land in
+        # several shapes across record formats and a substring test reads all
+        # of them.
+        if is_weak_trigger4_only(hits, last_human):
+            response_blob = json.dumps(recs[last_human_idx + 1:])
+            if not exchange_touches_carr(last_human, response_blob):
+                log(f"SILENT(out-of-scope) {hits} :: "
+                    f"{' '.join(last_human.split())[:100]}")
+                sys.exit(0)
 
         quote = " ".join(last_human.split())[:220]
         msg = ("LEDGER SWEEP — the partner's last turn matched "
