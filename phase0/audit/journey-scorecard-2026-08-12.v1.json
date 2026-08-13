@@ -31,11 +31,11 @@
     "read-back",
     "no data loss"
    ],
-   "result": null,
-   "coached": null,
+   "result": "partial",
+   "coached": false,
    "time_seconds": null,
-   "friction_notes": null,
-   "timestamp": null
+   "friction_notes": "Park half run fully unaided: Joe located the exact record, prepared a parking reason, confirmed, and reached the preserved-history and read-back verification without help. Joe then reported the journey done while the artifact still read Parked, version 8, restore unconfirmed, all five pressure fields Excluded. Cause per Joe verbatim: 'i didn't realize your entire question. so i didn't click restore bc i didn't notice your instruction included that step. I defintely saw the button and it was self explanatory.' This is a PROCTOR INSTRUMENT ERROR, not a product defect — the four-clause task statement was issued as a single sentence and the fourth clause did not land; the restore control itself was discovered unaided and read correctly. Restore was then completed after the fourth clause alone was re-stated (no route disclosure; control already located unaided), so restore-dependent criteria are valid evidence with that provenance. ARTIFACT VERIFIED POST-RESTORE: status Active Work, version 8 to 9, prior park event retained plus new 'Restored to Active Work in prototype - attributed to Joe' entry, all five read-back fields flipped Excluded to Included, no history rewrite and no loss. Criteria met: attributed events, read-back, no data loss, version visible. UNTESTED and the reason this is scored partial rather than pass: the conflict half of criterion 1 was never exercised — this journey's flow creates no version conflict, and the conflict state is reachable only through the Preview state selector, which was not used. CROSS-CUTTING EVIDENCE-VALIDITY FINDING, verified in source at workspace/public/js/app.js lines 92-108: journeySteps() renders unconditionally on both Command Center and Deal Room, displaying the expected route as numbered chips with current-step tracking, behind no toggle and no preview-state gate. Workspace journeys therefore cannot be described as purely uncoached, and this applies retroactively to FLOW-WS-01 as scored. Counter-signal limiting the severity: the chips read '5. Restore' and the step was still missed, so the displayed route does not reliably transfer. Timing not instrumented this run; journey carries no speed criterion.",
+   "timestamp": "2026-08-12T19:38:22-05:00"
   },
   {
    "id": "FLOW-WS-03",
