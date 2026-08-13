@@ -1,0 +1,67 @@
+{
+  "contract": "carr-control-room-phase0-manifest",
+  "version": "1.0.0",
+  "status": "phase0_identity_contract_and_live_runtime_machine_gate_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
+  "source": {"path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx", "original_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada", "sha256": "4ed1984275278fd1142df326ed830403cd27e63f2043aac9f40d91df60e2588a", "pages": 43, "durable_doctrine_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "doctrine_generation": 345, "doctrine_sections": 40, "objective_section_id": "fae3acb3-2efb-4b80-81f7-2b2d978c237a", "objective_section_version": 1, "hardware_section": {"section_key": "s38-local-edge-node-mac-hardware-and-operational-controls", "section_id": "7f263925-5939-44bf-98ca-e4c0054e63c8", "version": 2}},
+  "governing_sources": [
+    {"role": "business_product_roadmap", "slug": "carr-workspace-bduf", "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6", "generation": 344, "active_sections": 35, "receipt": "fresh_read_verified", "specific_binding": "s23 version 4 harmonizes the website milestone to approximately 12 weeks, the evidence range to 12–16 weeks, and the full multi-platform program to 4–6 months; s32 governs tenant-ready workflows; s33 governs the Local Edge Node hardware gate"},
+    {"role": "operations_product_roadmap", "slug": "carr-control-room-bduf", "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6", "generation": 345, "active_sections": 40, "receipt": "fresh_read_verified", "specific_binding": "s37 governs tenant/workflow/maintenance; s38 governs Local Edge Node service, observability, recovery, authority, and hardware controls"},
+    {"role": "integrated_end_state_roadmap", "slug": "carr-mature-software-end-state-bduf", "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d", "generation": 346, "active_sections": 42, "receipt": "fresh_read_verified", "desktop_sha256": "b062e6aea084990383af0fe0040df45d30a8cedf7624da6563bfb427aff4556b", "specific_binding": "s41 governs Local Edge Node purchase, identity, continuity, and acceptance"},
+    {"role": "governing_production_baseline", "slug": "carr-production-maturity-baseline", "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b", "generation": 336, "active_sections": 28, "receipt": "fresh_read_verified", "specific_binding": "s27 governs tenant readiness, workflow evolution, and the maintenance budget"}
+  ],
+  "integrated_delivery_program": {
+    "october_5_2026_milestone": {"name": "CARR Mature Foundation v1", "not_full_mature_end_state": true, "scope": ["Production Maturity Level 1 plus selected Level 2 controls", "core CARR Workspace and Command Center web milestone", "Calls and Doc request loop", "thin authoritative read-first CARR Control Room"]},
+    "full_mature_end_state": {"planning_horizon": "4–6 months", "delivery_model": "evidence-gated", "scope": ["production-mature web operations", "installed Mac parity after Website Completion", "iPhone after installed Mac parity", "iPad Tour Mode after iPhone", "safely mutable Production AgentOps after read-first operational evidence and its authority gates"]},
+    "construction_gate": "No production construction, migration, deployment, or irreversible implementation before Joe approves the frontier-model council output from the latest qualified Claude, Codex, and Grok models run at exactly high effort.",
+    "phase0_boundary": "Discovery, contracts, prototypes, inventories, validation, and council preparation only; zero production mutation routes or actions."
+  },
+  "hardware_program_gate": {
+    "workspace_section": {"section_key": "s33-carr-local-edge-node-and-mac-hardware-requirements", "section_id": "8f6edd0f-08a3-4012-92fc-e46640323fde"},
+    "control_room_section": {"section_key": "s38-local-edge-node-mac-hardware-and-operational-controls", "section_id": "7f263925-5939-44bf-98ca-e4c0054e63c8"},
+    "mature_end_state_section": {"section_key": "s41-carr-local-edge-node-and-hardware-purchase-decision", "section_id": "87eca39b-e83c-457e-adaa-75c5f0b086ef"},
+    "purchase_requires_joe": true,
+    "activation_requires_acceptance_evidence": true,
+    "required_acceptance_evidence": ["authoritative host identity and Local Edge Node inventory", "FileVault, login, keychain, application permission, lock-state, and background-task checks", "network outage recovery and idempotent queued replay", "UPS shutdown, startup, and power-return verification", "encrypted cloud backup restore and replacement-Mac clean rebuild", "Control Room Unknown, degraded, permission-denied, offline, and recovery evidence", "adapter actions remain behind the human gate"],
+    "required_audit_events": ["edge_node.state_changed", "edge_node.permission_denied", "edge_node.power_recovery_verified", "edge_node.backup_restore_verified"],
+    "timeline_expansion_authorized": false,
+    "adoption_credit_authorized": false,
+    "production_authorization": false
+  },
+  "planning_cost_bands_usd_monthly": {
+    "phase0_or_pilot_incremental": {"low": 5, "high": 20},
+    "mature_two_partner_web_operations": {"low": 62, "high": 84},
+    "before_paid_incident_response": {"low": 28, "high": 50},
+    "with_apple_reserve_approximate": {"low": 70, "high": 93},
+    "high_intentional_use": {"low": 300, "high": 500},
+    "evidence_location": "CARR Mature Software End State BDUF sections 25–28"
+  },
+  "settled_decisions": [
+    {"decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7", "subject": "Workspace and Control Room product and authority boundary"},
+    {"decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f", "subject": "Complete both Phase 0 preparations before Wednesday council; no construction before Joe approves the council output"},
+    {"decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5", "subject": "Operating objective and AI-session displacement test controls both roadmaps and adoption"},
+    {"decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84", "subject": "Freeze independently verified Phase 0 artifacts pending human and council gates"},
+    {"decision_id": "69512a40-99ec-483f-8528-5e05a4969551", "subject": "Treat eight weeks as the CARR Mature Foundation milestone, not the full native mature end state"},
+    {"decision_id": "f8799b7f-f655-4da7-b378-20ff312d4fe3", "subject": "Tenant-ready safety and future owner-controlled seat licensing; one CARR tenant and Joe and Dell only at launch; no public SaaS"},
+    {"decision_id": "1e929e67-6c69-4be3-ae57-47950a0d2a4d", "subject": "Mature rails now while provisional workflows graduate through the governed lifecycle"},
+    {"decision_id": "9e06926b-8928-4b99-8a4c-5fb89717289a", "subject": "Normal internal maintenance target is 3–5 measured human hours per month with exceptions separately attributed"},
+    {"decision_id": "09959bb0-8f3e-4abf-84cb-cc1b72b1d8f9", "subject": "Joe retains platform, intellectual property, and control; corporate may license seats only as a customer"}
+  ],
+  "repository": {"isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0", "branch": "control-room-phase0", "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253", "canonical_dirty_checkout_modified": true, "canonical_checkout_observation": {"observed_on": "2026-08-11", "status": "dirty_untracked_assets_present", "tracked_modified_paths": [], "untracked_paths": ["tools/doc-convo/assets/harvest-curated-seed.json", "tools/doc-convo/assets/harvest-factual.txt", "tools/doc-convo/assets/harvest-frames.txt", "tools/doc-convo/assets/harvest-questions-curated.json", "tools/doc-convo/assets/harvest-questions.json", "tools/doc-convo/assets/harvest-replies.jsonl", "tools/doc-convo/assets/harvest-sentences.jsonl", "tools/doc-convo/assets/turn-timings.jsonl"], "earlier_reported_tracked_path": "pipelines/doctrine_inventory.py", "earlier_report_reproduced_by_fresh_status": false}},
+  "artifact_groups": {
+    "contracts": ["domain-terms.v1.json", "operating-objective.v1.json", "state-machines.v1.json", "authority-risk-matrix.v1.json", "identity-sponsorship.v1.json", "security-redaction.v1.json", "ops-v1-read-contract.v1.json", "entity-schemas.v1.json", "audit-event-taxonomy.v1.json", "threat-model.v1.json", "feature-flags.v1.json", "phase0-acceptance.v1.json", "phase0-traceability.v1.json", "fixture-schema.v1.json", "council-review.v1.json", "tenant-workflow-maintenance.v1.json"],
+    "canonical_twins": ["overview.v1.json", "service.v1.json", "work-request.v1.json", "plan-approval.v1.json", "deployment.v1.json", "incident.v1.json", "audit.v1.json"],
+    "security_fixtures": ["tenant-boundary.v1.json", "identity-sponsorship.v1.json"],
+    "prototype": ["public/index.html", "public/css/app.css", "public/js/app.js", "public/js/client.js"],
+    "tests": ["test/contracts.test.mjs", "test/prototype.test.mjs", "test/acceptance-ids.test.mjs"]
+  },
+  "automated_evidence": {"node_test_count": 94, "node_test_passed": 94, "syntax_checks": ["public/js/app.js", "public/js/client.js"], "json_parse": "passed", "mutation_routes": 0, "production_actions": 0, "deployments": 0, "migrations": 0},
+  "exit_gates": {
+    "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning artifacts passed fresh-context independent verification with P0/P1/P2 all zero; the separately authorized narrow connector repair also passed live verification",
+    "browser_runtime_visual_accessibility": "loopback HTTP entry, CSS, JavaScript, and fixture fetch returned 200; interactive visual and accessibility review remains unverified",
+    "joe_uncoached_six_flows": "not performed",
+    "roadmap_final_approval": "Joe's approval is required after the Wednesday council produces its recommendation",
+    "integrated_program_reconciliation": "tenant, workflow, maintenance, and sponsor/runtime identity machine gates passed cold-context verification; identity sponsorship separates tenant, sponsor, agent, runtime, brain, and capability",
+    "production_identity_repair": "verified narrow bugfix: commit e88299c78bf8df29786e435a91e8b9b94f14da8a, migration 0095, Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377, 75/75 runtime tests, repair verification at 144 shared plus 30 Joe-personal, council-packet preflight on 2026-08-12 at 146 shared plus 31 Joe-personal, partner spoof refusal, and loop 319 done; counts are dated evidence and no Control Room Phase 0 files were deployed"
+  },
+  "prohibited_claims": ["production implementation exists", "Control Room auth is enforced", "ops.doctorcre.com is deployed", "collectors are live", "action broker exists", "Phase 0 exit gate is complete before independent and human evidence"]
+}

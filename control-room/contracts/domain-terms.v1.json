@@ -1,0 +1,42 @@
+{
+  "contract": "carr-control-room-domain-terms",
+  "version": "1.0.0",
+  "status": "phase0_frozen",
+  "source": {
+    "doctrine_document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+    "source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada",
+    "evidence_as_of": "2026-08-10"
+  },
+  "terms": [
+    {"term": "CARR Control Room", "definition": "A separate operations and evidence plane. It is never a terminal, raw SQL editor, generic MCP client, second CRM, or second IDE."},
+    {"term": "CARR Workspace", "definition": "The Joe and Dell business operating application. It receives only safe Control Room request, incident, maintenance, and release summaries."},
+    {"term": "Service", "definition": "A named operational component with an owner, purpose, supported workflows, dependencies, environments, health sources, runbooks, automations, incidents, and releases."},
+    {"term": "Environment", "definition": "One of local, rehearsal, staging, or production. It is explicit on every protected object and event and is never inferred from a hostname."},
+    {"term": "Observation", "definition": "A read-only source result with source, target, observed time, freshness, correlation, confidence, evidence reference, and redaction classification."},
+    {"term": "Freshness", "definition": "The state fresh, stale, missing, or unknown. Stale or missing authoritative telemetry produces Unknown health, never Healthy."},
+    {"term": "Work Request", "definition": "A durable operational work envelope with origin, desired outcome, acceptance criteria, risk, target, executor, lifecycle, blockers, evidence, and release disposition."},
+    {"term": "Agent Session", "definition": "A scoped execution envelope, not a transcript, that separately binds organization tenant, verified human sponsor or unsponsored status, acting agent principal, runtime principal, personal-brain scope and version, request, resources, environment, capability profile, expiry, phase, and evidence."},
+    {"term": "Sponsoring Human", "definition": "The verified Joe or Dell identity whose session originated an agent task. Sponsorship selects that partner's personal-brain scope but never replaces agent attribution or grants authority."},
+    {"term": "Agent Principal", "definition": "The registered Doc, Codex, Claude, or service actor to which an action is attributed. It is distinct from both the sponsoring human and organization tenant."},
+    {"term": "Runtime Principal", "definition": "The authenticated runtime instance and credential class executing the session. It validates the agent principal and capability profile but does not choose a partner brain."},
+    {"term": "Personal Brain Scope", "definition": "The Joe-personal or Dell-personal active rule namespace selected only from a verified sponsoring human. A missing or ambiguous expected scope is Unknown with null count, while an authenticated unsponsored agent reports scope none and zero personal and receives active shared rules and/or explicit server-attached job rules."},
+    {"term": "Plan Revision", "definition": "An immutable ordered plan with exact target, decisions, steps, risk, cost, rollback or forward fix, verification specification, and SHA-256 plan hash."},
+    {"term": "Approval", "definition": "A human decision bound to one plan revision and hash, exact target and environment, re-authentication evidence, expiry, and disposition."},
+    {"term": "Release", "definition": "An immutable set of commit, configuration, schema, assets, work requests, and safe release notes."},
+    {"term": "Deployment", "definition": "One attempt to place one release into one explicit environment, with ordered execution events, reconnect cursor, verification runs, and rollback or forward-fix state."},
+    {"term": "Check Run", "definition": "A timestamped deterministic observation with source, target, outcome, freshness, failure class, and evidence."},
+    {"term": "Job Run", "definition": "A timestamped automation execution with registered wrapper, inputs and outputs metadata, outcome, retry, freshness, and evidence."},
+    {"term": "Incident", "definition": "An operational impact record whose facts and hypotheses remain distinct and whose timeline links alerts, services, releases, requests, plans, evidence, mitigation, and recovery proof."},
+    {"term": "Capability Grant", "definition": "A narrow server-side grant binding principal, sponsor, parent request, exact resources, environment, capability, reason, issue time, expiry, and grant version."},
+    {"term": "Actuator", "definition": "A registered deterministic wrapper with typed inputs. Initial sanctioned families are deploy, migrate, smoke, health/probe, backup, restore, and local-agent wrappers; arbitrary command text is forbidden."},
+    {"term": "Evidence", "definition": "A redacted attributable result tied to an expected assertion, exact source and target, timestamp, correlation, verifier, and immutable reference."},
+    {"term": "Audit Event", "definition": "An append-only event linking origin, actor and sponsor, request and session, scope, plan and approval, execution, verification, result, and redaction declaration."},
+    {"term": "Safe Bridge Summary", "definition": "The Workspace-safe projection of a Control Room object: opaque ID, safe label, lifecycle, plain impact or result, verified time, and next action, with no engineering internals or client payload."},
+    {"term": "Unknown", "definition": "The honest health state when authoritative evidence is absent, stale, out of scope, or unreachable. Unknown always names its source gap and monitoring action."},
+    {"term": "Tenant Context", "definition": "The immutable tenant and environment scope the server derives from the authenticated principal and typed server route before authorization. Client, agent, and model tenant claims are never authoritative."},
+    {"term": "Platform Administration", "definition": "Joe-controlled authority over platform code, intellectual property, provisioning, licensing, release governance, and platform-wide policy. It is distinct from and never implied by tenant administration."},
+    {"term": "Tenant Administration", "definition": "Narrow owner-controlled administration within one tenant. At launch Joe administers the single CARR tenant and Dell remains a Control Room Reporter/Viewer."},
+    {"term": "Workflow Lifecycle", "definition": "The evidence-gated states experimental, pilot, approved, standard, and retired. Each work item pins an immutable version, promotion is audited, and retirement blocks new starts."},
+    {"term": "Maintenance Scorecard", "definition": "Measured normal internal human time, separately attributed exception time, toil concentration, actionable alerts, verified safe automation, and named remedies. Three complete consecutive months are required before a mature-maintenance claim."}
+  ]
+}

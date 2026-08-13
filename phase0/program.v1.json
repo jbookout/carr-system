@@ -1,0 +1,384 @@
+{
+  "contract": "carr-integrated-phase0-program",
+  "version": "1.4.0",
+  "status": "phase0_planning_and_sponsor_identity_machine_gates_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
+  "decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f",
+  "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
+  "artifact_freeze_decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84",
+  "integrated_delivery_decision_id": "69512a40-99ec-483f-8528-5e05a4969551",
+  "tenant_and_workflow_decision_ids": {
+    "tenant_ready_owner_controlled_licensing": "f8799b7f-f655-4da7-b378-20ff312d4fe3",
+    "mature_rails_with_provisional_workflows": "1e929e67-6c69-4be3-ae57-47950a0d2a4d",
+    "normal_internal_maintenance_budget": "9e06926b-8928-4b99-8a4c-5fb89717289a",
+    "platform_ip_and_control_retained_by_joe": "09959bb0-8f3e-4abf-84cb-cc1b72b1d8f9"
+  },
+  "source_thread_id": "019fec56-49b6-7ae0-9dfa-0af4289fbaa8",
+  "human_quote": "i honestly plan to run a claude fable audit of both roadmaps, plus a council meeting between fable 5, 5.6 Sol, and SuperGrok 4.5 to produce a final version. this will likely occur wednesday night when i get my claude usage reset. I'm going to proceed with phase 0 for both roadmaps tonight that way we are prepared as soon as the final version is approved to start rolling out construction",
+  "canonical_sources": [
+    {
+      "title": "CARR Workspace \u2014 Big Design Up Front",
+      "slug": "carr-workspace-bduf",
+      "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+      "generation": 344,
+      "active_sections": 35,
+      "receipt": "fresh_read_verified",
+      "material_revision": "s32 adds tenant-ready Workspace boundaries and evolving-workflow governance without changing the approved timing or commercial scope.",
+      "new_section": {
+        "section_key": "s32-tenant-ready-workspace-and-evolving-workflows",
+        "section_id": "8eb8136e-9657-473d-98d1-54b809b956df"
+      },
+      "document_control_version": 4,
+      "hardware_section": {
+        "section_key": "s33-carr-local-edge-node-and-mac-hardware-requirements",
+        "section_id": "8f6edd0f-08a3-4012-92fc-e46640323fde",
+        "version": 1
+      },
+      "word_artifact": {
+        "path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
+        "sha256": "cb7733ae8f85eb1847b2b67ee6801b048494102b7e49857dda5d91b90bec8935",
+        "pages": 48
+      }
+    },
+    {
+      "title": "CARR Control Room \u2014 Big Design Up Front",
+      "slug": "carr-control-room-bduf",
+      "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+      "generation": 345,
+      "active_sections": 40,
+      "receipt": "fresh_read_verified",
+      "material_revision": "s37 adds tenant operations, workflow governance, and lean-maintenance controls without changing the approved timing or commercial scope.",
+      "new_section": {
+        "section_key": "s37-tenant-operations-workflow-governance-and-lean-maintenance",
+        "section_id": "e6892082-fc29-47a3-a6ad-25080a8fac17"
+      },
+      "document_control_version": 4,
+      "hardware_section": {
+        "section_key": "s38-local-edge-node-mac-hardware-and-operational-controls",
+        "section_id": "7f263925-5939-44bf-98ca-e4c0054e63c8",
+        "version": 2
+      },
+      "word_artifact": {
+        "path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx",
+        "sha256": "4ed1984275278fd1142df326ed830403cd27e63f2043aac9f40d91df60e2588a",
+        "pages": 43
+      }
+    },
+    {
+      "title": "CARR Mature Software End State \u2014 Big Design Up Front",
+      "slug": "carr-mature-software-end-state-bduf",
+      "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
+      "generation": 346,
+      "active_sections": 42,
+      "ordinal_range": [
+        0,
+        41
+      ],
+      "receipt": "fresh_read_verified",
+      "dependency_edges": [
+        "CARR Workspace \u2014 Big Design Up Front",
+        "CARR Control Room \u2014 Big Design Up Front",
+        "CARR Production Maturity Baseline"
+      ],
+      "new_section": {
+        "section_key": "s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state",
+        "section_id": "4552de91-0806-47ae-ae02-6ea313b90d72"
+      },
+      "document_control_version": 5,
+      "hardware_section": {
+        "section_key": "s41-carr-local-edge-node-and-hardware-purchase-decision",
+        "section_id": "87eca39b-e83c-457e-adaa-75c5f0b086ef",
+        "version": 1
+      },
+      "word_artifact": {
+        "path": "/Users/booko/Desktop/System Road Maps/CARR Mature Software End State - BDUF and Implementation Roadmap.docx",
+        "sha256": "b062e6aea084990383af0fe0040df45d30a8cedf7624da6563bfb427aff4556b",
+        "pages": 52
+      }
+    },
+    {
+      "title": "CARR Production Maturity Baseline",
+      "slug": "carr-production-maturity-baseline",
+      "document_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
+      "generation": 336,
+      "active_sections": 28,
+      "role": "governing production source",
+      "receipt": "fresh_read_verified",
+      "new_section": {
+        "section_key": "s27-owner-controlled-tenant-readiness-workflow-evolution-and-maintenance-budget",
+        "section_id": "a4864ee7-e0a4-4b36-848f-5aa134989796"
+      }
+    }
+  ],
+  "lanes": [
+    {
+      "product": "CARR Workspace",
+      "role": "main private business product",
+      "root": "workspace",
+      "original_source_sha256": "6533cb68b84934cd152f7b84ebd06f0a555b8a1af2476136b98b9c47f4a8ae9d",
+      "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
+      "current_word_artifact_sha256": "cb7733ae8f85eb1847b2b67ee6801b048494102b7e49857dda5d91b90bec8935",
+      "current_word_artifact_pages": 48,
+      "word_artifact_status": "verified_current_doctrine_export_generation_344",
+      "doctrine_record_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+      "doctrine_generation": 344,
+      "doctrine_sections": 35,
+      "hardware_section": "s33-carr-local-edge-node-and-mac-hardware-requirements",
+      "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"
+    },
+    {
+      "product": "CARR Control Room",
+      "role": "operational safety and evidence counterpart",
+      "root": "control-room",
+      "original_source_sha256": "740d848a2ef05e628e77c7211431d0ca4e363e3aac101c661b53ff235098aada",
+      "current_word_artifact_path": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx",
+      "current_word_artifact_sha256": "4ed1984275278fd1142df326ed830403cd27e63f2043aac9f40d91df60e2588a",
+      "current_word_artifact_pages": 43,
+      "word_artifact_status": "verified_current_doctrine_export_generation_345",
+      "doctrine_record_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+      "doctrine_generation": 345,
+      "doctrine_sections": 40,
+      "hardware_section": "s38-local-edge-node-mac-hardware-and-operational-controls",
+      "phase0_exit": "artifact preparation plus Joe's six uncoached flows and authority/evidence mapping acceptance"
+    }
+  ],
+  "integrated_delivery": {
+    "ruling": "Eight weeks is the CARR Mature Foundation milestone, not the full native mature end state.",
+    "mature_foundation_v1": {
+      "target_date": "2026-10-05",
+      "scope": [
+        "Production Maturity Level 1 plus selected Level 2 controls",
+        "core Workspace and Command Center web milestone",
+        "Calls and Doc request loop",
+        "thin authoritative read-first Control Room"
+      ]
+    },
+    "production_mature_web_timing": {
+      "planning_center": "approximately 12 weeks",
+      "evidence_range": "12\u201316 weeks"
+    },
+    "full_multi_platform_timing": "4\u20136 months, evidence-gated",
+    "hard_predecessor_chain": [
+      "Website Completion",
+      "installed Mac desktop parity",
+      "iPhone",
+      "iPad Tour Mode"
+    ],
+    "control_room_sequence": "Ship thin authoritative read-first operational visibility before mutable AgentOps; safely mutable AgentOps remains evidence- and approval-gated.",
+    "construction_gate": "No production construction before Joe approves the frontier-model council output from the latest qualified Claude, Codex, and Grok models, each run at exactly high effort."
+  },
+  "incremental_cost_bands_usd_per_month": {
+    "phase0_or_pilot": "$5\u201320",
+    "mature_two_partner_web_operations": "$62\u201384",
+    "before_paid_incident_response": "$28\u201350",
+    "with_apple_reserve": "approximately $70\u201393",
+    "high_intentional_use": "$300\u2013500",
+    "source": "CARR Mature Software End State sections 25\u201328; estimates remain subject to measured usage and current vendor pricing."
+  },
+  "operating_objective": {
+    "section_title": "Operating objective and AI-session displacement test",
+    "cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?",
+    "objectives": 8,
+    "baseline_measures": 5,
+    "baseline_values": "unknown until instrumented or interviewed",
+    "adoption_rule": "A routine is not adopted until Joe or Dell can complete and understand it without a heavy Claude Code or Codex session and the old session-driven ritual has an explicit retirement or cutover path.",
+    "council_criterion": "The Wednesday council must reject a slice that cannot trace the objective and baseline through requirements, screens, canonical data/actions, tests, post-launch comparison, and cutover."
+  },
+  "tenant_readiness_and_workflow_governance": {
+    "launch_scope": "One private CARR tenant with Joe and Dell only; tenant-ready safety does not authorize a public SaaS launch.",
+    "tenant_context": "The server derives authoritative tenant context from the authenticated audience, session, membership, and route binding; client or agent supplied tenant identifiers never grant or widen access.",
+    "cross_tenant_rule": "Every tenant-scoped read, write, event, evidence reference, job, and automation must fail closed when the authenticated tenant differs, including fixtures that use otherwise-valid foreign record IDs.",
+    "workflow_lifecycle": [
+      "experimental",
+      "pilot",
+      "approved",
+      "standard",
+      "retired"
+    ],
+    "workflow_promotion": "Promotion is explicit, attributed, reviewable, and gated by named evidence, immutable version, accountable owner, observation window, failure criteria and handling, rollback plan, adoption result, and cutover plan; in-flight work pins its workflow version and retirement preserves audit history and a rollback or replacement path.",
+    "bounded_trial_rule": "A workflow trial must be possible in at most five business days, and may be shorter, using the governed thin primitives, with no new source of truth, destructive migration, parallel writer, or generic workflow engine.",
+    "maintenance_budget": {
+      "normal_internal_target": "3\u20135 human hours per month",
+      "measurement_rule": "Measure actual human hours; do not invent a baseline or hide toil in agent or vendor cost.",
+      "exception_rule": "Attribute material new scope, vendor or platform incidents, security events, and other approved exceptions separately from normal internal maintenance.",
+      "toil_trigger": "More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work.",
+      "mature_claim_gate": "The low-toil mature claim requires three complete consecutive normal months at three to five hours with required release, audit, security, backup, restore, and SLO evidence intact and exception time separately attributed."
+    },
+    "ownership_and_commercial_exclusions": [
+      "Joe retains platform ownership, intellectual property, and control.",
+      "A corporation may license owner-controlled seats only as a customer.",
+      "No public signup, self-service tenant creation, public SaaS, customer platform control, ownership transfer, or launch-scope expansion is authorized.",
+      "No generic workflow engine, plugin marketplace, customer scripting, or customer-authored executable workflow is authorized in the current program.",
+      "The amendment does not change the approved delivery timing or cost bands."
+    ],
+    "construction_gate": "These are Phase 0 contracts and fixtures only; production construction remains blocked until Joe approves the Wednesday council output."
+  },
+  "sponsor_agent_personal_brain_identity_boundary": {
+    "status": "planning_contract_and_authorized_live_runtime_repair_independently_verified",
+    "open_loop_id": "162c8d3a-a673-425c-aa18-cc9d4bcf949f",
+    "open_loop_number": 319,
+    "defect": "The current standing-context read path defaults personal scope from the runtime actor slug, so a Joe-sponsored Codex session can report 0 codex-personal while the Joe-personal generated render contains 30 active rules.",
+    "immutable_dimensions": {
+      "organization_tenant_id": "Server-derived organization boundary for records, events, search, files, calls, memory, queues, integrations, audit, and offline material.",
+      "sponsoring_human_id_or_partner_id": "Verified Joe or Dell identity that selects the permitted personal brain; it never replaces runtime attribution or grants a capability by itself.",
+      "agent_principal_id_or_runtime_principal": "Codex, Claude, or another authenticated runtime that remains the action actor in audit and capability evaluation.",
+      "session_capability_profile": "Server-derived, typed, plan-bound, environment- and resource-scoped authority; sponsor, model, browser, tool, or job input cannot widen it.",
+      "personal_brain_scope": "Exactly joe-personal, dell-personal, or task-scoped-unsponsored, with a server-resolved version and count."
+    },
+    "resolution_contract": {
+      "joe_sponsored": "A Joe-sponsored Codex or Claude session loads the current shared set plus Joe-personal, while actions remain attributed to the runtime agent and audit also records Joe as sponsor.",
+      "dell_sponsored": "A Dell-sponsored Codex or Claude session loads the current shared set plus Dell-personal, while actions remain attributed to the runtime agent and audit also records Dell as sponsor.",
+      "unsponsored_background": "An unattended or unsponsored agent receives only task-scoped rules, has no human sponsor, cannot claim a human personal brain, and cannot use humanOnly capabilities.",
+      "cross_brain": "Joe-personal and Dell-personal never cross-load; a requested cross-brain read is denied before rule bodies are projected.",
+      "failure_semantics": "Missing, ambiguous, inconsistent, stale, or unavailable personal scope is an explicit failure or Unknown, never a misleading successful zero.",
+      "parity": "Connector/store and generated fallback resolve the same partner brain, version, rule set, and counts; a mismatch is visible drift, not silent fallback success.",
+      "non_escalation": "Personal rules may guide presentation and partner preferences but cannot select or change tenant, grant or widen capabilities, silently promote themselves, or alter runtime attribution.",
+      "audit": "Audit records tenant, runtime agent, sponsoring human when present, personal-brain scope/version/count, and capability profile without exposing personal rule bodies."
+    },
+    "source_evidence": {
+      "original_live_standing_context": "Before repair, Joe's Codex session returned 143 shared and 0 codex-personal.",
+      "verified_live_standing_context": "The repair deployment was verified at 144 shared and 30 Joe-personal. The council-packet preflight on 2026-08-12 returned 146 shared and 31 Joe-personal with organization tenant carr-internal, sponsoring human joe, runtime and agent principal codex, personal scope joe-personal, and humanOnly authority false. Counts are dated evidence and must be fresh-read, not treated as contract constants.",
+      "live_cross_brain_spoof": "A caller-supplied partner=dell request was refused as partner_not_selectable before any shared or personal rule arrays were returned.",
+      "joe_generated_render": {
+        "path": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/00_Context/compiled-rules-joe.md",
+        "active_rules": 30,
+        "exported_at": "2026-08-11T12:00:05Z"
+      },
+      "dell_generated_render": {
+        "path": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/DNA/compiled-rules-dell.md",
+        "active_rules": 0,
+        "exported_at": "2026-08-11T12:00:06Z"
+      },
+      "governing_shared_rule_id": "4f7c348f",
+      "runtime_fix": {
+        "commit": "e88299c78bf8df29786e435a91e8b9b94f14da8a",
+        "migration": "0095_sponsor_runtime_audit.sql",
+        "cloudflare_worker_version": "b0067bcd-00e6-4c9c-adeb-eedb22e6e377",
+        "live_verbs": 91,
+        "health": "HTTP 200",
+        "node_tests": "75/75",
+        "independent_verifier": "P0/P1/P2 all zero"
+      },
+      "durable_decision_id": "0da54973-10c7-4d38-9e10-bdf62c227874",
+      "loop_319": "closed done at version 2 after live verification"
+    },
+    "required_machine_tests": [
+      "Joe plus Codex returns the current shared count plus 30 Joe-personal rules.",
+      "Dell plus Codex returns the current shared count plus the current Dell-personal count.",
+      "Cross-brain personal reads deny before bodies are returned.",
+      "Runtime agent attribution and verified human sponsor both survive audit.",
+      "An unattended agent cannot impersonate a human sponsor or invoke humanOnly verbs.",
+      "Missing or ambiguous sponsor or personal scope returns explicit failure or Unknown.",
+      "Connector/store output and generated render match partner brain, version, and counts.",
+      "Personal rules cannot alter tenant or capability.",
+      "Audit carries tenant, agent, sponsor, personal-brain scope/version/count, and capability profile without rule bodies."
+    ],
+    "completion_rule": "Tenant, workflow, maintenance, and integrated sponsor/runtime identity machine gates are complete: both planning lanes pass, the narrow separately authorized runtime repair is deployed, live Joe-sponsored Codex and spoof-refusal evidence pass, and fresh-context verification reports no P0/P1/P2 finding.",
+    "production_gate": "This narrow current-system identity bugfix was separately and explicitly authorized by Joe. It does not authorize any other Workspace, Control Room, roadmap, AgentOps, or production construction before the Wednesday council recommendation and Joe's approval."
+  },
+  "doctrine_metadata_integrity": {
+    "status": "blocked_by_deployed_verb_bug",
+    "open_loop_id": "2a9eca94-2311-42a5-a90a-a7675ea714f8",
+    "open_loop_number": 315,
+    "defect": "Workspace s01a and s02 still share ordinal 2; Control Room s01a and s02 still share ordinal 2.",
+    "attempt_result": "The deployed change verb accepted ordinal in its input schema but only applies ordinal when creating a section, so metadata-only updates advanced generations without changing either ordinal.",
+    "integrity_evidence": "Fresh read-back confirmed section IDs, titles, body text, and body hashes were unchanged.",
+    "release_claim": "Ordinal repair is not complete and must not be represented as fixed."
+  },
+  "artifact_verification": {
+    "status": "tenant_workflow_maintenance_identity_planning_and_live_runtime_machine_verification_passed",
+    "workspace": {
+      "prior_node_tests": 29,
+      "current_node_tests": 35,
+      "p0": 0,
+      "p1": 0,
+      "p2": 0,
+      "roadmap_reconciliation_reverification": "passed",
+      "runtime_public_assets": "verified",
+      "runtime_internal_files": "denied",
+      "count_note": "refreshed 2026-08-12 at council commit 66bccd3: 35/35 (prior recorded value 32 was stale dated evidence)"
+    },
+    "control_room": {
+      "prior_node_tests": 75,
+      "current_node_tests": 94,
+      "p0": 0,
+      "p1": 0,
+      "p2": 0,
+      "roadmap_reconciliation_reverification": "passed",
+      "runtime_public_assets": "verified",
+      "runtime_internal_files": "denied",
+      "runtime_interactive_visual_accessibility": "open"
+    }
+  },
+  "tonight_allowed": [
+    "terminology and domain glossary",
+    "state machines and explicit transition guards",
+    "role, authority, capability, and risk matrices",
+    "route and information-architecture maps",
+    "business and operational entity contracts",
+    "traceability matrices",
+    "retention and redaction contracts",
+    "notification and event taxonomies",
+    "test and acceptance strategy",
+    "threat models",
+    "runnable fixture-backed wireframes",
+    "canonical synthetic JSON twins",
+    "environment and release process",
+    "structured open-decision and council-review registers"
+  ],
+  "tonight_forbidden": [
+    "production construction",
+    "production migration",
+    "deployment",
+    "irreversible implementation",
+    "live authority route",
+    "automatic consequential or external effect",
+    "claiming a human exit gate without observed evidence"
+  ],
+  "council": {
+    "timing": "Wednesday night after Claude usage reset",
+    "members": [
+      "Claude frontier seat",
+      "Codex frontier seat",
+      "Grok frontier seat"
+    ],
+    "model_selection": "At preflight, select the latest, most advanced generally available qualified frontier model for each runtime family. Run every seat at exactly high effort\u2014neither below nor above; max and ultra are prohibited.",
+    "input": "the three canonical BDUFs, the governing Production Maturity Baseline, both Phase 0 artifact packages, independent verifier findings, every structured unresolved fork, the proposed Hermes Agent and Nous Portal candidate analysis at phase0/hermes-runtime-council-candidate.v1.json, the independent platform naming candidate at phase0/platform-naming-council-candidate.v1.json, the CARR human-seat and workspace-isolation candidate for more than 150 real estate agents at phase0/human-seat-workspace-isolation-council-candidate.v1.json, and the Drive-free system and Cowork-retirement candidate at phase0/drive-free-system-council-candidate.v1.json",
+    "launch_packet": "phase0/council-launch-packet-2026-08-12.v1.json",
+    "output_template": "phase0/council-disposition-ledger-template.v1.json",
+    "review_order": "launch packet and limited Mature End State orientation; then full Production Maturity Baseline, Workspace, Control Room, and Mature End State; then platform naming, human workspace isolation, Drive-free system operation, and Hermes/Portal; then Workspace and Control Room machine evidence plus reconciliation",
+    "meeting_method": "one human-visible Claude frontier chair session may conduct progressive disclosure, freeze its own review, invoke the selected Codex and Grok frontier models at exactly high effort through separate fresh CLI reviewer contexts, then cross-disclose the three sealed outputs for evidence normalization, ordered fork rounds, contradiction sweep, preserved dissent, non-voting synthesis, and Joe approval card",
+    "output": "recommended integrated roadmap versions with explicit fork dispositions for Joe's approval",
+    "construction_after": "Construction begins immediately only after Joe approves the council output."
+  },
+  "release_truth": {
+    "repository": "/Users/booko/carr-system",
+    "isolated_worktree": "/Users/booko/carr-system/.claude/worktrees/control-room-phase0",
+    "base_commit": "44354896e4bfe3eb5250290407cb955a1c10d253",
+    "canonical_dirty_checkout_is_not_release_source": true,
+    "canonical_checkout_observation": {
+      "observed_on": "2026-08-11",
+      "status": "dirty_untracked_assets_present",
+      "tracked_modified_paths": [],
+      "untracked_paths": [
+        "tools/doc-convo/assets/harvest-curated-seed.json",
+        "tools/doc-convo/assets/harvest-factual.txt",
+        "tools/doc-convo/assets/harvest-frames.txt",
+        "tools/doc-convo/assets/harvest-questions-curated.json",
+        "tools/doc-convo/assets/harvest-questions.json",
+        "tools/doc-convo/assets/harvest-replies.jsonl",
+        "tools/doc-convo/assets/harvest-sentences.jsonl",
+        "tools/doc-convo/assets/turn-timings.jsonl"
+      ],
+      "earlier_reported_tracked_path": "pipelines/doctrine_inventory.py",
+      "earlier_report_reproduced_by_fresh_status": false
+    },
+    "explicit_path_staging_required": true,
+    "phase0_files_deployed": 0,
+    "separately_authorized_runtime_bugfix": {
+      "commit": "e88299c78bf8df29786e435a91e8b9b94f14da8a",
+      "pushed_to_origin_main": true,
+      "worker_version": "b0067bcd-00e6-4c9c-adeb-eedb22e6e377",
+      "migration": "0095 applied with 100 applied and 0 pending on repeat dry-run"
+    }
+  }
+}

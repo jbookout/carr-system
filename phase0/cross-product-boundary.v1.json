@@ -1,0 +1,93 @@
+{
+  "contract": "carr-workspace-control-room-boundary",
+  "version": "1.2.0",
+  "status": "tenant_workflow_maintenance_validated_identity_boundary_reopened_pending_lane_validation_human_acceptance_and_council",
+  "decision_id": "5c1684ee-5243-4094-81e4-384ac82dbcc7",
+  "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
+  "conceptual_roles": {
+    "carr_workspace": "Run the business.",
+    "the_command_center": "Business home—what changed, what needs attention, and what happens next.",
+    "carr_control_room": "Run and observe the system—health, agents, automations, incidents, releases, and approvals.",
+    "doc": "Human-friendly explanation, intake, and routing.",
+    "claude_code_and_codex": "Exploration, complex investigation, construction, and system improvement.",
+    "carr_record_layer": "Canonical source of truth."
+  },
+  "ai_session_displacement": {
+    "cutover_test": "Can Joe or Dell now complete and understand this routine without opening Claude Code or Codex?",
+    "adoption_gate": "A claimed replacement must pass the cutover test and have an explicit retirement or cutover path for the old session-driven ritual.",
+    "baseline_rule": "Instrument or interview the five approved baseline measures; never invent a value.",
+    "cross_product_trace": "Every routine must trace through its owning product screen, canonical record or data contract, governed action, evidence return, test, post-launch comparison, and cutover state."
+  },
+  "principles": ["Workspace is the business system; Control Room is the operations and evidence plane.", "Each product has a separate browser origin, audience, and session namespace.", "Shared components and identity infrastructure do not imply shared authorization.", "Business payloads remain in Workspace; Control Room receives opaque origin references and safe labels only.", "Operational diagnostics and restricted audit evidence do not flow back to Workspace.", "Agents may extract, draft, propose, queue, and return evidence; consequential or external effects retain human gates."],
+  "tenant_boundary": {
+    "launch_scope": "One private CARR tenant with Joe and Dell only.",
+    "authoritative_context": "The server derives tenant identity from authenticated audience, session, membership, and route binding; a tenant identifier supplied by a browser, agent, tool call, record reference, or bridge payload is never authoritative.",
+    "bridge_envelope": "The receiving server binds tenant_id and correlation_id after authenticating the source; tenant_id is not an accepted authority-bearing payload field.",
+    "enforcement": "Every read, write, event, evidence reference, work request, job, and automation is tenant-scoped and denies an otherwise-valid foreign-tenant identifier before resolving or projecting payload data.",
+    "future_licensing": "Future seats remain owner-controlled and customer-scoped; tenant readiness does not authorize public signup, self-service tenant creation, a public SaaS, or transfer of platform control or intellectual property.",
+    "owner": "Joe retains platform ownership, intellectual property, and control; a corporation may only license seats as a customer."
+  },
+  "sponsor_agent_personal_brain_boundary": {
+    "independent_dimensions": ["organization_tenant_id", "sponsoring_human_id_or_partner_id", "agent_principal_id_or_runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count"],
+    "derivation": "Tenant, sponsor, runtime agent, capability profile, and personal-brain scope are derived or validated by the server from authenticated grants, session binding, membership, and job provenance. Browser, model, bridge, and job input cannot select or widen them.",
+    "sponsored_session": "A Joe- or Dell-sponsored Codex or Claude session loads shared rules plus only that verified sponsor's personal rules. Runtime actions remain attributed to Codex or Claude; audit separately preserves the sponsoring human.",
+    "unsponsored_session": "An authenticated background agent without a verified sponsor receives active shared rules and/or explicit server-attached job rules, reports personal scope none and personal count zero, cannot claim Joe or Dell personal scope, and is ineligible for humanOnly capabilities. Null scope/count is reserved for missing or ambiguous expected sponsorship.",
+    "cross_brain_rule": "A personal-brain read for someone other than the verified sponsor is denied before rule bodies or private metadata are projected.",
+    "fail_visible_rule": "Missing, ambiguous, stale, inconsistent, or unavailable personal scope returns explicit failure or Unknown and cannot be rendered as successful zero personal rules.",
+    "parity_rule": "The connector/store and generated fallback must resolve the same partner brain, version, rule membership, and counts; parity failure is observable drift.",
+    "personal_rule_non_authority": "A personal rule cannot choose or change tenant, grant or widen capability, change runtime attribution, cross-load to another brain, or silently promote itself.",
+    "audit_projection": "Audit stores organization tenant, runtime agent, sponsoring human when present, personal-brain scope/version/count, and session capability profile, but never personal rule bodies.",
+    "verified_runtime_repair": {
+      "loop_id": "162c8d3a-a673-425c-aa18-cc9d4bcf949f",
+      "loop_number": 319,
+      "loop_status": "done at version 2",
+      "original_observation": "Before repair, Joe's live Codex standing-context returned 143 shared and 0 codex-personal while the current Joe render declared 30 active Joe-personal rules.",
+      "verified_observation": "After commit e88299c78bf8df29786e435a91e8b9b94f14da8a and Worker b0067bcd-00e6-4c9c-adeb-eedb22e6e377 repaired the defect, repair verification returned 144 shared plus 30 Joe-personal. The council-packet preflight on 2026-08-12 returned 146 shared plus 31 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; counts are dated evidence and caller-selected partner is refused.",
+      "rule_id": "4f7c348f",
+      "decision_id": "0da54973-10c7-4d38-9e10-bdf62c227874"
+    }
+  },
+  "human_seat_workspace_boundary": {
+    "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json",
+    "company_shape": "CARR has more than 150 human real estate agents; some operate individually and some operate in multi-agent teams.",
+    "seat_rule": "A CARR company-tenant seat establishes verified human identity and licensed modules but grants zero business-data access by itself.",
+    "workspace_rule": "Business-data authority comes only from an exact server-derived active workspace membership and role. Panhandle Team is one workspace whose initial members are Joe and Dell; a solo agent receives a private workspace; a real estate team receives a team workspace with explicit individual memberships.",
+    "protected_surfaces": ["records and events", "search and embeddings", "files and attachments", "calls and summaries", "AI memory and retrieval", "queues and jobs", "integrations and credentials", "audit and evidence", "exports and offline packs", "Workspace, Control Room, Doc, Hermes, and local-edge projections"],
+    "administration_rule": "Tenant seat administration provisions identities and modules but does not grant access to a workspace's business records. Any compliance or supervisory view is separately purpose-bound, minimum-field, time-limited where appropriate, and audited.",
+    "sharing_rule": "Cross-workspace collaboration uses a typed share, referral, or transfer object with exact fields, recipient, purpose, expiry, revocation, and provenance; it never grants ambient access to the source workspace.",
+    "runtime_rule": "Doc or Hermes inherits the authenticated human's exact active workspace context and cannot use prompts, memory, jobs, URLs, or payload fields to widen it.",
+    "rollout_rule": "Phase 0 pre-engineers safe company-scale rails while only Panhandle Team operates. There is no current plan or authorization to onboard other CARR users, commercialize the platform, or launch company-wide.",
+    "fixture": "phase0/human-seat-workspace-isolation-fixtures.v1.json",
+    "status": "proposed_for_council_not_approved"
+  },
+  "workflow_governance": {
+    "lifecycle": ["experimental", "pilot", "approved", "standard", "retired"],
+    "promotion_rule": "Every promotion is explicit, attributed, evidence-backed, and reviewable, with an immutable version, accountable owner, observation window, failure criteria and handling, rollback plan, adoption result, and cutover plan; no experimental or pilot workflow silently becomes standard.",
+    "version_rule": "In-flight work pins an immutable workflow version across the product boundary; promotion, rollback, replacement, or retirement cannot rewrite completed history.",
+    "retirement_rule": "Retirement blocks new starts, preserves evidence and audit history, and names the replacement or deliberate end state.",
+    "bounded_trial_rule": "A bounded trial takes at most five business days, may be shorter, and cannot create a new source of truth, destructive migration, parallel writer, or generic workflow engine.",
+    "current_program_exclusions": ["generic workflow engine", "plugin marketplace", "customer scripting", "customer-authored executable workflows"]
+  },
+  "maintenance_accounting": {
+    "normal_internal_target": "3–5 human hours per month",
+    "cross_product_measure": "Attribute human time to the product, workflow version, maintenance category, cause, and evidence reference without duplicating the underlying work record.",
+    "exceptions": "Material new scope, vendor or platform incidents, security events, and other approved exceptions are reported separately and do not silently consume or redefine normal internal maintenance.",
+    "toil_trigger": "More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work.",
+    "mature_claim_gate": "Three complete consecutive normal months must remain at three to five hours with required control evidence intact and exceptions separately attributed before the low-toil mature claim."
+  },
+  "workspace_to_control_room": {
+    "typed_object": "EngineeringWorkRequestOrigin",
+    "allowed_fields": ["request_id", "origin_type", "origin_ref", "safe_label", "desired_outcome", "acceptance_criteria_refs", "requester_id", "created_at"],
+    "forbidden_fields": ["client_payload", "transcript", "raw_audio", "raw_email_body", "unrestricted_doc_context", "browser_cookie", "OAuth bearer", "partner credential"],
+    "authority_effect": "none; receipt creates a candidate Work Request and no operational capability"
+  },
+  "control_room_to_workspace": {
+    "typed_object": "SafeOperationalReturn",
+    "allowed_fields": ["request_id", "state", "plain_status", "safe_impact", "release_note", "verified_at", "evidence_summary_ref", "next_human_action"],
+    "forbidden_fields": ["restricted_diagnostics", "secret_metadata", "raw_tool_output", "model_prompt", "capability_grant", "approval_material", "audit_actor_security_detail"],
+    "authority_effect": "none; Workspace renders status and requires its own business-rule checks for any write"
+  },
+  "shared_identifiers": {"format": "opaque stable IDs", "record_resolution": "server-side exact current record only", "invented_or_ambiguous_id": "refuse", "correlation": "one correlation ID may link safe projections without copying payloads"},
+  "crosswalk": {"workspace_capability_ladder": ["read", "local_capture", "propose", "confirmed_narrow_write", "background_engineering_request"], "control_room_risk_classes": ["R0", "R1", "R2", "R3", "R4", "R5", "R6"], "rule": "The ladders must be explicitly cross-walked before implementation; neither silently replaces the other.", "status": "open_for_wednesday_council"},
+  "tests": ["XP-BND-001 separate audience and cookie replay refusal", "XP-BND-002 safe origin contains no business payload", "XP-BND-003 safe return contains no restricted diagnostics", "XP-BND-004 bridge creates no capability", "XP-BND-005 invented or ambiguous record ID refused", "XP-BND-006 correlation reconstructs the request without payload duplication", "XP-BND-007 server derives tenant context and ignores authority claims in payloads", "XP-BND-008 valid foreign-tenant record ID is denied before payload projection", "XP-BND-009 workflow version remains pinned across request and evidence return", "XP-BND-010 maintenance time is attributed once with exceptions reported separately", "XP-BND-011 five-business-day trial creates no new source of truth, destructive migration, parallel writer, or generic workflow engine", "XP-BND-012 two-month toil trigger and three-month mature claim gate remain cross-product requirements", "XP-BND-013 Joe-sponsored Codex or Claude resolves shared plus Joe-personal while retaining agent attribution", "XP-BND-014 Dell-sponsored Codex or Claude resolves shared plus Dell-personal while retaining agent attribution", "XP-BND-015 cross-brain personal reads deny before body projection", "XP-BND-016 unsponsored background agent remains task-scoped and cannot use humanOnly capabilities", "XP-BND-017 missing or ambiguous personal scope returns explicit failure or Unknown rather than successful zero", "XP-BND-018 connector and generated render agree on partner brain, version, and counts", "XP-BND-019 personal rules cannot change tenant or capability", "XP-BND-020 audit preserves tenant, agent, sponsor, personal-brain scope/version/count, and capability without rule bodies", "XP-BND-021 human tenant seat grants no business data without exact active workspace membership", "XP-BND-022 valid nonmember receives privacy-safe Panhandle denial across every protected surface", "XP-BND-023 solo-agent and team workspaces preserve individual attribution and deny cross-workspace access", "XP-BND-024 tenant administration grants no business data and explicit sharing plus revocation remain exact and audited"]
+}

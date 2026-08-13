@@ -1,0 +1,294 @@
+{
+  "contract": "carr-control-room-council-review",
+  "version": "1.0.0",
+  "status": "phase0_prepared_for_council",
+  "review_event": {
+    "timing": "Wednesday night after Joe's Claude usage reset",
+    "participants": [
+      "Claude frontier seat",
+      "Codex frontier seat",
+      "Grok frontier seat"
+    ],
+    "model_selection": "At preflight select the latest, most advanced generally available qualified frontier model for each runtime family and run each at exactly high effort\u2014neither lower nor max/ultra.",
+    "purpose": "Audit the Workspace, Control Room, and Mature Software End State BDUFs against the Production Maturity Baseline and produce a recommended integrated roadmap set for Joe's approval before construction.",
+    "review_order_source": "phase0/council-launch-packet-2026-08-12.v1.json#progressive_disclosure_review_order",
+    "additional_input": [
+      "Hermes Agent and Nous Portal candidate analysis at phase0/hermes-runtime-council-candidate.v1.json",
+      "Independent platform naming candidate at phase0/platform-naming-council-candidate.v1.json",
+      "Human real estate agent seat and workspace-isolation candidate at phase0/human-seat-workspace-isolation-council-candidate.v1.json",
+      "Drive-free system and Cowork-retirement candidate at phase0/drive-free-system-council-candidate.v1.json",
+      "Controlling launch procedure at phase0/council-launch-packet-2026-08-12.v1.json",
+      "Uniform output template at phase0/council-disposition-ledger-template.v1.json"
+    ],
+    "construction_gate": "No production construction, migration, deployment, or irreversible implementation before Joe approves the council output."
+  },
+  "operating_objective_review_criterion": "Reject any slice that cannot answer which routine it displaces, how the five Phase 0 baselines will be observed without invention, which product action is bound to the measure, whether Joe or Dell can complete and understand it without a heavy coding session, and how the old session-driven ritual retires without a permanent second system.",
+  "tenant_workflow_maintenance_review_criterion": "Reject any slice that lacks server-derived immutable tenant and environment context, cross-tenant denial before disclosure, explicit platform-versus-tenant authority, locked safety rails, an allow-listed no-code/no-SQL tenant configuration surface, evidence-backed workflow promotion and retirement, bounded five-business-day trials, Doc-outage operability, separately attributed measured maintenance hours, three consecutive months before a mature claim, and actionable verified remedies without control suppression or metric misclassification.",
+  "identity_sponsorship_review_criterion": "Reject any identity or agent slice that conflates organization tenant, sponsoring human, agent principal, runtime principal, capability profile, or personal-brain scope/version/count; derives a partner brain from the agent slug; treats missing scope as a successful zero; permits cross-brain load, sponsor impersonation, personal-rule authority widening, or humanOnly access by an unattended agent; lacks same-partner connector/render parity; or cannot audit agent and sponsor separately without rule bodies.",
+  "settled_inputs": [
+    {
+      "id": "CR-S01",
+      "decision": "CARR Control Room is a separate backend operations product with a separate origin, audience, and session boundary from CARR Workspace."
+    },
+    {
+      "id": "CR-S02",
+      "decision": "Read-only trustworthy operational inventory and honest Unknown/freshness semantics precede action controls."
+    },
+    {
+      "id": "CR-S03",
+      "decision": "Existing guarded wrappers remain deterministic actuators and are observed before any future broker can invoke them."
+    },
+    {
+      "id": "CR-S04",
+      "decision": "Joe launches as Owner/Production Approver; Dell launches as Reporter/Viewer for system operations."
+    },
+    {
+      "id": "CR-S05",
+      "decision": "No Production approval or execution on phone or iPad initially."
+    },
+    {
+      "id": "CR-S06",
+      "decision": "Material plan revision invalidates prior approval; browser and agent sessions do not inherit operation ownership or production capability."
+    },
+    {
+      "id": "CR-S07",
+      "decision": "No cheap conversational agent receives unrestricted production access; all future authority is typed, narrow, plan-bound, expiring, human-approved, audited, and freshly verified."
+    },
+    {
+      "id": "CR-S08",
+      "decision": "Phase 0 tonight is preparation only and proceeds alongside Workspace Phase 0, not as permission to build full Control Room first."
+    },
+    {
+      "id": "CR-S09",
+      "decision": "October 5, 2026 targets CARR Mature Foundation v1, not the full mature end state: Level 1 plus selected Level 2 controls, the core Workspace and Command Center web milestone, the Calls and Doc request loop, and a thin authoritative read-first Control Room."
+    },
+    {
+      "id": "CR-S10",
+      "decision": "The full production-mature web, installed Mac parity, iPhone, iPad Tour Mode, and safely mutable Production AgentOps program is planned for 4\u20136 months and remains evidence-gated."
+    },
+    {
+      "id": "CR-S11",
+      "decision": "Website Completion is the hard predecessor for installed Mac product construction; iPhone follows Mac parity and iPad Tour Mode follows iPhone."
+    },
+    {
+      "id": "CR-S12",
+      "decision": "Planning cost bands are $5\u201320 monthly incremental for Phase 0/pilot, $62\u201384 for mature two-partner web operations, $28\u201350 before paid incident response, approximately $70\u201393 with Apple reserve, and $300\u2013500 under high intentional use; source arithmetic and vendor evidence remain in Mature End State sections 25\u201328."
+    },
+    {
+      "id": "CR-S13",
+      "decision": "One CARR tenant with Joe and Dell launches first; tenant-ready safety supports only future owner-controlled seat licensing, not public SaaS, public signup, customer provisioning or billing, public invites, or customer platform control."
+    },
+    {
+      "id": "CR-S14",
+      "decision": "Joe retains platform code, intellectual property, licensing, provisioning, and platform control. Corporate can license seats only as a customer; tenant administration never implies platform administration."
+    },
+    {
+      "id": "CR-S15",
+      "decision": "Mature locked safety rails are built before workflow details settle; workflows evolve experimental to pilot to approved to standard to retired through explicit evidence-backed promotion, bounded five-business-day trials, immutable versions, and retirement paths."
+    },
+    {
+      "id": "CR-S16",
+      "decision": "Normal internal maintenance targets 3\u20135 measured human hours per month, exceptions remain separately attributed, a three-consecutive-month window gates mature claims, and no health, security, audit, alert, refusal, or failure may be suppressed or misclassified to meet the target."
+    },
+    {
+      "id": "CR-S17",
+      "decision": "Tenant flexibility is allow-listed typed data only: no tenant-supplied code, scripts, SQL, command strings, customer-authored executable workflows, arbitrary actuators, or platform-policy bypass. Routine operation remains possible when Doc is unavailable."
+    },
+    {
+      "id": "CR-S18",
+      "decision": "Every workflow trial lasts at most five business days and creates no new source of truth, destructive migration, parallel writer, or generic workflow engine. Generic workflow engines, plugin marketplaces, and customer scripting are outside the current program."
+    },
+    {
+      "id": "CR-S19",
+      "decision": "Every workflow promotion binds named evidence, immutable workflow version, accountable owner, completed observation window, failure criteria and handling, tested rollback, adoption result and adoption test, and cutover plan and cutover gate. Pilot-to-approved and approved-to-standard must each satisfy the complete envelope."
+    },
+    {
+      "id": "CR-S20",
+      "decision": "Runtime agent identity governs attribution and capability while verified sponsoring-human identity independently selects personal-brain scope. Joe-sponsored Codex or Claude loads shared plus Joe-personal; Dell-sponsored loads shared plus Dell-personal; unattended agents are task-scoped and never humanOnly; missing or mismatched scope fails visibly; personal rules cannot select tenant or capability; and audit records both agent and sponsor without rule bodies. The separately authorized narrow current-system repair was verified at 144 shared plus 30 Joe-personal; the council-packet preflight on 2026-08-12 returned 146 shared plus 31 Joe-personal. Counts are dated evidence and do not authorize broader construction."
+    }
+  ],
+  "unresolved_forks": [
+    {
+      "id": "CR-U01",
+      "question": "Ratify ops.doctorcre.com as the permanent Control Room origin and __Host-ops_session as its cookie namespace.",
+      "alternatives": [
+        "ratify proposed origin and namespace",
+        "choose another dedicated operations origin before auth implementation"
+      ],
+      "evidence": [
+        "security-redaction.v1.json#session",
+        "threat-model.v1.json#T01"
+      ],
+      "recommendation": "Ratify the dedicated proposed origin unless DNS or product naming evidence changes.",
+      "impact": "Locks audience, cookie, CSP, CORS, and OAuth redirect contracts.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U02",
+      "question": "Approve retention durations and name the legal-hold owner before any deletion automation exists.",
+      "alternatives": [
+        "7-year audit / 90-day evidence / 13-month aggregates as proposed",
+        "revised counsel-approved schedule"
+      ],
+      "evidence": [
+        "security-redaction.v1.json#retention"
+      ],
+      "recommendation": "Keep deletion automation absent until counsel-aware ownership and durations are explicit.",
+      "impact": "Controls storage, privacy, incident evidence, and future purge jobs.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U03",
+      "question": "Define the measured model-routing qualification and material-cost disclosure thresholds.",
+      "alternatives": [
+        "capability-specific allow-list with benchmark floors",
+        "single premium executor for initial release"
+      ],
+      "evidence": [
+        "domain-terms.v1.json",
+        "phase0-traceability.v1.json"
+      ],
+      "recommendation": "Use capability-specific qualification tests; default upward when evidence is insufficient.",
+      "impact": "Determines cost, latency, and whether cheapest-qualified routing is trustworthy.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U04",
+      "question": "Define the future production approval expiry and re-authentication windows after security testing.",
+      "alternatives": [
+        "10-minute re-auth and plan-specific expiry",
+        "shorter risk-class-specific windows"
+      ],
+      "evidence": [
+        "security-redaction.v1.json#session",
+        "authority-risk-matrix.v1.json#risk_classes"
+      ],
+      "recommendation": "Start with 10-minute fresh re-auth and the shortest practical plan expiry, then tune from rehearsal data.",
+      "impact": "Balances operator friction against approval replay risk.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U05",
+      "question": "Choose the first thin authoritative read-first Control Room vertical slice within CARR Mature Foundation v1 after roadmap approval.",
+      "alternatives": [
+        "Overview plus Service provenance",
+        "Work Request bridge",
+        "Release/deployment evidence"
+      ],
+      "evidence": [
+        "phase0-acceptance.v1.json",
+        "phase0-traceability.v1.json"
+      ],
+      "recommendation": "Overview plus Service provenance because honest health is the prerequisite for every later control.",
+      "impact": "Sets implementation order inside the settled Mature Foundation scope without authorizing mutation or changing the Phase 0 contracts.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U06",
+      "question": "Approve a constrained Hermes Agent evaluation and the proposed mature role split without treating Hermes profiles, memory, skills, schedules, channels, or MCP filters as security or authority boundaries.",
+      "alternatives": [
+        "Portal Cloud dedicated-container R0 read-only evaluation toward Hermes routine-operations orchestration and Doc runtime",
+        "self-hosted whole-process-isolated R0 read-only evaluation toward the same role split",
+        "defer Hermes and build only a native Doc and System Desk runtime"
+      ],
+      "evidence": [
+        "phase0/hermes-runtime-council-candidate.v1.json",
+        "identity-sponsorship.v1.json",
+        "authority-risk-matrix.v1.json",
+        "threat-model.v1.json"
+      ],
+      "recommendation": "Approve the Portal Cloud evaluation and the end-state direction in which Hermes orchestrates routine operations and may power Doc while Claude Code and Codex are reserved for engineering construction, complex investigation, new features, and reviewed repairs. The governed platform remains the kernel, source-of-truth, authority, approval, audit, and evidence plane. Enable Privacy Mode and minimum-necessary data; keep personal instances, messaging, scheduling, durable engineering-request creation, engineering dispatch, external effects, and mutations absent from R0; graduate request creation and dispatch through their named later gates; and judge expansion from 30, 60, and 90-day like-for-like cost, quality, toil, and routine-displacement evidence rather than forecast ROI.",
+      "impact": "Determines whether Hermes may be evaluated as one registered agent runtime, mature operations orchestrator, and Doc runtime candidate while the platform remains the sole source of truth and authority plane and Claude Code and Codex remain the engineering escalation plane.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U07",
+      "question": "Recommend an independent owner-controlled platform identity with CARR as the launch tenant, or retain CARR as the permanent software name.",
+      "alternatives": [
+        "keep CARR as permanent platform name",
+        "choose an independent platform name before construction and configure CARR as launch tenant",
+        "use a neutral temporary codename then choose after the pilot"
+      ],
+      "evidence": [
+        "phase0/platform-naming-council-candidate.v1.json",
+        "tenant-workflow-maintenance.v1.json",
+        "authority-risk-matrix.v1.json"
+      ],
+      "recommendation": "Choose the independent-name architecture now, but do not select or propagate a final name until trademark, domain, registry, app-store, similarity, usability, and cutover checks pass and Joe approves it.",
+      "impact": "Separates Joe-owned platform and IP identity from his current employer while preserving CARR as the launch tenant and familiar configuration; it does not authorize public SaaS or commercial rollout.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U08",
+      "question": "Pre-engineer workspace membership\u2014not company-tenant seat\u2014as the business-data authorization boundary for potential future CARR human users without authorizing rollout beyond Joe and Dell.",
+      "alternatives": [
+        "defer isolation structure until later and accept redesign risk",
+        "one organization tenant per agent or team",
+        "one CARR tenant with isolated solo-agent and team workspaces"
+      ],
+      "evidence": [
+        "phase0/human-seat-workspace-isolation-council-candidate.v1.json",
+        "phase0/human-seat-workspace-isolation-fixtures.v1.json",
+        "authority-risk-matrix.v1.json",
+        "security-redaction.v1.json"
+      ],
+      "recommendation": "Pre-engineer one CARR company-tenant structure now. A human seat grants identity and licensed modules only. Operate only Panhandle Team with Joe and Dell; model future solo agents as private workspaces and future teams as workspaces with explicit individual memberships. Tenant administrators gain no business-data access, and every Doc or Hermes operation remains bound to the active human workspace.",
+      "impact": "Avoids a later authorization and data-model redesign while adding no current signup, billing, onboarding, commercial route, or permission for other CARR agents to use the system.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    },
+    {
+      "id": "CR-U09",
+      "question": "Adopt Drive-free system operation and retire Cowork as an operational dependency while making Hermes the preferred persistent routine-operations and Doc orchestrator after its gates.",
+      "alternatives": [
+        "retain permanent Drive cloud/file-mode system fallback",
+        "evidence-gated Drive-free target with optional human document exchange",
+        "force complete Drive retirement into August 21"
+      ],
+      "evidence": [
+        "phase0/drive-free-system-council-candidate.v1.json",
+        "phase0/hermes-runtime-council-candidate.v1.json",
+        "phase0/council-reconciliation-2026-08-12.v1.json"
+      ],
+      "recommendation": "Adopt the evidence-gated Drive-free target. Treat Hermes as the preferred persistent orchestrator, not as source of truth, authority, restore dependency, or single point of failure. Preserve transitional consumers until each replacement, parity, rollback, observation, disconnected-Drive, and clean-rebuild gate passes.",
+      "impact": "Removes Drive and Cowork from the system dependency graph while preserving optional user document delivery, bounded transition safety, Local Edge Node execution, and a Hermes-independent recovery plane.",
+      "owner": "Joe",
+      "status": "open_for_council"
+    }
+  ],
+  "council_output_schema": {
+    "required": [
+      "fork_id",
+      "disposition",
+      "rationale",
+      "evidence_used",
+      "contract_changes",
+      "owner",
+      "approved_at"
+    ],
+    "required_when_deferred": [
+      "reopen_trigger",
+      "interim_default",
+      "blocked_scope"
+    ],
+    "allowed_dispositions": [
+      "accept",
+      "modify",
+      "defer_with_named_reopen_trigger",
+      "reject"
+    ],
+    "historical_value_mapping": {
+      "accept_recommendation": "accept",
+      "choose_alternative": "modify",
+      "defer_with_named_external_blocker": "defer_with_named_reopen_trigger"
+    },
+    "amended_by": "council disposition ledger 2026-08-12 (deferral-schema ruling): one canonical disposition vocabulary across both council contracts; a deferral never implies approval"
+  }
+}

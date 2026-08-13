@@ -1,0 +1,460 @@
+{
+  "contract": "carr-workspace-environment-release-process",
+  "version": "1.0.0",
+  "status": "phase0_candidate_no_release_authority",
+  "tonight_boundary": "Preparation only. No production construction, migration, deployment, or irreversible implementation is authorized by this contract. Per the council-approved delegation ruling (2026-08-12), a delegated session commits and pushes its own completed explicit-path work on an isolated branch as evidence packaging; merge to the protected trunk, deployment, production writes, and external communication remain separately authorized.",
+  "repository": {
+    "canonical_path": "/Users/booko/carr-system",
+    "workflow": "one narrow isolated worktree per bounded task",
+    "integration_owner": "main seat",
+    "rules": [
+      "preserve unrelated work",
+      "explicit-path staging only",
+      "no destructive reset",
+      "reconcile against current integration baseline before release verification"
+    ]
+  },
+  "environments": [
+    {
+      "name": "local",
+      "purpose": "contract, fixture, and prototype development",
+      "data": "synthetic fixtures only",
+      "writes": "local files and local prototype state only",
+      "release_gate": "JSON/schema/unit/static prototype checks"
+    },
+    {
+      "name": "preview",
+      "purpose": "per-branch UI and API acceptance",
+      "data": "synthetic data only; no production PII",
+      "writes": "ephemeral preview state only",
+      "release_gate": "primary journeys, authored states, accessibility, responsive, security boundary"
+    },
+    {
+      "name": "staging",
+      "purpose": "integrated rehearsal, migration, load, and release candidate",
+      "data": "sanitized representative fixtures or dedicated test data",
+      "writes": "rehearsal only through sanctioned paths",
+      "release_gate": "migration rehearsal, backup/restore, load, rollback, golden workflows"
+    },
+    {
+      "name": "production",
+      "purpose": "Joe and Dell operating system",
+      "data": "canonical protected records",
+      "writes": "human-gated narrow business services only",
+      "release_gate": "reviewed immutable source, clean deployment worktree, approval, live read-back, telemetry, rollback readiness"
+    }
+  ],
+  "branch_policy": [
+    "branch from trustworthy reviewed baseline",
+    "one integration owner",
+    "maker cannot independently sign off release",
+    "independent verifier required",
+    "build once and promote immutable artifact"
+  ],
+  "migration_policy": [
+    "forward-only expand-migrate-contract",
+    "rehearse on isolated Neon branch",
+    "restartable measurable idempotent backfills",
+    "compatible view/contract changes before old columns or writers retire",
+    "production only through sanctioned human-gated path",
+    "backup/restore rehearsal and rollback boundary before release"
+  ],
+  "ci_required_checks": [
+    "format",
+    "lint",
+    "typecheck",
+    "unit",
+    "contract",
+    "migration",
+    "integration",
+    "browser_e2e",
+    "accessibility",
+    "dependency",
+    "secret",
+    "PII",
+    "performance_budget"
+  ],
+  "runtime_verification_gates": [
+    {
+      "test_id": "FRONTDOOR-USAGE-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "baseline_interview_and_usage_inventory",
+      "required_evidence": [
+        "current Front Door tile/flow usage inventory",
+        "Joe and Dell task frequency and friction observations",
+        "no more than three proven flows selected or explicit none decision"
+      ]
+    },
+    {
+      "test_id": "FLOW-WS-06",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "uncoached_joe_and_dell_market_map_journey",
+      "required_evidence": [
+        "Joe and Dell each complete the whole-market scan and governed day-trip journey without coaching or Claude Code/Codex",
+        "each person distinguishes records from locations, identifies stale/Unknown/unlocated items, preserves locked appointments, reviews exclusions, and confirms the exact Tour handoff version",
+        "the prior manual market-review and travel-planning routine has an explicit cutover or documented retained role"
+      ]
+    },
+    {
+      "test_id": "MAP-A11Y-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_manual_accessibility_matrix",
+      "required_evidence": [
+        "keyboard and screen-reader users expand authorized clusters and operate the equivalent list with exact focus/filter/selection parity",
+        "200 percent zoom, 44-pixel targets, reduced motion, non-color category/freshness/precision encoding, and desktop/tablet/phone layouts pass",
+        "sterile/client-facing mode structurally removes the whole-market surface"
+      ]
+    },
+    {
+      "test_id": "MAP-ADOPTION-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "uncoached_joe_and_dell_acceptance",
+      "required_evidence": [
+        "Joe and Dell each complete the six market-map journeys without coaching or Claude Code/Codex",
+        "median state-understanding and trip-planning time compared to interviewed baseline",
+        "old manual travel-planning routine has an explicit cutover or remains available"
+      ]
+    },
+    {
+      "test_id": "MAP-TENANT-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_then_staging_geospatial_denial_matrix",
+      "required_evidence": [
+        "server derives tenant, Team Book/National Accounts, and active workspace before cluster/count/query/cache/export/Doc/background/vendor-egress computation",
+        "cross-tenant and cross-workspace map, list, search, export, Doc, cache, local-edge, background, and vendor requests match privacy-safe not-found without approximate leakage",
+        "sterile mode denies whole-market access and only exact client-scoped tour pins survive"
+      ]
+    },
+    {
+      "test_id": "MAP-PRIVACY-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_then_staging_geospatial_privacy_and_provider_terms_matrix",
+      "required_evidence": [
+        "minimum-necessary precision and redaction are verified for map, list, clusters, deep links, export, cache, Doc, background jobs, logs, vendor egress, and client-scoped Tour pins",
+        "whole-market access is structurally absent in sterile/client-facing mode and privacy-safe denial leaks no identity, existence, approximation, schedule, or travel pattern",
+        "selected-provider storage/cache expiry, purge/refresh, attribution, Terms, Privacy Policy, map compatibility, and provider-exit behavior pass from current official terms"
+      ]
+    },
+    {
+      "test_id": "MAP-TRIP-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_provider_eval_then_staging",
+      "required_evidence": [
+        "provider-backed proposal preserves locked appointments and keeps eligible stops while separately excluding stale, Unknown, unlocated, approximate, and infeasible stops with reasons",
+        "response shows skipped stops, provider, observed time, declared model inputs, buffers, alternatives, version, and planning fingerprint without optimal or Live claims",
+        "fresh Google or selected-provider terms, caching, attribution, map compatibility, pricing, measured SKU events, billing caps, alerts, degraded behavior, and provider-exit rehearsal pass"
+      ]
+    },
+    {
+      "test_id": "AI-INJECT-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_model_eval",
+      "required_evidence": [
+        "adversarial transcript/document/email corpus treated as untrusted data",
+        "tool behavior remains schema-bound",
+        "no exfiltration or authority expansion"
+      ]
+    },
+    {
+      "test_id": "AI-LEAK-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_model_eval",
+      "required_evidence": [
+        "restricted-data canaries placed outside scoped context",
+        "model output and telemetry scanned",
+        "no cross-record or sensitive-data disclosure"
+      ]
+    },
+    {
+      "test_id": "AI-TARGET-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_model_eval_and_staging",
+      "required_evidence": [
+        "invented and ambiguous IDs refused",
+        "exact current index required",
+        "version check and read-back preserve the selected target"
+      ]
+    },
+    {
+      "test_id": "CALL-SPEAKER-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "actual_device_call_eval",
+      "required_evidence": [
+        "uncertain speaker remains uncertain",
+        "manual speaker mapping is authoritative",
+        "candidate promotion refuses guessed attribution"
+      ]
+    },
+    {
+      "test_id": "CONTRACT-WRITE-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "staging_narrow_business_service",
+      "required_evidence": [
+        "strict request schema and exact target validation",
+        "idempotency and If-Match conflict rehearsal",
+        "fresh target read-back proves the exact effect"
+      ]
+    },
+    {
+      "test_id": "SURFACE-PARITY-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "live_inventory_then_preview",
+      "required_evidence": [
+        "canonical source and projection counts compared",
+        "representative behavior parity including exclusions",
+        "Joe and Dell uncoached cutover evidence"
+      ]
+    },
+    {
+      "test_id": "SURFACE-WRITER-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "live_inventory_then_observation",
+      "required_evidence": [
+        "all current writer call sites inventoried",
+        "single canonical writer proven",
+        "old writes removed only after observation and rollback proof"
+      ]
+    },
+    {
+      "test_id": "SEC-AUTH-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_then_staging",
+      "required_evidence": [
+        "Joe and Dell sign-in succeeds",
+        "unapproved identity receives privacy-safe refusal",
+        "separate Workspace audience verified"
+      ]
+    },
+    {
+      "test_id": "SEC-AUTHZ-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "staging",
+      "required_evidence": [
+        "exact-object allow-list tests",
+        "cross-owner and nonexistent object responses are privacy-safe"
+      ]
+    },
+    {
+      "test_id": "TENANT-CROSS-DENIAL-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_then_staging_all_runtime_channels",
+      "required_evidence": [
+        "server derives one immutable tenant context with no client selector",
+        "browser, API, background job, local edge sync, search, export, attachment, Doc, and AI all deny synthetic cross-tenant targets",
+        "cross-tenant and nonexistent responses match without metadata or payload",
+        "payload-free attributed denial evidence"
+      ]
+    },
+    {
+      "test_id": "SEC-CSRF-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "staging",
+      "required_evidence": [
+        "sibling-origin write refused",
+        "missing and invalid CSRF proof refused",
+        "same-origin approved write rehearsed"
+      ]
+    },
+    {
+      "test_id": "SEC-DEVICE-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "staging_actual_device",
+      "required_evidence": [
+        "revoked device loses session and local-key access",
+        "unsynced evidence recovery behavior recorded"
+      ]
+    },
+    {
+      "test_id": "SEC-REPLAY-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "staging",
+      "required_evidence": [
+        "expired/revoked token replay refused",
+        "idempotency replay cannot duplicate an effect"
+      ]
+    },
+    {
+      "test_id": "AUTH-KV-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "staging_then_production_probe",
+      "required_evidence": [
+        "writes per registration/login/refresh measured",
+        "peak and quota headroom documented",
+        "capacity alert threshold verified"
+      ]
+    },
+    {
+      "test_id": "AUTH-RECOVERY-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "staging_rehearsal",
+      "required_evidence": [
+        "quota/dependency outage simulated",
+        "existing safe session behavior observed",
+        "recovery probe and owner runbook verified"
+      ]
+    },
+    {
+      "test_id": "WORKFLOW-PROMOTION-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "isolated_pilot_then_staging",
+      "required_evidence": [
+        "trial of no more than five business days on one tenant, immutable version, partner cohort, record allow-list, and rollback owner; shorter is allowed",
+        "trial creates no new source of truth, destructive migration, parallel writer, or generic workflow engine",
+        "no tenant or authority failure and exact consequential effects read back",
+        "running-work version pins, rollback, cutover, observation, and material-revision invalidation proven",
+        "Joe approves promotion from the collected evidence"
+      ]
+    },
+    {
+      "test_id": "MAINTENANCE-MEASURE-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "baseline_then_30_60_90_day_operations",
+      "required_evidence": [
+        "time diary and work requests produce an observed baseline without backfilling guesses",
+        "normal internal human hours reported separately from every attributed exception",
+        "more than five normal internal maintenance hours in each of two consecutive months emits toil_triggered and opens prioritized toil-reduction work",
+        "a low-toil or mature claim is refused until three complete consecutive normal months are each at three to five hours",
+        "tenant, authorization, approval, audit, backup/restore, release/rollback, workflow, retention, and exception evidence remains intact for the claim",
+        "rolling like-for-like comparison preserves separately reported exceptions"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-JOE-RULES-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "fresh_joe_sponsored_connector_and_fallback",
+      "required_evidence": [
+        "Joe-sponsored Codex and Claude each resolve the current shared rule set plus Joe-personal",
+        "fresh result returns 144 shared and 30 Joe-personal from the current artifact version",
+        "missing scope cannot appear as successful zero"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-DELL-RULES-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "fresh_dell_sponsored_connector_and_fallback",
+      "required_evidence": [
+        "Dell-sponsored Codex and Claude each resolve shared plus Dell-personal",
+        "personal count is derived from a fresh resolved Dell artifact",
+        "an explicit zero passes only with resolved scope and version"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-CROSS-BRAIN-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "identity_authorization_matrix",
+      "required_evidence": [
+        "Joe-sponsored session cannot read Dell-personal and Dell-sponsored session cannot read Joe-personal",
+        "refusal reveals no personal body, version, or count"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-AUDIT-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "identity_audit_probe",
+      "required_evidence": [
+        "action remains attributed to Codex or Claude while sponsoring human is separately preserved",
+        "audit records tenant, agent, sponsor, personal scope/version/counts, capability, and resolution status",
+        "audit includes no personal or shared rule bodies"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-UNSPONSORED-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "unattended_agent_authorization",
+      "required_evidence": [
+        "unsponsored agent receives active shared rules and/or explicit server-attached job rules, reports personal scope none and personal count zero",
+        "human sponsor impersonation and humanOnly verbs are refused",
+        "job or model input cannot add a sponsor"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-SCOPE-UNKNOWN-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "identity_resolution_failure_matrix",
+      "required_evidence": [
+        "missing and ambiguous personal scope return explicit failure or Unknown",
+        "personal rule count is null rather than successful zero",
+        "no personal rule executes before resolution"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-CONNECTOR-PARITY-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "connector_store_and_generated_fallback",
+      "required_evidence": [
+        "connector/store and generated fallback resolve the same partner brain and version",
+        "shared and personal counts match across paths",
+        "parity mismatch is visible failure"
+      ]
+    },
+    {
+      "test_id": "IDENTITY-NONESCALATION-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "identity_non_escalation_matrix",
+      "required_evidence": [
+        "personal rules cannot alter tenant, sponsor, runtime agent, personal brain, or capability profile",
+        "browser, model, and job inputs cannot widen server-derived identity",
+        "silent personal-rule promotion is refused and audited"
+      ]
+    },
+    {
+      "test_id": "RELEASE-GATE-001",
+      "status": "future_gate_not_implemented_in_phase0_static_prototype",
+      "environment": "preview_staging_production",
+      "required_evidence": [
+        "immutable artifact built from reviewed commit",
+        "independent verification",
+        "target read-back",
+        "rollback rehearsal"
+      ]
+    }
+  ],
+  "release_sequence": [
+    "freeze requirement and traceability revision",
+    "verify Definition of Ready",
+    "build immutable artifact from reviewed commit",
+    "run local and preview checks",
+    "independent verification",
+    "rehearse staging migration and rollback where applicable",
+    "capture approval bound to exact artifact and environment",
+    "deploy through sanctioned wrapper",
+    "smoke auth, key reads, guarded writes, rollback flag, telemetry",
+    "read back live routes, assets, verbs, database version, and golden workflows",
+    "observe feature flag and error budget",
+    "retire old write only after parity and observation"
+  ],
+  "rollback_contract": {
+    "required_before_release": [
+      "feature flag disable",
+      "schema compatibility boundary",
+      "data forward-fix or rollback method",
+      "owner",
+      "trigger",
+      "maximum safe recovery time",
+      "verification after rollback"
+    ],
+    "rule": "Command success is not completion; rollback also requires target read-back."
+  },
+  "integrated_program_gate": {
+    "foundation_target": "CARR Mature Foundation v1 on 2026-10-05; not the full mature end state",
+    "workspace_web_timing": "approximately 12 weeks with a 12\u201316-week evidence range",
+    "full_multi_platform_timing": "4\u20136 months, evidence gated",
+    "platform_predecessors": [
+      "Website Completion",
+      "installed Mac desktop parity",
+      "iPhone voice-first",
+      "iPad Tour Mode"
+    ],
+    "rule": "A date or elapsed estimate never substitutes for the named acceptance and production-maturity evidence."
+  },
+  "phase_gates": {
+    "phase0_exit": [
+      "approved contracts and open-decision register",
+      "runnable prototypes and canonical JSON twins",
+      "Joe and Dell complete six primary Workspace journeys without coaching",
+      "approved test, release, rollback, CI, runbook, and threat-model package",
+      "three-roadmap reconciliation against the Production Maturity Baseline"
+    ],
+    "phase1_entry": "Only after Joe approves the frontier-model council output from the latest qualified Claude, Codex, and Grok models run at exactly high effort, and Phase 0 exit evidence passes; Website Completion remains the hard predecessor for later platform construction."
+  }
+}

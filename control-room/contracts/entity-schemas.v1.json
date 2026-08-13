@@ -1,0 +1,904 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "carr-control-room-entity-schemas-v1",
+  "contract": "carr-control-room-entity-schemas",
+  "version": "1.0.0",
+  "status": "phase0_frozen",
+  "tenant_context_policy": {
+    "applies_to": "every operational entity, list query, event, approval, export, and model-context projection",
+    "binding_location": "server request envelope before authorization and persistence access",
+    "authoritative_sources": [
+      "authenticated principal tenant mapping",
+      "typed route and server-authorized environment scope"
+    ],
+    "never_authoritative": [
+      "client tenant_id",
+      "client environment",
+      "agent output",
+      "model context"
+    ],
+    "phase0_status": "schema and acceptance contract only; production middleware and storage constraints not implemented"
+  },
+  "identity_context_policy": {
+    "applies_to": "every agent session, rule briefing, capability evaluation, action attribution, and audit projection",
+    "binding_location": "server session envelope before personal-rule selection or authorization",
+    "independent_dimensions": ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count"],
+    "failure_rule": "missing or ambiguous expected personal scope is identity_scope_unknown with null count; zero is emitted only for a resolved Dell brain or authenticated unsponsored scope none",
+    "phase0_status": "planning schema reconciled to separately authorized and live-verified standing-context sponsor/runtime repair; broader Control Room production identity middleware remains unimplemented"
+  },
+  "$defs": {
+    "OpaqueId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "Environment": {
+      "enum": [
+        "local",
+        "rehearsal",
+        "staging",
+        "production"
+      ]
+    },
+    "TenantContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tenant_id",
+        "environment",
+        "derived_by",
+        "client_mutable"
+      ],
+      "properties": {
+        "tenant_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "derived_by": {
+          "const": "server_identity_and_typed_scope"
+        },
+        "client_mutable": {
+          "const": false
+        }
+      }
+    },
+    "WorkflowDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_id",
+        "version",
+        "tenant_id",
+        "lifecycle_state",
+        "owner_id",
+        "risk_class",
+        "evidence_contract",
+        "retirement_path"
+      ],
+      "properties": {
+        "workflow_id": {"$ref": "#/$defs/OpaqueId"},
+        "version": {"type": "integer", "minimum": 1},
+        "tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "lifecycle_state": {"enum": ["experimental", "pilot", "approved", "standard", "retired"]},
+        "owner_id": {"$ref": "#/$defs/OpaqueId"},
+        "risk_class": {"type": "string", "pattern": "^R[0-6]$"},
+        "evidence_contract": {"type": "string", "minLength": 1},
+        "retirement_path": {"type": "string", "minLength": 1}
+      }
+    },
+    "MaintenanceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_id", "tenant_id", "actor_id", "occurred_at", "measured_minutes", "category", "normal_or_exception", "evidence_ref"],
+      "properties": {
+        "entry_id": {"$ref": "#/$defs/OpaqueId"},
+        "tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "actor_id": {"$ref": "#/$defs/OpaqueId"},
+        "occurred_at": {"$ref": "#/$defs/Timestamp"},
+        "measured_minutes": {"type": "integer", "minimum": 1},
+        "category": {"type": "string", "minLength": 1},
+        "normal_or_exception": {"enum": ["normal_internal", "exception"]},
+        "evidence_ref": {"$ref": "#/$defs/OpaqueId"}
+      }
+    },
+    "Freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "expires_at"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "fresh",
+            "stale",
+            "missing",
+            "unknown"
+          ]
+        },
+        "expires_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "ref"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "collector",
+            "registry",
+            "wrapper",
+            "operator"
+          ]
+        },
+        "ref": {
+          "$ref": "#/$defs/OpaqueId"
+        }
+      }
+    },
+    "ControlRoomMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "api_version",
+        "audience",
+        "read_only"
+      ],
+      "properties": {
+        "product": {
+          "const": "CARR Control Room"
+        },
+        "api_version": {
+          "const": "v1"
+        },
+        "audience": {
+          "const": "carr-control-room-web"
+        },
+        "read_only": {
+          "const": true
+        }
+      }
+    },
+    "OverviewReadModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environments",
+        "needs_joe",
+        "incidents",
+        "changes",
+        "agent_sessions"
+      ],
+      "properties": {
+        "environments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServiceEnvironment"
+          }
+        },
+        "needs_joe": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "incidents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "agent_sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        }
+      }
+    },
+    "Service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "owner",
+        "criticality",
+        "environments",
+        "dependency_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "criticality": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "environments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServiceEnvironment"
+          }
+        },
+        "dependency_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        }
+      }
+    },
+    "ServiceList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Service"
+      }
+    },
+    "ServiceEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service_id",
+        "environment",
+        "health",
+        "source",
+        "observed_at",
+        "freshness"
+      ],
+      "properties": {
+        "service_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "health": {
+          "enum": [
+            "healthy",
+            "degraded",
+            "unavailable",
+            "unknown"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "observed_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        }
+      }
+    },
+    "Run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "service_id",
+        "environment",
+        "state",
+        "source",
+        "observed_at",
+        "freshness"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "service_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "state": {
+          "enum": [
+            "scheduled",
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "timed_out",
+            "cancelled",
+            "skipped",
+            "stale",
+            "unknown"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "freshness": {
+          "$ref": "#/$defs/Freshness"
+        }
+      }
+    },
+    "CheckRunList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Run"
+      }
+    },
+    "JobRunList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Run"
+      }
+    },
+    "WorkRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "state",
+        "requester_id",
+        "origin_ref",
+        "service_id",
+        "environment",
+        "risk_class",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requester_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "origin_ref": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "service_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "risk_class": {
+          "type": "string",
+          "pattern": "^R[0-6]$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "WorkRequestList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WorkRequest"
+      }
+    },
+    "IdentityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization_tenant_id", "sponsoring_human_id", "partner_id", "agent_principal_id", "runtime_principal", "session_capability_profile", "personal_brain_scope", "personal_brain_version", "personal_rule_count", "resolution"],
+      "properties": {
+        "organization_tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "sponsoring_human_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "partner_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "agent_principal_id": {"$ref": "#/$defs/OpaqueId"},
+        "runtime_principal": {"$ref": "#/$defs/OpaqueId"},
+        "session_capability_profile": {"$ref": "#/$defs/OpaqueId"},
+        "personal_brain_scope": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_version": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "personal_rule_count": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "resolution": {"enum": ["resolved", "task_scoped_only", "identity_scope_unknown"]}
+      }
+    },
+    "AgentSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "identity_context",
+        "parent_request_id",
+        "state",
+        "capabilities",
+        "resource_ids",
+        "environment",
+        "expires_at"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "identity_context": {"$ref": "#/$defs/IdentityContext"},
+        "parent_request_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "state": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "resource_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      }
+    },
+    "AgentSessionList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AgentSession"
+      }
+    },
+    "PlanRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "revision",
+        "hash",
+        "request_id",
+        "environment",
+        "resource_ids",
+        "state",
+        "steps"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "request_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "resource_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "state": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "order",
+              "decision",
+              "risk_class",
+              "expected_evidence"
+            ],
+            "properties": {
+              "order": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "decision": {
+                "type": "string"
+              },
+              "risk_class": {
+                "type": "string",
+                "pattern": "^R[0-6]$"
+              },
+              "expected_evidence": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "Approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "approver_id",
+        "plan_id",
+        "revision",
+        "plan_hash",
+        "resource_ids",
+        "environment",
+        "state",
+        "expires_at"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "approver_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "plan_hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "state": {
+          "type": "string"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      }
+    },
+    "ApprovalList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Approval"
+      }
+    },
+    "Release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_sha",
+        "schema_version",
+        "state",
+        "rollback_ref"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "rollback_ref": {
+          "$ref": "#/$defs/OpaqueId"
+        }
+      }
+    },
+    "ReleaseList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Release"
+      }
+    },
+    "Deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "release_id",
+        "plan_id",
+        "plan_hash",
+        "environment",
+        "state",
+        "browser_owns_operation",
+        "verification_evidence_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "release_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "plan_hash": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "state": {
+          "type": "string"
+        },
+        "browser_owns_operation": {
+          "const": false
+        },
+        "verification_evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        }
+      }
+    },
+    "DeploymentList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Deployment"
+      }
+    },
+    "Incident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "severity",
+        "state",
+        "service_ids",
+        "environment",
+        "facts",
+        "hypotheses"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "pattern": "^SEV-[0-4]$"
+        },
+        "state": {
+          "type": "string"
+        },
+        "service_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "source_ref", "recorded_at"],
+            "properties": {
+              "text": {"type": "string"},
+              "source_ref": {"$ref": "#/$defs/OpaqueId"},
+              "recorded_at": {"$ref": "#/$defs/Timestamp"}
+            }
+          }
+        },
+        "hypotheses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "confidence"],
+            "properties": {
+              "text": {"type": "string"},
+              "confidence": {"enum": ["unconfirmed", "low", "medium", "high"]}
+            }
+          }
+        }
+      }
+    },
+    "IncidentList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Incident"
+      }
+    },
+    "AuditEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "event_type",
+        "occurred_at",
+        "organization_tenant_id",
+        "agent_principal_id",
+        "runtime_principal",
+        "sponsoring_human_id",
+        "partner_id",
+        "personal_brain_scope",
+        "personal_brain_version",
+        "personal_rule_count",
+        "session_capability_profile",
+        "resource_id",
+        "environment",
+        "risk_class",
+        "result",
+        "causation_id",
+        "evidence_refs",
+        "redaction_class"
+      ],
+      "properties": {
+        "event_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "event_type": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "organization_tenant_id": {"$ref": "#/$defs/OpaqueId"},
+        "agent_principal_id": {"$ref": "#/$defs/OpaqueId"},
+        "runtime_principal": {"$ref": "#/$defs/OpaqueId"},
+        "sponsoring_human_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "partner_id": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_scope": {"oneOf": [{"enum": ["joe", "dell"]}, {"type": "null"}]},
+        "personal_brain_version": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "personal_rule_count": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "session_capability_profile": {"$ref": "#/$defs/OpaqueId"},
+        "resource_id": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "risk_class": {
+          "type": "string",
+          "pattern": "^R[0-6]$"
+        },
+        "result": {
+          "type": "string"
+        },
+        "causation_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/OpaqueId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpaqueId"
+          }
+        },
+        "redaction_class": {
+          "type": "string",
+          "pattern": "^O[0-4]_"
+        }
+      }
+    },
+    "AuditEventList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AuditEvent"
+      }
+    },
+    "EventReplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "after_cursor",
+        "next_cursor",
+        "events",
+        "server_state"
+      ],
+      "properties": {
+        "after_cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/OpaqueId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_cursor": {
+          "$ref": "#/$defs/OpaqueId"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuditEvent"
+          }
+        },
+        "server_state": {
+          "const": "authoritative"
+        }
+      }
+    }
+  }
+}

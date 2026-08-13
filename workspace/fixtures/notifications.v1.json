@@ -1,0 +1,18 @@
+{
+  "schema_version": "workspace-fixture/v1",
+  "surface": "notifications",
+  "requirement_ids": ["NOTIFY-001"],
+  "synthetic": true,
+  "states": {
+    "normal": {"freshness": {"status": "fresh", "as_of": "2026-08-10T18:38:00Z"}, "items": [{"id": "notice-demo-1", "type": "Review needed", "title": "Call pack ready", "why": "Three candidates need disposition.", "destination": "call-review", "unresolved": true}, {"id": "notice-demo-2", "type": "Urgent", "title": "Tour pack differs from itinerary", "why": "A locked appointment changed.", "destination": "tour", "unresolved": true}]},
+    "loading": {"freshness": {"status": "checking", "as_of": null}, "message": "Checking unresolved decisions…"},
+    "empty": {"freshness": {"status": "fresh", "as_of": "2026-08-10T18:38:00Z"}, "message": "No unresolved human decisions."},
+    "partial": {"freshness": {"status": "partial", "as_of": "2026-08-10T18:36:00Z"}, "message": "In-app notices loaded; device delivery status is unavailable."},
+    "stale": {"freshness": {"status": "stale", "as_of": "2026-08-09T18:00:00Z"}, "message": "Notification state is stale. Open the source object before acting."},
+    "offline": {"freshness": {"status": "offline", "as_of": "2026-08-10T17:45:00Z"}, "message": "Offline. Showing the last acknowledged inbox."},
+    "unauthorized": {"freshness": {"status": "unknown", "as_of": null}, "message": "Notification Center is available only to signed-in partners."},
+    "conflict": {"freshness": {"status": "fresh", "as_of": "2026-08-10T18:39:00Z"}, "message": "A decision was resolved on another device. Refresh the badge."},
+    "refusal": {"freshness": {"status": "fresh", "as_of": "2026-08-10T18:38:00Z"}, "message": "Named lead outreach reminders remain exclusively on the Lead Board."},
+    "retry": {"freshness": {"status": "unknown", "as_of": null}, "message": "Inbox refresh failed. Retry; acknowledgement state was not changed."}
+  }
+}

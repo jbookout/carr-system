@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "fixture_id": "fixture-overview",
+  "synthetic": true,
+  "surface": "overview",
+  "route": "/overview",
+  "default_scenario": "normal",
+  "meta": {
+    "environment_scope": "production",
+    "source": {"kind": "collector", "ref": "synthetic:overview-aggregate"},
+    "observed_at": "2026-08-10T22:00:00Z",
+    "freshness": {"state": "fresh", "expires_at": "2026-08-10T22:05:00Z"},
+    "redaction": {"classification": "O0_ops_safe", "fields_withheld": ["diagnostic_detail"]},
+    "correlation_id": "corr-synth-overview-001"
+  },
+  "data": {
+    "title": "System home",
+    "north_star_questions": ["Is CARR healthy?", "What is broken or degraded?", "What changed?", "What needs Joe?", "What are agents doing?"],
+    "environments": [
+      {"id": "env-production", "name": "Production", "shape": "hexagon", "status": "unknown", "freshness": "unknown", "last_verified": "2026-08-10T21:42:00Z", "source": "Worker outcome collector", "affected_workflows": ["Record reads", "Deal Room"], "next_action": "Inspect the missing Worker outcome sample"},
+      {"id": "env-rehearsal", "name": "Rehearsal", "shape": "diamond", "status": "healthy", "freshness": "fresh", "last_verified": "2026-08-10T21:59:00Z", "source": "Synthetic branch probe", "affected_workflows": [], "next_action": "None"},
+      {"id": "env-staging", "name": "Staging", "shape": "square", "status": "unknown", "freshness": "missing", "last_verified": null, "source": "No deployed staging collector", "affected_workflows": [], "next_action": "Keep labeled Planned until a real environment exists"},
+      {"id": "env-local", "name": "Local edge", "shape": "circle", "status": "degraded", "freshness": "fresh", "last_verified": "2026-08-10T21:58:00Z", "source": "Managed Mac heartbeat", "affected_workflows": ["Call capture"], "next_action": "Open Local edge service evidence"}
+    ],
+    "needs_joe": [
+      {"id": "need-synth-001", "type": "decision", "title": "Retention schedule is proposed, not active", "next_action": "Review before any deletion automation exists", "risk": "R5"}
+    ],
+    "incidents": [
+      {"id": "INC-SYNTH-002", "severity": "SEV-2", "state": "investigating", "impact": "Call capture is delayed on one managed edge", "duration": "18 minutes", "owner": "Doc · System Desk", "next_action": "Verify the edge heartbeat source"}
+    ],
+    "changes": [
+      {"id": "REL-SYNTH-017", "name": "Record gateway rehearsal", "environment": "rehearsal", "commit": "4435489", "state": "verifying", "rollback_state": "ready", "verified": false}
+    ],
+    "queue": {"ready": 2, "active": 1, "blocked": 1, "awaiting_release": 0, "closed_today": 3},
+    "automations": [
+      {"id": "AUTO-SYNTH-RULES", "name": "Rules refresh", "status": "healthy", "last_run": "2026-08-10T21:00:00Z", "source": "registered wrapper"},
+      {"id": "AUTO-SYNTH-CAPTURE", "name": "Call capture watcher", "status": "degraded", "last_run": "2026-08-10T21:41:00Z", "source": "managed edge"}
+    ],
+    "agent_activity": [
+      {"id": "SES-SYNTH-004", "executor": "Codex", "phase": "inspecting", "service": "Control Room", "environment": "rehearsal", "elapsed": "12m", "credential_expiry": null, "last_evidence": "Phase 0 contracts parsed"}
+    ],
+    "monitoring_gap": {"active": true, "title": "Production health is Unknown", "detail": "The required Worker outcome sample expired 18 minutes ago.", "action": "Open the source and freshness evidence"}
+  },
+  "scenarios": {
+    "normal": {"label": "Normal", "mode": "render_data"},
+    "loading": {"label": "Loading", "message": "Collecting current operational evidence…"},
+    "empty": {"label": "Empty", "message": "No synthetic overview rows match this view.", "action": "Reset the prototype filters"},
+    "partial": {"label": "Partial", "message": "Local edge evidence is available; Production collector evidence is missing.", "withhold": ["changes", "automations"]},
+    "stale": {"label": "Stale", "message": "Evidence expired. Health is Unknown until the collector verifies again.", "health_override": "unknown"},
+    "offline": {"label": "Offline", "message": "Showing a timestamped read-only cache. No action controls are available.", "health_override": "unknown"},
+    "unauthorized": {"label": "Unauthorized", "message": "This operations view is not available to the current audience.", "error": "wrong_audience"},
+    "conflict": {"label": "Conflict", "message": "The selected snapshot changed. Reload the current evidence.", "error": "version_conflict"},
+    "refusal": {"label": "Refusal", "message": "Phase 0 has no mutation or production action route.", "error": "unsupported_action"},
+    "retry": {"label": "Retry", "message": "The collector is temporarily unavailable.", "error": "collector_unavailable", "action": "Retry the read"}
+  }
+}

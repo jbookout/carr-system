@@ -1,0 +1,425 @@
+{
+  "contract": "carr-phase0-council-reconciliation",
+  "version": "1.0.0",
+  "status": "prepared_for_council_not_approved",
+  "prepared_at": "2026-08-12",
+  "review_event_date": "2026-08-12",
+  "base_commit": "acd33fe4a5e7b51412d958137449e7b65aaff382",
+  "scope": {
+    "purpose": "Give the three-model council one explicit reconciliation packet without silently changing canonical doctrine or approving disputed roadmap choices.",
+    "authority": "This artifact records settled factual corrections and partner-confirmed decisions. Every item marked proposed_for_council_not_approved requires council disposition and Joe approval before canonical BDUF amendment or production construction.",
+    "canonical_sources_unchanged": true,
+    "construction_gate": "No production construction, migration, deployment, or irreversible implementation begins until the council output is complete and Joe approves the reconciled roadmaps."
+  },
+  "canonical_inputs": [
+    {
+      "name": "CARR Workspace BDUF and Implementation Roadmap",
+      "doctrine_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
+      "generation": 344,
+      "review_artifact": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
+      "review_rule": "Fresh-read doctrine generation 344; the Word file is a verified human-readable export, not authority."
+    },
+    {
+      "name": "CARR Control Room BDUF and Implementation Roadmap",
+      "doctrine_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
+      "generation": 345,
+      "review_artifact": "/Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx",
+      "review_rule": "Fresh-read doctrine generation 345; the Word file is a verified human-readable export, not authority."
+    },
+    {
+      "name": "CARR Mature Software End State BDUF",
+      "doctrine_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
+      "generation": 346,
+      "review_artifact": "/Users/booko/Desktop/System Road Maps/CARR Mature Software End State - BDUF and Implementation Roadmap.docx",
+      "review_rule": "Fresh-read doctrine generation 346; the Word file is a verified human-readable export, not authority."
+    },
+    {
+      "name": "CARR Production Maturity Baseline",
+      "doctrine_id": "10d25f48-916b-4a7f-a1a6-d231274fed4b",
+      "generation": 336,
+      "review_artifact": null,
+      "review_rule": "Read through the CARR Cloudflare read-doctrine verb at generation 336; do not substitute a Markdown projection."
+    },
+    {
+      "name": "Hermes Agent and Nous Portal council candidate",
+      "source": "phase0/hermes-runtime-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
+    },
+    {
+      "name": "Independent platform naming council candidate",
+      "source": "phase0/platform-naming-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
+    },
+    {
+      "name": "Human real estate agent seat and workspace-isolation council candidate",
+      "source": "phase0/human-seat-workspace-isolation-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
+    },
+    {
+      "name": "Drive-free system and Cowork-retirement council candidate",
+      "source": "phase0/drive-free-system-council-candidate.v1.json",
+      "status": "proposed_for_council_not_approved"
+    },
+    {
+      "name": "Council launch procedure and uniform output contract",
+      "source": "phase0/council-launch-packet-2026-08-12.v1.json",
+      "ledger_template": "phase0/council-disposition-ledger-template.v1.json",
+      "status": "controlling_meeting_procedure_not_a_roadmap_decision"
+    }
+  ],
+  "settled_fact_corrections": [
+    {
+      "id": "FACT-001",
+      "topic": "standing_context_counts",
+      "settled_fact": "The council-packet preflight on 2026-08-12 returned 146 shared rules and 31 Joe-personal rules. Earlier 143 and 144 shared counts and the earlier 30 Joe-personal count are point-in-time evidence, not contract constants.",
+      "stale_claims": [
+        "Workspace review snapshot lines 85 and 1099 say 143 shared rules.",
+        "Control Room review snapshot line 90 says 143 shared rules.",
+        "Mature End State review snapshot line 22 says 143 shared rules."
+      ],
+      "canonical_correction_after_council": "Remove fixed rule counts from timeless roadmap assertions. Record 146 shared and 31 Joe-personal only as the dated council-preflight observation and require every operating preflight to report its fresh server-derived counts."
+    },
+    {
+      "id": "FACT-002",
+      "topic": "repository_release_truth",
+      "settled_fact": "Fresh local observation on 2026-08-11 found main and origin/main both at 2c0d6025542bec0390cda9d455787a5597a8b4a1 with ahead 0 and behind 0. The shared checkout had untracked deliverables and doc-convo assets, so isolated worktrees and explicit-path commits remain required.",
+      "stale_claims": [
+        "Workspace review snapshot line 854 records main 5da6809, origin/main 4435489, ahead 15 and behind 14.",
+        "Control Room review snapshot line 92 records origin/main 4435489 and the same 15/14 divergence."
+      ],
+      "canonical_correction_after_council": "Label the August 10 divergence as historical evidence, add the August 11 synchronized baseline, and keep clean isolated release-truth requirements unchanged."
+    },
+    {
+      "id": "FACT-003",
+      "topic": "canonical_record_and_connector_state",
+      "settled_fact": "The canonical CARR record layer exists and the connector is restored. Canonical status must be expressed as current evidence with fresh read-back, not as a future state contingent on connector restoration.",
+      "stale_claims": [
+        "Workspace review snapshot line 79 describes the canonical CARR record as occurring after connector restoration."
+      ],
+      "canonical_correction_after_council": "Rewrite the status sentence in the Workspace executive/current-state material; preserve fresh-read and no-shadow-database requirements."
+    },
+    {
+      "id": "FACT-004",
+      "topic": "migration_inventory",
+      "settled_fact": "The repository contains forward migration files through ordinal 0097, including duplicate 0095 filenames. This repository inventory does not assert that every file is applied in Production; a sanctioned fresh production read is still required before an applied-migration claim.",
+      "stale_claims": [
+        "Control Room review snapshot line 767 describes the numbered migration inventory as 0001-0094."
+      ],
+      "canonical_correction_after_council": "Replace the fixed 0001-0094 inventory claim with a fresh-read instruction or the verified repository range through 0097, explicitly separating repository files from applied Production migrations."
+    },
+    {
+      "id": "FACT-005",
+      "topic": "control_room_source_path",
+      "settled_fact": "The reviewed Control Room Word artifact is under /Users/booko/Desktop/System Road Maps/CARR Control Room - BDUF and Implementation Roadmap.docx.",
+      "stale_claims": [
+        "Control Room review snapshot line 1032 omits the System Road Maps directory."
+      ],
+      "canonical_correction_after_council": "Correct the receiving-session source path without changing the artifact identity or roadmap content."
+    },
+    {
+      "id": "FACT-006",
+      "topic": "oauth_kv_workers_paid",
+      "settled_fact": "Joe confirmed Workers Paid was activated on 2026-08-11 after the KV daily-quota incident. The immediate whether-to-pay fork is closed; the production-readiness obligation to measure OAuth/session KV writes, reduce duplicate or high-churn writes, document peak headroom, verify alerts, and rehearse recovery remains open.",
+      "stale_claims": [
+        "Workspace review snapshot line 1031 correctly describes the incident but predates the paid-capacity decision.",
+        "The Workspace council register OPEN-AUTH-KV-001 still presents paying for higher capacity as an undecided option."
+      ],
+      "canonical_correction_after_council": "Record Workers Paid as the chosen capacity tier; retain AUTH-KV-001 and AUTH-RECOVERY-001 as engineering evidence gates and retain alternate-state-store analysis only as a measured future redesign trigger."
+    },
+    {
+      "id": "FACT-007",
+      "topic": "dell_migration_runtime",
+      "settled_fact": "Dell's secondary-machine migration completed operationally on 2026-08-11. His Mac now uses ~/carr-system plus the live record/doctrine path, has no CARR AI vault mounted, and installs no primary-only CARR scheduled jobs. Drive code copies are no longer a Dell runtime dependency. Their remaining cloud-only/file-mode role is transitional and is now explicitly proposed for complete retirement under PROP-010 after consumer, parity, rollback, and disconnected-operation evidence.",
+      "stale_claims": [
+        "Repository README and manifest language still describe Drive copies as Dell's runtime or Dell/cloud runtime.",
+        "Historical lead-board comments describe the shared Drive publish as Dell's copy rather than a cloud-only delivery fallback."
+      ],
+      "canonical_correction_after_council": "Describe both partner Macs as repo runtimes. During transition, retain an inventoried Drive fallback only until its consumer is repointed and parity, rollback, and observation evidence passes. If PROP-010 is approved, the mature target contains no Drive system files and Drive remains only an optional human document exchange integration. Dell's T69 checkout reconciliation remains a local closeout requirement; perform it first if Dell will do repo work, but do not treat it as a blocker to Joe's Phase 0 audit."
+    }
+  ],
+  "proposed_rulings": [
+    {
+      "id": "PROP-001",
+      "topic": "dell_phase0_gating",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Workspace snapshot line 948 and Workspace phase0-acceptance manual checks require Joe and Dell to complete Phase 0 prototype journeys, while current standing authority says Joe completes system design and Dell reviews finished system work. Mature End State snapshot lines 774 and 1042 already distinguish Joe acceptance/completion from Dell finished-workflow validation.",
+      "recommended_ruling": "Joe is the Phase 0 roadmap and prototype exit approver. Dell validation remains a required post-finish shared-business-workflow and adoption gate, but Dell availability does not gate completion of system design, the council audit, or entry into non-production construction.",
+      "preserved_boundary": "Dell remains an equal operator of shared business records; this ruling concerns system-design sequencing only and does not weaken later two-partner workflow acceptance."
+    },
+    {
+      "id": "PROP-002",
+      "topic": "phase_numbering_and_entry",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Mature End State snapshot lines 897-900 define G0 as Approved and Ready and G1 as Trustworthy foundation; its Phase 0 action register at lines 1028-1045 mixes preconstruction planning with release-truth construction. Workspace snapshot lines 942-954 treat Phase 0 as the program/readiness gate and Phase 1 as website foundation acceptance.",
+      "recommended_ruling": "Reserve Phase 0 for planning, inventories, contracts, runnable synthetic prototypes, council reconciliation, and Joe approval through G0. Rename baseline P0 construction programs as Foundation work packages. Phase 1 begins at G1 with clean release truth, isolated staging, CI, artifact provenance, environment auth, audit correlation, and restore rehearsal before product vertical slices.",
+      "entry_rule": "Phase 1 may start immediately after council recommendation, Joe approval, all Phase 0 machine checks, Joe's six uncoached Workspace journeys and six uncoached Control Room flows, five baseline collection methods ready without invented values, and every material fork either decided or deferred with a named reopen trigger."
+    },
+    {
+      "id": "PROP-003",
+      "topic": "persistent_staging",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Mature End State snapshot lines 750-753 and Production Maturity Baseline snapshot lines 543-547 and 966-970 require isolated Staging, while Control Room snapshot lines 358, 406, and 1010 describe Staging as planned and recommend rehearsal branches first.",
+      "recommended_ruling": "Adopt a persistent isolated Staging environment as a G1 requirement. Rehearsal remains a distinct earlier safety environment and must not be relabeled as Staging. Staging must be proven unable to access Production data or credentials and must publish intentional drift.",
+      "preserved_boundary": "Until Staging exists, every product and UI must show it as Planned/Unknown and production mutation remains closed."
+    },
+    {
+      "id": "PROP-004",
+      "topic": "canonical_prototype_suite",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Mature End State snapshot lines 745-746 and 1041-1042 describe six synthetic integrated prototypes, the pre-map Workspace contract defined five primary journeys, and Control Room snapshot lines 839-841 says six flows while nearby concept lists can be mistaken for seven separate acceptance journeys. PROP-011 introduces a materially distinct whole-market-to-trip routine that cannot be truthfully hidden inside Tour Mode.",
+      "recommended_ruling": "Make the executable acceptance contracts canonical: six Workspace journeys plus six Control Room flows. FLOW-WS-06 is the distinct whole-market visual-planning-to-governed-trip journey; FLOW-WS-05 remains execution in Tour Mode. Screen concepts are supporting views, not additional human exit journeys.",
+      "workspace_journeys": [
+        "FLOW-WS-01 Command Center to source",
+        "FLOW-WS-02 Park and restore Myrick",
+        "FLOW-WS-03 Weekly Deal Room call",
+        "FLOW-WS-04 Doc context and engineering request",
+        "FLOW-WS-05 Multi-stop Tour Mode",
+        "FLOW-WS-06 Whole-market visual planning to governed day trip"
+      ],
+      "control_room_flows": [
+        "flow-01-honest-health Collector failure is honest",
+        "flow-02-service-provenance Service and environment provenance",
+        "flow-03-request-bridge Business problem to safe Work Request",
+        "flow-04-plan-invalidation Scoped plan and invalidated approval",
+        "flow-05-deployment-proof Release evidence and reconnect",
+        "flow-06-incident-audit Incident investigation to audit chain"
+      ]
+    },
+    {
+      "id": "PROP-005",
+      "topic": "delegation_commit_rule",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Workspace snapshot line 835 says subagents do not commit unless explicitly authorized, while the current standing rule requires every session to commit and push only its explicit paths. workspace/contracts/environment-release-process.v1.json also carries the obsolete no-commit/no-push wording.",
+      "recommended_ruling": "The current standing rule controls: each delegated coding session uses an isolated worktree or explicitly owned paths, stages explicit paths, runs proportional verification, commits its own completed scope, and pushes its branch when available. Deployment, production writes, external communication, and merges remain separately authorized actions.",
+      "preserved_boundary": "A commit is evidence packaging, not merge, deploy, production-write, or expansion of task scope."
+    },
+    {
+      "id": "PROP-006",
+      "topic": "council_deferral_schema",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "control-room/contracts/council-review.v1.json allows only accept_recommendation, choose_alternative, or defer_with_named_external_blocker. A valid evidence-gated deferral can depend on an internal measurement or scheduled review rather than an external blocker.",
+      "recommended_ruling": "Add defer_with_named_reopen_trigger. Every deferral must name the exact trigger, owner, due or observation condition, affected construction scope, and safe interim default. Deferral must never imply approval or silently unblock construction.",
+      "proposed_required_fields": [
+        "fork_id",
+        "disposition",
+        "rationale",
+        "evidence_used",
+        "contract_changes",
+        "owner",
+        "approved_at",
+        "reopen_trigger",
+        "interim_default",
+        "blocked_scope"
+      ]
+    },
+    {
+      "id": "PROP-007",
+      "topic": "hermes_agent_and_nous_portal",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Joe's proposal correctly identifies the need for persistent agent presence, but it also gives Hermes durable memory, self-modifying skills, shared full MCP access, multi-channel delivery, scheduling, and Portal hosting before CARR's server-side authority, privacy, retention, isolation, and evidence gates have been proven for that runtime.",
+      "recommended_ruling": "Approve the constrained Nous Portal Cloud-hosted, dedicated-container, R0 read-only Hermes evaluation defined in phase0/hermes-runtime-council-candidate.v1.json and accept its proposed mature role split: Hermes orchestrates routine CARR operations behind Doc and product controls, while Claude Code and Codex are reserved for construction, complex investigation, new features, and reviewed repairs. Treat Hermes memory and skills as non-authoritative working state, enable Privacy Mode, send only minimum-necessary data, and keep scheduling, engineering dispatch, delivery, and mutation absent from the evaluation. Joe accepts the incremental model-data exposure; persistent credential, execution, retention, recovery, export, and cost gates remain load-bearing. Expansion requires observed 30, 60, and 90-day like-for-like cost, quality, toil, and routine-displacement evidence; forecast ROI is not adoption evidence.",
+      "preserved_boundary": "CARR MCP, Doctrine, Neon, and the record layer remain the kernel, source of truth, and authority plane; Doc remains the human-facing product identity; Hermes may orchestrate only through typed graduated capabilities; Claude Code and Codex remain the engineering plane; every later mutation or external effect remains server-authorized, plan-bound, human-approved, audited, and freshly verified."
+    },
+    {
+      "id": "PROP-008",
+      "topic": "independent_platform_name_and_carr_launch_tenant",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "CARR is Joe's current employer and launch organization, while the mature software and IP are intended to remain owner-controlled and potentially licensable to other isolated tenants. Retaining CARR as the permanent platform identity would bind Joe-owned software to one employer and deepen rename debt during construction.",
+      "recommended_ruling": "Approve the independent naming architecture in phase0/platform-naming-council-candidate.v1.json: choose a distinct platform name before production construction, preserve CARR as the launch tenant and familiar branding configuration, and run a bounded evidence-backed name-selection sprint after Joe approves the council output. Do not choose or propagate a final name without trademark, domain, registry, app-store, similarity, usability, and migration checks.",
+      "preserved_boundary": "Renaming does not authorize public SaaS, billing, signup, a tenant selector, source transfer, commercial rollout, or construction. Joe retains platform/IP/root/release/licensing authority, and tenant identity remains server-derived."
+    },
+    {
+      "id": "PROP-009",
+      "topic": "human_real_estate_agent_seats_and_within_tenant_workspace_isolation",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "CARR has more than 150 human real estate agents, including solo agents and teams. Treating a CARR company-tenant seat as tenant-wide business-data authority would expose Panhandle-specific or other agents' records, search, files, calls, memory, queues, integrations, audit, exports, offline packs, and product projections.",
+      "recommended_ruling": "Pre-engineer one CARR company-tenant architecture with isolated business workspaces while only Joe and Dell operate Panhandle Team. A human seat grants authentication and licensed modules but zero business-data access. A future solo agent could receive a private workspace; a future real estate team could receive a workspace with explicit individual memberships and attribution. Every request is bound to one server-derived active workspace, and cross-workspace collaboration uses typed minimum-field shares rather than ambient visibility.",
+      "preserved_boundary": "This is cheap structural preparation, not a rollout or commercialization decision. Tenant administration grants no business-data access; Doc and Hermes cannot widen the human's active workspace; company reporting is purpose-built and minimum-field. No additional CARR user onboarding, public SaaS, signup, billing, client portal, or tenant-wide book search is authorized."
+    },
+    {
+      "id": "PROP-010",
+      "topic": "drive_free_system_operation_cowork_retirement_and_hermes_enabled_orchestration",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "The mature architecture places authority in Neon and system definitions in Git, and Dell already operates without a CARR AI vault. Yet README, repo-to-vault mappings, Drive-synchronized skills, Cowork launchers, calendar exchange files, compiled projections, hooks, health checks, and other file-mode consumers still preserve Google Drive as a transitional runtime dependency. The existing reconciliation describes some Drive fallbacks as continuing without naming their final retirement target.",
+      "recommended_ruling": "Approve the Drive-free target defined in phase0/drive-free-system-council-candidate.v1.json. No Drive file may be required to boot, authorize, schedule, operate, observe, recover, or reconstruct the platform. Retire Cowork as an operational dependency. Put deterministic recurring work in repo-defined code on registered Local Edge Nodes; make Hermes the preferred persistent routine-operations and Doc orchestrator after its graduated gates; reserve Claude Code and Codex for engineering. Preserve Google Drive only as an optional user-selected human document destination whose absence cannot degrade core system health.",
+      "joe_position": "Hermes is the game-changing cloud orchestration layer that makes the Drive-free, Cowork-independent direction practical.",
+      "preserved_boundary": "Drive independence is a property of Neon, GitHub, Cloudflare/KV/R2, typed MCP, and registered Local Edge Nodes, not a dependency on Hermes. A Hermes or Portal outage cannot force Drive fallback, change authority, or impair canonical recovery. Do not silently expand the August 21 doctrine cutoff or delete transitional consumers before inventory, parity, rollback, and disconnected-operation evidence passes."
+    },
+    {
+      "id": "PROP-011",
+      "topic": "whole_market_visual_operations_and_governed_day_trip_planning",
+      "status": "proposed_for_council_not_approved",
+      "conflict": "Workspace and Tour Mode define business records, locked appointments, routing, and offline tours, but the canonical Workspace roadmap does not yet define one whole-market spatial operating surface across prospects, active clients, in-process and active projects, and visits. Without a location-role model, records with several sites, unlocated records, geocode vendor terms, and route proposals can become silent omissions or a shadow source of truth.",
+      "recommended_ruling": "Approve phase0/workspace-market-map-council-candidate.v1.json as a formal Workspace roadmap amendment. Create one tenant- and workspace-scoped Market Map and Day-Trip Planner with exact accessible map/list parity; separate entity class from practice/current, target area, candidate, confirmed-site, and visit-stop location roles; report current/stale/Unknown/unlocated component counts; keep vendor-derived geocodes and routes isolated and versioned; preserve locked appointments; exclude ineligible stops with reasons while routing eligible stops; and require Joe or Dell confirmation before the existing Tour lifecycle.",
+      "preserved_boundary": "The map is a read projection and planning workspace, never a canonical record writer. Whole-market access is absent in sterile/client-facing mode. Google remains only the preferred measured routing direction until terms, retention, map compatibility, attribution, portability, price, usage caps, tenant/workspace denial, accessibility, and Joe/Dell uncoached adoption pass. Phase 0 uses synthetic data and grants no production construction or vendor-purchase authority."
+    }
+  ],
+  "canonical_amendments_after_approval": [
+    {
+      "order": 1,
+      "targets": [
+        "all four canonical inputs"
+      ],
+      "change": "Apply FACT-001 through FACT-007 using fresh sanctioned reads where identified; do not turn snapshot observations into timeless claims."
+    },
+    {
+      "order": 2,
+      "targets": [
+        "Workspace section 23.1 and its Phase 0 acceptance contract",
+        "Mature End State week-4 acceptance and Phase 0 action register"
+      ],
+      "change": "Apply PROP-001: Joe owns preconstruction exit; Dell validates finished shared workflows at the later adoption gate."
+    },
+    {
+      "order": 3,
+      "targets": [
+        "Mature End State sections 30, 36, and Phase 0 action register",
+        "Workspace sections 23.1 and 23.2",
+        "Production Maturity Baseline Phase 0 action register"
+      ],
+      "change": "Apply PROP-002: Phase 0 ends at G0; rename construction-bearing P0 programs as Foundation work packages; Phase 1 starts with G1 trust foundation."
+    },
+    {
+      "order": 4,
+      "targets": [
+        "Mature End State week-2 and G1",
+        "Production Maturity Baseline environment and Phase 0 action-register sections",
+        "Control Room environment-state and delivery sections"
+      ],
+      "change": "Apply PROP-003: persistent isolated Staging is required at G1; Rehearsal remains separate; Planned/Unknown is shown until deployment exists."
+    },
+    {
+      "order": 5,
+      "targets": [
+        "Mature End State weekly plan and Phase 0 action register",
+        "Workspace prototype/acceptance sections",
+        "Control Room BDUF and phase0-acceptance contract"
+      ],
+      "change": "Apply PROP-004: enumerate the canonical 6+6 human suite and distinguish whole-market planning, Tour execution, and supporting screens."
+    },
+    {
+      "order": 6,
+      "targets": [
+        "Workspace section 21.3",
+        "workspace/contracts/environment-release-process.v1.json",
+        "receiving-session prompts in all roadmaps"
+      ],
+      "change": "Apply PROP-005: align delegation with explicit-path commit/push discipline while retaining separate authorization for merge, deploy, production writes, and external communication."
+    },
+    {
+      "order": 7,
+      "targets": [
+        "control-room/contracts/council-review.v1.json",
+        "Workspace council review register",
+        "council output templates in all roadmaps"
+      ],
+      "change": "Apply PROP-006: add the named-reopen-trigger disposition and its required fields."
+    },
+    {
+      "order": 8,
+      "targets": [
+        "Workspace BDUF near the operating objective, route/IA, Tour Mode, entity contracts, privacy/security, acceptance, and timing/cost sections",
+        "Mature End State Workspace capability and cost/operations cross-references",
+        "Control Room dependency, vendor, cost, freshness, and redaction observation requirements",
+        "Production Maturity Baseline geospatial vendor, data retention, Unknown, and release gates"
+      ],
+      "change": "Apply PROP-011: add the whole-market visual and governed day-trip capability, domain/location contract, provider terms and pricing gates, exact acceptance journeys, and explicit non-authority boundary without expanding the October milestone."
+    },
+    {
+      "order": "8a",
+      "targets": [
+        "all four canonical inputs",
+        "control-room contracts (executor disclosure, runtime kill switch, deletion/export receipt, credential revocation, rebuild, outage, evidence parity, cost caps)"
+      ],
+      "change": "Apply the Hermes ruling as modified by council: define Hermes as an optional registered runtime behind typed CARR services, never authority, source of truth, or recovery plane; R0 evaluation synthetic and read-only; live data requires a new Joe decision; no doctrine names Hermes preferred or default until measured unique-need plus 30/60/90-day displacement evidence."
+    },
+    {
+      "order": "8b",
+      "targets": [
+        "all four canonical inputs",
+        "new Phase 0 contracts"
+      ],
+      "change": "Apply the independent-naming ruling: distinguish platform identity, organization tenant, business workspace, product surface, assistant identity, and runtime; no new contract assumes CARR is the immutable platform identity; the rename classification pass explicitly covers machine identifiers (verb namespaces, tenant ids, contract names), which may remain carr-prefixed as internal compatibility identifiers."
+    },
+    {
+      "order": "8c",
+      "targets": [
+        "tenant and data contracts",
+        "database/API design rules",
+        "domain glossary",
+        "audit contract"
+      ],
+      "change": "Apply the workspace-isolation ruling as modified: lock the scope model (seat grants zero business data; server-derived active-workspace membership is the business-data boundary; denial fixtures are canonical future twins; revocation SLO; payload-free audit) while deferring provisioning, multi-workspace switching, administration surfaces, and corporate reporting to a named licensing opportunity; adopt a human-facing term for people distinct from 'agent' (reserved for AI principals)."
+    },
+    {
+      "order": "8d",
+      "targets": [
+        "all four canonical inputs",
+        "repo and installed-runtime inventory",
+        "recovery contracts"
+      ],
+      "change": "Apply the Drive-free ruling as modified: adopt the Drive-free and Cowork-non-dependency target with its six acceptance tests, with Hermes-preference language removed (runtime preference lives in the Hermes fork); no consumer deleted before inventory, parity, rollback, and observation evidence; the August 21 cutoff is not expanded."
+    },
+    {
+      "order": 9,
+      "targets": [
+        "all amended canonical doctrine records and generated Word artifacts"
+      ],
+      "change": "Re-render sanctioned artifacts, record new generations and checksums, run cross-roadmap contradiction checks, and obtain Joe's explicit approval before opening Phase 1 construction."
+    }
+  ],
+  "remaining_gates": {
+    "must_be_ready_before_council": [
+      "Both product contract suites and static prototypes remain green.",
+      "The council receives this reconciliation packet plus the current open-item registers and live-inventory gaps.",
+      "No proposal in this packet is represented as an approved doctrine change."
+    ],
+    "council_and_joe_decisions": [
+      "PROP-001 Dell gating",
+      "PROP-002 phase numbering and Phase 1 entry",
+      "PROP-003 persistent Staging",
+      "PROP-004 canonical 6+6 prototype suite",
+      "PROP-005 delegation and commit rule",
+      "PROP-006 deferral schema",
+      "PROP-007 Hermes Agent and Nous Portal constrained evaluation",
+      "PROP-008 independent platform name with CARR as launch tenant",
+      "PROP-009 human real estate agent seats and isolated solo-agent or team workspaces",
+      "PROP-010 Drive-free system operation, Cowork retirement, and Hermes-enabled orchestration",
+      "PROP-011 whole-market visual operations and governed day-trip planning"
+    ],
+    "phase0_exit_evidence": [
+      "All automatic contract, schema, traceability, fixture, identity, tenant, workflow, static-prototype, and secret-canary checks pass.",
+      "Joe completes all six Workspace journeys and all six Control Room flows without coaching under the approved PROP-001 ruling.",
+      "Responsive, keyboard, screen-reader, sterile-mode, and Color Assist checks are captured.",
+      "Collection methods for all five operating baselines and maintenance time exist; no measured value is invented.",
+      "Live service, surface, writer, route, job, identity, vendor, migration, and environment inventories are reconciled or explicitly deferred with named reopen triggers.",
+      "Every material council fork is approved or safely deferred and Joe approves the final integrated roadmaps."
+    ],
+    "phase1_entry_dependencies": [
+      "Phase 0 exit evidence is complete and Joe approval is durable.",
+      "A clean reviewed release-truth branch and protected integration policy are in effect.",
+      "Construction begins with G1 trust-foundation work, not product feature breadth.",
+      "No production mutation path opens before isolated Staging, CI, provenance, authorization, audit, rollback, restore rehearsal, and fresh verification pass."
+    ],
+    "safe_to_defer_without_blocking_phase1_start": [
+      "Post-launch 30-day, 60-day, and 90-day comparisons that require elapsed observation time.",
+      "Two-week surface cutover observation periods before retiring old surfaces.",
+      "Five-business-day Command Center adoption evidence and later weekly-call observations.",
+      "Native Mac, iPhone, and iPad actual-device gates until their settled predecessor gates are reached.",
+      "Three-complete-consecutive-normal-month evidence required for low-toil or mature claims."
+    ]
+  },
+  "acceleration_boundary": {
+    "safe_to_parallelize_after_phase0": [
+      "G1 release truth, CI, environment isolation, identity, audit, and restore rails with bounded ownership",
+      "read-only Workspace and Control Room vertical-slice preparation behind feature flags",
+      "independent verification against frozen shared contracts"
+    ],
+    "cannot_be_compressed_by_more_agents": [
+      "human uncoached evidence",
+      "cutover observation windows",
+      "actual-device acceptance",
+      "production reliability and maintenance observation periods"
+    ]
+  }
+}

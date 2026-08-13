@@ -1,0 +1,933 @@
+{
+  "contract": "carr-control-room-state-machines",
+  "version": "1.0.0",
+  "status": "phase0_frozen",
+  "rules": [
+    "Transitions are server enforced and audited.",
+    "The UI may render states but may not invent them.",
+    "Every side exit records a reason.",
+    "Unknown, blocked, expired, partially_verified, failed, and rolled_back remain distinct."
+  ],
+  "transition_policy": {
+    "unlisted_effect": "refuse",
+    "refusal_event": "state_transition.refused",
+    "required_fields": [
+      "from",
+      "to",
+      "guard"
+    ]
+  },
+  "machines": {
+    "work_request": {
+      "initial": "captured",
+      "terminal": [
+        "confirmed_closed",
+        "declined",
+        "superseded"
+      ],
+      "main": [
+        "captured",
+        "triaged",
+        "ready",
+        "claimed",
+        "in_progress",
+        "verification",
+        "awaiting_release",
+        "released",
+        "confirmed_closed"
+      ],
+      "side": [
+        "needs_joe",
+        "blocked",
+        "declined",
+        "superseded",
+        "failed"
+      ],
+      "invariants": [
+        "blocked requires blocker_code and blocker_detail",
+        "later is not a blocker",
+        "only verification may enter awaiting_release",
+        "confirmed_closed requires accepted verification evidence"
+      ],
+      "transitions": [
+        {
+          "from": "captured",
+          "to": "triaged",
+          "guard": "classification recorded"
+        },
+        {
+          "from": "*",
+          "to": "needs_joe",
+          "guard": "one material human decision is named"
+        },
+        {
+          "from": "triaged",
+          "to": "ready",
+          "guard": "scope and acceptance criteria complete"
+        },
+        {
+          "from": "ready",
+          "to": "claimed",
+          "guard": "eligible executor assigned"
+        },
+        {
+          "from": "claimed",
+          "to": "in_progress",
+          "guard": "session created read only"
+        },
+        {
+          "from": "in_progress",
+          "to": "verification",
+          "guard": "candidate work complete"
+        },
+        {
+          "from": "verification",
+          "to": "awaiting_release",
+          "guard": "verification accepted and release required"
+        },
+        {
+          "from": "verification",
+          "to": "confirmed_closed",
+          "guard": "verification accepted and no release required"
+        },
+        {
+          "from": "awaiting_release",
+          "to": "released",
+          "guard": "release evidence linked"
+        },
+        {
+          "from": "released",
+          "to": "confirmed_closed",
+          "guard": "requester confirms outcome"
+        },
+        {
+          "from": "*",
+          "to": "blocked",
+          "guard": "blocker_code and blocker_detail recorded"
+        },
+        {
+          "from": "*",
+          "to": "declined",
+          "guard": "authorized disposition recorded"
+        },
+        {
+          "from": "*",
+          "to": "superseded",
+          "guard": "replacement request linked"
+        },
+        {
+          "from": "*",
+          "to": "failed",
+          "guard": "failure class and evidence recorded"
+        },
+        {
+          "from": "needs_joe",
+          "to": "triaged",
+          "guard": "authorized human decision and evidence recorded; scope and acceptance criteria revalidated"
+        },
+        {
+          "from": "blocked",
+          "to": "triaged",
+          "guard": "named blocker cleared with evidence; scope and acceptance criteria revalidated"
+        },
+        {
+          "from": "failed",
+          "to": "triaged",
+          "guard": "authorized retry decision records prior failure evidence and revised scope or acceptance criteria"
+        }
+      ]
+    },
+    "identity_resolution": {
+      "initial": "unresolved",
+      "terminal": ["resolved", "task_scoped_only", "identity_scope_unknown", "refused"],
+      "main": ["unresolved", "runtime_validated", "tenant_bound", "sponsor_resolved", "brain_resolved", "capability_bound", "resolved"],
+      "side": ["task_scoped_only", "identity_scope_unknown", "refused"],
+      "invariants": [
+        "organization tenant, sponsoring human, partner, agent principal, runtime principal, capability profile, and personal brain scope are separate immutable dimensions",
+        "agent principal receives action attribution while sponsoring human remains additional audit provenance",
+        "personal brain scope derives only from verified sponsoring human and cannot select tenant or capability",
+        "missing or ambiguous personal scope ends identity_scope_unknown and never resolved with zero personal rules",
+        "an unsponsored runtime ends task_scoped_only and cannot claim a human sponsor or humanOnly capability",
+        "connector and generated render must resolve the same partner brain version and counts before resolved"
+      ],
+      "transitions": [
+        {"from": "unresolved", "to": "runtime_validated", "guard": "registered runtime principal authenticates and maps one agent principal"},
+        {"from": "runtime_validated", "to": "tenant_bound", "guard": "server derives immutable organization tenant and environment"},
+        {"from": "tenant_bound", "to": "sponsor_resolved", "guard": "verified Joe or Dell sponsor resolves from server grant metadata"},
+        {"from": "tenant_bound", "to": "task_scoped_only", "guard": "registered unattended job has no human sponsor; only exact task rules and non-humanOnly capability remain"},
+        {"from": "tenant_bound", "to": "identity_scope_unknown", "guard": "interactive agent sponsor is missing or ambiguous; no personal counts are claimed"},
+        {"from": "sponsor_resolved", "to": "brain_resolved", "guard": "personal brain equals verified sponsor and connector/store and generated render versions and counts agree"},
+        {"from": "sponsor_resolved", "to": "refused", "guard": "foreign brain requested or source parity fails"},
+        {"from": "brain_resolved", "to": "capability_bound", "guard": "server issues independent exact capability profile; personal rules cannot widen it"},
+        {"from": "capability_bound", "to": "resolved", "guard": "redacted audit projection binds tenant, agent, runtime, sponsor, partner, brain scope/version/count, capability, and result"},
+        {"from": "*", "to": "refused", "guard": "caller, browser, model, job, or personal rule attempts to select or widen tenant, sponsor, agent, runtime, brain, or capability"}
+      ]
+    },
+    "agent_session": {
+      "initial": "created_read_only",
+      "terminal": [
+        "complete",
+        "declined",
+        "expired",
+        "failed",
+        "handed_off"
+      ],
+      "main": [
+        "created_read_only",
+        "collecting",
+        "inspecting",
+        "explaining",
+        "planning",
+        "waiting_for_approval",
+        "executing",
+        "verifying",
+        "complete"
+      ],
+      "side": [
+        "blocked",
+        "declined",
+        "expired",
+        "failed",
+        "handed_off"
+      ],
+      "invariants": [
+        "every session starts read only",
+        "mutation requires a parent request, exact scope, capability, and expiry",
+        "a replacement session never inherits production capability",
+        "session creation requires a terminal identity_resolution result before any rule briefing or authorization",
+        "agent attribution and verified human sponsorship remain distinct through audit",
+        "unsponsored sessions are task scoped and never humanOnly"
+      ],
+      "transitions": [
+        {
+          "from": "created_read_only",
+          "to": "collecting",
+          "guard": "parent request and read scope valid"
+        },
+        {
+          "from": "*",
+          "to": "blocked",
+          "guard": "external blocker and detail recorded"
+        },
+        {
+          "from": "*",
+          "to": "declined",
+          "guard": "authorized disposition and reason recorded"
+        },
+        {
+          "from": "collecting",
+          "to": "inspecting",
+          "guard": "source provenance recorded"
+        },
+        {
+          "from": "inspecting",
+          "to": "explaining",
+          "guard": "facts separated from hypotheses"
+        },
+        {
+          "from": "explaining",
+          "to": "planning",
+          "guard": "proposed outcome accepted for planning"
+        },
+        {
+          "from": "planning",
+          "to": "waiting_for_approval",
+          "guard": "immutable plan revision frozen"
+        },
+        {
+          "from": "waiting_for_approval",
+          "to": "executing",
+          "guard": "exact unexpired capability and approval validated"
+        },
+        {
+          "from": "executing",
+          "to": "verifying",
+          "guard": "registered actuator returned evidence"
+        },
+        {
+          "from": "verifying",
+          "to": "complete",
+          "guard": "named outcome checks passed"
+        },
+        {
+          "from": "*",
+          "to": "expired",
+          "guard": "session or capability expiry reached"
+        },
+        {
+          "from": "*",
+          "to": "handed_off",
+          "guard": "new read-only session linked; capability not transferred"
+        },
+        {
+          "from": "*",
+          "to": "failed",
+          "guard": "failure class and evidence recorded"
+        },
+        {
+          "from": "blocked",
+          "to": "collecting",
+          "guard": "named blocker cleared with evidence; parent request and read scope revalidated; session remains read only"
+        }
+      ]
+    },
+    "plan_revision": {
+      "initial": "draft",
+      "terminal": [
+        "verified",
+        "superseded",
+        "rejected",
+        "expired",
+        "failed",
+        "rolled_back"
+      ],
+      "main": [
+        "draft",
+        "proposed",
+        "rehearsed",
+        "approval_pending",
+        "approved",
+        "executing",
+        "verified"
+      ],
+      "side": [
+        "superseded",
+        "rejected",
+        "expired",
+        "failed",
+        "rolled_back"
+      ],
+      "invariants": [
+        "a material edit creates a new revision and hash",
+        "a material revision invalidates prior approvals",
+        "rehearsal evidence binds the revision hash"
+      ],
+      "transitions": [
+        {
+          "from": "draft",
+          "to": "proposed",
+          "guard": "steps, risk, evidence, rollback, cost, target, and environment complete"
+        },
+        {
+          "from": "proposed",
+          "to": "rejected",
+          "guard": "authorized human rejection recorded"
+        },
+        {
+          "from": "proposed",
+          "to": "rehearsed",
+          "guard": "rehearsal evidence binds current hash"
+        },
+        {
+          "from": "rehearsed",
+          "to": "approval_pending",
+          "guard": "approval required for risk and target"
+        },
+        {
+          "from": "approval_pending",
+          "to": "approved",
+          "guard": "approver, plan hash, target, environment, and expiry match"
+        },
+        {
+          "from": "approved",
+          "to": "executing",
+          "guard": "dedicated executor validates capability"
+        },
+        {
+          "from": "executing",
+          "to": "verified",
+          "guard": "all named outcome checks pass"
+        },
+        {
+          "from": "*",
+          "to": "superseded",
+          "guard": "new material revision and SHA-256 hash created"
+        },
+        {
+          "from": "*",
+          "to": "expired",
+          "guard": "revision or approval expiry reached"
+        },
+        {
+          "from": "executing",
+          "to": "rolled_back",
+          "guard": "rollback evidence recorded"
+        },
+        {
+          "from": "*",
+          "to": "failed",
+          "guard": "failure class and evidence recorded"
+        }
+      ]
+    },
+    "approval": {
+      "initial": "draft",
+      "terminal": [
+        "verified",
+        "rejected",
+        "expired",
+        "invalidated",
+        "failed",
+        "rolled_back"
+      ],
+      "main": [
+        "draft",
+        "proposed",
+        "approved",
+        "executing",
+        "verified"
+      ],
+      "side": [
+        "revised",
+        "rejected",
+        "expired",
+        "invalidated",
+        "failed",
+        "rolled_back"
+      ],
+      "invariants": [
+        "production approval is Joe only at launch",
+        "approval binds plan hash, target, environment, and expiry",
+        "material revision or scope mismatch makes approval unusable"
+      ],
+      "transitions": [
+        {
+          "from": "draft",
+          "to": "proposed",
+          "guard": "immutable plan target and hash attached"
+        },
+        {
+          "from": "proposed",
+          "to": "approved",
+          "guard": "authorized human re-authenticated and exact binding confirmed"
+        },
+        {
+          "from": "approved",
+          "to": "executing",
+          "guard": "executor validates unchanged binding"
+        },
+        {
+          "from": "executing",
+          "to": "verified",
+          "guard": "outcome evidence accepted"
+        },
+        {
+          "from": "proposed",
+          "to": "revised",
+          "guard": "requested changes recorded"
+        },
+        {
+          "from": "*",
+          "to": "invalidated",
+          "guard": "plan hash, target, environment, or material scope changed"
+        },
+        {
+          "from": "*",
+          "to": "expired",
+          "guard": "expiry reached"
+        },
+        {
+          "from": "proposed",
+          "to": "rejected",
+          "guard": "authorized human rejection recorded"
+        },
+        {
+          "from": "executing",
+          "to": "rolled_back",
+          "guard": "rollback evidence recorded"
+        },
+        {
+          "from": "*",
+          "to": "failed",
+          "guard": "failure class and evidence recorded"
+        },
+        {
+          "from": "revised",
+          "to": "proposed",
+          "guard": "new immutable plan hash, target, environment, scope, and requested changes attached; every prior approval invalidated"
+        }
+      ]
+    },
+    "release": {
+      "initial": "planned",
+      "terminal": [
+        "complete",
+        "failed",
+        "aborted",
+        "rolled_back",
+        "superseded"
+      ],
+      "main": [
+        "planned",
+        "rehearsing",
+        "ready",
+        "awaiting_approval",
+        "deploying",
+        "verifying",
+        "complete"
+      ],
+      "side": [
+        "failed",
+        "aborted",
+        "rolled_back",
+        "superseded"
+      ],
+      "invariants": [
+        "release uses an immutable source SHA",
+        "source parity and clean scope are required",
+        "rollback or forward fix is named",
+        "complete requires target read back and named golden workflows"
+      ],
+      "transitions": [
+        {
+          "from": "planned",
+          "to": "rehearsing",
+          "guard": "immutable source and rollback named"
+        },
+        {
+          "from": "*",
+          "to": "superseded",
+          "guard": "replacement immutable release linked"
+        },
+        {
+          "from": "rehearsing",
+          "to": "ready",
+          "guard": "rehearsal passes"
+        },
+        {
+          "from": "ready",
+          "to": "awaiting_approval",
+          "guard": "risk requires approval"
+        },
+        {
+          "from": "awaiting_approval",
+          "to": "deploying",
+          "guard": "exact approval and capability validate"
+        },
+        {
+          "from": "ready",
+          "to": "deploying",
+          "guard": "policy records approval not required"
+        },
+        {
+          "from": "deploying",
+          "to": "verifying",
+          "guard": "target operation returns evidence"
+        },
+        {
+          "from": "verifying",
+          "to": "complete",
+          "guard": "target read-back and all golden workflows pass"
+        },
+        {
+          "from": "*",
+          "to": "aborted",
+          "guard": "safe abort and reason recorded"
+        },
+        {
+          "from": "deploying",
+          "to": "rolled_back",
+          "guard": "rollback evidence recorded"
+        },
+        {
+          "from": "*",
+          "to": "failed",
+          "guard": "failure class and evidence recorded"
+        }
+      ]
+    },
+    "deployment": {
+      "initial": "created",
+      "terminal": [
+        "complete",
+        "aborted",
+        "failed",
+        "rolled_back",
+        "partially_verified"
+      ],
+      "main": [
+        "created",
+        "preflight",
+        "rehearsing",
+        "awaiting_approval",
+        "executing",
+        "verifying",
+        "complete"
+      ],
+      "side": [
+        "aborted",
+        "failed",
+        "rolled_back",
+        "partially_verified"
+      ],
+      "invariants": [
+        "one deployment binds one release and one environment",
+        "browser disconnect does not cancel a server operation",
+        "reconnect resumes through cursor replay",
+        "command success alone cannot complete"
+      ],
+      "transitions": [
+        {
+          "from": "created",
+          "to": "preflight",
+          "guard": "release, environment, source, and rollback binding valid"
+        },
+        {
+          "from": "preflight",
+          "to": "rehearsing",
+          "guard": "guarded wrapper preflight passes"
+        },
+        {
+          "from": "rehearsing",
+          "to": "awaiting_approval",
+          "guard": "rehearsal evidence recorded and approval required"
+        },
+        {
+          "from": "awaiting_approval",
+          "to": "executing",
+          "guard": "exact plan approval and capability validate"
+        },
+        {
+          "from": "rehearsing",
+          "to": "executing",
+          "guard": "policy records approval not required"
+        },
+        {
+          "from": "executing",
+          "to": "verifying",
+          "guard": "actuator evidence recorded"
+        },
+        {
+          "from": "verifying",
+          "to": "complete",
+          "guard": "all outcome checks pass"
+        },
+        {
+          "from": "verifying",
+          "to": "partially_verified",
+          "guard": "one or more named checks are pending or fail"
+        },
+        {
+          "from": "*",
+          "to": "aborted",
+          "guard": "safe abort and reason recorded"
+        },
+        {
+          "from": "executing",
+          "to": "rolled_back",
+          "guard": "rollback evidence recorded"
+        },
+        {
+          "from": "*",
+          "to": "failed",
+          "guard": "failure class and evidence recorded"
+        }
+      ]
+    },
+    "incident": {
+      "initial": "detected",
+      "terminal": [
+        "reviewed",
+        "duplicate",
+        "false_positive"
+      ],
+      "main": [
+        "detected",
+        "triaged",
+        "investigating",
+        "mitigating",
+        "monitoring",
+        "resolved",
+        "reviewed"
+      ],
+      "side": [
+        "duplicate",
+        "false_positive"
+      ],
+      "invariants": [
+        "facts and hypotheses are separate",
+        "resolved requires a monitoring interval and recovery proof",
+        "reviewed requires follow-up disposition"
+      ],
+      "transitions": [
+        {
+          "from": "detected",
+          "to": "triaged",
+          "guard": "impact, severity, and owner recorded"
+        },
+        {
+          "from": "triaged",
+          "to": "investigating",
+          "guard": "facts and hypotheses separated"
+        },
+        {
+          "from": "investigating",
+          "to": "mitigating",
+          "guard": "mitigation selected with risk and evidence"
+        },
+        {
+          "from": "mitigating",
+          "to": "monitoring",
+          "guard": "mitigation applied and recovery signal defined"
+        },
+        {
+          "from": "monitoring",
+          "to": "resolved",
+          "guard": "required interval and recovery proof pass"
+        },
+        {
+          "from": "resolved",
+          "to": "reviewed",
+          "guard": "follow-up disposition recorded"
+        },
+        {
+          "from": "detected",
+          "to": "duplicate",
+          "guard": "canonical incident linked"
+        },
+        {
+          "from": "detected",
+          "to": "false_positive",
+          "guard": "disproving evidence recorded"
+        }
+      ]
+    },
+    "check_or_job_run": {
+      "initial": "scheduled",
+      "terminal": [
+        "succeeded",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "skipped",
+        "stale",
+        "unknown"
+      ],
+      "main": [
+        "scheduled",
+        "queued",
+        "running",
+        "succeeded"
+      ],
+      "side": [
+        "failed",
+        "timed_out",
+        "cancelled",
+        "skipped",
+        "stale",
+        "unknown"
+      ],
+      "invariants": [
+        "manual and scheduled paths call the same wrapper",
+        "a scheduled-path success is required to close an automation failure"
+      ],
+      "transitions": [
+        {
+          "from": "scheduled",
+          "to": "queued",
+          "guard": "registered schedule fires"
+        },
+        {
+          "from": "queued",
+          "to": "running",
+          "guard": "registered wrapper starts"
+        },
+        {
+          "from": "running",
+          "to": "succeeded",
+          "guard": "named outcome checks pass"
+        },
+        {
+          "from": "running",
+          "to": "failed",
+          "guard": "wrapper or outcome check fails"
+        },
+        {
+          "from": "running",
+          "to": "timed_out",
+          "guard": "registered deadline passes"
+        },
+        {
+          "from": "queued",
+          "to": "cancelled",
+          "guard": "authorized cancellation recorded"
+        },
+        {
+          "from": "scheduled",
+          "to": "skipped",
+          "guard": "documented schedule policy skips"
+        },
+        {
+          "from": "*",
+          "to": "stale",
+          "guard": "freshness expiry reached"
+        },
+        {
+          "from": "*",
+          "to": "unknown",
+          "guard": "required source missing or untrustworthy"
+        }
+      ]
+    },
+    "capability_grant": {
+      "initial": "proposed",
+      "terminal": [
+        "expired_revoked",
+        "rejected",
+        "superseded"
+      ],
+      "main": [
+        "proposed",
+        "approved",
+        "active",
+        "expired_revoked"
+      ],
+      "side": [
+        "rejected",
+        "superseded"
+      ],
+      "invariants": [
+        "grant scope names exact organization tenant, agent principal, runtime principal, resource, environment, capability, and expiry",
+        "sponsoring human and personal brain do not grant, widen, or transfer capability",
+        "only the unchanged failed step may retry",
+        "grant revokes automatically at expiry",
+        "an agent cannot approve or grant itself"
+      ],
+      "transitions": [
+        {
+          "from": "proposed",
+          "to": "approved",
+          "guard": "authorized human confirms exact principal, resources, environment, capability, plan hash, and expiry"
+        },
+        {
+          "from": "approved",
+          "to": "active",
+          "guard": "broker revalidates unchanged binding"
+        },
+        {
+          "from": "active",
+          "to": "expired_revoked",
+          "guard": "expiry, completion, revocation, or material plan change"
+        },
+        {
+          "from": "proposed",
+          "to": "rejected",
+          "guard": "authorized human rejection recorded"
+        },
+        {
+          "from": "proposed",
+          "to": "superseded",
+          "guard": "replacement grant linked"
+        }
+      ]
+    },
+    "workflow_lifecycle": {
+      "initial": "experimental",
+      "terminal": [
+        "retired"
+      ],
+      "main": [
+        "experimental",
+        "pilot",
+        "approved",
+        "standard",
+        "retired"
+      ],
+      "side": [],
+      "invariants": [
+        "workflow identity and version are immutable",
+        "running work pins one workflow version",
+        "every promotion requires named evidence, immutable workflow version, accountable owner, completed observation window, failure criteria and handling, tested rollback, adoption result and adoption test, cutover plan and cutover gate, and an authorized audited governance decision",
+        "retirement blocks new starts and preserves historical evidence",
+        "Doc availability never controls workflow authorization or routine operability"
+      ],
+      "transitions": [
+        {"from": "experimental", "to": "pilot", "guard": "accountable owner freezes immutable workflow version and opens bounded observation window with named evidence, failure criteria and handling, tested rollback, adoption result expectation and adoption test, cutover plan, closed cutover gate, and audited authorization"},
+        {"from": "pilot", "to": "approved", "guard": "accountable owner presents named evidence for immutable workflow version after completed observation window, including failure criteria and handling, tested rollback, adoption result and adoption test, cutover plan, explicit approved-or-closed cutover gate, and audited authorization"},
+        {"from": "approved", "to": "standard", "guard": "accountable owner presents named evidence for immutable workflow version after completed standard-readiness observation window, including failure criteria and handling, tested rollback, repeated adoption result and adoption test, cutover plan, passed standard cutover gate, and audited authorization"},
+        {"from": "experimental", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, and active-work disposition"},
+        {"from": "pilot", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, and active-work disposition"},
+        {"from": "approved", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, and active-work disposition"},
+        {"from": "standard", "to": "retired", "guard": "owner records reason, replacement or no-replacement decision, migration or drain plan, and evidence retention"}
+      ]
+    },
+    "health": {
+      "initial": "unknown",
+      "terminal": [],
+      "main": [
+        "healthy",
+        "degraded",
+        "unavailable",
+        "unknown"
+      ],
+      "side": [],
+      "invariants": [
+        "missing or stale required collector produces unknown",
+        "source and last_verified are mandatory",
+        "planned staging cannot render healthy or empty"
+      ],
+      "transitions": [
+        {
+          "from": "unknown",
+          "to": "healthy",
+          "guard": "every required authoritative signal is fresh and passes"
+        },
+        {
+          "from": "unknown",
+          "to": "degraded",
+          "guard": "fresh evidence proves partial impairment"
+        },
+        {
+          "from": "unknown",
+          "to": "unavailable",
+          "guard": "fresh evidence proves outcome failure"
+        },
+        {
+          "from": "healthy",
+          "to": "degraded",
+          "guard": "fresh evidence proves partial impairment"
+        },
+        {
+          "from": "healthy",
+          "to": "unavailable",
+          "guard": "fresh evidence proves outcome failure"
+        },
+        {
+          "from": "healthy",
+          "to": "unknown",
+          "guard": "required evidence expires or disappears"
+        },
+        {
+          "from": "degraded",
+          "to": "healthy",
+          "guard": "fresh recovery evidence passes all required signals"
+        },
+        {
+          "from": "degraded",
+          "to": "unavailable",
+          "guard": "fresh evidence proves outcome failure"
+        },
+        {
+          "from": "degraded",
+          "to": "unknown",
+          "guard": "required evidence expires or disappears"
+        },
+        {
+          "from": "unavailable",
+          "to": "degraded",
+          "guard": "fresh evidence proves partial recovery"
+        },
+        {
+          "from": "unavailable",
+          "to": "healthy",
+          "guard": "fresh recovery evidence passes all required signals"
+        },
+        {
+          "from": "unavailable",
+          "to": "unknown",
+          "guard": "required evidence expires or disappears"
+        }
+      ]
+    }
+  }
+}
