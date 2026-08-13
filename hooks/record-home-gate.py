@@ -86,6 +86,23 @@ import os
 import re
 import sys
 
+# Script-relative, NOT os.path.expanduser("~/carr-system") — see the same fix
+# in test-ledger-sweep.py and test-review-council.py. On a GitHub runner the
+# repo is checked out to /home/runner/work/carr-system/carr-system, outside
+# $HOME, so the four ~/carr-system-literal paths below silently pointed at
+# files that do not exist there: generated_paths() raising FileNotFoundError
+# is caught and falls back to the 16-path GENERATED_FALLBACK list, which is
+# missing the dossier/ledger/dictionary entries generated_paths() itself
+# parses from exporters/targets.py at call time. That is undetectable from
+# most test cases (an .md file denied for the wrong reason still reads as
+# DENY), but it is exactly wrong for a generated dossier that ALSO sits under
+# an ALLOW_PREFIX directory (DNA/Clients/prospects/): with the real target
+# list unavailable, the dossier is never recognized as generated and falls
+# through to the prefix allowance meant for hand-authored intake files,
+# flipping the verdict from DENY to ALLOW.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
 def _vault():
     """This machine's vault. The literal below is one Drive ACCOUNT's mount, so
     on a second machine it resolved to a path that does not exist and every
@@ -105,7 +122,7 @@ def _vault():
 
 
 VAULT = _vault()
-LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
+LOG = os.path.join(REPO, "out", "hook-guard.log")
 
 # --- A. generated renders ----------------------------------------------------
 # READ FROM THE EXPORTER, NOT RETYPED. The first cut of this file hardcoded 16
@@ -131,7 +148,7 @@ LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 #   * The dossiers are a DIRECTORY (DOSSIER_DIR), not a fixed list. Guarding the
 #     directory covers the 23 that exist and every one minted later; enumerating
 #     them would reopen the same gap the day a new client lands.
-TARGETS_PY = os.path.expanduser("~/carr-system/exporters/targets.py")
+TARGETS_PY = os.path.join(REPO, "exporters", "targets.py")
 PARTIAL_TARGET_KEYS = {"compiled-rules-gist-index"}
 
 
@@ -310,8 +327,8 @@ def check(tool, ti):
     # files and leaves ordinary out/ artifacts writable.
     try:
         control = {
-            os.path.realpath(os.path.expanduser("~/carr-system/out/delegation-gate-state.json")),
-            os.path.realpath(os.path.expanduser("~/carr-system/out/delegation-gate-state.json.lock")),
+            os.path.realpath(os.path.join(REPO, "out", "delegation-gate-state.json")),
+            os.path.realpath(os.path.join(REPO, "out", "delegation-gate-state.json.lock")),
         }
         real_path = os.path.realpath(os.path.expanduser(path))
         if real_path in control or os.path.basename(real_path).startswith(".delegation-gate-"):

@@ -105,7 +105,13 @@ REQ_DIR="$RC_DIR/requests"
 DONE_DIR="$REQ_DIR/done"
 FAILED_DIR="$REQ_DIR/failed"
 LOG="$RC_DIR/runner.log"
+# Same fallback ops/ci.sh itself uses: a repo venv is Joe's Mac's real setup,
+# but CI installs requirements.lock straight into the runner's system/hosted
+# Python with no .venv/ ever created — this file's own third-party imports
+# are all stdlib (see pipelines/run_codex_review.py's import block), so
+# whatever python3 is on PATH is sufficient.
 PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
 
 mkdir -p "$REQ_DIR" "$DONE_DIR" "$FAILED_DIR" "$RC_DIR/worktrees"
 
