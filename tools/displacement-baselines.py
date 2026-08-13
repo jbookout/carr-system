@@ -179,7 +179,7 @@ def is_typed_prompt(record):
     #
     # Subagent traffic is already excluded above by isSidechain, tool output is
     # excluded below by tool_result, and scripted or scheduled prompts are machine
-    # text caught by MACHINE_ORIGIN. promptSource adds nothing beyond that.
+    # text caught by is_machine_origin(). promptSource adds nothing beyond that.
     msg = record.get("message")
     if isinstance(msg, dict) and isinstance(msg.get("content"), list):
         if any(

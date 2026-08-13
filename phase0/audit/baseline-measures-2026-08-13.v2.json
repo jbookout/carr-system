@@ -37,7 +37,19 @@
    "sessions_total": 137,
    "sessions_with_a_typed_prompt": 71,
    "median_session_minutes": 13.7,
-   "JUDGMENT_STILL_REQUIRED": "This is TOTAL active time. The baseline doctrine asks for ROUTINE OPERATION time only, because objective 8 permits heavy sessions for exploration, investigation and construction. Splitting the two is a judgment call this script will not fake."
+   "JUDGMENT_RESOLVED_BY_JOE_2026_08_13": "The figures above are TOTAL active time. The baseline doctrine asks for ROUTINE OPERATION time only, because objective 8 permits heavy sessions for exploration, investigation and construction. Joe ruled on that split on 2026-08-13, in his words: 'Record the ceiling: under 12.7 h/wk'. THE BASELINE IS THEREFORE A CEILING OF 12.7 ROUTINE-OPERATION HOURS PER WEEK, not the 45.9 total. Authority is decision 3b442d6c in the record layer, which carries the full rationale, the two alternatives that lost, and the reopen conditions; this artifact points at it rather than restating it.",
+   "routine_operation_split": {
+    "classifier": "session opening prompt, which is what the partner sat down to do",
+    "construction_or_exploration_hours_per_week": 39.6,
+    "construction_or_exploration_share": 0.45,
+    "routine_operation_hours_per_week_CEILING": 12.7,
+    "routine_operation_share": 0.14,
+    "unclassifiable_hours_per_week": 36.0,
+    "unclassifiable_share": 0.41,
+    "WHY_A_CEILING_AND_NOT_A_MEASUREMENT": "Two reasons, both recorded rather than smoothed over. The 41% unclassifiable band cannot be read from the opener at all — five sessions open with the literal words 'new session' and carry no intent. And the routine bucket still contains visible misclassifications, including a session studying an industry link scored as routine, so the true routine share is LOWER than 12.7. The number is an upper bound and must never be quoted as a measurement.",
+    "WEAKEST_POINT": "If much of the unclassifiable band is in fact routine, this understates the routine load and therefore understates what the product displaced.",
+    "post_launch_comparison": "The same classifier runs on both sides, so the before-and-after comparison stays valid even though the absolute value is a bound. Retire the inference method entirely once the Command Center can instrument routine work directly instead of deriving it from transcripts."
+   }
   },
   "measure_2_questions_needing_agent_explanation": {
    "method": "user turns matching a question shape, excluding tool results",
