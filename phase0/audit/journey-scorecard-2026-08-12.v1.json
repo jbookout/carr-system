@@ -117,11 +117,11 @@
     "last verified time and source are visible",
     "no cached green remains"
    ],
-   "result": null,
-   "coached": null,
+   "result": "pass",
+   "coached": false,
    "time_seconds": null,
-   "friction_notes": null,
-   "timestamp": null
+   "friction_notes": "All three criteria met, verified on the rendered surface and in fixtures/overview.v1.json. (1) health is Unknown — Production renders 'Unknown' with an explicit banner, 'Production health is Unknown. The required Worker outcome sample expired 18 minutes ago.'; (2) last verified time and source visible — 'Worker outcome collector · freshness unknown · verified Aug 10, 9:42 PM UTC'; (3) no cached green remains — Production holds no stale Healthy, and Staging is honest in the same way, 'No deployed staging collector · freshness missing · verified Never · Next: Keep labeled Planned until a real environment exists'. EVIDENCE BASIS DIFFERS FROM THE WORKSPACE JOURNEYS AND THIS MATTERS FOR HOW THE ROW IS READ: this journey mutates nothing, so there is no state trail proving what Joe did. Joe's testimony was that he read Production's status, saw why the check failed, and followed the recommended next step. That testimony IS CORROBORATED BY ARTIFACT: app.js line 136 wires the monitoring-gap action 'Open the source and freshness evidence' through linkTo(), which returns a real button (app.js lines 75-77) targeting the SERVICE surface, and Joe was found on the Service surface immediately afterward, which is precisely where that control lands. MINOR FINDING: the same surface renders two kinds of next-action with no distinction between them. The monitoring-gap banner action is a working control, but the per-environment lines at app.js line 126 render 'Next: ...' as an inert paragraph, including 'Next: Inspect the missing Worker outcome sample' and 'Next: Open Local edge service evidence' — both of which name a destination while offering no way to reach it. EVIDENCE-VALIDITY CONTRAST WORTH RECORDING FOR PHASE 0 EXIT: the Control Room prototype contains NO journeySteps equivalent — a search for journeySteps or journey-steps in control-room/public/js/app.js returns zero matches, and no numbered route chips appeared on the surfaces observed. The Control Room journeys are therefore uncoached in a way the six Workspace journeys were not, so the two halves of this scorecard do not carry equivalent evidence quality and must not be averaged together. PROCTOR METHOD NOTE, recorded because it nearly produced a false finding: two DOM queries run while Joe was still navigating reported zero interactive elements on this surface and suggested the CTA was inert text. That reading was wrong — the page had changed underneath the query and the selectors were scoped inside main while this prototype's navigation is eight plain buttons outside it. The claim was withdrawn before it reached the record and re-derived from source instead. DOM inspection during an active human run is unreliable; verify from source. Timing not instrumented.",
+   "timestamp": "2026-08-12T20:28:50-05:00"
   },
   {
    "id": "flow-02-service-provenance",
