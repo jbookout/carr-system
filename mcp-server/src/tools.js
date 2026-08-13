@@ -4776,6 +4776,83 @@ export const TOOLS = {
     }),
   },
 
+  "loop-headers": {
+    write: false,
+    description: "Read the standing paragraph that sits at the top of each loops section — the header prose of open-loops.md, its backlog file, team-loops.md, action-required.md and the idea bank. THE GAP THIS CLOSES: that prose is DATA (loop_block.prose_md), held there deliberately so a partner's own words stay his to change instead of being a code edit, but nothing could read it back except a raw table query, so nobody could see that a header had gone stale. Returns each block's file, section, version and prose, so a caller has the base_version edit-loop-header needs without probing a write verb for it.",
+    inputSchema: { type: "object", properties: {
+      file: { type: "string", description: "narrow to one render, e.g. '00_Context/open-loops.md'; substring match" },
+      section: { type: "string", description: "narrow to one section key: hot, backlog, open, done, parked, retired" },
+    } },
+    handler: async (c, _a, args) => {
+      const where = [], params = [];
+      if (args.file) { params.push(`%${args.file}%`); where.push(`rel_path ilike $${params.length}`); }
+      if (args.section) { params.push(args.section); where.push(`block_key = $${params.length}`); }
+      const r = await c.query(
+        `select id as block_id, rel_path as file, kind, block_key as section, seq,
+                version, coalesce(prose_md,'') as prose_md
+           from loop_block ${where.length ? "where " + where.join(" and ") : ""}
+          order by rel_path, seq`, params);
+      return { count: r.rows.length, blocks: r.rows };
+    },
+  },
+
+  "edit-loop-header": {
+    write: true,
+    description: "Rewrite the standing paragraph at the top of one loops section. THE GAP THIS CLOSES (loop #294): this prose is stored data rather than code — migration 0024 put it in loop_block.prose_md on purpose, so Joe's doctrine paragraph stays his to change — but no verb wrote that column, so a header that went stale could only be corrected by a raw table write, which is exactly the kind of write the record layer exists to prevent. It cost something real: open-loops.md's header pointed closed rows at a file that had been a frozen archive since 2026-07-31, a session read the stale pointer instead of the archive's own header, and reported to Joe that the closed-loop history was broken when 152 outcomes were sitting exactly where they belonged. Read the current text with loop-headers first and pass its version back as base_version. Pass the WHOLE replacement paragraph, not a patch — this verb sets the column, it does not merge.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      block_id: { type: "string", description: "exact uuid from loop-headers; wins over file+section" },
+      file: { type: "string", description: "the render, e.g. '00_Context/open-loops.md'; use with section" },
+      section: { type: "string", description: "the section key within that file: hot, backlog, open, done, parked, retired" },
+      base_version: { type: "integer", description: "the version loop-headers returned for this block" },
+      prose_md: { type: "string", description: "REQUIRED: the complete replacement paragraph, markdown, exactly as it should render" },
+    }, required: ["idempotency_key", "prose_md"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "edit-loop-header", args, async () => {
+      const cols = "id, rel_path, kind, block_key, version, coalesce(prose_md,'') as prose_md";
+      let r;
+      if (args.block_id) {
+        r = await c.query(`select ${cols} from loop_block where id=$1`, [args.block_id]);
+        if (!r.rows.length) throw new ToolError({ error: "not_found", block_id: args.block_id,
+          hint: "no loops section carries that id — read loop-headers for the list" });
+      } else {
+        if (!args.file || !args.section)
+          throw new ToolError({ error: "need_block_id_or_file_and_section",
+            hint: "pass block_id, or both file and section — a file alone is ambiguous because most render two sections" });
+        r = await c.query(
+          `select ${cols} from loop_block where rel_path ilike $1 and block_key = $2`,
+          [`%${args.file}%`, args.section]);
+        if (!r.rows.length) throw new ToolError({ error: "no_such_section", file: args.file, section: args.section,
+          hint: "read loop-headers for the real file/section pairs" });
+        if (r.rows.length > 1) throw new ToolError({ error: "ambiguous_file",
+          candidates: r.rows.map((x) => ({ block_id: x.id, file: x.rel_path, section: x.block_key })),
+          hint: "the file substring matched more than one render — pass block_id" });
+      }
+      const cur = r.rows[0];
+      await versionGuard(c, "loop_block", cur.id, args.base_version);
+
+      // An EMPTY header is not an edit, it is a deletion of the only explanation a
+      // reader of that render ever gets. Two of these blocks are Done tables whose
+      // prose is a single short line; blanking one silently is indistinguishable
+      // from the column never having been populated.
+      if (!String(args.prose_md).trim())
+        throw new ToolError({ error: "empty_prose",
+          hint: "pass the replacement paragraph; to say nothing, say it in words rather than by blanking the header" });
+      if (args.prose_md === cur.prose_md)
+        throw new ToolError({ error: "nothing_to_update", block_id: cur.id,
+          hint: "the text passed is byte-identical to what is stored" });
+
+      await c.query("update loop_block set prose_md=$1, updated_by=$2 where id=$3",
+        [args.prose_md, actor.id, cur.id]);
+      // The OLD text is kept in the event, in full. This paragraph is doctrine a
+      // partner wrote; an edit that leaves no way back is not a correction.
+      await writeEvent(c, actor, "edit-loop-header", "loop_block", cur.id,
+        { old: { prose_md: cur.prose_md }, new: { prose_md: args.prose_md },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, block_id: cur.id, file: cur.rel_path, section: cur.block_key,
+        was_length: cur.prose_md.length, now_length: args.prose_md.length };
+    }),
+  },
+
   "close-loop": {
     write: true,
     description: "Close a loop — done, or deliberately dropped. AN OUTCOME IS REQUIRED and the verb refuses without one: team-loops states the reason in its own words, 'outcomes are how the asker finds out without asking twice.' Say what actually came of it, not that it is closed. Where the row goes depends on whether its file keeps closed rows visible: a team_loop or action_required row moves to its Done table carrying the outcome, and an idea moves to the idea bank's Retired table the same way (its rule 4 is 'move, don't delete — the reasoning stays visible so we don't re-litigate it later'); an open_loop simply leaves the hot/backlog render, the same thing closing a row has always done. Use resolution 'dropped' when it is being abandoned rather than finished — recording an abandonment as done inflates every completion measure built on this.",
