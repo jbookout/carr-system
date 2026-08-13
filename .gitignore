@@ -48,11 +48,13 @@ tools/doc-convo/assets/whisper-server.log
 tools/doc-convo/assets/.harvest-brain-session-id
 
 # Client deal material never enters this repo, private or not (Joe ruling (a),
-# 2026-08-01, ORDER 42 — the same rule that keeps frozen-sources/ out). The
-# Ramsey/Enclave packet generator embeds the client's name and advisory prose
-# addressed to him, and the tmp-*-review folders are page renders of his
-# documents. Client deliverables live in the Drive vault with the rest of the
-# client's file; the scratch renders are staged in _to_delete.
-build_ramsey_carr_pdfs.py
+# 2026-08-01, ORDER 42 — the same rule that keeps frozen-sources/ out). Packet
+# generators embed the client's name and advisory prose addressed to them, the
+# branded PDFs are the client's own documents, and the tmp-*-review folders are
+# page renders of those documents. Finished client deliverables live in the
+# Drive vault under Output/; scratch renders are staged in the vault _to_delete/.
+# The patterns are deliberately generic: naming a client here would put the very
+# identifier this rule exists to keep out into a tracked file.
+build_*_carr_pdfs.py
 tmp-*-review/
-deliverables/ramsey-carr-branded-*/
+deliverables/*-carr-branded-*/
