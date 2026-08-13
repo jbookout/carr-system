@@ -1081,6 +1081,58 @@ except Exception as e:
     print(f"  ⚠︎ {'rules live':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# ── cutover readiness: LAST result per partner (Phase 1, 2026-08-13) ─────────
+# Unlike the "rules live" row above, this does NOT re-run the check — it reads
+# the artifact ops/cutover-readiness.py wrote the last time the nightly chain
+# ran it (out/cutover-readiness.json), same read-the-artifact pattern as the
+# vault-drift-watch row below. Re-running here would mean this row silently
+# fires a LIVE standing-context/doctrine-index call and a full store scan every
+# time someone runs `run.sh health` by hand, which is a heavier side effect
+# than a freshness check should carry. What matters for the cutover is whether
+# last night's proof was clean and recent, not whether it is clean RIGHT NOW.
+print("\ncutover readiness (store-first boot, per partner)")
+try:
+    _crc_path = os.path.join(REPO_ROOT, "out", "cutover-readiness.json")
+    if not os.path.exists(_crc_path):
+        print(f"  -- cutover-readiness    no run yet — ops/cutover-readiness.py has not been "
+              f"run (rides the nightly chain now; expected before the first night, a fault after)")
+    else:
+        with open(_crc_path) as _f:
+            _crj = json.load(_f)
+        if _crj.get("skip"):
+            print(f"  -- cutover-readiness    last run SKIPPED — {_crj['skip']}")
+        else:
+            _crc_age_h = (time.time() -
+                          datetime.strptime(_crj["generated_at"][:19], "%Y-%m-%dT%H:%M:%S").timestamp())
+            # generated_at is UTC (isoformat of a timezone.utc datetime); the strptime
+            # above parses it naive, so localtime-vs-UTC offsets this by up to a few
+            # hours depending on the machine's zone. Good enough for a freshness gate
+            # whose tolerance is measured in hours, same slack the vault-drift row below
+            # accepts from the same isoformat-vs-epoch approach.
+            _crc_age_h = abs(_crc_age_h) / 3600
+            _this = (_crj.get("this_machine") or {}).get("resolved_identity") or "(unresolved)"
+            _parts = _crj.get("partners") or {}
+            _bits = []
+            for _p in ("joe", "dell"):
+                _st = (_parts.get(_p) or {}).get("status", "MISSING")
+                _short = "READY" if _st == "READY" else ("PARTIAL" if _st.startswith("PARTIAL") else "NOT READY")
+                _bits.append(f"{_p}={_short}")
+            _summary = f"this machine={_this}; {', '.join(_bits)}"
+            if not _crj.get("overall_ready", False):
+                print(f"  ⚠︎ cutover-readiness    {_summary} ({_crc_age_h:.1f}h old) · on breach: "
+                      f"./.venv/bin/python ops/cutover-readiness.py and read the DISAGREES/FAILED lines")
+                rc = 1
+            elif _crc_age_h > 30:
+                print(f"  ⚠︎ cutover-readiness    STALE {_crc_age_h:.0f}h — last result was clean "
+                      f"({_summary}) · on breach: check the nightly chain log for the "
+                      f"'cutover readiness' step")
+                rc = 1
+            else:
+                print(f"  OK cutover-readiness    {_summary} ({_crc_age_h:.1f}h old)")
+except Exception as e:
+    print(f"  ⚠︎ cutover-readiness check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 # ── forgetting (loop #212, migration 0071) ──────────────────────────────────
 # The store's forgetting policy, surfaced daily: re-verify queue depth (expired
 # + unstamped-volatile verifications), ingest_inbox backlog, and growth SLOPE

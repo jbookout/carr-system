@@ -149,6 +149,18 @@ step "fetch allowlist (client domains -> guard)"     ./.venv/bin/python ops/fetc
 step "exports (7 targets -> vault)"                  ./run.sh export
 EXPORTS_RC=$LAST_STEP_RC
 
+# CUTOVER READINESS (Phase 1, 2026-08-13, August 21 cutover). Right after the
+# exports because it checks the compiled-rules renders those exports just
+# wrote against an independent store query, plus a LIVE standing-context /
+# doctrine-index call through this machine's own local-actor identity. Proves
+# nightly, for whichever partner this machine belongs to, that the store-first
+# boot path agrees with both the store and the fallback file — so drift shows
+# up here before the 21st instead of on it. The OTHER partner's live half
+# cannot be proven from this machine on purpose (Phase 1 closed the caller-
+# supplied-identity hole in local-verb.mjs); this step correctly reports that
+# half PARTIAL rather than failing on it — see ops/cutover-readiness.py.
+step "cutover readiness (store-first boot predicate)" ./.venv/bin/python ops/cutover-readiness.py
+
 # CORPUS FLIP (2026-08-06): the doctrine tier is git-canonical now — corpus/ under this
 # repo, not the Drive, is the source of truth. This step pushes whatever changed in git
 # out to the Drive/vault/home render copies. It refuses to clobber a source-side hand-edit
