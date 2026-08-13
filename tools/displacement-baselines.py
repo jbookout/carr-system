@@ -166,8 +166,20 @@ def is_typed_prompt(record):
         return False
     if record.get("isSidechain"):
         return False
-    if record.get("promptSource") == "sdk":
-        return False
+    # promptSource is NOT a usable signal for "the partner typed this", and
+    # excluding sdk here was the single most damaging error in this instrument.
+    # Measured across the whole corpus on 2026-08-13: promptSource is ABSENT on
+    # 15,433 user records (hook feedback, harness notices, tool traffic), reads
+    # "sdk" on 1,394, and reads "typed" on exactly 2. The partner's own prompts —
+    # verified against known turns he typed, including the one that authorised
+    # this fix — carry "sdk", because the desktop app drives Claude Code through
+    # the SDK. So the old rule discarded nearly every genuine partner turn while
+    # keeping the machine text that carries no promptSource at all: the filter was
+    # inverted, and no amount of tuning the strip pattern could have fixed it.
+    #
+    # Subagent traffic is already excluded above by isSidechain, tool output is
+    # excluded below by tool_result, and scripted or scheduled prompts are machine
+    # text caught by MACHINE_ORIGIN. promptSource adds nothing beyond that.
     msg = record.get("message")
     if isinstance(msg, dict) and isinstance(msg.get("content"), list):
         if any(
@@ -193,7 +205,69 @@ INJECTED = re.compile(
     r"))+"
 )
 
-MIN_TYPED = 12  # shorter than this is an acknowledgement fragment, not a turn
+# THIRD INSTRUMENT ERROR, corrected 2026-08-13, same family as the two above and
+# the same shape: the script ran clean and the number was wrong.
+#
+# INJECTED strips only a LEADING HEADER — a "Stop hook feedback:" line, a tag
+# block, a PreToolUse/PostToolUse line. But this project's conduct gates arrive as
+# "Stop hook feedback:\nCONDUCT GATE — ...". The header was stripped and the ENTIRE
+# GATE BODY survived as the tail, cleared MIN_TYPED, and was counted as the partner
+# typing. Other machine texts — harness retry notices, interruption markers, skill
+# preambles, image descriptors — matched no pattern at all and were counted whole.
+# Measured contamination at the time of the fix: 194 of 207 counted partner turns,
+# 94%, were machine-authored. This inflated baselines 1, 2 and 5. Baseline 3 counts
+# tool invocations and baseline 4 is human-timed, so neither was affected.
+#
+# Baseline 5 was contaminated twice over: its HANDOFF pattern matches the word
+# "handoff", and the harness's own CONTEXT HANDOFF GATE contains it, so the
+# machinery's notice was counted as evidence the partner hand-carried context.
+#
+# A whole-body veto is therefore required, not a leading-header strip.
+# CASE-SENSITIVE ON PURPOSE. The gates shout in capitals, and that is the whole
+# discriminator. An earlier draft compiled this with IGNORECASE, which turned
+# "[A-Z][A-Z ]{3,}GATE" into a trap for any turn STARTING with a word ending in
+# "gate" — it ate the partner's real turns "investigate…", "navigate…",
+# "propagate…", "yea loosen the gate" and "commite the gate". Three false
+# positives in a 1,380-turn corpus is small but it is the partner's own words, and
+# the regression test below pins it.
+MACHINE_SHOUTED = re.compile(
+    r"^(?:"
+    r"[A-Z][A-Z ]{3,}GATE\b"          # CONDUCT GATE, COMPLETION EVIDENCE GATE, ...
+    r"|DELEGATION TRIPWIRE\b"
+    r"|WRITE LAW\b"
+    r")"
+)
+
+# Fixed machine strings from the harness, the skill loader and the tool layer.
+# Safe under IGNORECASE because none is a prefix of ordinary partner speech.
+MACHINE_LITERAL = re.compile(
+    r"^(?:"
+    r"The previous response failed to produce"
+    r"|This session is being continued from"
+    r"|Please continue the conversation from"
+    r"|Continue from where you left off"
+    r"|\[Request interrupted"
+    r"|\[Image:"
+    r"|Base directory for this skill:"
+    r"|Caveat: The messages below"
+    r"|<[a-z-]+>"
+    r"|#\s*\w[\w ]*Skill\b"           # bundled-skill preamble text
+    r"|Approach this as the\b"        # skill-injected persona preamble
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_machine_origin(text):
+    """True when this text was authored by the machinery, not the partner."""
+    return bool(MACHINE_SHOUTED.match(text) or MACHINE_LITERAL.match(text))
+
+# The old floor of 12 characters discarded the partner's genuinely short turns —
+# "lets do it" is ten characters, "go ahead" is eight — while doing nothing to stop
+# the machine text above, which is always long. It errs in BOTH directions at once.
+# The veto now does the discriminating, so the floor only has to reject empties and
+# single stray characters.
+MIN_TYPED = 2
 
 
 def partner_text(record):
@@ -202,7 +276,12 @@ def partner_text(record):
     if not body.strip():
         return ""
     tail = INJECTED.sub("", body).strip()
-    return tail if len(tail) >= MIN_TYPED else ""
+    if len(tail) < MIN_TYPED:
+        return ""
+    # Whatever survived the header strip must still be the partner's own words.
+    if is_machine_origin(tail):
+        return ""
+    return tail
 
 
 # A question shape, not a topic. Deliberately crude and stated as such: it counts
