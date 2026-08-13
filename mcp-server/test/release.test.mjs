@@ -33,7 +33,7 @@ function fakeSql(responses) {
 
 test("buildRelease: full shape when everything is reachable and stamped", async () => {
   const sql = fakeSql([
-    ["schema_migrations", [{ applied_count: 101, highest_applied_migration: "0099_thing.sql" }]],
+    ["v_schema_ledger", [{ applied_count: 101, highest_applied_migration: "0099_thing.sql" }]],
     ["doctrine_meta", [{ generation: 42 }]],
   ]);
   const out = await buildRelease({
@@ -58,7 +58,7 @@ test("buildRelease: full shape when everything is reachable and stamped", async 
 
 test("buildRelease: git_sha reports null + a specific reason when GIT_SHA was never stamped", async () => {
   const sql = fakeSql([
-    ["schema_migrations", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
+    ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
     ["doctrine_meta", [{ generation: 1 }]],
   ]);
   const out = await buildRelease({ env: {}, sql, verbCount: 1, now: FIXED_NOW });
@@ -71,7 +71,7 @@ test("buildRelease: git_sha reports null + a specific reason when GIT_SHA was ne
 
 test("buildRelease: an empty-string GIT_SHA degrades to the same not-stamped reason", async () => {
   const sql = fakeSql([
-    ["schema_migrations", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
+    ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
     ["doctrine_meta", [{ generation: 1 }]],
   ]);
   const out = await buildRelease({ env: { GIT_SHA: "" }, sql, verbCount: 1, now: FIXED_NOW });
@@ -81,7 +81,7 @@ test("buildRelease: an empty-string GIT_SHA degrades to the same not-stamped rea
 
 test("buildRelease: a database failure degrades schema and doctrine_generation to null + reason, never throws", async () => {
   const sql = fakeSql([
-    ["schema_migrations", new Error("connection terminated unexpectedly")],
+    ["v_schema_ledger", new Error("connection terminated unexpectedly")],
     ["doctrine_meta", new Error("connection terminated unexpectedly")],
   ]);
   const out = await buildRelease({
@@ -106,9 +106,9 @@ test("buildRelease: a database failure degrades schema and doctrine_generation t
   assert.equal(out.verb_count, 50);
 });
 
-test("buildRelease: an empty schema_migrations table reports zero, not an error", async () => {
+test("buildRelease: an empty v_schema_ledger reports zero, not an error", async () => {
   const sql = fakeSql([
-    ["schema_migrations", [{ applied_count: 0, highest_applied_migration: null }]],
+    ["v_schema_ledger", [{ applied_count: 0, highest_applied_migration: null }]],
     ["doctrine_meta", [{ generation: 1 }]],
   ]);
   const out = await buildRelease({ env: { GIT_SHA: "c".repeat(40) }, sql, verbCount: 1, now: FIXED_NOW });
@@ -119,7 +119,7 @@ test("buildRelease: an empty schema_migrations table reports zero, not an error"
 
 test("buildRelease: doctrine_meta with no id=1 row reports null + a specific reason", async () => {
   const sql = fakeSql([
-    ["schema_migrations", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
+    ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
     ["doctrine_meta", []],
   ]);
   const out = await buildRelease({ env: { GIT_SHA: "d".repeat(40) }, sql, verbCount: 1, now: FIXED_NOW });
@@ -129,7 +129,7 @@ test("buildRelease: doctrine_meta with no id=1 row reports null + a specific rea
 
 test("buildRelease: never returns a secret — env is never echoed back, whatever it holds", async () => {
   const sql = fakeSql([
-    ["schema_migrations", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
+    ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
     ["doctrine_meta", [{ generation: 1 }]],
   ]);
   const env = {
@@ -158,7 +158,7 @@ test("buildRelease: never returns a secret — env is never echoed back, whateve
 
 test("buildRelease: response is JSON-safe (no undefined, no function, round-trips clean)", async () => {
   const sql = fakeSql([
-    ["schema_migrations", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
+    ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
     ["doctrine_meta", [{ generation: 1 }]],
   ]);
   const out = await buildRelease({ env: {}, sql, verbCount: 1, now: FIXED_NOW });

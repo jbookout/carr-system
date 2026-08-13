@@ -26,15 +26,22 @@
 //                          reported as null + a reason, never guessed or
 //                          left silently absent.
 //   schema                — schema_migrations is tools/migrate.py's ledger
-//                          of applied migrations, read the same way
-//                          tools/migrate.py itself reads it. It is NOT
-//                          ground truth: tools/ledger-repair.py exists
-//                          because this exact table drifted from reality
-//                          once already (four migrations physically applied
-//                          to production outside the runner were invisible
-//                          to it until repaired 2026-07-31). So this field
-//                          reports what the TRACKING TABLE CLAIMS, and says
-//                          so in its own `note`, every time.
+//                          of applied migrations. Read through v_schema_ledger
+//                          (0113), a two-column view over schema_migrations,
+//                          because carr_reader — the role this endpoint's
+//                          DATABASE_URL_READER connection uses — is a
+//                          views-only role by design (0004); the endpoint's
+//                          first live call found that gap (permission denied
+//                          on schema_migrations direct) and 0113 closed it
+//                          with a view rather than a base-table grant, to
+//                          keep that posture intact. It is NOT ground truth
+//                          either way: tools/ledger-repair.py exists because
+//                          this exact table drifted from reality once already
+//                          (four migrations physically applied to production
+//                          outside the runner were invisible to it until
+//                          repaired 2026-07-31). So this field reports what
+//                          the TRACKING TABLE CLAIMS, and says so in its own
+//                          `note`, every time.
 //   doctrine_generation   — same query doctrine.js's standing-context verb
 //                          already runs (`select generation from
 //                          doctrine_meta where id = 1`), reused rather than
@@ -52,7 +59,7 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
   try {
     const rows = await sql`
       select count(*)::int as applied_count, max(filename) as highest_applied_migration
-        from schema_migrations`;
+        from v_schema_ledger`;
     const row = (rows && rows[0]) || {};
     schema = {
       highest_applied_migration: row.highest_applied_migration ?? null,
