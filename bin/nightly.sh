@@ -122,6 +122,34 @@ export CARR_EXPORT_LIVE=1
 # secrets policy, held in the additive INGEST_TOKENS_EXTRA Worker secret).
 # Until that token is pasted on both ends, the POST 401s loudly and the local
 # quarantine + salvage manifest still capture everything — fail-visible.
+# RECOVERY-POINT CATCH-UP, ahead of every step that could hang.
+#
+# The chain already survives a step that FAILS: `step` records the bad exit and
+# keeps going, so a broken export cannot skip the backup. It does NOT survive a
+# step that HANGS — the backup is the last step, so anything that blocks earlier
+# takes the backup down with it, wake schedule or no.
+#
+# Joe accepted a 24-hour recovery point objective on 2026-08-13. That tolerance is
+# a contract, and a contract that only holds when nothing hangs is not a contract.
+# So: if the newest backup is already older than the objective, take one NOW,
+# before the chain risks stalling. The end-of-chain backup still runs and is still
+# the authoritative post-write snapshot; this only fires when we are ALREADY out
+# of contract, which on a healthy night is never.
+RPO_HOURS=24
+newest_backup="$(ls -t "$REPO"/backups/*.sql.age 2>/dev/null | head -1)"
+if [ -z "$newest_backup" ]; then
+  say "CATCH-UP  no prior backup found — taking one before the chain begins"
+  step "recovery-point catch-up (no prior backup)" ./bin/backup-dump.sh
+else
+  backup_age_h=$(( ( $(date +%s) - $(stat -f %m "$newest_backup") ) / 3600 ))
+  if [ "$backup_age_h" -ge "$RPO_HOURS" ]; then
+    say "CATCH-UP  newest backup is ${backup_age_h}h old, objective is ${RPO_HOURS}h — taking one before the chain begins"
+    step "recovery-point catch-up (${backup_age_h}h since last backup)" ./bin/backup-dump.sh
+  else
+    say "OK    recovery point intact (newest backup ${backup_age_h}h old, objective ${RPO_HOURS}h)"
+  fi
+fi
+
 step "vault drift watch (check, first)"              env CARR_DRIFT_INGEST=1 ./.venv/bin/python ops/vault-drift-watch.py --check
 
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
