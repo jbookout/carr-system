@@ -269,11 +269,44 @@ check_migration() {
     *) hard migration "REFUSED: CARR_CI_DATABASE_URL is not loopback. This applies every migration; it runs against a throwaway only."
        return ;;
   esac
+  # WHAT THIS ASKS, changed 2026-08-13. It used to replay all 121 migrations
+  # against an empty database, which CANNOT WORK and is also the wrong question.
+  # Several migrations are data backfills carrying guards like "remapped ZERO
+  # deals — stop and report, do not force"; those guards are correct, they catch
+  # a backfill that silently did nothing to production, and they assert on
+  # business data an empty database legitimately does not have.
+  #
+  # It now loads db/schema.sql — production's committed structure plus its
+  # applied-migration ledger — and applies whatever is PENDING on top. That is
+  # the question worth gating a change on: does the migration in this diff apply
+  # cleanly to the database we actually have? Replaying history tests history.
+  local psql_bin=""
+  for c in psql /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql; do
+    if command -v "$c" >/dev/null 2>&1; then psql_bin="$c"; break; fi
+  done
+  if [ -z "$psql_bin" ]; then
+    skip migration "no psql on PATH to load db/schema.sql"
+    return
+  fi
+  if [ ! -f db/schema.sql ]; then
+    skip migration "db/schema.sql absent — regenerate with bin/schema-snapshot.sh"
+    return
+  fi
+
+  if ! PGOPTIONS='--client-min-messages=warning' run_quiet "$LOGDIR/migration-load.log" \
+       "$psql_bin" -v ON_ERROR_STOP=1 -q -d "$dsn" -f db/schema.sql; then
+    tail -25 "$LOGDIR/migration-load.log" >&2
+    bad migration "db/schema.sql did not load — the committed structure is not loadable"
+    return
+  fi
+
   if DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration.log" "$PY" tools/migrate.py --apply --yes; then
-    ok migration "$(grep -c . migrations/*.sql >/dev/null 2>&1; ls migrations/*.sql | wc -l | tr -d ' ') migrations apply to an empty database"
+    local n
+    n="$(grep -c '^applying ' "$LOGDIR/migration.log" 2>/dev/null || echo 0)"
+    ok migration "committed schema loads; $n pending migration(s) apply on top of it"
   else
     tail -30 "$LOGDIR/migration.log" >&2
-    bad migration "migrations did not apply cleanly"
+    bad migration "a pending migration did not apply to the committed schema"
   fi
 }
 
