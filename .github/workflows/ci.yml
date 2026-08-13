@@ -84,9 +84,35 @@ jobs:
       - name: Install Node dependencies
         run: npm --prefix mcp-server ci
 
+      - name: Install zsh
+        # bin/review-council-runner.sh has a #!/bin/zsh shebang and its test
+        # invokes it by that interpreter. Installing zsh keeps that suite in CI
+        # rather than excluding it — the coverage is worth 3 seconds of apt.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+
+      - name: Create the Neon admin role the migrations expect
+        # Migration 0005 grants the privilege bundles to neondb_owner, which
+        # exists on every Neon project and on no vanilla Postgres. Without it the
+        # migration set is not rehearsable anywhere except production, which
+        # defeats the point of rehearsing. Creating it here models Neon's
+        # environment rather than editing a migration that is already applied.
+        env:
+          PGPASSWORD: carr_ci
+        run: |
+          psql -h localhost -U carr_ci -d carr_ci -v ON_ERROR_STOP=1 -c \
+            "do \$\$ begin
+               if not exists (select 1 from pg_roles where rolname = 'neondb_owner') then
+                 create role neondb_owner;
+               end if;
+             end \$\$;"
+
       - name: Run every check class
         env:
           # ops/ci.sh refuses any DSN that is not loopback. This one is the
           # service container above.
           CARR_CI_DATABASE_URL: postgres://carr_ci:carr_ci@localhost:5432/carr_ci # ci-secret-scan: allow — throwaway container credential, loopback only, dies with the runner
+          # Excludes the checks whose dependency cannot exist on a runner
+          # (installed Claude Code settings, macOS launchd). Each one prints its
+          # reason in the output; nothing is dropped silently.
+          CARR_CI_PORTABLE_ONLY: "1"
         run: ops/ci.sh --strict

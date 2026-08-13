@@ -61,6 +61,13 @@ RC_DIR = os.path.join(REPO, "out", "review-council")
 REQ_DIR = os.path.join(RC_DIR, "requests")
 FAILED_DIR = os.path.join(REQ_DIR, "failed")
 
+# out/ is gitignored, so a fresh checkout does not have these. On Joe's Mac they
+# have existed for months and the tests silently depended on that; on a CI runner
+# the first write died with FileNotFoundError. Create them rather than assume
+# them — a test that only passes on a machine with history is not a test.
+for _d in (RC_DIR, REQ_DIR, FAILED_DIR):
+    os.makedirs(_d, exist_ok=True)
+
 results: list[tuple[str, bool, str]] = []  # (label, ok, detail)
 
 
