@@ -247,28 +247,14 @@ def is_mechanical(tool: str) -> bool:
     return tool in MECHANICAL or tool.startswith(("mcp__carr__", "mcp__carr_records__"))
 
 
-# A no-op-ish confirmation command has no read surface and cannot enumerate or
-# exfiltrate anything, so counting it toward the mechanical-sweep threshold
-# only produces false positives.  Live case, 2026-08-13: a leaf worker's plain
-# `echo` -- issued only to signal a step boundary -- tripped the tripwire
-# meant for repeated grep/find/read sweeps.  Deliberately narrow: any shell
-# metacharacter (pipe, subshell, redirect, substitution, chaining) drops the
-# command out of this allowance and back into ordinary mechanical counting,
-# so `echo $(cat secrets)` or `echo done && rm -rf x` is never exempted.
-TRIVIAL_BASH = re.compile(
-    r"^\s*(?:echo|true|pwd|date|whoami|hostname)\b[^|;&`$<>]*$"
-)
+# A no-op-ish confirmation command (echo/true/pwd/git status/...) has no read
+# surface and cannot enumerate or exfiltrate anything. Superseded 2026-08-14:
+# rather than a deny-list of "trivial" commands, is_broad() below is an
+# ALLOW-list of actual sweep shapes (recursive grep, rg/ag/fd, find, ls -R),
+# so an echo, a git status, or any other command that is not itself a
+# broad-search operation is automatically excluded without needing a separate
+# triviality check.
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "apply_patch", "functions.apply_patch"}
-
-
-def is_trivial_bash(tool: str, tool_input: dict) -> bool:
-    """A bare echo/true/pwd/date/whoami/hostname, no metacharacters."""
-    if tool != "Bash":
-        return False
-    command = tool_input.get("command")
-    if not isinstance(command, str):
-        return False
-    return bool(TRIVIAL_BASH.match(command.strip()))
 
 
 def written_path(tool: str, tool_input: dict) -> str | None:
@@ -298,6 +284,74 @@ def reads_own_recent_write(tool: str, tool_input: dict, written: set[str]) -> bo
     except Exception:
         real = path
     return real in written
+
+
+# --- Broad-search classification (2026-08-14 fix) --------------------------
+# THE RULE, STATED IN ONE SENTENCE: a call only counts toward the sweep --
+# and is only ever eligible to be blocked -- when it is ITSELF broad-search
+# work (Grep, Glob, WebSearch, a Bash/functions.exec command that is itself a
+# recursive/multi-file search, or a Read of a second-or-later distinct file
+# this turn); everything else -- git status/log/diff/show, a single database
+# query, a targeted Read of one named file, a re-read of a file this turn
+# already wrote -- is never counted and never blocked, no matter how many of
+# them stack up.
+#
+# WHY. The gate fired today against the MAIN SEAT after essentially one
+# lookup: a targeted Read of a specific file the session needed in order to
+# fix this very gate, `git status` checks, and single-purpose verification
+# queries. The delegation latch this gate enforces explicitly says "the main
+# seat MAY verify load-bearing findings and execute authorised writes" -- so
+# blocking targeted verification directly contradicted the rule the gate
+# exists to enforce. The old design counted ANY second Bash/Read/Grep/Glob/
+# WebFetch/WebSearch/DB call in a turn, regardless of what that call actually
+# was, which made "git status" after one "Read" indistinguishable from a real
+# codebase sweep. This section replaces "does this call's TOOL TYPE match a
+# mechanical list" with "is this call's actual SHAPE a broad search", and
+# replaces "any Nth call" with "N consecutive broad-search calls" -- a
+# threshold chosen to sit comfortably above a single targeted lookup while
+# still catching a main seat that is plainly grinding through a codebase.
+BROAD_BASH = re.compile(
+    r"\bgrep\b[^\n]*-\w*[rR]\w*(?:\s|$)"     # grep -r / -R (recursive)
+    r"|\b(?:rg|ag|fd)\b"                      # ripgrep / silver searcher / fd
+    r"|\bfind\s"                              # find over a path
+    r"|\bls\s+-\w*R\w*\b",                    # ls -R
+    re.I,
+)
+BASH_LIKE_TOOLS = {"Bash", "functions.exec"}
+
+
+def is_broad(name: str, inp: dict, seen_read_files: set[str],
+             written: set[str]) -> bool:
+    """Is THIS call, on its own, sweep work -- independent of turn history?
+
+    Mutates `seen_read_files` for Read calls so repeated calls in the same
+    scan share one running notion of "distinct files seen so far this turn".
+    """
+    if name in ("Grep", "Glob", "WebSearch"):
+        return True
+    if name in BASH_LIKE_TOOLS:
+        command = inp.get("command") or inp.get("cmd")
+        if not isinstance(command, str):
+            return False
+        return bool(BROAD_BASH.search(command))
+    if name == "Read":
+        if reads_own_recent_write(name, inp, written):
+            return False
+        path = inp.get("file_path") or inp.get("path")
+        if not isinstance(path, str) or not path:
+            return False
+        try:
+            real = os.path.realpath(path)
+        except Exception:
+            real = path
+        if real in seen_read_files:
+            return False  # a re-read of a file already seen this turn
+        first_file = not seen_read_files
+        seen_read_files.add(real)
+        return not first_file  # the FIRST distinct file this turn is targeted
+    # DB queries (mcp__carr__/mcp__carr_records__), WebFetch (one URL),
+    # apply_patch, and anything else: single-purpose, never broad.
+    return False
 
 
 def is_agent_tool(tool: str) -> bool:
@@ -633,22 +687,44 @@ def main() -> int:
         if any(is_agent_tool(name) for name in used):
             return 0
 
-        # Count only calls that are actually sweep work: a trivial echo/true
-        # confirmation, or a Read of a path this same turn already wrote,
-        # carries none of the repeated-grep/find/read cost the gate exists to
-        # push downhill, so neither should consume the one free lookup or
-        # trip the tripwire.  Order matters -- a write earlier in this window
-        # exempts a later read of that same path, not the reverse.
+        # Order matters -- a write earlier in this window exempts a later
+        # read of that same path, not the reverse. `written` and
+        # `seen_read_files` accumulate across every prior call in the turn so
+        # the CURRENT call's own broadness (checked next) sees the same
+        # running state a call at this position would have seen live.
         written: set[str] = set()
-        mechanical_count = 0
+        seen_read_files: set[str] = set()
+        broad_count = 0
         for name, inp in calls:
-            if is_mechanical(name) and not is_trivial_bash(name, inp) \
-                    and not reads_own_recent_write(name, inp, written):
-                mechanical_count += 1
+            if is_broad(name, inp, seen_read_files, written):
+                broad_count += 1
             target = written_path(name, inp)
             if target:
                 written.add(target)
-        if mechanical_count == 0:  # the one inline briefing lookup the rule allows
+
+        # THE GATE ONLY EVER ACTS ON WHAT THIS CALL ACTUALLY IS. A call that
+        # is not itself broad-search work -- git status/log/diff, a single DB
+        # query, a targeted Read of one named file, a re-read of a file this
+        # turn already wrote -- is allowed here, full stop, regardless of
+        # what preceded it. This is the fix: the old design blocked on the
+        # Nth call of ANY mechanical tool type; this design blocks only when
+        # the call itself is a sweep operation.
+        current_input = payload.get("tool_input") or payload.get("toolInput") or {}
+        if not isinstance(current_input, dict):
+            current_input = {}
+        if not is_broad(tool, current_input, seen_read_files, written):
+            return 0
+
+        # Under an active sticky delegated task, Joe already said to
+        # delegate, so one broad-search lookup is still free (the "one
+        # briefing lookup" the rule has always allowed) and the second broad
+        # call denies. Without an active task, three consecutive broad calls
+        # are allowed before the tripwire fires -- comfortably past a single
+        # targeted search or a couple of related lookups, while still
+        # catching a main seat that is plainly grinding through a codebase.
+        threshold = 2 if task_id else 3
+        total_broad = broad_count + 1
+        if total_broad < threshold:
             return 0
 
         if task_id:
@@ -656,14 +732,16 @@ def main() -> int:
                 payload,
                 "DELEGATION GATE — active delegated task " + task_id + ". The partner's "
                 "instruction survives phase changes, new logins/data sources, retries, "
-                "continuation and compaction. One briefing lookup was allowed; this is the "
-                "second mechanical call. Spawn the cheapest Agent qualified to complete the "
-                "subtask correctly, including a Terra peer when the work needs it. The main "
-                "seat may verify load-bearing findings and execute authorised writes, but may "
-                "not reclaim the sweep. Release only with a visible exact `delegation "
-                "complete: " + task_id + "`, or the partner's explicit revocation.",
+                "continuation and compaction. One broad-search lookup was allowed; this is "
+                "the second broad-search call (Grep/Glob/WebSearch, a recursive/multi-file "
+                "Bash search, or a Read of another distinct file this turn). Spawn the "
+                "cheapest Agent qualified to complete the subtask correctly, including a "
+                "Terra peer when the work needs it. The main seat may verify load-bearing "
+                "findings and execute authorised writes, but may not reclaim the sweep. "
+                "Release only with a visible exact `delegation complete: " + task_id + "`, "
+                "or the partner's explicit revocation.",
                 task_id,
-                mechanical_count,
+                total_broad,
             )
 
         assistant_text = "\n".join(
@@ -708,10 +786,14 @@ def main() -> int:
 
         return deny(
             payload,
-            "DELEGATION TRIPWIRE — second mechanical tool call this turn and no executor "
-            "declared. Either spawn the cheapest Agent qualified to do the subtask "
-            "correctly (a Terra peer counts), or START A LINE with `executor: <label> — "
-            "because <specific reason>`. The label must be one of: " + EXECUTOR_LABELS +
+            "DELEGATION TRIPWIRE — third broad-search call this turn (Grep/Glob/WebSearch, "
+            "a recursive/multi-file Bash search such as grep -r, find, rg, fd or ls -R, or a "
+            "Read of a third distinct file) and no executor declared. git status/log/diff, a "
+            "single database query, a targeted Read of one named file, and re-reading a file "
+            "this turn already wrote are never counted and never blocked -- only an actual "
+            "sweep is. Either spawn the cheapest Agent qualified to do the subtask correctly "
+            "(a Terra peer counts), or START A LINE with `executor: <label> — because "
+            "<specific reason>`. The label must be one of: " + EXECUTOR_LABELS +
             ". Any other word is rejected. Most reliable channel: put that same line in the "
             "Bash `description`, or as a leading `# executor: ...` comment on the command, "
             "which this hook reads directly and cannot miss. "
@@ -719,7 +801,7 @@ def main() -> int:
             "orchestration, judgment, verification, or is too small to brief. Do not "
             "silently absorb the sweep.",
             None,
-            mechanical_count,
+            total_broad,
             scan,
             attempts,
         )

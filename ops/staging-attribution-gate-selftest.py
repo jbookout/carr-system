@@ -28,6 +28,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -212,6 +213,81 @@ def import_case_malformed_json_allows():
     return code == 0
 
 
+# --- 2026-08-14 fix: attribute by OBSERVATION as well as by transcript -----
+# staging-observation-tracker.py accumulates a per-session
+# out/staging-observed/<session>.json of tracked paths this session made
+# dirty by running a script through Bash. These cases exercise the union
+# staging-attribution-gate.py now does: own_written_paths() UNION
+# observed_dirty_paths(). mod.OBSERVED_DIR is monkeypatched to an isolated
+# temp dir for every case so this never reads or writes the real out/
+# directory (which real concurrent sessions are using).
+
+def import_case_observed_script_write_allowed():
+    """THE REAL SHAPE, case 1: a script (not Write/Edit/MultiEdit) modified
+    an existing tracked file, the tracker observed it, and THIS session then
+    stages it -- must ALLOW even though the transcript carries zero
+    Write/Edit/MultiEdit records for that path."""
+    transcript = make_transcript()  # no Write/Edit/MultiEdit records at all
+    orig_status, orig_dir = mod.porcelain_status, mod.OBSERVED_DIR
+    tmp_observed = tempfile.mkdtemp(prefix="sag-observed-")
+    session = "observed-fixture-session"
+    mod.porcelain_status = lambda: {"fake/script-written.py": "M "}
+    mod.OBSERVED_DIR = tmp_observed
+    try:
+        with open(os.path.join(tmp_observed, f"{session}.json"), "w") as fh:
+            json.dump({"observed": ["fake/script-written.py"], "pending": {}}, fh)
+        code, out, err = run_main("git add fake/script-written.py", transcript, session=session)
+    finally:
+        mod.porcelain_status, mod.OBSERVED_DIR = orig_status, orig_dir
+        os.unlink(transcript)
+        shutil.rmtree(tmp_observed, ignore_errors=True)
+    return code == 0
+
+
+def import_case_not_observed_and_not_written_denied():
+    """THE REAL SHAPE, case 2: a file modified by another process, with NO
+    Write/Edit record AND no observation by this session (empty observed
+    state) -- must still DENY. Proves the union does not quietly become
+    allow-everything."""
+    transcript = make_transcript()  # no Write/Edit/MultiEdit records
+    orig_status, orig_dir = mod.porcelain_status, mod.OBSERVED_DIR
+    tmp_observed = tempfile.mkdtemp(prefix="sag-observed-empty-")
+    session = "no-observation-session"
+    mod.porcelain_status = lambda: {"fake/untouched.py": "M "}
+    mod.OBSERVED_DIR = tmp_observed  # empty: no state file for this session
+    try:
+        code, out, err = run_main("git add fake/untouched.py", transcript, session=session)
+        mentions = "fake/untouched.py" in err
+    finally:
+        mod.porcelain_status, mod.OBSERVED_DIR = orig_status, orig_dir
+        os.unlink(transcript)
+        shutil.rmtree(tmp_observed, ignore_errors=True)
+    return code == 2 and mentions
+
+
+def import_case_observed_set_does_not_bypass_wholesale():
+    """THE REAL SHAPE, case 3: wholesale forms (`git add -A`) must still DENY
+    unconditionally even when the observed set would have covered every
+    dirty path individually. Observation is an attribution signal for named
+    paths, never a reason to waive the wholesale-form refusal -- decision
+    9e1f83c2 has no exception for it."""
+    transcript = make_transcript()
+    orig_status, orig_dir = mod.porcelain_status, mod.OBSERVED_DIR
+    tmp_observed = tempfile.mkdtemp(prefix="sag-observed-wholesale-")
+    session = "observed-wholesale-session"
+    mod.porcelain_status = lambda: {"fake/a.py": "M ", "fake/b.py": "M "}
+    mod.OBSERVED_DIR = tmp_observed
+    try:
+        with open(os.path.join(tmp_observed, f"{session}.json"), "w") as fh:
+            json.dump({"observed": ["fake/a.py", "fake/b.py"], "pending": {}}, fh)
+        code, out, err = run_main("git add -A", transcript, session=session)
+    finally:
+        mod.porcelain_status, mod.OBSERVED_DIR = orig_status, orig_dir
+        os.unlink(transcript)
+        shutil.rmtree(tmp_observed, ignore_errors=True)
+    return code == 2
+
+
 IMPORT_CASES = [
     ("own-path-allowed", import_case_own_path_allowed, True),
     ("foreign-path-denied", import_case_foreign_path_denied, False),
@@ -219,6 +295,9 @@ IMPORT_CASES = [
     ("override-allowed-and-receipted", import_case_override_allowed_and_receipted, True),
     ("override-no-reason-denied", import_case_override_flag_without_reason_still_denied, False),
     ("malformed-json-allows", import_case_malformed_json_allows, True),
+    ("observed-script-write-allowed", import_case_observed_script_write_allowed, True),
+    ("not-observed-and-not-written-denied", import_case_not_observed_and_not_written_denied, False),
+    ("observed-set-does-not-bypass-wholesale", import_case_observed_set_does_not_bypass_wholesale, False),
 ]
 
 

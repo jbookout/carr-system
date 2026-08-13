@@ -47,21 +47,33 @@ appears in its own transcript's Write/Edit/MultiEdit history NOR is a brand-new
 untracked file. That is exactly the incident shape — an existing file another
 session is mid-editing, swept into a stranger's commit.
 
-WHAT THIS MISSES, STATED PLAINLY: a session that modifies a tracked file via
-Bash (a redirect, sed -i, a script that writes output) rather than the
-Write/Edit/MultiEdit tools leaves no transcript trace this gate can see, so
-staging that file reads as "not written by this session" even though it was.
-To keep that from becoming a false refusal — a gate that cries wolf gets
-worked around — brand-new UNTRACKED paths ("??" in porcelain) are allowed
-through unconditionally: creating a new file is the common case for a Bash
-based write, and the specific harm this decision targets (another session's
-uncommitted EDIT to an EXISTING file, mixed into a commit that does not
-describe it) does not apply to a file with no prior committed content to
-misattribute. The tradeoff is deliberate and asymmetric: it will occasionally
-let a foreign new file through, and it will very rarely refuse this session's
-own Bash-authored edit to an existing tracked file — bias toward the latter
-being rare and toward never blocking a session's own legitimate work over
-catching every possible foreign path.
+WHAT THIS USED TO MISS, until 2026-08-14: a session that modifies a tracked
+file via Bash (a redirect, sed -i, a script that writes output) rather than
+the Write/Edit/MultiEdit tools left no transcript trace this gate could see,
+so staging that file read as "not written by this session" even though it
+was — which broke the real unattended pattern, since the nightly chain and
+other scheduled jobs regenerate tracked files by running scripts and then
+(per standing rule bc9188b4) commit their own work. THE FIX: attribute by
+OBSERVATION as well as by transcript. hooks/staging-observation-tracker.py
+runs on both sides of every Bash call this session makes, diffs `git status`
+before/after each call, and accumulates every tracked path that became dirty
+as a direct result of THIS session's own command into
+out/staging-observed/<session_id>.json. `observed_dirty_paths()` below reads
+that file, and `own_written_paths() | observed_dirty_paths(session_id)` is
+what "this session's own work" now means — transcript edits UNION
+observed-dirty-after-my-own-command. A brand-new UNTRACKED path ("??" in
+porcelain) is STILL allowed through unconditionally regardless of either
+mechanism: creating a new file is the common case for a Bash-based write, and
+the specific harm this decision targets (another session's uncommitted EDIT
+to an EXISTING file, mixed into a commit that does not describe it) does not
+apply to a file with no prior committed content to misattribute.
+
+THE HONEST REMAINING GAP: the observation tracker correlates a Pre- and
+Post-snapshot by `tool_use_id`, so a Bash write whose Pre-side observation was
+never recorded (harness restarted mid-call, or this tracker was only wired
+after the session's first Bash call) still reads as unattributed. That is the
+same safe direction as before -- a missed observation costs one honest
+refusal, recoverable via the override below, never a silent misattribution.
 
 THE OVERRIDE, mirroring the break-glass envelope in tools/db-tap.py (env flag
 + required reason). Because a PreToolUse hook only ever sees the COMMAND TEXT
@@ -103,6 +115,9 @@ from datetime import datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "staging-attribution-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "hook-guard.log")
+# Written by hooks/staging-observation-tracker.py's Pre/Post Bash pair -- see
+# that file's docstring for the observation mechanism this reads.
+OBSERVED_DIR = os.path.join(REPO, "out", "staging-observed")
 
 # Ordered: nothing here needs precedence over anything else, both are checked.
 COMMIT_WHOLESALE = re.compile(
@@ -250,6 +265,35 @@ def own_written_paths(transcript_path):
     return written
 
 
+def _observed_state_path(session_id):
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (session_id or "unknown"))
+    return os.path.join(OBSERVED_DIR, f"{safe}.json")
+
+
+def observed_dirty_paths(session_id):
+    """Repo-relative paths THIS session made dirty by running a script through
+    Bash, per staging-observation-tracker.py's own Pre/Post `git status` diff.
+
+    Ground truth about STATE CHANGE, complementing own_written_paths()'s
+    ground truth about TOOL CALLS -- together the two cover both ways this
+    session can modify a tracked file: the Write/Edit/MultiEdit tools, and
+    everything else run through Bash (a redirect, sed -i, a pipeline run).
+    Fails safe to an empty set on any error, same as every other lookup here
+    -- a missing observation costs one honest refusal, never a silent grant.
+    """
+    if not session_id:
+        return set()
+    try:
+        with open(_observed_state_path(session_id)) as fh:
+            data = json.load(fh)
+        paths = data.get("observed") if isinstance(data, dict) else None
+        if isinstance(paths, list):
+            return {p for p in paths if isinstance(p, str)}
+    except Exception:
+        pass
+    return set()
+
+
 def extract_add_paths(command, cwd):
     """[(as-typed, repo-relative-or-None), ...] for every `git add` invocation
     in the command that is NOT one of the wholesale forms (already filtered by
@@ -349,7 +393,12 @@ def main():
         if not status:
             sys.exit(0)  # clean tree (or git unreachable) — nothing to catch
 
+        # Ground truth from two independent signals, unioned: the harness's
+        # own Write/Edit/MultiEdit record of this session's tool calls, AND
+        # staging-observation-tracker.py's Pre/Post `git status` diff of
+        # this session's own Bash-run scripts. See both docstrings.
         written = own_written_paths(payload.get("transcript_path"))
+        written |= observed_dirty_paths(session_id)
 
         foreign = []
         for as_typed, rel in add_paths:
@@ -361,7 +410,7 @@ def main():
             if code == "??":
                 continue  # brand-new untracked file — see docstring for why
             if rel in written or as_typed in written:
-                continue  # this session's own Write/Edit/MultiEdit, ground truth
+                continue  # this session's own edit or observed script-write
             foreign.append((as_typed, rel, code))
 
         if not foreign:
@@ -404,21 +453,23 @@ def main():
                 "afterward, not silent."
             )
 
-        own_list = ", ".join(sorted(written)[:8]) or "(none this session has written)"
+        own_list = ", ".join(sorted(written)[:8]) or "(none this session has written or been observed writing)"
         reason = (
             "STAGING ATTRIBUTION GATE — refused: path(s) not written by this "
             "session.\n\n"
             f"{foreign_list}\n\n"
             "Each has an uncommitted, tracked modification and none of them "
-            "appear in this session's own Write/Edit/MultiEdit history "
-            f"(this session wrote: {own_list}). ~/carr-system runs several "
-            "concurrent Claude sessions against one shared working tree — "
-            "this is very likely another session's in-flight work.\n\n"
+            "appear in this session's own Write/Edit/MultiEdit history OR its "
+            "own Bash-run script edits observed via git-status diff "
+            f"(this session wrote/observed: {own_list}). ~/carr-system runs "
+            "several concurrent Claude sessions against one shared working "
+            "tree — this is very likely another session's in-flight work.\n\n"
             "DO THIS INSTEAD:\n"
             "  - stage only the path(s) you personally wrote\n"
-            "  - if a listed path really is yours (edited via Bash rather "
-            "than the Write/Edit tool, so this gate could not see it), say so "
-            "and stage it by name\n"
+            "  - if a listed path really is yours (a script this session ran "
+            "before the observation tracker was wired, or a call whose "
+            "tool_use_id the tracker never matched), say so and stage it by "
+            "name\n"
             "  - if you are genuinely ADOPTING an orphaned file because its "
             "writer disappeared, use the named override:\n\n"
             "    CARR_ADOPT_ORPHAN=1 CARR_ADOPT_REASON=\"why you're adopting "
