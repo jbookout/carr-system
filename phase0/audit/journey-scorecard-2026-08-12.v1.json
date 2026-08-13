@@ -48,11 +48,11 @@
     "all candidates dispositioned",
     "purge gate truthful"
    ],
-   "result": null,
-   "coached": null,
+   "result": "pass",
+   "coached": false,
    "time_seconds": null,
-   "friction_notes": null,
-   "timestamp": null
+   "friction_notes": "Run unaided and completed end to end. RUN AUTHENTICITY VERIFIED AGAINST THE SHIPPED FIXTURE rather than taken from the partner's report: fixtures/call-review.v1.json ships capture_stage 'ready' with all_candidates_dispositioned, aggregate_summary_confirmed, legal_hold, policy_resolved, recovery_window_elapsed and purge_eligible all false. Observed end state was capture_stage 'complete' with dispositioned and aggregate-confirmed true, which app.js sets only inside the complete-call action (lines 386-389), whose control is disabled while any candidate remains pending (line 135). Joe therefore drove ready to recording to review, dispositioned every candidate individually (all read 'confirmed', none skipped), then confirmed the aggregate summary to reach complete. ALL FIVE CRITERIA MET: (1) parked records excluded — 'Parked records excluded: Paused prospect demo' rendered explicitly alongside the two active records, and the pre-check confirmed this list is fixture-sourced and independent of the Myrick record's state, so journey 2's restore did not contaminate it; (2) no guessed speaker or target — every candidate in all seven sections carries 'Exact target: wrk-demo-001 - confirmed', with Joe actions and Dell actions separated and participants named; (3) draft-only outside communication — 'Prepare a check-in draft for review; sending is unavailable' plus the boundary note 'Outside communication remains a draft. Sending is structurally absent. There is no transcript library'; (4) all candidates dispositioned — reported Yes AND mechanically enforced by the disabled finish control, not merely displayed; (5) purge gate truthful — reported Blocked with the reason naming exactly the unmet conditions while correctly reporting legal hold explicitly false as Yes, and purge_eligible is computed as the conjunction of all five flags at line 391, so the gate cannot display Eligible unless every condition actually holds. Criteria 4 and 5 are enforced structurally rather than cosmetically, which is stronger evidence than a visual check. MINOR FRICTION, not a criterion: the 'Work initiated by Doc, Claude, or Codex' section rendered as a heading with no content and no empty-state message. Cross-cutting coaching affordance applies here as it does to all Workspace journeys — journeySteps() rendered the four-step route (Consent gate, Recording, Independent structured review, Retention eligibility) unconditionally. Timing not instrumented; journey carries no speed criterion.",
+   "timestamp": "2026-08-12T19:45:26-05:00"
   },
   {
    "id": "FLOW-WS-04",
