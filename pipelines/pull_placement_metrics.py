@@ -217,18 +217,32 @@ def build_plan(posts, analytics):
                 features=features_for(p, fmt), status="live"))
         piece_idx = by_text[key]
 
-        placements.append(dict(
+        # [loop #139] Every placement this run touches carries its own attempt
+        # outcome, decided here where the API's answer is actually in hand.
+        # `metric_kinds` empty plus a `reason` is the whole point: it separates
+        # "the platform was asked and said nothing" from "nobody ever asked",
+        # which were indistinguishable for all 89 placements before this.
+        pl = dict(
             piece_idx=piece_idx, platform=p["platform"], external_id=pid,
             url=url, live_at=p["postTime"], fmt=fmt,
-            length=len(text), media_count=len(media)))
+            length=len(text), media_count=len(media),
+            metric_kinds=[], attempt_reason=None)
+        placements.append(pl)
 
         a = ana.get(pid)
         if not a:
+            # ATTEMPTED AND EMPTY, not unattempted. The analytics call covered the
+            # same window as the posts call, so a published post with no analytics
+            # entry is a platform that returned silence about it — a platform
+            # problem, and a different diagnosis from a coverage gap.
+            pl["attempt_reason"] = (
+                "the analytics endpoint covered this window and returned no entry "
+                "for this post")
             continue
         snaps = a.get("metricsHistory") or []
         if not snaps and a.get("latestMetrics"):
             snaps = [a["latestMetrics"]]
-        wrote_any = False
+        kinds = set()
         for s in snaps:
             observed = s.get("fetchedAt")
             for k, v in (s.get("metrics") or {}).items():
@@ -239,9 +253,19 @@ def build_plan(posts, analytics):
                 metrics.append(dict(
                     external_id=pid, kind=snake(k), value=val,
                     observed_at=observed))
-                wrote_any = True
-        if wrote_any:
+                kinds.add(snake(k))
+        pl["metric_kinds"] = sorted(kinds)
+        if kinds:
             pieces[piece_idx]["status"] = "measured"
+        else:
+            # An entry came back but nothing in it parsed as a number. A THIRD
+            # flavour of nothing, and it points at this parser rather than at the
+            # platform — so it must not be reported as platform silence.
+            pl["attempt_reason"] = (
+                "the analytics endpoint returned an entry for this post carrying no "
+                "numeric metric values" if snaps else
+                "the analytics endpoint returned an entry for this post with no "
+                "snapshots")
 
     return pieces, placements, metrics, skipped, unknown
 
@@ -249,8 +273,14 @@ def build_plan(posts, analytics):
 # ── database ─────────────────────────────────────────────────────────────────
 
 def apply_plan(conn, pieces, placements, metrics):
-    """Idempotent on placement.external_id and on the metric primary key."""
+    """Idempotent on placement.external_id, the metric primary key, and the
+    attempt key (placement_id, source, attempted_at)."""
     cur = conn.cursor()
+    # ONE timestamp for every attempt row this run writes (loop #139). Taken from
+    # the database rather than the host clock so the attempt history cannot drift
+    # against the rows it sits beside, and taken ONCE so a replay of this run is a
+    # no-op instead of a second attempt that never happened.
+    run_at = cur.execute("select now()").fetchone()[0]
     joe = cur.execute("select id from actor where slug='joe'").fetchone()
     automation = cur.execute("select id from actor where slug='automation'").fetchone()
     if not joe or not automation:
@@ -301,6 +331,45 @@ def apply_plan(conn, pieces, placements, metrics):
             (placement_id, m["observed_at"], m["kind"], m["value"], METRIC_SOURCE)).rowcount
         new_metrics += n or 0
 
+    # ── THE ATTEMPT ROWS (loop #139) ─────────────────────────────────────────
+    # One row per placement this run touched, whether or not any metric landed.
+    # Before this, every placement read `unmeasured_reason = 'no measurement
+    # attempt recorded'` — true for the 73 nobody ever pulled, MISLEADING for the
+    # 16 that were pulled successfully, and it collapsed three different states
+    # into one bucket. A recorded absence is evidence; a missing row is not. Same
+    # posture as record-finding's found:false.
+    #
+    # ONE TIMESTAMP FOR THE WHOLE RUN, captured once above. The unique key is
+    # (placement_id, source, attempted_at), so replaying this run cannot
+    # double-insert, while a genuinely separate run later records a genuinely
+    # separate attempt — which is the point, because the attempt history is the
+    # record. ON CONFLICT DO NOTHING makes the replay case explicit rather than
+    # an error.
+    #
+    # The table's own CHECK enforces the contract this code must not violate:
+    # 'recorded' must name at least one metric kind, 'unavailable' must name none
+    # and must carry a reason. Building the row any other way fails at the
+    # server, which is where it should fail.
+    new_attempts = 0
+    for pl in placements:
+        placement_id = pl.get("_id")
+        if not placement_id:
+            continue
+        kinds = pl.get("metric_kinds") or []
+        if kinds:
+            outcome, reason = "recorded", None
+        else:
+            outcome = "unavailable"
+            reason = pl.get("attempt_reason") or "no metrics returned for this placement"
+        n = cur.execute(
+            "insert into placement_measurement "
+            "  (placement_id, attempted_at, source, outcome, reason, metric_kinds, recorded_by) "
+            "values (%s,%s,%s,%s,%s,%s,%s) "
+            "on conflict (placement_id, source, attempted_at) do nothing",
+            (placement_id, run_at, METRIC_SOURCE, outcome, reason, kinds,
+             automation)).rowcount
+        new_attempts += n or 0
+
     # Status catches up for pieces whose placements gained metrics on a later run.
     # Scoped to rows THIS pipeline authored (features.source), so a piece created
     # by any other path can never be relabelled by a metrics pull.
@@ -313,7 +382,7 @@ def apply_plan(conn, pieces, placements, metrics):
     promoted = cur.rowcount
 
     conn.commit()
-    return new_pieces, new_placements, new_metrics, promoted
+    return new_pieces, new_placements, new_metrics, promoted, new_attempts
 
 
 # ── report ───────────────────────────────────────────────────────────────────
@@ -360,10 +429,18 @@ def write_report(path, pieces, placements, metrics, skipped, applied, counts, wi
         A(f"- `placement` inserted: **{counts[1]}**")
         A(f"- `placement_metric` inserted: **{counts[2]}**")
         A(f"- pieces promoted to status `measured`: **{counts[3]}**")
+        # [loop #139] Reported separately from placement_metric on purpose: a run
+        # that writes 0 metrics and N attempts is not a run that did nothing, it is
+        # a run that recorded N absences — which is the distinction this whole
+        # column exists to make.
+        A(f"- `placement_measurement` attempts recorded: **{counts[4]}** "
+          f"(one per placement touched, whether or not any metric landed)")
     else:
         A(f"- would insert `content_piece`: **{db_state['pieces_new']}**")
         A(f"- would insert `placement`: **{db_state['placements_new']}**")
         A(f"- would insert `placement_metric`: **{db_state['metrics_new']}**")
+        A(f"- would insert `placement_measurement`: **{db_state.get('attempts_new', 0)}** "
+          f"(one per placement touched — that count does not depend on whether metrics came back)")
         A(f"- database read: {db_state['note']}")
     A("")
     A("## Feature cells (platform x format) — the weekly learning job's unit")
@@ -479,6 +556,10 @@ def main():
                     placements_new=len(new_pl),
                     pieces_new=len({p["piece_idx"] for p in new_pl}),
                     metrics_new=sum(1 for m in metrics if m["external_id"] not in have),
+                    # [loop #139] Every placement this run touched earns an attempt
+                    # row, new or already-known alike — the attempt is about THIS
+                    # pull, not about whether the placement was seen before.
+                    attempts_new=len(placements),
                     note=f"read OK — {len(have)} placement(s) already recorded")
     elif a.apply:
         print("No database credential (CARR_DB_JOBS_URL / DATABASE_URL) — "
