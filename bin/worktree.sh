@@ -84,14 +84,34 @@ case "$1" in
     name="$2"
     wt="$HOME_DIR/$name"
     [ -d "$wt" ] || { print -r -- "no worktree at $wt"; exit 1; }
-    # Drop the two symlinks THIS script created, before judging the tree dirty.
+    # Drop the symlinks THIS script created, before judging the tree dirty.
     # They are plumbing, not work, and leaving them in made the dirty-check
-    # refuse its own handiwork — caught on the first live removal. The -L test
-    # means only a symlink is ever unlinked, so a worktree holding a genuine
-    # out/ or .venv keeps it and is correctly reported dirty.
+    # refuse its own handiwork — caught on the first live removal.
+    #
+    # UNTRACKED IS THE TEST, NOT -L. The original test was `[ -L ]` alone, on
+    # the reasoning that only a symlink is ever unlinked so a genuine .venv is
+    # kept and correctly reported dirty. A TRACKED symlink is still a symlink,
+    # so that reasoning has a hole: dropping one deletes a tracked file, which
+    # makes the tree dirty and fires the refusal below on dirt this script has
+    # just created. Branch dealroom-chrome-tidy tracks .venv and hit exactly
+    # that on 2026-08-13 — refused, and left without its .venv either way.
+    # Asking git whether the path is tracked closes it: plumbing this script
+    # made is untracked by definition, so anything tracked is somebody's work
+    # and is never touched.
+    typeset -a dropped; dropped=()
     for l in .venv out mcp-server/node_modules; do
-      [ -L "$wt/$l" ] && rm "$wt/$l"
+      if [ -L "$wt/$l" ] && ! git -C "$wt" ls-files --error-unmatch "$l" >/dev/null 2>&1; then
+        rm "$wt/$l" && dropped+=("$l")
+      fi
     done
+    # RESTORE ON ANY PATH THAT DOES NOT REMOVE. A refusal must leave the tree
+    # exactly as it was found: the first version returned the tree minus its
+    # .venv, so the next command run in there failed on a path that was simply
+    # not there — the same invisible breakage the create path exists to prevent.
+    restore_dropped() {
+      local l
+      for l in $dropped; do ln -sfn "$CANON/$l" "$wt/$l"; done
+    }
     # REFUSE ON DIRTY, always. A worktree exists to hold work in progress, so
     # removing one is the single most likely way to lose some. The check is
     # cheap and the failure it prevents is not recoverable from git.
@@ -99,10 +119,18 @@ case "$1" in
       print -r -- "REFUSED — $name has uncommitted work:"
       git -C "$wt" status --porcelain | sed 's/^/    /'
       print -r -- "Commit it there (naming paths), or remove the directory yourself if it is truly scrap."
+      restore_dropped
       exit 1
     fi
-    git -C "$CANON" worktree remove "$wt" && print -r -- "removed $name (branch kept)"
-    exit $?
+    # The other non-removing path: git itself can refuse (a submodule, a locked
+    # worktree, a file it cannot delete). Same rule as the dirty refusal — a
+    # tree that survives keeps its plumbing.
+    if git -C "$CANON" worktree remove "$wt"; then
+      print -r -- "removed $name (branch kept)"
+      exit 0
+    fi
+    restore_dropped
+    exit 1
     ;;
 esac
 
