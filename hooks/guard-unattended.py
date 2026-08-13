@@ -508,6 +508,40 @@ URL_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
 # position, so an email address quoted in a git commit message reaches it never.
 REMOTE_TARGET_RE = re.compile(r"[\w.+-]+@([A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}):")
 
+# ── IS THIS COMMAND ACTUALLY RUNNING SQL? (loop #240, 2026-08-13) ─────────────
+#
+# SAME DEFECT AS THE EGRESS ONE FIXED EARLIER THE SAME DAY, in the other rule set,
+# and found the same way — by the guard blocking real work. The destructive-SQL
+# patterns scan the whole command string, so `\btruncate\s+(table\s+)?\w` matched
+# the ENGLISH PHRASE "truncate honestly" inside a loop's closing outcome, and the
+# session could not file it. No SQL was involved anywhere in that command.
+#
+# The patterns themselves are right and are NOT loosened: a real TRUNCATE, DROP,
+# unqualified DELETE or unqualified UPDATE stays blocked. What changes is that they
+# are consulted only when the command plausibly EXECUTES SQL at all. Prose that
+# quotes a SQL keyword is not a database operation, exactly as prose that quotes a
+# URL is not a network send.
+#
+# Deliberately generous about what counts as SQL context: a false positive here
+# costs a blocked session, a false negative costs a table. Anything that opens a
+# database, names a .sql file, or executes a statement string qualifies.
+SQL_CONTEXT = re.compile(
+    r"(?:\bpsql\b|\bpg_dump\b|\bpgcli\b|\bmysql\b|\bsqlite3?\b|\bdb-tap\b|\bmigrate\b"
+    r"|\.sql\b|\bDATABASE_URL\b|\bCARR_DB_[A-Z_]+\b|\bneonctl\b"
+    r"|\bcur\.execute\b|\bconn\.execute\b|\bcursor\(\)|\bexecute_many\b"
+    r"|\bpsycopg\b|\bsqlalchemy\b|--command\b|\s-c\s+['\"])",
+    re.I)
+
+# The labels above that are ONLY meaningful against a database. Kept as an explicit
+# set rather than inferred from the pattern, so adding a non-SQL rule later cannot
+# accidentally inherit the SQL gate.
+SQL_LABELS = frozenset({"DROP", "TRUNCATE", "unqualified DELETE", "unqualified UPDATE"})
+
+
+def is_sql_context(cmd):
+    """True when the command could actually reach a database."""
+    return bool(SQL_CONTEXT.search(cmd))
+
 
 def hosts_in(cmd):
     """Every host this command could reach: URL hosts plus remote-copy targets."""
@@ -744,6 +778,11 @@ def check(cmd):
         if pat.search(cmd):
             # Destructive-fs rules are waived inside the sanctioned scratch zones.
             if label in ("recursive/forced delete", "secure delete") and in_safe_zone(cmd):
+                continue
+            # A SQL keyword sitting in PROSE is not a database operation (loop #240).
+            # The patterns stay exactly as strict; they are simply consulted only when
+            # the command could reach a database at all.
+            if label in SQL_LABELS and not is_sql_context(cmd):
                 continue
             return f"{label} — blocked by the CARR unattended guard"
 
