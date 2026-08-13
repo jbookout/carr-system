@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +45,82 @@ RENDERS = {
 }
 
 ID_RE = re.compile(r"^`#?([0-9a-f]{8})`|^#### .*`#([0-9a-f]{8})`", re.M)
+
+# The two files this script is allowed to touch, and the ONLY two it may ever
+# commit. Named explicitly because the house rule is to name every path and
+# never `git add -A` in a tree that regularly holds another session's work.
+OWNED = ["ops/config/rule-enforcement-map.json", "ops/config/gate-baseline.json"]
+
+
+def git(*args, check=False):
+    """Run git in the repo and return (returncode, combined output)."""
+    p = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+    if check and p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout).strip())
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+def dirty_owned() -> list[str]:
+    """Which of OWNED already have uncommitted changes, before this run writes.
+
+    Asks git once per path and returns OUR canonical path strings rather than
+    slicing them out of porcelain output. The first version sliced `line[3:]`,
+    which is correct for a plain " M path" line and wrong for other status
+    shapes — the selftest caught it returning "ps/config/gate-baseline.json",
+    an off-by-one that would have made the guard compare a mangled name and
+    silently decide nobody owned the file. Comparing against a path we already
+    hold removes the parsing step that could be wrong at all.
+    """
+    out = []
+    for path in OWNED:
+        rc, res = git("status", "--porcelain", "--", path)
+        if rc == 0 and res.strip():
+            out.append(path)
+    return out
+
+
+def commit_and_push(summary: str, preexisting: list[str]) -> None:
+    """Commit the synced pair, or say loudly why it was not committed.
+
+    THIS IS THE HALF THAT WAS MISSING. The first version of this script derived
+    the map correctly, re-stamped the baseline correctly, printed "COMMIT NEEDED"
+    and stopped — into a log nobody reads. So on 2026-08-13 the sync ran at
+    08:39, did its job perfectly, and left both config files sitting uncommitted;
+    a session found them by accident hours later. An unpushed gate change is the
+    same outage in slow motion: the local machine looks healthy while the repo
+    and Dell's clone never receive it. Committing is not decoration on this job,
+    it is the job (Joe, 2026-08-11: "you need to start committing your work").
+    """
+    if preexisting:
+        # Another writer was already mid-edit on these exact files. Committing
+        # would sweep their work into our commit, which the two-writer rule
+        # forbids outright. Leave it and be loud.
+        print("sync-enforcement-map: NOT COMMITTED — these were already modified "
+              "before this run, so another writer owns them: "
+              + ", ".join(preexisting))
+        print("sync-enforcement-map: FAIL a human must commit the pair")
+        return
+
+    rc, out = git("commit", *OWNED, "-m",
+                  f"gates: sync enforcement map inventory ({summary}) and "
+                  "re-stamp its baseline hash\n\n"
+                  "Automated by bin/sync-enforcement-map.py on the hourly rules "
+                  "refresh. Both paths land in ONE commit because a map change "
+                  "without its baseline is what took the gates down on "
+                  "2026-08-12.")
+    if rc != 0:
+        print(f"sync-enforcement-map: FAIL commit refused — {out}")
+        return
+    print("sync-enforcement-map: committed the pair")
+
+    rc, out = git("push", "origin", "HEAD")
+    if rc != 0:
+        # Deliberately does NOT pull/rebase. Moving shared HEAD unattended is
+        # the hazard the two-writer rule names; a local commit that still needs
+        # a push is recoverable, a bad rebase is not.
+        print(f"sync-enforcement-map: FAIL push refused, commit is local only — {out}")
+        return
+    print("sync-enforcement-map: pushed")
 
 
 def find_vault() -> str | None:
@@ -78,6 +155,11 @@ def main() -> int:
     if not vault:
         print("sync-enforcement-map: SKIP vault not reachable")
         return 0
+
+    # Captured BEFORE anything is written: once this script edits the pair they
+    # are dirty by definition, so the only moment we can tell our own change
+    # apart from another writer's is right now.
+    preexisting = dirty_owned()
 
     data = json.load(open(MAP))
     inventory = data.get("active_rule_ids") or {}
@@ -146,6 +228,7 @@ def main() -> int:
     with open(BASELINE, "w") as fh:
         fh.write(btext.replace(old_hash, new_hash, 1))
 
+    summary_bits = []
     for scope, added, dropped in changed:
         bits = []
         if added:
@@ -153,8 +236,13 @@ def main() -> int:
         if dropped:
             bits.append(f"-{','.join(dropped)}")
         print(f"sync-enforcement-map: SYNCED {scope} {' '.join(bits)}")
+        summary_bits.append(f"{scope} {' '.join(bits)}")
     print("sync-enforcement-map: contract hash re-stamped; gate hashes untouched")
-    print("sync-enforcement-map: COMMIT NEEDED — both config files are modified")
+
+    if "--no-commit" in sys.argv:
+        print("sync-enforcement-map: --no-commit given; leaving the pair modified")
+        return 0
+    commit_and_push("; ".join(summary_bits), preexisting)
     return 0
 
 
