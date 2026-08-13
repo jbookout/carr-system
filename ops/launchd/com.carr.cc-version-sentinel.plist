@@ -26,7 +26,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
-    <string>/Users/booko/carr-system/bin/cc-version-sentinel.sh</string>
+    <string>{{REPO}}/bin/cc-version-sentinel.sh</string>
   </array>
 
   <!-- Hourly. The desktop app can update mid-day and that runtime is the one
@@ -39,7 +39,7 @@
   <key>RunAtLoad</key><true/>
   <key>ThrottleInterval</key><integer>60</integer>
 
-  <key>StandardOutPath</key><string>/Users/booko/carr-system/out/cc-version-sentinel.out</string>
-  <key>StandardErrorPath</key><string>/Users/booko/carr-system/out/cc-version-sentinel.err</string>
+  <key>StandardOutPath</key><string>{{REPO}}/out/cc-version-sentinel.out</string>
+  <key>StandardErrorPath</key><string>{{REPO}}/out/cc-version-sentinel.err</string>
 </dict>
 </plist>

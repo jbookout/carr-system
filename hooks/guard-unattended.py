@@ -448,9 +448,80 @@ RULES = [
     (re.compile(r"\bupdate\s+\w+\s+set\b(?![\s\S]*\bwhere\b)", re.I), "unqualified UPDATE"),
 ]
 
-# Any http(s) URL in a sending context.
-SEND_CTX = re.compile(r"\b(curl|wget|http|https)\b", re.I)
+# ── IS THIS COMMAND ACTUALLY SENDING? (loop #283, fixed 2026-08-13) ───────────
+#
+# THE BUG THIS REPLACES, and it was a false positive that blocked real work every
+# time it fired. The old test was:
+#
+#     SEND_CTX = re.compile(r"\b(curl|wget|http|https)\b", re.I)
+#
+# `http` and `https` as bare words appear inside EVERY quoted URL, so any command
+# that merely MENTIONED a link was treated as a network send and then had to pass
+# every host in it through the allowlist. Found 2026-08-09 by the
+# linkedin-engagement-daily run: it assembled its own deliverable — open a local
+# file, concatenate strings, write it back — and was refused with "network send to
+# an unrecognised host (www.linkedin.com)". No network call was made or attempted.
+# That routine's own SOP mandates a permalink per item, so every run hit it, and
+# the x-reply run stores post links the same way.
+#
+# WHY NOT JUST ALLOWLIST linkedin.com. Because that widens REAL egress to fix a
+# case where no egress happens, and leaves every other URL-quoting file write
+# still broken. The loop names the right fix and this is it: decide from the
+# command's EXECUTABLE first, and only then look at hostnames.
+#
+# THE SENDER TEST. A sender name counts only in COMMAND POSITION — at the start of
+# the command, or after a pipe, semicolon, `&&`, `||`, a subshell opener, or one
+# of the usual prefix words (sudo/env/xargs/time/nohup) — optionally with a
+# leading path. That is what keeps `https` in `"see https://example.com"` from
+# matching while `curl`, `/usr/bin/curl` and `... | xargs curl` all still do.
+# `http`/`https` REMAIN senders in command position, because httpie's client is
+# literally named `http` and dropping it would open a real hole.
+SENDER = (r"curl|wget|nc|ncat|netcat|telnet|ftp|sftp|scp|rsync|ssh|httpie|http|https"
+          r"|links|lynx|w3m|aria2c|axel|fetch")
+SEND_CTX = re.compile(
+    r"(?:^|[|;&(){}`\n]|\$\(|&&|\|\||\bsudo\b|\bxargs\b|\benv\b|\btime\b|\bnohup\b|\bdoas\b)"
+    r"\s*(?:[\w./-]*/)?(?:" + SENDER + r")\b",
+    re.I)
+
+# AN INTERPRETER THAT IMPORTS A NETWORK CLIENT IS ALSO A SENDER, and this half is
+# what keeps the narrower executable test from becoming a hole: `python3 -c "import
+# requests; requests.post(...)"` has no sender in command position. Matching the
+# library reference catches it. A `python3 -c` that only opens a local file and
+# writes a string — the exact shape loop #283 was about — matches neither and is
+# correctly allowed through to the write-target checks below.
+NET_CLIENT = re.compile(
+    r"\b(?:urllib|urlopen|requests\.|httpx|http\.client|httplib|aiohttp|websockets?"
+    r"|net/http|Net::HTTP|LWP|WWW::Mechanize|axios|node-fetch|XMLHttpRequest"
+    r"|socket\.(?:socket|create_connection)|fetch\()",
+    re.I)
 URL_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
+
+# A REMOTE COPY TARGET IS A HOST TOO, and this was a real gap rather than a
+# consequence of the loop #283 change — URL_RE has only ever understood `http://`,
+# so `scp db.sql user@host:/tmp` named no host, passed the allowlist by having
+# nothing to check, and was allowed. Found 2026-08-13 by writing
+# ops/egress-scope-selftest.py, which asserted the property the guard was assumed
+# to have; the assertion failed and the assumption was wrong.
+#
+# Deliberately narrow: it matches the `user@host:` form that scp and rsync use for
+# a remote path. It is only ever consulted when a sender is already in command
+# position, so an email address quoted in a git commit message reaches it never.
+REMOTE_TARGET_RE = re.compile(r"[\w.+-]+@([A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}):")
+
+
+def hosts_in(cmd):
+    """Every host this command could reach: URL hosts plus remote-copy targets."""
+    return URL_RE.findall(cmd) + REMOTE_TARGET_RE.findall(cmd)
+
+
+def is_send_context(cmd):
+    """True when the command can actually put bytes on the network.
+
+    Two independent tests, either sufficient: a sending EXECUTABLE in command
+    position, or an interpreter that references a network client library. A
+    command that merely quotes a URL matches neither.
+    """
+    return bool(SEND_CTX.search(cmd) or NET_CLIENT.search(cmd))
 
 # ── THE DERIVED HOST LIST (2026-08-09, the "B" half of Joe's "build A and B") ─
 #
@@ -676,8 +747,8 @@ def check(cmd):
                 continue
             return f"{label} — blocked by the CARR unattended guard"
 
-    if SEND_CTX.search(cmd):
-        for host in URL_RE.findall(cmd):
+    if is_send_context(cmd):
+        for host in hosts_in(cmd):
             # host_allowlisted covers KNOWN_HOSTS plus the record-derived client
             # and lead domains. The Bash path gets NO equivalent of the WebFetch
             # open-read class and must not: curl chooses its own method and body,
