@@ -74,6 +74,16 @@
           "timeout": 10
         }
       ]
+    },
+    {
+      "matcher": "mcp__.*__(record-defect|add-loop)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/drift-claim-gate.py",
+          "timeout": 10
+        }
+      ]
     }
   ],
   "PostToolUse": [
