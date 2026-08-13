@@ -710,8 +710,31 @@ else:
             print(f"  OK {_name:<22} {_kind}, 0 executable refs (comments ignored) — {_flag}"
                   + (f"  (replaced by {_repl})" if _repl else ""))
         else:
+            # SELF-HEAL MESSAGE (loop #240 item 1). Every other non-OK row on this
+            # surface already tells the reader what to do about it; this one named a
+            # problem and stopped, which is the shape that trains a reader to skim
+            # past a warning. A row an agent cannot act on unaided is a row that
+            # stays amber forever.
+            #
+            # It names the REPLACEMENT when one is registered, because that is the
+            # whole content of the remedy \u2014 repoint these callers at it \u2014 and says
+            # plainly when there is none, since "deprecated with nothing to move to"
+            # is a different and more expensive problem than a pending repoint.
+            _paths = ", ".join(os.path.basename(f) for f in _files[:4])
+            _more = f" (+{len(_files) - 4} more)" if len(_files) > 4 else ""
             print(f"  \u26a0\ufe0e {_name:<22} {_kind}, still referenced by {len(_files)} file(s): "
-                  + ", ".join(os.path.basename(f) for f in _files[:4]))
+                  + _paths + _more)
+            if _repl:
+                print(f"       FIX: repoint those callers at {_repl}, then re-run "
+                      f"`./run.sh health` \u2014 this row clears itself once the last "
+                      f"executable reference is gone (comments do not count).")
+            else:
+                print(f"       FIX: no replacement is registered, so this cannot be "
+                      f"repointed yet. Either register the replacement in the "
+                      f"deprecation register, or drop the deprecation if "
+                      f"{_name} is in fact still the live path."
+                      + (f" Scheduled removal: {_after}." if _after else
+                         " No removal date is set, which is why it has no deadline to hit."))
             rc = 1
 
 # --- the export register (added 2026-08-02) ----------------------------------
