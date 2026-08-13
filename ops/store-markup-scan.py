@@ -40,6 +40,25 @@ WINDOW = 70
 # as damage.
 AUDIT_TABLES = {"event", "tool_call"}
 
+# Tables whose whole job is to DESCRIBE failures will quote failure signatures in
+# their narrative columns — the defect row filed about this very defect names the
+# four marker strings in prose. Same carve-out, and same reasoning, as the rule
+# that documents the check being allowed to quote it.
+DOC_COLUMNS = {("defect", "claimed"), ("defect", "actual"),
+               ("defect", "source_unread"), ("defect", "cost_note")}
+
+# A row the system REFUSES to let anyone repair must not hold a nightly check
+# red forever. update-loop answers `loop_not_open` on a closed loop — "a closed
+# loop is history; open a new one rather than editing the record of what
+# happened" — so corruption in a done row is permanent BY DESIGN, and no amount
+# of reporting will change it. Proven on loop #159 (2026-08-13): the repair was
+# extracted correctly and the verb declined it. Those rows are still listed,
+# because silently dropping them would misreport the store as clean, but they do
+# not fail the run. The check exists to catch NEW damage in live records.
+HISTORICAL_SQL = {
+    "loop_item": "status <> 'open'",
+}
+
 
 def classify(column, val):
     """CORRUPTION vs MENTION.
@@ -112,12 +131,14 @@ def main() -> int:
     like = " or ".join(f"{{col}} like %s" for _ in MARKERS)
     params = [f"%{m}%" for m in MARKERS]
 
-    live_hits, audit_hits, mentions = [], [], []
+    live_hits, audit_hits, mentions, historical = [], [], [], []
     scanned = 0
     for table, column in cols:
         pk = pks.get(table)
         sel = f'"{pk}"::text' if pk else "'(no pk)'"
-        q = (f'select {sel}, "{column}" from "{table}" where '
+        hist = HISTORICAL_SQL.get(table)
+        hist_sel = f"({hist})" if hist else "false"
+        q = (f'select {sel}, "{column}", {hist_sel} from "{table}" where '
              + like.format(col=f'"{column}"') + " limit 50")
         try:
             cur.execute(q, params)
@@ -126,15 +147,18 @@ def main() -> int:
             print(f"  skip {table}.{column}: {str(e).splitlines()[0][:80]}")
             continue
         scanned += 1
-        for key, val in cur.fetchall():
+        for key, val, is_hist in cur.fetchall():
             pos = min((val.find(m) for m in MARKERS if m in val), default=0)
             snip = val[max(0, pos - WINDOW): pos + WINDOW].replace("\n", " ")
-            kind = classify(column, val)
-            if kind == "MENTION":
+            if (table, column) in DOC_COLUMNS or classify(column, val) == "MENTION":
                 mentions.append((table, column, key))
                 continue
-            (audit_hits if table in AUDIT_TABLES else live_hits).append(
-                (table, column, key, snip))
+            if table in AUDIT_TABLES:
+                audit_hits.append((table, column, key, snip))
+            elif is_hist:
+                historical.append((table, column, key, snip))
+            else:
+                live_hits.append((table, column, key, snip))
 
     print(f"\nscanned {scanned} text column(s) across "
           f"{len({t for t, _ in cols})} base table(s)")
@@ -151,6 +175,15 @@ def main() -> int:
             print(f"  {t}.{c} pk={k}")
         if len(audit_hits) > 10:
             print(f"  ... and {len(audit_hits) - 10} more")
+
+    if historical:
+        rows = len({(t, k) for t, _, k, _ in historical})
+        print(f"\nHISTORICAL — {len(historical)} column hit(s) across {rows} CLOSED "
+              "row(s). Corrupt, and UNREPAIRABLE by design: update-loop refuses a\n"
+              "  closed loop (loop_not_open). Listed so the store is not misreported as\n"
+              "  clean; not failed, because no action can clear them.")
+        for t, c, k, _ in historical:
+            print(f"  {t}.{c} pk={k}")
 
     if not live_hits:
         print("\nLIVE RECORDS: OK no tool-call markup in any live text column")
