@@ -102,6 +102,24 @@ fi
 # precise silent failure this chain exists to prevent.
 export CARR_EXPORT_LIVE=1
 
+# ── PHASE 1 v2 (2026-08-13): vault drift watch --check, FIRST THING THIS CHAIN
+# DOES. "install that vault drift watch into the nightly rewrite. That way, the
+# first thing it does is check all the drive files" — the design brief for
+# this step. It compares the vault's registered/generated files against the
+# LAST --rebaseline (taken after last night's exports, see the step at the
+# bottom of this chain) so a file tampered with outside the export path is
+# caught BEFORE tonight's export would otherwise silently overwrite the
+# evidence — the exact gap ops/vault-drift-watch.py's v1 (plain manifest diff)
+# could not close. It also flags any UNEXPECTED add/modify/delete of a non-
+# registry, non-corpus-mirror .md file. A finding here is loud (exit 2, marks
+# this step FAIL, quarantines the file + a diff, appends an intake payload to
+# out/vault-drift-salvage-manifest.jsonl) but NEVER aborts the chain — exports
+# still have to run and heal the file either way, same "does not abort"
+# contract every other step in this chain already has via the step() wrapper
+# below. Live routing to /ingest stays off unless CARR_DRIFT_INGEST=1 is set by
+# hand; unset here on purpose.
+step "vault drift watch (check, first)"              ./.venv/bin/python ops/vault-drift-watch.py --check
+
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
 # credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first
@@ -213,6 +231,17 @@ step "open-items dashboard (one-page view)"          ./.venv/bin/python generato
 # still covers transport, dispatch and answer correctness, and this probe says so
 # in its own output rather than letting a green row imply more than it proves.
 step "verb probe (worker gate + view sweep)"         ./.venv/bin/python ops/nightly-verb-probe.py
+
+# PHASE 1 v2 (2026-08-13): vault drift watch --rebaseline, LAST functional step
+# — after every export and every other step that touches a vault or repo file,
+# so the snapshot it writes is the true post-chain state. This is what
+# tomorrow's first-thing --check (top of this file) compares against: a
+# registered file whose hash differs from tonight's rebaseline was touched
+# OUTSIDE this chain, which is exactly the "system rewrites every file, so
+# tamper would never be caught" gap this watch exists to close. Always exit 0
+# (it snapshots, it does not judge) unless the vault root itself is
+# unreachable.
+step "vault drift watch (rebaseline, last)"          ./.venv/bin/python ops/vault-drift-watch.py --rebaseline
 
 # ── ORDER 5: dead-man pings LAST — a ping means the whole chain above ran ────
 #

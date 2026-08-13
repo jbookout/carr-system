@@ -1226,4 +1226,71 @@ except Exception as e:
     print(f"  ⚠︎ portability-mirror check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# --- vault drift watch (Phase 1 v2, 2026-08-13) --------------------------------
+# Detection control for the proven-open Codex vault-write door
+# (ops/vault-drift-watch.py). v2 added a second, independent baseline
+# (--rebaseline, run LAST in the nightly chain after all exports) that survives
+# the nightly rewrite, so a generated file tampered with and then re-exported
+# the same night is still caught the NEXT time --check runs (--check runs
+# FIRST in the chain, before exports) — the exact gap a plain manifest-to-
+# manifest diff could not close. This row reads --check's own summary
+# (out/vault-drift-check-summary.json) plus the --rebaseline baseline's age;
+# neither existing yet before the first-ever run of its mode is not a fault, a
+# stale or non-clean one is. Bound action inline per rule 590b11e1.
+print("\nvault drift watch")
+try:
+    _vdw_summary_path = os.path.join(REPO_ROOT, "out", "vault-drift-check-summary.json")
+    _vdw_baseline_path = os.path.join(REPO_ROOT, "out", "vault-drift-baseline", "manifest.json")
+
+    _vdw_baseline_age_h = None
+    if os.path.exists(_vdw_baseline_path):
+        with open(_vdw_baseline_path) as _f:
+            _vdw_bl = json.load(_f)
+        _vdw_baseline_age_h = (time.time() -
+                                datetime.fromisoformat(_vdw_bl["generated_at"]).timestamp()) / 3600
+
+    if not os.path.exists(_vdw_summary_path):
+        _bl_note = (f"; baseline is {_vdw_baseline_age_h:.1f}h old" if _vdw_baseline_age_h is not None
+                    else ", and no --rebaseline baseline exists yet either")
+        print(f"  -- vault-drift-watch     no --check run yet — run ops/vault-drift-watch.py "
+              f"--check once (nightly step 1){_bl_note} (expected before the first run, a "
+              f"fault after)")
+    else:
+        with open(_vdw_summary_path) as _f:
+            _vdw = json.load(_f)
+        _vdw_age_h = (time.time() -
+                      datetime.fromisoformat(_vdw["generated_at"]).timestamp()) / 3600
+        _vdw_tamper = _vdw.get("tamper_count", 0)
+        _vdw_unexpected = _vdw.get("unexpected_count", 0)
+        _bl_str = f"{_vdw_baseline_age_h:.1f}h" if _vdw_baseline_age_h is not None else "NO BASELINE"
+        if _vdw_tamper or _vdw_unexpected:
+            print(f"  ⚠︎ vault-drift-watch     {_vdw_tamper} TAMPER + {_vdw_unexpected} "
+                  f"UNEXPECTED last check ({_vdw_age_h:.1f}h old, baseline {_bl_str} old) · "
+                  f"on breach: read out/vault-drift-salvage-manifest.jsonl and the newest "
+                  f"folder under out/vault-drift-quarantine/ for the quarantined files + "
+                  f"diffs, then confirm with Joe whether each edit is legitimate")
+            rc = 1
+        elif _vdw_age_h > 30:
+            print(f"  ⚠︎ vault-drift-watch     STALE {_vdw_age_h:.0f}h — last check reported "
+                  f"clean (baseline {_bl_str} old) · on breach: check the nightly chain log "
+                  f"for the 'vault drift watch (check)' step")
+            rc = 1
+        elif _vdw_baseline_age_h is None:
+            print(f"  ⚠︎ vault-drift-watch     check clean ({_vdw_age_h:.1f}h old) but NO "
+                  f"--rebaseline BASELINE exists yet · on breach: run "
+                  f"ops/vault-drift-watch.py --rebaseline once (nightly's last step, after "
+                  f"exports) — until then the tamper check has nothing to compare against")
+            rc = 1
+        elif _vdw_baseline_age_h > 30:
+            print(f"  ⚠︎ vault-drift-watch     check clean ({_vdw_age_h:.1f}h old) but "
+                  f"baseline STALE {_vdw_baseline_age_h:.0f}h · on breach: check the nightly "
+                  f"chain log for the 'vault drift watch (rebaseline)' step")
+            rc = 1
+        else:
+            print(f"  OK vault-drift-watch     0 tamper, 0 unexpected ({_vdw_age_h:.1f}h old "
+                  f"check, baseline {_vdw_baseline_age_h:.1f}h old)")
+except Exception as e:
+    print(f"  ⚠︎ vault-drift-watch check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
