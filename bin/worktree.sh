@@ -116,10 +116,17 @@ case "$1" in
     # removing one is the single most likely way to lose some. The check is
     # cheap and the failure it prevents is not recoverable from git.
     if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+      # RESTORE BEFORE PRINTING, never after. Putting it after the messages made
+      # the tree's repair depend on surviving output: a caller piping this to
+      # `head` closes the pipe after two lines, the third print takes SIGPIPE,
+      # and the script dies before it can put the links back — the very damage
+      # this restore exists to prevent, reappearing only under a pipe. Found
+      # 2026-08-13 when a verification run using `| head -2` reported the links
+      # MISSING while the identical unpiped command left them intact.
+      restore_dropped
       print -r -- "REFUSED — $name has uncommitted work:"
       git -C "$wt" status --porcelain | sed 's/^/    /'
       print -r -- "Commit it there (naming paths), or remove the directory yourself if it is truly scrap."
-      restore_dropped
       exit 1
     fi
     # The other non-removing path: git itself can refuse (a submodule, a locked
