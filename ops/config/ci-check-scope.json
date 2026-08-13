@@ -15,15 +15,6 @@
   ],
   "quarantined": [],
   "_evidence_note": "Every local_only entry here was proven by a real CI failure, not predicted. Two others that failed the same run were FIXED rather than excluded: test-review-council.py needed zsh installed and its own out/ dirs created, and test-record-home-gate.py had a hardcoded $HOME path. Excluding a check is the last resort, not the first.",
-  "known_gaps": [
-    {
-      "class": "migration",
-      "reason": "Replaying the chain from zero is blocked on a design ruling, not on a bug. 0013a fixed the missing reference data; the chain now stops at 0017's data-backfill guard, which is CORRECT and asserts on business data only production has. Three options are written up on the open-loops board under 'the migration chain cannot build a database from zero' (#366) and the answer is Joe's.",
-      "loop": "366",
-      "expires": "2026-08-20",
-      "why_not_just_fail": "Leaving it hard-red means every push emails Joe a failure he already knows about and can do nothing about until he rules. Seven such emails on 2026-08-13 is what prompted this. A gate people learn to ignore has stopped being a gate.",
-      "why_it_expires": "So it cannot rot into a permanent exemption. On 2026-08-20 this becomes a hard failure again whether or not anyone remembers it.",
-      "added": "2026-08-13"
-    }
-  ]
+  "known_gaps": [],
+  "_known_gap_history": "2026-08-13: the migration class carried a known gap for ~40 minutes while replay-from-zero was blocked on a design decision. Resolved by the schema-snapshot approach (bin/schema-snapshot.sh + db/schema.sql), so the class passes on its own merit and the gap was removed the same day. Kept here as evidence the expiry mechanism was exercised and released rather than quietly extended."
 }
