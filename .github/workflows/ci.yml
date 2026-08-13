@@ -88,5 +88,5 @@ jobs:
         env:
           # ops/ci.sh refuses any DSN that is not loopback. This one is the
           # service container above.
-          CARR_CI_DATABASE_URL: postgres://carr_ci:carr_ci@localhost:5432/carr_ci
+          CARR_CI_DATABASE_URL: postgres://carr_ci:carr_ci@localhost:5432/carr_ci # ci-secret-scan: allow — throwaway container credential, loopback only, dies with the runner
         run: ops/ci.sh --strict
