@@ -85,7 +85,7 @@ def main() -> int:
         print(f"{tag} forgetting — {expired} expired + {unstamped} unstamped re-verifies · "
               f"ingest new={new_n} oldest={new_age}d · growth: {slope_txt} · "
               f"on breach: enrichment-weekly consumes v_expired_verification; "
-              f"intake backlog routes to loop #182's fix")
+              f"intake backlog routes to loop #354, triage the unfiled calendar rows")
         return 1 if warn else 0
     except Exception as e:
         print(f"SKIP: query failed ({type(e).__name__}: {str(e).splitlines()[0]})")
