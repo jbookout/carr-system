@@ -1,4 +1,41 @@
 {
+ "SUPERSEDED": true,
+ "superseded_by": "phase0/audit/baseline-measures-2026-08-13.v2.json",
+ "superseded_on": "2026-08-13",
+ "do_not_quote": "EVERY FIGURE BELOW IS STALE. This artifact was written from an instrument with two defects that were corrected after it was committed: the partner-turn filter was INVERTED, and the reader saw only ONE of the two CARR transcript roots, measuring roughly a third of the corpus. Read the v2 artifact instead.",
+ "what_changed_and_by_how_much": {
+  "observation_window_days": {
+   "v1": 10.01,
+   "v2": 27.95
+  },
+  "sessions_in_window": {
+   "v1": 136,
+   "v2": 232
+  },
+  "partner_typed_turns": {
+   "v1": 187,
+   "v2": 2155
+  },
+  "question_shaped_turns": {
+   "v1": 119,
+   "v2": 569
+  },
+  "verb_calls": {
+   "v1": 3702,
+   "v2": 7687
+  },
+  "turns_restating_prior_context": {
+   "v1": 72,
+   "v2": 44
+  },
+  "weekly_partner_active_hours": {
+   "v1": 36.5,
+   "v2": 37.2,
+   "note": "the only figure v1 got close, and by luck rather than method"
+  }
+ },
+ "the_correction_that_matters_most": "v1 stated that the routine-operation share of session time was NOT mechanically derivable and offered 36.5 weekly hours as a CEILING. v2 derives it, classifying by each session's opening prompt \u2014 what the partner actually sat down to do. Routine operation is 6.8 hours per week, construction and exploration 18.2, and 33.0 remain unclassifiable. The baseline doctrine asks for is therefore 6.8, not 36.5. v1's ceiling was more than five times the real figure.",
+ "why_this_row_is_kept": "Nothing silently rots. The v1 numbers were quoted to Joe in conversation and appear in a continuation packet, so the record has to show what they were and why they were wrong rather than quietly replacing them with better ones.",
  "generated": "2026-08-12",
  "artifact": "phase0-operating-baseline-measures",
  "source_doctrine": "carr-workspace-bduf section s01a 'Operating objective and AI-session displacement test'",
