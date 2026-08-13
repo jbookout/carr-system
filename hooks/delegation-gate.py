@@ -207,30 +207,97 @@ def text_blocks(rec: dict, roles: tuple[str, ...]) -> str | None:
 
 
 def tool_names(rec: dict) -> list[str]:
+    return [name for name, _ in tool_calls(rec)]
+
+
+def tool_calls(rec: dict) -> list[tuple[str, dict]]:
+    """(name, input) pairs for one record -- tool_names' data plus the call
+    input, which the sweep-vs-noise counting refinement needs to tell a real
+    read sweep apart from a trivial command or a self-referential re-read."""
     payload = rec.get("payload")
     if isinstance(payload, dict):
         if payload.get("type") == "custom_tool_call":
             name = payload.get("name", "")
-            return [f"functions.{name}"] if isinstance(name, str) else []
+            inp = payload.get("input") or payload.get("arguments") or {}
+            if not isinstance(inp, dict):
+                inp = {}
+            return [(f"functions.{name}", inp)] if isinstance(name, str) else []
         if payload.get("type") == "function_call":
             name, namespace = payload.get("name", ""), payload.get("namespace")
+            inp = payload.get("arguments") or payload.get("input") or {}
+            if not isinstance(inp, dict):
+                inp = {}
             if isinstance(name, str):
-                return [f"{namespace}.{name}" if namespace else name]
+                return [(f"{namespace}.{name}" if namespace else name, inp)]
             return []
     msg = rec.get("message") or rec
     content = msg.get("content")
     if not isinstance(content, list):
         return []
-    return [
-        b.get("name", "")
-        for b in content
-        if isinstance(b, dict) and b.get("type") == "tool_use"
-    ]
+    out = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            inp = b.get("input")
+            out.append((b.get("name", ""), inp if isinstance(inp, dict) else {}))
+    return out
 
 
 def is_mechanical(tool: str) -> bool:
     """Classify repeatable CARR sweep work across both runtime spellings."""
     return tool in MECHANICAL or tool.startswith(("mcp__carr__", "mcp__carr_records__"))
+
+
+# A no-op-ish confirmation command has no read surface and cannot enumerate or
+# exfiltrate anything, so counting it toward the mechanical-sweep threshold
+# only produces false positives.  Live case, 2026-08-13: a leaf worker's plain
+# `echo` -- issued only to signal a step boundary -- tripped the tripwire
+# meant for repeated grep/find/read sweeps.  Deliberately narrow: any shell
+# metacharacter (pipe, subshell, redirect, substitution, chaining) drops the
+# command out of this allowance and back into ordinary mechanical counting,
+# so `echo $(cat secrets)` or `echo done && rm -rf x` is never exempted.
+TRIVIAL_BASH = re.compile(
+    r"^\s*(?:echo|true|pwd|date|whoami|hostname)\b[^|;&`$<>]*$"
+)
+WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "apply_patch", "functions.apply_patch"}
+
+
+def is_trivial_bash(tool: str, tool_input: dict) -> bool:
+    """A bare echo/true/pwd/date/whoami/hostname, no metacharacters."""
+    if tool != "Bash":
+        return False
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return False
+    return bool(TRIVIAL_BASH.match(command.strip()))
+
+
+def written_path(tool: str, tool_input: dict) -> str | None:
+    """The realpath a Write/Edit/apply_patch call targets, or None."""
+    if tool not in WRITE_TOOLS:
+        return None
+    path = tool_input.get("file_path") or tool_input.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        return os.path.realpath(path)
+    except Exception:
+        return path
+
+
+def reads_own_recent_write(tool: str, tool_input: dict, written: set[str]) -> bool:
+    """A Read of a path this same turn already wrote is a self-check, not a
+    sweep across files the session doesn't yet know the contents of -- the
+    other 2026-08-13 case: a worker denied on re-reading its own output."""
+    if tool != "Read":
+        return False
+    path = tool_input.get("file_path") or tool_input.get("path")
+    if not isinstance(path, str) or not path:
+        return False
+    try:
+        real = os.path.realpath(path)
+    except Exception:
+        real = path
+    return real in written
 
 
 def is_agent_tool(tool: str) -> bool:
@@ -241,6 +308,24 @@ def is_subagent_payload(payload: dict) -> bool:
     """Codex supplies agent_type for child tool calls; main calls omit it."""
     kind = str(payload.get("agent_type") or payload.get("agentType") or "").lower()
     return kind in {"subagent", "sub_agent", "child"}
+
+
+# Claude Code sets this in a spawned session's own OS environment whenever it
+# starts that session as the child of another running Claude Code process --
+# exactly the shape of an Agent/Task-tool leaf worker, confirmed 2026-08-13 by
+# instrumenting this hook and triggering it live from inside a real leaf
+# worker: the hook subprocess inherited CLAUDE_CODE_CHILD_SESSION=1 from its
+# own session's process environment. Unlike the Codex agent_type field or the
+# legacy nested-"/subagents/"-directory transcript shape (neither of which
+# matched: this deployment gives every leaf worker its own top-level
+# transcript file, not one nested under a parent's session directory), this
+# signal is present on the exact payload Claude Code delivers for the exact
+# failure observed four times on 2026-08-13. A leaf worker cannot delegate
+# further -- it IS the delegate -- so the gate must never fire here; doing so
+# blocks the very worker the main seat delegated the sweep to, which is the
+# defect this exemption exists to close.
+def is_subagent_env() -> bool:
+    return os.environ.get("CLAUDE_CODE_CHILD_SESSION") == "1"
 
 
 def is_carr_mcp_tool(tool: str) -> bool:
@@ -505,6 +590,14 @@ def main() -> int:
         return 0
 
     try:
+        # A leaf worker cannot delegate further -- it IS the delegate. This
+        # must be the first check: it must exempt every mechanical tool this
+        # gate would otherwise classify, before scope or transcript checks
+        # that a leaf worker's own payload (cwd, transcript shape) might not
+        # satisfy the same way a main-seat session's would.
+        if is_subagent_env():
+            return 0
+
         tool = payload.get("tool_name") or payload.get("toolName") or ""
         if not is_mechanical(tool):
             return 0
@@ -529,7 +622,8 @@ def main() -> int:
             return 0
 
         window = recs[last_human_idx + 1:]
-        used = [name for rec in window for name in tool_names(rec)]
+        calls = [call for rec in window for call in tool_calls(rec)]
+        used = [name for name, _ in calls]
         # Persist/reconcile task authority before applying the one-lookup
         # allowance.  Otherwise a first allowed lookup could be followed by a
         # continuation before any durable task id existed.
@@ -538,7 +632,22 @@ def main() -> int:
         )
         if any(is_agent_tool(name) for name in used):
             return 0
-        mechanical_count = sum(is_mechanical(name) for name in used)
+
+        # Count only calls that are actually sweep work: a trivial echo/true
+        # confirmation, or a Read of a path this same turn already wrote,
+        # carries none of the repeated-grep/find/read cost the gate exists to
+        # push downhill, so neither should consume the one free lookup or
+        # trip the tripwire.  Order matters -- a write earlier in this window
+        # exempts a later read of that same path, not the reverse.
+        written: set[str] = set()
+        mechanical_count = 0
+        for name, inp in calls:
+            if is_mechanical(name) and not is_trivial_bash(name, inp) \
+                    and not reads_own_recent_write(name, inp, written):
+                mechanical_count += 1
+            target = written_path(name, inp)
+            if target:
+                written.add(target)
         if mechanical_count == 0:  # the one inline briefing lookup the rule allows
             return 0
 

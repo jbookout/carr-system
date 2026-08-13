@@ -17,6 +17,28 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "delegation-gate.py")
 
 
+def hook_env(extra=None, child_session=False):
+    """Base env for a hook subprocess, with CLAUDE_CODE_CHILD_SESSION pinned.
+
+    This selftest runner is itself frequently a leaf worker (spawned via the
+    Agent tool), so os.environ here can carry CLAUDE_CODE_CHILD_SESSION=1 of
+    its OWN. Every case below simulates a specific seat -- main or subagent --
+    and must not silently inherit whichever seat happens to be running the
+    test. child_session=False (the default, i.e. every pre-existing case in
+    this file, which all assume main-seat behaviour) always deletes the key
+    so a contaminated environment can never turn a main-seat case into a
+    false-pass; child_session=True sets it to "1" to simulate the leaf-worker
+    payload the gate must exempt.
+    """
+    env = dict(os.environ)
+    env.pop("CLAUDE_CODE_CHILD_SESSION", None)
+    if child_session:
+        env["CLAUDE_CODE_CHILD_SESSION"] = "1"
+    if extra:
+        env.update(extra)
+    return env
+
+
 def load_hook():
     spec = importlib.util.spec_from_file_location("delegation_gate", HOOK)
     module = importlib.util.module_from_spec(spec)
@@ -38,6 +60,12 @@ def assistant_text(text):
 
 def tool(name):
     return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "name": name, "input": {}}]}}
+
+
+def tool_with_input(name, tool_input):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "name": name, "input": tool_input}
+    ]}}
 
 
 def codex_user(text, include_generated_context=False):
@@ -67,7 +95,8 @@ def codex_tool(name):
     }}
 
 
-def run_case(name, recs, want, state, session, cwd=REPO, subagent=False):
+def run_case(name, recs, want, state, session, cwd=REPO, subagent=False,
+             tool_name="Bash", tool_input=None, child_session=False):
     with tempfile.TemporaryDirectory(prefix="delegation-gate-") as td:
         base = os.path.join(td, "subagents") if subagent else td
         os.makedirs(base, exist_ok=True)
@@ -79,10 +108,10 @@ def run_case(name, recs, want, state, session, cwd=REPO, subagent=False):
             "session_id": session,
             "cwd": cwd,
             "transcript_path": transcript,
-            "tool_name": "Bash",
-            "tool_input": {"command": "true"},
+            "tool_name": tool_name,
+            "tool_input": tool_input if tool_input is not None else {"command": "true"},
         }
-        env = dict(os.environ, DELEGATION_GATE_STATE=state)
+        env = hook_env({"DELEGATION_GATE_STATE": state}, child_session=child_session)
         got = subprocess.run(
             [sys.executable, HOOK],
             input=json.dumps(payload),
@@ -121,7 +150,7 @@ def run_codex_case(name, recs, should_block, reason_prefix=None, agent_type=None
         got = subprocess.run(
             [sys.executable, HOOK], input=json.dumps(payload), text=True,
             capture_output=True,
-            env=dict(os.environ, DELEGATION_GATE_STATE=os.path.join(td, "state.json")),
+            env=hook_env({"DELEGATION_GATE_STATE": os.path.join(td, "state.json")}),
         )
         try:
             response = json.loads(got.stdout) if got.stdout else None
@@ -175,7 +204,7 @@ def run_race_case(name, recs, appended, state, session, delay=0.45):
         proc = subprocess.Popen(
             [sys.executable, HOOK],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=dict(os.environ, DELEGATION_GATE_STATE=state),
+            text=True, env=hook_env({"DELEGATION_GATE_STATE": state}),
         )
         writer.start()
         _, err = proc.communicate(json.dumps(payload))
@@ -203,7 +232,7 @@ def run_tool_input_case(name, recs, tool_input, want, state, session):
         }
         got = subprocess.run(
             [sys.executable, HOOK], input=json.dumps(payload), text=True,
-            capture_output=True, env=dict(os.environ, DELEGATION_GATE_STATE=state),
+            capture_output=True, env=hook_env({"DELEGATION_GATE_STATE": state}),
         )
         ok = got.returncode == want
         print(f"{'PASS' if ok else 'FAIL'}  {name}: got {got.returncode}, want {want}")
@@ -226,7 +255,7 @@ def run_message_case(name, recs, state, session, must_contain):
         }
         got = subprocess.run(
             [sys.executable, HOOK], input=json.dumps(payload), text=True,
-            capture_output=True, env=dict(os.environ, DELEGATION_GATE_STATE=state),
+            capture_output=True, env=hook_env({"DELEGATION_GATE_STATE": state}),
         )
         message = got.stderr or ""
         ok = got.returncode == 2 and must_contain in message
@@ -398,7 +427,7 @@ def main():
             payload = {"hook_event_name": "PreToolUse", "cwd": "/private/tmp", "session_id": "mcp-fixture",
                        "tool_name": "mcp__carr__update-deal", "tool_input": {}, "transcript_path": transcript}
             result = subprocess.run([sys.executable, HOOK], input=json.dumps(payload), text=True, capture_output=True,
-                                    env=dict(os.environ, DELEGATION_GATE_STATE=os.path.join(td, "state.json")))
+                                    env=hook_env({"DELEGATION_GATE_STATE": os.path.join(td, "state.json")}))
             try:
                 response = json.loads(result.stdout or "{}")
             except json.JSONDecodeError:
@@ -406,6 +435,93 @@ def main():
             ok = response.get("decision") == "block"
             print(f"{'PASS' if ok else 'FAIL'}  CARR MCP is scoped without cwd: {response!r}")
             oks.append(ok)
+
+        # --- 2026-08-13 fix regressions -------------------------------
+        # The defect: the gate fired inside subagents four times today at
+        # real cost, blocking a leaf worker that has no ability to delegate
+        # further, and it counted a plain echo and a self-write re-read as
+        # "mechanical sweep" work. These cases pin the fix: main-seat
+        # behaviour is unchanged, a subagent payload is fully exempt
+        # regardless of how much real sweep work it does, and the counter
+        # ignores trivial/self-referential calls while still catching real
+        # repeated sweeps.
+
+        # Main-seat: a real multi-file sweep (two different Read targets,
+        # no executor declared) must still trip the tripwire exactly as
+        # before. This is the behaviour the whole gate exists to keep.
+        oks.append(run_case(
+            "main seat: repeated real sweep (Read, Read) still fires",
+            [user("audit this"),
+             tool_with_input("Read", {"file_path": "/tmp/one.txt"}),
+             tool_with_input("Read", {"file_path": "/tmp/two.txt"})],
+            2, state, "main-seat-sweep-fires",
+            tool_name="Read", tool_input={"file_path": "/tmp/three.txt"},
+        ))
+        oks.append(run_case(
+            "main seat: repeated real sweep (Grep, Bash) still fires",
+            [user("audit this"), tool("Grep"),
+             tool_with_input("Bash", {"command": "grep -rl foo ."})],
+            2, state, "main-seat-sweep-fires-2",
+        ))
+
+        # Subagent: CLAUDE_CODE_CHILD_SESSION=1 must exempt the call
+        # entirely, even for a payload that would otherwise be a slam-dunk
+        # denial (an explicit sticky delegation, repeated real sweep calls,
+        # no executor declared, no Agent spawn in the window). A leaf worker
+        # cannot delegate further -- exempting it is not a loophole, it is
+        # the fix.
+        oks.append(run_case(
+            "subagent env: sticky delegation + repeated sweep is still exempt",
+            [user("delegate this to the cheapest qualified model"),
+             tool_with_input("Read", {"file_path": "/tmp/a.txt"}),
+             tool_with_input("Grep", {"pattern": "x"})],
+            0, state, "subagent-env-exempt",
+            child_session=True,
+        ))
+        oks.append(run_case(
+            "subagent env: a plain echo is not blocked (the live 2026-08-13 case)",
+            [user("do the assigned sweep"),
+             tool_with_input("Bash", {"command": "echo done"})],
+            0, state, "subagent-env-echo",
+            tool_name="Bash", tool_input={"command": "echo done"},
+            child_session=True,
+        ))
+
+        # Counting refinement: a trivial echo does not consume the one free
+        # lookup, so the very next real mechanical call is still the
+        # session's first one and is allowed.
+        oks.append(run_case(
+            "counting: a leading trivial echo does not consume the free lookup",
+            [user("audit this"), tool_with_input("Bash", {"command": "echo starting"})],
+            0, state, "counting-echo-free",
+        ))
+        # Control: the same echo WITH a shell metacharacter is not trivial
+        # and counts normally -- the allowance must stay narrow.
+        oks.append(run_case(
+            "counting: echo with a metacharacter is not exempted",
+            [user("audit this"),
+             tool_with_input("Bash", {"command": "echo done && rm -rf /tmp/x"})],
+            2, state, "counting-echo-not-trivial",
+        ))
+        # A Read of a path this same turn already Wrote is a self-check, not
+        # a sweep -- it must not consume the free lookup either.
+        oks.append(run_case(
+            "counting: a Read of a file this turn just wrote is not a sweep hit",
+            [user("build this"),
+             tool_with_input("Write", {"file_path": "/tmp/dg-selftest-out.txt"}),
+             tool_with_input("Read", {"file_path": "/tmp/dg-selftest-out.txt"})],
+            0, state, "counting-self-write-read",
+        ))
+        # Control: a Read of a DIFFERENT path than the one just written is an
+        # ordinary sweep read and must still count -- the exemption is
+        # targeted at the exact path, not a blanket post-write allowance.
+        oks.append(run_case(
+            "counting: a Read of an unrelated path still counts",
+            [user("build this"),
+             tool_with_input("Write", {"file_path": "/tmp/dg-selftest-out.txt"}),
+             tool_with_input("Read", {"file_path": "/tmp/dg-selftest-other.txt"})],
+            2, state, "counting-unrelated-read-counts",
+        ))
 
     print(f"\n{sum(oks)}/{len(oks)} delegation-gate cases passed")
     return 0 if all(oks) else 1
