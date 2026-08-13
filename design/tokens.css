@@ -1,0 +1,96 @@
+/* ============================================================
+   CARR design tokens — SINGLE SOURCE OF TRUTH for surface tokens
+   ============================================================
+   Per ux-doctrine: this file is canon. When a live surface's own
+   token block disagrees with this file, this file wins.
+
+   This is a reference file only — creating it does NOT retrofit
+   any existing surface to import it. Surfaces migrate to consume
+   these tokens the next time they are touched for other reasons,
+   not as a sweep. Do not `@import` this into every file at once.
+
+   Rules encoded here:
+   - navy / deep navy / orange are chrome, action, and focus colors
+     only — NEVER used as a data color (status, category, chart).
+   - Light scheme is warm cream/parchment. Pure white (#FFF/#FFFFFF)
+     is banned on light surfaces (Joe's ruling: "i really dislike
+     bright white light on my screen. remember that"). --card must
+     sit within one visible step of --paper, never equal to it and
+     never pure white.
+   - Dark scheme is deep navy, not neutral black.
+   - Elevation shadows keep a navy tint in BOTH light and dark
+     schemes — never a flat neutral black shadow.
+   - Touch targets: 44px minimum on any interactive control.
+   ============================================================ */
+
+:root{
+  /* ---- Brand / chrome colors (never data colors) ---- */
+  --navy:        #002F6C;
+  --navy-deep:   #00224D;
+  --orange:      #F57F29;
+
+  /* ---- Light scheme (warm cream/parchment; never pure white) ---- */
+  --paper:       #F4EDDF;
+  --card:        #FFFAF0;
+  --field:       #F7F0E3;
+  --line:        #DDD1BC;
+  --ink:         #172235;
+  --muted:       #5F6B7B;
+  --quiet:       #87909D;
+
+  /* ---- Semantic status colors (never used for brand/chrome) ---- */
+  --risk:        #B63A2F;
+  --risk-bg:     #F9E7E2;
+  --warn:        #9A6516;
+  --warn-bg:     #F9EFD9;
+  --good:        #2D7136;
+  --blue-bg:     #E7EEF8;
+
+  /* ---- Type ---- */
+  --font-display: "Oswald","Arial Narrow","Avenir Next Condensed",Impact,sans-serif;
+  --font-body:    "Montserrat","Avenir Next","Helvetica Neue",Arial,sans-serif;
+
+  /* ---- Spacing scale ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* ---- Radius ---- */
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* ---- Elevation (navy-tinted in both schemes, never flat black) ---- */
+  --shadow: 0 16px 48px rgba(0,31,73,.16);
+
+  /* ---- Motion ---- */
+  --duration-fast: .12s;
+  --duration-base: .2s;
+  --ease-out: cubic-bezier(.2,.7,.3,1);
+
+  /* ---- Touch target minimum ---- */
+  --touch-min: 44px;
+}
+
+/* ---- Dark scheme (deep navy ground, navy-tinted shadow) ---- */
+body.night, :root[data-theme="dark"]{
+  --paper:   #0D192B;
+  --card:    #14243B;
+  --field:   #182B46;
+  --line:    #2A3D58;
+  --ink:     #EDF3FB;
+  --muted:   #B0BFD2;
+  --quiet:   #7D8DA4;
+
+  --risk:    #EF8A7C;
+  --risk-bg: #3B211F;
+  --warn:    #E2BD6F;
+  --warn-bg: #342C18;
+  --good:    #83CB8D;
+  --blue-bg: #1B3151;
+
+  --shadow:  0 18px 55px rgba(0,34,77,.4);
+}

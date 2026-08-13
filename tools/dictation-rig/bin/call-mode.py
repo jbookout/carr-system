@@ -341,7 +341,7 @@ def sync_post_call(path: Path, runner: Any = subprocess.run) -> dict[str, Any]:
 CALL_MODE_HTML = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CARR Call Mode</title><style>
-:root{--navy:#002f6c;--deep:#001f49;--orange:#f57f29;--paper:#f4eddf;--card:#fffaf0;--ink:#172235;--muted:#687486;--line:#ddd1bc;--red:#c23b32}
+:root{--navy:#002f6c;--deep:#00224D;--orange:#f57f29;--paper:#f4eddf;--card:#fffaf0;--ink:#172235;--muted:#687486;--line:#ddd1bc;--red:#c23b32}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px "Avenir Next","Segoe UI",sans-serif;min-height:100vh;display:grid;place-items:center;padding:18px}
 main{width:min(560px,100%);background:var(--card);border:1px solid var(--line);border-radius:20px;box-shadow:0 22px 70px rgba(0,31,73,.2);overflow:hidden}
 header{background:var(--deep);color:white;padding:18px 22px;display:flex;align-items:center;justify-content:space-between}.brand{font-weight:850;letter-spacing:.05em;text-transform:uppercase}.bridge{font-size:11px;color:#b9c7d9}
