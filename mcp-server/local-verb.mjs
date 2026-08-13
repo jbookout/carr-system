@@ -37,7 +37,7 @@ import ws from "ws";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { TOOLS, ToolError } from "./src/tools.js";
+import { TOOLS, ToolError, executeRegisteredTool } from "./src/tools.js";
 
 // The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
 // constructor makes the driver die with an unhandled ErrorEvent before any
@@ -156,7 +156,15 @@ const pool = new Pool({ connectionString: url });
 const client = await pool.connect();
 try {
   if (!tool.write) {
-    const out = await tool.handler(client, { slug, human: true, kind: "human", via: VIA }, args);
+    // Through executeRegisteredTool, NOT tool.handler directly (loop 353,
+    // 2026-08-13). That function's own comment already called itself "the one
+    // choke point ... so the fix lands once instead of being re-implemented per
+    // caller", and named local-verb.mjs among its callers — but this file was
+    // in fact bypassing it, so the CLI silently missed both the argument type
+    // coercion and the raw-DB-error translation the Worker path has. Rule
+    // a8c55a47: a manual path and an automated path that do the same job must
+    // be the same code.
+    const out = await executeRegisteredTool(client, { slug, human: true, kind: "human", via: VIA }, verb, args);
     console.log(JSON.stringify(out, null, 2));
   } else {
     await client.query("begin");
@@ -164,7 +172,7 @@ try {
     if (!a.rows.length) throw new Error(`no actor ${slug}`);
     const actor = { slug, human: a.rows[0].kind === "human", kind: a.rows[0].kind, id: a.rows[0].id, via: VIA };
     if (tool.humanOnly && !actor.human) throw new Error("human_only verb");
-    const out = await tool.handler(client, actor, args);
+    const out = await executeRegisteredTool(client, actor, verb, args);
     await client.query("commit");
     console.log(JSON.stringify(out, null, 2));
   }

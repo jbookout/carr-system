@@ -204,6 +204,83 @@ export function compareVersion(current, baseVersion) {
   return { ok: true };
 }
 
+// THE OTHER HALF OF THE SAME DEFECT (found 2026-08-13, loop 353). compareVersion
+// above fixed ONE field, base_version, against mistyped arrival. The cause it
+// names — "MCP tool-call arguments are never validated against inputSchema
+// server-side" — was never field-specific, and leaving it at one field meant the
+// next mistyped argument was only a matter of which verb got called.
+//
+// It got called. `teach` decides a rule's SCOPE with `args.personal ? ... : null`
+// (loose truthiness) and echoes it back with `args.personal === true` (strict).
+// A boolean that arrived as the STRING "false" is truthy at the first line and
+// false at the second, so the verb stored a SHARED rule as PERSONAL while
+// reporting personal_requested:false. That is not a cosmetic disagreement: scope
+// decides WHO a taught rule binds, the response said the caller got what it
+// asked for, and only a hand comparison of two exported files caught it. Twice
+// in one session.
+//
+// Fixing teach alone would have been the same mistake a second time: a sweep
+// found 17 sites reading a declared boolean or number with loose truthiness or
+// bare arithmetic, SEVEN of which write the wrong value straight to the database
+// (drift_critical on add-loop and update-loop, also_listing_side on add-premises,
+// found and internal on record-finding, close on score-campaign), and eight more
+// that silently skip a dedup or plausibility gate. So the coercion happens ONCE,
+// at the choke point every verb passes through, and no handler has to remember.
+//
+// STRICTLY SCHEMA-DRIVEN, NEVER VALUE-SNIFFING. Only a property whose declared
+// type is exactly "boolean", "integer" or "number" is touched. A field declared
+// "string" is never inspected, so free text that happens to read "true" (a
+// human_quote, a note, a rationale) is untouchable by construction. A union
+// (oneOf, anyOf, or type given as an array) is skipped rather than guessed at —
+// log-decision's `about` takes string OR array, and patch-deal-field has
+// nullable strings.
+//
+// IT THROWS RATHER THAN GUESSING. "true"/"false" and numeric strings map
+// cleanly; anything else in a typed field is a caller error and now fails
+// loudly, in the same spirit as invalid_base_version. Silently leaving an
+// unmappable value in place is what produced this defect in the first place.
+//
+// Recursive, because two of the affected flags are not top-level: add-premises
+// carries also_listing_side inside ownership[] and force_new one level deeper
+// inside ownership[].new_party.
+export function coerceArgsToSchema(schema, args, path = "") {
+  if (!schema || !args || typeof args !== "object" || Array.isArray(args)) return args;
+  const props = schema.properties;
+  if (!props) return args;
+  for (const [key, spec] of Object.entries(props)) {
+    if (!spec || !Object.prototype.hasOwnProperty.call(args, key)) continue;
+    const v = args[key];
+    if (v === undefined || v === null) continue;
+    const where = path ? `${path}.${key}` : key;
+    // A union is ambiguous by design; coercing one would destroy the other.
+    if (spec.oneOf || spec.anyOf || Array.isArray(spec.type)) continue;
+    if (spec.type === "boolean") {
+      if (typeof v === "boolean") continue;
+      if (typeof v === "string") {
+        const s = v.trim().toLowerCase();
+        if (s === "true") { args[key] = true; continue; }
+        if (s === "false") { args[key] = false; continue; }
+      }
+      throw new ToolError({ error: "invalid_boolean", field: where, got: typeof v === "string" ? v : typeof v,
+        hint: `${where} is declared boolean; pass true or false, not a quoted or numeric value` });
+    }
+    if (spec.type === "integer" || spec.type === "number") {
+      if (typeof v === "number") continue;
+      if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v.trim()))) {
+        args[key] = Number(v.trim());
+        continue;
+      }
+      throw new ToolError({ error: "invalid_number", field: where, got: typeof v === "string" ? v : typeof v,
+        hint: `${where} is declared ${spec.type}; pass a number` });
+    }
+    if (spec.type === "object") { coerceArgsToSchema(spec, v, where); continue; }
+    if (spec.type === "array" && Array.isArray(v) && spec.items) {
+      v.forEach((item, i) => coerceArgsToSchema(spec.items, item, `${where}[${i}]`));
+    }
+  }
+  return args;
+}
+
 async function versionGuard(client, table, id, baseVersion) {
   // Every write handler runs inside mcp.js's writer transaction.  Locking the
   // row makes the optimistic check real: a concurrent writer waits, then sees
@@ -3864,7 +3941,12 @@ export const TOOLS = {
         `insert into rule (statement, human_quote, taught_by, scope, personal_to, supersedes)
          values ($1,$2,$3,$4,$5,$6) returning id, personal_to`,
         [args.statement, args.human_quote, actor.id, JSON.stringify(args.scope || {}),
-         args.personal ? actor.id : null, args.supersedes || null]);
+         // STRICT, matching the two response lines below (loop 353). The
+         // boundary coercer already guarantees a real boolean here, so this is
+         // belt-and-braces: it makes the storage line and the echo lines
+         // structurally incapable of disagreeing, which is the disagreement that
+         // stored a shared rule as personal while reporting otherwise.
+         args.personal === true ? actor.id : null, args.supersedes || null]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
         { new: { statement: args.statement, supersedes: args.supersedes || null },
           human_quote: args.human_quote, idempotency_key: args.idempotency_key });
@@ -5331,6 +5413,12 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   if (tool.humanOnly && !actor.human)
     throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
+  // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
+  // coerceArgsToSchema above for what this fixes and why it is here rather than
+  // in the seventeen handlers that would otherwise each need to remember. It
+  // runs before the humanOnly-passed handler sees anything, so no verb can read
+  // a declared boolean or number in the wrong JS type.
+  coerceArgsToSchema(tool.inputSchema, args);
   // DEFECT 2, HALF (b): every verb funnels through here — the one choke point
   // where a raw DB error can be translated into a clean ToolError before it
   // ever reaches the transport (mcp.js's callTool/dispatch, or local-verb.mjs),
