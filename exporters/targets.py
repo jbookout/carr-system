@@ -1447,7 +1447,29 @@ def build_decision_history(tmp_path, cur):
     body, shown, budget = [], 0, (DECISION_BUDGET_BYTES
                                   - sum(len(l) + 1 for l in head)
                                   - TAIL_RESERVE_BYTES)
-    full_budget = int(budget * FULL_TEXT_SHARE)
+
+    # The complete index is costed BEFORE any full text is laid out, because it is
+    # the part that must always fit — it is what makes the accounted count an
+    # invariant. Full text then gets whatever is genuinely left, which is why this
+    # is a subtraction and not a second percentage: two independent shares summing
+    # past the budget is how a file quietly overruns its own ceiling.
+    def _index_line(entry_date, title):
+        t = title if len(title) <= 88 else title[:87].rstrip() + "…"
+        return f"- `{entry_date}` — {t}"
+
+    index_head = ["---", "", "## Every decision on record, newest first",
+                  "",
+                  "> A complete index, including the entries rendered in full above.",
+                  "> Titles are truncated; read any one in full with the wider query at",
+                  "> the top. Nothing here is archived, moved, or lost.",
+                  ""]
+    all_lines = [_index_line(r[0], r[2]) for r in rows]
+    index_bytes = sum(len(l) + 1 for l in index_head) + sum(len(l) + 1 for l in all_lines)
+    INDEX_MAX_SHARE = 0.58
+    index_cap = int(budget * INDEX_MAX_SHARE)
+    index_reserve = min(index_bytes, index_cap)
+
+    full_budget = budget - index_reserve
     used = 0
     canonical = []
     last_date = None
@@ -1486,42 +1508,51 @@ def build_decision_history(tmp_path, cur):
         canonical.append([str(entry_date), session_key, title, author,
                           quote or "", str(quote_absent)])
 
-    # Whatever did not fit in full still gets a line, newest-first, until the rest
-    # of the budget is gone. Same rows, same order, just compacted.
-    indexed = 0
-    if shown < len(rows):
-        index_lines = ["---", "", "## Older decisions, by title",
-                       "",
-                       "> These are the same records, compacted because the full text no",
-                       "> longer fits the budget. Read any one in full with the wider query",
-                       "> above. Nothing here is archived, moved, or lost.",
-                       ""]
-        pending = sum(len(l) + 1 for l in index_lines)
-        for (entry_date, session_key, title, author, quote, rationale,
-             quote_absent, provenance, cost_delta, quality_delta) in rows[shown:]:
-            line = f"- `{entry_date}` — {title}"
-            cost = len(line) + 1
-            if used + pending + cost > budget:
+    # THE INDEX COVERS EVERY DECISION, not just the ones that missed the full-text
+    # window, and that is the point rather than an accident.
+    #
+    # A first version indexed only the overflow. It cut the problem down but did
+    # not remove it: the accounted count still moved with prose length, because a
+    # longer entry rendered in full pushes titles off the end. It tripped the 5%
+    # shrink guard within the hour (245 -> 231) on a single lengthened rationale,
+    # which is exactly the false alarm the change was meant to stop.
+    #
+    # Indexing ALL of them gives the render an invariant worth having: the count is
+    # the number of decisions on record, so it moves when the RECORD moves and at
+    # no other time. Verbosity now shifts how many appear in full — which no guard
+    # watches — instead of how many the file accounts for, which one does.
+    # If the full index will not fit its share, carry as much as it will and say
+    # so, rather than letting the index crowd the full text out entirely.
+    if index_bytes <= index_cap:
+        index_lines = index_head + all_lines
+        indexed = len(all_lines)
+    else:
+        index_lines, indexed, pending = list(index_head), 0, sum(len(l) + 1 for l in index_head)
+        for line in all_lines:
+            if pending + len(line) + 1 > index_cap:
                 break
             index_lines.append(line)
-            pending += cost
+            pending += len(line) + 1
             indexed += 1
-            canonical.append([str(entry_date), session_key, title, author,
-                              quote or "", str(quote_absent)])
-        if indexed:
-            body += index_lines
-            used += pending
+    body += index_lines
+    used += sum(len(l) + 1 for l in index_lines)
 
-    accounted = shown + indexed
+    # canonical mirrors what the file accounts for: every indexed decision, once.
+    canonical = [[str(r[0]), r[1], r[2], r[3], r[4] or "", str(r[6])]
+                 for r in rows[:indexed]]
+
+    accounted = indexed
     omitted = len(rows) - accounted
     tail = [
         "---",
         "",
-        f"*Window: {shown} of {len(rows)} recorded decisions in full"
-        + (f", {indexed} more by title" if indexed else "")
-        + (f"; {omitted} older entr{'y' if omitted == 1 else 'ies'} are outside the "
-           "window entirely and are read with a wider query, not from a second file."
-           if omitted else "; every decision on record is accounted for here.") + "*",
+        f"*{shown} of {len(rows)} recorded decisions are rendered in full"
+        + (f"; all {indexed} are indexed by title below."
+           if not omitted else
+           f"; {indexed} are indexed by title below and {omitted} "
+           f"older entr{'y is' if omitted == 1 else 'ies are'} outside the window "
+           "entirely, read with a wider query rather than from a second file.")
+        + "*",
         "",
     ]
     from datetime import datetime, timezone
@@ -1538,7 +1569,7 @@ def build_decision_history(tmp_path, cur):
     # Counting full plus indexed restores the guard's meaning — the number really
     # is "decisions this file accounts for", so a genuine disappearance still trips
     # it while ordinary verbosity does not.
-    return shown + indexed, canonical
+    return accounted, canonical
 
 
 # ---------------- the write-surface registry, v0 ----------------
@@ -1756,16 +1787,14 @@ TARGETS = {
     # bin/refresh-rules.sh beat. A gist index that lags the rules it indexes is the
     # drift this target exists to prevent.
     "compiled-rules-gist-index": (CLAUDE_MD_REL, build_rule_gist_index),
-    # The data dictionary. Structure, the migrations' own COMMENT ON prose, the
-    # closed vocabularies and per-column fill counts — no row values (see the
-    # module docstring's three rules). Shared tier: both partners read the same
-    # record and both ask the same "what does status = 'roster' mean".
-    "record-layer-dictionary.md": (DICT_REL, build_dictionary),
-    # ORDER 39 (2026-08-01): the two md-ledger renders. hunt-ledger.md is the
-    # live flipped file; the reciprocity render lives beside deals.md because
-    # deals.md is section-scoped (27 hand-kept deal records stay hand-kept).
+    # record-layer-dictionary.md RETIRED to staging 2026-08-13 (decision dcd4912c,
+    # Joe-approved) — restore by re-adding this line + exporters/dictionary.py's
+    # DICT_REL/build_dictionary import.
+    # ORDER 39 (2026-08-01): hunt-ledger.md is the live flipped render.
+    # md-ledger-reciprocity RETIRED to staging 2026-08-13 (decision dcd4912c,
+    # Joe-approved) — restore by re-adding "md-ledger-reciprocity":
+    # (LEDGER_RECIP_REL, build_reciprocity),
     "md-ledger-hunt": (LEDGER_HUNT_REL, build_hunt_ledger),
-    "md-ledger-reciprocity": (LEDGER_RECIP_REL, build_reciprocity),
     # #8 (Wave 3, ORDER 25d). Carries a death sentence — see build_router.
     "lead-router-2026-07-13.xlsx": (ROUTER_REL, build_router),
     # #9-#12 (one-writer Phase A, ORDER 31d). `--only loop` refreshes all four,
