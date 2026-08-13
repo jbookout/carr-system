@@ -54,6 +54,16 @@
           "timeout": 20
         }
       ]
+    },
+    {
+      "matcher": "Agent",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/executor-tier-gate.py",
+          "timeout": 10
+        }
+      ]
     }
   ],
   "PostToolUse": [
