@@ -47,9 +47,19 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "adjudicate-investigation-branch",  # owner-only branch judgment write, like review-deal:
+                                         # a one-off judgment verb whose first word ("adjudicate")
+                                         # is not a generic write prefix
     "call-verb",             # unknown inner call is conservatively a write
     "dry-run-doctrine-gates",
+    "edit-loop-header",      # updates loop_block.prose_md, like presence-lease/review-deal:
+                              # a one-off verb whose first word ("edit") is not a generic
+                              # write prefix and has no sibling "edit-*" verbs to justify one
     "open-campaign",
+    "open-investigation",        # same "open" first-word as open-campaign; the "open" prefix
+                                  # is deliberately not generalized, so this sibling gets the
+                                  # same exact-entry treatment
+    "open-investigation-branch",  # sibling of open-investigation, same reasoning
     "presence-lease",
     "review-deal",
 }
