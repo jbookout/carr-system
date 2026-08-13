@@ -54,7 +54,7 @@ stamp "FIRE begin ($n md renders)"
 mkdir -p "$STAGE"
 
 printf "insert into system_config (key, value, note) values ('doctrine.md_renders_retired', '\"true\"', 'cutoff fired %s by cutoff-doctrine.sh') on conflict (key) do update set value = '\"true\"';" "$(date +%F)" > "$REPO/pipelines/_cutoff_flag.sql"
-"$REPO/.venv/bin/python" "$REPO/tools/db-tap.py" sql "$REPO/pipelines/_cutoff_flag.sql"
+CARR_BREAK_GLASS=1 "$REPO/.venv/bin/python" "$REPO/tools/db-tap.py" --reason "cutoff-doctrine fire $(date -u +%FT%TZ)" sql "$REPO/pipelines/_cutoff_flag.sql"
 rm "$REPO/pipelines/_cutoff_flag.sql"
 stamp "flag set"
 

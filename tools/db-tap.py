@@ -20,11 +20,25 @@ Usage:
 the rehearse-on-branch pattern through the same no-substitution path (added
 2026-07-31, Fable seat session 4, for the 0026 rehearsal).
 
+READ-ONLY BY DEFAULT (Phase 1, 2026-08-13): every ordinary invocation, sql or
+run, opens its subprocess with default_transaction_read_only=on. A write
+against production fails at the server unless you deliberately break glass:
+
+  CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py --reason "why" sql pipelines/x.sql
+
+Both CARR_BREAK_GLASS=1 and a non-empty --reason are required together. A
+break-glass run is banner-announced, requires a local actor identity
+(~/.config/carr/local-actor.json, see bin/set-local-actor.sh), and appends a
+receipt to out/break-glass-receipts.log before the target ever runs.
+
 Never prints the DSN. ON_ERROR_STOP is always set for sql mode.
 """
+import json
 import os
 import subprocess
 import sys
+import urllib.parse
+from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NEONCTL = os.path.join(REPO, "mcp-server", "node_modules", ".bin", "neonctl")
@@ -33,6 +47,8 @@ PSQL_CANDIDATES = [
     "/usr/local/opt/libpq/bin/psql",
     "psql",
 ]
+LOCAL_ACTOR_FILE = os.path.join(os.path.expanduser("~"), ".config", "carr", "local-actor.json")
+RECEIPT_LOG = os.path.join(REPO, "out", "break-glass-receipts.log")
 
 
 def _neon_api_key() -> str:
@@ -112,13 +128,48 @@ def psql_bin() -> str:
     return "psql"
 
 
+def _engaged(reason: str) -> bool:
+    # Break-glass is an ACCIDENT gate and an audit trail, not an attacker gate:
+    # any process running as this Mac user can set CARR_BREAK_GLASS=1 and pass
+    # any --reason string, exactly as this script itself can. The real security
+    # boundary is server-side (a scoped role/credential), not this file — same
+    # honest limit bin/set-local-actor.sh states for identity.
+    return os.environ.get("CARR_BREAK_GLASS") == "1" and bool(reason and reason.strip())
+
+
+def _local_actor_slug() -> str:
+    try:
+        with open(LOCAL_ACTOR_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        slug = (data.get("actor_slug") or "").strip()
+        if slug:
+            return slug
+    except (OSError, ValueError):
+        pass
+    return "identity-not-set"
+
+
+def _append_receipt(actor: str, mode: str, target: str, host: str, reason: str) -> None:
+    os.makedirs(os.path.dirname(RECEIPT_LOG), exist_ok=True)
+    line = (f"{datetime.now(timezone.utc).isoformat()} actor={actor} mode={mode} "
+            f'target={target} host={host} reason="{reason.strip()}"\n')
+    with open(RECEIPT_LOG, "a", encoding="utf-8") as fh:
+        fh.write(line)
+
+
 def main() -> None:
     argv = sys.argv[1:]
     branch = "production"
-    if argv and argv[0] == "--branch":
+    reason = ""
+    while argv and argv[0] in ("--branch", "--reason"):
+        flag = argv[0]
         if len(argv) < 2:
-            sys.exit("--branch needs a name")
-        branch, argv = argv[1], argv[2:]
+            sys.exit(f"{flag} needs a value")
+        if flag == "--branch":
+            branch = argv[1]
+        else:
+            reason = argv[1]
+        argv = argv[2:]
     if len(argv) < 2 or argv[0] not in ("sql", "run"):
         sys.exit(__doc__)
     mode, target, extra = argv[0], argv[1], argv[2:]
@@ -127,14 +178,58 @@ def main() -> None:
         sys.exit(f"no such file: {target_abs}")
     url = dsn(branch)
     os.chdir(REPO)
-    if mode == "sql":
-        rc = subprocess.run([psql_bin(), url, "-v", "ON_ERROR_STOP=1", "-f", target_abs]).returncode
+
+    engaged = _engaged(reason)
+    env = {**os.environ}
+
+    if engaged:
+        actor = _local_actor_slug()
+        host = urllib.parse.urlsplit(url).hostname or "unknown-host"
+        if actor == "identity-not-set":
+            _append_receipt(actor, mode, target, host, reason)
+            sys.exit(
+                "BREAK-GLASS REFUSED: no local actor identity found at\n"
+                "  ~/.config/carr/local-actor.json (written once per machine by\n"
+                "  bin/set-local-actor.sh). Run that script, then retry.\n"
+                "  This refused attempt was still logged to\n"
+                "  out/break-glass-receipts.log as identity-not-set."
+            )
+        print("=" * 72, file=sys.stderr)
+        print("BREAK-GLASS ENGAGED — running WITHOUT the read-only guard.", file=sys.stderr)
+        print(f"  actor:  {actor}", file=sys.stderr)
+        print(f"  reason: {reason.strip()}", file=sys.stderr)
+        print(f"  mode:   {mode} {target}", file=sys.stderr)
+        print("=" * 72, file=sys.stderr)
+        # Log the ATTEMPT before running the target below — the attempt is the
+        # event this receipt records, not success. Do not roll this line back
+        # if the run then fails.
+        _append_receipt(actor, mode, target, host, reason)
     else:
-        env = {**os.environ, "DATABASE_URL": url}
+        # Default posture: PGOPTIONS is a standard libpq env var honored the
+        # same way whether the subprocess is psql (sql mode) or a Python
+        # script connecting via psycopg/psycopg2 off DATABASE_URL (run mode,
+        # also libpq-based) — one mechanism, no per-mode special-casing.
+        # Merge onto any PGOPTIONS a caller already set rather than overwrite
+        # it (none currently do).
+        existing = env.get("PGOPTIONS", "")
+        guard = "-c default_transaction_read_only=on"
+        env["PGOPTIONS"] = f"{existing} {guard}".strip()
+
+    if mode == "sql":
+        rc = subprocess.run([psql_bin(), url, "-v", "ON_ERROR_STOP=1", "-f", target_abs], env=env).returncode
+    else:
+        env["DATABASE_URL"] = url
         # Cloudflare ACCOUNT ID (an identifier, not a credential) — needed by
         # R2 wrangler calls in pipeline scripts; verbatim from ORDER 20's taps.
         env.setdefault("CLOUDFLARE_ACCOUNT_ID", "12ccca77eb49142a6be8eb84c0d6a3a0")
         rc = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"), target_abs, *extra], env=env).returncode
+
+    if not engaged and rc != 0:
+        print(
+            "refused (or failed) while running read-only. To write, set "
+            'CARR_BREAK_GLASS=1 and pass --reason "..." — see tools/db-tap.py.',
+            file=sys.stderr,
+        )
     sys.exit(rc)
 
 
