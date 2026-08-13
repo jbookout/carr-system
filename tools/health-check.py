@@ -17,7 +17,7 @@ Second mode, added 2026-08-02:
 classifies scheduled tasks by whether a firing window has actually PASSED, so a
 brand-new task is never mistaken for a broken one. See the scheduler section below.
 """
-import json, os, sys, glob, time, re, subprocess
+import json, os, sys, glob, time, re, subprocess, calendar
 from datetime import datetime, timedelta
 
 REPO_ROOT = os.path.expanduser("~/carr-system")
@@ -411,10 +411,26 @@ for name, out_pat, max_age, inputs, note in WATCH:
 #
 # The scheduler's own lastRunAt is NOT readable from a script (it lives in the app's
 # store, reachable only through the list_scheduled_tasks MCP tool), so this uses the
-# signal that is local: the TIME OF DAY the output was written. A nightly whose files
-# carry an 08:49 mtime did not run at 02:05, whatever the schedule claims.
+# signal that is local: WHEN THE JOB LAST STARTED, read from the marker the job itself
+# writes on entry.
 #
-# name, output glob, expected local hour, tolerance hours, note
+# MEASURE THE LAST ATTEMPT, NEVER THE LAST SUCCESS (corrected 2026-08-13, loop #327).
+# Until this change the drift was computed from the watched file's MTIME, which is the
+# last time anything appended to it — i.e. the last run to get far enough to write. So a
+# chain that FIRED EXACTLY ON TIME and then failed, and was re-run by hand at midday,
+# reported the midday time and was indistinguishable from a chain that never fired at
+# all. That happened on 2026-08-11 and the row it printed — "ran 12:33, scheduled ~02:00
+# — 10.6h drift · Fix: sudo pmset repeat wakeorpoweron" — was wrong in every part: the
+# job had begun at 07:05:04Z (02:05 CT, on schedule), the failure was the mypy tripwire,
+# and the pmset wake event it recommended was ALREADY SET and could not have helped. A
+# session read that row and went chasing a sleep problem that did not exist instead of
+# the failing step. THE TWO FACTS ARE SEPARATE SENTENCES: "fired on time, exited 1" is a
+# different report from "never fired", they have different remedies, and only the second
+# is ever a wake-schedule problem — which is why the pmset hint now lives ONLY on that
+# branch. Whether the run WORKED is the next block's question, not this one's.
+#
+# name, watched file, expected local hour, tolerance hours, start marker, stale-after
+# hours, wake-remedy note.
 # The watched file must be one ONLY THE SCHEDULED JOB writes. The first version of this
 # check watched an exported .xlsx and immediately produced a false positive: a manual
 # `CARR_EXPORT_LIVE=1 ./run.sh export` rewrote it at 11:38 and the check reported "9.6h
@@ -422,15 +438,50 @@ for name, out_pat, max_age, inputs, note in WATCH:
 # when the JOB ran. out/nightly.log is appended by bin/nightly.sh and by nothing else.
 SCHEDULE = [
     ("nightly-record-layer", "~/carr-system/out/nightly.log", 2, 2.5,
-     "cron 0 2 * * * (local CT). Landing hours late means the Mac slept through it and "
-     "the task fired on wake — the encrypted backup is the seventh step of that chain "
-     "(it was step 3 when this note was written), so it is "
-     "skipped for as long as no session opens. Fix: sudo pmset repeat wakeorpoweron "
-     "MTWRFSU 01:55:00"),
+     "chain begin", 26,
+     "the Mac slept through the window and no session opened to fire it on wake — the "
+     "encrypted backup is the seventh step of that chain (it was step 3 when this note "
+     "was written), so it is skipped for as long as no session opens. "
+     "Fix: sudo pmset repeat wakeorpoweron MTWRFSU 01:55:00"),
 ]
 
-print("Schedule drift — did the job run WHEN scheduled, not merely recently")
-for name, out_pat, want_hour, tol_h, note in SCHEDULE:
+
+def attempt_starts(path, marker):
+    """Every ATTEMPT start in the log, as local epochs, oldest-first. The marker is the
+    line the job writes on ENTRY, so these are firings, not completions. Marker lines
+    lead with an ISO-8601 UTC stamp: `2026-08-13T07:05:05Z  ===== nightly chain begin
+    =====`. Returns None when the marker is unreadable — the caller must say so rather
+    than fall back to mtime silently, because mtime answers a different question."""
+    found = []
+    try:
+        with open(path, errors="replace") as fh:
+            for ln in fh:
+                if marker not in ln:
+                    continue
+                parts = ln.split()
+                if not parts:
+                    continue
+                try:
+                    parsed = time.strptime(parts[0], "%Y-%m-%dT%H:%M:%SZ")
+                except ValueError:
+                    continue
+                found.append(calendar.timegm(parsed))   # stamp is UTC
+    except OSError:
+        return None
+    return sorted(found) or None
+
+
+def scheduled_window(want_hour, now=None):
+    """Epoch of the most recent time the job was DUE — today at want_hour, or yesterday
+    if today's has not come round yet."""
+    now = time.time() if now is None else now
+    lt = time.localtime(now)
+    due = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, want_hour, 0, 0, 0, 0, -1))
+    return due if due <= now else due - 86400
+
+
+print("Schedule drift — did the job START when scheduled (not: did it succeed)")
+for name, out_pat, want_hour, tol_h, marker, stale_h, wake_note in SCHEDULE:
     # SCHEDULE watches job artefacts, which may sit in the repo rather than the vault.
     out = (newest(out_pat) if not out_pat.startswith(("~", "/"))
            else (lambda h: h if os.path.exists(h) else None)(os.path.expanduser(out_pat)))
@@ -438,17 +489,38 @@ for name, out_pat, want_hour, tol_h, note in SCHEDULE:
         print(f"  MISSING {name:<22} no file matches {out_pat}")
         rc = 1
         continue
-    lt = time.localtime(os.path.getmtime(out))
-    ran_h = lt.tm_hour + lt.tm_min / 60.0
-    # circular distance on a 24h clock: 23:50 against 00:10 is 20 minutes, not 23.7h
-    d = abs(ran_h - want_hour)
-    drift = min(d, 24 - d)
-    if drift > tol_h:
-        print(f"  ⚠︎ {name:<22} ran {time.strftime('%H:%M', lt)}, scheduled ~{want_hour:02d}:00 "
-              f"— {drift:.1f}h drift  · {note}")
+    starts = attempt_starts(out, marker)
+    if not starts:
+        print(f"  -- {name:<22} no '{marker}' marker in {os.path.basename(out)} — the "
+              f"last ATTEMPT cannot be read, and this row refuses to substitute the "
+              f"file's mtime, which is its last WRITE and a different question")
+        rc = 1
+        continue
+    # MEASURE AGAINST THE WINDOW, NOT AGAINST THE NEWEST LINE. A hand re-run writes its
+    # own marker, so "newest attempt" would hand a midday rescue the same false positive
+    # the mtime reading produced. The question is whether SOME attempt landed near the
+    # last scheduled firing; later re-runs are recovery and belong to the result row.
+    due = scheduled_window(want_hour)
+    closest = min(starts, key=lambda e: abs(e - due))
+    drift = abs(closest - due) / 3600.0
+    lt = time.localtime(closest)
+    reruns = sum(1 for e in starts if e > closest)
+    tail = f" · {reruns} later re-run(s), which this row ignores by design" if reruns else ""
+    # NEVER FIRED is its own verdict, and the only one the wake schedule explains.
+    if (time.time() - starts[-1]) / 3600.0 > stale_h:
+        print(f"  ⚠︎ {name:<22} NEVER FIRED — newest attempt began "
+              f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(starts[-1]))}, "
+              f"{(time.time() - starts[-1]) / 3600.0:.1f}h ago against a ~{stale_h}h "
+              f"cadence  · {wake_note}")
+        rc = 1
+    elif drift > tol_h:
+        print(f"  ⚠︎ {name:<22} FIRED LATE — nearest attempt to the "
+              f"{time.strftime('%m-%d %H:%M', time.localtime(due))} window began "
+              f"{time.strftime('%H:%M', lt)}, {drift:.1f}h drift  · {wake_note}{tail}")
         rc = 1
     else:
-        print(f"  OK {name:<22} ran {time.strftime('%H:%M', lt)}, within {tol_h}h of ~{want_hour:02d}:00")
+        print(f"  OK {name:<22} fired {time.strftime('%H:%M', lt)}, within {tol_h}h of "
+              f"~{want_hour:02d}:00 (whether it SUCCEEDED is the next row){tail}")
 # --- did the chain WORK, not merely run (added 2026-08-10) -------------------
 # The drift row above answers "did it run on time" and nothing else, which is the
 # same defect the backup guard had: a success signal that never looks at the
