@@ -42,8 +42,18 @@ SCRIPT = os.path.join(REPO, "ops", "vault-drift-watch.py")
 
 VERBOSE = "-v" in sys.argv[1:]
 
-SCRATCH_BASE = "/private/tmp/claude-501/-Users-booko-My-Drive-CARR-AI/" \
-    "96f86a1a-1075-40de-86b4-dd6a27b066f1/scratchpad/vault-drift-watch-selftest"
+# ONE SCRATCH TREE PER PROCESS. This was a hardcoded absolute path — including
+# a long-dead session id — shared by every concurrent run, and fresh_dirs()
+# rmtree's its per-case subdir on entry while main() rmtree's the whole base on
+# exit. Two runs at once therefore deleted each other's fixtures mid-test, and
+# because the interleaving differs every time, so did the set of cases that
+# failed. That is exactly the signature this suite was QUARANTINED for on
+# 2026-08-14 ("4 of 5 runs pass and the failing case DIFFERS between runs"),
+# diagnosed then as same-second mtime resolution. It is not mtime: three
+# concurrent runs reproduce it every time, and a single run passes 6 for 6.
+# mkdtemp gives each process its own base, so nothing is shared and nothing
+# races. TMPDIR keeps it in the sandbox's scratch area rather than /tmp.
+SCRATCH_BASE = tempfile.mkdtemp(prefix="vault-drift-watch-selftest-")
 
 CASES = []
 
