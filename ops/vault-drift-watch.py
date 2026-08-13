@@ -211,11 +211,30 @@ def scan(root):
     return files
 
 
+# A THIRD legitimate writer class the first two missed. `expected` covers the
+# exporters/targets.py TARGETS registry and `corpus_mirror` covers
+# tools/corpus-sync.py, but the vault has a third machine that writes .md into
+# it every night: `./run.sh graph-system` (bin/nightly.sh:233) regenerates the
+# whole derived Graph-System/ tree. Nothing registers those files, because they
+# are not export targets and not corpus mirrors — so every one of them landed in
+# the UNEXPECTED pile. Measured cost, run 20260813T201608Z: 97 of that run's 99
+# UNEXPECTED findings were Graph-System/ paths. A drift report that is 98% one
+# known generator is a report nobody reads, which is how the two REAL findings
+# in that same run (two deliberately retired renders) nearly went unnoticed.
+# ops/vault-duplicate-sweep.py already skips this directory by name for exactly
+# this reason; this is that same knowledge, applied to the second scanner.
+# Prefix-matched rather than set-matched on purpose: the tree is regenerated
+# wholesale, so its members change nightly and enumerating them would drift.
+DERIVED_DIRS = ("Graph-System/",)
+
+
 def classify(relpath, expected, corpus_mirror):
     if relpath in expected:
         return "expected-writer: exporter"
     if relpath in corpus_mirror:
         return "expected-writer: corpus-mirror (see tools/corpus-sync.py)"
+    if relpath.startswith(DERIVED_DIRS):
+        return "expected-writer: derived (see ./run.sh graph-system)"
     return "UNEXPECTED"
 
 
@@ -415,12 +434,71 @@ def run_rebaseline(args):
 
     expected, expected_err = load_expected_writers()
     if expected_err:
-        print(f"⚠︎ could not load exporters/targets.py's TARGETS registry ({expected_err}) — "
-              f"baselining only the {len(ALWAYS_EXPECTED)} hardcoded compiled-rules paths.",
-              file=sys.stderr)
+        # FAIL CLOSED on a full rebaseline. This used to warn and carry on,
+        # writing a baseline of just the 3 hardcoded compiled-rules paths —
+        # which REPLACES the full one, silently deleting the tamper baseline for
+        # every registered export target. It happened for real: the baseline
+        # found on disk today was stamped 2026-08-13T18:21:01Z with file_count
+        # 3, because someone ran `python3 ops/vault-drift-watch.py --rebaseline`
+        # instead of nightly.sh's `./.venv/bin/python`, psycopg was missing, and
+        # the tool degraded quietly. From then until the next nightly, tamper
+        # detection covered 3 files instead of the whole registry, and nothing
+        # in the artifact said so — the warning went to stderr and the run still
+        # exited 0. A baseline that silently covers less than it claims is worse
+        # than a missing one, because --check reports "OK" off it.
+        #
+        # --only is exempt: it MERGES, so it can only ever add or refresh the
+        # paths it names, and ALWAYS_EXPECTED is hardcoded rather than imported.
+        if not args.only:
+            print(f"FATAL: could not load exporters/targets.py's TARGETS registry "
+                  f"({expected_err}). Refusing to write a full baseline covering only the "
+                  f"{len(ALWAYS_EXPECTED)} hardcoded compiled-rules paths — that would drop "
+                  f"tamper coverage for every export target. Run it the way bin/nightly.sh "
+                  f"does: ./.venv/bin/python ops/vault-drift-watch.py --rebaseline",
+                  file=sys.stderr)
+            return 1
+        print(f"⚠︎ could not load the TARGETS registry ({expected_err}) — proceeding "
+              f"because --only merges and its paths are hardcoded.", file=sys.stderr)
+
+    # --only: a PARTIAL rebaseline, merged into whatever is already on file.
+    #
+    # WHY THIS EXISTS. --rebaseline is documented to run LAST, after the nightly
+    # export chain, and it re-snapshots everything at once. That is correct for
+    # every writer that runs on the nightly beat — but bin/refresh-rules.sh
+    # re-renders the three compiled-rules files HOURLY, 7:00-20:00, so a rule
+    # taught at noon reaches the binding surface the same day. Those two beats
+    # do not agree, and the tamper pass believed the slower one: on run
+    # 20260813T201608Z all three compiled-rules files reported TAMPER
+    # ("rewritten outside the nightly export") against an 18:04Z baseline they
+    # had legitimately moved past at 20:00Z. It is not an occasional race. The
+    # render carries an `Exported: <timestamp>` line, so the bytes change on
+    # EVERY hourly pass even when no rule changed — DNA/compiled-rules-dell.md's
+    # diff in that run was that one line and nothing else. Three guaranteed
+    # false TAMPER findings a day, on the three files whose integrity matters
+    # most, is worse than no check at all: it teaches the reader to skip them.
+    #
+    # WHY MERGE RATHER THAN A FULL RE-SNAPSHOT ON THE HOURLY BEAT. Running the
+    # whole --rebaseline hourly would silently bless any OTHER registered file
+    # that had been rewritten outside its export — which is the exact tampering
+    # this tool exists to catch. --only keeps the blast radius to the paths the
+    # caller names and leaves every other baseline entry exactly as it was.
+    only_prefixes = None
+    if args.only:
+        only_prefixes = tuple(p.strip() for p in args.only.split(",") if p.strip())
+        if not only_prefixes:
+            print("FATAL: --only was given but parsed to no prefixes", file=sys.stderr)
+            return 1
+        expected = {p for p in expected if p.startswith(only_prefixes)}
+        if not expected:
+            print(f"FATAL: --only {args.only} matched no registered path — refusing to "
+                  f"write a baseline that would drop every entry.", file=sys.stderr)
+            return 1
 
     print(f"vault drift watch --rebaseline — {datetime.now(timezone.utc).isoformat()}")
     print(f"root: {root}")
+    if only_prefixes:
+        print(f"--only {', '.join(only_prefixes)} — partial rebaseline, merging into "
+              f"the existing baseline")
     print(f"registered file(s): {len(expected)}")
 
     sizes = {}
@@ -447,7 +525,30 @@ def run_rebaseline(args):
         print(f"over the ~{cap_mb:.0f}MB cap — content-copying .md registry files only; "
               f"xlsx/binary registry files get a hash-only baseline")
 
-    if content_dir.exists():
+    # A partial run inherits the prior manifest's copy decision instead of
+    # recomputing it from its own small subset — otherwise rebaselining three
+    # .md files would see "well under the cap" and start content-copying every
+    # xlsx on the next full run's terms, quietly changing an unrelated policy.
+    prior = {}
+    manifest_path = baseline_dir / "manifest.json"
+    if only_prefixes:
+        if manifest_path.exists():
+            try:
+                prior = json.loads(manifest_path.read_text())
+            except (OSError, ValueError) as exc:
+                print(f"FATAL: --only needs a readable existing baseline to merge into, "
+                      f"but {manifest_path} could not be parsed ({exc}). Run a full "
+                      f"--rebaseline first.", file=sys.stderr)
+                return 1
+            content_copy_all = bool(prior.get("content_copy_all", content_copy_all))
+        else:
+            print(f"FATAL: --only needs an existing baseline to merge into, but "
+                  f"{manifest_path} does not exist. Run a full --rebaseline first.",
+                  file=sys.stderr)
+            return 1
+    elif content_dir.exists():
+        # Full rebaseline still starts clean; a partial one must NOT, or it
+        # would delete the content copies of every path it is not touching.
         shutil.rmtree(content_dir)
 
     files = {}
@@ -470,6 +571,20 @@ def run_rebaseline(args):
         files[relpath] = {"sha256": sha, "size": sizes[relpath], "content_copied": do_copy}
 
     baseline_dir.mkdir(parents=True, exist_ok=True)
+    touched = len(files)
+    if only_prefixes:
+        # Merge: every path this run did not name keeps the entry it already
+        # had. The counts below are recomputed over the MERGED set so the
+        # manifest keeps describing the whole baseline, not just this slice.
+        merged = dict(prior.get("files") or {})
+        merged.update(files)
+        files = merged
+        copied = sum(1 for e in files.values() if e.get("content_copied"))
+        hash_only = sum(1 for e in files.values()
+                        if e.get("sha256") is not None and not e.get("content_copied"))
+        missing = [p for p, e in files.items() if e.get("sha256") is None]
+        total_bytes = sum(e.get("size") or 0 for e in files.values())
+
     manifest = {
         "schema": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -483,12 +598,22 @@ def run_rebaseline(args):
         "missing_count": len(missing),
         "files": files,
     }
-    manifest_path = baseline_dir / "manifest.json"
+    if only_prefixes:
+        # Provenance, so a later reader can tell a merged baseline from a full
+        # one without diffing timestamps.
+        manifest["partial_rebaseline"] = {
+            "prefixes": list(only_prefixes),
+            "paths_touched": touched,
+            "prior_generated_at": prior.get("generated_at"),
+        }
     tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
     tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     tmp.replace(manifest_path)
 
     print(f"\nbaseline written: {manifest_path}")
+    if only_prefixes:
+        print(f"  {touched} path(s) re-snapshotted, "
+              f"{len(files) - touched} carried forward untouched")
     print(f"  {copied} content-copied, {hash_only} hash-only, {len(missing)} missing")
     return 0
 
@@ -705,6 +830,13 @@ def main(argv=None):
                      help="Tamper + structural drift check (run FIRST, before exports)")
     ap.add_argument("--rebaseline", action="store_true",
                      help="Snapshot the post-export registry state (run LAST, after exports)")
+    ap.add_argument("--only", default=None, metavar="PREFIX[,PREFIX...]",
+                     help="With --rebaseline: re-snapshot ONLY registered paths starting "
+                          "with one of these comma-separated prefixes, MERGING them into "
+                          "the existing baseline and leaving every other path's baseline "
+                          "untouched. For a writer that runs on its own beat between "
+                          "nightly chains (bin/refresh-rules.sh). Without it, --rebaseline "
+                          "re-snapshots the whole registry as before.")
     ap.add_argument("--dry-run-ingest", action="store_true",
                      help="With --check and CARR_DRIFT_INGEST=1: build and print payloads, "
                           "never actually POST. No effect when CARR_DRIFT_INGEST is unset.")
@@ -713,6 +845,10 @@ def main(argv=None):
                           "salvage payloads (default: current UTC timestamp). Tests only.")
     args = ap.parse_args(argv)
 
+    if args.only and args.check:
+        print("FATAL: --only applies to --rebaseline only; --check always scans "
+              "the whole registry.", file=sys.stderr)
+        return 1
     if args.check and args.rebaseline:
         print("FATAL: --check and --rebaseline are mutually exclusive — run them as two "
               "separate steps (--check first, --rebaseline last).", file=sys.stderr)

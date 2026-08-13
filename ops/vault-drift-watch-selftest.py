@@ -76,8 +76,20 @@ def fresh_dirs(tag):
     }
 
 
+# Run the tool under the SAME interpreter bin/nightly.sh uses, not whichever
+# python launched this test. --rebaseline imports exporters/targets.py for the
+# registry, which needs psycopg — present in the repo venv, absent from a bare
+# system python3. Before this, `python3 ops/vault-drift-watch-selftest.py`
+# silently exercised the degraded path (registry unavailable) and still passed,
+# which is precisely how the 2026-08-13T18:21Z 3-path baseline got written and
+# went unnoticed. A test that does not run the real invocation is not a test of
+# it. Falls back to sys.executable so the file still runs without a venv.
+_VENV = os.path.join(REPO, ".venv", "bin", "python")
+VENV_PYTHON = _VENV if os.path.exists(_VENV) else sys.executable
+
+
 def run(dirs, mode="--check", extra_args=None, env_overrides=None):
-    args = [sys.executable, SCRIPT, mode,
+    args = [VENV_PYTHON, SCRIPT, mode,
             "--root", dirs["root"], "--manifest", dirs["manifest"],
             "--baseline-dir", dirs["baseline"], "--quarantine-dir", dirs["quarantine"],
             "--salvage-manifest", dirs["salvage"], "--summary", dirs["summary"]]
@@ -427,6 +439,95 @@ def _(assert_):
     rc, out, err = run(d, extra_args=["--rebaseline"])  # run() already passes --check
     assert_(rc == 1, f"passing both mode flags should exit 1, got {rc}")
     assert_("mutually exclusive" in err, "the error should say the flags are mutually exclusive")
+
+
+# ---------------------------------------------------------------- v3 cases
+# (Graph-System/ classification + partial --rebaseline --only. Both added
+# 2026-08-13 after run 20260813T201608Z reported 3 TAMPER + 99 UNEXPECTED and
+# every one of the 102 turned out to be a known writer or a deliberate
+# retirement.)
+
+@case("Graph-System/ is a known derived writer, not UNEXPECTED")
+def _(assert_):
+    d = fresh_dirs("derived")
+    write(d["root"], "Graph-System/\U0001f4c1 DNA.md", "# derived\n")
+    write(d["root"], "hand-authored.md", "# mine\n")
+    rc, out, err = run(d)
+    assert_(rc == 0, f"seed run should exit 0, got {rc}\nstderr={err}")
+    rc2, out2, err2 = run(d)
+    assert_(rc2 == 0, f"second run should exit 0, got {rc2}\nstderr={err2}")
+    graph_line = [ln for ln in out.splitlines() if "Graph-System/" in ln]
+    assert_(graph_line, "the Graph-System file should appear in the report")
+    assert_(all("UNEXPECTED" not in ln for ln in graph_line),
+            f"Graph-System/ must not classify as UNEXPECTED: {graph_line}")
+    assert_(any("derived" in ln for ln in graph_line),
+            f"Graph-System/ should classify as a derived writer: {graph_line}")
+    hand = [ln for ln in out.splitlines() if "hand-authored.md" in ln]
+    assert_(any("UNEXPECTED" in ln for ln in hand),
+            f"an ordinary hand-authored .md must still be UNEXPECTED: {hand}")
+
+
+@case("--rebaseline --only re-snapshots the named paths and carries the rest forward")
+def _(assert_):
+    d = fresh_dirs("partial")
+    joe = "00_Context/compiled-rules-joe.md"
+    shared = "DNA/compiled-rules-shared.md"
+    write(d["root"], joe, "31 rules\n")
+    write(d["root"], shared, "151 rules\n")
+    rc, _, err = run(d, mode="--rebaseline")
+    assert_(rc == 0, f"full rebaseline should exit 0, got {rc}\nstderr={err}")
+    before = json.loads(open(os.path.join(d["baseline"], "manifest.json")).read())
+    shared_sha_before = before["files"][shared]["sha256"]
+
+    # Only joe moves, exactly as an hourly refresh would move it.
+    write(d["root"], joe, "33 rules\n")
+    rc2, out2, err2 = run(d, mode="--rebaseline", extra_args=["--only", joe])
+    assert_(rc2 == 0, f"partial rebaseline should exit 0, got {rc2}\nstderr={err2}")
+    assert_("partial rebaseline" in out2, "a partial run should say so")
+    after = json.loads(open(os.path.join(d["baseline"], "manifest.json")).read())
+    assert_(after["files"][joe]["sha256"] != before["files"][joe]["sha256"],
+            "the named path's baseline hash should have moved")
+    assert_(after["files"][shared]["sha256"] == shared_sha_before,
+            "an unnamed path's baseline must be carried forward untouched")
+    assert_(after["file_count"] == before["file_count"],
+            "a merge must not drop registry entries")
+    assert_(after.get("partial_rebaseline", {}).get("prefixes") == [joe],
+            "the manifest should record which prefixes were partially rebaselined")
+
+    # The whole point: the moved file must no longer read as TAMPER.
+    rc3, _, err3 = run(d)
+    assert_(rc3 == 0, f"check after partial rebaseline should exit 0, got {rc3}\nstderr={err3}")
+    tampered = []
+    if os.path.exists(d["salvage"]):
+        tampered = [json.loads(l)["path"] for l in open(d["salvage"])
+                    if l.strip() and json.loads(l)["finding_type"] == "tamper"]
+    assert_(joe not in tampered,
+            f"the rebaselined path must not be reported as tampered: {tampered}")
+
+
+@case("--rebaseline --only refuses a prefix that matches nothing, rather than emptying the baseline")
+def _(assert_):
+    d = fresh_dirs("partial-nomatch")
+    write(d["root"], "DNA/compiled-rules-shared.md", "# rules\n")
+    rc, _, _ = run(d, mode="--rebaseline")
+    assert_(rc == 0, "full rebaseline should exit 0")
+    before = open(os.path.join(d["baseline"], "manifest.json")).read()
+    rc2, _, err2 = run(d, mode="--rebaseline",
+                       extra_args=["--only", "No/Such/Path.md"])
+    assert_(rc2 == 1, f"a no-match --only should exit 1, got {rc2}")
+    assert_("matched no registered path" in err2,
+            f"the error should say the prefix matched nothing: {err2}")
+    after = open(os.path.join(d["baseline"], "manifest.json")).read()
+    assert_(after == before, "a refused partial run must leave the baseline byte-identical")
+
+
+@case("--only is rejected with --check, which always scans the whole registry")
+def _(assert_):
+    d = fresh_dirs("partial-mode")
+    write(d["root"], "hello.md", "# hello\n")
+    rc, _, err = run(d, extra_args=["--only", "DNA/"])  # run() already passes --check
+    assert_(rc == 1, f"--only with --check should exit 1, got {rc}")
+    assert_("--rebaseline only" in err, f"the error should name the right mode: {err}")
 
 
 def main():

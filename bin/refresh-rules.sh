@@ -35,6 +35,19 @@ if CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules >> "$LOG" 2>&1; then
   if ! python3 "$REPO/ops/rule-render-markup-check.py" >> "$LOG" 2>&1; then
     echo "$(date -u +%FT%TZ) FAIL tool-call markup found in a rendered rule" >> "$LOG"
   fi
+  # Same class of gap as the enforcement map above, same remedy, same place.
+  # vault-drift-watch's tamper baseline is refreshed by the NIGHTLY chain, but
+  # these three renders move HOURLY here — and they carry an `Exported:`
+  # timestamp, so their bytes change on every pass even when no rule changed.
+  # The two beats disagreed, so the drift check reported all three as TAMPER
+  # ("rewritten outside the nightly export") every day; run 20260813T201608Z is
+  # the measured case. The baseline for these paths is derived data, so it is
+  # moved by code here, right where the renders move. --only touches ONLY these
+  # three and merges, so a genuine out-of-band rewrite of any OTHER registered
+  # file is still caught by tonight's check.
+  "$REPO/.venv/bin/python" "$REPO/ops/vault-drift-watch.py" --rebaseline \
+    --only "DNA/compiled-rules-shared.md,00_Context/compiled-rules-joe.md,DNA/compiled-rules-dell.md" \
+    >> "$LOG" 2>&1 || true
 else
   rc=$?  # capture BEFORE the date subshell resets $? — the old line always logged rc=0
   echo "$(date -u +%FT%TZ) FAIL rules refresh rc=$rc" >> "$LOG"
