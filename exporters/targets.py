@@ -1748,7 +1748,72 @@ def build_source_captures(tmp_path, cur):
     return len(rows), canonical
 
 
+CURRICULUM_REL = "DNA/Deal Management/record-layer/joe-curriculum-dashboard.html"
+
+
+def build_curriculum(tmp_path, cur):
+    """The curriculum board, rendered from media_recommendation rows (loop #122).
+
+    The page has claimed these records as its source of truth since it shipped on
+    2026-08-01, and they did not exist — so it was hand-maintained HTML asserting a
+    provenance it did not have, which is a render with two writers. This makes the
+    claim true.
+
+    The shell comes VERBATIM from Joe's approved page; only the card list is
+    generated, so the design cannot drift as a side effect of a data change.
+    """
+    import html as _html
+    from datetime import datetime, timezone
+    from exporters.curriculum_template import HEAD, TAIL
+
+    cur.execute("""
+        select title, author, kind, why, observed_pattern, tags, priority, status,
+               recommended_on, finished_on
+          from v_media_recommendation
+         where personal_to = 'joe'
+         order by case priority when 'now' then 0 else 1 end,
+                  case status when 'done' then 1 else 0 end,
+                  recommended_on desc, title
+    """)
+    rows = cur.fetchall()
+
+    cards = []
+    for (title, author, kind, why, pattern, tags, priority, status,
+         rec_on, fin_on) in rows:
+        classes = ["card"]
+        if priority == "now":
+            classes.append("priority-now")
+        classes.append("type-book" if kind == "book" else "type-media")
+        classes.append("status-done" if status == "done" else "status-new")
+        tag_html = '<span class="tag type">' + _html.escape(kind.title(), quote=False) + "</span>"
+        if priority == "now":
+            tag_html += '<span class="tag now">Start here</span>'
+        for t in (tags or []):
+            tag_html += '<span class="tag">' + _html.escape(t, quote=False) + "</span>"
+        author_html = (' <span class="author">— ' + _html.escape(author, quote=False) + "</span>"
+                       if author else "")
+        meta = "Recommended " + str(rec_on) + " · observed pattern: " + _html.escape(pattern, quote=False)
+        if fin_on:
+            meta += " · finished " + str(fin_on)
+        cards.append(
+            '\n  <div class="' + " ".join(classes) + '">\n'
+            '    <div class="top"><span class="title">' + _html.escape(title, quote=False)
+            + author_html + "</span></div>\n"
+            '    <div class="tags">' + tag_html + "</div>\n"
+            '    <p class="why"><b>Why now:</b> ' + _html.escape(why, quote=False) + "</p>\n"
+            '    <div class="meta">' + meta + "</div>\n"
+            "  </div>\n")
+
+    stamp = ("\n<!-- generated " + datetime.now(timezone.utc).isoformat()
+             + " from media_recommendation — " + str(len(rows)) + " item(s). "
+             "Do not hand-edit: this is a render, and a hand edit is lost on the "
+             "next export. -->\n")
+    tmp_path.write_text(HEAD + "".join(cards) + "\n</div>\n" + TAIL + stamp)
+    return len(rows), CURRICULUM_REL
+
+
 TARGETS = {
+    "curriculum": (CURRICULUM_REL, build_curriculum),
     "lead-registry.xlsx": (REGISTRY_REL, build_registry),
     "source-captures": (SOURCES_REL, build_source_captures),
     # 2026-08-06, Joe's phone approval: "Flip it". Hand half = abilities-catalog.md.
