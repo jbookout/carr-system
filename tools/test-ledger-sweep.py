@@ -27,7 +27,11 @@ import subprocess
 import sys
 import tempfile
 
-REPO = os.path.expanduser("~/carr-system")
+# Script-relative, NOT expanduser("~/carr-system"). CI checks the repo out to
+# /home/runner/work/carr-system/carr-system, which is not under $HOME, so the old
+# form did not fail an assertion — it failed to FIND the hook and took the whole
+# file down before a single case ran.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HOOK = os.environ.get("LEDGER_SWEEP_HOOK", f"{REPO}/hooks/ledger-sweep.py")
 
 FIRE, QUIET = True, False

@@ -17,9 +17,11 @@ Six groups, per the build spec, in order:
      this exercises the shell runner's move logic without needing any
      reviewer installed or any network access, since a schema failure
      happens before either is ever touched)
-  6. the Grok lane, mirroring the Codex coverage above: binary probe (real —
-     Grok IS installed on this machine, so this is a genuine filesystem
-     check, not a mock), command-shape assertions (including a HARD safety
+  6. the Grok lane, mirroring the Codex coverage above: binary probe
+     (deterministic — every filesystem/PATH probe is stubbed, both the
+     absent and the present case, so the result never depends on whether
+     Grok or Codex actually happen to be installed on the machine running
+     this file), command-shape assertions (including a HARD safety
      regression check that neither backend's command ever carries an
      approval-bypass flag), output parsing against a captured real envelope
      shape, per-backend token isolation, and per-reviewer independence (one
@@ -36,12 +38,21 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
+from unittest import mock
 
-REPO = os.path.expanduser("~/carr-system")
+# Script-relative, NOT os.path.expanduser("~/carr-system") — this file runs
+# under ops/ci.sh's `gates` class on a GitHub ubuntu runner where the repo is
+# checked out under /home/runner/work/..., not under $HOME, so a
+# home-relative path would silently miss and break the sys.path.insert below
+# (ModuleNotFoundError on import, before a single check runs). Same pattern
+# already used by ops/guard-selftest.py and ops/vault-drift-watch-selftest.py.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(REPO, "pipelines"))
 
 import run_codex_review as rcr  # noqa: E402
@@ -415,22 +426,75 @@ def test_failure_path_lands_in_failed():
 def test_grok_lane():
     print("\n[6] grok lane (binary probe, command shape, output parsing, independence)")
 
-    # --- binary probe: REAL, not mocked — Grok is actually installed on this
-    # machine (0.2.118, confirmed live at build time), so this genuinely
-    # exercises find_grok_binary()'s filesystem/PATH logic rather than
-    # asserting against a fake. Codex's probe was already covered implicitly
-    # by every earlier test that hit "not found" naturally (no Codex binary
-    # exists here) — this is the mirror case, "found for real".
-    grok_path, checked = rcr.find_grok_binary()
+    # --- binary probe: DETERMINISTIC, not host-dependent. This used to assert
+    # "grok_path is not None" on the grounds that Grok CLI was actually
+    # installed on the machine this file was built on — true on that Mac at
+    # build time, false on ops/ci.sh's `gates` class running on a bare GitHub
+    # ubuntu runner (no Grok CLI there), so it would fail on the very first
+    # CI run. Same defect as the Codex probe above, pointing the other way.
+    # Fixed the same way: construct both worlds explicitly by stubbing every
+    # probe find_grok_binary uses, instead of assuming either one from
+    # whatever happens to be on this host.
+    with mock.patch.object(rcr.shutil, "which", return_value=None), \
+         mock.patch.object(rcr.os.path, "isfile", return_value=False):
+        grok_path_absent, checked = rcr.find_grok_binary()
     check("find_grok_binary checked at least PATH", len(checked) >= 1)
-    check("find_grok_binary finds the real, installed grok CLI on this machine",
-          grok_path is not None and os.path.basename(grok_path) == "grok",
-          f"got {grok_path!r}")
+    check("find_grok_binary reports 'not found' when no binary is reachable "
+          "anywhere it looks — constructed with every probe stubbed out, not "
+          "assumed from this host's real state",
+          grok_path_absent is None)
 
-    codex_path, codex_checked = rcr.find_codex_binary()
-    check("find_codex_binary still correctly reports 'not found' on this machine "
-          "(no Codex CLI installed here — confirmed at build time)",
-          codex_path is None)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        fake_grok = Path(tmp_dir) / "grok"
+        fake_grok.write_text("#!/bin/sh\necho fake grok\n")
+        fake_grok.chmod(fake_grok.stat().st_mode | stat.S_IEXEC)
+
+        def fake_which_grok(name, *a, **kw):
+            return str(fake_grok) if name == "grok" else None
+
+        with mock.patch.object(rcr.shutil, "which", side_effect=fake_which_grok):
+            grok_path_present, checked_present = rcr.find_grok_binary()
+        check("find_grok_binary finds a constructed fake binary on PATH",
+              grok_path_present == str(fake_grok), f"got {grok_path_present!r}")
+
+    # --- codex probe: DETERMINISTIC, not host-dependent. The property under
+    # test is "when no Codex binary is reachable anywhere find_codex_binary
+    # looks, it returns (None, checked) cleanly instead of raising or
+    # hallucinating a path" — that must hold on every machine, not just one
+    # where Codex happens to be absent. A Codex CLI IS installed on this Mac
+    # now (it was not at build time), so asserting against this host's real
+    # state would pass on a bare CI runner and fail here — it would be
+    # testing the machine, not the code. Construct the "nothing found" world
+    # explicitly by stubbing every probe find_codex_binary uses, instead of
+    # assuming it from whatever happens to be on this host.
+    with mock.patch.object(rcr.shutil, "which", return_value=None), \
+         mock.patch.object(rcr.os.path, "isdir", return_value=False), \
+         mock.patch.object(rcr.os.path, "isfile", return_value=False):
+        codex_path_absent, codex_checked_absent = rcr.find_codex_binary()
+    check("find_codex_binary checked at least PATH", len(codex_checked_absent) >= 1)
+    check("find_codex_binary reports 'not found' when no binary is reachable "
+          "anywhere it looks (PATH, app bundles, common install paths, npm "
+          "global) — constructed with every probe stubbed out, not assumed "
+          "from this host's real state",
+          codex_path_absent is None)
+
+    # --- codex probe, present case: mirrors the present-case coverage Grok
+    # already gets above, but with a FAKE executable planted in a temp dir
+    # and found via the cheap PATH branch (shutil.which stubbed to point at
+    # it) — never by relying on this host's real Codex install, which may or
+    # may not exist and may be a different build on a different machine.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        fake_codex = Path(tmp_dir) / "codex"
+        fake_codex.write_text("#!/bin/sh\necho fake codex\n")
+        fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IEXEC)
+
+        def fake_which(name, *a, **kw):
+            return str(fake_codex) if name == "codex" else None
+
+        with mock.patch.object(rcr.shutil, "which", side_effect=fake_which):
+            codex_path_present, codex_checked_present = rcr.find_codex_binary()
+        check("find_codex_binary finds a constructed fake binary on PATH",
+              codex_path_present == str(fake_codex), f"got {codex_path_present!r}")
 
     # --- command shape + THE hard safety regression check ------------------
     fake_prompt = "REVIEW PROMPT PLACEHOLDER"

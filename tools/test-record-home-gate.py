@@ -12,7 +12,11 @@ import os
 import subprocess
 import sys
 
-GATE = os.path.expanduser("~/carr-system/hooks/record-home-gate.py")
+# Script-relative, NOT expanduser("~/carr-system") — see the same fix in
+# test-ledger-sweep.py. A checkout outside $HOME made this file crash on import
+# rather than report a failure.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+GATE = os.path.join(REPO, "hooks", "record-home-gate.py")
 VAULT = os.path.expanduser(
     "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
@@ -85,7 +89,7 @@ CASES = [
     ("allow · weekly brief output (retiring prefix)", ALLOW, "Write",
      {"file_path": f"{VAULT}/DNA/Network/briefs/2026-08-10-network-brief.md", "content": "x"}),
     ("allow · repo file, outside the vault", ALLOW, "Write",
-     {"file_path": os.path.expanduser("~/carr-system/specs/some-spec.md"), "content": "spec"}),
+     {"file_path": os.path.join(REPO, "specs", "some-spec.md"), "content": "spec"}),
     ("allow · scratchpad", ALLOW, "Write",
      {"file_path": "/private/tmp/claude-501/scratch/notes.md", "content": "scratch"}),
     ("allow · non-markdown in the vault", ALLOW, "Write",
@@ -108,7 +112,7 @@ def run(tool, ti):
 def manifest_unit_cases():
     """Direct md_manifest checks the subprocess harness cannot reach: the
     retirement clock is injectable only in-process."""
-    sys.path.insert(0, os.path.expanduser("~/carr-system/hooks"))
+    sys.path.insert(0, os.path.join(REPO, "hooks"))
     from datetime import date, timedelta
     from md_manifest import md_write_verdict, CUTOFF
     cases = [
