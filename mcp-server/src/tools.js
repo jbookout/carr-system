@@ -540,6 +540,12 @@ const RETIRED_REF_CAP = 10;
 // says so in the note rather than truncating silently.
 const LINK_CAP = 20;
 
+// [loop #279] How many rulings find-precedent returns at once. A ruling's reasoning
+// runs to paragraphs, so this is bounded by what a caller can actually read before
+// deciding, not by what the query could return. Eight is the default; this is the
+// ceiling a caller may raise it to.
+const PRECEDENT_CAP = 25;
+
 // THE NODE KEY IS THE REF, NOT THE NAME, and that choice is load-bearing.
 // v_party_graph carries exactly one ref per party (0020's `distinct on`), so a
 // ref identifies a party. A name does not: production holds one real lead
@@ -6163,6 +6169,117 @@ Object.assign(TOOLS, {
                    "problem, not a lapse: say so rather than filing the next one quietly."
                  : "first of its class." };
     }),
+  },
+  "find-precedent": {
+    write: false,
+    description: "\"What have we ruled on a fork shaped like this before?\" — searches the RULING HISTORY, which nothing else could reach. Hundreds of decisions are recorded and `find` matches party names, deal names and client refs only, so until this verb the entire decision history was retrievable by nothing but a human remembering that a ruling existed. Search it BEFORE re-arguing a settled point, and before telling a partner something is an open question. THIS IS THE MISSING EVIDENCE BEHIND THE TWO COUNTERPARTY CHAIRS: council-landlord and council-listing-agent are each required to announce that they run at very low n, and a searchable ruling history is precisely what raises it. Matches on the ruling's title, the partner's own verbatim words, and the reasoning — the partner's phrasing matters because a fork is often findable only by how he said it, which is never how the summary says it. Trigram similarity, so near-misses and different word order still match; a query of two or three concrete words beats a sentence. NOT for doctrine (search-doctrine), NOT for records (find), NOT for open work (loop-board). Read-only.",
+    inputSchema: { type: "object", properties: {
+      query: { type: "string", description: "the fork in a few concrete words — 'party merge survivor', 'markdown vs database', 'national account modelling'. Two or three specific nouns beat a full sentence: this is trigram matching, not a question answerer." },
+      limit: { type: "integer", description: `rulings returned, capped at ${PRECEDENT_CAP} (default 8)` },
+      since: { type: "string", description: "ISO date; only rulings on or after it. Use when you want the CURRENT position rather than the whole history — an older ruling may have been superseded." } },
+      required: ["query"] },
+    handler: async (c, _a, args) => {
+      const q = String(args.query || "").trim();
+      if (!q) throw new ToolError({ error: "query_required",
+        hint: "name the fork in a few concrete words" });
+      const cap = Math.max(1, Math.min(PRECEDENT_CAP, args.limit || 8));
+      const present = await c.query("select to_regclass('public.v_precedent') is not null as t");
+      if (!present.rows[0].t)
+        throw new ToolError({ error: "migration_not_applied", migration: "0106_precedent_and_point_in_time",
+          hint: "precedent search needs 0106. Apply it (`~/carr-system/run.sh migrate --apply --yes`) and retry." });
+      // WORD SIMILARITY, NOT similarity(). This was built with similarity() first and it
+      // returned ZERO for every realistic query, because similarity() compares two whole
+      // trigram sets: a three-word query against a thousand-character ruling scores near
+      // zero no matter how exactly those words appear in it. word_similarity() scores the
+      // query against the best-matching WINDOW of the document, which is the actual
+      // question. Measured on the live corpus: similarity() found 0 rulings for "markdown
+      // database" and word_similarity() found the database-first ruling at 0.58.
+      //
+      // The second branch is the one that catches an exact multi-word phrase whose words
+      // are far apart in the text — every word present, order and distance irrelevant.
+      const words = q.split(/\s+/).filter(w => w.length > 2);
+      const r = await c.query(
+        `select decision_id, entry_date, title, human_quote, agent_rationale, author,
+                provenance, word_similarity($1, haystack) as score
+           from v_precedent
+          where (word_similarity($1, haystack) >= 0.3
+                 or ($2::text[] <> '{}' and haystack ilike all(
+                       select '%' || w || '%' from unnest($2::text[]) w)))
+            and ($3::date is null or entry_date >= $3::date)
+          order by word_similarity($1, haystack) desc, entry_date desc
+          limit $4`,
+        [q, words, args.since || null, cap]);
+      // THE RATIONALE IS CUT, NOT DROPPED. A ruling's reasoning runs to paragraphs and eight
+      // of them would swamp the caller; the id is here so the full text is one read away.
+      const rulings = r.rows.map(x => ({
+        decision_id: x.decision_id,
+        date: x.entry_date,
+        title: x.title,
+        // The partner's own words first: that is the binding half of a ruling, and the
+        // summary is the session's paraphrase of it.
+        human_said: x.human_quote || null,
+        reasoning_excerpt: (x.agent_rationale || "").slice(0, 400)
+          + ((x.agent_rationale || "").length > 400 ? " …" : ""),
+        author: x.author,
+        provenance: x.provenance || null,
+        match_score: Number(x.score?.toFixed?.(3) ?? x.score),
+      }));
+      return { ok: true, query: q, count: rulings.length, rulings,
+        note: rulings.length
+          ? "A ruling found here is a SETTLED point, not a suggestion — read the full reasoning " +
+            "before departing from it, and say so out loud if you do. An older ruling may have " +
+            "been superseded by a newer one in this same list, so read the dates; nothing here " +
+            "marks supersession automatically."
+          : "No ruling matches. That is NOT proof none exists — this is trigram matching over " +
+            "the words actually used, so try the partner's likely phrasing and a couple of " +
+            "different concrete nouns before concluding the fork is unsettled." };
+    },
+  },
+  "state-as-of": {
+    write: false,
+    description: "\"What did the record SAY about this on date X?\" — replays the field-level change log for one record up to an instant. The material has been there since the first migration (every write stores the old and new value of the field it touched) and nothing exposed it. USE IT INSTEAD OF ASKING A PARTNER WHETHER SOMETHING IS STILL TRUE: the standing rule that a session must stop and ask before drafting off notes older than about sixty days exists because nothing could answer that mechanically, and this can. Also the way to settle which of two disagreeing surfaces went stale — knowing what we believed WHEN is the whole of that question. Every field comes back with how many times it changed AFTER the cutoff and what it says now, so a caller can always tell \"true then and still true\" from \"true then, moved since\". Read-only, and it reconstructs rather than restores: nothing is written back.",
+    inputSchema: { type: "object", properties: {
+      ref: { type: "string", description: "the record — C-127 / L-204 / V-CPA-006 / P-0948 or an exact deal name" },
+      as_of: { type: "string", description: "the instant to reconstruct (ISO date or timestamp). Defaults to now, which returns the current state with its change counts — useful on its own for seeing what has moved recently." } },
+      required: ["ref"] },
+    handler: async (c, _a, args) => {
+      const present = await c.query("select to_regclass('public.v_field_history') is not null as t");
+      if (!present.rows[0].t)
+        throw new ToolError({ error: "migration_not_applied", migration: "0106_precedent_and_point_in_time",
+          hint: "point-in-time reconstruction needs 0106. Apply it and retry." });
+      const s = await resolveSubject(c, args.ref);
+      const at = args.as_of || null;
+      const r = await c.query(
+        `select field, value_at, changed_at, changed_by, verb, later_changes, current_value
+           from state_as_of($1, $2, coalesce($3::timestamptz, now()))`,
+        [s.type, s.id, at]);
+      if (!r.rows.length)
+        return { ok: true, ref: args.ref, subject_type: s.type, as_of: at || "now",
+                 fields: [], count: 0,
+                 note: "This record has NO field-level history at or before that instant. That " +
+                       "means nothing was recorded about it then, not that it did not exist — a " +
+                       "record created by an import carries its creation but no field changes." };
+      const fields = r.rows.map(x => ({
+        field: x.field,
+        value_then: x.value_at,
+        set_at: x.changed_at,
+        set_by: x.changed_by,
+        by_verb: x.verb,
+        changes_since: x.later_changes,
+        value_now: x.later_changes > 0 ? x.current_value : undefined,
+        still_current: x.later_changes === 0,
+      }));
+      const moved = fields.filter(f => !f.still_current);
+      return { ok: true, ref: args.ref, subject_type: s.type, as_of: at || "now",
+               count: fields.length, fields_changed_since: moved.length, fields,
+               note: moved.length
+                 ? `${moved.length} of ${fields.length} field(s) have moved since that instant — ` +
+                   "each of those carries value_now beside value_then. Anything drafted off a " +
+                   "note from that date is out of step on exactly those fields and no others, " +
+                   "which is a narrower and more useful answer than 'the notes are old'."
+                 : "Nothing about this record has changed since that instant, so a note from " +
+                   "that date is still accurate on every field the record tracks." };
+    },
   },
   "call-verb": {
     write: true,   // rides the writer path so inner writes work; inner reads work there too
