@@ -148,11 +148,11 @@
     "one next action",
     "engineering chat is absent"
    ],
-   "result": null,
-   "coached": null,
+   "result": "pass",
+   "coached": false,
    "time_seconds": null,
-   "friction_notes": null,
-   "timestamp": null
+   "friction_notes": "All four criteria met. (1) one request ID — PASS: WR-SYNTH-042 carries the heading and reappears identically in the Safe Workspace return panel, with no competing identifier anywhere on the surface. (2) origin is linked without client payload — PASS, and belt-and-braces: the Safe business origin panel gives type workspace_problem, surface 'Command Center system-status card', and origin ref workspace://synthetic/problem-042, alongside an explicit 'Business payload copied: false', while fixtures/work-request.v1.json independently declares business_payload in its redaction fields_withheld. The origin is reachable as a reference without the content travelling with it. (3) one next action — MET, WITH A REAL AMBIGUITY WORTH FIXING: the surface renders two separate fields both labelled exactly 'Next action', holding different values — the Request panel says 'Complete AC-3 against the runnable prototype' while the Safe Workspace return says 'No action needed'. Both are correct for their own audience, the Control Room operator and the Workspace requester respectively, and the panel titles are the only thing distinguishing them. The identical label with no audience qualifier is the defect; the criterion is satisfied in substance because neither panel offers a menu. (4) engineering chat is absent — PASS, AFFIRMATIVELY RATHER THAN ACCIDENTALLY. A source search for chat, thread, comment, discussion, reply or message-box across public/js/app.js and public/index.html returns nothing, so no such construct exists to be hidden, and fixtures/work-request.v1.json declares engineering_chat in its redaction fields_withheld, making the absence a stated policy rather than an omission. Task clauses all served: what it asks for is the request title plus three acceptance criteria; how success is judged is those criteria carrying explicit verdicts and evidence refs, AC-1 Passed with EV-SYNTH-101, AC-2 Passed with EV-SYNTH-102, AC-3 Pending with 'Evidence pending'; where it stands now is State verification with a timestamped, attributed lifecycle of captured, triaged, claimed, verification. Scoped executor is shown bounded — Codex, session SES-SYNTH-004, capability read_and_propose, scope svc-workspace rehearsal, expiring Aug 10 11:00 PM UTC. SECOND INSTANCE OF THE CI PATTERN FIRST RECORDED IN JOURNEY 8: the control-room suite passes 94 of 94 tests, but no test asserts the absence of engineering chat, just as none asserts configuration visibility. The suite is green on things it does not check. That is the finding to carry into Phase 1, not the individual gaps. Control Room carries no route chips, so no coaching affordance applies. Timing not instrumented.",
+   "timestamp": "2026-08-12T20:36:28-05:00"
   },
   {
    "id": "flow-04-plan-invalidation",
