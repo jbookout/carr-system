@@ -182,6 +182,28 @@ step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
 step "lead promote (review shortlist, writes no leads)" ./run.sh lead-promote
 
 step "graph (derived from the exported files)"       ./run.sh graph
+
+# Added 2026-08-13 (Phase 1): the retrieval index and the system graph were
+# invoked by NOTHING — not this chain, not any launchd plist, not brief_pack.py,
+# not local-briefs.sh, not crontab — so `run.sh retrieve` and Graph-System were
+# only ever as fresh as the last time a human remembered to run them by hand.
+# Both read the freshly EXPORTED vault files (section-index walks the vault
+# tree; the system graph's folder-to-folder edges come from file text) AND the
+# doctrine STORE (both take the lib/record_sources store pass this Mac's venv
+# can reach), so they must run AFTER the exports step and AFTER the corpus push
+# above (git-canonical doctrine -> vault) — running earlier would index/graph
+# yesterday's vault content. Placed here, late in the chain and right after the
+# Obsidian graph render, rather than any earlier: they also want the record
+# layer to have finished its own writes and reads for the night (cadence,
+# matcher, cutover readiness, consumers), and there is nothing downstream of
+# them in-chain that reads their output before the backup, so their exact slot
+# among the late steps is not load-bearing — only "after exports+corpus push,
+# before backup" is. Same $PY venv convention as every other DB-touching step
+# (run.sh's own graph_system/section_index functions already use $PY, not
+# plain python3, for the same psycopg reason as ORDER 29a).
+step "section index (retrieval-as-code layer)"       ./run.sh section-index
+step "system graph (Graph-System/, derived)"         ./run.sh graph-system
+
 step "encrypted backup -> R2"                        ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.

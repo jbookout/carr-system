@@ -210,8 +210,17 @@ WATCH = [
      "Monday radar run (radar-digest-sop.md)"),
     ("PECOS pool",        "Automation/radar/upstream/pecos.json", 100, [],
      "quarterly (Jan/Apr/Jul/Oct; next diff vs the Q1 baseline in Oct)"),
-    ("Section index",     "Automation/section-index.tsv", 9, [],
-     "retrieval-as-code layer; rebuild = run.sh section-index (rides the Monday run; no BEHIND check — doc inputs churn daily by design)"),
+    ("Section index",     "Automation/section-index.tsv", 26/24, [],
+     "retrieval-as-code layer; rebuild = run.sh section-index. CORRECTED 2026-08-13 (Phase 1): "
+     "this used to claim it 'rides the Monday run', wiring that never existed — build-section-"
+     "index.py was invoked by nothing until today. It now rides the nightly chain (bin/nightly.sh, "
+     "after exports + corpus push), same 26h cadence as the other nightly-chain GEN rows below. "
+     "No BEHIND check — doc inputs churn daily by design. Graph-System/ (pipelines/build-system-"
+     "graph.py, also newly wired into the same nightly step) deliberately gets no row of its own: "
+     "it is a many-file derived folder like Graph/ (build-graph-notes.py, wired long before today), "
+     "which has never had a row here either — a single representative mtime would not mean much for "
+     "a folder, and the nightly chain's own step log already proves it ran. Adding one would be "
+     "noise, not signal."),
     # --- the record layer's generated files (added 2026-07-31 with ORDER 2) ------
     # 26h, matching the export digest's dead-man: the chain runs nightly 7 days a
     # week (unlike the weekday pipelines above), so anything past ~a day means the

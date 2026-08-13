@@ -82,12 +82,22 @@ by_base = {b: v[0] for b, v in base_map.items() if len(v) == 1}
 REF = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_/&. -]*\.(?:md|xlsx|json|html)", re.I)
 
 def resolve(ref):
+    # Deterministic tie-break (fixed 2026-08-13): by_path is a set, so a plain
+    # `for r in by_path` walked it in Python's per-process hash-randomized
+    # order — proven today by running the unmodified script twice and getting
+    # different folder-flow counts on the SAME vault content. When more than
+    # one file ends with the same suffix, pick shortest-path-then-lexicographic
+    # instead of whichever the set handed out first.
     ref = ref.strip().lstrip("./")
     if ref in by_path:
         return ref
-    for r in by_path:
-        if r.lower().endswith("/" + ref.lower()):
-            return r
+    suffix = "/" + ref.lower()
+    candidates = sorted(
+        (r for r in by_path if r.lower().endswith(suffix)),
+        key=lambda r: (len(r), r),
+    )
+    if candidates:
+        return candidates[0]
     return by_base.get(os.path.basename(ref).lower())
 
 # ---------- doctrine store pass: which .md files are store-held, and their text ----------
