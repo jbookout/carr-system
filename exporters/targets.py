@@ -1400,7 +1400,15 @@ def build_decision_history(tmp_path, cur):
         "select entry_date, session_key, title, author, human_quote, agent_rationale, "
         "       quote_absent, provenance, cost_delta, quality_delta "
         "  from v_decision_entry "
-        " order by entry_date desc, session_key desc")
+        # ORDER BY THE TIMESTAMP, NEVER THE DATE ALONE (migration 0110). Every
+        # entry a partner logs in one session shares both entry_date and
+        # session_key, so the old `entry_date desc, session_key desc` imposed no
+        # order at all inside a day — and this render is byte-budgeted, so
+        # whichever entries luck put last simply fell out of the full-text
+        # window. On 2026-08-13 that made the file assert the opposite of a
+        # ruling Joe had just given, because the entry recording his answer lost
+        # its place to older ones from the same morning.
+        " order by occurred_at desc")
     rows = cur.fetchall()
 
     head = [
