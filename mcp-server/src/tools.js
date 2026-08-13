@@ -17,6 +17,40 @@ export class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
 }
 
+// DEFECT 2, HALF (b) (found 2026-08-13, decision 7026246b): a write whose bad
+// input reaches the database raw (an enum this file never learned to validate,
+// a foreign key nobody checked first) throws a driver error, not a ToolError —
+// and mcp.js's top-level catch used to flatten EVERY non-ToolError into a bare
+// {"error":"internal error"} with no field, no constraint, no allowed values.
+// Half (a) closes the specific gap (marker, domain, above); this is the
+// backstop for every OTHER enum/FK this file has not yet learned to check —
+// Postgres SQLSTATE class 23 (integrity_constraint_violation) always names the
+// constraint and usually the column, so that much can be surfaced honestly
+// without ever touching the connection string (which lives in env bindings,
+// never in a query or its error — nothing here reads or forwards env).
+// Deliberately narrow: anything outside class 23 (a real connection or driver
+// fault) returns null and falls through to the generic handler unchanged,
+// because this is a translator for bad input, not a catch-all.
+const PG_VIOLATION_KIND = Object.freeze({
+  "23514": "check_violation",       // e.g. marker/kind fails its CHECK
+  "23503": "foreign_key_violation", // e.g. domain names no row in loop_domain
+  "23505": "unique_violation",
+  "23502": "not_null_violation",
+});
+const CONNSTR_RE = /\b\w+:\/\/[^\s'"]+/gi; // defense in depth; pg errors don't carry one today
+function redact(s) {
+  return typeof s === "string" ? s.replace(CONNSTR_RE, "[redacted]") : s;
+}
+export function pgConstraintError(e) {
+  const code = e && e.code;
+  if (typeof code !== "string" || !PG_VIOLATION_KIND[code]) return null;
+  return new ToolError({ error: "invalid_field_value", violation: PG_VIOLATION_KIND[code],
+    constraint: e.constraint || null, table: e.table || null, column: e.column || null,
+    detail: redact(e.detail) || null,
+    hint: "a value failed a database constraint — check it against this verb's documented " +
+          "enum or required fields; this is the constraint the value actually violated, not a stack trace" });
+}
+
 // [ORDER 34 review, blocker 1] The old array-replacer form of JSON.stringify
 // FILTERED nested keys instead of canonicalizing them — links[]/building/spaces
 // payloads hashed as empty, so a corrected retry under a reused key replayed
@@ -143,21 +177,67 @@ async function mirrorDecision(client, actor, d) {
   return attached;
 }
 
+// Pure decision logic for the optimistic-lock check, isolated from the DB
+// round trip so it is unit-testable without a connection. THE BUG THIS FIXES
+// (found 2026-08-13, decision 7026246b): the old check was `current !==
+// baseVersion`, a STRICT comparison with no coercion. `current` always comes
+// back a genuine JS number (the loop_item.version column is `int`, and both
+// the Worker's and local-verb's Pool driver parse int4 to Number), but
+// `baseVersion` arrives verbatim from the caller's JSON payload — and MCP
+// tool-call arguments are never validated against inputSchema server-side
+// (see callTool in mcp.js: `rpc.params?.arguments` is passed straight
+// through). A caller that sent base_version as the JSON STRING "1" instead
+// of the number 1 — e.g. copying a value that had been rendered as text —
+// produced `1 !== "1"` => true: a false version_conflict on a loop that had
+// just been created and never touched again, reproduced twice on 2026-08-13
+// (loop #350, base_version 1, current_version 1). Coercing both sides to
+// Number before comparing fixes this without weakening the check: a REAL
+// mismatch (e.g. 1 vs 3) still differs after coercion.
+export function compareVersion(current, baseVersion) {
+  if (baseVersion === undefined || baseVersion === null)
+    return { ok: false, kind: "missing_base_version" };
+  const cv = Number(current);
+  const bv = Number(baseVersion);
+  if (!Number.isFinite(bv))
+    return { ok: false, kind: "invalid_base_version" };
+  if (cv !== bv) return { ok: false, kind: "conflict" };
+  return { ok: true };
+}
+
 async function versionGuard(client, table, id, baseVersion) {
   // Every write handler runs inside mcp.js's writer transaction.  Locking the
   // row makes the optimistic check real: a concurrent writer waits, then sees
   // the incremented version instead of letting two same-version writes through.
+  // Query text UNCHANGED from before this fix (still exactly
+  // "select version from <table> where id=$1 for update") — existing fakes in
+  // this suite (loop-owner-repair.test.mjs) match on it verbatim, and the new
+  // logic below only needs a second read on the rare conflict path.
   const r = await client.query(`select version from ${table} where id=$1 for update`, [id]);
   if (!r.rows.length) throw new ToolError({ error: "not_found", table, id });
   const current = r.rows[0].version;
-  if (baseVersion === undefined || baseVersion === null)
+  const cmp = compareVersion(current, baseVersion);
+  if (cmp.kind === "missing_base_version")
     throw new ToolError({ error: "missing_base_version", current_version: current,
       hint: "read the record first; pass its version back as base_version" });
-  if (current !== baseVersion) {
+  if (cmp.kind === "invalid_base_version")
+    throw new ToolError({ error: "invalid_base_version", got: baseVersion, current_version: current,
+      hint: "base_version must be the integer version from a fresh read, not a non-numeric value" });
+  if (!cmp.ok) {
+    // Exclude the record's OWN creation event from the "intervening" list.
+    // A caller holding any base_version >= 1 has, by construction, already
+    // read the record after it existed — its birth is not news to them, so
+    // citing it as an intervening event is misleading regardless of the fix
+    // above. created_at and the creation event's recorded_at are written in
+    // the same transaction (both default to now()), so they are exactly
+    // equal; `recorded_at > created_at` keeps every REAL subsequent edit and
+    // drops only that one founding row. Fetched here, lazily, only on the
+    // conflict path, rather than folded into the query above.
+    const created = await client.query(`select created_at from ${table} where id=$1`, [id]);
     const ev = await client.query(
       `select a.slug as actor, e.verb, e.field, e.old_value, e.new_value, e.recorded_at
        from event e join actor a on a.id=e.actor_id
-       where e.subject_id=$1 order by e.recorded_at desc limit 5`, [id]);
+       where e.subject_id=$1 and e.recorded_at > $2 order by e.recorded_at desc limit 5`,
+      [id, created.rows[0]?.created_at ?? null]);
     throw new ToolError({ error: "version_conflict", current_version: current,
       intervening_events: ev.rows,
       hint: "surface this to the human and re-read; NEVER auto-retry" });
@@ -1041,6 +1121,18 @@ const BLOCKER_CLASSES = Object.freeze([
   "other_lane",     // depends on another lane's in-flight deliverable, named
   "capability",     // a credential, gate or verb this session cannot hold, named (rule 1b8e7f43)
 ]);
+
+// loop_item.marker's own contract (migration 0024): 'check (marker in (...))'.
+// THE BUG THIS LIST FIXES (found 2026-08-13, decision 7026246b): add-loop's
+// inputSchema had always documented this enum, but inputSchema is advisory
+// only — the MCP transport never validates a call's arguments against it
+// (mcp.js's callTool passes `rpc.params?.arguments` straight to the handler),
+// so an illegal value like 'wrench' sailed past the JS layer entirely and hit
+// the DB's CHECK constraint raw, which the generic top-level catch then
+// flattened into a bare {"error":"internal error"} naming neither the field
+// nor the allowed values. Same pattern BLOCKER_CLASSES fixed for `blocker`
+// above; marker gets the identical up-front-validation treatment in add-loop.
+const LOOP_MARKERS = Object.freeze(["bell", "dated", "decision", "none"]);
 
 // The detail field is where a determined session would smuggle the deferral back
 // in, so the phrases that mean "not now, no reason" are refused by name. This is
@@ -4305,7 +4397,7 @@ export const TOOLS = {
       owner: { type: "string", description: "the label the file uses: 'Joe', 'Joe/Claude', 'Dell', 'Joe→Dell'" },
       unblocks: { type: "string", description: "what it unblocks / why it matters" },
       source_note: { type: "string", description: "source / detail / links" },
-      marker: { type: "string", enum: ["bell", "dated", "decision", "none"] },
+      marker: { type: "string", enum: LOOP_MARKERS },
       due_on: { type: "string", description: "YYYY-MM-DD; required when marker is 'dated'" },
       drift_critical: { type: "boolean", description: "the ⚡ — leaving it undone causes system drift; BOTH brains' heartbeats surface it daily" },
       number: { type: "string", description: "override the auto-assigned ref. Only pass this to reproduce a number that already exists somewhere; the files already contain collisions." },
@@ -4319,9 +4411,35 @@ export const TOOLS = {
       if (!args.title && !args.body)
         throw new ToolError({ error: "empty_loop",
           hint: "a loop needs text: `body` for an open_loop, `title` for a team_loop or action_required" });
+      // THE OTHER HALF OF DEFECT 2 (found 2026-08-13, decision 7026246b): marker
+      // is documented in inputSchema as an enum but was never checked before
+      // hitting loop_item's CHECK constraint. An illegal value ('wrench' — not
+      // in bell/dated/decision/none) reached the DB raw and came back as a bare
+      // {"error":"internal error"}, reproduced twice live. Validate up front,
+      // exactly like BLOCKER_CLASSES does for `blocker` a few lines below.
+      if (args.marker !== undefined && !LOOP_MARKERS.includes(args.marker))
+        throw new ToolError({ error: "unknown_marker", got: args.marker, allowed: LOOP_MARKERS,
+          hint: "marker must be one of bell/dated/decision/none — the file's own convention " +
+                "(see this verb's description for what each means)" });
       if (args.marker === "dated" && !args.due_on)
         throw new ToolError({ error: "dated_marker_needs_date",
           hint: "a 🗓 row is silent until its day — without a date it would be silent forever" });
+      // Same class of bug, same fix: domain is a reference-table taxonomy
+      // (loop_domain, 'open taxonomy, insert a row not a migration' per this
+      // system's own convention — rule 0001), enforced by a FOREIGN KEY rather
+      // than a CHECK, but an unrecognized slug fails exactly the same way: a
+      // raw constraint violation with no field named. Checked against the live
+      // table rather than a hardcoded list, because the taxonomy is deliberately
+      // open to a new row without a code change.
+      if (args.domain !== undefined && args.domain !== null) {
+        const dom = await c.query("select slug from loop_domain where slug=$1", [args.domain]);
+        if (!dom.rows.length) {
+          const all = await c.query("select slug from loop_domain order by sort asc");
+          throw new ToolError({ error: "unknown_domain", got: args.domain,
+            allowed: all.rows.map(r => r.slug),
+            hint: "classify by what the WORK is, not who appears in it — see this verb's description" });
+        }
+      }
 
       // ── THE DEFERRAL GATE (migration 0081, Joe 2026-08-09) ──────────────────
       // Joe taught rule 179be4b8 on 2026-08-08 — "why would you put them off?
@@ -4427,7 +4545,7 @@ export const TOOLS = {
       unblocks: { type: "string" }, source_note: { type: "string" },
       domain: { type: "string", enum: ["deals","prospecting","networking","marketing","business","system"],
         description: "reclassify the loop. Same rule as add-loop: classify by what the WORK is, not who appears in it." },
-      marker: { type: "string", enum: ["bell", "dated", "decision", "none"] },
+      marker: { type: "string", enum: LOOP_MARKERS },
       due_on: { type: "string", description: "YYYY-MM-DD" },
       drift_critical: { type: "boolean" },
       blocker: { type: "string", enum: ["human_only","counterparty","ruling","external_event","other_lane","capability"],
@@ -5213,7 +5331,21 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   if (tool.humanOnly && !actor.human)
     throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
-  return tool.handler(client, actor, args);
+  // DEFECT 2, HALF (b): every verb funnels through here — the one choke point
+  // where a raw DB error can be translated into a clean ToolError before it
+  // ever reaches the transport (mcp.js's callTool/dispatch, or local-verb.mjs),
+  // so the fix lands once instead of being re-implemented per caller. A
+  // ToolError a handler threw on purpose passes straight through unchanged;
+  // only an UNTRANSLATED error gets a look from pgConstraintError, and only a
+  // recognized class-23 violation gets rewritten — anything else (a real
+  // connection or driver fault) still surfaces as-is for the transport's own
+  // generic handling.
+  try {
+    return await tool.handler(client, actor, args);
+  } catch (e) {
+    if (e instanceof ToolError) throw e;
+    throw pgConstraintError(e) || e;
+  }
 }
 
 
