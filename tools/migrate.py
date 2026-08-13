@@ -29,7 +29,27 @@ from pathlib import Path
 from typing import NoReturn
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
-NAME_RE = re.compile(r"^\d{4}_[a-z0-9_]+\.sql$")
+# NNNN_name.sql, plus an OPTIONAL single lowercase letter after the number:
+# 0013a_name.sql. Widened 2026-08-13 for a defect that could not be fixed inside
+# the old contract.
+#
+# THE NEED. Applying every migration to an empty database died at 0014, which
+# asserts fourteen client_status rows are flagged and found three: eleven slugs
+# entered production out of band and no migration creates them. The fix has to
+# run BEFORE 0014 on a fresh database, and 0013 and 0014 are consecutive
+# integers, so there is no number between them. Appending at the end would not
+# help — on an empty database it would still run after the migration it needs to
+# precede. This is the ordinary reason migration tools use timestamps or decimal
+# numbering; a single letter is the smallest change that buys the same thing.
+#
+# WHY IT IS SAFE. The regex only WIDENS what is accepted, so every existing
+# filename still matches and nothing about already-applied migrations changes.
+# Ordering is unaffected: Python sorts 0013_ < 0013a_ < 0014_ ('_' is 0x5F and
+# 'a' is 0x61, then '3' < '4'), which is exactly the order the fix needs. And
+# migrate.py is the ONLY parser of the filename shape — v_schema_ledger (0113)
+# and mcp-server/src/release.js store and display the string without extracting
+# a number from it, so widening here cannot desync a second reader.
+NAME_RE = re.compile(r"^\d{4}[a-z]?_[a-z0-9_]+\.sql$")
 
 # ── DDL TIMEOUTS (added 2026-08-02, cold-session audit) ──────────────────────
 # WHY. Migrations are applied by hand against production Neon while a Cloudflare

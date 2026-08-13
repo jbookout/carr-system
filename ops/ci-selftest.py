@@ -249,6 +249,37 @@ def test_lock_is_not_platform_specific():
           not bad, f"bare: {bad[:3]}")
 
 
+def test_migration_filenames_match_the_runner():
+    """Every migration must satisfy tools/migrate.py's own NAME_RE, and the
+    ordered-insert file must sort where it claims to. CI rejected 0013a with
+    'bad migration filename' AFTER it was written and pushed — a filename
+    contract that is only enforced on a live database is one you find out about
+    from a red runner rather than from a check."""
+    src = (REPO / "tools" / "migrate.py").read_text()
+    m = re.search(r'NAME_RE = re\.compile\(r"([^"]+)"\)', src)
+    check("migrate.py's NAME_RE is readable from source", m is not None)
+    if not m:
+        return
+    rx = re.compile(m.group(1))
+    names = sorted(p.name for p in (REPO / "migrations").iterdir()
+                   if p.suffix == ".sql")
+    bad = [n for n in names if not rx.match(n)]
+    check("every migration filename matches the runner's contract",
+          not bad, f"rejected: {', '.join(bad[:4])}")
+
+    # Ordering is the whole point of an inserted migration; assert it rather
+    # than trusting the ASCII reasoning in the file's own header comment.
+    inserted = [n for n in names if re.match(r"^\d{4}[a-z]_", n)]
+    for n in inserted:
+        stem = n[:4]
+        nxt = f"{int(stem) + 1:04d}"
+        before = [x for x in names if x.startswith(stem + "_")]
+        after = [x for x in names if x.startswith(nxt + "_")]
+        if before and after:
+            i, b, a = names.index(n), names.index(before[0]), names.index(after[0])
+            check(f"{n} sorts between {before[0]} and {after[0]}", b < i < a)
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -258,7 +289,8 @@ def main():
                test_tracked_scripts_are_executable_in_git,
                test_secret_scanner_catches_and_respects_allow,
                test_dep_check_detects_a_stale_lock,
-               test_lock_is_not_platform_specific):
+               test_lock_is_not_platform_specific,
+               test_migration_filenames_match_the_runner):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip
