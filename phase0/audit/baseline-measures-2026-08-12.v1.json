@@ -1,0 +1,80 @@
+{
+ "generated": "2026-08-12",
+ "artifact": "phase0-operating-baseline-measures",
+ "source_doctrine": "carr-workspace-bduf section s01a 'Operating objective and AI-session displacement test'",
+ "doctrine_rule": "Before implementation, instrument or interview the following measures. Do not invent a baseline. Store the evidence method, observation window, result, bound product action, and post-launch comparison for each measure.",
+ "register_rule": "carr-workspace-bduf s27 and carr-control-room-bduf s34: the register must name the method, owner, and observation window rather than fabricate a value.",
+ "baseline_context": "These measure the CURRENT world, before CARR Workspace and CARR Control Room ship. Tasks are performed with the partner's existing tools, never against the Phase 0 prototypes. Timing a partner on the prototypes would measure the proposed system rather than the baseline it is supposed to beat, and would make the post-launch comparison meaningless.",
+ "measures": [
+  {
+   "id": "baseline-1-weekly-heavy-session-time",
+   "measure": "Joe's current weekly time spent using heavy AI sessions for routine system or business operation",
+   "method": "instrument",
+   "method_detail": "Derive from local session records; classify sessions as routine-operation versus exploration/construction, since doctrine objective 8 permits heavy sessions for exploring, investigating genuinely complex problems, and constructing something new. Only routine-operation time counts against this baseline.",
+   "owner": "system",
+   "observation_window": "trailing 4 weeks",
+   "requires_partner": false,
+   "bound_product_action": "Prioritize product controls and Doc routes for the largest measured categories.",
+   "post_launch_comparison": "Remeasure weekly time on the same basis.",
+   "result": null
+  },
+  {
+   "id": "baseline-2-questions-needing-agent-explanation",
+   "measure": "Count and categories of routine questions that require Claude Code or Codex explanation",
+   "method": "instrument",
+   "method_detail": "Classify question-shaped turns in session transcripts. Joe validates the category scheme once; he does not supply the count.",
+   "owner": "system",
+   "observation_window": "trailing 4 weeks",
+   "requires_partner": false,
+   "bound_product_action": "Add the missing visual explanation or qualified Doc answer route.",
+   "post_launch_comparison": "Recount by the same categories and observation window.",
+   "result": null
+  },
+  {
+   "id": "baseline-3-actions-not-completable-visually",
+   "measure": "Count and categories of recurring actions that cannot be completed visually",
+   "method": "hybrid",
+   "method_detail": "System derives a candidate list from verb-call frequency over the window; Joe confirms which genuinely had no visual route.",
+   "owner": "system proposes, Joe confirms",
+   "observation_window": "trailing 4 weeks",
+   "requires_partner": true,
+   "bound_product_action": "Prioritize the corresponding straightforward control or exact action card.",
+   "post_launch_comparison": "Recount the remaining non-visual routines by category.",
+   "result": null
+  },
+  {
+   "id": "baseline-4-median-time-to-determine-state",
+   "measure": "Median time to determine business state and system health",
+   "method": "timed tasks with the partner",
+   "method_detail": "This measure CANNOT be instrumented: it measures human comprehension time, not system activity. Six tasks, three business-state and three system-health, issued one at a time. The proctor records send time and answer time; elapsed time is the measurement. No hint is given about where to look, matching the uncoached journey discipline. Every answer is independently verified against the record afterward, because a fast wrong answer is not a fast answer.",
+   "owner": "Joe",
+   "observation_window": "single sitting, 2026-08-12",
+   "requires_partner": true,
+   "known_bias": "Elapsed time includes reading the question and typing the answer, neither of which occurs in a silent real workflow. The bias is accepted and held CONSTANT: the post-launch remeasure uses the identical six tasks and the identical send-to-answer method, so the comparison remains valid even though the absolute number is inflated.",
+   "task_set_frozen_before_measurement": true,
+   "tasks": [
+    {"id": "B1", "domain": "business state", "prompt": "How many deals are active right now, and which single one needs you first?", "verification": "deal-board plus set-next-action review"},
+    {"id": "B2", "domain": "business state", "prompt": "Which client or lead has gone longest without a touch?", "verification": "stale-records"},
+    {"id": "B3", "domain": "business state", "prompt": "What changed in the business since yesterday?", "verification": "catch-me-up"},
+    {"id": "S1", "domain": "system health", "prompt": "Is anything in the system broken or degraded right now?", "verification": "run.sh health"},
+    {"id": "S2", "domain": "system health", "prompt": "When did the encrypted database backup last actually run?", "verification": "backup log and the nightly chain history"},
+    {"id": "S3", "domain": "system health", "prompt": "Which scheduled job most recently failed, and why?", "verification": "scheduled task history and job logs"}
+   ],
+   "bound_product_action": "Tune The Command Center and CARR Control Room overview journeys to expose the measured missing state.",
+   "post_launch_comparison": "Repeat the identical six tasks by the identical method and compare medians.",
+   "result": null
+  },
+  {
+   "id": "baseline-5-hand-carried-context-transfers",
+   "measure": "Number of hand-carried context transfers between sessions",
+   "method": "instrument",
+   "method_detail": "Count handoff packets produced and cross-session context restatements, distinguishing durable record-layer handoffs from context a human had to carry by hand.",
+   "owner": "system",
+   "observation_window": "trailing 4 weeks",
+   "requires_partner": false,
+   "bound_product_action": "Route scoped Work Requests, durable handoffs, and verified results through the CARR record layer.",
+   "post_launch_comparison": "Recount hand-carried transfers over the same period.",
+   "result": null
+  }
+ ]
+}
