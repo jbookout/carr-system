@@ -25,7 +25,8 @@ export const ALLOW_LIST = Object.freeze({
 });
 
 /** The only actor slugs this Worker will ever hand to a verb. */
-const DISPLAY = Object.freeze({ joe: "Joe", dell: "Dell", codex: "Codex", claude: "Claude", grok: "Grok" });
+const DISPLAY = Object.freeze({ joe: "Joe", dell: "Dell", codex: "Codex", claude: "Claude", grok: "Grok",
+  "joe-local": "Joe (local)" });
 const PARTNER_SLUGS = new Set(["joe", "dell"]);
 const SERVER_MACHINE_IDENTITIES = Object.freeze({
   "smoke-probe": { marker: "probe", via: "probe-token" },
@@ -217,19 +218,38 @@ export function authorizationClassForActor(actor) {
 // verbs on a credential in a config file), while this resolves to the tool's own
 // actor with human:false, which mcp.js's humanOnly gate refuses by construction.
 
+// LOCAL_SPONSOR (Phase 1, 2026-08-13, decision 97e76a2f — closing the
+// direct-database bypass in run.sh call / local-verb.mjs). A bearer-token
+// agent slug that names a locked-profile, NON-HUMAN identity but should still
+// resolve to a human's personal scope, unlike codex/grok above (deliberately
+// unsponsored/shared-only per the loop #227 design). 'joe-local' is the
+// machine credential local-verb.mjs now authenticates as when it talks to the
+// deployed Worker instead of opening its own database connection — see that
+// file's header for the full design. Adding an entry here is a design
+// decision (a credential sitting in a 600 file gaining a personal brain), the
+// same weight as adding to DISPLAY, never a routine config edit.
+const LOCAL_SPONSOR = Object.freeze({ "joe-local": "joe" });
+
 /**
- * AGENT_TOKENS bearer -> outside-model agent actor, or null.
+ * AGENT_TOKENS (or a same-shape sibling map, e.g. LOCAL_TOKENS) bearer ->
+ * outside-model agent actor, or null.
  *
- * The pure half of index.js's agentActorFor, split out so it is testable: the
- * Worker entrypoint imports from `cloudflare:` and cannot be loaded by node
- * --test, so any logic left in there is logic nothing can prove before a
- * deploy. Takes the raw Authorization header and the raw AGENT_TOKENS string
- * rather than a Request and an env, for the same reason.
+ * The pure half of index.js's agentActorFor / localActorFor, split out so it
+ * is testable: the Worker entrypoint imports from `cloudflare:` and cannot be
+ * loaded by node --test, so any logic left in there is logic nothing can
+ * prove before a deploy. Takes the raw Authorization header and the raw
+ * token-map string rather than a Request and an env, for the same reason.
+ *
+ * `viaLabel` names which door matched, so a tool_call/tool_read_call row can
+ * tell an outside-model CLI's grant apart from a local machine credential's —
+ * both resolve through this one function, EXTENDED rather than duplicated
+ * (the credential's per-door shape is a config difference, not a new profile-
+ * matching code path).
  *
  * Fails closed on every path: no header, unparseable JSON, empty map, a token
  * that matches nothing, or a slug that is not a known actor.
  */
-export function agentActorForToken(authorizationHeader, agentTokensRaw) {
+export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel = "agent-token") {
   const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
   let tokens;
@@ -244,9 +264,13 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw) {
   // DISPLAY is the same hard stop the OAuth path answers to: a typo'd or
   // renamed slug must never mint an identity this Worker does not recognise.
   if (!isKnownActor(slug)) return null;
-  // Bearer-token agents have no verified human sponsor. They remain shared-only
-  // rather than acquiring a brain through a model name or a mutable config map.
+  // Bearer-token agents have no verified human sponsor BY DEFAULT. They remain
+  // shared-only rather than acquiring a brain through a model name or a
+  // mutable config map — UNLESS the slug is explicitly listed in LOCAL_SPONSOR
+  // above, which is how 'joe-local' resolves to Joe's personal scope while
+  // codex/grok (absent from that map) stay unsponsored exactly as before.
+  const sponsoring_human_slug = LOCAL_SPONSOR[slug] || null;
   return { slug, display: `Agent (${slug})`, human: false, agent: true,
-           via: "agent-token", client_id: null,
-           sponsoring_human_slug: null, human_slug: null, sponsor_required: false };
+           via: viaLabel, client_id: null,
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
 }

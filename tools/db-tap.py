@@ -137,7 +137,13 @@ def _engaged(reason: str) -> bool:
     return os.environ.get("CARR_BREAK_GLASS") == "1" and bool(reason and reason.strip())
 
 
-def _local_actor_slug() -> str:
+def local_actor_slug() -> str:
+    """Public (Phase 1, 2026-08-13): tools/call-verb.py's own break-glass path
+    (mcp-server/local-verb.mjs's direct-database mode) reuses this rather than
+    re-implementing the same ~/.config/carr/local-actor.json read a second
+    time — rule a8c55a47, a manual path and an automated path that do the same
+    job must be the same code. Was `_local_actor_slug`; renamed, no other
+    caller referenced the old name."""
     try:
         with open(LOCAL_ACTOR_FILE, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -149,11 +155,18 @@ def _local_actor_slug() -> str:
     return "identity-not-set"
 
 
-def _append_receipt(actor: str, mode: str, target: str, host: str, reason: str) -> None:
-    os.makedirs(os.path.dirname(RECEIPT_LOG), exist_ok=True)
+def append_receipt(actor: str, mode: str, target: str, host: str, reason: str,
+                    log_path: str = RECEIPT_LOG) -> None:
+    """Public (Phase 1, 2026-08-13): same reuse rationale as local_actor_slug
+    above. tools/call-verb.py's break-glass path appends to this exact log,
+    in this exact line shape, so out/break-glass-receipts.log stays ONE audit
+    trail for every break-glass act in the repo rather than two files that
+    could drift in format. Was `_append_receipt`; renamed, no other caller
+    referenced the old name."""
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
     line = (f"{datetime.now(timezone.utc).isoformat()} actor={actor} mode={mode} "
             f'target={target} host={host} reason="{reason.strip()}"\n')
-    with open(RECEIPT_LOG, "a", encoding="utf-8") as fh:
+    with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(line)
 
 
@@ -183,10 +196,10 @@ def main() -> None:
     env = {**os.environ}
 
     if engaged:
-        actor = _local_actor_slug()
+        actor = local_actor_slug()
         host = urllib.parse.urlsplit(url).hostname or "unknown-host"
         if actor == "identity-not-set":
-            _append_receipt(actor, mode, target, host, reason)
+            append_receipt(actor, mode, target, host, reason)
             sys.exit(
                 "BREAK-GLASS REFUSED: no local actor identity found at\n"
                 "  ~/.config/carr/local-actor.json (written once per machine by\n"
@@ -203,7 +216,7 @@ def main() -> None:
         # Log the ATTEMPT before running the target below — the attempt is the
         # event this receipt records, not success. Do not roll this line back
         # if the run then fails.
-        _append_receipt(actor, mode, target, host, reason)
+        append_receipt(actor, mode, target, host, reason)
     else:
         # Default posture: PGOPTIONS is a standard libpq env var honored the
         # same way whether the subprocess is psql (sql mode) or a Python

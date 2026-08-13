@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   actorFromProps,
+  agentActorForToken,
   authorizationClassForActor,
   ORGANIZATION_TENANT_ID,
   personalScopeForActor,
@@ -184,6 +185,24 @@ test("legacy Codex grants with human_slug retain Joe scope without reconnect", (
   assert.deepEqual(personalScopeForActor(legacy), {
     status: "personal", sponsor: "joe", source: "verified_grant_sponsor",
   });
+});
+
+test("local token (Phase 1, decision 97e76a2f) resolves joe-local to Joe's personal scope end to end", () => {
+  // The whole point of local-verb.mjs's new HTTPS path: a LOCAL_TOKENS bearer
+  // should behave, for personal-scope purposes, like Joe's own interactive
+  // session — while still failing the humanOnly gate, proven in
+  // identity.test.mjs. This test proves the OTHER half, through the exact
+  // function the Worker calls (agentActorForToken), never a hand-built actor.
+  const localActor = agentActorForToken(
+    "Bearer whatever-the-fixture-secret-is",
+    JSON.stringify({ "joe-local": "whatever-the-fixture-secret-is" }),
+    "local-token",
+  );
+  assert.deepEqual(personalScopeForActor(localActor), {
+    status: "personal", sponsor: "joe", source: "verified_grant_sponsor",
+  });
+  assert.equal(authorizationClassForActor(localActor), "sponsored_agent");
+  assert.equal(localActor.human, false, "must never resolve human:true — that would reopen the PARTNER_TOKENS hole");
 });
 
 test("personal brain never changes the server authority class or request-side limiter", () => {

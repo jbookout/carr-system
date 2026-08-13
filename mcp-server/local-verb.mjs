@@ -1,82 +1,233 @@
-// local-verb.mjs — run ONE registered verb against a database from this Mac.
+// local-verb.mjs — run ONE registered verb from this Mac.
 //
-// Why it exists: the Worker's deploy is a human tap, so a verb has to be
-// provable BEFORE it is live. This imports the real `src/tools.js` registry —
-// the same handler code the Worker runs, not a reimplementation — and calls it
-// over a plain connection, so a rehearsal on a Neon branch exercises the actual
-// verb rather than a description of it.
+// PHASE 1, 2026-08-13, DECISION 97e76a2f — THE BYPASS THIS CLOSES. Until this
+// change, EVERY call through this file opened its own direct connection to
+// the production database and ran the verb's handler code locally — entirely
+// bypassing the deployed Worker's identity derivation (mcp-server/src/
+// identity.js), its profile gate (mcp.js's callTool), and its read-call
+// instrumentation (migration 0108's tool_read_call). Proven live 2026-08-13:
+// a standing-context call through this path left no tool_read_call row; the
+// same verb through the real /mcp endpoint does.
 //
-//   DATABASE_URL=<branch url> node local-verb.mjs <verb> '<json args>'
+// THE DEFAULT PATH NOW (no DATABASE_URL set — the ordinary case): a thin
+// HTTPS client of the deployed Worker's /mcp endpoint, carrying a LOCAL_TOKENS
+// bearer. Every verb call runs through mcp.js's dispatch() exactly like any
+// other caller — the OAuth path, the probe/review/agent-token doors, and this
+// one all converge on the same code. See mcp-server/src/index.js's "local
+// token" comment and wrangler.toml's secrets header for the server side.
 //
-// IDENTITY, Phase 1 (2026-08-13, council-ordered, closes the caller-supplied-
-// identity hole). This used to take the actor as a THIRD ARGV SLUG, defaulting
-// to "joe" when omitted — any local caller could claim any identity, and every
-// historical receipt written through this path is unverifiable because of it.
-// There is no argv slug anymore. The actor is derived from ONE place:
+// THE ACTOR is 'joe-local' (identity.js DISPLAY), human:false, sponsored to
+// 'joe' (identity.js's LOCAL_SPONSOR) — full verb parity minus humanOnly
+// verbs (teach, retire-rule, confirm-merge, reassign-deal, …), which refuse
+// by construction wherever `tool.humanOnly && !actor.human` is checked. That
+// is a FEATURE, not a gap: a credential sitting in a 600 file on a Mac must
+// never be able to teach a rule that binds both partners, retire one, confirm
+// a merge, or reassign a deal on its own say-so. A humanOnly verb attempted
+// this way fails with a message naming the interactive OAuth route instead.
+//
+// BREAK-GLASS, NOT A FALLBACK (DATABASE_URL set): the direct-database path
+// described above still exists, for the case a rehearsal branch needs proving
+// before it ships, or the deployed Worker is genuinely unreachable — but it
+// is now an explicit, receipted act, never a silent default. It requires
+// CARR_BREAK_GLASS=1 AND a non-empty CARR_BREAK_GLASS_REASON, mirroring
+// tools/db-tap.py's envelope exactly, including its receipts-log convention
+// (out/break-glass-receipts.log, one shared audit trail for every break-glass
+// act in the repo). tools/call-verb.py --reason "..." sets both of those and
+// derives the DSN; a bare `DATABASE_URL=... node local-verb.mjs <verb> ...`
+// invocation that skips call-verb.py is refused by the same check run here,
+// not only by the wrapper, so there is no way to reach the direct-database
+// path without a stated reason and a logged receipt. On a genuine Worker
+// outage the DEFAULT path fails visibly (a network/HTTP error, printed
+// plainly) and never silently reverts to this direct connection — reverting
+// is a human's deliberate choice (set CARR_BREAK_GLASS=1, state why), not
+// something this file decides on its own.
+//
+// Because break-glass still derives identity from ~/.config/carr/
+// local-actor.json (bin/set-local-actor.sh) rather than from a server-issued
+// token, it retains HUMAN semantics for whichever partner set up this Mac —
+// so a humanOnly verb with no interactive session available is possible only
+// through break-glass, deliberately, with a reason and a receipt. That is the
+// intended shape, not an oversight: see THE ACTOR paragraph above for why the
+// default path cannot do this at all.
+//
+//   node local-verb.mjs <verb> '<json args>'                         # default: HTTPS to the deployed Worker
+//   DATABASE_URL=<url> CARR_BREAK_GLASS=1 CARR_BREAK_GLASS_REASON="..." \
+//     node local-verb.mjs <verb> '<json args>'                       # break-glass: direct database
+//
+// In practice always invoked through tools/call-verb.py (`run.sh call`),
+// which derives the DSN and sets the break-glass env only when its own
+// --reason flag and CARR_BREAK_GLASS=1 are both present — see that file.
+//
+// IDENTITY, Phase 1 (2026-08-13, earlier same day). This used to take the
+// actor as a THIRD ARGV SLUG, defaulting to "joe" when omitted — any local
+// caller could claim any identity, and every historical receipt written
+// through this path is unverifiable because of it. There is no argv slug
+// anymore. On the default path the actor is server-derived from the
+// LOCAL_TOKENS bearer (identity.js), never from anything this Mac asserts.
+// On the break-glass path the actor is still derived from ONE place,
 // ~/.config/carr/local-actor.json, written once per machine by
-// bin/set-local-actor.sh. Both reads and writes require it — see the
-// resolveIdentity() block below for why reads are not exempted.
+// bin/set-local-actor.sh — see resolveIdentity() below for why break-glass
+// reads are not exempted either.
 //
-// THE HONEST LIMIT (stated again at set-local-actor.sh): this closes
-// ACCIDENTAL and DEFAULT impersonation — a stray argv, a copy-pasted "joe"
-// that should have been "dell". It does NOT stop a DELIBERATE local attacker:
-// any process running as this Mac's own user can read or overwrite
-// local-actor.json exactly as this script does. That boundary is the server
-// side's job (the actor table on write, the OAuth-issued token on the real
-// MCP path) — this file only makes the ordinary, unintentional case
-// impossible, not the adversarial one.
-//
-// PRODUCTION IS REACHABLE, reads and writes alike (Joe's ruling 2026-08-09,
-// loop #258 — the old CARR_LOCAL_VERB_ALLOW_PRODUCTION rail is retired and the
-// variable is no longer read anywhere). A production write prints a warning
-// naming the verb and the host; it is not blocked. The full reasoning sits at
-// the check itself, below the TOOLS lookup.
+// THE HONEST LIMIT (stated again at set-local-actor.sh, and at
+// tools/db-tap.py for the break-glass envelope): none of this stops a
+// DELIBERATE local attacker — any process running as this Mac's own user can
+// read the LOCAL_TOKENS bearer from the token file, or overwrite
+// local-actor.json, exactly as this script does. That boundary is the
+// server side's job (the actor table on write, the OAuth-issued token or the
+// LOCAL_TOKENS bearer on the real MCP path) — this file only makes the
+// ordinary, unintentional case impossible on the default path, and makes the
+// deliberate direct-database case receipted and visible rather than silent.
 
 import { Pool, neonConfig } from "@neondatabase/serverless";
 import ws from "ws";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { TOOLS, ToolError, executeRegisteredTool } from "./src/tools.js";
 
 // The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
 // constructor makes the driver die with an unhandled ErrorEvent before any
 // query runs (measured 2026-08-06, first real use of this harness). `ws` is
-// already in node_modules and works.
+// already in node_modules and works. Only touched on the break-glass path,
+// but wired at module scope same as before — importing it costs nothing on
+// the default path and keeps this one file simple.
 neonConfig.webSocketConstructor = ws;
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const cliArgs = process.argv.slice(2);
 const [verb, rawArgs = "{}"] = cliArgs;
-if (!verb || !process.env.DATABASE_URL) {
-  console.error("usage: DATABASE_URL=... node local-verb.mjs <verb> '<json args>'");
+if (!verb) {
+  console.error("usage: node local-verb.mjs <verb> '<json args>'  (default: HTTPS to the deployed Worker)");
+  console.error("       DATABASE_URL=... CARR_BREAK_GLASS=1 CARR_BREAK_GLASS_REASON=\"...\" node local-verb.mjs <verb> '<json args>'  (break-glass)");
   process.exit(2);
 }
 // The old third argv (actor slug) is GONE, not silently ignored: a caller
 // still passing one is almost always stale muscle memory or an unfixed
 // wrapper, and swallowing it quietly would hide exactly the impersonation
-// path this change closes. Fail loud and say why.
+// path a prior Phase 1 change closed. Fail loud and say why.
 if (cliArgs.length > 2) {
   console.error(
     `local-verb.mjs no longer takes an actor-slug argv (got extra arg "${cliArgs[2]}"). ` +
-    "Identity is derived from ~/.config/carr/local-actor.json — see resolveIdentity() " +
-    "below, or run bin/set-local-actor.sh <slug> if that file does not exist yet."
+    "The default path derives identity from the LOCAL_TOKENS bearer server-side; break-glass " +
+    "derives it from ~/.config/carr/local-actor.json — see bin/set-local-actor.sh <slug> if that " +
+    "file does not exist yet."
   );
   process.exit(2);
 }
+const args = JSON.parse(rawArgs);
 
-// ---------- identity: derive the actor from the machine, not the caller ----------
+// ---------------------------------------------------------------------------
+// DEFAULT PATH — HTTPS client of the deployed Worker.
+// ---------------------------------------------------------------------------
+
+const CARR_MCP_URL = process.env.CARR_MCP_URL || "https://api.doctorcre.com/mcp";
+const MCP_TOKENS_ENV = process.env.CARR_MCP_ENV ||
+  path.join(os.homedir(), ".config", "carr", "mcp-tokens.env");
+const LOCAL_TOKEN_VAR = "CARR_MCP_LOCAL_TOKEN";
+
+/** Same lookup convention as pipelines/run_codex_review.py's read_review_token:
+ * env var first, then a `KEY=value` line in the 600 tokens file. Never a
+ * dotenv library — this repo is stdlib/no-extra-dependency by convention for
+ * exactly this kind of small parse. */
+function readLocalToken() {
+  if (process.env[LOCAL_TOKEN_VAR]) return process.env[LOCAL_TOKEN_VAR];
+  let raw;
+  try {
+    raw = fs.readFileSync(MCP_TOKENS_ENV, "utf8");
+  } catch {
+    return "";
+  }
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (t.startsWith(`${LOCAL_TOKEN_VAR}=`)) {
+      return t.slice(LOCAL_TOKEN_VAR.length + 1).trim().replace(/^['"]|['"]$/g, "");
+    }
+  }
+  return "";
+}
+
+async function runViaWorker(verbName, verbArgs) {
+  const token = readLocalToken();
+  if (!token) {
+    console.error(
+      `no local MCP token — set ${LOCAL_TOKEN_VAR} in ${MCP_TOKENS_ENV} (600, outside the repo) ` +
+      `or export ${LOCAL_TOKEN_VAR} directly. Provisioning: pipelines/provision-local-client.sql + ` +
+      "\"wrangler secret put LOCAL_TOKENS\" — see mcp-server/wrangler.toml's secrets header.\n" +
+      "This is the default path failing VISIBLY, per design — it does not fall back to a direct " +
+      "database connection. That path exists only as explicit break-glass; see this file's header."
+    );
+    process.exit(2);
+  }
+  console.error(`local-verb identity -> joe-local (via local-token) -> ${CARR_MCP_URL}`);
+
+  let res;
+  try {
+    res = await fetch(CARR_MCP_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: verbName, arguments: verbArgs },
+      }),
+    });
+  } catch (e) {
+    console.error(
+      `could not reach the deployed Worker at ${CARR_MCP_URL}: ${e.message}\n` +
+      "The default path fails here rather than silently opening a direct database connection. " +
+      "For a genuine outage, break glass explicitly — see this file's header for the envelope."
+    );
+    process.exit(1);
+  }
+
+  const bodyText = await res.text();
+  let body;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    console.error(`non-JSON response (HTTP ${res.status}) from ${CARR_MCP_URL}: ${bodyText.slice(0, 500)}`);
+    process.exit(1);
+  }
+  if (!res.ok && body?.error === undefined && body?.result === undefined) {
+    console.error(`HTTP ${res.status} from ${CARR_MCP_URL}: ${JSON.stringify(body)}`);
+    process.exit(1);
+  }
+  if (body.error) {
+    // JSON-RPC transport-level error (unknown method, malformed request, …),
+    // distinct from a ToolError, which arrives as result.isError below.
+    console.error("RPC ERROR " + JSON.stringify(body.error, null, 2));
+    process.exit(1);
+  }
+  const result = body.result || {};
+  const text = result.content?.[0]?.text ?? "null";
+  if (result.isError) {
+    let payload;
+    try { payload = JSON.parse(text); } catch { payload = { error: "unparseable_tool_error", raw: text }; }
+    console.error("TOOL ERROR " + JSON.stringify(payload, null, 2));
+    process.exit(1);
+  }
+  let out;
+  try { out = JSON.parse(text); } catch { out = text; }
+  console.log(JSON.stringify(out, null, 2));
+}
+
+// ---------------------------------------------------------------------------
+// BREAK-GLASS PATH — direct database connection, receipted.
+// ---------------------------------------------------------------------------
 
 const IDENTITY_PATH = path.join(os.homedir(), ".config", "carr", "local-actor.json");
 const SETUP_COMMAND = `bin/set-local-actor.sh <slug>  (run from the repo root; use "joe" on this Mac)`;
+const RECEIPT_LOG = path.join(REPO, "out", "break-glass-receipts.log");
+const PRODUCTION_ENDPOINT = "ep-restless-resonance-awbp35k3"; // measured, see tools/db-tap.py's dsn()
 
 function resolveIdentity() {
-  // Both reads AND writes require this file. The tempting shortcut — let a
-  // read proceed with a loud warning and no resolved actor — was considered
-  // and rejected: personal-scope reads (personal_to, personal-scope filters)
-  // depend on WHICH human is asking just as much as a write does, so a
-  // warn-and-guess read would leak or hide rows for the wrong person instead
-  // of failing loudly. Requiring the file everywhere means the failure mode
-  // is always "stop and run one command," never "ran, but as someone else."
+  // Reads AND writes both require this file on the break-glass path, same
+  // discipline the old default-path code applied unconditionally: personal-
+  // scope reads (personal_to, personal-scope filters) depend on WHICH human is
+  // asking just as much as a write does, so a warn-and-guess read would leak
+  // or hide rows for the wrong person instead of failing loudly.
   let raw;
   try {
     raw = fs.readFileSync(IDENTITY_PATH, "utf8");
@@ -106,82 +257,95 @@ function resolveIdentity() {
   return actorSlug;
 }
 
-const slug = resolveIdentity();
-const VIA = "local-verb/identity-file";
-
-const url = process.env.DATABASE_URL;
-if (!/ep-|neon\.tech/.test(url)) { console.error("DATABASE_URL does not look like a Neon url"); process.exit(2); }
-console.error(`local-verb identity -> ${slug} (via ${VIA}, from ${IDENTITY_PATH})`);
-// Production's endpoint, MEASURED today rather than guessed:
-//   neonctl connection-string production ... -> ep-restless-resonance-awbp35k3
-// The first version of this rail named an endpoint that does not exist, so it
-// would have refused nothing. A guard that cannot fire is worse than no guard,
-// because it is trusted. Hence the second half: the target host is always
-// printed, so a human reading the output can see what it actually connected to
-// even if this constant ever goes stale (a recreated endpoint changes it).
-const PRODUCTION_ENDPOINT = "ep-restless-resonance-awbp35k3";
-const host = (url.match(/@([^/?]+)/) || [])[1] || "(unparsed)";
-console.error(`local-verb -> ${host}`);
-
-const tool = TOOLS[verb];
-if (!tool) { console.error(`unknown verb ${verb}; known: ${Object.keys(TOOLS).join(", ")}`); process.exit(2); }
-
-// THE PRODUCTION RAIL WAS RETIRED 2026-08-09 BY JOE'S RULING (loop #258).
-// Its history, kept because the reasoning is the useful part: it originally
-// refused EVERY verb against production, which blocked reads as harmless as
-// `list-verbs` while protecting nothing. Narrowing it to writes (2026-08-08)
-// fixed that half. Joe then ruled the write half open as well: a terminal may
-// write production through `run.sh call`.
-//
-// The argument he ruled on, recorded so nobody reinstates the rail by reflex:
-// the actor plumbing is IDENTICAL either way — local-verb resolves the actor
-// slug against the actor table, refuses a human_only verb to a non-human, and
-// every write still carries its idempotency key and tool_call row. The rail was
-// never the thing making a write traceable; the verb layer is. What the rail
-// actually bought was a pause before a mistyped verb at a prompt reached live
-// records, and Joe judged that cost higher than its benefit for a solo operator
-// who hits it while doing ordinary work.
-//
-// WHAT REPLACES IT is visibility, not obstruction. The target host is printed
-// on every run, and a production WRITE announces itself with the verb named, so
-// the human always knows which database is about to change and why. A warning
-// that cannot block is honest about what it is; a guard that is always
-// overridden is theatre, and theatre teaches people to stop reading.
-if (tool.write && url.includes(PRODUCTION_ENDPOINT)) {
-  console.error(`⚠ PRODUCTION WRITE — ${verb} is about to change live records on ${host}.`);
+function appendReceipt(actor, mode, target, host, reason) {
+  fs.mkdirSync(path.dirname(RECEIPT_LOG), { recursive: true });
+  const line = `${new Date().toISOString()} actor=${actor} mode=${mode} target=${target} ` +
+    `host=${host} reason="${String(reason).trim()}"\n`;
+  fs.appendFileSync(RECEIPT_LOG, line);
 }
 
-const args = JSON.parse(rawArgs);
-const pool = new Pool({ connectionString: url });
-const client = await pool.connect();
-try {
-  if (!tool.write) {
-    // Through executeRegisteredTool, NOT tool.handler directly (loop 353,
-    // 2026-08-13). That function's own comment already called itself "the one
-    // choke point ... so the fix lands once instead of being re-implemented per
-    // caller", and named local-verb.mjs among its callers — but this file was
-    // in fact bypassing it, so the CLI silently missed both the argument type
-    // coercion and the raw-DB-error translation the Worker path has. Rule
-    // a8c55a47: a manual path and an automated path that do the same job must
-    // be the same code.
-    const out = await executeRegisteredTool(client, { slug, human: true, kind: "human", via: VIA }, verb, args);
-    console.log(JSON.stringify(out, null, 2));
-  } else {
-    await client.query("begin");
-    const a = await client.query("select id, kind from actor where slug=$1", [slug]);
-    if (!a.rows.length) throw new Error(`no actor ${slug}`);
-    const actor = { slug, human: a.rows[0].kind === "human", kind: a.rows[0].kind, id: a.rows[0].id, via: VIA };
-    if (tool.humanOnly && !actor.human) throw new Error("human_only verb");
-    const out = await executeRegisteredTool(client, actor, verb, args);
-    await client.query("commit");
-    console.log(JSON.stringify(out, null, 2));
+async function runBreakGlass(verbName, verbArgs, url) {
+  const engaged = process.env.CARR_BREAK_GLASS === "1" &&
+    Boolean(process.env.CARR_BREAK_GLASS_REASON && process.env.CARR_BREAK_GLASS_REASON.trim());
+  const host = (url.match(/@([^/?]+)/) || [])[1] || "(unparsed)";
+  if (!engaged) {
+    console.error(
+      "BREAK-GLASS REFUSED: the direct-database path requires CARR_BREAK_GLASS=1 and a non-empty " +
+      "CARR_BREAK_GLASS_REASON.\n" +
+      '  Run through tools/call-verb.py --reason "..." (which sets both and derives the DSN) — see ' +
+      "that file's header and tools/db-tap.py's identical envelope.\n" +
+      "  The default path (no DATABASE_URL set) talks to the deployed Worker instead and is what " +
+      "every ordinary call should use; it does not silently fall back to this path on its own."
+    );
+    process.exit(2);
   }
-} catch (e) {
-  await client.query("rollback").catch(() => {});
-  if (e instanceof ToolError) { console.error("TOOL ERROR " + JSON.stringify(e.payload, null, 2)); process.exit(1); }
-  console.error(e);
-  process.exit(1);
-} finally {
-  client.release();
-  await pool.end();
+  if (!/ep-|neon\.tech/.test(url)) {
+    console.error("DATABASE_URL does not look like a Neon url");
+    process.exit(2);
+  }
+
+  const slug = resolveIdentity();
+  const reason = process.env.CARR_BREAK_GLASS_REASON;
+
+  console.error("=".repeat(72));
+  console.error("BREAK-GLASS ENGAGED — direct database connection, bypassing the deployed Worker.");
+  console.error(`  actor:  ${slug}`);
+  console.error(`  reason: ${reason.trim()}`);
+  console.error(`  verb:   ${verbName}`);
+  console.error(`  host:   ${host}`);
+  console.error("=".repeat(72));
+  // Logged BEFORE the target ever runs — the attempt is the event this
+  // receipt records, not success. Same ordering as tools/db-tap.py.
+  appendReceipt(slug, "call-verb", verbName, host, reason);
+
+  const tool = TOOLS[verbName];
+  if (!tool) {
+    console.error(`unknown verb ${verbName}; known: ${Object.keys(TOOLS).join(", ")}`);
+    process.exit(2);
+  }
+  if (tool.write && url.includes(PRODUCTION_ENDPOINT)) {
+    console.error(`⚠ PRODUCTION WRITE — ${verbName} is about to change live records on ${host}.`);
+  }
+
+  const pool = new Pool({ connectionString: url });
+  const client = await pool.connect();
+  try {
+    if (!tool.write) {
+      // Through executeRegisteredTool, NOT tool.handler directly (loop 353,
+      // 2026-08-13, rule a8c55a47): the one choke point that also applies
+      // argument type coercion and raw-DB-error translation.
+      const out = await executeRegisteredTool(client, { slug, human: true, kind: "human", via: "break-glass/local-verb" }, verbName, verbArgs);
+      console.log(JSON.stringify(out, null, 2));
+    } else {
+      await client.query("begin");
+      const a = await client.query("select id, kind from actor where slug=$1", [slug]);
+      if (!a.rows.length) throw new Error(`no actor ${slug}`);
+      const actor = { slug, human: a.rows[0].kind === "human", kind: a.rows[0].kind, id: a.rows[0].id, via: "break-glass/local-verb" };
+      if (tool.humanOnly && !actor.human) throw new Error("human_only verb");
+      const out = await executeRegisteredTool(client, actor, verbName, verbArgs);
+      await client.query("commit");
+      console.log(JSON.stringify(out, null, 2));
+    }
+  } catch (e) {
+    await client.query("rollback").catch(() => {});
+    if (e instanceof ToolError) { console.error("TOOL ERROR " + JSON.stringify(e.payload, null, 2)); process.exit(1); }
+    console.error(e);
+    process.exit(1);
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mode selection: DATABASE_URL present means break-glass was deliberately
+// requested (only tools/call-verb.py sets it, and only under its own
+// CARR_BREAK_GLASS + --reason gate) — its absence means the ordinary,
+// default, HTTPS-to-the-Worker path.
+// ---------------------------------------------------------------------------
+
+if (process.env.DATABASE_URL) {
+  await runBreakGlass(verb, args, process.env.DATABASE_URL);
+} else {
+  await runViaWorker(verb, args);
 }

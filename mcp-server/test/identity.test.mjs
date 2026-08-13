@@ -240,3 +240,45 @@ test("an empty-string secret in the map never authenticates", () => {
   assert.equal(agentActorForToken("Bearer ", blank), null);
   assert.equal(agentActorForToken("Bearer anything", blank), null);
 });
+
+// ---------------------------------------------------------------------------
+// LOCAL_TOKENS / joe-local (Phase 1, 2026-08-13, decision 97e76a2f). Closes
+// the direct-database bypass in mcp-server/local-verb.mjs: that file is now a
+// thin HTTPS client of this Worker, carrying a LOCAL_TOKENS bearer that
+// resolves through this SAME function (extended, not duplicated) rather than
+// a new profile-matching code path.
+// ---------------------------------------------------------------------------
+
+const LOCAL_TOKENS = JSON.stringify({ "joe-local": "local-secret-fixture" });
+
+test("local token resolves to joe-local, human:false, sponsored to joe", () => {
+  const actor = agentActorForToken("Bearer local-secret-fixture", LOCAL_TOKENS, "local-token");
+  assert.deepEqual(actor, {
+    slug: "joe-local", display: "Agent (joe-local)", human: false, agent: true,
+    via: "local-token", client_id: null, sponsoring_human_slug: "joe",
+    human_slug: "joe", sponsor_required: false,
+  });
+  // The same security claim as the outside-model agent tokens: humanOnly
+  // verbs key off actor.human, and this is false regardless of the sponsor.
+  assert.equal(actor.human, false);
+  assert.equal(actor.probe, undefined);
+  assert.equal(actor.review, undefined);
+});
+
+test("via label defaults to agent-token when omitted, unaffected by the LOCAL_SPONSOR extension", () => {
+  const AGENT_TOKENS = JSON.stringify({ grok: "grok-secret-fixture" });
+  assert.equal(agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS).via, "agent-token");
+});
+
+test("codex/grok remain unsponsored even when resolved through the extended function", () => {
+  // LOCAL_SPONSOR names 'joe-local' only. Any other slug — including one
+  // presented on the LOCAL_TOKENS map by mistake — must stay shared-only.
+  assert.equal(agentActorForToken("Bearer codex-secret-fixture",
+    JSON.stringify({ codex: "codex-secret-fixture" }), "local-token").sponsoring_human_slug, null);
+});
+
+test("local token is per-slug like every other agent token: a stray key does not widen it", () => {
+  const mixed = JSON.stringify({ "joe-local": "local-secret-fixture", grok: "grok-secret-fixture" });
+  assert.equal(agentActorForToken("Bearer grok-secret-fixture", mixed, "local-token").sponsoring_human_slug, null);
+  assert.equal(agentActorForToken("Bearer local-secret-fixture", mixed, "local-token").sponsoring_human_slug, "joe");
+});

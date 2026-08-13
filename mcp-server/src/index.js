@@ -25,6 +25,14 @@
 //               the 'reviewer' capability profile locked in mcp.js: ALL reads
 //               + EXACTLY record-finding. Nothing about the OAuth path or the
 //               probe-token path changes because it exists.
+//               A FOURTH door (see "local token" below), Phase 1 2026-08-13,
+//               decision 97e76a2f: a LOCAL_TOKENS bearer for this Mac's own
+//               `run.sh call` terminal (tools/call-verb.py ->
+//               mcp-server/local-verb.mjs), which used to bypass this Worker
+//               with a direct database connection. Resolves to the 'joe-local'
+//               actor, human:false, sponsored to 'joe' — full verb parity
+//               minus humanOnly, same as the agent-token door, never a wider
+//               grant than that.
 //   /pipeline/changes  OAuth-protected Deal Room event cursor + live presence.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
@@ -333,6 +341,70 @@ function agentActorFor(request, env) {
   return agentActorForToken(request.headers.get("authorization"), env.AGENT_TOKENS);
 }
 
+// ---------- local token (Phase 1, 2026-08-13, decision 97e76a2f) ----------
+//
+// THE DEFECT THIS CLOSES. `run.sh call <verb>` (tools/call-verb.py ->
+// mcp-server/local-verb.mjs) used to open its OWN direct connection to the
+// production database and run a verb's handler code locally — bypassing this
+// Worker entirely, and with it the identity derivation above, the profile
+// gate in mcp.js, and the read-call instrumentation (0108's tool_read_call).
+// Proven live 2026-08-13: a standing-context call through that path left no
+// tool_read_call row; the same verb through this door does. local-verb.mjs is
+// now a thin HTTPS client of THIS Worker's /mcp endpoint, carrying the bearer
+// below — every verb it calls runs through dispatch() exactly like any other
+// caller on this page, with one exception (see NOT A REBUILT PARTNER_TOKENS).
+//
+// WHY A FOURTH DOOR RATHER THAN REUSING AGENT_TOKENS. `wrangler secret put`
+// REPLACES a secret wholesale and no secret can be read back — widening
+// AGENT_TOKENS for this would mean re-pasting Codex's and Grok's live tokens
+// from memory, a silent-kill risk for both on a typo (secrets-inventory.md's
+// INGEST_TOKENS_EXTRA note is the same lesson, hit once already). LOCAL_TOKENS
+// is its own Worker secret, additive and structurally identical to
+// PROBE_TOKENS / REVIEW_TOKENS / AGENT_TOKENS: a JSON map of slug -> secret,
+// checked here before the OAuthProvider ever sees the request.
+//
+// THE ACTOR: 'joe-local', human:false, is the ONE slug LOCAL_TOKENS is
+// expected to hold a key for. Unlike the outside-model CLIs above, it carries
+// a server-derived sponsor (identity.js's LOCAL_SPONSOR map ties it to
+// 'joe') — this Mac's own `run.sh call` is Joe's terminal, not an unsponsored
+// outside tool, so its personal-scope reads and writes should land the same
+// way an interactive session's would. That resolution is entirely
+// identity.js's job (agentActorForToken, extended rather than duplicated —
+// see its own comment); nothing about it lives in this file.
+//
+// EVERY VERB EXCEPT humanOnly FALLS OUT OF EXISTING MECHANISMS, ON PURPOSE.
+// No profile lock here (unlike probe/reviewer): full parity minus humanOnly
+// IS the grant, exactly like the agent-token door above, because human:false
+// makes tools.js's `if (tool.humanOnly && !actor.human) throw ...` refuse
+// teach / retire-rule / confirm-merge / reassign-deal / new-deal / … by
+// construction — never a list this file has to maintain. A credential sitting
+// in a 600 file on a Mac must not be able to teach a rule that binds both
+// partners, retire one, confirm a merge, or reassign a deal; if that is ever
+// truly needed with no interactive session available, it is a deliberate,
+// receipted break-glass act (mcp-server/local-verb.mjs), never this door.
+//
+// NOT A REBUILT PARTNER_TOKENS (retired 2026-08-03, see the note above
+// agentActorForToken in identity.js): that secret authenticated as a full
+// HUMAN actor, which is exactly what carried the humanOnly verbs on a
+// credential in a config file. This one resolves to human:false with a
+// server-derived sponsor, which is a different, narrower shape — sponsored
+// but never human — and the humanOnly gate answers to `actor.human`, not to
+// whether a sponsor exists.
+//
+// The actor row ('joe-local', kind='automation') must exist before any write
+// verb runs, exactly like every other machine actor above — see
+// pipelines/provision-local-client.sql (prepared, mirrors
+// provision-smoke-probe.sql; JOE ONLY for the steps that touch the secret
+// itself, same division of labor as PROBE_TOKENS).
+//
+// Checked last among the token doors: probe and reviewer are the narrowest
+// (a locked profile), agent and local are both full-parity-minus-humanOnly,
+// and a token colliding across maps resolves deterministically to whichever
+// is checked first — in practice a caller holds exactly one.
+function localActorFor(request, env) {
+  return agentActorForToken(request.headers.get("authorization"), env.LOCAL_TOKENS, "local-token");
+}
+
 // ---------- the provider ----------
 
 const oauthProvider = new OAuthProvider({
@@ -397,6 +469,8 @@ export default {
       if (reviewActor) return dispatch(request, env, ctx, reviewActor);
       const agentActor = agentActorFor(request, env);
       if (agentActor) return dispatch(request, env, ctx, agentActor);
+      const localActor = localActorFor(request, env);
+      if (localActor) return dispatch(request, env, ctx, localActor);
     }
     return oauthProvider.fetch(request, env, ctx);
   },
