@@ -42,17 +42,39 @@
 -- pending and applies now, out of historical order — which is safe because it is
 -- a no-op there.
 --
--- IT IS A NO-OP ON PRODUCTION, TWICE OVER. `on conflict (slug) do nothing` means
--- an existing slug is untouched. And production has already run 0018, which
--- removed these eleven, so nothing here can resurrect them: the insert lands
--- eleven rows that 0018 has already been proven to clean up, and the guard below
--- asserts the vocabulary is back to six afterwards. Deliberately NOT relaxing
--- 0014's assertion to a floor, which was the cheaper option — a floor would have
--- left the reconstruction claim false while making the check green.
+-- IT IS A NO-OP ON PRODUCTION BECAUSE OF THE HISTORICAL-POSITION TEST BELOW, and
+-- for no other reason. See the correction block above: the ON CONFLICT clause
+-- does NOT make it one, because 0018 deleted these slugs and ON CONFLICT only
+-- protects rows that still exist. Deliberately NOT relaxing 0014's assertion to
+-- a floor, which was the cheaper option — a floor would have left the
+-- reconstruction claim false while making the check green.
 --
 -- Sort values start at 70 so the six original seeds (10-60) keep their order.
 -- Labels are reconstructed from the slugs; no surviving artifact records the
 -- display strings, and nothing reads them after 0018 replaces the vocabulary.
+
+-- CORRECTION, 2026-08-13, caught by CI before this ever touched production.
+-- An earlier draft of this file claimed to be "a no-op on production, twice
+-- over": ON CONFLICT DO NOTHING, plus 0018 having already removed these eleven.
+-- The second half was backwards. ON CONFLICT only protects a slug that STILL
+-- EXISTS, and 0018 deleted these — so applying this to production would have
+-- INSERTED all eleven obsolete statuses back, taking the vocabulary from six to
+-- seventeen and undoing the rationalisation on purpose-built vocabulary. The
+-- guard below then failed for the mirror-image reason: it asserted research,
+-- active and paused are present, which is true in 2026-07 history and false in
+-- the database as it stands today.
+--
+-- Both halves are fixed the same way. This file only does anything when it is
+-- running in HISTORICAL POSITION — that is, on a database that has not yet
+-- applied 0014. On any database that already has, it is genuinely inert.
+do $$
+declare missing text;
+begin
+if exists (select 1 from schema_migrations
+            where filename = '0014_active_flags_and_semantics.sql') then
+  raise notice '0013a: 0014 already applied — this database is past the point these slugs existed; nothing to do';
+  return;
+end if;
 
 insert into client_status (slug, label, sort) values
   ('cold_not_started',             'Cold — not started',           70),
@@ -68,13 +90,12 @@ insert into client_status (slug, label, sort) values
   ('pending',                      'Pending',                      170)
 on conflict (slug) do nothing;
 
--- Guard: 0014 is about to require exactly fourteen flagged rows, and it can only
--- flag a slug that exists. Assert the fourteen are present HERE, so a failure
--- names the missing vocabulary rather than surfacing later as a count mismatch
--- in a migration that is not the one at fault.
-do $$
-declare missing text;
-begin
+-- Guard, inside the same historical-position branch. 0014 is about to require
+-- exactly fourteen flagged rows and can only flag a slug that exists, so assert
+-- the fourteen are present HERE — a failure then names the missing vocabulary
+-- instead of surfacing later as a count mismatch in a migration that is not the
+-- one at fault. It must not run on a modern database, where three of the
+-- fourteen are correctly gone.
   select string_agg(s, ', ' order by s) into missing
     from unnest(array[
       'cold_not_started','research','due_diligence','legal','negotiation',
