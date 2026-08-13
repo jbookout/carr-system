@@ -1,0 +1,203 @@
+{
+  "generated": "2026-08-12",
+  "source_contracts": [
+    "/Users/booko/carr-system/.claude/worktrees/control-room-phase0/workspace/contracts/phase0-acceptance.v1.json (primary_uncoached_journeys)",
+    "/Users/booko/carr-system/.claude/worktrees/control-room-phase0/control-room/contracts/phase0-acceptance.v1.json (flows)"
+  ],
+  "journeys": [
+    {
+      "id": "FLOW-WS-01",
+      "name": "Command Center to source",
+      "task_statement": "Find the one thing in Command Center that needs a signed-in partner's attention, understand why it matters, and get to its original source.",
+      "pass_criteria": [
+        "under 15 seconds",
+        "one accountable owner",
+        "no named lead outreach reminder",
+        "source and freshness visible"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "FLOW-WS-02",
+      "name": "Park and restore Myrick",
+      "task_statement": "Find the Myrick work record, park it with a reason, prove its history survived, then bring it back.",
+      "pass_criteria": [
+        "version and conflict behavior visible",
+        "attributed events",
+        "read-back",
+        "no data loss"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "FLOW-WS-03",
+      "name": "Weekly Deal Room call",
+      "task_statement": "Run this week's Deal Room call from start to finish, then review what it produced and handle retention correctly.",
+      "pass_criteria": [
+        "parked records excluded",
+        "no guessed speaker or target",
+        "draft-only outside communication",
+        "all candidates dispositioned",
+        "purge gate truthful"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "FLOW-WS-04",
+      "name": "Doc context and engineering request",
+      "task_statement": "Ask Doc a grounded question about what you're looking at, then report a problem or improvement and see it through to a submitted request.",
+      "pass_criteria": [
+        "exact request ID",
+        "no broad authority",
+        "executor and evidence visible",
+        "Completed impossible without fresh proof"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "FLOW-WS-05",
+      "name": "Multi-stop Tour Mode",
+      "task_statement": "Plan a multi-stop tour around your locked appointment, take it offline, capture a note and a photo along the way, and review what it proposes when you finish.",
+      "pass_criteria": [
+        "locked appointment preserved",
+        "map/list order matches",
+        "exact resume",
+        "acknowledged evidence not lost",
+        "no record write without confirmation",
+        "Goodnotes remains optional share flow"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "FLOW-WS-06",
+      "name": "Whole-market visual planning to governed day trip",
+      "task_statement": "Using the whole-market map, put together a day trip of at least two eligible stops around your locked appointment and hand it off for governed Tour approval.",
+      "pass_criteria": [
+        "prospects, active clients, projects in process, active projects, and visits/appointments remain distinguishable",
+        "map/list/keyboard parity and non-color meaning are exact",
+        "unlocated records remain counted and listed",
+        "stale, Unknown, approximate, target-area, and unauthorized stops are excluded with reasons without blocking other eligible stops",
+        "no optimal or Live claim",
+        "whole-market surface is absent in sterile/client-facing mode",
+        "no map interaction or route proposal writes canonical truth",
+        "routine completed without Claude Code or Codex"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "flow-01-honest-health",
+      "name": "Collector failure is honest",
+      "task_statement": "Find out whether Production is actually healthy right now, including what happens when a health check itself fails, and see what to do about it.",
+      "pass_criteria": [
+        "health is Unknown",
+        "last verified time and source are visible",
+        "no cached green remains"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "flow-02-service-provenance",
+      "name": "Service and environment provenance",
+      "task_statement": "Pick a service and work out what's really running in each environment, Production, Rehearsal, and the planned Staging, plus what else depends on it.",
+      "pass_criteria": [
+        "environment is explicit",
+        "planned Staging is planned and Unknown",
+        "version, schema, configuration, source, and freshness are visible"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "flow-03-request-bridge",
+      "name": "Business problem to safe Work Request",
+      "task_statement": "Find the Work Request that came from a business problem, confirm what it's asking for and how success is judged, and trace where it stands now.",
+      "pass_criteria": [
+        "one request ID",
+        "origin is linked without client payload",
+        "one next action",
+        "engineering chat is absent"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "flow-04-plan-invalidation",
+      "name": "Scoped plan and invalidated approval",
+      "task_statement": "Determine exactly what an agent session is scoped and approved to do right now, and confirm that an outdated approval no longer applies.",
+      "pass_criteria": [
+        "old approval is Invalidated",
+        "current plan has a new hash",
+        "no production action control exists"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "flow-05-deployment-proof",
+      "name": "Release evidence and reconnect",
+      "task_statement": "Check on a release in progress, confirm who is actually driving it, and verify it's proven safe with a working rollback.",
+      "pass_criteria": [
+        "browser is not the operation owner",
+        "sanctioned actuator is named",
+        "Complete requires version read-back and golden workflows"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    },
+    {
+      "id": "flow-06-incident-audit",
+      "name": "Incident investigation to audit chain",
+      "task_statement": "Investigate an active incident, separate what's confirmed from what's still a guess, and trace the full record of how it was handled.",
+      "pass_criteria": [
+        "restricted diagnostics are withheld",
+        "resolution requires monitoring proof",
+        "origin through verification is reconstructable"
+      ],
+      "result": null,
+      "coached": null,
+      "time_seconds": null,
+      "friction_notes": null,
+      "timestamp": null
+    }
+  ]
+}
