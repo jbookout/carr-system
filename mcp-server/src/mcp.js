@@ -263,7 +263,30 @@ export async function callTool(env, actor, name, args, profile = "full") {
         hint: "call-verb takes {verb, args}; list live verbs with list-verbs" });
     if (inner === "call-verb" || inner === "list-verbs")
       throw new ToolError({ error: "no_recursion" });
-    return callTool(env, actor, inner, (args && args.args) || {}, profile);
+    // Some clients serialize the nested `args` object as a JSON STRING. The old
+    // line was `(args && args.args) || {}`, and a string is truthy, so the inner
+    // verb received a STRING, read every field off it as undefined, and answered
+    // with its own "missing_<field>" error. That is how a passthrough bug wears
+    // the mask of a caller mistake: on 2026-08-13 a session trying to file a
+    // defect burned four attempts rearranging idempotency_key before testing
+    // read-loop with a known-good id, getting need_number_or_id, and realising
+    // EVERY verb reached this way was receiving empty arguments. The passthrough
+    // was granting reach and delivering nothing. Parse a string, refuse anything
+    // that is neither string nor object, and never silently forward {} — a
+    // dropped payload must fail as itself, not as the inner verb's problem.
+    let innerArgs = args && args.args;
+    if (typeof innerArgs === "string") {
+      try { innerArgs = JSON.parse(innerArgs); }
+      catch {
+        throw new ToolError({ error: "unparseable_args",
+          hint: "args arrived as a string that is not valid JSON; pass the inner verb's own argument object" });
+      }
+    }
+    if (innerArgs === undefined || innerArgs === null) innerArgs = {};
+    if (typeof innerArgs !== "object" || Array.isArray(innerArgs))
+      throw new ToolError({ error: "args_not_an_object", got: typeof innerArgs,
+        hint: "call-verb takes {verb, args} where args is the inner verb's own argument object" });
+    return callTool(env, actor, inner, innerArgs, profile);
   }
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
