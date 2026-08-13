@@ -36,7 +36,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECTS = Path.home() / ".claude" / "projects"
-JOE_PROJECT = "-Users-booko-My-Drive-CARR-AI"  # the CARR business project
+
+# THE CARR PROJECT LIVES UNDER TWO TRANSCRIPT ROOTS, NOT ONE, and reading only one
+# of them silently measured a third of the corpus. The vault is reachable by two
+# paths — the short ~/My Drive/CARR AI and the real Google Drive mount under
+# ~/Library/CloudStorage/... — and Claude Code derives a project directory from
+# whichever path the session was launched with. Measured 2026-08-13: the
+# CloudStorage root holds 99 files and 541.6 MB, the short root holds 137 files and
+# 250.0 MB, and the two share ZERO filenames, so the union is clean and no session
+# is counted twice. Pinning a single root name measured 250 of 792 MB, 32%.
+#
+# Discovered rather than hard-coded, so a future mount-path change cannot silently
+# shrink the corpus again. Scratchpad projects are excluded: they are throwaway
+# session directories, not the business project.
+def _project_roots():
+    roots = sorted(
+        p
+        for p in PROJECTS.iterdir()
+        if p.is_dir() and "CARR-AI" in p.name and "scratchpad" not in p.name
+    )
+    if not roots:
+        sys.exit("no CARR project transcript directory found under %s" % PROJECTS)
+    return roots
 WINDOW_DAYS = 28
 IDLE_CAP = timedelta(minutes=10)
 
@@ -89,13 +110,14 @@ def tool_names(record):
 
 
 def load_sessions():
-    """Return {session_id: [records]} for Joe's CARR project inside the window."""
-    root = PROJECTS / JOE_PROJECT
-    if not root.exists():
-        sys.exit(f"project directory not found: {root}")
+    """Return {session_id: [records]} for Joe's CARR project inside the window.
 
+    Reads EVERY CARR transcript root, not one — see _project_roots above. Records
+    key on sessionId, so a session that somehow appeared under both roots would
+    merge rather than double-count; measured overlap is zero filenames either way.
+    """
     sessions = defaultdict(list)
-    files = sorted(root.glob("*.jsonl"))
+    files = sorted(f for root in _project_roots() for f in root.glob("*.jsonl"))
     for path in files:
         try:
             with path.open(encoding="utf-8", errors="replace") as fh:
