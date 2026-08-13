@@ -84,6 +84,17 @@ async function ingest(request, env) {
   } catch {
     tokens = {};
   }
+  // INGEST_TOKENS_EXTRA (Phase 1, 2026-08-13): additive second map, merged over
+  // the first. `wrangler secret put` REPLACES a secret wholesale and no secret
+  // can be read back, so growing the original map means re-pasting every live
+  // token — a silent-kill risk for any lane whose value isn't at hand. New
+  // sources go in THIS map instead, one key at a time, zero risk to the old
+  // ones. Same shape ({source: token}), same one-token-per-source rule.
+  try {
+    tokens = { ...tokens, ...JSON.parse(env.INGEST_TOKENS_EXTRA || "{}") };
+  } catch {
+    // a malformed extra map never takes down the primary lanes
+  }
   const source = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
   if (!source) return json({ error: "unauthorized" }, 401);
   const len = parseInt(request.headers.get("content-length") || "0", 10);

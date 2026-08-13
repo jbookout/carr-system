@@ -116,9 +116,13 @@ export CARR_EXPORT_LIVE=1
 # out/vault-drift-salvage-manifest.jsonl) but NEVER aborts the chain — exports
 # still have to run and heal the file either way, same "does not abort"
 # contract every other step in this chain already has via the step() wrapper
-# below. Live routing to /ingest stays off unless CARR_DRIFT_INGEST=1 is set by
-# hand; unset here on purpose.
-step "vault drift watch (check, first)"              ./.venv/bin/python ops/vault-drift-watch.py --check
+# below. Live routing to /ingest ENABLED 2026-08-13 (Joe: "Let's go ahead and
+# do it"): posts each salvage payload as source vault_drift via the token in
+# ~/.config/carr/ingest.env (CARR_INGEST_TOKEN_VAULT_DRIFT, Joe-pasted per the
+# secrets policy, held in the additive INGEST_TOKENS_EXTRA Worker secret).
+# Until that token is pasted on both ends, the POST 401s loudly and the local
+# quarantine + salvage manifest still capture everything — fail-visible.
+step "vault drift watch (check, first)"              env CARR_DRIFT_INGEST=1 ./.venv/bin/python ops/vault-drift-watch.py --check
 
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
