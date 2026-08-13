@@ -85,10 +85,10 @@ test("market map keeps record type separate from sourced location role and makes
     current_records: 4,
     stale_records: 1,
     unknown_records: 1,
-    locations: 10,
+    locations: 11,
     mapped_locations: 9,
-    unlocated_locations: 1,
+    unlocated_locations: 2,
     trip_eligible_locations: 4,
-    trip_ineligible_locations: 6
+    trip_ineligible_locations: 7
   });
 });

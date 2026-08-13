@@ -52,11 +52,11 @@
           "current_records": 4,
           "stale_records": 1,
           "unknown_records": 1,
-          "locations": 10,
+          "locations": 11,
           "mapped_locations": 9,
-          "unlocated_locations": 1,
+          "unlocated_locations": 2,
           "trip_eligible_locations": 4,
-          "trip_ineligible_locations": 6
+          "trip_ineligible_locations": 7
         },
         "route_evidence": {
           "provider": "none",
@@ -90,6 +90,10 @@
             {
               "map_item_id": "location-demo-j02-confirmed",
               "reason": "owning record is stale"
+            },
+            {
+              "map_item_id": "location-demo-j01-restricted",
+              "reason": "unauthorized: showing not yet cleared by the listing agent, no navigation-grade location released"
             }
           ]
         },
@@ -482,6 +486,30 @@
                 "deep_link": "#deal-room",
                 "trip_eligible": true,
                 "trip_eligibility_reason": "Confirmed arrival point with a locked appointment."
+              },
+              {
+                "map_item_id": "location-demo-j01-restricted",
+                "organization_tenant_id": "tenant-synthetic-carr",
+                "business_workspace_id": "workspace-synthetic-panhandle",
+                "record_type": "project_in_process",
+                "record_id": "market-demo-project-01",
+                "record_version": 9,
+                "location_role": "candidate_property",
+                "location_source": {
+                  "type": "listing_referral",
+                  "id": "source-demo-j01-restricted",
+                  "version": 1
+                },
+                "location_projection_version": null,
+                "display_label": "Second Baldwin demo candidate site, showing not yet authorized",
+                "location_precision": "unknown",
+                "position": null,
+                "observed_at": null,
+                "freshness": "unknown",
+                "redaction_profile": "internal_authorization_pending",
+                "deep_link": "#deal-room",
+                "trip_eligible": false,
+                "trip_eligibility_reason": "The listing agent has not authorized a showing or released a navigation-grade location for this candidate site."
               }
             ],
             "summary": "Synthetic search project with a locked site visit.",
