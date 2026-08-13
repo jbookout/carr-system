@@ -112,7 +112,48 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
   const allowedCauses = new Set(["human_stated", "human_correction", "ingest_email",
     "ingest_calendar", "ingest_webhook", "import_migration", "import_salesforce",
     "automation_job", "learning_job", "system"]);
-  const cause = allowedCauses.has(fields.cause) ? fields.cause : "human_stated";
+  // THE DEFAULT USED TO BE 'human_stated' UNCONDITIONALLY, and it made the column
+  // a lie. Measured 2026-08-13: 2,822 of 3,946 events read human_stated, including
+  // every row written by an automated sweep — 173 research findings, 109 org
+  // consolidations, 38 measurement pulls, and this run's own defect records, none
+  // of which a human stated. A provenance column that says "a human said this"
+  // about a nightly job is worse than an absent one, because a reader trusts it.
+  //
+  // DERIVED FROM WHO IS WRITING, not from an optimistic default. An explicit cause
+  // from the caller still wins, because a verb that knows it is replaying an email
+  // or a Salesforce import knows better than this rule does. Otherwise: a write
+  // carrying the partner's verbatim words is human-stated by definition — that is
+  // the intent signal the write-provenance ruling settled on — and a write from a
+  // non-human actor with no quote is an automation job, which is what it is.
+  //
+  // HISTORY IS NOT REWRITTEN. The 2,822 wrong rows stay wrong. Backfilling an
+  // audit trail so a metric reads better is the one repair that would be worse
+  // than the defect: the log's value is that it records what happened, including
+  // that this column was unreliable before today.
+  // THE ACTOR'S human FLAG IS NOT THE DISCRIMINATOR, and trying it first is how
+  // this fix was nearly shipped wrong. A scheduled unattended run authenticates as
+  // Joe — his OAuth grant, his slug, human:true — so keying on the actor recorded
+  // a 2am cron as "a human said this", which is the same lie in a new place. There
+  // IS no transport signal separating "Joe decided this" from "the agent decided
+  // this"; the write-provenance ruling settled that, and this rule obeys it.
+  //
+  // So the only honest signal is the one that ruling named: the partner's verbatim
+  // words. A write carrying them is human-stated because a session cannot invent a
+  // quote without writing a false sentence a human would recognise. A write without
+  // them is an automation job, whichever account authenticated — and that is the
+  // stricter, more truthful reading, because Joe never types into this database.
+  // He tells Claude and Claude writes.
+  //
+  // An explicit cause from the caller still wins: a verb replaying an email or a
+  // Salesforce import knows better than this rule does.
+  let cause;
+  if (allowedCauses.has(fields.cause)) {
+    cause = fields.cause;
+  } else if (fields.human_quote && String(fields.human_quote).trim()) {
+    cause = "human_stated";
+  } else {
+    cause = "automation_job";
+  }
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
