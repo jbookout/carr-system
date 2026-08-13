@@ -3,20 +3,52 @@
 build-section-index.py — derived section-level index of the CARR AI vault.
 
 Walks the vault's knowledge tier and emits one TSV row per markdown section:
-path, start line, end line, header level, header text, parent breadcrumb, and
-(for file-level rows) a one-line gist pulled from the file's own preamble.
-This is the machine layer retrieve.py scores against so a session can decide
-WHERE an answer lives without opening files (graph-engineering build,
-2026-07-25; doctrine: the index is for the model, the graph view is for Joe).
+path, start line, end line, header level, header text, parent breadcrumb, a
+one-line gist (file-level rows only), and a source tag (file|store). This is
+the machine layer retrieve.py scores against so a session can decide WHERE an
+answer lives without opening files (graph-engineering build, 2026-07-25;
+doctrine: the index is for the model, the graph view is for Joe).
 
 DERIVED VIEW: regenerate any time with `./run.sh section-index`; never
-hand-edit the output. Truth is the markdown files themselves.
+hand-edit the output.
 
-Excluded on purpose: cold storage (Source Material, Output, archives), staging
-and pending-deletion folders (_asset_staging, _to_delete), the exporter's own
-*.generations snapshot directories, app internals (.obsidian, .claude), and any
-file self-marked SUPERSEDED — retrieval must never route a session into stale
-data. Graph/ IS indexed: its per-entity notes are derived
+PHASE 1 (2026-08-13, the doctrine-store build, gate for the Aug 21 retirement
+start): doctrine content is no longer read off disk here. Every vault path
+recorded on a VERIFIED doctrine_migration_batch (lib/record_sources.
+doctrine_migrated_paths) is skipped by the walk below; its sections are pulled
+by ONE read-only query (lib/record_sources.doctrine_sections, carr_exporter
+credential) and turned into rows carrying source='store', path=`doctrine:<slug>`
+— retrieve.py points a session at `read-doctrine` for those, never a file path.
+Truth for store-held content is the database now, not the markdown file.
+
+THE KEEP-LIST IS THE MIGRATION LEDGER, NOT THE EXPORT-TARGET OR CORPUS LISTS.
+The build spec for this phase proposed deriving the skip-list from what is NOT
+a registered export target (exporters.targets.TARGETS) and NOT a corpus mirror
+(corpus/corpus-set.tsv). Measured against the live store before writing this
+(2026-08-13): every one of the 40 .md export targets (decision-history.md,
+clients-active.md, the compiled-rules-*.md family, record-layer-dictionary.md,
+CLAUDE.md, abilities.md, the md-ledger and dossier renders...) has ZERO rows in
+doctrine_document — none of that content is doctrine, it renders OTHER record-
+layer tables (decision_event, the rule store, etc.), so excluding it here would
+delete it from the index with no replacement. And 4 of the 42 corpus-set.tsv
+vault-relative rows (the Dell-starter-kit onboarding files) are corpus mirrors
+that have never been migrated to the store either. Skipping by either list would
+have been the exact "unexplained loss" the parity gate exists to catch. The
+migration ledger is the only set that is BOTH a store-content proof and a
+1:1 substitution — every path in it was the literal import source for a live
+document, so trading its file row for the store's row loses nothing and gains
+freshness (the store is live; the file is a snapshot until next export).
+
+FAIL-SOFT: if the store pass errors (no exporter credential, psycopg missing,
+the DB unreachable), migrated files fall back to being WALKED like before —
+retrieve must never go blind because the database had a bad moment. Same
+posture as retrieve.py's own dual-read pass.
+
+Also excluded on purpose: cold storage (Source Material, Output, archives),
+staging and pending-deletion folders (_asset_staging, _to_delete), the
+exporter's own *.generations snapshot directories, app internals (.obsidian,
+.claude), and any file self-marked SUPERSEDED — retrieval must never route a
+session into stale data. Graph/ IS indexed: its per-entity notes are derived
 from the live xlsx/JSON sources of truth, so they are the entity-level nodes
 retrieval should land on.
 
@@ -27,6 +59,7 @@ import sys, os, re
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT  = os.path.join(ROOT, "Automation", "section-index.tsv")
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 SKIP_DIRS  = {"Source Material", "Output", ".obsidian", ".claude", ".git",
               "source-exports", "photos", "Prospects",
@@ -77,7 +110,7 @@ def index_file(abspath, relpath, rows):
         return  # frozen backups never enter the retrieval layer
     # file-level row (level 0) so headerless files still score
     rows.append((relpath, 1, n, 0, os.path.splitext(os.path.basename(relpath))[0],
-                 "", gist_of(lines)))
+                 "", gist_of(lines), "file"))
     heads, fence = [], False
     for i, ln in enumerate(lines, 1):
         if ln.lstrip().startswith("```"):
@@ -98,10 +131,59 @@ def index_file(abspath, relpath, rows):
             if heads[k][1] < lvl:
                 crumbs.append(heads[k][2])
                 lvl = heads[k][1]
-        rows.append((relpath, start, end, level, text, " > ".join(reversed(crumbs)), ""))
+        rows.append((relpath, start, end, level, text,
+                     " > ".join(reversed(crumbs)), "", "file"))
+
+
+def store_rows(sections):
+    """Doctrine store content as index rows, same shape a file's rows take: one
+    document-level row (mirrors gist_of's job) plus one row per active section
+    (mirrors a header row). path is a store address (`doctrine:<slug>`), never
+    a file path — retrieve.py's print loop routes source='store' rows to
+    `read-doctrine`, not to opening a file."""
+    rows = []
+    by_doc = {}
+    for s in sections:
+        by_doc.setdefault(s["slug"], []).append(s)
+    for slug, secs in sorted(by_doc.items()):
+        secs.sort(key=lambda s: s["ordinal"])
+        doc_title = secs[0]["doc_title"]
+        path = f"doctrine:{slug}"
+        preamble = next((s for s in secs if s["section_key"] == "preamble"), secs[0])
+        gist = clean(preamble["plain_text"].splitlines()[0]) if preamble["plain_text"] else ""
+        rows.append((path, 0, 0, 0, clean(doc_title), "", gist[:200], "store"))
+        for s in secs:
+            title = clean(s["title"] or s["section_key"].replace("-", " "))
+            rows.append((path, s["ordinal"], s["ordinal"], 1, title,
+                         clean(doc_title), "", "store"))
+    return rows
+
+
+def is_store_held(relpath, migrated, store_ok):
+    """The Phase 1 classification gate: skip walking this .md file iff the
+    store pass succeeded AND this exact path was the import source for a live
+    doctrine document (lib.record_sources.doctrine_migrated_paths). store_ok
+    gates it so a failed store pass never causes a silent content loss — see
+    the fail-soft note above main(). Pulled out as its own function so the
+    classification is unit-testable without a database (tools/test-section-
+    index-store-classification.py)."""
+    return store_ok and relpath in migrated
+
 
 def main():
     rows = []
+    migrated = set()
+    store_ok = False
+    try:
+        sys.path.insert(0, REPO)
+        from lib.record_sources import doctrine_migrated_paths, doctrine_sections
+        migrated = doctrine_migrated_paths(ROOT)
+        rows.extend(store_rows(doctrine_sections()))
+        store_ok = True
+    except Exception as exc:  # noqa: BLE001 — fail-soft, same posture as retrieve.py
+        print(f"section-index: store pass skipped ({type(exc).__name__}) — "
+              f"walking all files (no store-held skip)", file=sys.stderr)
+
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = sorted(d for d in dirnames
                              if d not in SKIP_DIRS
@@ -112,15 +194,20 @@ def main():
                 continue
             abspath = os.path.join(dirpath, name)
             relpath = os.path.relpath(abspath, ROOT)
+            if is_store_held(relpath, migrated, store_ok):
+                continue  # store-held now; already indexed from the database above
             index_file(abspath, relpath, rows)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
         f.write("# section-index.tsv — DERIVED, never hand-edit. Rebuild: ./run.sh section-index\n")
-        f.write("# path\tstart\tend\tlevel\theader\tparents\tgist\n")
+        f.write("# path\tstart\tend\tlevel\theader\tparents\tgist\tsource\n")
         for r in rows:
             f.write("\t".join(str(x) for x in r) + "\n")
-    files = len({r[0] for r in rows})
-    print(f"section-index: {files} files, {len(rows)} rows -> {os.path.relpath(OUT, ROOT)}")
+    files = len({r[0] for r in rows if r[7] == "file"})
+    docs = len({r[0] for r in rows if r[7] == "store"})
+    print(f"section-index: {files} files + {docs} store documents "
+          f"({len(migrated)} store-held paths skipped on disk), "
+          f"{len(rows)} rows -> {os.path.relpath(OUT, ROOT)}")
 
 if __name__ == "__main__":
     main()

@@ -32,6 +32,20 @@ WHY THERE ARE NO PROXY NODES (v1 had them; they were duplication)
 
 PLACEMENT: code in the repo (durable, versioned); output in the vault (where
 Obsidian reads it). Output is DERIVED — never hand-edit Graph-System/.
+
+PHASE 1 (2026-08-13, doctrine-store build, gate for the Aug 21 retirement
+start): folder-to-folder edges are rolled up from references found IN a
+document's text. For any .md file recorded on a VERIFIED doctrine_migration_
+batch, that text now comes from ONE read-only query (lib/record_sources.
+doctrine_sections) instead of an open() — the file is never read. The node
+itself (the file existing under some folder) still comes from the plain
+os.walk below; only the CONTENT READ that reference-extraction depends on
+moves to the store for migrated files. doctrine_edge/doctrine_link exist for
+this purpose too but carry only 5/0 rows respectively as of this build — too
+sparse to be a primary signal — so wikilink-style references are extracted
+from the section plain_text the same way REF already mines a file's raw
+markdown, per the build's own fallback instruction. FAIL-SOFT: any store error
+falls back to opening every file exactly as before (no graph blindness).
 """
 import sys, os, re, shutil, unicodedata
 from collections import defaultdict
@@ -39,6 +53,7 @@ from collections import defaultdict
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, "Graph-System")
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 SKIP = {"Graph", "Graph-System", ".obsidian", "_to_delete", "_asset_staging",
         ".git", "node_modules", ".trash", "Output"}
@@ -75,14 +90,35 @@ def resolve(ref):
             return r
     return by_base.get(os.path.basename(ref).lower())
 
+# ---------- doctrine store pass: which .md files are store-held, and their text ----------
+slug_by_path = {}
+store_text = {}   # rel path -> concatenated plain_text (ordinal order), store-held files only
+try:
+    sys.path.insert(0, REPO)
+    from lib.record_sources import doctrine_slug_by_path, doctrine_sections
+    slug_by_path = doctrine_slug_by_path(ROOT)
+    by_slug = defaultdict(list)
+    for s in doctrine_sections():
+        by_slug[s["slug"]].append(s)
+    for rel, slug in slug_by_path.items():
+        secs = sorted(by_slug.get(slug, []), key=lambda s: s["ordinal"])
+        if secs:
+            store_text[rel] = "\n\n".join(s["plain_text"] for s in secs)
+except Exception as exc:  # noqa: BLE001 — fail-soft, same posture as retrieve.py
+    print(f"build-system-graph: store pass skipped ({type(exc).__name__}) — "
+          f"reading every file from disk (no store-held skip)", file=sys.stderr)
+
 folder_edges: defaultdict[tuple[str, str], int] = defaultdict(int)  # (folder A, folder B) -> reference count
 for rel, fold in docs.items():
     if not rel.endswith(".md"):
         continue
-    try:
-        text = open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore").read()
-    except OSError:
-        continue
+    if rel in store_text:
+        text = store_text[rel]
+    else:
+        try:
+            text = open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
     for m in REF.findall(text):
         tgt = resolve(m)
         if tgt and docs[tgt] != fold:
@@ -193,4 +229,5 @@ w(LEGEND, ["---", "type: legend", "tags: [sys-legend]", "---", "",
 edges += 4
 
 print(f"Graph-System: {len(folders)} folders, {len(docs)} real docs linked directly "
-      f"(no proxies), {len(folder_edges)} folder flows, ~{edges} edges")
+      f"(no proxies), {len(folder_edges)} folder flows, ~{edges} edges "
+      f"({len(store_text)} store-read, {sum(1 for r in docs if r.endswith('.md')) - len(store_text)} disk-read)")

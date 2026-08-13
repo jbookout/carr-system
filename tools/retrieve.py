@@ -67,24 +67,19 @@ def main():
     # verb runs; a store hit prints as a verb pointer, never a file path.
     # FAIL-SOFT: any error prints one line and the file pass still answers —
     # a dead store must never make retrieval blind (record_sources doctrine).
+    #
+    # PHASE 1 (2026-08-13): migrated_rel now comes from lib.record_sources.
+    # doctrine_migrated_paths — the SAME function build-section-index.py and
+    # build-system-graph.py call, so all three systemic readers agree on
+    # exactly which paths are store-held. It used to be computed inline here
+    # (three copies drifting was the risk rule 73381d78 names).
     migrated_rel = set()
     store_hits = []
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-        from lib.record_sources import _connect
+        from lib.record_sources import _connect, doctrine_migrated_paths
+        migrated_rel = doctrine_migrated_paths(vault)
         with _connect() as conn, conn.cursor() as cur:
-            cur.execute("""
-                select b.source_paths from doctrine_migration_batch b
-                 where b.state = 'verified'""")
-            for (paths,) in cur.fetchall():
-                for p in paths or []:
-                    rel = p
-                    for pref in (vault + os.sep, vault.replace(
-                            "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com",
-                            "/Users/booko") + os.sep):
-                        if rel.startswith(pref):
-                            rel = rel[len(pref):]
-                    migrated_rel.add(rel)
             # AND first (websearch), OR fallback: long natural questions rarely
             # land every word in one section, and the file scorer is OR-based —
             # without the fallback the store looked blind exactly on the queries
@@ -113,6 +108,11 @@ def main():
     if not os.path.exists(index):
         print(f"retrieve: {index} missing — run ./run.sh section-index first"); sys.exit(1)
 
+    # PHASE 1 (2026-08-13): the index carries an 8th column now — source,
+    # 'file' or 'store' (build-section-index.py). A 'store' row's path is
+    # `doctrine:<slug>`, never a real file, so it prints as a read-doctrine
+    # pointer below instead of a file-open. Rows with only 7 columns (a stale
+    # TSV from before this build) default to 'file' — same behaviour as ever.
     scored = []
     with open(index, encoding="utf-8") as f:
         rdr = csv.reader((ln for ln in f if not ln.startswith("#")), delimiter="\t")
@@ -120,6 +120,7 @@ def main():
             if len(row) < 7:
                 continue
             path, start, end, level, header, parents, gist = row[:7]
+            source = row[7] if len(row) > 7 else "file"
             fname = os.path.splitext(os.path.basename(path))[0]
             dirs  = os.path.dirname(path)
             score = 0.0
@@ -131,11 +132,13 @@ def main():
             if len(query) > 6 and (query in header.lower() or query in gist.lower()):
                 score += 4.0
             if score > 0:
-                # migrated files: the store already answered for these; a file
-                # hit would be a duplicate pointing at a frozen copy
-                if path in migrated_rel:
+                # migrated files: build-section-index.py no longer even walks
+                # these, so this only fires against a stale TSV — kept as a
+                # defensive net rather than trusted as the primary gate now.
+                if source == "file" and path in migrated_rel:
                     continue
-                scored.append((score, path, int(start), int(end), int(level), header, parents))
+                scored.append((score, path, int(start), int(end), int(level),
+                               header, parents, source))
 
     if store_hits:
         print(f"retrieve: STORE hits (read via verbs, these are the live copies):")
@@ -150,21 +153,27 @@ def main():
     if not scored:
         sys.exit(0)
 
-    # prefer the sharpest section per file; file-level rows only win when no
-    # section in that file scored (keeps reads narrow, per the one-section rule)
+    # prefer the sharpest section per file/document; file-level (or store
+    # document-level) rows only win when no section scored higher (keeps
+    # reads narrow, per the one-section rule) — path is the dedup key for
+    # both a file (its own path) and a store document (`doctrine:<slug>`).
     best = {}
     for s in sorted(scored, key=lambda r: (-r[0], r[4] == 0, r[3] - r[2])):
-        key = (s[1], s[2])
-        cur = best.get(s[1])
-        if cur is None or s[0] > cur[0] + 0.01 or (abs(s[0] - cur[0]) <= 0.01 and s[4] > cur[4]):
+        prior = best.get(s[1])
+        if prior is None or s[0] > prior[0] + 0.01 or (abs(s[0] - prior[0]) <= 0.01 and s[4] > prior[4]):
             best[s[1]] = s
     ranked = sorted(best.values(), key=lambda r: -r[0])[:top]
 
     print(f"retrieve: top {len(ranked)} of {len(best)} matching files for: {' '.join(sorted(q))}")
-    for score, path, start, end, level, header, parents in ranked:
+    for score, path, start, end, level, header, parents, source in ranked:
         crumb = f"{parents} > {header}" if parents else header
-        span = f"lines {start}-{end}" if level else f"whole file (1-{end})"
-        print(f"  {score:5.1f}  {path}  [{span}]  {crumb}")
+        if source == "store":
+            slug = path.split("doctrine:", 1)[1]
+            print(f"  {score:5.1f}  [store]  {crumb}")
+            print(f"           read-doctrine {{\"document\": \"{slug}\"}}")
+        else:
+            span = f"lines {start}-{end}" if level else f"whole file (1-{end})"
+            print(f"  {score:5.1f}  {path}  [{span}]  {crumb}")
     print("open the top hit only; follow one link out if it points elsewhere (the one-edge rule)")
 
 if __name__ == "__main__":

@@ -486,3 +486,100 @@ _ROUTER_DB_COLS = {
     "Profession": "vertical", "Practice Address": "address", "City": "city",
     "County": "county", "Email": "email", "Phone": "phone",
 }
+
+
+# ---------------- doctrine store: the vault's third-and-fourth readers (Phase 1) ----------------
+#
+# retrieve.py already ran a dual-read pass against doctrine_migration_batch to
+# avoid printing a stale file pointer for content the store now owns. Phase 1
+# (2026-08-13, the Aug 21 retirement gate) gives build-section-index.py and
+# build-system-graph.py the SAME two facts, so all three systemic vault readers
+# compute "is this file store-held now" and "what does the store actually say"
+# from ONE function each — a second implementation of either is exactly the
+# drift rule 73381d78 exists to prevent. carr_exporter already holds SELECT on
+# every doctrine_* table read here (0078_exporter_doctrine_select.sql).
+#
+# doctrine_document carries no source_path column (P1 schema, 0075) — imports
+# only ever recorded the ORIGINAL FILE LIST on the batch ledger. doctrine_slug_by_path
+# reconstructs the slug doctrine_import.py would have assigned to each migrated
+# path, replaying the same kebab-case + index/readme-parent-prefix + collision
+# rule against doctrine_migration_batch rows in (batch_no, source_paths order) —
+# the same order the batches were actually applied in. Verified 2026-08-13
+# against the live store: 217/217 reconstructed slugs match a real document row.
+# If a future batch breaks that (a collision rule change, a hand-edited slug),
+# the mismatch is silently DROPPED rather than mis-attributed — a graph edge
+# that cannot be placed is a smaller loss than one placed on the wrong folder.
+
+def _strip_vault_prefix(path, vault):
+    for pref in (vault + os.sep, vault.replace(
+            "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com",
+            "/Users/booko") + os.sep):
+        if path.startswith(pref):
+            return path[len(pref):]
+    return path
+
+
+def doctrine_migrated_paths(vault):
+    """Vault-relative paths recorded on a VERIFIED migration batch. Content for
+    these lives in the store now — a file-walking consumer must stop opening
+    them, exactly what retrieve.py's dual-read pass already assumes."""
+    migrated = set()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("select source_paths from doctrine_migration_batch where state = 'verified'")
+        for (paths,) in cur.fetchall():
+            for p in paths or []:
+                migrated.add(_strip_vault_prefix(p, vault))
+    return migrated
+
+
+def doctrine_slug_by_path(vault):
+    """{vault-relative path: document slug} for every migrated file, replaying
+    doctrine_import.py's kebab/collision rule against the batch ledger (no file
+    opens — the ledger alone is enough to reproduce it, see module note above)."""
+    import re
+    import unicodedata
+
+    def kebab(s):
+        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+        s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
+        return s or "section"
+
+    mapping = {}
+    assigned = set()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("select source_paths from doctrine_migration_batch "
+                     "where state = 'verified' order by batch_no")
+        for (paths,) in cur.fetchall():
+            for p in paths or []:
+                stem = Path(p).stem
+                parent = Path(p).parent.name
+                if stem.lower() in ("index", "readme"):
+                    slug = kebab(f"{parent}-{stem}") if parent and parent != "CARR AI" \
+                        else kebab(f"root-{stem}")
+                else:
+                    slug = kebab(stem)
+                if slug in assigned:
+                    slug = f"{kebab(parent)}-{slug}"
+                assigned.add(slug)
+                mapping[_strip_vault_prefix(p, vault)] = slug
+    return mapping
+
+
+def doctrine_sections(visibility="shared"):
+    """Every active doctrine section, store identity attached — one read-only
+    query. [{slug, doc_title, content_class, section_key, title, ordinal,
+    plain_text}, ...], ordered by document then section position. Default
+    visibility='shared' matches retrieve.py's own FTS pass; every document is
+    'shared' as of this build (no 'personal' doctrine exists yet)."""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            select d.slug, d.title, d.content_class, s.section_key, s.title,
+                   s.ordinal, r.plain_text
+              from doctrine_section s
+              join doctrine_document d on d.id = s.document_id
+              join doctrine_revision r on r.id = s.current_revision_id
+             where s.status = 'active' and d.visibility = %s
+             order by d.slug, s.ordinal""", (visibility,))
+        cols = ["slug", "doc_title", "content_class", "section_key",
+                "title", "ordinal", "plain_text"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]

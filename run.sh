@@ -42,10 +42,16 @@ graph()        { "$PY" "$REPO/pipelines/build-graph-notes.py" "$VAULT" "$@" \
                  && "$PY" "$REPO/pipelines/build-graph-structure.py" "$VAULT" "$@"; }
 # NOTE: build-graph-notes.py wipes and rebuilds Graph/, which deletes Graph/hubs.
 # The hub pass MUST run after it, so `graph` always runs both.
-graph_system() { python3 "$REPO/pipelines/build-system-graph.py" "$VAULT"; }
+# phase1 (2026-08-13): both now read the doctrine store (lib/record_sources,
+# carr_exporter credential) for store-held content, so both need the repo
+# venv's psycopg — same ORDER 29a reasoning as the other DB-touching pipelines
+# below. Plain python3 still runs them (fail-soft: file-walk everything, no
+# store pass) but on this Mac it has no psycopg at all, so it would silently
+# never take the store path — always prefer $PY here.
+graph_system() { "$PY" "$REPO/pipelines/build-system-graph.py" "$VAULT"; }
 graph_health() { shift; "$PY" "$REPO/pipelines/graph-health.py" "$VAULT" "$@"; }
 sf_diff()      { shift; "$PY" "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }  # ORDER 29b flip: venv, records-mode read (parity byte-identical 2026-08-05)
-section_index(){ python3 "$REPO/pipelines/build-section-index.py" "$VAULT"; }
+section_index(){ "$PY" "$REPO/pipelines/build-section-index.py" "$VAULT"; }
 registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" "$@"; }
 # ORDER 16. Both are READ-ONLY surfaces: no database write, no send, no push.
 # They run on the repo venv because they speak to Neon through psycopg.
