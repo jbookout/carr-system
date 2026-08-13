@@ -50,6 +50,7 @@ be able to stop work. Logged to out/hook-guard.log.
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -59,9 +60,17 @@ CONFIG = os.path.join(REPO, "ops", "config", "model-floors.json")
 CACHE_DIR = os.path.join(REPO, "out", "model-floor-cache")
 
 # How many lines at the head of a transcript to scan for the run's identity.
-# The opening user message is the first record; a small window is plenty and
-# keeps this cheap on a long session.
-HEAD_LINES = 12
+#
+# THREE, not twelve, and the difference is correctness rather than speed.
+# Measured against a real scheduled-run transcript on 2026-08-13: a scheduled
+# run's FIRST record (line 0) is a queue-operation whose `content` field opens
+# with <scheduled-task name="..." file="...">, so the marker is always on line
+# 0 and one line would do. Twelve lines read 139KB of an active session, which
+# is not just wasteful: it sweeps in ordinary conversation, so a session merely
+# DISCUSSING the X reply run would match its name and be gated as if it were
+# that run. Narrow to the opening record plus margin, so identity comes from
+# how the session was launched rather than from anything it later talks about.
+HEAD_LINES = 3
 # How many lines at the tail to scan back through for the newest assistant
 # record carrying a model.
 TAIL_BYTES = 400_000
@@ -101,14 +110,41 @@ def tier_of(model_string, ranks):
     return best
 
 
-def head_text(path, n):
-    out = []
+LAUNCH_MARKER = re.compile(r'<scheduled-task\s+name="([^"]+)"')
+
+
+def launched_task(path, n=HEAD_LINES):
+    """The scheduled task this session was LAUNCHED as, or None.
+
+    Identity comes from the launch marker and from nothing else. A scheduled
+    run's first record is a queue-operation whose `content` opens with
+    <scheduled-task name="..." file="...">, so the name is read out of that
+    attribute.
+
+    THIS REPLACED A SUBSTRING SEARCH OVER THE TRANSCRIPT HEAD, which was wrong
+    in a way a test caught before this ever ran: an ordinary interactive
+    session whose opening message merely MENTIONED a floor-bound run ("let's
+    look at x-reply-run-daily") matched the floor and was gated as if it were
+    that run. Naming a run is not being one. Reading the launch attribute makes
+    the check immune to whatever the session goes on to talk about.
+    """
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for i, line in enumerate(fh):
             if i >= n:
                 break
-            out.append(line)
-    return "\n".join(out)
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            content = rec.get("content")
+            if not isinstance(content, str):
+                continue
+            found = LAUNCH_MARKER.search(content)
+            if found:
+                return found.group(1).strip()
+    return None
 
 
 def newest_model(path):
@@ -174,15 +210,15 @@ def main():
         ranks = cfg.get("tier_rank") or {}
         floors = cfg.get("floors") or []
 
-        head = head_text(transcript, HEAD_LINES).lower()
+        task = launched_task(transcript)
         bound = None
-        for floor in floors:
-            for needle in floor.get("match") or []:
-                if needle.lower() in head:
+        if task:
+            low = task.lower()
+            for floor in floors:
+                names = [str(n).lower() for n in (floor.get("match") or [])]
+                if low in names or low == str(floor.get("name", "")).lower():
                     bound = floor
                     break
-            if bound:
-                break
 
         if not bound:
             try:
