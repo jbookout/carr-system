@@ -10,22 +10,20 @@ real src/tools.js registry and runs any registered verb — but it was invisible
 from run.sh and it needs a DATABASE_URL that a human has to produce by hand.
 This wires the two together: db-tap's DSN derivation feeds local-verb's runner.
 
-WHAT IT DOES NOT DO, deliberately. It does NOT open a production write path.
-local-verb.mjs refuses the production endpoint unless
-CARR_LOCAL_VERB_ALLOW_PRODUCTION=1 is set, on the stated grounds that
-"production writes are a human's tap; this tool exists for branch rehearsal and
-must not become a side door." That rail is two days older than this file and it
-is left exactly where it stands — this script never sets that variable, it only
-passes through an environment that already carries it. Reaching production is
-therefore still a deliberate act by the human, not a side effect of a
-convenience wrapper.
-
 The DSN is derived by tools/db-tap.py, not re-implemented here, so the branch
 targeting and the neonctl invocation stay one piece of code.
 
+IDENTITY, Phase 1 (2026-08-13). There is no actor-slug argument anymore. Until
+this change, the actor was a caller-typed argv slug that DEFAULTED to "joe" —
+any local caller could claim any identity. local-verb.mjs now derives the
+actor from ~/.config/carr/local-actor.json (written once per machine by
+bin/set-local-actor.sh) and refuses to run without it. This script no longer
+accepts or passes a slug — see mcp-server/local-verb.mjs for the identity
+resolution and its stated limits.
+
 Usage:
-  ./run.sh call <verb> '<json args>' [actor-slug]
-  ./run.sh call --branch rehearse-0031 add-loop '{"kind":"idea", ...}' joe
+  ./run.sh call <verb> '<json args>'
+  ./run.sh call --branch rehearse-0031 add-loop '{"kind":"idea", ...}'
   ./run.sh call list-verbs '{}'
 
 Never prints the DSN.
@@ -73,7 +71,12 @@ def main() -> None:
         sys.exit(__doc__)
     verb, rest = argv[0], argv[1:]
     args_json = rest[0] if rest else "{}"
-    actor = rest[1] if len(rest) > 1 else "joe"
+    # Anything past args_json used to be an actor-slug argv (default "joe").
+    # That default is gone. Pass any leftover positional args straight through
+    # so local-verb.mjs's own guard rejects them loudly and names the exact
+    # setup command, rather than this wrapper silently swallowing a stale
+    # slug argument and papering over the impersonation path being closed.
+    extra = rest[1:]
 
     if not os.path.exists(LOCAL_VERB):
         sys.exit(f"no such file: {LOCAL_VERB}")
@@ -82,7 +85,7 @@ def main() -> None:
     env = {**os.environ, "DATABASE_URL": url}
     os.chdir(os.path.join(REPO, "mcp-server"))
     rc = subprocess.run(
-        [node_bin(), LOCAL_VERB, verb, args_json, actor], env=env
+        [node_bin(), LOCAL_VERB, verb, args_json, *extra], env=env
     ).returncode
     sys.exit(rc)
 

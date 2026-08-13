@@ -6,7 +6,25 @@
 // over a plain connection, so a rehearsal on a Neon branch exercises the actual
 // verb rather than a description of it.
 //
-//   DATABASE_URL=<branch url> node local-verb.mjs <verb> '<json args>' [actor-slug]
+//   DATABASE_URL=<branch url> node local-verb.mjs <verb> '<json args>'
+//
+// IDENTITY, Phase 1 (2026-08-13, council-ordered, closes the caller-supplied-
+// identity hole). This used to take the actor as a THIRD ARGV SLUG, defaulting
+// to "joe" when omitted — any local caller could claim any identity, and every
+// historical receipt written through this path is unverifiable because of it.
+// There is no argv slug anymore. The actor is derived from ONE place:
+// ~/.config/carr/local-actor.json, written once per machine by
+// bin/set-local-actor.sh. Both reads and writes require it — see the
+// resolveIdentity() block below for why reads are not exempted.
+//
+// THE HONEST LIMIT (stated again at set-local-actor.sh): this closes
+// ACCIDENTAL and DEFAULT impersonation — a stray argv, a copy-pasted "joe"
+// that should have been "dell". It does NOT stop a DELIBERATE local attacker:
+// any process running as this Mac's own user can read or overwrite
+// local-actor.json exactly as this script does. That boundary is the server
+// side's job (the actor table on write, the OAuth-issued token on the real
+// MCP path) — this file only makes the ordinary, unintentional case
+// impossible, not the adversarial one.
 //
 // PRODUCTION IS REACHABLE, reads and writes alike (Joe's ruling 2026-08-09,
 // loop #258 — the old CARR_LOCAL_VERB_ALLOW_PRODUCTION rail is retired and the
@@ -16,6 +34,9 @@
 
 import { Pool, neonConfig } from "@neondatabase/serverless";
 import ws from "ws";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { TOOLS, ToolError } from "./src/tools.js";
 
 // The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
@@ -24,13 +45,73 @@ import { TOOLS, ToolError } from "./src/tools.js";
 // already in node_modules and works.
 neonConfig.webSocketConstructor = ws;
 
-const [verb, rawArgs = "{}", slug = "joe"] = process.argv.slice(2);
-const url = process.env.DATABASE_URL;
-if (!verb || !url) {
-  console.error("usage: DATABASE_URL=... node local-verb.mjs <verb> '<json args>' [actor-slug]");
+const cliArgs = process.argv.slice(2);
+const [verb, rawArgs = "{}"] = cliArgs;
+if (!verb || !process.env.DATABASE_URL) {
+  console.error("usage: DATABASE_URL=... node local-verb.mjs <verb> '<json args>'");
   process.exit(2);
 }
+// The old third argv (actor slug) is GONE, not silently ignored: a caller
+// still passing one is almost always stale muscle memory or an unfixed
+// wrapper, and swallowing it quietly would hide exactly the impersonation
+// path this change closes. Fail loud and say why.
+if (cliArgs.length > 2) {
+  console.error(
+    `local-verb.mjs no longer takes an actor-slug argv (got extra arg "${cliArgs[2]}"). ` +
+    "Identity is derived from ~/.config/carr/local-actor.json — see resolveIdentity() " +
+    "below, or run bin/set-local-actor.sh <slug> if that file does not exist yet."
+  );
+  process.exit(2);
+}
+
+// ---------- identity: derive the actor from the machine, not the caller ----------
+
+const IDENTITY_PATH = path.join(os.homedir(), ".config", "carr", "local-actor.json");
+const SETUP_COMMAND = `bin/set-local-actor.sh <slug>  (run from the repo root; use "joe" on this Mac)`;
+
+function resolveIdentity() {
+  // Both reads AND writes require this file. The tempting shortcut — let a
+  // read proceed with a loud warning and no resolved actor — was considered
+  // and rejected: personal-scope reads (personal_to, personal-scope filters)
+  // depend on WHICH human is asking just as much as a write does, so a
+  // warn-and-guess read would leak or hide rows for the wrong person instead
+  // of failing loudly. Requiring the file everywhere means the failure mode
+  // is always "stop and run one command," never "ran, but as someone else."
+  let raw;
+  try {
+    raw = fs.readFileSync(IDENTITY_PATH, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") {
+      console.error(
+        `no local identity set — this Mac has never run set-local-actor.sh.\n` +
+        `Run this once:\n\n    ${SETUP_COMMAND}\n`
+      );
+      process.exit(2);
+    }
+    console.error(`could not read ${IDENTITY_PATH}: ${e.message}`);
+    process.exit(2);
+  }
+  let identity;
+  try {
+    identity = JSON.parse(raw);
+  } catch (e) {
+    console.error(`${IDENTITY_PATH} is not valid JSON (${e.message}). Re-run:\n\n    ${SETUP_COMMAND} --force\n`);
+    process.exit(2);
+  }
+  const actorSlug = identity && identity.actor_slug;
+  if (!actorSlug || typeof actorSlug !== "string") {
+    console.error(`${IDENTITY_PATH} is missing "actor_slug". Re-run:\n\n    ${SETUP_COMMAND} --force\n`);
+    process.exit(2);
+  }
+  return actorSlug;
+}
+
+const slug = resolveIdentity();
+const VIA = "local-verb/identity-file";
+
+const url = process.env.DATABASE_URL;
 if (!/ep-|neon\.tech/.test(url)) { console.error("DATABASE_URL does not look like a Neon url"); process.exit(2); }
+console.error(`local-verb identity -> ${slug} (via ${VIA}, from ${IDENTITY_PATH})`);
 // Production's endpoint, MEASURED today rather than guessed:
 //   neonctl connection-string production ... -> ep-restless-resonance-awbp35k3
 // The first version of this rail named an endpoint that does not exist, so it
@@ -75,13 +156,13 @@ const pool = new Pool({ connectionString: url });
 const client = await pool.connect();
 try {
   if (!tool.write) {
-    const out = await tool.handler(client, { slug, human: true, kind: "human" }, args);
+    const out = await tool.handler(client, { slug, human: true, kind: "human", via: VIA }, args);
     console.log(JSON.stringify(out, null, 2));
   } else {
     await client.query("begin");
     const a = await client.query("select id, kind from actor where slug=$1", [slug]);
     if (!a.rows.length) throw new Error(`no actor ${slug}`);
-    const actor = { slug, human: a.rows[0].kind === "human", kind: a.rows[0].kind, id: a.rows[0].id };
+    const actor = { slug, human: a.rows[0].kind === "human", kind: a.rows[0].kind, id: a.rows[0].id, via: VIA };
     if (tool.humanOnly && !actor.human) throw new Error("human_only verb");
     const out = await tool.handler(client, actor, args);
     await client.query("commit");
