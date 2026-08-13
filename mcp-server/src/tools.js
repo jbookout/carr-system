@@ -7,6 +7,7 @@
 // The doctrine store's verbs (P2, decision 82a2fb62) live in doctrine.js as a
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
+import { investigationTools } from "./investigation.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -74,11 +75,15 @@ async function withEnvelope(client, actor, verb, args, fn) {
 
 async function writeEvent(client, actor, verb, subjectType, subjectId, fields = {}) {
   const identity = auditIdentity(actor);
+  const allowedCauses = new Set(["human_stated", "human_correction", "ingest_email",
+    "ingest_calendar", "ingest_webhook", "import_migration", "import_salesforce",
+    "automation_job", "learning_job", "system"]);
+  const cause = allowedCauses.has(fields.cause) ? fields.cause : "human_stated";
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
        organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, 'human_stated', $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
@@ -5710,3 +5715,7 @@ Object.assign(TOOLS, {
 
 // Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
 Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
+
+// Bounded investigation control plane (0098): deterministic signals, one
+// reasoning owner, evidence-only worker packets, explicit branch termination.
+Object.assign(TOOLS, investigationTools({ withEnvelope, writeEvent, ToolError }));

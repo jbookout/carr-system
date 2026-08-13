@@ -54,6 +54,7 @@ const PROFILES = {
   capture: new Set([
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
+    "record-signal", "record-branch-evidence",
   ]),
 
   // AWAY MODE, added 2026-08-03 on Joe's ruling. The scheduled CEO session that
@@ -88,10 +89,13 @@ const PROFILES = {
     // everything capture holds
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
+    "record-signal", "record-branch-evidence",
     // plus: close what it opened, advance the book, draft, and keep the record honest
     "close-loop", "update-deal", "add-premises", "record-counter",
     "prepare-document", "update-document-status",
     "log-decision", "update-decision",
+    "open-investigation", "open-investigation-branch",
+    "adjudicate-investigation-branch", "close-investigation",
     // plus: the marketing lane, since social is carved out of Dell's review
     "open-campaign", "score-campaign", "attach-to-campaign", "measure-placement",
   ]),
