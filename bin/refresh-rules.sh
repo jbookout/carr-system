@@ -26,6 +26,15 @@ if CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules >> "$LOG" 2>&1; then
   # It re-stamps only the map's own contract hash — never the gate-script
   # hashes, so tampering with a gate is still detected on the next boot.
   python3 "$REPO/bin/sync-enforcement-map.py" >> "$LOG" 2>&1 || true
+  # Assert no tool-call markup reached a rule. Rule c53beeaa has prescribed this
+  # exact check since 2026-08-03 and nothing ran it; on 2026-08-13 six active
+  # shared rules were found carrying it, five with Joe's verbatim quote absorbed
+  # into the statement and human_quote written NULL, the oldest sitting there
+  # four days. Runs here because this is where the renders are produced, and a
+  # check nobody runs is not a check.
+  if ! python3 "$REPO/ops/rule-render-markup-check.py" >> "$LOG" 2>&1; then
+    echo "$(date -u +%FT%TZ) FAIL tool-call markup found in a rendered rule" >> "$LOG"
+  fi
 else
   rc=$?  # capture BEFORE the date subshell resets $? — the old line always logged rc=0
   echo "$(date -u +%FT%TZ) FAIL rules refresh rc=$rc" >> "$LOG"
