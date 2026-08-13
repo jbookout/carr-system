@@ -525,8 +525,9 @@ async function resolveLoop(client, args) {
     throw new ToolError({ error: "needs_disambiguation", number: args.number,
       candidates: r.rows.map(x => ({ loop_id: x.id, kind: x.kind, section: x.section,
                                      renders_into: x.rel_path })),
-      hint: "this number names more than one live row — pass loop_id. The collision is " +
-            "real and in the source files; it is Joe's to renumber, not a verb's." });
+      hint: "this number names more than one live row — pass loop_id to act on one now, and " +
+            "fix the collision itself with update-loop's `number` (plus renumber_reason). " +
+            "Migration 0112 makes a new one impossible; anything left is pre-0112 history." });
   return r.rows[0];
 }
 
@@ -4680,6 +4681,8 @@ export const TOOLS = {
       blocker: { type: "string", enum: ["human_only","counterparty","ruling","external_event","other_lane","capability"],
         description: "REVISE what the loop is waiting on. add-loop refuses a loop without a blocker, but until 2026-08-09 nothing could change one, so a blocker named on day one was permanent even after the real obstacle turned out to be different — found on loop #295, whose blocker read human_only until building it revealed the actual block was a missing corpus (other_lane). Changing this requires blocker_detail too: a reclassification with the old specifics attached is worse than the original, because it reads as current and is not." },
       blocker_detail: { type: "string", description: "the SPECIFIC thing, restated for the new class: which person, which ruling, which date, which prerequisite. Required whenever blocker changes; may also be passed alone to sharpen the detail without reclassifying." },
+      number: { type: "string", description: "RENUMBER the row. Only reason this exists: two open rows of the same kind can carry the same number, and then every verb that resolves by number refuses — correctly, but a human saying 'close 95' is saying something the system cannot act on, and anyone working around it with loop_id silently picks whichever row they happened to look up. Requires renumber_reason in the same call. Refused if the target number is already taken by another OPEN row of this kind, which is the collision this exists to end." },
+      renumber_reason: { type: "string", description: "REQUIRED whenever number changes: why, and where the old number still appears. Rule 7105955b binds here — a renumbered row is not an abandoned one, and the note recording the change has to say so in its first words, because the old number lives on in other rows' prose and in every generated render." },
       last_surfaced: { type: "string", description: "IDEA ROWS ONLY: stamp the idea bank's 'Last surfaced' column, YYYY-MM-DD. This is what the monthly resurface writes when a parked idea is presented and KEPT — the column its own rotation reads to pick the oldest ideas next month. Blank or '—' means never surfaced, so leaving it unwritten is not neutral: it keeps re-presenting the same rows." },
       section: { type: "string", enum: ["hot", "backlog", "open"], description: "move the row to this section of its file" } },
       required: ["idempotency_key"] },
@@ -4714,6 +4717,37 @@ export const TOOLS = {
         set("blocker_class", args.blocker);
       }
       if (args.blocker_detail !== undefined) set("blocker_detail", args.blocker_detail);
+
+      // RENUMBER (loop #306). Two open rows of one kind sharing a number is a
+      // data-integrity defect, not a cosmetic one: update-loop, close-loop and
+      // read-loop all resolve by number and all refuse on an ambiguous one — which
+      // is the right behaviour and still leaves the human unable to act, because
+      // the failure reads like a broken verb rather than like broken data. Until
+      // now nothing could set this column, so the only workaround was to pass
+      // loop_id, which silently picks whichever row the caller happened to look up.
+      if (args.number !== undefined) {
+        const next = String(args.number).replace(/^#/, "").trim();
+        if (!/^\d+$/.test(next))
+          throw new ToolError({ error: "bad_number", got: args.number,
+            hint: "digits only — the renders sort on this and a free-form ref sorts wrong forever" });
+        if (args.renumber_reason === undefined)
+          throw new ToolError({ error: "renumber_reason_required",
+            hint: "rule 7105955b: a renumbered row is not an abandoned one, and the old number " +
+                  "survives in other rows' prose and in every render. Say why, in the same call." });
+        if (next !== cur.number) {
+          // The uniqueness index added alongside this enforces it in the database;
+          // this check exists so the caller gets the two colliding ids back instead
+          // of a constraint name.
+          const clash = await c.query(
+            "select id from loop_item where kind=$1 and number=$2 and status='open' and id <> $3",
+            [cur.kind, next, cur.id]);
+          if (clash.rows.length)
+            throw new ToolError({ error: "number_taken", kind: cur.kind, number: next,
+              held_by: clash.rows.map((x) => x.id),
+              hint: "another OPEN row of this kind already carries that number — pick one nothing holds" });
+          set("number", next);
+        }
+      }
 
       // 'Last surfaced' is an extra_cells key, not a column — the idea bank's two
       // bank-specific columns (Status, Last surfaced) ride in that jsonb because
@@ -4769,10 +4803,16 @@ export const TOOLS = {
       vals.push(actor.id); sets.push(`updated_by=$${vals.length}`);
       vals.push(cur.id);
       await c.query(`update loop_item set ${sets.join(", ")} where id=$${vals.length}`, vals);
+      const renumbered = sets.some(s => s.startsWith("number="))
+        ? { from: cur.number, to: String(args.number).replace(/^#/, "").trim(),
+            reason: args.renumber_reason }
+        : null;
       await writeEvent(c, actor, "update-loop", "loop", cur.id,
-        { new: { changed: sets.map(s => s.split("=")[0]), moved },
+        { old: renumbered ? { number: cur.number } : undefined,
+          new: { changed: sets.map(s => s.split("=")[0]), moved, renumbered },
           idempotency_key: args.idempotency_key });
-      return { ok: true, loop_id: cur.id, number: cur.number, moved };
+      return { ok: true, loop_id: cur.id, number: renumbered ? renumbered.to : cur.number,
+        moved, renumbered };
     }),
   },
 
