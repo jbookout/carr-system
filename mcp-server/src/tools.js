@@ -376,6 +376,13 @@ const WHO_PATH_CAP = 25;
 // and never truncated — only the ref list is capped, and the row says so.
 const RETIRED_REF_CAP = 10;
 
+// [loop #127] How many lead↔client links, and how many deals reached through them,
+// `find` returns per search. Production carries 30 linked leads in total, so this is
+// headroom rather than a real cut today; it exists so a future search on a common
+// org name cannot spend the whole payload on traversal rows. A search that hits it
+// says so in the note rather than truncating silently.
+const LINK_CAP = 20;
+
 // THE NODE KEY IS THE REF, NOT THE NAME, and that choice is load-bearing.
 // v_party_graph carries exactly one ref per party (0020's `distinct on`), so a
 // ref identifies a party. A name does not: production holds one real lead
@@ -519,6 +526,101 @@ async function require0066(c) {
     hint: "the marketing verbs need 0066 (campaign window/criterion/verdict columns, " +
           "marketing_subject, placement_measurement, and the measurement views). Apply it " +
           "(`~/carr-system/run.sh migrate --apply --yes`) and retry. NOTHING was written." });
+}
+
+// ---------- code subjects (0101, loop #211) ----------
+
+// THE ONE REPO. CARR CLAUDE.md rev 10: "the code lives in ONE repo:
+// jbookout/carr-system". A caller who writes `commit:<sha>` and names no repo means
+// this one, because there is no other. The schema deliberately does NOT hard-code
+// it — a second repo is a real possibility and a schema forbidding it would be a
+// lie — so the default lives here, at the caller's edge, where it is a convenience
+// rather than a constraint.
+const DEFAULT_REPO = "jbookout/carr-system";
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+// Parse the forms a reviewing seat actually writes, in the order it writes them:
+//   commit:f7abde7               -> the one repo at that commit
+//   jbookout/carr-system@f7abde7 -> any repo at that commit
+//   repo:jbookout/carr-system    -> the repo itself (a finding about the codebase,
+//   jbookout/carr-system            not about one change)
+// Returns { repo, sha } with sha null for a repo-level subject.
+function parseCodeRef(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  let body = s;
+  let forcedKind = null;
+  const m = /^(commit|repo)\s*:\s*(.*)$/i.exec(s);
+  if (m) { forcedKind = m[1].toLowerCase(); body = m[2].trim(); }
+  let repo = null, sha = null;
+  const at = body.lastIndexOf("@");
+  if (at > 0) {
+    repo = body.slice(0, at).trim();
+    sha = body.slice(at + 1).trim();
+  } else if (SHA_RE.test(body)) {
+    // A bare sha only reads as a sha when the caller said `commit:`. Otherwise a
+    // seven-character word like 'deadbee' would silently become a commit.
+    if (forcedKind !== "commit") return null;
+    repo = DEFAULT_REPO; sha = body;
+  } else {
+    repo = body;
+  }
+  if (!repo) return null;
+  repo = repo.toLowerCase();
+  if (!REPO_RE.test(repo)) return null;
+  if (sha !== null) {
+    if (!SHA_RE.test(sha)) return null;
+    sha = sha.toLowerCase();
+  }
+  if (forcedKind === "repo") sha = null;
+  if (forcedKind === "commit" && sha === null) return null;
+  return { repo, sha };
+}
+
+async function require0101(c) {
+  const r = await c.query(
+    `select to_regclass('public.code_subject')  is not null as registry,
+            to_regclass('public.v_code_finding') is not null as read_side`);
+  const s = r.rows[0];
+  if (s.registry && s.read_side) return;
+  throw new ToolError({ error: "migration_not_applied",
+    migration: "0101_code_review_subject", present: s,
+    hint: "filing a finding against code needs 0101 (code_subject plus the repo/commit " +
+          "branches on record_flag and v_record_flag_subject). Apply it " +
+          "(`~/carr-system/run.sh migrate --apply --yes`) and retry. NOTHING was written." });
+}
+
+// MINTED ON DEMAND, and that is the deliberate difference from marketing_subject.
+// 0066 refuses to mint because a typo'd slug would invent a pillar and pollute a
+// taxonomy. A commit sha invents nothing: it either names an object in the repo or
+// it does not, and the CHECK constraints in 0101 are what stop a sentence becoming
+// a subject. Requiring a human to pre-register every reviewed commit would put a
+// gate in front of the one thing this fix exists to make automatic.
+async function resolveCodeSubject(c, ref, actorId) {
+  const parsed = parseCodeRef(ref);
+  if (!parsed) throw new ToolError({ error: "code_subject_unparseable", got: String(ref || "").slice(0, 80),
+    hint: "write it the way it is written everywhere else: 'commit:<sha>' for the one repo, " +
+          "'owner/name@<sha>' for another repo, or 'repo:owner/name' for the codebase itself. " +
+          "A sha is 7-40 hex characters." });
+  await require0101(c);
+  const { repo, sha } = parsed;
+  const found = await c.query(
+    "select id from code_subject where repo=$1 and coalesce(commit_sha,'')=coalesce($2,'')",
+    [repo, sha]);
+  if (found.rows.length) return { type: sha ? "commit" : "repo", id: found.rows[0].id, repo, sha };
+  const ins = await c.query(
+    `insert into code_subject (repo, commit_sha, created_by) values ($1,$2,$3)
+     on conflict (repo, coalesce(commit_sha, '')) do nothing returning id`,
+    [repo, sha, actorId || null]);
+  if (ins.rows.length) return { type: sha ? "commit" : "repo", id: ins.rows[0].id, repo, sha };
+  // Lost the race to a concurrent write — read the winner rather than failing.
+  const again = await c.query(
+    "select id from code_subject where repo=$1 and coalesce(commit_sha,'')=coalesce($2,'')",
+    [repo, sha]);
+  if (again.rows.length) return { type: sha ? "commit" : "repo", id: again.rows[0].id, repo, sha };
+  throw new ToolError({ error: "code_subject_not_minted", repo, commit_sha: sha,
+    hint: "the registry accepted neither an insert nor a read for this repo/sha — nothing was written" });
 }
 
 // A campaign by uuid or by name. Name matching is normalised the same way
@@ -1125,7 +1227,7 @@ export const TOOLS = {
 
   "find": {
     write: false,
-    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Matches party.name / deal.name / client.roster_ref. Survivors come first and are counted separately from retired aliases: `refs`/`live_rows` are what you may write to, `retired_refs`/`retired_aliases` are tombstones of completed merges, kept navigable but never a target. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. NOT the verb for a ref you already hold (catch-me-up takes that), and NOT the referral-path verb (who-do-we-know walks the graph). Read-only.",
+    description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Matches party.name / deal.name / client.roster_ref. Survivors come first and are counted separately from retired aliases: `refs`/`live_rows` are what you may write to, `retired_refs`/`retired_aliases` are tombstones of completed merges, kept navigable but never a target. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. FOLLOWS THE LEAD ↔ CLIENT LINK SINCE 0102: `lead_client_links` pairs a matched lead with the client it became (or sits under), by exact key and never by name, and `deals_via_link` carries the deals filed under that client — which is how a search for a doctor's name finally surfaces the deal filed under their practice's name. `deals` remains the name-match list and the two are never blended. NOT the verb for a ref you already hold (catch-me-up takes that), and NOT the referral-path verb (who-do-we-know walks the graph). Read-only.",
     inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     handler: async (c, _a, args) => {
       const q = args.query;
@@ -1242,6 +1344,43 @@ export const TOOLS = {
       const orphanNames = organizations.filter(r => r.all_retired).map(r => r.name);
       const promoted = organizations.filter(r => r.live_rows === 0 && r.live_as_role > 0);
 
+      // ── THE LEAD ↔ CLIENT LINK, FOLLOWED (0102, loop #127) ────────────────────
+      // Until now this verb matched deals BY NAME ONLY, so a search that landed on a
+      // lead returned deals:[] even when that lead's own client carried a live deal —
+      // the deal is filed under the practice's name and the search was for the
+      // doctor's. The link was in the data the whole time and no read verb followed it.
+      //
+      // EXACT KEYS ONLY, NEVER A NAME. v_lead_client_best ranks three uuid equalities
+      // (conversion pointer, shared party, shared org) and hands back one row per lead;
+      // this verb does no matching of its own. That constraint is in the loop's own
+      // body for a reason: this system once welded Jenna Beasley to Jeff Beasley DMD —
+      // two different people — through an import that matched on a surname.
+      const matchedRefs = [
+        ...parties.rows.map(r => r.ref).filter(Boolean),
+        ...organizations.flatMap(r => [...(r.refs || []), ...(r.role_refs || [])]),
+      ];
+      let linked = [], linkedDeals = [];
+      if (matchedRefs.length) {
+        const lr = await c.query(
+          `select lead_ref, lead_name, client_ref, client_name, link_basis, either_merged
+             from v_lead_client_best
+            where lead_ref = any($1) or client_ref = any($1)
+            order by link_basis, lead_ref limit $2`, [matchedRefs, LINK_CAP]);
+        linked = lr.rows;
+        // The deals reachable THROUGH that link — the answer the caller wanted and did
+        // not get. Kept in their own field rather than folded into `deals` so a reader
+        // can always tell which of the two paths produced a row.
+        const clientRefs = [...new Set(linked.map(r => r.client_ref).filter(Boolean))];
+        const named = new Set(deals.rows.map(d => d.name));
+        if (clientRefs.length) {
+          const dr = await c.query(
+            `select name, phase, lead_owner as owner, client_ref
+               from v_deal_board where client_ref = any($1)
+              order by client_ref, name limit $2`, [clientRefs, LINK_CAP]);
+          linkedDeals = dr.rows.filter(d => !named.has(d.name));
+        }
+      }
+
       const notes = [];
       if (retiredSeen)
         notes.push("LIVE and RETIRED are counted separately here and are never blended. " +
@@ -1265,8 +1404,29 @@ export const TOOLS = {
           "catch-me-up one of the retired refs to see where it went. This is not a claim that " +
           "we do not know them.");
 
+      if (linked.length) {
+        const conv = linked.filter(r => r.link_basis === "conversion").length;
+        const org = linked.filter(r => r.link_basis === "same_org").length;
+        notes.push(
+          `lead_client_links carries ${linked.length} lead/client pair(s) touching this ` +
+          "search, resolved by exact key and never by name. link_basis says which: " +
+          "`conversion` is lead.client_id, the pointer set when the lead became that " +
+          "client; `same_party` is one person holding both records; `same_org` is the " +
+          "lead sitting under the client's practice, which answers \"is this practice " +
+          "already a client\" and is NOT a conversion." +
+          (conv ? "" : " None of these is a conversion pointer.") +
+          (org ? " Read the same_org rows as neighbours, not as the same record." : ""));
+        if (linkedDeals.length)
+          notes.push(`deals_via_link carries ${linkedDeals.length} deal(s) that this ` +
+            "search would otherwise have missed entirely: they are filed under the linked " +
+            "client, whose name does not contain the search term. `deals` is still the " +
+            "name-match list and the two are never blended.");
+      }
+
       return { parties: parties.rows, deals: deals.rows, connections: connections.rows,
-               organizations, note: notes.join(" ") };
+               organizations,
+               lead_client_links: linked, deals_via_link: linkedDeals,
+               note: notes.join(" ") };
     },
   },
 
@@ -3437,12 +3597,12 @@ export const TOOLS = {
 
   "record-finding": {
     write: true,
-    description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is passed as proposes_correction, which is recorded as a proposal for the owning partner and applied by them, never by this verb. STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface. NOT ONLY PEOPLE SINCE 0066: subject_kind campaign / platform / pillar / format files a finding against a THING — a platform, a content pillar, a format, a campaign — which is how the marketing seat's measured conclusions finally get a home. Read them back through v_record_flag_subject, which resolves every branch to a name.",
+    description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is passed as proposes_correction, which is recorded as a proposal for the owning partner and applied by them, never by this verb. STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface. NOT ONLY PEOPLE SINCE 0066: subject_kind campaign / platform / pillar / format files a finding against a THING — a platform, a content pillar, a format, a campaign — which is how the marketing seat's measured conclusions finally get a home. Read them back through v_record_flag_subject, which resolves every branch to a name. AND NOT ONLY BUSINESS RECORDS SINCE 0101: a finding can be filed against CODE — pass 'commit:<sha>' (the one repo at that commit), 'owner/name@<sha>', or 'repo:owner/name' (the codebase itself) and the subject is minted on first use. That is how a code review's result — INCLUDING its failure finding, which is the one a reader most needs — becomes part of the record instead of surviving only in a local sidecar. Read code findings back through v_code_finding, which carries repo and commit_sha as their own columns.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
-      subject: { type: "string", description: "C-127 / L-204 / V-CPA-006 / P-0301, an exact deal name, or — when subject_kind is campaign/platform/pillar/format — a campaign name or a marketing_subject slug ('twitter', 'reel')" },
-      subject_kind: { type: "string", enum: ["auto","party","campaign","platform","pillar","format"], default: "auto",
-        description: "'party' pins the flag to the person/org behind a ref instead of the client/lead/vendor record. THE FOUR MARKETING KINDS (0066) are how a finding about a THING rather than a PERSON gets recorded: 'X has returned no analytics for any of 42 placements' is a platform finding, 'reels outperform statics on reach' is a format finding. Before 0066 those had no subject at all and the marketing seat's core output went nowhere. A platform/pillar/format subject must already exist in marketing_subject — this verb registers nothing, because a typo'd slug minting a new pillar is how a taxonomy becomes noise." },
+      subject: { type: "string", description: "C-127 / L-204 / V-CPA-006 / P-0301, an exact deal name, or — when subject_kind is campaign/platform/pillar/format — a campaign name or a marketing_subject slug ('twitter', 'reel'). CODE (0101): 'commit:<sha>' files against the one repo at that commit, 'owner/name@<sha>' against another repo, 'repo:owner/name' against the codebase itself." },
+      subject_kind: { type: "string", enum: ["auto","party","campaign","platform","pillar","format","repo","commit"], default: "auto",
+        description: "'party' pins the flag to the person/org behind a ref instead of the client/lead/vendor record. THE FOUR MARKETING KINDS (0066) are how a finding about a THING rather than a PERSON gets recorded: 'X has returned no analytics for any of 42 placements' is a platform finding, 'reels outperform statics on reach' is a format finding. Before 0066 those had no subject at all and the marketing seat's core output went nowhere. A platform/pillar/format subject must already exist in marketing_subject — this verb registers nothing, because a typo'd slug minting a new pillar is how a taxonomy becomes noise. THE TWO CODE KINDS (0101) are 'commit' (subject is a sha, or 'owner/name@<sha>') and 'repo' (subject is 'owner/name'). Unlike the marketing kinds these ARE minted on demand: a sha is self-evidencing rather than a taxonomy, so there is no vocabulary a typo can pollute. You rarely need to pass these — a subject written as 'commit:<sha>' or 'owner/name@<sha>' is recognised under 'auto'." },
       kind: { type: "string", description: "what was looked for: verified, email, cell, social, npi, title, discrepancy..." },
       value: { type: "object", description: "the finding, structured. Omit when found:false." },
       found: { type: "boolean", default: true, description: "false records a searched-and-empty result" },
@@ -3482,7 +3642,30 @@ export const TOOLS = {
 
       let subjectType, subjectId;
       const MARKETING_KINDS = ["campaign", "platform", "pillar", "format"];
-      if (args.subject_kind === "party") {
+      const CODE_KINDS = ["repo", "commit"];
+      // [0101, loop #211] THE CODE BRANCH. Placed FIRST among the special kinds and
+      // sniffed even under subject_kind:'auto', because the whole defect this closes is
+      // that a reviewing seat writes `commit:<sha>` and gets subject_not_found. Requiring
+      // it to also know about a subject_kind flag would leave the reported failure in
+      // place for every caller who writes what they already write. The sniff is narrow —
+      // parseCodeRef returns null for anything that is not unmistakably a repo or a
+      // commit ref, and a bare hex word is only a sha when the caller said `commit:`.
+      const codeRef = CODE_KINDS.includes(args.subject_kind)
+        ? parseCodeRef(args.subject_kind === "repo"
+            ? `repo:${args.subject}` : `commit:${args.subject}`)
+        : (args.subject_kind && args.subject_kind !== "auto" ? null : parseCodeRef(args.subject));
+      if (CODE_KINDS.includes(args.subject_kind) && !codeRef)
+        throw new ToolError({ error: "code_subject_unparseable", got: String(args.subject || "").slice(0, 80),
+          subject_kind: args.subject_kind,
+          hint: args.subject_kind === "commit"
+            ? "with subject_kind:'commit', subject is a sha ('f7abde7') or 'owner/name@<sha>'"
+            : "with subject_kind:'repo', subject is 'owner/name'" });
+      if (codeRef) {
+        const cs = await resolveCodeSubject(c, args.subject_kind === "repo"
+          ? `repo:${codeRef.repo}`
+          : (codeRef.sha ? `${codeRef.repo}@${codeRef.sha}` : `repo:${codeRef.repo}`), actor.id);
+        subjectType = cs.type; subjectId = cs.id;
+      } else if (args.subject_kind === "party") {
         subjectType = "party";
         subjectId = await resolvePartyByRef(c, args.subject);
       } else if (MARKETING_KINDS.includes(args.subject_kind)) {
