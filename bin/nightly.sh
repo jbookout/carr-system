@@ -204,6 +204,17 @@ step "settings mirror (permission surface -> git)"   ./bin/sync-settings.sh --ap
 # legacy noise — the baseline was green the day it was wired.
 step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 
+# Added 2026-08-13. The rules half of this defect is caught hourly by
+# ops/rule-render-markup-check.py on the refresh; this is the records half. The
+# same malformed-parameter write path serves every verb that takes prose, and
+# rule c53beeaa names loop #159's absorbed `unblocks` as a known instance — so
+# the record side was known to be affected and had never once been swept. A
+# scanner nobody runs is not a scanner, which is precisely how c53beeaa's own
+# prescribed check came to sit unexecuted from 2026-08-03 to 2026-08-13.
+# Read-only (exporter role) and reports only; repair needs the absorbed text read
+# first and each parameter returned to its own field, per row.
+step "tool-call markup sweep (records)"              ./.venv/bin/python ops/store-markup-scan.py
+
 # Added 2026-08-07 (Joe's pick: "build the one-page view first"): the combined
 # open-items dashboard — every open loop, team row, idea, and action-required
 # item on one filterable page, derived read-only from v_export_loops. Runs after
