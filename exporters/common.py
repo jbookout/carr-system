@@ -6,7 +6,7 @@ Every exporter runs the same poison gate:
 A failed validation leaves the previous good file untouched and writes a
 validation_failed run row: the alarm layer (digest dead-man at 26h) sees it.
 
-STAGING vs LIVE: until cutover, exporters write ONLY to the staging dir
+DRAFT vs LIVE: until cutover, exporters write ONLY to the draft dir
 (repo out/exports). Live vault paths activate with CARR_EXPORT_LIVE=1 —
 flipped once, at cutover, never casually.
 
@@ -25,7 +25,7 @@ from pathlib import Path
 import psycopg
 
 REPO = Path(__file__).resolve().parent.parent
-STAGING = REPO / "out" / "exports"
+DRAFT = REPO / "out" / "exports"
 VAULT = Path(os.environ.get(
     "CARR_VAULT",
     "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
@@ -196,9 +196,9 @@ def keep_generation(final_path: Path):
 
 def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
     """build_fn(tmp_path, cur) -> (row_count, canonical_rows). Returns True on ok."""
-    dest_dir = (VAULT / live_rel_path).parent if LIVE else STAGING
+    dest_dir = (VAULT / live_rel_path).parent if LIVE else DRAFT
     dest_dir.mkdir(parents=True, exist_ok=True)
-    final_path = (VAULT / live_rel_path) if LIVE else STAGING / Path(live_rel_path).name
+    final_path = (VAULT / live_rel_path) if LIVE else DRAFT / Path(live_rel_path).name
     tmp_path = final_path.with_name(final_path.name + ".tmp")
 
     with connect() as conn, conn.cursor() as cur:
@@ -258,13 +258,13 @@ def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
 
         keep_generation(final_path)
         os.replace(tmp_path, final_path)
-        # file_sha is a LIVE-file tamper detector; a staged run's hash describes
+        # file_sha is a LIVE-file tamper detector; a draft run's hash describes
         # out/exports/, not the vault, and recording it poisoned renders-verify
         # with false "tampered" flags (caught by the doctrine health pass,
-        # 2026-08-08: three staged 03:43Z rows outranked the live 02:51Z ones).
+        # 2026-08-08: three draft 03:43Z rows outranked the live 02:51Z ones).
         file_sha = hashlib.sha256(final_path.read_bytes()).hexdigest() if LIVE else None
         record_run(cur, target_key, row_count, checksum, "ok", file_sha)
         conn.commit()
-        mode = "LIVE" if LIVE else "staging"
+        mode = "LIVE" if LIVE else "draft"
         print(f"[{target_key}] ok — {row_count} rows -> {final_path} ({mode})")
         return True

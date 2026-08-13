@@ -999,7 +999,7 @@ LOOP_TARGETS = {
 # changes the first thing every reader sees and breaks the round-trip diff the
 # order's done-test turns on. The do-not-hand-edit warning belongs IN the stored
 # prose, added once by a human at the live flip, into the block the human owns.
-# Until that flip these renders are staging-only, so nothing sits unlabelled in
+# Until that flip these renders are draft-only, so nothing sits unlabelled in
 # the vault.
 
 

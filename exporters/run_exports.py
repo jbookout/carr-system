@@ -1,6 +1,6 @@
 """Run the Wave 1 exporters. Usage:
   python -m exporters.run_exports [--only <target>] [--bootstrap]
-Staging by default; CARR_EXPORT_LIVE=1 activates vault paths (cutover only).
+Draft by default; CARR_EXPORT_LIVE=1 activates vault paths (cutover only).
 """
 import argparse, sys
 from .common import run_export

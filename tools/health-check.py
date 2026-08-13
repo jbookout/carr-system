@@ -1045,7 +1045,7 @@ except Exception as e:
 # 2026-08-04: teach returned ok, activate-rule returned ok, and
 # `run.sh export --only compiled-rules` returned ok reporting 56 rows. The rule
 # was still absent from the file sessions read. `run.sh export` writes to
-# out/exports/ STAGING by default; only CARR_EXPORT_LIVE=1 reaches the vault
+# out/exports/ DRAFT by default; only CARR_EXPORT_LIVE=1 reaches the vault
 # (exporters/common.py:32), and CLAUDE.md documented the command without the
 # flag. The vault file was fresh the whole time — the hourly refresh keeps it
 # that way — so an mtime check would have shown green while a rule taught after

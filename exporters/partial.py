@@ -20,10 +20,10 @@ The contract, and why each half of it is what it is:
   goes stale. The failure message carries the exact two lines to paste and the
   file to paste them into, so the fix is thirty seconds of a human's time.
 
-* The host file is read from the LIVE path, always — never from the staging
+* The host file is read from the LIVE path, always — never from the draft
   copy. The hand-authored 90% of the file only exists in the vault, so a
-  staging dry run that read staging would splice into nothing. In staging mode
-  the merged result is still WRITTEN to staging, which is what makes the dry
+  draft dry run that read draft would splice into nothing. In draft mode
+  the merged result is still WRITTEN to draft, which is what makes the dry
   run worth running: it shows the real merge without touching the vault.
 """
 

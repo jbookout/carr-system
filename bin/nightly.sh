@@ -98,7 +98,7 @@ fi
 
 # Exported explicitly, NOT as a `VAR=1 step ...` prefix: a var-prefix on a
 # function call is not reliably scoped in zsh, and if it failed to propagate the
-# export would quietly write to staging and the vault would never update — the
+# export would quietly write to draft and the vault would never update — the
 # precise silent failure this chain exists to prevent.
 export CARR_EXPORT_LIVE=1
 

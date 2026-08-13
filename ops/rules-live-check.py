@@ -4,7 +4,7 @@
 WHY THIS EXISTS (2026-08-04, Joe's go). `teach` returned ok. `activate-rule`
 returned ok. `run.sh export --only compiled-rules` returned ok and reported 56
 rows. All three were true, and the rule was still absent from the file sessions
-actually read — because `run.sh export` writes to out/exports/ STAGING by
+actually read — because `run.sh export` writes to out/exports/ DRAFT by
 default and only `CARR_EXPORT_LIVE=1` reaches the vault (exporters/common.py:32).
 Three green results and a dormant rule.
 
@@ -17,7 +17,7 @@ observed both failing and sitting six hours behind a permission prompt.
 But the window was never the point. NOTHING REPORTED THE GAP. A narrower silent
 window is still a silent window, and this system has now produced the same defect
 three times in one day: a smoke suite green while structurally dead, DMARC reports
-that would never arrive read as "no spoofing", and an export that stages silently.
+that would never arrive read as "no spoofing", and an export that drafts silently.
 So this check does not try to shrink the window. It makes the gap VISIBLE.
 
 WHAT IT COMPARES. The count of active rules in the store, per audience, against

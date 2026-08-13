@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ORDER 36 step 8 — render every dossier and diff it against its frozen original.
 
-STAGING ONLY, and by construction rather than by promise: it calls build_dossier
+DRAFT ONLY, and by construction rather than by promise: it calls build_dossier
 directly with a read cursor and writes to out/dossier-diff/ in the repo (which is
 gitignored). It never touches the vault, never writes an export_run row, and
 never needs --bootstrap — the A8 gate's row-tolerance machinery is about

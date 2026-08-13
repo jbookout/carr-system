@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ORDER 36 step 5 rehearsal driver: run the dossier exporters against a Neon
-BRANCH, staging-only, never production and never the vault.
+BRANCH, draft-only, never production and never the vault.
 
 Run it through db-tap so the branch DSN never appears in a shell command:
 

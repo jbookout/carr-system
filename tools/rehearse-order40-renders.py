@@ -16,7 +16,7 @@ WHAT IT DOES, in order:
      activate-rule. It happens here because v_compiled_rules is active-only
      (0015), so a compiled preview built from proposed rules would render empty
      and prove nothing. The branch is disposable; this is what it is for.
-  3. Runs the three renders into out/exports/ (staging). CARR_EXPORT_LIVE is
+  3. Runs the three renders into out/exports/ (draft). CARR_EXPORT_LIVE is
      never set, so the vault is untouchable from here.
 
 The exporter reads CARR_DB_EXPORTER_URL; db-tap supplies DATABASE_URL. This
@@ -101,7 +101,7 @@ def main():
             # production the same guard fires again and Joe accepts it once,
             # deliberately, which is exactly the protection it is there to give.
             ok = run_export(k, rel, fn, bootstrap=True) and ok
-    print("renders written to out/exports/ (staging)")
+    print("renders written to out/exports/ (draft)")
     sys.exit(0 if ok else 1)
 
 

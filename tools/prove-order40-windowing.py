@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO))
 
 
 def render_stats(url):
-    """Build the render into staging and report its window + size."""
+    """Build the render into draft and report its window + size."""
     os.environ["CARR_DB_EXPORTER_URL"] = url
     os.environ.pop("CARR_EXPORT_LIVE", None)
     from exporters.targets import DECISION_REL, build_decision_history

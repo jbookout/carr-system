@@ -71,11 +71,11 @@ def scratch_root(tmp, name, fresh_registry=False):
     # lead-registry.xlsx had last been exported at 14:50 — so file mode read
     # '2029-01' where the record said 2029-01-01, and that is the export being
     # six hours behind, not the two paths deriving different boards.
-    # --fresh-registry points file mode at a registry exported NOW (staging, no
+    # --fresh-registry points file mode at a registry exported NOW (draft, no
     # vault write) so the comparison is actually same-day. Run
     # `./run.sh export --only lead-registry` first.
-    staged = REPO / "out/exports/lead-registry.xlsx"
-    reg = staged if (fresh_registry and staged.exists()) else VAULT / "DNA/Leads/lead-registry.xlsx"
+    draft = REPO / "out/exports/lead-registry.xlsx"
+    reg = draft if (fresh_registry and draft.exists()) else VAULT / "DNA/Leads/lead-registry.xlsx"
     (root / "DNA/Leads/lead-registry.xlsx").symlink_to(reg)
     return root
 
