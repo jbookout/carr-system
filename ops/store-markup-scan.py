@@ -59,6 +59,31 @@ HISTORICAL_SQL = {
     "loop_item": "status <> 'open'",
 }
 
+# JOE'S RULING, 2026-08-13: "accept them permanently as history."
+#
+# These nine closed rows are corrupt and stay corrupt. That is the settled end
+# state, not a deferral, so they are reported as a single accepted count instead
+# of eighteen lines every night — a nightly report that lists the same
+# unactionable rows forever trains the reader to skip the section, which is how
+# the check this defect needed came to sit unrun for ten days in the first place.
+# Pass --verbose to see them.
+#
+# ACCEPTED IS A FIXED SET, NOT A BLANKET AMNESTY FOR ANYTHING CLOSED. A row
+# corrupted tomorrow and closed before anyone noticed would otherwise inherit the
+# ruling and vanish. Any historical hit whose row is NOT in this set fails the
+# run, because it is new damage wearing history's clothes.
+ACCEPTED_HISTORICAL = {
+    "52250c55-0abe-4b0b-8a95-b3f7d7c9ffe8",  # loop #159, absorbed unblocks/source_note/since
+    "3bd353f2-8092-4674-b8b1-8ec4bd4f70d2",  # loop #248
+    "07118214-6c41-4850-baac-b91e6e93b8bb",  # loop #316
+    "c053920e-9e7c-4eca-928d-50a79340e955",  # loop #252
+    "68520b7e-74a0-42f8-9d12-67bb68161a52",  # loop #276
+    "0c0f5557-7090-47d8-9de8-5c0cdd59e50f",  # loop #239
+    "c17997bd-e442-4a6b-94e6-aac5ecbc5a78",  # idea #66
+    "adbe90af-676f-4bc3-9619-27d3fc002045",  # idea #67
+    "3b152875-25fb-4916-af63-60a46f042336",  # loop #342
+}
+
 
 def classify(column, val):
     """CORRUPTION vs MENTION.
@@ -176,14 +201,21 @@ def main() -> int:
         if len(audit_hits) > 10:
             print(f"  ... and {len(audit_hits) - 10} more")
 
-    if historical:
-        rows = len({(t, k) for t, _, k, _ in historical})
-        print(f"\nHISTORICAL — {len(historical)} column hit(s) across {rows} CLOSED "
-              "row(s). Corrupt, and UNREPAIRABLE by design: update-loop refuses a\n"
-              "  closed loop (loop_not_open). Listed so the store is not misreported as\n"
-              "  clean; not failed, because no action can clear them.")
-        for t, c, k, _ in historical:
-            print(f"  {t}.{c} pk={k}")
+    accepted = [h for h in historical if h[2] in ACCEPTED_HISTORICAL]
+    unaccepted = [h for h in historical if h[2] not in ACCEPTED_HISTORICAL]
+    if accepted:
+        rows = len({(t, k) for t, _, k, _ in accepted})
+        print(f"\nHISTORICAL — {rows} closed row(s), ACCEPTED PERMANENTLY AS HISTORY "
+              "(Joe's ruling, 2026-08-13). Not actionable; --verbose to list.")
+        if "--verbose" in sys.argv:
+            for t, c, k, _ in accepted:
+                print(f"  {t}.{c} pk={k}")
+    # A row corrupted and closed AFTER the ruling has not been accepted by anyone.
+    # It is new damage that merely reached a closed state before anyone looked.
+    live_hits.extend(unaccepted)
+    if unaccepted:
+        print(f"\nNOTE: {len(unaccepted)} closed row(s) are NOT in the accepted set — "
+              "treated as live damage below.")
 
     if not live_hits:
         print("\nLIVE RECORDS: OK no tool-call markup in any live text column")
