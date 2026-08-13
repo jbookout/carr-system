@@ -664,6 +664,18 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           `insert into doctrine_change_set (actor_id, session_key, idempotency_key, state)
            values ($1,$2,$3,'prepared') returning id`,
           [actor.id, actor.client_id || null, args.idempotency_key]);
+        // The document's own declared review policy, read once for the whole
+        // batch. write-doctrine-section has always applied this; this door did
+        // not, so every section written here landed with a null review_after and
+        // stayed permanently unwatched — three of them from the 2026-08-12
+        // council pass, found by the nightly run's never-reviewed row. Null stays
+        // null when the document carries no policy, which is the same
+        // else-branch the single-section door uses and the one migration 0097
+        // argued is correct: a document with no policy should not gain a clock.
+        const policyDays = (await c.query(
+          `select p.max_age_days from doctrine_document d
+             left join doctrine_review_policy p on p.id = d.review_policy_id
+            where d.id=$1`, [doc.id])).rows[0].max_age_days;
         const results = [];
         // Lock in stable section_key order — the deadlock-prevention rule from
         // the council's commit protocol.
@@ -708,8 +720,12 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
              args.commit_message || null]);
           await c.query(
             `update doctrine_section set current_revision_id=$2, current_version=$3,
-                    body_hash=$4, updated_at=now() where id=$1`,
-            [sec.id, rev.rows[0].id, newVersion, hash]);
+                    body_hash=$4, updated_at=now(),
+                    review_after = case when $5::int is not null
+                                        then now() + ($5::int || ' days')::interval
+                                        else review_after end
+              where id=$1`,
+            [sec.id, rev.rows[0].id, newVersion, hash, policyDays]);
           results.push({ section_key: it.section_key, section_id: sec.id, version: newVersion });
         }
         await c.query(
