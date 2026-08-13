@@ -58,7 +58,9 @@ HOME_DIR="$CANON/.claude/worktrees"     # the convention already in use here
 usage() {
   print -r -- "usage: run.sh worktree <name> [--from <base>]   create (branch = <name>)"
   print -r -- "       run.sh worktree --list                   show every worktree"
-  print -r -- "       run.sh worktree --remove <name>          remove one (refuses if dirty)"
+  print -r -- "       run.sh worktree --remove <name|path>     remove one (refuses if dirty)"
+  print -r -- "                                                a name resolves under $HOME_DIR;"
+  print -r -- "                                                a path reaches trees anywhere"
   exit 2
 }
 
@@ -81,9 +83,36 @@ case "$1" in
     ;;
   --remove|-r)
     [ $# -ge 2 ] || usage
-    name="$2"
-    wt="$HOME_DIR/$name"
+    target="$2"
+    # A NAME resolves under HOME_DIR; anything containing a slash or a ~ is
+    # taken as a PATH. Name-only was the whole vocabulary until 2026-08-13, and
+    # it could not reach a single one of the eleven trees living in /private/tmp
+    # or a session scratchpad — so that day's cleanup was done by hand with raw
+    # `git worktree remove`, which skips the symlink handling and the dirty
+    # refusal that make this command safe, and hit the node_modules refusal
+    # twice. Doing a thing by hand twice is the system asking for the command
+    # (rule 9873a0d2), the same reasoning that created this script.
+    case "$target" in
+      */*|'~'*) wt="${target:A}" ;;
+      *)        wt="$HOME_DIR/$target" ;;
+    esac
+    name="${wt:t}"
     [ -d "$wt" ] || { print -r -- "no worktree at $wt"; exit 1; }
+    # IT MUST BE A REGISTERED WORKTREE OF THIS REPO, and never the canonical
+    # checkout. Accepting a path widens what this command can be pointed at, so
+    # the guard has to widen with it: without this, one mistyped path hands an
+    # arbitrary directory to `git worktree remove`, and the canonical tree is
+    # itself in that list — removing it would take the repo with it.
+    if [ "${wt:A}" = "${CANON:A}" ]; then
+      print -r -- "refusing to remove the canonical tree: $CANON"
+      exit 2
+    fi
+    if ! git -C "$CANON" worktree list --porcelain | awk '/^worktree /{print $2}' \
+         | grep -qx -e "${wt:A}" -e "$wt"; then
+      print -r -- "not a registered worktree of this repo: $wt"
+      print -r -- "  ./run.sh worktree --list   shows the ones that are"
+      exit 2
+    fi
     # Drop the symlinks THIS script created, before judging the tree dirty.
     # They are plumbing, not work, and leaving them in made the dirty-check
     # refuse its own handiwork — caught on the first live removal.
