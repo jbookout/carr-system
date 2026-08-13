@@ -53,8 +53,9 @@ from exporters.targets import _fetch_rules           # noqa: E402
 
 # audience label, personal_to slug (None = shared), vault-relative path
 AUDIENCES = [
-    ("shared", None,  "DNA/compiled-rules-shared.md"),
-    ("joe",    "joe", "00_Context/compiled-rules-joe.md"),
+    ("shared", None,   "DNA/compiled-rules-shared.md"),
+    ("joe",    "joe",  "00_Context/compiled-rules-joe.md"),
+    ("dell",   "dell", "DNA/compiled-rules-dell.md"),
 ]
 
 # The header line each file writes about itself, e.g. "**56 active rule(s), by section.**"
@@ -62,12 +63,26 @@ AUDIENCES = [
 # and the one the session-start recitation is read from, so it is the one checked.
 DECLARED = re.compile(r"\*\*(\d+)\s+active rule\(s\)")
 
+# compiled-rules-dell.md (and, in principle, any audience with zero active rules)
+# skips the bold header entirely when empty — see exporters/targets.py
+# `_build_rules`: "Thirteen empty headings under 'no active rules yet' is
+# thirteen ways of saying the same nothing." Only the italic exported-footer
+# line survives in that state, e.g. "*Exported: ... · 0 active rule(s)*". Fall
+# back to it so a file that is legitimately empty (and agrees with the store)
+# does not read as "missing a declared count" — added 2026-08-13 when dell was
+# added to AUDIENCES with a genuinely empty store count.
+DECLARED_FOOTER = re.compile(r"·\s*(\d+)\s+active rule\(s\)\*")
+
 
 def declared_count(path: Path):
     """The count the file claims about itself, or None if it does not say."""
     if not path.exists():
         return None
-    m = DECLARED.search(path.read_text())
+    text = path.read_text()
+    m = DECLARED.search(text)
+    if m:
+        return int(m.group(1))
+    m = DECLARED_FOOTER.search(text)
     return int(m.group(1)) if m else None
 
 
