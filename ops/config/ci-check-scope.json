@@ -1,0 +1,20 @@
+{
+  "_note": "Which checks ops/ci.sh runs where, and WHY each exception exists. Read by the gates class. Every entry needs a reason, and ci.sh PRINTS every exception on every run — a check that stops running must never do so quietly. That is the failure shape of the runaway launchd job found 2026-08-13: a clean report that was clean because nothing was looking.",
+
+  "local_only": [
+    {
+      "check": "vault-drift-watch-selftest.py",
+      "reason": "Exercises drift detection against the Google Drive vault, which exists only on Joe's Mac. A Linux runner has no vault to drift.",
+      "added": "2026-08-13"
+    }
+  ],
+
+  "quarantined": [
+    {
+      "check": "vault-drift-watch-selftest.py",
+      "reason": "FLAKY, not failing. Measured 2026-08-13: 4 of 5 runs pass and the failing case DIFFERS between runs ('HEAL: re-running --rebaseline after a tamper' one run, 'manifest is a manifest: sha256 + mtime per tracked file' the next). Different failures across identical runs is a race, most likely same-second mtime resolution, not a logic defect. Quarantined rather than fixed here because a concurrent session was actively committing to this file the same day (74a06bb, a52d739, efbb523) and two-writer discipline says do not edit another session's live surface.",
+      "loop": "see loop board, domain system",
+      "added": "2026-08-13"
+    }
+  ]
+}

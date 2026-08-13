@@ -5,7 +5,7 @@ openpyxl>=3.1
 Pillow>=10.0   # used by the write-content card crop step + image handling in space-search
 psycopg[binary]>=3.2   # record layer: tools/migrate.py + (build day) the MCP server's DB path
 
-# UNDECLARED UNTIL 2026-08-14, found by ops/ci-dep-check.py on its first run. The
+# UNDECLARED UNTIL 2026-08-13, found by ops/ci-dep-check.py on its first run. The
 # repo convention line above ("everything else is stdlib by design") had quietly
 # stopped being true: these four were installed by hand on Joe's Mac and written
 # down nowhere, so a clean install from this file produced a machine that looked

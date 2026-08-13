@@ -81,4 +81,59 @@ EOF
   exit 1
 done
 
+# ---------------------------------------------------------------------------
+# PROGRAM 2 QUALITY GATE, added 2026-08-13.
+#
+# WHY IT IS HERE AND NOT ONLY IN CI. GitHub Actions runs the same checks on every
+# push, but this repo is private on a free plan, so a red CI run cannot BLOCK
+# anything — branch protection and rulesets both refuse with "Upgrade to GitHub
+# Pro" (verified live against both endpoints). Until Pro is enabled, this hook is
+# the only place a failing check actually stops something, so a red tree does not
+# leave the machine.
+#
+# IT CALLS ops/ci.sh AND DEFINES NO CHECKS OF ITS OWN. Same script GitHub runs
+# (rule a8c55a47). A check added there appears here for free and cannot exist in
+# one path and not the other.
+#
+# NOT --strict, deliberately. On a laptop there is no throwaway Postgres, so the
+# migration class SKIPs, and under --strict a skip is a failure. Failing every
+# local push over a database that is only ever present in CI would teach everyone
+# to pass --no-verify, which would disable the whole hook rather than one class.
+# CI runs --strict; here a skip is reported and allowed.
+#
+# THE ESCAPE HATCH IS REAL AND STATED. --no-verify skips this, same as it skips
+# the branch guard above. This is an accident-stopper, not a security control:
+# anyone can edit this file or unset core.hooksPath. It exists to catch the push
+# nobody meant to make, which is the only kind that has ever happened here.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
+  if [ "$CARR_SKIP_CI" = "1" ] 2>/dev/null; then
+    echo "  pre-push: CARR_SKIP_CI=1 — quality checks skipped for this command" >&2
+  else
+    echo "  pre-push: running ops/ci.sh before this push leaves the machine…" >&2
+    if ! "$REPO_ROOT/ops/ci.sh"; then
+      cat >&2 <<'EOF'
+
+  ────────────────────────────────────────────────────────────────
+  PUSH REFUSED — carr-system quality checks failed
+  ────────────────────────────────────────────────────────────────
+  The failing class is named above. Run it on its own to iterate:
+
+      ops/ci.sh --only <class>
+      ops/ci.sh --list
+
+  Fix it, or say out loud that you are pushing anyway:
+
+      CARR_SKIP_CI=1 git push
+
+  ────────────────────────────────────────────────────────────────
+
+EOF
+      exit 1
+    fi
+  fi
+fi
+
 exit 0

@@ -169,7 +169,7 @@ echo "  OK  mcp-server/ and dealroom/ are clean"
 # ---------- preflight 3: verb count did not shrink ----------
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 
-# The count moved to ops/verb-count.sh on 2026-08-14 so that CI can run this same
+# The count moved to ops/verb-count.sh on 2026-08-13 so that CI can run this same
 # guard at MERGE time, not only here at DEPLOY time. Same code, two callers
 # (rule a8c55a47) — deliberately NOT a second copy that can drift from this one.
 SHIPPING="$(sh "$REPO/ops/verb-count.sh" "$WORKER_DIR" 2>/dev/null || true)"

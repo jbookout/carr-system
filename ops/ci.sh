@@ -1,6 +1,21 @@
 #!/bin/bash
 # ci.sh — the ONE check script. Program 2's spine.
 #
+# RUN UNDER BASH OR NOT AT ALL. The class loop is `for c in $CLASS_ORDER`, which
+# depends on bash word-splitting an unquoted string. zsh does not split there,
+# so under zsh the loop runs ONCE with c set to the whole list, `check_$c`
+# becomes one unknown command, every check is skipped -- and the script still
+# reaches its own success line and prints "CI passed - every class green".
+# Observed exactly that on 2026-08-13 from `zsh ops/ci.sh`: eight classes
+# reported green, zero of them executed. A green CI that ran nothing is the
+# worst possible failure for a promotion gate, and the shebang alone does not
+# prevent it, because a shebang binds `./ops/ci.sh` and not `zsh ops/ci.sh` or
+# `sh ops/ci.sh`. Re-exec rather than error: the caller's intent is always to
+# run the checks, so silently doing the right thing beats refusing.
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec /bin/bash "$0" "$@"
+fi
+#
 # WHY ONE SCRIPT. Program 2's gate is "seeded failures in tests, migration, auth,
 # binding, secret and dependency checks each block promotion." That needs the
 # same checks to run in two places: a GitHub runner on every push, and Joe's Mac
@@ -13,7 +28,7 @@
 # WHY BOTH CALLERS EXIST AT ALL. This repo is private on a free GitHub plan, and
 # both the branch-protection API and the newer rulesets API refuse:
 # "Upgrade to GitHub Pro or make this repository public." Verified live
-# 2026-08-14 against both endpoints. So GitHub Actions can RUN these checks and
+# 2026-08-13 against both endpoints. So GitHub Actions can RUN these checks and
 # report, but it cannot REQUIRE them before a merge. The pre-push hook is what
 # gives the checks teeth today, at no cost: a red tree does not leave the
 # machine. It is bypassable with --no-verify, and that is stated plainly rather
@@ -150,18 +165,43 @@ check_contract() {
 # the ledger-sweep scope gate swallowing its own headline trigger, so they are a
 # promotion gate in their own right rather than developer convenience.
 check_gates() {
-  local failures="" count=0
-  for t in ops/*-selftest.py; do
+  local failures="" count=0 skiplist=""
+
+  # Exceptions come from ops/config/ci-check-scope.json and are ANNOUNCED, never
+  # applied silently. A quarantined check is skipped everywhere; a local_only one
+  # is skipped only where its dependency genuinely cannot exist (a runner has no
+  # Google Drive vault). Both print their reason on every single run, so the
+  # coverage this class actually delivers is visible in the output rather than
+  # buried in a config file nobody opens.
+  local scope="ops/config/ci-check-scope.json"
+  excluded_reason() {  # excluded_reason <basename> -> reason, or empty
+    [ -f "$scope" ] || return 0
+    "$PY" - "$scope" "$1" "${CARR_CI_PORTABLE_ONLY:-0}" <<'PYEOF'
+import json, sys
+scope, name, portable = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+d = json.load(open(scope))
+for e in d.get("quarantined", []):
+    if e["check"] == name:
+        print("QUARANTINED: " + e["reason"]); sys.exit(0)
+if portable:
+    for e in d.get("local_only", []):
+        if e["check"] == name:
+            print("LOCAL-ONLY: " + e["reason"]); sys.exit(0)
+PYEOF
+  }
+
+  for t in ops/*-selftest.py tools/test-*.py; do
     [ -f "$t" ] || continue
+    local base; base="$(basename "$t")"
+    local why; why="$(excluded_reason "$base")"
+    if [ -n "$why" ]; then
+      skiplist="$skiplist $base"
+      printf '        \033[33mnot run\033[0m  %s — %s\n' "$base" "$why" >&2
+      continue
+    fi
     count=$((count+1))
-    run_quiet "$LOGDIR/gate-$(basename "$t").log" "$PY" "$t" \
-      || { failures="$failures $(basename "$t")"; tail -12 "$LOGDIR/gate-$(basename "$t").log" >&2; }
-  done
-  for t in tools/test-*.py; do
-    [ -f "$t" ] || continue
-    count=$((count+1))
-    run_quiet "$LOGDIR/gate-$(basename "$t").log" "$PY" "$t" \
-      || { failures="$failures $(basename "$t")"; tail -12 "$LOGDIR/gate-$(basename "$t").log" >&2; }
+    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t" \
+      || { failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2; }
   done
   # gate-integrity is the baseline check itself: a gate edited without a
   # re-bless in the same commit (rule c0b38d80) fails here.
@@ -169,6 +209,11 @@ check_gates() {
     || { failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
   if [ -n "$failures" ]; then
     bad gates "failed:$failures"
+  elif [ -n "$skiplist" ]; then
+    # Deliberately NOT a plain OK. The class ran with reduced coverage, and the
+    # summary line says so — an exception that reads as a clean pass is how a
+    # bounded check gets mistaken for a complete one.
+    ok gates "$count suites + baseline integrity · NOT RUN:$skiplist"
   else
     ok gates "$count selftest suites + baseline integrity"
   fi
