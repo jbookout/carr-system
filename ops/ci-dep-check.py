@@ -71,12 +71,101 @@ def declared_packages():
     return names
 
 
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name.split("[")[0]).strip().lower()
+
+
+def declared_markers():
+    """{normalised package name: environment marker} for requirements.txt lines
+    that carry one, e.g. pyobjc-framework-EventKit ; sys_platform == "darwin"."""
+    out = {}
+    for raw in REQ.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if ";" not in line:
+            continue
+        spec, marker = line.split(";", 1)
+        name = _norm(re.split(r"[<>=!\[]", spec, maxsplit=1)[0])
+        if name:
+            out[name] = marker.strip()
+    return out
+
+
+def platform_marked_packages():
+    """Propagate each declared environment marker across the packages that ONLY
+    that marked root reaches.
+
+    WHY THIS EXISTS, and it is not a nicety. `pip freeze` emits bare `name==ver`
+    and DROPS environment markers, so a lock generated from a Mac silently
+    contained pyobjc-core, pyobjc-framework-Cocoa and pyobjc-framework-EventKit
+    with no `sys_platform == "darwin"` on them. requirements.txt had the marker
+    and the lock did not. The first CI run died trying to build pyobjc-core from
+    source on Linux — the lock was Mac-only and nothing said so.
+
+    Reachability, not a name prefix. A package inherits a marker only when EVERY
+    root that reaches it carries that same marker; anything an unmarked root also
+    needs stays unconditional. That way a shared transitive dependency is never
+    accidentally excluded from Linux because a Mac-only package happens to use it
+    too.
+    """
+    try:
+        from importlib import metadata
+    except ImportError:  # pragma: no cover
+        return {}
+
+    requires = {}
+    for dist in metadata.distributions():
+        name = _norm(dist.metadata["Name"] or "")
+        if not name:
+            continue
+        deps = set()
+        for req in dist.requires or []:
+            # Skip extras-gated deps; they are not installed unless requested.
+            if ";" in req and "extra ==" in req.split(";", 1)[1]:
+                continue
+            deps.add(_norm(re.split(r"[<>=!;\[\s]", req, maxsplit=1)[0]))
+        requires[name] = deps
+
+    def closure(root):
+        seen, stack = set(), [root]
+        while stack:
+            cur = stack.pop()
+            for dep in requires.get(cur, ()):
+                if dep and dep not in seen:
+                    seen.add(dep)
+                    stack.append(dep)
+        return seen
+
+    markers = declared_markers()
+    declared = set(declared_packages())
+    unmarked_roots = declared - set(markers)
+
+    # Everything an unmarked root needs must stay unconditional.
+    safe = set()
+    for root in unmarked_roots:
+        safe |= {root} | closure(root)
+
+    marked = {}
+    for root, marker in markers.items():
+        for pkg in {root} | closure(root):
+            if pkg not in safe:
+                marked[pkg] = marker
+    return marked
+
+
 def write_lock() -> int:
     freeze = subprocess.run(
         [sys.executable, "-m", "pip", "freeze"],
         capture_output=True, text=True, check=True,
     ).stdout.strip().splitlines()
-    pinned = sorted(l for l in freeze if "==" in l and not l.startswith("-e"))
+
+    marked = platform_marked_packages()
+    pinned = []
+    for line in freeze:
+        if "==" not in line or line.startswith("-e"):
+            continue
+        marker = marked.get(_norm(line.split("==", 1)[0]))
+        pinned.append(f"{line} ; {marker}" if marker else line)
+    pinned.sort()
     body = "\n".join([
         LOCK_HEADER,
         "#",
