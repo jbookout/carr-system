@@ -68,10 +68,17 @@ CODEX_HOOKS_LIVE = os.path.expanduser("~/.codex/hooks.json")
 CODEX_CONFIG_LIVE = os.path.expanduser("~/.codex/config.toml")
 RULE_ENFORCEMENT_MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 RULE_ENFORCEMENT_MAP_CHECK = os.path.join(REPO, "ops", "rule-enforcement-map-check.py")
+# model-floors.json added 2026-08-13 with model-floor-gate.py. A gate whose
+# BEHAVIOUR is driven by a data file is only as tamper-evident as that file:
+# hashing the script alone would let someone lower or delete a voice run's model
+# floor without anything noticing, which is the whole failure the baseline
+# exists to make visible.
+MODEL_FLOORS = os.path.join(REPO, "ops", "config", "model-floors.json")
 CONTRACTS = {
     "delegation-gate-hook.json": DELEGATION_HOOK_CONFIG,
     "codex-hooks.json": CODEX_HOOKS_REPO,
     "rule-enforcement-map.json": RULE_ENFORCEMENT_MAP,
+    "model-floors.json": MODEL_FLOORS,
 }
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 

@@ -64,6 +64,16 @@
           "timeout": 10
         }
       ]
+    },
+    {
+      "matcher": "Bash|mcp__claude-in-chrome__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/model-floor-gate.py",
+          "timeout": 10
+        }
+      ]
     }
   ],
   "PostToolUse": [
