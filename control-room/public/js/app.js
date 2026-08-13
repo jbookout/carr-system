@@ -155,12 +155,13 @@ function renderService(fixture) {
   const data = fixture.data;
   const table = node("div", {class: "table-wrap"}, [
     node("table", {}, [
-      node("thead", {}, node("tr", {}, ["Environment", "State", "Version", "Schema", "Source", "Freshness", "Last verified"].map(text => node("th", {text})))),
+      node("thead", {}, node("tr", {}, ["Environment", "State", "Version", "Schema", "Configuration", "Source", "Freshness", "Last verified"].map(text => node("th", {text})))),
       node("tbody", {}, data.environments.map(env => node("tr", {}, [
         node("td", {text: env.label ? `${env.id} · ${env.label}` : env.id}),
         node("td", {}, status(env.status)),
         node("td", {class: "mono", text: env.version || "Not deployed"}),
         node("td", {text: env.schema_version || "Not deployed"}),
+        node("td", {text: env.configuration_fingerprint || "Not deployed"}),
         node("td", {text: env.source}),
         node("td", {}, status(env.freshness)),
         node("td", {text: formatDate(env.last_verified)})
@@ -216,7 +217,7 @@ function renderPlan(fixture) {
     ]),
     node("div", {class: "section-gap"}, [panel("Ordered steps", list(revision.steps, step => [node("div", {class: "list-title"}, [node("span", {text: `${step.order}. ${step.decision}`}), status(step.risk)]), node("p", {text: `Expected evidence: ${step.expected_evidence}`})]))]),
     node("div", {class: "grid two section-gap"}, [
-      panel("Session scope", definitionList([["Session", data.session_scope.session_id], ["Sponsor", data.session_scope.sponsor], ["Capability", data.session_scope.capability], ["Resources", data.session_scope.resources.join(", ")], ["Environment", data.session_scope.environment], ["Expires", formatDate(data.session_scope.expires_at)]])),
+      panel("Session scope", definitionList([["Session", data.session_scope.session_id], ["Sponsor", data.session_scope.sponsoring_human_id], ["Capability", data.session_scope.session_capability_profile], ["Resources", data.session_scope.resources.join(", ")], ["Environment", data.session_scope.environment], ["Expires", formatDate(data.session_scope.expires_at)]])),
       node("div", {class: "callout warning"}, [node("h2", {text: "No production control"}), node("p", {text: data.phase0_notice})])
     ])
   ];
@@ -242,6 +243,9 @@ function renderDeployment(fixture) {
         ))
       ),
       panel("Verification", list(data.verification, item => [node("div", {class: "list-title"}, [node("span", {text: item.name}), status(item.result)]), node("p", {text: `Expected: ${item.expected}`}), node("p", {text: `Actual: ${item.actual ?? "Pending"}`})]))
+    ]),
+    node("div", {class: "section-gap"}, [
+      panel("Registered actuator metadata", list([data.actuator], item => [node("div", {class: "list-title"}, [node("span", {class: "mono", text: item.name}), status(item.phase0_mode)]), node("p", {text: "No invocation route exists in Phase 0."})]))
     ]),
     node("div", {class: "callout warning section-gap"}, [node("h2", {text: "Completion gate"}), node("p", {text: data.completion_rule}), node("p", {text: `Next: ${data.next_action}`})])
   ];
