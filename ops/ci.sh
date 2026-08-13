@@ -105,11 +105,20 @@ if [ "${LIST:-0}" = "1" ]; then
 fi
 
 FAILED=0
+FAILED_CLASSES=""
+# A HARD failure is one no known gap may ever suppress. A gap excuses "this
+# class is red pending a design ruling"; it must never excuse a SAFETY refusal,
+# because those are categorically not the thing anyone is waiting on a ruling
+# about. Caught by ops/ci-selftest.py the moment known gaps were added: the
+# first version suppressed the loopback guard too, which would have let a DSN
+# pointed at Neon pass silently.
+HARD_FAILED=0
 SKIPPED=0
 RAN=0
 
 ok()   { RAN=$((RAN+1)); printf '  \033[32mOK\033[0m    %-11s %s\n' "$1" "${2:-}"; }
-bad()  { RAN=$((RAN+1)); printf '  \033[31mFAIL\033[0m  %-11s %s\n' "$1" "${2:-}"; FAILED=$((FAILED+1)); }
+bad()  { RAN=$((RAN+1)); printf '  \033[31mFAIL\033[0m  %-11s %s\n' "$1" "${2:-}"; FAILED=$((FAILED+1)); FAILED_CLASSES="$FAILED_CLASSES $1"; }
+hard() { bad "$1" "${2:-}"; HARD_FAILED=$((HARD_FAILED+1)); }
 skip() { RAN=$((RAN+1)); printf '  \033[33mSKIP\033[0m  %-11s %s\n' "$1" "${2:-}"; SKIPPED=$((SKIPPED+1)); }
 
 run_quiet() {  # run_quiet <logfile> <cmd...>  — capture output, return status
@@ -257,7 +266,7 @@ check_migration() {
   fi
   case "$dsn" in
     *@localhost:*|*@localhost/*|*@127.0.0.1:*|*@127.0.0.1/*) ;;
-    *) bad migration "REFUSED: CARR_CI_DATABASE_URL is not loopback. This applies every migration; it runs against a throwaway only."
+    *) hard migration "REFUSED: CARR_CI_DATABASE_URL is not loopback. This applies every migration; it runs against a throwaway only."
        return ;;
   esac
   if DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration.log" "$PY" tools/migrate.py --apply --yes; then
@@ -328,6 +337,55 @@ for c in $CLASS_ORDER; do
   if [ -n "$ONLY" ] && [ "$ONLY" != "$c" ]; then continue; fi
   "check_$c"
 done
+
+# KNOWN GAPS. A class that is red because a DESIGN RULING is outstanding, not
+# because of a bug someone could fix. It still runs, it still prints its failure
+# in full, and it is still counted and named below — it just does not take the
+# exit code down while the ruling is pending.
+#
+# WHY THIS EXISTS. On 2026-08-13 seven consecutive pushes each emailed Joe a CI
+# failure for the same blocked-on-him migration question. A gate that cries every
+# push about something the reader cannot act on is one they learn to filter, and a
+# filtered gate has stopped being a gate. The noise, not the redness, is the
+# hazard.
+#
+# EVERY GAP EXPIRES, and that is the whole safety of the mechanism. Past its date
+# it becomes a hard failure again whether or not anyone remembers it, so this can
+# never quietly become a permanent exemption. ops/ci-selftest.py enforces that
+# every entry HAS an expiry and that an expired one is honoured.
+if [ "$FAILED" -gt 0 ] && [ "$HARD_FAILED" -eq 0 ] && [ -f ops/config/ci-check-scope.json ]; then
+  GAP_REPORT="$("$PY" - ops/config/ci-check-scope.json "$FAILED_CLASSES" <<'PYEOF'
+import json, sys, datetime
+scope, failed = sys.argv[1], sys.argv[2].split()
+gaps = {g["class"]: g for g in json.load(open(scope)).get("known_gaps", [])}
+today = datetime.date.today().isoformat()
+covered, live = [], []
+for c in failed:
+    g = gaps.get(c)
+    if g and g.get("expires", "") > today:
+        covered.append(c)
+        print(f"KNOWNGAP\t{c}\t{g['expires']}\t{g.get('loop','')}\t{g['reason']}")
+    else:
+        live.append(c)
+        if g:
+            print(f"EXPIRED\t{c}\t{g.get('expires','no expiry')}")
+print("REMAINING\t" + str(len(live)))
+PYEOF
+)"
+  echo "$GAP_REPORT" | while IFS=$'\t' read -r tag c exp loop reason; do
+    case "$tag" in
+      KNOWNGAP) printf '  \033[33mKNOWN GAP\033[0m  %s — blocked on a ruling, not a bug. Expires %s (then this fails hard again).\n             Open loop #%s: %s\n' "$c" "$exp" "$loop" "$reason" ;;
+      EXPIRED)  printf '  \033[31mEXPIRED GAP\033[0m %s — its exemption ran out on %s. Failing hard, as designed.\n' "$c" "$exp" ;;
+    esac
+  done
+  REMAINING="$(echo "$GAP_REPORT" | awk -F'\t' '$1=="REMAINING"{print $2}')"
+  if [ "${REMAINING:-$FAILED}" = "0" ]; then
+    echo
+    echo "CI: $FAILED class(es) red, all of them known gaps awaiting a ruling. Not counted as failure."
+    exit 0
+  fi
+  FAILED="${REMAINING:-$FAILED}"
+fi
 
 echo
 if [ "$FAILED" -gt 0 ]; then

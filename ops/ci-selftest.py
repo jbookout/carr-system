@@ -280,6 +280,37 @@ def test_migration_filenames_match_the_runner():
             check(f"{n} sorts between {before[0]} and {after[0]}", b < i < a)
 
 
+def test_known_gaps_all_expire():
+    """A known gap suppresses a red class's exit code while a ruling is pending.
+    That is only safe because it expires. An entry with no expiry, or one dated
+    so far out it never bites, is a permanent exemption wearing a temporary
+    label — which is the thing this mechanism must not become."""
+    import datetime, json as _json
+    scope = REPO / "ops" / "config" / "ci-check-scope.json"
+    if not scope.exists():
+        return
+    gaps = _json.loads(scope.read_text()).get("known_gaps", [])
+    today = datetime.date.today()
+    for g in gaps:
+        name = g.get("class", "?")
+        exp = g.get("expires")
+        check(f"known gap '{name}' has an expiry date", bool(exp))
+        if not exp:
+            continue
+        try:
+            d = datetime.date.fromisoformat(exp)
+        except ValueError:
+            check(f"known gap '{name}' expiry parses as a date", False, exp)
+            continue
+        check(f"known gap '{name}' expires within 30 days",
+              d <= today + datetime.timedelta(days=30),
+              f"{exp} is {(d - today).days} days out")
+        check(f"known gap '{name}' names the loop carrying the ruling",
+              bool(g.get("loop")))
+    if not gaps:
+        check("no known gaps outstanding (nothing suppressed)", True)
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -290,7 +321,8 @@ def main():
                test_secret_scanner_catches_and_respects_allow,
                test_dep_check_detects_a_stale_lock,
                test_lock_is_not_platform_specific,
-               test_migration_filenames_match_the_runner):
+               test_migration_filenames_match_the_runner,
+               test_known_gaps_all_expire):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip
