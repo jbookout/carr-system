@@ -14,7 +14,7 @@ test("all contract files are valid versioned JSON", () => {
     const value = read(path.join("contracts", file));
     if (file !== "fixture-schema.v1.json") {
       assert.equal(value.version, "1.0.0", file);
-      assert.match(value.status, /^phase0_/, file);
+      assert.match(value.status, /^phase[01]_/, file);
     }
   }
 });
