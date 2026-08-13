@@ -55,8 +55,15 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(
 OUT = os.path.join(ROOT, "Graph-System")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+# Backups added 2026-08-13. Backups/portability-mirror held 224 .md copies that
+# the walk treated as live vault content, so a reference could resolve to a
+# BACKUP COPY instead of the real document. Measured on the folder-pair diff
+# behind the determinism fix: of 65 folder-pairs that fix removed, 55 touched
+# the mirror and 53 had it as the target. Same class as Output/_to_delete/.trash
+# — derived, not live. The 5 doctrine documents whose only on-disk trace was the
+# mirror are emitted from the store instead, in the pass below.
 SKIP = {"Graph", "Graph-System", ".obsidian", "_to_delete", "_asset_staging",
-        ".git", "node_modules", ".trash", "Output"}
+        ".git", "node_modules", ".trash", "Output", "Backups"}
 DOC_EXT = (".md", ".xlsx", ".json", ".html")
 
 # ---------- collect real documents ----------
@@ -70,6 +77,41 @@ for dp, dn, fn in os.walk(ROOT):
         if rel.split("/")[0] in SKIP:
             continue
         docs[rel] = os.path.dirname(rel) or "."
+
+# ---------- doctrine store pass: which .md files are store-held, and their text ----------
+# MOVED here 2026-08-13 (it used to sit after resolve()). It has to run before
+# the folder list and the reference index are built, because doctrine that lives
+# ONLY in the store now contributes real nodes — and because those nodes must be
+# resolvable as reference TARGETS like any other document.
+STORE_ONLY_FOLDER = "DNA/Doctrine (store-only)"
+slug_by_path = {}
+store_text = {}   # rel path -> concatenated plain_text (ordinal order), store-held files only
+try:
+    sys.path.insert(0, REPO)
+    from lib.record_sources import doctrine_slug_by_path, doctrine_sections
+    slug_by_path = doctrine_slug_by_path(ROOT)
+    by_slug = defaultdict(list)
+    for s in doctrine_sections():
+        by_slug[s["slug"]].append(s)
+    for rel, slug in slug_by_path.items():
+        secs = sorted(by_slug.get(slug, []), key=lambda s: s["ordinal"])
+        if secs:
+            store_text[rel] = "\n\n".join(s["plain_text"] for s in secs)
+    # Doctrine with NO live vault file. Before Backups/ was skipped, the backup
+    # mirror was the only thing putting these on the graph at all — which meant
+    # the graph was showing them from a backup rather than from the store that
+    # actually holds them. Give them a node of their own instead of hanging them
+    # off a folder they do not live in.
+    for slug in sorted(set(by_slug) - set(slug_by_path.values())):
+        secs = sorted(by_slug[slug], key=lambda s: s["ordinal"])
+        if not secs:
+            continue
+        rel = f"{STORE_ONLY_FOLDER}/{slug}.md"
+        docs[rel] = STORE_ONLY_FOLDER
+        store_text[rel] = "\n\n".join(s["plain_text"] for s in secs)
+except Exception as exc:  # noqa: BLE001 — fail-soft, same posture as retrieve.py
+    print(f"build-system-graph: store pass skipped ({type(exc).__name__}) — "
+          f"reading every file from disk (no store-held skip)", file=sys.stderr)
 
 folders = sorted({d for d in docs.values()})
 
@@ -99,24 +141,6 @@ def resolve(ref):
     if candidates:
         return candidates[0]
     return by_base.get(os.path.basename(ref).lower())
-
-# ---------- doctrine store pass: which .md files are store-held, and their text ----------
-slug_by_path = {}
-store_text = {}   # rel path -> concatenated plain_text (ordinal order), store-held files only
-try:
-    sys.path.insert(0, REPO)
-    from lib.record_sources import doctrine_slug_by_path, doctrine_sections
-    slug_by_path = doctrine_slug_by_path(ROOT)
-    by_slug = defaultdict(list)
-    for s in doctrine_sections():
-        by_slug[s["slug"]].append(s)
-    for rel, slug in slug_by_path.items():
-        secs = sorted(by_slug.get(slug, []), key=lambda s: s["ordinal"])
-        if secs:
-            store_text[rel] = "\n\n".join(s["plain_text"] for s in secs)
-except Exception as exc:  # noqa: BLE001 — fail-soft, same posture as retrieve.py
-    print(f"build-system-graph: store pass skipped ({type(exc).__name__}) — "
-          f"reading every file from disk (no store-held skip)", file=sys.stderr)
 
 folder_edges: defaultdict[tuple[str, str], int] = defaultdict(int)  # (folder A, folder B) -> reference count
 for rel, fold in docs.items():
