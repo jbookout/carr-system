@@ -12,7 +12,7 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
-import { TOOLS, ToolError, executeRegisteredTool } from "./tools.js";
+import { TOOLS, ToolError, executeRegisteredTool, auditIdentity } from "./tools.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -238,6 +238,52 @@ function toolList(profile = "full") {
     }));
 }
 
+// ---------- read-call recording (Phase 1, 0108) ----------
+//
+// withEnvelope() in tools.js is the ONLY writer of tool_call, and it only ever
+// runs inside a WRITE handler body. Every read verb — including the one every
+// session calls at boot, standing-context — reached executeRegisteredTool
+// DIRECTLY below with no record left anywhere. That made "did a session boot
+// from the store, and whose?" unanswerable except by a human running a manual
+// test, which is exactly the question the Dell 2026-08-21 cutover needs
+// answered passively. See migrations/0108_tool_read_call.sql for why this is
+// a SIBLING table rather than a reuse of tool_call (idempotency_key is a
+// primary key with no read equivalent; response is NOT NULL and reads must
+// never carry a response body).
+//
+// readCallInsertSQL is pure — no DB, no env, no ctx — so it is unit-testable
+// on its own (mcp-server/test/tool-read-call.test.mjs). It builds the exact
+// statement recordReadCall sends, and by construction it can only ever see
+// (actor, verb, ok, errorKind): there is no parameter through which an
+// argument value or a response body could reach it.
+export function readCallInsertSQL(actor, verb, ok, errorKind) {
+  const identity = auditIdentity(actor);
+  return {
+    text: `insert into tool_read_call (verb, actor_slug, actor_id, ok, error_kind, via, client_id,
+             organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
+           values ($1, $2, (select id from actor where slug=$2), $3, $4, $5, $6, $7, $8, $9, $10)`,
+    params: [verb, actor.slug || null, ok, errorKind || null, actor.via || null, actor.client_id || null,
+             identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
+             identity.authorization_class],
+  };
+}
+
+// insertFn is (text, params) => Promise<rows>. Production passes a thin neon()
+// wrapper against DATABASE_URL_WRITER (carr_reader is views-only and cannot
+// INSERT — see 0108's grants); tests pass a fake that just records the call.
+// NEVER THROWS: a logging failure must not become a read failure, so any
+// rejection from insertFn is swallowed here, not propagated to the caller
+// that scheduled this via ctx.waitUntil.
+export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
+  const { text, params } = readCallInsertSQL(actor, verb, ok, errorKind);
+  try {
+    await insertFn(text, params);
+  } catch {
+    // fire-and-forget: the read already succeeded (or failed) and its response
+    // is already on the wire by the time this runs under ctx.waitUntil.
+  }
+}
+
 // Exported for deterministic no-network identity-gate tests. It remains the
 // single normal dispatcher path; callers receive no additional route or grant.
 export async function callTool(env, actor, name, args, profile = "full") {
@@ -322,7 +368,22 @@ export async function callTool(env, actor, name, args, profile = "full") {
   if (!tool.write) {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
-    return executeRegisteredTool(client, actor, name, args || {});
+    // Record AFTER the response is ready, via ctx.waitUntil, so recording never
+    // adds latency to the read the caller is waiting on. ok/errorKind are
+    // metadata only — never the result itself, never args.
+    let ok = true, errorKind = null;
+    try {
+      return await executeRegisteredTool(client, actor, name, args || {});
+    } catch (e) {
+      ok = false;
+      errorKind = e instanceof ToolError ? String(e.payload?.error || "tool_error").slice(0, 64) : "internal_error";
+      throw e;
+    } finally {
+      if (env?.DATABASE_URL_WRITER) {
+        const insertFn = (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params);
+        env.ctx?.waitUntil?.(recordReadCall(insertFn, actor, name, ok, errorKind));
+      }
+    }
   }
 
   // writes: real transaction on the writer pool; actor row resolved inside it

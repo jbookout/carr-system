@@ -102,6 +102,43 @@ def declared_count(path: Path):
     return int(m.group(1)) if m else None
 
 
+def format_age(then: datetime, now: datetime) -> str:
+    delta = now - then
+    hours = delta.total_seconds() / 3600
+    if hours < 1:
+        return f"{int(delta.total_seconds() // 60)}m ago"
+    if hours < 48:
+        return f"{hours:.1f}h ago"
+    return f"{delta.days}d ago"
+
+
+def fetch_boot_evidence(conn, cur, partner: str, now: datetime):
+    """The most recent STORE-FIRST boot recorded for `partner` — the latest
+    tool_read_call row for verb='standing-context' with that sponsor
+    (migration 0108, Phase 1). This is what turns "did a session boot from
+    the store, and whose?" from a manual test into a line in this report.
+    Table absence (0108 not yet applied here) is reported as unknown, not a
+    crash — this script must keep answering every other question it already
+    answers even before that migration lands everywhere it runs."""
+    try:
+        cur.execute(
+            "select client_id, via, ok, created_at from tool_read_call "
+            "where verb = 'standing-context' and sponsoring_human_slug = %s "
+            "order by created_at desc limit 1", (partner,))
+        row = cur.fetchone()
+    except Exception as e:
+        conn.rollback()  # a failed query aborts the transaction; reset it so later
+                          # queries in this same connection (the other partner, or
+                          # anything after) are not poisoned by this one's failure.
+        return {"table_reachable": False, "note": f"tool_read_call not queryable here ({type(e).__name__}): {e}"}
+    if not row:
+        return {"table_reachable": True, "seen": False,
+                "note": "no store-first boot recorded yet"}
+    client_id, via, ok, created_at = row
+    return {"table_reachable": True, "seen": True, "ok": ok, "via": via, "client": client_id,
+            "at": created_at.isoformat(), "age": format_age(created_at, now)}
+
+
 def resolve_local_identity():
     """Whichever partner slug this machine is set up as, or None with why not."""
     try:
@@ -176,6 +213,7 @@ def main():
 
     store_counts = {}
     render_checks = {}
+    boot_evidence = {}
     with conn, conn.cursor() as cur:
         for label, (slug, rel) in AUDIENCES.items():
             n = len(_fetch_rules(cur, slug))
@@ -189,6 +227,13 @@ def main():
                 "declared_count": declared,
                 "agrees": declared is not None and declared == n,
             }
+        # Boot evidence is a store FACT, not tied to which machine this runs
+        # on (unlike live_call below) — it reports what ANY machine's session
+        # already recorded, which is the whole point: Dell's cutover question
+        # answered from Joe's Mac, or vice versa, with no manual test either way.
+        now = datetime.now(timezone.utc)
+        for partner in PARTNERS:
+            boot_evidence[partner] = fetch_boot_evidence(conn, cur, partner, now)
 
     overall_ok = True
     partner_reports = {}
@@ -204,6 +249,7 @@ def main():
             "render": {"shared": shared_r, "personal": personal_r},
             "render_agrees": render_ok,
             "checked_live_here": is_local,
+            "boot_evidence": boot_evidence[partner],
         }
 
         if not is_local:
@@ -288,6 +334,14 @@ def main():
             print(f"        doctrine-index: {'ok, ' + str(dc.get('documents')) + ' documents' if dc.get('ok') else 'FAILED — ' + str(dc.get('error'))}")
         else:
             print(f"        live standing-context / doctrine-index: not checked — {r['live_call']['reason']}")
+        be = r["boot_evidence"]
+        if not be.get("table_reachable"):
+            print(f"        store-first boot: unknown — {be.get('note')}")
+        elif not be.get("seen"):
+            print(f"        store-first boot: no store-first boot recorded yet")
+        else:
+            print(f"        store-first boot: {be['age']} ({be['at']}), via={be.get('via')}, "
+                  f"client={be.get('client')}, ok={be.get('ok')}")
     print(f"  overall: {'READY (or PARTIAL-HERE only)' if overall_ok else 'NOT READY — see DISAGREES/FAILED lines above'}")
 
     return 0 if overall_ok else 2
