@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-10T08:25:36-0500",
-  "generator": "tools/corpus-sync.py --sync (conflict-resolution path, post-flip)",
+  "generated_at": "2026-08-13T14:29:24-0500",
+  "generator": "tools/corpus-sync.py --push (CORPUS FLIP, 2026-08-06)",
   "vault_root": "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
   "canonical": "GIT. This repo's corpus/ is the doctrine tier's source of truth; the Drive/vault/home copies are renders kept current by `--push`. Flipped 2026-08-06 (was Drive-canonical under ORDER 30 phase 1). `--sync` remains only as the conflict-resolution path, pulling a source-side change INTO git.",
   "max_bytes": 5242880,
@@ -438,11 +438,11 @@
     {
       "source": "INDEX.md",
       "mirror": "corpus/INDEX.md",
-      "sha256": "8de7cb53ffeaa73a46fda3c3cb260ff1797a0055b33fa5c25f8efc65c0708e1c",
-      "bytes": 22932,
-      "mtime": 1786368042.223,
-      "mtime_iso": "2026-08-10T08:20:42",
-      "mirrored_at": "2026-08-10T08:20:49-0500",
+      "sha256": "032494e8db217ce4cbaf3818860ef402c85fbad6f3a2dc5afaf2c60a87221350",
+      "bytes": 23187,
+      "mtime": 1786649323.185,
+      "mtime_iso": "2026-08-13T14:28:43",
+      "mirrored_at": "2026-08-13T14:29:24-0500",
       "class": "doctrine-root",
       "why": "the master orientation file + task router; the hand-authored half of the always-read core"
     },
