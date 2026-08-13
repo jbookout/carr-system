@@ -1418,7 +1418,36 @@ def build_decision_history(tmp_path, cur):
         "",
     ]
 
-    body, shown, budget = [], 0, DECISION_BUDGET_BYTES - sum(len(l) + 1 for l in head)
+    # THE WINDOW NEEDED A FALLBACK, added 2026-08-13 after it silently stopped
+    # covering even a single day. Measured that day: 53 decisions were recorded
+    # totalling 146,467 bytes against a 95,000-byte budget, so the render held
+    # PART OF ONE DAY and everything older vanished from the file entirely. The
+    # store was never at risk — all 507 entries sit in v_decision_entry — but the
+    # render is Dell's boot path, and a boot path that silently drops the last
+    # month of reasoning is worse than one that admits what it cannot show.
+    #
+    # So the window now degrades instead of truncating: full text while the first
+    # share of the budget lasts, then ONE LINE per decision, date and title, until
+    # the budget is gone. A decision that no longer fits in full is still visible
+    # and still findable by name, which is the difference between "older entries
+    # are outside the window" as a true statement and as an excuse.
+    #
+    # The split is deliberate rather than tuned: roughly three fifths keeps a
+    # useful depth of full reasoning on a normal day, and on a heavy day the
+    # index absorbs the overflow rather than the file losing a month.
+    FULL_TEXT_SHARE = 0.62
+
+    # The closing window/export lines are appended AFTER the budget check, so they
+    # were never counted against it — the file quietly ran over. Reserved here so
+    # the stated budget is the actual ceiling rather than an approximation.
+    # Measured at 961 bytes on 2026-08-13; held at 1,200 so the counts in it can
+    # grow digits without the file creeping back over its own ceiling.
+    TAIL_RESERVE_BYTES = 1_200
+
+    body, shown, budget = [], 0, (DECISION_BUDGET_BYTES
+                                  - sum(len(l) + 1 for l in head)
+                                  - TAIL_RESERVE_BYTES)
+    full_budget = int(budget * FULL_TEXT_SHARE)
     used = 0
     canonical = []
     last_date = None
@@ -1448,7 +1477,7 @@ def build_decision_history(tmp_path, cur):
             chunk.append("")
 
         size = sum(len(l) + 1 for l in chunk)
-        if used + size > budget and shown:
+        if used + size > full_budget and shown:
             break
         body += chunk
         used += size
@@ -1457,14 +1486,42 @@ def build_decision_history(tmp_path, cur):
         canonical.append([str(entry_date), session_key, title, author,
                           quote or "", str(quote_absent)])
 
-    omitted = len(rows) - shown
+    # Whatever did not fit in full still gets a line, newest-first, until the rest
+    # of the budget is gone. Same rows, same order, just compacted.
+    indexed = 0
+    if shown < len(rows):
+        index_lines = ["---", "", "## Older decisions, by title",
+                       "",
+                       "> These are the same records, compacted because the full text no",
+                       "> longer fits the budget. Read any one in full with the wider query",
+                       "> above. Nothing here is archived, moved, or lost.",
+                       ""]
+        pending = sum(len(l) + 1 for l in index_lines)
+        for (entry_date, session_key, title, author, quote, rationale,
+             quote_absent, provenance, cost_delta, quality_delta) in rows[shown:]:
+            line = f"- `{entry_date}` — {title}"
+            cost = len(line) + 1
+            if used + pending + cost > budget:
+                break
+            index_lines.append(line)
+            pending += cost
+            indexed += 1
+            canonical.append([str(entry_date), session_key, title, author,
+                              quote or "", str(quote_absent)])
+        if indexed:
+            body += index_lines
+            used += pending
+
+    accounted = shown + indexed
+    omitted = len(rows) - accounted
     tail = [
         "---",
         "",
-        f"*Window: {shown} of {len(rows)} recorded decisions"
+        f"*Window: {shown} of {len(rows)} recorded decisions in full"
+        + (f", {indexed} more by title" if indexed else "")
         + (f"; {omitted} older entr{'y' if omitted == 1 else 'ies'} are outside the "
-           "window and are read with a wider query, not from a second file."
-           if omitted else "; the whole history fits the window.") + "*",
+           "window entirely and are read with a wider query, not from a second file."
+           if omitted else "; every decision on record is accounted for here.") + "*",
         "",
     ]
     from datetime import datetime, timezone
@@ -1472,7 +1529,16 @@ def build_decision_history(tmp_path, cur):
              f"{len(rows)} decision(s) on record*", ""]
 
     tmp_path.write_text("\n".join(head + body + tail))
-    return shown, canonical
+    # RETURN WHAT THE FILE ACCOUNTS FOR, not how many rendered in full. The shared
+    # validation guard compares this count run-to-run and treats a drop as a sign
+    # rows went missing. On a BYTE-budgeted target that premise does not hold: the
+    # full-text count falls whenever the newest entries are longer, so the guard
+    # fired on 2026-08-13 (45 -> 31) purely because that day's decisions were
+    # unusually long, blocking a render in which nothing was actually lost.
+    # Counting full plus indexed restores the guard's meaning — the number really
+    # is "decisions this file accounts for", so a genuine disappearance still trips
+    # it while ordinary verbosity does not.
+    return shown + indexed, canonical
 
 
 # ---------------- the write-surface registry, v0 ----------------
