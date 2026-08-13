@@ -66,7 +66,13 @@ SKIP_DIRS  = {"Source Material", "Output", ".obsidian", ".claude", ".git",
               # 2026-08-03, IT sweep. _asset_staging put 352 rows into the index
               # and _to_delete 36 — a folder whose entire purpose is pending
               # deletion was being served to sessions as retrievable knowledge.
-              "_asset_staging", "_to_delete"}
+              "_asset_staging", "_to_delete",
+              # 2026-08-13, Phase 1 loose end. Backups/portability-mirror is a
+              # disaster-recovery snapshot of doctrine content that already
+              # lives elsewhere (its own MANIFEST.md says "never read in normal
+              # operation") — indexing its 223 .md files had every search
+              # competing live content against stale duplicates of itself.
+              "portability-mirror"}
 SKIP_FILES = {"decision-history-archive.md", "open-loops-closed.md", "section-index.tsv"}
 SUPERSEDED = re.compile(r"SUPERSEDED|RETIRED\b", re.IGNORECASE)
 
