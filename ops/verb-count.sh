@@ -1,0 +1,51 @@
+#!/bin/sh
+# verb-count.sh — print the number of verbs the MCP registry would ship.
+#
+# WHY THIS IS ITS OWN FILE. This count is the artifact-mismatch guard: it is what
+# caught loop #276, where a stale-branch deploy silently dropped 9 verbs from
+# production. Until now it lived as a three-line inline snippet inside
+# bin/deploy-worker.sh, which meant it only ran at DEPLOY time — after review,
+# after merge, at the moment of shipping. Program 2 needs the same guard to run
+# at MERGE time, and rule a8c55a47 is explicit that a manual path and an
+# automated path doing the same job must be the same code, not two copies that
+# drift. So the snippet moved here and both callers import it.
+#
+# THE COUNT IS EXACT, NOT PARSED, and that property is load-bearing. It imports
+# the module and reads Object.keys(TOOLS).length. A regex over the source
+# undercounts — 61 against a real 66 on the branch that caused loop #276 — and a
+# guard that reports the wrong number is worse than no guard, because it reports
+# it confidently.
+#
+# Usage:  ops/verb-count.sh <worker-dir>      # prints an integer on stdout
+# Exits non-zero, printing nothing to stdout, when the registry will not import.
+# A refusal to count is never the same as a count of zero: the caller must treat
+# a non-zero exit as "unmeasured", not as "shrank to nothing".
+
+set -eu
+
+WORKER_DIR="${1:-}"
+if [ -z "$WORKER_DIR" ]; then
+  echo "verb-count.sh: needs the worker directory as its one argument" >&2
+  exit 64
+fi
+if [ ! -f "$WORKER_DIR/src/tools.js" ]; then
+  echo "verb-count.sh: no registry at $WORKER_DIR/src/tools.js" >&2
+  exit 66
+fi
+
+COUNT="$(cd "$WORKER_DIR" && node --input-type=module -e '
+import("'"$WORKER_DIR"'/src/tools.js")
+  .then(m => console.log(Object.keys(m.TOOLS).length))
+  .catch(e => { console.error(e.message); process.exit(1); });' 2>&1)" || {
+  echo "verb-count.sh: the registry did not import — $COUNT" >&2
+  exit 1
+}
+
+case "$COUNT" in
+  ''|*[!0-9]*)
+    echo "verb-count.sh: expected an integer, got: $COUNT" >&2
+    exit 1
+    ;;
+esac
+
+echo "$COUNT"

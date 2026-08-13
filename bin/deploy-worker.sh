@@ -169,10 +169,10 @@ echo "  OK  mcp-server/ and dealroom/ are clean"
 # ---------- preflight 3: verb count did not shrink ----------
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 
-SHIPPING="$(cd "$WORKER_DIR" && node --input-type=module -e '
-import("'"$WORKER_DIR"'/src/tools.js")
-  .then(m => console.log(Object.keys(m.TOOLS).length))
-  .catch(e => { console.error(e.message); process.exit(1); });' 2>/dev/null)"
+# The count moved to ops/verb-count.sh on 2026-08-14 so that CI can run this same
+# guard at MERGE time, not only here at DEPLOY time. Same code, two callers
+# (rule a8c55a47) — deliberately NOT a second copy that can drift from this one.
+SHIPPING="$(sh "$REPO/ops/verb-count.sh" "$WORKER_DIR" 2>/dev/null || true)"
 
 case "$SHIPPING" in
   ''|*[!0-9]*) fail "could not count verbs in $WORKER_DIR/src/tools.js — the import failed.
