@@ -27,6 +27,6 @@
   "contracts": {
     "delegation-gate-hook.json": "e40833c685de0a915d4a15b96506ef2c4bff60cd70e70e240dbe274233b7dbd4",
     "codex-hooks.json": "90a60c2f81583865752fd445209c7e8186201c026d6e920a96cd84ae47c381a5",
-    "rule-enforcement-map.json": "459457a04e3db2369187db5a7cd2867c7b5f9d376ab10868d48df4af823e7247"
+    "rule-enforcement-map.json": "7071759c7725a11c19f442939cba963a59c6fc6f18f02d8d66ee6e37305e5cf3"
   }
 }
