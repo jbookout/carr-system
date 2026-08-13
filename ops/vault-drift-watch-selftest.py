@@ -521,6 +521,60 @@ def _(assert_):
     assert_(after == before, "a refused partial run must leave the baseline byte-identical")
 
 
+@case("--only-target covers EVERY path its export selector writes, not a hand-kept subset")
+def _(assert_):
+    # The regression this exists for: refresh-rules.sh hardcoded the 3 render
+    # paths, but `export --only compiled-rules` writes 5 (it also matches
+    # compiled-rules-gist-index -> CLAUDE.md and compiled-rules-intro ->
+    # DNA/Network/introduction-rules.md). Assert against the live registry
+    # rather than a literal 5, so a new target is covered automatically.
+    # Resolve through the venv interpreter, not this process: importing
+    # exporters.targets needs psycopg, which a bare system python3 lacks.
+    probe = subprocess.run(
+        [VENV_PYTHON, "-c",
+         "import json,sys; sys.path.insert(0, %r);"
+         "from exporters import targets as t;"
+         "print(json.dumps(sorted({rel for k,(rel,_b) in t.TARGETS.items()"
+         " if k.startswith('compiled-rules')})))" % REPO],
+        capture_output=True, text=True, timeout=60, cwd=REPO)
+    assert_(probe.returncode == 0,
+            f"could not resolve the compiled-rules targets: {probe.stderr}")
+    want = set(json.loads(probe.stdout))
+    assert_(len(want) > 3,
+            f"fixture check: the compiled-rules selector should span more than the 3 "
+            f"render paths that were hardcoded, got {sorted(want)}")
+
+    d = fresh_dirs("only-target")
+    for rel in want:
+        write(d["root"], rel, "v1\n")
+    rc, _, err = run(d, mode="--rebaseline")
+    assert_(rc == 0, f"full rebaseline should exit 0, got {rc}\nstderr={err}")
+    for rel in want:
+        write(d["root"], rel, "v2\n")  # the hourly export moves ALL of them
+    rc2, out2, err2 = run(d, mode="--rebaseline",
+                          extra_args=["--only-target", "compiled-rules"])
+    assert_(rc2 == 0, f"--only-target rebaseline should exit 0, got {rc2}\nstderr={err2}")
+
+    rc3, _, err3 = run(d)
+    assert_(rc3 == 0, f"check should be clean after the rebaseline, got {rc3}\nstderr={err3}")
+    tampered = []
+    if os.path.exists(d["salvage"]):
+        tampered = [json.loads(l)["path"] for l in open(d["salvage"])
+                    if l.strip() and json.loads(l)["finding_type"] == "tamper"]
+    assert_(not tampered,
+            f"no compiled-rules path should read as tampered after --only-target: {tampered}")
+
+
+@case("--only and --only-target together are rejected, rather than one silently winning")
+def _(assert_):
+    d = fresh_dirs("only-both")
+    write(d["root"], "DNA/compiled-rules-shared.md", "# rules\n")
+    rc, _, err = run(d, mode="--rebaseline",
+                     extra_args=["--only", "DNA/", "--only-target", "compiled-rules"])
+    assert_(rc == 1, f"passing both selectors should exit 1, got {rc}")
+    assert_("pass one" in err, f"the error should say to pass one: {err}")
+
+
 @case("--only is rejected with --check, which always scans the whole registry")
 def _(assert_):
     d = fresh_dirs("partial-mode")

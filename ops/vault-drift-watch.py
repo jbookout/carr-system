@@ -120,6 +120,31 @@ GENERATIONS_SUFFIX = ".generations"
 # exporters/targets.py still does not misclassify any of the three as
 # UNEXPECTED — it degrades to "everything else is UNEXPECTED", never the
 # reverse.
+def load_target_paths_by_key_prefix(prefix):
+    """The vault paths written by every TARGETS entry whose KEY starts with
+    `prefix` — i.e. exactly the files `run.sh export --only <prefix>` writes.
+
+    WHY BY KEY AND NOT BY PATH. bin/refresh-rules.sh first shipped this with a
+    hardcoded list of the three compiled-rules render paths, and it was wrong
+    within minutes: `--only compiled-rules` also prefix-matches
+    compiled-rules-gist-index (CLAUDE.md) and compiled-rules-intro
+    (DNA/Network/introduction-rules.md), so the hourly job rewrote five files
+    and the rebaseline only re-snapshotted three. The next check reported the
+    other two as TAMPER. A hand-kept list beside a registry is the drift this
+    whole change exists to remove (rule a8c55a47 — a manual path and an
+    automated path that do the same job must be the same code), so the caller
+    now names the EXPORT SELECTOR and the registry resolves it. Adding a sixth
+    compiled-rules target needs no edit here.
+    """
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from exporters import targets as _targets  # noqa: PLC0415 (deliberate late import)
+        return {rel for key, (rel, _b) in _targets.TARGETS.items()
+                if key.startswith(prefix)}, None
+    except Exception as exc:  # pragma: no cover - exercised via a real import failure only
+        return set(), f"{type(exc).__name__}: {exc}"
+
+
 ALWAYS_EXPECTED = {
     "DNA/compiled-rules-shared.md",
     "00_Context/compiled-rules-joe.md",
@@ -449,7 +474,9 @@ def run_rebaseline(args):
         #
         # --only is exempt: it MERGES, so it can only ever add or refresh the
         # paths it names, and ALWAYS_EXPECTED is hardcoded rather than imported.
-        if not args.only:
+        # --only-target falls through to its own resolver below, which fails
+        # closed with a message naming the selector the caller actually passed.
+        if not args.only and not args.only_target:
             print(f"FATAL: could not load exporters/targets.py's TARGETS registry "
                   f"({expected_err}). Refusing to write a full baseline covering only the "
                   f"{len(ALWAYS_EXPECTED)} hardcoded compiled-rules paths — that would drop "
@@ -483,7 +510,23 @@ def run_rebaseline(args):
     # this tool exists to catch. --only keeps the blast radius to the paths the
     # caller names and leaves every other baseline entry exactly as it was.
     only_prefixes = None
-    if args.only:
+    if args.only_target:
+        resolved, resolve_err = load_target_paths_by_key_prefix(args.only_target)
+        if resolve_err:
+            print(f"FATAL: --only-target needs exporters/targets.py's TARGETS registry to "
+                  f"resolve '{args.only_target}', and it could not be loaded "
+                  f"({resolve_err}). Run it the way bin/nightly.sh does: "
+                  f"./.venv/bin/python ops/vault-drift-watch.py --rebaseline …",
+                  file=sys.stderr)
+            return 1
+        if not resolved:
+            print(f"FATAL: --only-target {args.only_target} matched no export target key. "
+                  f"Nothing to rebaseline — refusing rather than writing an empty slice.",
+                  file=sys.stderr)
+            return 1
+        only_prefixes = tuple(sorted(resolved))
+        expected = {p for p in expected if p in resolved} | resolved
+    elif args.only:
         only_prefixes = tuple(p.strip() for p in args.only.split(",") if p.strip())
         if not only_prefixes:
             print("FATAL: --only was given but parsed to no prefixes", file=sys.stderr)
@@ -830,6 +873,11 @@ def main(argv=None):
                      help="Tamper + structural drift check (run FIRST, before exports)")
     ap.add_argument("--rebaseline", action="store_true",
                      help="Snapshot the post-export registry state (run LAST, after exports)")
+    ap.add_argument("--only-target", default=None, metavar="EXPORT_KEY_PREFIX",
+                     help="With --rebaseline: re-snapshot exactly the paths written by "
+                          "`run.sh export --only <EXPORT_KEY_PREFIX>`, resolved through "
+                          "exporters/targets.py so the two selections cannot drift apart. "
+                          "Preferred over --only for anything that shadows an export.")
     ap.add_argument("--only", default=None, metavar="PREFIX[,PREFIX...]",
                      help="With --rebaseline: re-snapshot ONLY registered paths starting "
                           "with one of these comma-separated prefixes, MERGING them into "
@@ -845,9 +893,14 @@ def main(argv=None):
                           "salvage payloads (default: current UTC timestamp). Tests only.")
     args = ap.parse_args(argv)
 
-    if args.only and args.check:
-        print("FATAL: --only applies to --rebaseline only; --check always scans "
-              "the whole registry.", file=sys.stderr)
+    if (args.only or args.only_target) and args.check:
+        print("FATAL: --only/--only-target apply to --rebaseline only; --check always "
+              "scans the whole registry.", file=sys.stderr)
+        return 1
+    if args.only and args.only_target:
+        print("FATAL: --only and --only-target are two ways to name the same slice — "
+              "pass one. Prefer --only-target when the slice shadows an export.",
+              file=sys.stderr)
         return 1
     if args.check and args.rebaseline:
         print("FATAL: --check and --rebaseline are mutually exclusive — run them as two "

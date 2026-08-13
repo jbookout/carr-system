@@ -42,12 +42,18 @@ if CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules >> "$LOG" 2>&1; then
   # The two beats disagreed, so the drift check reported all three as TAMPER
   # ("rewritten outside the nightly export") every day; run 20260813T201608Z is
   # the measured case. The baseline for these paths is derived data, so it is
-  # moved by code here, right where the renders move. --only touches ONLY these
-  # three and merges, so a genuine out-of-band rewrite of any OTHER registered
-  # file is still caught by tonight's check.
+  # moved by code here, right where the renders move. It merges, so a genuine
+  # out-of-band rewrite of any OTHER registered file is still caught tonight.
+  #
+  # --only-target takes the SAME selector as the export above and resolves it
+  # through exporters/targets.py. The first cut hardcoded the three render paths
+  # and was wrong immediately: `--only compiled-rules` also matches
+  # compiled-rules-gist-index (CLAUDE.md) and compiled-rules-intro
+  # (DNA/Network/introduction-rules.md), so the job rewrote five files, the
+  # rebaseline covered three, and the next check called the other two TAMPER.
+  # One selector, one registry, no hand-kept list to drift.
   "$REPO/.venv/bin/python" "$REPO/ops/vault-drift-watch.py" --rebaseline \
-    --only "DNA/compiled-rules-shared.md,00_Context/compiled-rules-joe.md,DNA/compiled-rules-dell.md" \
-    >> "$LOG" 2>&1 || true
+    --only-target compiled-rules >> "$LOG" 2>&1 || true
 else
   rc=$?  # capture BEFORE the date subshell resets $? — the old line always logged rc=0
   echo "$(date -u +%FT%TZ) FAIL rules refresh rc=$rc" >> "$LOG"
