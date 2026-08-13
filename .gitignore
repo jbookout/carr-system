@@ -46,3 +46,13 @@ tools/dictation-rig/dictate/.build/
 # lane owns the call on whether they are source or output.
 tools/doc-convo/assets/whisper-server.log
 tools/doc-convo/assets/.harvest-brain-session-id
+
+# Client deal material never enters this repo, private or not (Joe ruling (a),
+# 2026-08-01, ORDER 42 — the same rule that keeps frozen-sources/ out). The
+# Ramsey/Enclave packet generator embeds the client's name and advisory prose
+# addressed to him, and the tmp-*-review folders are page renders of his
+# documents. Client deliverables live in the Drive vault with the rest of the
+# client's file; the scratch renders are staged in _to_delete.
+build_ramsey_carr_pdfs.py
+tmp-*-review/
+deliverables/ramsey-carr-branded-*/

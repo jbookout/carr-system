@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CARR Instagram Grid Reset</title>
+  <style>
+    @font-face { font-family: "Oswald"; src: url("../../claude-tree/skills/write-content/graphics/fonts/Oswald.ttf"); }
+    @font-face { font-family: "Montserrat"; src: url("../../claude-tree/skills/write-content/graphics/fonts/Montserrat.ttf"); }
+    :root { --navy:#002F6C; --orange:#F57F29; --ink:#12305a; --cream:#F7F3EA; --mist:#E7EFF6; }
+    * { box-sizing:border-box; }
+    html, body { margin:0; min-height:100%; background:#0e2444; }
+    body { font-family:Montserrat,Arial,sans-serif; }
+    #grid { display:grid; grid-template-columns:repeat(3, 1080px); gap:18px; padding:18px; width:max-content; }
+    body.single #grid { display:block; padding:0; }
+    body.single .card { display:none; }
+    body.single .card.selected { display:block; }
+    .card { position:relative; width:1080px; height:1350px; overflow:hidden; color:var(--ink); background:var(--cream); }
+    .brand { position:absolute; left:74px; bottom:62px; font:700 34px Oswald, sans-serif; letter-spacing:.04em; color:var(--navy); }
+    .brand::after { content:""; display:inline-block; width:42px; height:5px; margin:0 0 8px 12px; background:var(--orange); }
+    .territory { position:absolute; right:72px; bottom:66px; font-size:15px; font-weight:700; letter-spacing:.07em; color:#5b6d83; text-transform:uppercase; }
+    .eyebrow { font:700 23px Oswald, sans-serif; letter-spacing:.12em; color:var(--orange); }
+    .headline { margin:0; font:700 98px/.97 Oswald, sans-serif; letter-spacing:.006em; text-transform:uppercase; }
+    .sub { font-size:25px; line-height:1.4; color:#475e79; }
+    .orange-line { width:72px; height:8px; background:var(--orange); }
+    /* 01 — annotated lease detail */
+    .terms { background:#f7f1e5; }
+    .terms .eyebrow { position:absolute; top:84px; left:78px; }
+    .terms .orange-line { position:absolute; top:124px; left:78px; }
+    .terms .headline { position:absolute; top:184px; left:76px; width:720px; font-size:112px; color:var(--navy); }
+    .terms .paper { position:absolute; top:638px; right:68px; width:622px; height:470px; padding:54px 52px; background:#fffdf7; border:2px solid #d9d1c1; box-shadow:22px 24px 0 #dbe7f2; transform:rotate(-2deg); }
+    .terms .paper h3 { margin:0 0 25px; font:700 40px Oswald; color:var(--navy); }
+    .terms .paper p { margin:17px 0; font:600 24px Montserrat; color:#253f60; }
+    .terms .paper p::before { content:"+"; color:var(--orange); padding-right:18px; font-size:34px; }
+    .terms .tag { position:absolute; top:742px; left:75px; width:330px; padding:38px 30px; background:var(--orange); color:#fff; transform:rotate(3deg); box-shadow:8px 10px 0 #b85a17; }
+    .terms .tag strong { display:block; font:700 49px/.95 Oswald; text-transform:uppercase; }
+    .terms .tag span { font:600 19px Montserrat; }
+    /* 02 — acquisition split */
+    .deals { background:#e7eef6; }
+    .deals .topbar { position:absolute; top:0; left:0; width:100%; height:87px; background:var(--navy); }
+    .deals .eyebrow { position:absolute; top:144px; left:75px; }
+    .deals .headline { position:absolute; top:196px; left:75px; width:850px; color:var(--navy); }
+    .deals .left-sheet, .deals .right-sheet { position:absolute; top:582px; width:520px; height:490px; padding:55px; }
+    .deals .left-sheet { left:64px; background:#fff; transform:rotate(-4deg); box-shadow:18px 22px 0 #c7d7e7; }
+    .deals .right-sheet { right:62px; background:var(--orange); color:#fff; transform:rotate(4deg); box-shadow:18px 22px 0 #d86619; }
+    .deals .sheet-label { font:700 31px Oswald; letter-spacing:.12em; text-transform:uppercase; }
+    .deals .sheet-title { margin-top:90px; font:700 74px/.9 Oswald; text-transform:uppercase; }
+    .deals .connector { position:absolute; top:795px; left:486px; width:108px; height:108px; border-radius:50%; border:11px solid var(--navy); background:#fff; color:var(--navy); font:700 70px/.95 Oswald; text-align:center; z-index:3; }
+    /* 03 — renewal clock */
+    .renewal { background:#f57f29; color:var(--navy); }
+    .renewal .rings { position:absolute; right:-160px; top:98px; width:900px; height:900px; border:60px solid rgba(255,255,255,.35); border-radius:50%; }
+    .renewal .rings::before { content:""; position:absolute; inset:115px; border:45px solid rgba(0,47,108,.2); border-radius:50%; }
+    .renewal .eyebrow { position:absolute; top:104px; left:78px; color:#fff; }
+    .renewal .headline { position:absolute; top:245px; left:74px; width:780px; font-size:116px; }
+    .renewal .twelve { position:absolute; top:698px; left:82px; font:700 372px/.8 Oswald; color:#fff; letter-spacing:-.04em; }
+    .renewal .months { position:absolute; top:966px; left:392px; font:700 58px/.9 Oswald; letter-spacing:.06em; text-transform:uppercase; }
+    .renewal .note { position:absolute; top:1090px; left:82px; width:660px; font-size:26px; line-height:1.35; color:#fff; font-weight:600; }
+    .renewal .brand, .renewal .territory { color:var(--navy); }
+    /* 04 — data dial */
+    .mob { background:#f9fbfc; }
+    .mob .eyebrow { position:absolute; top:90px; left:76px; }
+    .mob .headline { position:absolute; top:147px; left:76px; width:770px; font-size:94px; color:var(--navy); }
+    .mob .dial { position:absolute; top:493px; left:184px; width:710px; height:710px; border-radius:50%; background:conic-gradient(var(--orange) 0 333.7deg, #d8e2ed 333.7deg 360deg); }
+    .mob .dial::before { content:""; position:absolute; inset:40px; background:#f9fbfc; border-radius:50%; }
+    .mob .percent { position:absolute; top:682px; left:244px; width:590px; text-align:center; font:700 210px/.8 Oswald; color:var(--navy); letter-spacing:-.04em; z-index:2; }
+    .mob .label { position:absolute; top:887px; left:250px; width:580px; text-align:center; font:700 29px Oswald; letter-spacing:.12em; text-transform:uppercase; color:#657993; z-index:2; }
+    .mob .source { position:absolute; top:1073px; left:78px; font-size:20px; font-weight:600; color:#60738d; }
+    /* 05 — myth/reality */
+    .myth { background:#eef3f6; }
+    .myth .side { position:absolute; top:0; right:0; bottom:0; width:255px; background:var(--orange); }
+    .myth .eyebrow { position:absolute; top:90px; left:77px; }
+    .myth .headline { position:absolute; top:144px; left:75px; width:790px; font-size:102px; color:var(--navy); }
+    .myth .myth-box, .myth .real-box { position:absolute; left:75px; width:765px; padding:42px 46px; }
+    .myth .myth-box { top:573px; background:#fff; border-left:16px solid #9aacbd; }
+    .myth .real-box { top:848px; background:var(--navy); color:#fff; border-left:16px solid var(--orange); }
+    .myth .box-kicker { font:700 28px Oswald; letter-spacing:.14em; color:var(--orange); }
+    .myth .myth-box .box-kicker { color:#7890a9; }
+    .myth .box-copy { margin-top:18px; font:700 54px/.98 Oswald; text-transform:uppercase; }
+    .myth .slash { position:absolute; top:655px; right:112px; height:274px; width:18px; background:#fff; transform:rotate(43deg); }
+    .myth .territory { right:18px; width:240px; color:#fff; font-size:13px; line-height:1.25; text-align:right; }
+    /* 06 — market map */
+    .market { background:#e9f0f5; }
+    .market .eyebrow { position:absolute; top:84px; left:76px; }
+    .market .headline { position:absolute; top:138px; left:76px; width:870px; font-size:107px; color:var(--navy); }
+    .market .route { position:absolute; top:680px; left:104px; width:850px; height:250px; border-top:12px solid var(--navy); border-radius:50% 50% 0 0; transform:rotate(-4deg); }
+    .market .route::before { content:""; position:absolute; left:205px; top:-94px; width:420px; height:114px; border-top:11px dashed var(--orange); border-radius:50% 50% 0 0; }
+    .market .dot { position:absolute; width:34px; height:34px; border-radius:50%; background:var(--orange); box-shadow:0 0 0 13px rgba(245,127,41,.22); }
+    .market .city { position:absolute; font:700 25px Oswald; letter-spacing:.08em; color:var(--navy); }
+    .market .city small { display:block; margin-top:3px; font:600 15px Montserrat; letter-spacing:0; color:#657991; }
+    .market .p1 { top:866px; left:120px; } .market .p2 { top:773px; left:340px; } .market .p3 { top:730px; left:610px; } .market .p4 { top:785px; left:847px; }
+    .market .c1 { top:914px; left:86px; } .market .c2 { top:695px; left:292px; } .market .c3 { top:653px; left:566px; } .market .c4 { top:833px; left:796px; }
+    .market .map-note { position:absolute; top:1055px; left:76px; width:750px; font-size:25px; font-weight:600; line-height:1.4; color:#47617e; }
+    /* 07 — field reel */
+    .tour { background:#fffaf0; }
+    .tour .window { position:absolute; top:71px; left:70px; width:940px; height:790px; border:22px solid var(--navy); background:#dbe9f2; box-shadow:22px 22px 0 var(--orange); }
+    .tour .window::before, .tour .window::after { content:""; position:absolute; background:rgba(0,47,108,.2); }
+    .tour .window::before { left:105px; top:152px; width:544px; height:17px; transform:rotate(-21deg); }
+    .tour .window::after { right:95px; bottom:126px; width:420px; height:17px; transform:rotate(18deg); }
+    .tour .frame { position:absolute; top:145px; left:144px; width:330px; height:477px; border:8px solid var(--orange); }
+    .tour .play { position:absolute; top:334px; left:616px; width:140px; height:140px; border-radius:50%; background:var(--navy); }
+    .tour .play::after { content:""; position:absolute; top:39px; left:54px; border-top:31px solid transparent; border-bottom:31px solid transparent; border-left:47px solid #fff; }
+    .tour .eyebrow { position:absolute; top:932px; left:76px; }
+    .tour .headline { position:absolute; top:980px; left:75px; width:890px; font-size:92px; color:var(--navy); }
+    .tour .reel-chip { position:absolute; top:98px; right:99px; padding:12px 18px; background:var(--navy); color:#fff; font:700 22px Oswald; letter-spacing:.1em; }
+    /* 08 — cost of waiting */
+    .waiting { background:#fff; }
+    .waiting .orange-block { position:absolute; top:565px; right:0; width:412px; height:785px; background:var(--orange); }
+    .waiting .eyebrow { position:absolute; top:93px; left:76px; }
+    .waiting .headline { position:absolute; top:151px; left:74px; width:770px; color:var(--navy); }
+    .waiting .steps { position:absolute; top:615px; left:76px; width:775px; }
+    .waiting .step { position:relative; height:116px; margin-bottom:17px; padding:30px 30px 0 118px; background:#edf3f7; font:700 41px/.9 Oswald; text-transform:uppercase; color:var(--navy); }
+    .waiting .step:nth-child(2) { margin-left:55px; background:#dce8f0; } .waiting .step:nth-child(3) { margin-left:110px; background:#c8dce9; } .waiting .step:nth-child(4) { margin-left:165px; background:var(--navy); color:#fff; }
+    .waiting .step b { position:absolute; left:35px; top:22px; color:var(--orange); font:700 58px/.9 Oswald; } .waiting .step:nth-child(4) b { color:#fff; }
+    .waiting .arrow { position:absolute; top:582px; right:105px; font:700 120px/.8 Oswald; color:#fff; transform:rotate(90deg); }
+    .waiting .territory { right:18px; width:240px; color:#fff; font-size:13px; line-height:1.25; text-align:right; }
+    /* 09 — one intentional navy card */
+    .exit { background:var(--navy); color:#fff; }
+    .exit .orange-line { position:absolute; top:88px; left:77px; }
+    .exit .eyebrow { position:absolute; top:127px; left:77px; }
+    .exit .headline { position:absolute; top:208px; left:75px; width:875px; font-size:112px; }
+    .exit .rule { position:absolute; left:77px; top:756px; width:840px; height:2px; background:#5376a2; }
+    .exit .statement { position:absolute; left:77px; top:809px; width:790px; font-size:31px; line-height:1.42; color:#d7e6f2; }
+    .exit .statement strong { color:var(--orange); }
+    .exit .brand { color:#fff; } .exit .territory { color:#a9c4dd; }
+  </style>
+</head>
+<body>
+  <main id="grid"></main>
+  <script>
+    const cards = [
+      {kind:'terms', html:`<div class="eyebrow">LEASE REVIEW</div><div class="orange-line"></div><h1 class="headline">The lease has terms beyond rent.</h1><div class="tag"><strong>Read past<br>the rate.</strong><span>The cost lives in more than one line.</span></div><div class="paper"><h3>What changes the deal?</h3><p>Escalations</p><p>Operating expenses</p><p>Options &amp; assignment</p><p>Build-out timing</p></div>`},
+      {kind:'deals', html:`<div class="topbar"></div><div class="eyebrow">PRACTICE ACQUISITION</div><h1 class="headline">One purchase.<br>Two deals.</h1><div class="left-sheet"><div class="sheet-label">Decision one</div><div class="sheet-title">The<br>practice</div></div><div class="right-sheet"><div class="sheet-label">Decision two</div><div class="sheet-title">The real<br>estate</div></div><div class="connector">+</div>`},
+      {kind:'renewal', html:`<div class="rings"></div><div class="eyebrow">RENEWAL LEVERAGE</div><h1 class="headline">Starts before the letter arrives.</h1><div class="twelve">12</div><div class="months">Months out</div><p class="note">Start early enough to create a real choice. That is what gives a renewal its leverage.</p>`},
+      {kind:'mob', html:`<div class="eyebrow">MEDICAL OUTPATIENT BUILDINGS</div><h1 class="headline">Why good space feels tight.</h1><div class="dial"></div><div class="percent">92.7%</div><div class="label">Occupancy at year-end 2025</div><div class="source">JLL 2026 MOB Perspective · National context, not a local rate quote</div>`},
+      {kind:'myth', html:`<div class="side"></div><div class="eyebrow">TENANT IMPROVEMENTS</div><h1 class="headline">A larger TI package can carry a bad rent.</h1><div class="myth-box"><div class="box-kicker">MYTH</div><div class="box-copy">The biggest concession wins.</div></div><div class="real-box"><div class="box-kicker">REALITY</div><div class="box-copy">Rent adds up every year.</div></div><div class="slash"></div>`},
+      {kind:'market', html:`<div class="eyebrow">LOCAL MARKET NOTE</div><h1 class="headline">The Panhandle holds several markets.</h1><div class="route"></div><div class="dot p1"></div><div class="dot p2"></div><div class="dot p3"></div><div class="dot p4"></div><div class="city c1">PENSACOLA<small>Different supply</small></div><div class="city c2">FORT WALTON<small>Different traffic</small></div><div class="city c3">PANAMA CITY<small>Different leverage</small></div><div class="city c4">TALLAHASSEE<small>Different referral flows</small></div><p class="map-note">The right search area is shaped by the practice, its patients, and its operations.</p>`},
+      {kind:'tour', html:`<div class="window"></div><div class="frame"></div><div class="play"></div><div class="reel-chip">FIELD REEL</div><div class="eyebrow">SITE TOUR</div><h1 class="headline">What a tour can’t show you.</h1>`},
+      {kind:'waiting', html:`<div class="orange-block"></div><div class="arrow">→</div><div class="eyebrow">RENEWAL TIMING</div><h1 class="headline">Waiting costs leverage before the deadline.</h1><div class="steps"><div class="step"><b>01</b>Options</div><div class="step"><b>02</b>Leverage</div><div class="step"><b>03</b>Concessions</div><div class="step"><b>04</b>Choice</div></div>`},
+      {kind:'exit', html:`<div class="orange-line"></div><div class="eyebrow">EXIT PLANNING</div><h1 class="headline">The lease has to work on the day you sell.</h1><div class="rule"></div><p class="statement">Your buyer, lender, attorney, and landlord will all read the lease. <strong>It is part of the exit plan long before the exit.</strong></p>`}
+    ];
+    const grid = document.querySelector('#grid');
+    cards.forEach((card, index) => {
+      const el = document.createElement('article');
+      el.className = `card ${card.kind}`;
+      el.dataset.card = index + 1;
+      el.innerHTML = `${card.html}<div class="brand">CARR.</div><div class="territory">Florida Panhandle &amp; South Alabama</div>`;
+      grid.appendChild(el);
+    });
+    const selected = new URLSearchParams(location.search).get('card');
+    if (selected) { document.body.classList.add('single'); document.querySelector(`[data-card="${selected}"]`).classList.add('selected'); }
+  </script>
+</body>
+</html>
