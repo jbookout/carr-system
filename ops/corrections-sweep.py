@@ -90,10 +90,25 @@ def active_rule_text(cur):
 
 def transcript_corrections(limit_files=None):
     """Partner turns that read as corrections, from his real typed turns only."""
-    import pathlib
-    root = pathlib.Path.home() / ".claude" / "projects"
+    # SCOPED TO THE CARR PROJECT ROOTS, not every project on the machine.
+    #
+    # This walked ~/.claude/projects with rglob, which recurses into EVERY project
+    # directory a session has ever opened here. That is a data-class boundary
+    # crossing rather than a measurement bug: this sweep proposes RULES for the
+    # CARR store from the partner's typed corrections, so a correction he made in
+    # the separate Life AI environment could become a CARR taught rule. Measured
+    # 2026-08-13: 240 CARR transcript files and 13 non-CARR, the latter all
+    # scratchpad and doc-convo tooling — so nothing personal was in fact harvested.
+    # The exposure was structural, and it would have opened the first time he ran a
+    # personal session on this machine.
+    #
+    # Roots come from the instrument that owns them, for the same reason the
+    # partner-turn filter does: that discovery already handles the CARR project
+    # living under two paths after a mount change, and a second copy would be a
+    # second thing to get wrong.
     hits = []
-    files = sorted(root.rglob("*.jsonl"))
+    files = sorted(f for root in _baselines._project_roots()
+                   for f in root.glob("*.jsonl"))
     if limit_files:
         files = files[-limit_files:]
     for f in files:
