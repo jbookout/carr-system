@@ -5458,8 +5458,21 @@ export const TOOLS = {
 export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
+  // not just the refusal. Every non-human door (probe/reviewer/agent-token,
+  // and — since this same day — the LOCAL_TOKENS machine door local-verb.mjs
+  // now uses) refuses here identically, actor.human being the only switch;
+  // this is the one message all of them show. A credential in a config file
+  // must never be able to teach a rule, retire one, confirm a merge, or
+  // reassign a deal — that refusal is a feature. The one deliberate exception
+  // is a receipted local break-glass act (mcp-server/local-verb.mjs), which
+  // still authenticates as a human via ~/.config/carr/local-actor.json, so it
+  // is named too.
   if (tool.humanOnly && !actor.human)
-    throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
+    throw new ToolError({ error: "human_only",
+      hint: "this verb never accepts automation — reconnect through the interactive OAuth " +
+            "connector (Joe's or Dell's own Claude session), or, if there is truly no interactive " +
+            "session available, use a receipted local break-glass act (see mcp-server/local-verb.mjs)" });
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
   // coerceArgsToSchema above for what this fixes and why it is here rather than
   // in the seventeen handlers that would otherwise each need to remember. It
