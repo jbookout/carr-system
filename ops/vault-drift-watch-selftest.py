@@ -565,6 +565,40 @@ def _(assert_):
             f"no compiled-rules path should read as tampered after --only-target: {tampered}")
 
 
+@case("BOTH modes fail closed when the TARGETS registry cannot be imported")
+def _(assert_):
+    # Exercised with a REAL interpreter that cannot import the registry (the
+    # system python3 has no psycopg), because that is the actual cause every
+    # time this has happened -- a caller reaching for `python3` instead of the
+    # venv. Skips rather than lies if that interpreter can import it.
+    probe = subprocess.run(
+        ["/usr/bin/python3", "-c",
+         "import sys; sys.path.insert(0, %r); import exporters.targets" % REPO],
+        capture_output=True, text=True, timeout=60, cwd=REPO)
+    if probe.returncode == 0:
+        print("    (skipped: /usr/bin/python3 can import the registry here)")
+        return
+
+    d = fresh_dirs("registry-fail-closed")
+    write(d["root"], "DNA/compiled-rules-shared.md", "# rules\n")
+    base = ["--root", d["root"], "--manifest", d["manifest"],
+            "--baseline-dir", d["baseline"], "--quarantine-dir", d["quarantine"],
+            "--salvage-manifest", d["salvage"], "--summary", d["summary"]]
+    for mode in ("--rebaseline", "--check"):
+        p = subprocess.run(["/usr/bin/python3", SCRIPT, mode] + base,
+                           capture_output=True, text=True, timeout=60)
+        assert_(p.returncode == 1,
+                f"{mode} should exit 1 without the registry, got {p.returncode}")
+        assert_("FATAL" in p.stderr,
+                f"{mode} should say FATAL, not warn and continue: {p.stderr[:200]}")
+        assert_(".venv/bin/python" in p.stderr,
+                f"{mode}'s error should name the interpreter to use: {p.stderr[:200]}")
+    assert_(not os.path.exists(d["salvage"]),
+            "a refused check must not write salvage rows")
+    assert_(not os.path.exists(os.path.join(d["baseline"], "manifest.json")),
+            "a refused rebaseline must not write a baseline")
+
+
 @case("--only and --only-target together are rejected, rather than one silently winning")
 def _(assert_):
     d = fresh_dirs("only-both")

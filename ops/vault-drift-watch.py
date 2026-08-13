@@ -679,10 +679,28 @@ def run_check(args):
 
     expected, expected_err = load_expected_writers()
     if expected_err:
-        print(f"⚠︎ could not load exporters/targets.py's TARGETS registry "
-              f"({expected_err}) — falling back to the {len(ALWAYS_EXPECTED)} "
-              f"hardcoded compiled-rules paths only. Everything else will read "
-              f"UNEXPECTED until this import is fixed.", file=sys.stderr)
+        # FAIL CLOSED, for the same reason --rebaseline does. This used to warn
+        # and continue, and its own warning stated the consequence: "Everything
+        # else will read UNEXPECTED until this import is fixed." That is not a
+        # degraded check, it is a wrong one. `expected` IS the classifier, so a
+        # check without the registry reclassifies every legitimate export target
+        # as UNEXPECTED and emits dozens of false findings -- each of which
+        # quarantines a copy, writes a salvage row, and, because bin/nightly.sh
+        # runs this step with CARR_DRIFT_INGEST=1, POSTs to the ingest endpoint.
+        # The run then exits 2 (findings), which reads as "drift detected"
+        # rather than "the scanner was blind", and the only thing distinguishing
+        # them is one stderr line nobody reads in a nightly log.
+        #
+        # This is the same defect the --rebaseline side already had and the same
+        # one that produced the 3-path baseline on 2026-08-13T18:21Z. Fixing one
+        # caller and leaving the other is how a class survives its own fix.
+        print(f"FATAL: could not load exporters/targets.py's TARGETS registry "
+              f"({expected_err}). Refusing to run a check whose classifier knows only "
+              f"{len(ALWAYS_EXPECTED)} of the registered paths — every export target "
+              f"would be reported as UNEXPECTED, quarantined and ingested. Run it the "
+              f"way bin/nightly.sh does: ./.venv/bin/python ops/vault-drift-watch.py "
+              f"--check", file=sys.stderr)
+        return 1
 
     corpus_mirror = load_corpus_mirror_set()
 
