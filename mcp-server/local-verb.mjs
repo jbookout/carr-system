@@ -85,6 +85,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { humanOnlyGuidance, isHumanOnlyError } from "./human-only-hint.mjs";
 import { TOOLS, ToolError, executeRegisteredTool } from "./src/tools.js";
 
 // The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
@@ -206,6 +207,9 @@ async function runViaWorker(verbName, verbArgs) {
     let payload;
     try { payload = JSON.parse(text); } catch { payload = { error: "unparseable_tool_error", raw: text }; }
     console.error("TOOL ERROR " + JSON.stringify(payload, null, 2));
+    // The server's hint names the two paths but not the thing a human at this
+    // prompt needs first: that being human here does not satisfy the gate.
+    if (isHumanOnlyError(payload)) console.error(humanOnlyGuidance(verbName));
     process.exit(1);
   }
   let out;
