@@ -109,7 +109,6 @@
     "d9874334": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "capability blocker", "control": "session_boot", "exceptions": "small probe persists denied"},
     "634a2d94": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "approved mechanical task", "control": "conduct_stop", "exceptions": "irreversible/genuine judgment call"},
     "c864b8cb": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "multi-question request", "control": "conduct_stop", "exceptions": "one protected question"},
-    "a225b744": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "human action request", "control": "conduct_stop", "exceptions": "no human action required"},
     "113b3833": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "file lookup", "control": "session_boot", "exceptions": "connector/cloud fallback"},
     "30a189fb": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "non-CARR task", "control": "session_boot", "exceptions": "CARR relevance established"},
     "57d13061": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "X retrieval", "control": "session_boot", "exceptions": "logged-in Chrome-only surface"},
@@ -264,6 +263,6 @@
     "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605"],
     "transactional_schema": ["faf1b643", "54e2bcb9", "c53beeaa", "d7e6de46", "5409731b", "9f15f21a", "23ea0607"],
     "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880"],
-    "session_task_rail": ["236ca227", "25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "a225b744", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5"]
+    "session_task_rail": ["236ca227", "25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5"]
   }
 }
