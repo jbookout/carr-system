@@ -21,9 +21,12 @@
 # local nightly is byte-identical to before this file existed.
 #
 # READ-ONLY, DEDICATED CREDENTIAL. Connects as carr_backup
-# (migrations/0119_backup_role.sql): SELECT on every table in every schema,
-# now and future, and nothing else — no INSERT/UPDATE/DELETE/DDL anywhere,
-# not a member of carr_writer/carr_reader/carr_jobs. A leaked
+# (migrations/0119_backup_role.sql): SELECT on every table in the CARR-owned
+# public and ops schemas, now and future, and nothing else — no
+# INSERT/UPDATE/DELETE/DDL anywhere, not a member of
+# carr_writer/carr_reader/carr_jobs. bin/backup-dump.sh scopes pg_dump to those
+# same schemas; Neon-managed neon_auth is deliberately outside this artifact.
+# A leaked
 # BACKUP_DATABASE_URL secret can produce a read-only copy of the database
 # and nothing more.
 #

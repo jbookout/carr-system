@@ -38,9 +38,17 @@
 #   BACKUP_OUTPUT_DIR — overrides where the dump (and the size-floor's
 #     previous-dump lookup) lives. Defaults to $REPO/backups, exactly as
 #     before.
+#
+# SCHEMA SCOPE (2026-08-14). The application owns public and ops. Neon Auth
+# owns neon_auth, which is provider-managed identity data and is outside the
+# CARR record-layer backup contract. The dedicated carr_backup role therefore
+# has SELECT only in public+ops, and pg_dump is scoped to the same two schemas.
+# This is both the least-privilege boundary and the restore boundary: Neon
+# recreates its managed services; this artifact restores CARR's schema+data.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/usr/local/opt/node@22/bin:/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
+PG_DUMP_BIN="${PG_DUMP_BIN:-pg_dump}"
 PUBKEY="$(cat "$REPO/backups-public-key.txt")"
 if [ -n "${BACKUP_DATABASE_URL:-}" ]; then
   URL="$BACKUP_DATABASE_URL"
@@ -64,7 +72,8 @@ OUT="$OUTDIR/carr-$STAMP.sql.age"
 # We restore SCHEMA AND DATA, never the source cluster's permission model: roles
 # and grants are rebuilt by the migrations, which are in git. Dropping them from
 # the dump costs nothing and is what makes it portable.
-if ! pg_dump --no-owner --no-acl "$URL" | age -r "$PUBKEY" > "$OUT.tmp"; then
+if ! "$PG_DUMP_BIN" --no-owner --no-acl --schema=public --schema=ops "$URL" \
+     | age -r "$PUBKEY" > "$OUT.tmp"; then
   echo "DUMP FAILED (pg_dump or age exited non-zero) — aborting, previous backups untouched" >&2
   rm -f "$OUT.tmp"
   exit 1
