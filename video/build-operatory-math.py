@@ -5,6 +5,7 @@ Mixed beats: private-practice footage + animated stat cards (counters, cost stac
 Numbers are a conservative illustrative model from cited industry benchmarks
 (production/op $300-600K; buildout $150-350/sqft; TI $50-100/sqft dental)."""
 import json, pathlib, subprocess, sys, time
+from typing import Any
 
 PIPE = pathlib.Path.home() / "Movies/CARR Video Pipeline"
 BROLL = "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Stock/broll"
@@ -23,7 +24,11 @@ IMPACT = AUD / "sfx/cinematic-whoosh-deep-impact.mp3"
 OPER = f"{BROLL}/dental-operatory-pan_AS493460578.mov"
 RECEP = f"{BROLL}/clinic-reception-waiting_AS515592805.mov"
 
-SHOTS = [
+# ANNOTATED because the shots are deliberately heterogeneous — a stat card and a
+# footage beat carry different keys — so mypy infers dict[str, object] from the
+# literal and every s["dur"] becomes an object it refuses to add. The annotation
+# states the shape the file already relies on rather than casting at each use.
+SHOTS: list[dict[str, Any]] = [
     {"src": OPER, "dur": 5.0, "pushIn": 1.06, "line": "Out of operatories? Run this math."},
     {"type": "stat", "kind": "counter", "dur": 5.0,
      "title": "One general operatory can produce",
@@ -47,7 +52,7 @@ SHOTS = [
      "sub": "net cost paid back in about 13 months"},
     {"src": OPER, "dur": 5.0, "pushIn": 1.08, "line": "The right space can pay for itself. Run your numbers first."},
 ]
-ENDCARD = {"dur": 4.5, "name": "Joe Bookout", "title": "HEALTHCARE REAL ESTATE | CARR",
+ENDCARD: dict[str, Any] = {"dur": 4.5, "name": "Joe Bookout", "title": "HEALTHCARE REAL ESTATE | CARR",
            "tagline": "Tenant and buyer representation only"}
 
 total = sum(s["dur"] for s in SHOTS) + ENDCARD["dur"]
