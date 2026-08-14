@@ -395,6 +395,78 @@ def test_dep_check_detects_a_stale_lock():
         check("a comment-only edit does NOT invalidate the lock", p.returncode == 0)
 
 
+def test_types_class_catches_a_seeded_type_error():
+    """The `types` class must REFUSE a type error, not merely exist.
+
+    The class landed in #60 and was proven to block BY HAND. No test was left
+    behind, and this is the class that most needs one on its own evidence: #60's
+    commit message records that its first attempt at that proof was a FALSE PASS.
+    The seed was appended to tools/health-check.py, whose module body ends in
+    sys.exit(rc); everything after a NoReturn call at module level is unreachable,
+    mypy does not check unreachable code, and so the test measured dead code
+    while reporting that the gate worked.
+
+    That is exactly the failure this file leads with — a check reporting green
+    having examined nothing — and a hand-run proof does not stop it returning on
+    the next edit. Three PRs (#60, #65, #67) rewrote this class inside one hour,
+    one of them silently dropping the exit-78 branch, which is the rate of change
+    a permanent test is for.
+
+    MODULE LEVEL IS LOAD-BEARING: mypy.ini sets check_untyped_defs = False, so an
+    error inside an unannotated function body is not reported at all and this
+    test would pass for the wrong reason a second time.
+    """
+    fixture = "tools/_ci_selftest_types_fixture.py"
+    with seeded_paths(fixture):
+        rc, out = run(["--only", "types"])
+        check("types passes on the committed tree", rc == 0,
+              f"rc={rc} out={out[-400:]}")
+
+        (REPO / fixture).write_text(
+            "# fixture written by ops/ci-selftest.py — removed on exit.\n"
+            "# Module level on purpose: check_untyped_defs = False means an error\n"
+            "# inside an unannotated function body would not be reported at all.\n"
+            "x: int = 'not an int'\n")
+        rc, out = run(["--only", "types"])
+        check("a seeded type error makes the types class FAIL", rc == 1,
+              f"rc={rc} out={out[-400:]}")
+        check("the failing run names the types class",
+              "types" in ANSI.sub("", out).lower(), f"out={out[-400:]}")
+
+    rc, out = run(["--only", "types"])
+    check("removing the seed turns the types class green again", rc == 0,
+          f"rc={rc} out={out[-400:]}")
+
+
+def test_type_check_script_resolves_mypy_in_both_homes():
+    """bin/type-check.sh runs in two environments and must not fork.
+
+    Joe's Mac has a .venv; the GitHub runner pip-installs requirements.lock into
+    the system python and has none. The script prefers the venv and falls back to
+    PATH.
+
+    THE EXIT-78 BRANCH IS PINNED HERE BECAUSE IT WAS ALREADY LOST ONCE. Absent
+    mypy exits 78 (EX_CONFIG), which ci.sh must read as SKIP — a skip that
+    --strict then refuses in CI, so the check cannot go quietly missing while
+    a machine without mypy is not told it has type errors. Two sessions built
+    this class in parallel on 2026-08-14 and the one WITHOUT that branch merged
+    second (#65 over #60), so a machine with no mypy read "mypy found shape
+    mistakes": a false failure carrying a false explanation. #67 restored it.
+    Nothing but a test stops the third rewrite dropping it again.
+    """
+    src = (REPO / "bin" / "type-check.sh").read_text()
+    ci = CI.read_text()
+    check("type-check.sh falls back to mypy on PATH", "command -v mypy" in src)
+    check("absent mypy exits 78 (EX_CONFIG), not 0", "exit 78" in src)
+    check("ci.sh still reads 78 as a SKIP rather than a type failure",
+          re.search(r'-eq 78 \]', ci) is not None and
+          re.search(r'skip types', ci) is not None)
+    check("mypy is pinned in the lockfile so the runner has it",
+          "mypy==" in (REPO / "requirements.lock").read_text())
+    check("ci.sh's types class calls the script rather than mypy directly",
+          "bin/type-check.sh" in ci)
+
+
 def test_lock_is_not_platform_specific():
     """pip freeze drops environment markers, which made the lock Mac-only and
     killed the first CI run on pyobjc. Anything darwin-only must carry its
@@ -512,6 +584,8 @@ def main():
                test_tracked_scripts_are_executable_in_git,
                test_secret_scanner_catches_and_respects_allow,
                test_dep_check_detects_a_stale_lock,
+               test_types_class_catches_a_seeded_type_error,
+               test_type_check_script_resolves_mypy_in_both_homes,
                test_lock_is_not_platform_specific,
                test_migration_filenames_match_the_runner,
                test_known_gaps_all_expire,
