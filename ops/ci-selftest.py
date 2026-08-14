@@ -395,6 +395,54 @@ def test_dep_check_detects_a_stale_lock():
         check("a comment-only edit does NOT invalidate the lock", p.returncode == 0)
 
 
+def test_typecheck_catches_a_seeded_type_error():
+    """The typecheck class must actually fail on a type error, not just exist.
+
+    Wired into CI 2026-08-14. The tripwire had run since 2026-08-06 but ONLY in
+    bin/nightly.sh, so a shape mistake merged green and went red hours later at
+    2am — which is how four incidents and a morning of chasing were produced on
+    2026-08-14 alone. A class that is listed but does not refuse would restore
+    exactly that gap while looking like it had closed it.
+
+    The fixture error is at MODULE level on purpose: mypy.ini sets
+    check_untyped_defs = False, so an error inside an unannotated function body
+    would not be reported and this test would pass for the wrong reason.
+    """
+    fixture = "tools/_ci_selftest_typecheck_fixture.py"
+    with seeded_paths(fixture):
+        rc, out = run(["--only", "typecheck"])
+        check("typecheck passes on the committed tree", rc == 0,
+              f"rc={rc} out={out[-400:]}")
+
+        (REPO / fixture).write_text(
+            "# fixture written by ops/ci-selftest.py — deleted on exit\n"
+            "x: int = 'not an int'\n")
+        rc, out = run(["--only", "typecheck"])
+        check("a seeded type error makes the typecheck class FAIL", rc == 1,
+              f"rc={rc} out={out[-400:]}")
+        check("the failure names the class", "typecheck" in out.lower(),
+              f"out={out[-400:]}")
+
+
+def test_type_check_script_is_portable():
+    """bin/type-check.sh must run on the GitHub runner, not just on Joe's Mac.
+
+    Both of these were real: a #!/bin/zsh shebang that ubuntu-latest cannot
+    execute, and a hardcoded ./.venv/bin/mypy that does not exist there because
+    the workflow pip-installs requirements.lock into the system python. Either
+    one makes CI's copy of this check behave differently from the nightly's —
+    the precise failure rule a8c55a47 exists to prevent.
+    """
+    src = (REPO / "bin" / "type-check.sh").read_text()
+    check("type-check.sh does not require zsh", not src.startswith("#!/bin/zsh"),
+          "ubuntu-latest has no zsh")
+    check("type-check.sh falls back to mypy on PATH", "command -v mypy" in src)
+    check("type-check.sh refuses rather than passing when mypy is absent",
+          "exit 2" in src)
+    check("mypy is pinned in the lockfile so the runner has it",
+          "mypy==" in (REPO / "requirements.lock").read_text())
+
+
 def test_lock_is_not_platform_specific():
     """pip freeze drops environment markers, which made the lock Mac-only and
     killed the first CI run on pyobjc. Anything darwin-only must carry its
@@ -512,6 +560,8 @@ def main():
                test_tracked_scripts_are_executable_in_git,
                test_secret_scanner_catches_and_respects_allow,
                test_dep_check_detects_a_stale_lock,
+               test_typecheck_catches_a_seeded_type_error,
+               test_type_check_script_is_portable,
                test_lock_is_not_platform_specific,
                test_migration_filenames_match_the_runner,
                test_known_gaps_all_expire,

@@ -56,7 +56,7 @@ REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "ops" / "githooks" / "pre-commit"
 
 passed = 0
-failures = []
+failures: list[str] = []
 
 
 def check(name, cond, detail=""):

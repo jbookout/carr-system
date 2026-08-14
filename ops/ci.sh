@@ -87,12 +87,13 @@ done
 # mean this script behaved differently in its two callers — which is the exact
 # failure this one-script design exists to prevent. Plain arrays and a case
 # statement run identically on both.
-CLASS_ORDER="unit contract gates secret dependency migration binding artifact"
+CLASS_ORDER="unit contract typecheck gates secret dependency migration binding artifact"
 
 class_desc() {
   case "$1" in
     unit)       echo "seeded failing unit test" ;;
     contract)   echo "seeded auth/schema contract break" ;;
+    typecheck)  echo "seeded type error in a data hand-off" ;;
     gates)      echo "seeded enforcement-layer regression" ;;
     secret)     echo "seeded credential in the tree" ;;
     dependency) echo "seeded unpinned or vulnerable dependency" ;;
@@ -171,6 +172,33 @@ check_contract() {
     bad contract "contract checks failed:$failures"
   else
     ok contract "workspace + control-room contracts validate"
+  fi
+}
+
+# ---------------------------------------------------------------- typecheck
+# Wired in 2026-08-14. bin/type-check.sh had existed since 2026-08-06 but ran in
+# ONE caller — bin/nightly.sh. So the sequence for a shape mistake was: push it,
+# watch CI go green, merge, and read about it at 2am when the nightly went red.
+# That is not hypothetical. On 2026-08-14 the tripwire went to zero, was back to
+# 12 errors within the hour from two files written in parallel, and produced a
+# SEV-2 incident plus a morning of chasing. A third file (ops/main-commit-gate-
+# selftest.py) landed the same defect while this very check was being written.
+#
+# Same script, both callers (rule a8c55a47) — this deliberately does NOT restate
+# mypy's target list, because a second copy of that list is the thing that drifts.
+check_typecheck() {
+  if [ ! -f ./bin/type-check.sh ]; then
+    skip typecheck "bin/type-check.sh not present in this checkout"
+    return
+  fi
+  # NOT a skip when mypy is missing: the script itself exits 2 and says how to
+  # install it. A type check that quietly did not run is the same lie as a green
+  # CI that executed nothing — the defect this file's own selftest leads with.
+  if run_quiet "$LOGDIR/typecheck.log" sh ./bin/type-check.sh; then
+    ok typecheck "mypy clean across the swept tree"
+  else
+    tail -25 "$LOGDIR/typecheck.log" >&2
+    bad typecheck "mypy reports type errors"
   fi
 }
 
