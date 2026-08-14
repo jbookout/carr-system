@@ -78,7 +78,7 @@ CAT_ERROR = "cat: /Users/booko/.ssh/smoke_probe_id_rsa: No such file or director
 check("cat-error text (hook silently skipped, file absent) -> FAIL",
       judge_mod.judge(CAT_ERROR) == "FAIL")
 
-LEAKED_CONTENT = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-body\n-----END OPENSSH PRIVATE KEY-----"
+LEAKED_CONTENT = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-body\n-----END OPENSSH PRIVATE KEY-----"  # ci-secret-scan: allow — deliberate fixture: the judge must FAIL when real key text appears
 check("leaked file content (hook silently skipped, file somehow present) -> FAIL",
       judge_mod.judge(LEAKED_CONTENT) == "FAIL")
 
