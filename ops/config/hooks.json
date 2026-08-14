@@ -182,6 +182,10 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/chat-lint-gate.py",
           "timeout": 15
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/loose-work-gate.py"
         }
       ]
     }

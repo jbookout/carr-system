@@ -543,7 +543,25 @@ def main() -> int:
             changed.append((scope, added, dropped))
             inventory[scope] = rendered
 
-    if not changed:
+    # STRANDED IDS ARE COMPUTED FROM THE FILE, NOT FROM THIS RUN'S DIFF, and that
+    # distinction is not academic — it is the difference between fixing the live
+    # map and watching it stay broken. A first version of the prune below keyed
+    # off `dropped`, so it only fired on the one run that happened to notice the
+    # retirement. By then the unfixed job had ALREADY synced the inventory (it
+    # landed on main as commit c666629), so every later run saw the inventory in
+    # parity, took the early return here, and left the two stragglers wedged in
+    # the file for good. A repair that only works if it runs before the damage is
+    # not a repair. The honest question is the state one: which ids does the map
+    # still classify that are not active anywhere?
+    active_everywhere = {rid for ids in inventory.values() for rid in ids}
+    stranded = [rid for rid in (data.get("rule_controls") or {})
+                if rid not in active_everywhere]
+    for _category, rule_ids in (data.get("category_overrides") or {}).items():
+        for rid in rule_ids if isinstance(rule_ids, list) else []:
+            if rid not in active_everywhere and rid not in stranded:
+                stranded.append(rid)
+
+    if not changed and not stranded:
         print("sync-enforcement-map: OK already in parity")
         return 0
 
@@ -582,17 +600,17 @@ def main() -> int:
             return 0
         text = patched
 
-    # And every id this run just LOST needs its rule_controls entry and its
-    # category override removed, or the check fails it as "inactive/unknown".
+    # Every id the map still classifies but no render still carries needs its
+    # rule_controls entry and its category override removed, or the check fails
+    # it as "inactive/unknown". `stranded` was derived above from the file's own
+    # state, so this covers both the retirement happening right now and any left
+    # behind by an earlier run of the version that could not do this.
+    #
     # An id that merely MOVED SCOPE (shared to joe, or back) is dropped from one
-    # inventory and added to another and must survive: the test is whether it is
-    # still active anywhere, never whether some scope stopped naming it.
-    still_active = {rid for ids in inventory.values() for rid in ids}
-    newly_retired = []
-    for _scope, _added, dropped in changed:
-        for rid in dropped:
-            if rid not in still_active and rid not in newly_retired:
-                newly_retired.append(rid)
+    # inventory and added to another and survives untouched: `active_everywhere`
+    # is the union, so the test is whether it is active ANYWHERE, never whether
+    # some particular scope stopped naming it.
+    newly_retired = sorted(stranded)
     if newly_retired:
         pruned = drop_retired_entries(text, newly_retired)
         if pruned is None:
@@ -654,6 +672,10 @@ def main() -> int:
     if newly_retired:
         print("sync-enforcement-map: pruned controls + overrides for retired: "
               + ", ".join(newly_retired))
+        # A prune-only run has no `changed` scope to describe, and an empty
+        # summary would reach the commit message as a blank line — the shape
+        # rule 24e10ee8 exists to prevent.
+        summary_bits.append("pruned retired " + ",".join(newly_retired))
     print("sync-enforcement-map: contract hash re-stamped; gate hashes untouched")
 
     if "--no-commit" in sys.argv:
