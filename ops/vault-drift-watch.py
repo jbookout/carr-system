@@ -353,17 +353,20 @@ def scan(root):
 # this way merging PR #57's DERIVED_DIRS change against the manifest-
 # verification work below — verification supersedes blanket exclusion
 # wherever the two approaches would otherwise collide on this one path.
-# Graph/ (no -System) is the SAME writer class again, missed a second time:
-# pipelines/build-graph-notes.py + build-graph-structure.py (both run by
-# `./run.sh graph`) wipe and atomically rebuild the whole Graph/ entity tree
-# from record-layer views on every run. Unregistered, each regeneration
-# false-flagged its files as UNEXPECTED in the ingest_inbox review queue
-# (confirmed 2026-08-14: Graph/leads/Blair Stiles (lead).md and Graph/leads/
-# Jeff Yee (lead).md, both verified by hand and rejected). The trailing slash
-# in each key keeps the two prefixes independent — "Graph-System/…" does not
-# startswith "Graph/" — so neither entry can shadow the other's writer label.
 DERIVED_DIRS = {
     "Graph-System/": "./run.sh graph-system",
+    # Graph/ belongs here for exactly the same reason, and its absence failed
+    # the nightly chain on 2026-08-14: 0 TAMPER + 4 UNEXPECTED, two of them
+    # lead notes for two leads added that day. pipelines/build-graph-notes.py
+    # WIPES AND REBUILDS this whole directory on every run — run.sh's own
+    # comment beside the graph target says so, and warns that the hub pass must
+    # follow it for that reason. So every new lead, client or vendor produced a
+    # file no writer claimed, and ordinary business activity read as drift.
+    #
+    # Left unfixed this is the alarm-that-fires-every-day problem the chain has
+    # already been burned by twice (see the ORDER 2 addendum note in
+    # bin/nightly.sh): a check that goes red on normal work teaches people to
+    # stop reading it, and then it is worth nothing on the night it matters.
     "Graph/": "./run.sh graph",
 }
 

@@ -478,6 +478,37 @@ def _(assert_):
             f"an ordinary hand-authored .md must still be UNEXPECTED: {hand}")
 
 
+@case("Graph/ is a derived writer too, so a new lead note is not drift")
+def _(assert_):
+    # WHY THIS CASE EXISTS. On 2026-08-14 the nightly check failed exit 2 on
+    # 0 TAMPER + 4 UNEXPECTED, and two of the four were lead notes under Graph/
+    # for two leads added that day. pipelines/build-graph-notes.py WIPES AND
+    # REBUILDS Graph/ on every run — run.sh's own comment beside the graph
+    # target says exactly that — which is the same relationship
+    # build-system-graph.py has to Graph-System/. Only the latter was
+    # registered, so ADDING A LEAD, ordinary business activity, failed the
+    # nightly chain, and would have failed it again for every future lead.
+    #
+    # The fixture name is deliberately not a real person: a selftest that
+    # carries live lead names puts client-identifying data in the repo for no
+    # test benefit.
+    d = fresh_dirs("derived-graph")
+    write(d["root"], "Graph/leads/Example Lead (lead).md", "# lead\n")
+    write(d["root"], "hand-authored.md", "# mine\n")
+    rc, out, err = run(d)
+    assert_(rc == 0, f"seed run should exit 0, got {rc}\nstderr={err}")
+    lead = [ln for ln in out.splitlines() if "Graph/leads/" in ln]
+    assert_(lead, "the Graph/ lead note should appear in the report")
+    assert_(all("UNEXPECTED" not in ln for ln in lead),
+            f"Graph/ must not classify as UNEXPECTED: {lead}")
+    assert_(any("derived" in ln for ln in lead),
+            f"Graph/ should classify as a derived writer: {lead}")
+    # The blanket stays narrow: Graph/ is regenerated wholesale, the vault is not.
+    hand2 = [ln for ln in out.splitlines() if "hand-authored.md" in ln]
+    assert_(any("UNEXPECTED" in ln for ln in hand2),
+            f"a hand-authored .md outside Graph/ must still be UNEXPECTED: {hand2}")
+
+
 # ---------------------------------------------------------------- v4 cases
 # (portability-mirror hash verification. 2026-08-14: the mirror's own 224
 # regenerated .md files were landing as UNEXPECTED every night — the tamper
