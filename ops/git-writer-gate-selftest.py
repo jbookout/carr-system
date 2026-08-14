@@ -144,6 +144,12 @@ def main():
         if os.path.isdir(wt_root) else None
     if live_wt:
         SAFE.append(("wt-branch-op", f"cd {live_wt} && git checkout -b probe"))
+        # The RELATIVE form, which is how these commands are actually written
+        # and which the first version of this exemption missed entirely — it
+        # resolved against the hook's cwd, so the very first real use after it
+        # shipped was refused.
+        rel = os.path.relpath(live_wt, REPO)
+        SAFE.append(("wt-branch-op-rel", f"cd {REPO} && cd {rel} && git checkout -b probe"))
     else:
         print("  SKIP wt-branch-op      (no worktree exists to run one in)")
     print()

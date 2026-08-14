@@ -162,12 +162,24 @@ def target_tree(cmd):
             raw = next((g for g in m.groups() if g), None)
             if not raw:
                 continue
-            try:
-                cand = os.path.realpath(os.path.expanduser(raw))
-            except Exception:
-                continue
-            if cand.startswith(wt_root + os.sep) and os.path.isdir(cand):
-                return cand
+            raw = os.path.expanduser(raw)
+            # A RELATIVE PATH IS THE NATURAL FORM AND WAS BEING MISSED. Commands
+            # here routinely read `cd ~/carr-system && cd .claude/worktrees/x`,
+            # and resolving that against the HOOK's cwd rather than the repo made
+            # the exemption apply only to absolute paths — so the first real use
+            # of it after it shipped was refused. Relative candidates resolve
+            # against REPO, which is the only directory a relative `cd` in these
+            # commands is ever written against.
+            candidates = [raw] if os.path.isabs(raw) else [os.path.join(REPO, raw), raw]
+            for c in candidates:
+                try:
+                    cand = os.path.realpath(c)
+                except Exception:
+                    continue
+                # Still bounded exactly as before: under this repo's own
+                # worktrees directory, and actually present on disk.
+                if cand.startswith(wt_root + os.sep) and os.path.isdir(cand):
+                    return cand
     return None
 
 
