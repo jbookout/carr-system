@@ -324,6 +324,66 @@ export function looksLikeToolCallMarkup(field, value) {
   return false;
 }
 
+// REQUIRED ARGUMENTS, ENFORCED AT THE DOOR (2026-08-14).
+//
+// Every verb declares `required` in its inputSchema and, until this existed,
+// nothing checked it. mcp.js hands rpc.params.arguments through untouched and
+// the local CLI path does the same, so a required field that was misspelled or
+// simply absent arrived as undefined and the handler ran regardless.
+//
+// WHAT THAT PRODUCED, measured live rather than imagined. search-doctrine builds
+// websearch_to_tsquery('english', undefined), which Postgres does not treat as
+// an error — it matches nothing:
+//
+//     search-doctrine {"query":"HIPAA"}  ->  ok:true, hits:[], total:0
+//     search-doctrine {}                 ->  ok:true, hits:[], total:0
+//     search-doctrine {"q":"HIPAA"}      ->  20 hits
+//
+// A call with NO ARGUMENTS AT ALL came back clean and empty.
+//
+// AN EMPTY RESULT IS INDISTINGUISHABLE FROM A GENUINE ABSENCE, which is what
+// makes this worse than a crash. On 2026-08-14 a session searched doctrine for a
+// settled council ruling, got total:0, concluded the ruling did not exist, and
+// filed a defect claiming the doctrine read path was broken. The ruling was
+// there; the parameter name was wrong. Rule c53beeaa already says an ok:true
+// confirms the call PARSED and never that the values landed — this enforces that
+// at the boundary instead of hoping each of a hundred handlers remembers.
+//
+// It sits beside coerceArgsToSchema deliberately, per the same 2026-08-13 ruling
+// that put coercion at the choke point rather than in seventeen handlers.
+//
+// PRESENCE, not truthiness: `false` and `0` are arguments a caller meant. `null`
+// and `""` are what an unfilled template produces and carry no instruction.
+//
+// The near-miss hint is not decoration. The observed failure was a caller who
+// HAD the schema and still sent `query` for `q`, so the error names the field it
+// wanted and echoes the unrecognised keys that were sent instead.
+export function assertRequiredArgs(schema, args) {
+  const required = schema && Array.isArray(schema.required) ? schema.required : null;
+  if (!required || !required.length) return args;
+  const bag = (args && typeof args === "object" && !Array.isArray(args)) ? args : {};
+  const missing = required.filter((k) => {
+    const v = bag[k];
+    return v === undefined || v === null || v === "";
+  });
+  if (!missing.length) return args;
+  const known = new Set(Object.keys(schema.properties || {}));
+  const unrecognised = Object.keys(bag).filter((k) => !known.has(k));
+  const payload = {
+    error: "missing_required",
+    missing,
+    hint: `this verb requires ${missing.map((m) => JSON.stringify(m)).join(", ")}`,
+  };
+  if (unrecognised.length) {
+    payload.unrecognised = unrecognised;
+    payload.hint += `; it received ${unrecognised.map((u) => JSON.stringify(u)).join(", ")}` +
+      `, which it does not accept — check the argument NAME against the schema before` +
+      ` concluding the verb is broken or the answer is empty`;
+  }
+  throw new ToolError(payload);
+}
+
+
 export function coerceArgsToSchema(schema, args, path = "") {
   if (!schema || !args || typeof args !== "object" || Array.isArray(args)) return args;
   const props = schema.properties;
@@ -5652,6 +5712,11 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // runs before the humanOnly-passed handler sees anything, so no verb can read
   // a declared boolean or number in the wrong JS type.
   coerceArgsToSchema(tool.inputSchema, args);
+  // REQUIRED-ARGUMENT CHECK, immediately after coercion so a value that only
+  // becomes present once coerced is judged in its final form. See
+  // assertRequiredArgs above: a missing required field used to reach the
+  // handler as undefined and come back as a confident empty answer.
+  assertRequiredArgs(tool.inputSchema, args);
   // DEFECT 2, HALF (b): every verb funnels through here — the one choke point
   // where a raw DB error can be translated into a clean ToolError before it
   // ever reaches the transport (mcp.js's callTool/dispatch, or local-verb.mjs),
