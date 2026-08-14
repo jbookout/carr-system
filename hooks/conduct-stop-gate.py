@@ -126,6 +126,104 @@ def audit(record):
         pass
 
 
+# ── THE RESEND CARRIES THE DELTA (rule 1d50a3bb) ─────────────────────────────
+#
+# Joe, 2026-08-13, after reading a ~40-line report, having this gate block the
+# turn for one missing verification, and getting the same ~40 lines back with
+# five new ones on top: "why did you just say the same thing twice in a row? I
+# feel like you're just wasting my tokens on purpose." The gate asked for the
+# verification. It did not ask for the report again.
+#
+# It compounds, which is why it needs a mechanism rather than care: these gates
+# fire on long working turns, so the naive response re-sends the biggest
+# possible message at the worst possible moment, and again on the next block.
+#
+# AT MOST ONCE, and that bound is the design. This gate's oldest promise is
+# that it never wedges a session — `stop_hook_active` short-circuits it for
+# exactly that reason. So a blocked message is remembered, used for one
+# comparison, and marked spent in the same read. Whatever the session sends
+# after that, this check stays silent for that turn. A gate that can refuse
+# twice for the same reason is one bad regex away from a session nobody can
+# close.
+DELTA_HOME = os.path.join(REPO, "out", "conduct-gate-blocked")
+# Above this share of the resend already read, it is a repeat rather than a
+# delta. Two thirds leaves generous room for a genuine recap line or two.
+REPEAT_SHARE = 0.66
+# Short replies are all delta by definition; comparing them produces noise.
+MIN_SENTENCES = 4
+
+
+def _sentences(text):
+    """Content lines, normalised. Whitespace and case only — the failure is a
+    message pasted back, not paraphrase, and a fuzzy matcher here would start
+    refusing honest restatements of a fact that genuinely has one wording."""
+    out = []
+    for chunk in re.split(r"(?<=[.!?])\s+|\n+", text or ""):
+        s = " ".join(chunk.split()).strip().lower()
+        if len(s) > 15:                    # skip headers, bullets, one-word lines
+            out.append(s)
+    return out
+
+
+def _delta_path(session_id, home):
+    safe = "".join(c for c in (session_id or "") if c.isalnum() or c in "-_")
+    return os.path.join(home, f"{safe or 'unknown'}.json")
+
+
+def remember_blocked(assistant, session_id, home=DELTA_HOME):
+    """Record the message this gate just blocked. NEVER raises: failing to
+    remember costs one comparison, and raising would cost the session."""
+    try:
+        os.makedirs(home, exist_ok=True)
+        with open(_delta_path(session_id, home), "w") as fh:
+            json.dump({"sentences": _sentences(assistant), "spent": False}, fh)
+    except Exception as exc:                                  # noqa: BLE001
+        dlog(f"delta: could not remember blocked message ({exc})")
+
+
+def repeats_blocked(assistant, session_id, home=DELTA_HOME):
+    """(is_repeat, overlap) for a resend against the remembered blocked message.
+
+    Reading is also SPENDING: the record is marked used before this returns, so
+    the answer can be True at most once per blocked message. Fails OPEN — a
+    missing, empty or corrupt record means no opinion, never a block."""
+    try:
+        path = _delta_path(session_id, home)
+        with open(path) as fh:
+            record = json.load(fh)
+        if record.get("spent"):
+            return False, 0.0
+        before = set(record.get("sentences") or [])
+        now_lines = _sentences(assistant)
+        if not before or len(now_lines) < MIN_SENTENCES:
+            return False, 0.0
+        already_read = sum(1 for s in now_lines if s in before)
+        overlap = already_read / len(now_lines)
+        if overlap < REPEAT_SHARE:
+            return False, overlap
+        record["spent"] = True
+        with open(path, "w") as fh:
+            json.dump(record, fh)
+        return True, overlap
+    except Exception:                                         # noqa: BLE001
+        return False, 0.0
+
+
+DELTA_REASON = (
+    "SEND THE DELTA, NOT THE MESSAGE AGAIN (rule 1d50a3bb).\n\n"
+    "{pct}% of this reply is text Joe has already read. A gate reopened this "
+    "turn to ask for ONE missing thing; supply exactly that, plus at most a "
+    "one-line pointer to what was already said.\n\n"
+    "His words, 2026-08-13: \"why did you just say the same thing twice in a "
+    "row? I feel like you're just wasting my tokens on purpose.\" He had read a "
+    "40-line report, and got the same 40 lines back with a fix on top. "
+    "Everything he had already read was pure cost.\n\n"
+    "THE TEST: which sentences here has he already read? Cut those. If the "
+    "answer is \"all of them except four lines\", send four lines.\n\n"
+    "This check speaks once per turn and will not stop you again."
+)
+
+
 def read_tail(path, limit=400):
     out = []
     with open(path, "r", errors="replace") as fh:
@@ -273,8 +371,38 @@ def main():
         sys.exit(0)
 
     try:
-        # NEVER loop. If we already blocked once this turn, let it through.
+        # NEVER loop on the CONDUCT classes. If we already blocked once this
+        # turn, those let it through — unchanged, and the reason is unchanged:
+        # a wedged session is worse than one offload reaching Joe.
+        #
+        # The delta check is the one thing that runs here instead, because a
+        # resend is the only moment it can possibly apply, and it is bounded to
+        # speak once per blocked message by repeats_blocked() marking the
+        # record spent as it reads it (rule 1d50a3bb).
         if payload.get("stop_hook_active"):
+            path = payload.get("transcript_path")
+            if not path or not os.path.exists(path):
+                sys.exit(0)
+            recs = read_tail(path)
+            resend = ""
+            for r in recs:
+                t = text_of(r, ("assistant",))
+                if t and t.strip():
+                    resend = t.strip()
+            session_id = payload.get("session_id")
+            repeat, overlap = repeats_blocked(resend, session_id)
+            if repeat:
+                audit({
+                    "ts": now(),
+                    "hook": "conduct-stop-gate",
+                    "classes": ["repeated_message"],
+                    "patterns": [f"delta:overlap={overlap:.2f}"],
+                    "session": session_id,
+                    "excerpt": " ".join(resend.split())[:400],
+                })
+                dlog(f"BLOCK delta :: overlap={overlap:.2f}")
+                print(json.dumps({"decision": "block",
+                                  "reason": DELTA_REASON.format(pct=round(overlap * 100))}))
             sys.exit(0)
 
         path = payload.get("transcript_path")
@@ -347,6 +475,11 @@ def main():
             "all ACTIVE and all recited at the start of this session, and were "
             "violated anyway. Prose does not bind; this does."
         )
+
+        # Remember what is being blocked, so the resend can be checked against
+        # it for repetition (rule 1d50a3bb). Never raises; a memory that fails
+        # to write costs one comparison, not the session.
+        remember_blocked(assistant, payload.get("session_id"))
 
         dlog(f"BLOCK {classes} :: {[n for _, n in findings]}")
         print(json.dumps({"decision": "block", "reason": body}))
