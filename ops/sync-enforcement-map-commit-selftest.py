@@ -18,6 +18,22 @@ quietly commits a partner's half-finished work under a gates message.
 Pure and hermetic: builds a throwaway git repo per case, never touches the real
 one, and needs no network (the push failure path is exercised by having no
 remote, which must leave the commit intact and report FAIL rather than crash).
+
+THAT CLAIM WAS FALSE FROM THE FILE'S FIRST DAY UNTIL 2026-08-13, and case 0 now
+tests it rather than asserting it. Two independent leaks, either one sufficient:
+
+  1. GIT_DIR OUTRANKS cwd. `cwd=repo` is not isolation, because git reads GIT_DIR
+     first — and every git hook exports it. ops/githooks/pre-push runs ops/ci.sh,
+     which runs this file, so a plain `git push` made the fixture's own
+     `git config user.email selftest@example.invalid` land in the REAL
+     ~/carr-system/.git/config. The shared repo wore the test's identity.
+  2. THE MODULE'S PATHS WERE FROZEN AT IMPORT. bin/sync-enforcement-map.py had
+     MAP and BASELINE as module constants, so `mod.REPO = repo` redirected its
+     git calls to the fixture while every read and write of the map and the
+     baseline still went to the live checkout.
+
+Both are closed: _fixture_env() strips the redirect variables, and the module
+resolves map_path()/baseline_path() at call time. Loop #367.
 """
 
 import importlib.util
@@ -49,8 +65,47 @@ def load_module_for(repo):
     return mod
 
 
+# Every git variable that can redirect a command AWAY from its cwd. Git reads
+# these before it reads the working directory, so `cwd=repo` is not isolation on
+# its own — it is isolation only when nothing in the environment outranks it.
+_GIT_ENV_OVERRIDES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
+    "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_PREFIX",
+)
+
+
+def _fixture_env():
+    """The environment a fixture git call must run in.
+
+    WHY THIS EXISTS, found live 2026-08-13. `cwd=repo` was believed to be
+    isolation and is not: git honours GIT_DIR over the working directory, and
+    GIT_DIR is EXPORTED BY EVERY GIT HOOK. ops/githooks/pre-push runs ops/ci.sh,
+    ci.sh runs this selftest, and so on a plain `git push` from this machine the
+    fixture's own `git config user.email selftest@example.invalid` was written
+    into the REAL ~/carr-system/.git/config — the shared repo silently took the
+    test's identity, and any commit made in that window was authored by
+    "selftest". Reproduced from a clean clone: exporting GIT_DIR and running
+    this file rewrote the outer repo's user.email every time.
+
+    Stripping the variables is the fix rather than passing `-C repo`, because
+    -C changes the directory and GIT_DIR would still outrank it.
+    """
+    env = dict(os.environ)
+    for var in _GIT_ENV_OVERRIDES:
+        env.pop(var, None)
+    # Belt and braces: read no system or global config either, so the fixture
+    # cannot pick up Joe's identity and, more importantly, a `git config` that
+    # somehow escaped --local has nowhere real to land. Both take FILE paths.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    return env
+
+
 def git(repo, *args):
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True,
+                          text=True, env=_fixture_env())
 
 
 def make_repo():
@@ -74,6 +129,44 @@ def touch(repo, rel, text):
 
 
 print("sync-enforcement-map commit half")
+
+# 0. THE ISOLATION CASE — this file's own promise, tested instead of asserted.
+#
+# The docstring claimed "never touches the real one" for weeks while the file
+# was writing the live repo's config on every run (two independent leaks: paths
+# frozen at import in the module under test, and GIT_DIR outranking cwd here).
+# A promise a test makes about itself has to be a case like any other, or it is
+# just a comment. Builds a throwaway OUTER repo, points GIT_DIR at it the way a
+# git hook does, drives the fixture, and asserts the outer repo is untouched.
+_outer = tempfile.mkdtemp(prefix="syncmap-outer-")
+git(_outer, "init", "-q")
+git(_outer, "config", "user.email", "outer@example.invalid")
+_outer_email_before = git(_outer, "config", "--get", "user.email").stdout.strip()
+_saved_git_dir = os.environ.get("GIT_DIR")
+os.environ["GIT_DIR"] = os.path.join(_outer, ".git")
+try:
+    _probe = make_repo()
+    _probe_mod = load_module_for(_probe)
+    touch(_probe, "ops/config/rule-enforcement-map.json", '{"probe": 1}\n')
+    touch(_probe, "ops/config/gate-baseline.json", '{"probe": 1}\n')
+    _probe_mod.commit_and_push("shared +probe", [])
+finally:
+    if _saved_git_dir is None:
+        os.environ.pop("GIT_DIR", None)
+    else:
+        os.environ["GIT_DIR"] = _saved_git_dir
+
+check("GIT_DIR set: outer repo keeps its own identity",
+      git(_outer, "config", "--get", "user.email").stdout.strip() == _outer_email_before,
+      f"outer user.email became "
+      f"{git(_outer, 'config', '--get', 'user.email').stdout.strip()!r}")
+check("GIT_DIR set: outer repo gains no commits",
+      git(_outer, "log", "--oneline").stdout.strip() == "",
+      f"outer log: {git(_outer, 'log', '--oneline').stdout.strip()!r}")
+check("module writes the FIXTURE's map, not this checkout's",
+      os.path.dirname(os.path.dirname(os.path.dirname(_probe_mod.map_path())))
+      == _probe,
+      f"map_path() resolved to {_probe_mod.map_path()!r}")
 
 # 1. Clean tree: it commits its own pair.
 repo = make_repo()
