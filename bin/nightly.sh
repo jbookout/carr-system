@@ -435,6 +435,23 @@ export HC_BACKUP_RC="$BACKUP_RC"
 export HC_CHAIN_RC="$rc_total"
 step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 
+# ── TURN TONIGHT'S FAILURES INTO INCIDENTS (Program 3, 2026-08-14) ───────────
+# LAST, and after the pings on purpose. Every step above has now recorded its
+# outcome to the job-run ledger, so this sees the whole night rather than a
+# prefix of it. The pings stay ahead of it because a dead-man alarm must not wait
+# on anything that touches the database.
+#
+# WHY IT IS A STEP AND NOT A TAIL COMMAND: a step() call records ITSELF to the
+# ledger, so an assess that starts failing is visible the same way every other
+# step is. An assessment nobody assesses is the blind spot this whole program
+# exists to remove.
+#
+# It opens an incident for each job whose LATEST run failed, appends a fact to
+# one that is already open rather than raising a second, and moves an incident to
+# monitoring when its job starts passing again. It cannot close one — the grant
+# withholds resolved_at, so only a human declares an incident resolved (0117).
+step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/ops-record.py assess --environment production
+
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="
 else
