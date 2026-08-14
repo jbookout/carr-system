@@ -1,4 +1,7 @@
 node_modules/
+# bare form too: worktree plumbing links node_modules as a symlink, and
+# trailing-slash patterns match only real directories (same as .venv/out in root)
+node_modules
 .wrangler/
 .dev.vars
 .dev.vars.*

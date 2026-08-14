@@ -855,6 +855,42 @@ COMMENT ON COLUMN ops.service_environment.expected_cadence_seconds IS 'How long 
 
 
 --
+-- Name: settings_change; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.settings_change (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    kind text NOT NULL,
+    target text NOT NULL,
+    reason text NOT NULL,
+    outcome text NOT NULL,
+    session_id text NOT NULL,
+    actor text,
+    command text,
+    environment text,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    CONSTRAINT a_reason_has_to_say_something CHECK ((length(btrim(reason)) >= 8)),
+    CONSTRAINT settings_change_environment_check CHECK (((environment IS NULL) OR (environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text])))),
+    CONSTRAINT settings_change_outcome_check CHECK ((outcome = ANY (ARRAY['applied'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: TABLE settings_change; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.settings_change IS 'Every change to a control plane this system does not own — GitHub rulesets, Actions variables and secrets, branch protection, launchd jobs, git config, Worker secrets. Written by hooks/settings-change-gate.py AT THE MOMENT OF THE CHANGE, because a record that waits for the session to finish dies with it.';
+
+
+--
+-- Name: COLUMN settings_change.reason; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.settings_change.reason IS 'Why the change was made, in the words of whoever made it. The 2026-08-14 ruleset incident was not a missing change log — it was a missing REASON: the change itself was discoverable from GitHub''s own version history within minutes, and still nobody could tell an authorised change from tampering.';
+
+
+--
 -- Name: v_check_run; Type: VIEW; Schema: ops; Owner: -
 --
 
@@ -8123,6 +8159,14 @@ ALTER TABLE ONLY ops.service
 
 
 --
+-- Name: settings_change settings_change_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.settings_change
+    ADD CONSTRAINT settings_change_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: work_request work_request_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -9470,6 +9514,20 @@ COMMENT ON INDEX ops.run_open_idx IS 'Partial on purpose: terminal runs accumula
 --
 
 CREATE INDEX run_service_env_observed_idx ON ops.run USING btree (service_id, environment, observed_at DESC);
+
+
+--
+-- Name: settings_change_kind_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX settings_change_kind_idx ON ops.settings_change USING btree (kind, recorded_at DESC);
+
+
+--
+-- Name: settings_change_recorded_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX settings_change_recorded_idx ON ops.settings_change USING btree (recorded_at DESC);
 
 
 --
@@ -12440,6 +12498,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0115_ops_observability.sql	b4962c412c5de6c70002ea1b74a8d75f585cbf260a5622e8dd1bd41989c29478	2026-08-14 02:00:09.88795+00
 0116_incident_signature.sql	9267e4799295a3c888a053ce018607140bcca5115b9c38ab77d151f098743070	2026-08-14 11:07:52.632609+00
 0117_collector_incident_grants.sql	25f46a6ade52dbea6a2e6e13072cec0510b992cbfd68424f8f310d0db2bb0e07	2026-08-14 11:21:39.42866+00
+0118_settings_change.sql	062bcfbb196bcd131a185fd045cd4194846623b16e9650858eed2495b1fe8996	2026-08-14 13:08:24.514561+00
 \.
 
 

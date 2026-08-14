@@ -1,0 +1,156 @@
+# carr-system nightly backup — PROGRAM 4, THE MAC-INDEPENDENT COPY.
+# Joe-approved, 2026-08-14.
+#
+# WHY THIS EXISTS. The only nightly backup that has ever run is
+# bin/nightly.sh -> bin/backup-dump.sh on Joe's own Mac. That means the
+# backup of last resort depends on the exact machine everything else
+# depends on: if the Mac is off, asleep, or dead overnight, there is no new
+# encrypted dump that night, and nothing surfaces the gap until a restore
+# actually needs it. This workflow is a second, independent nightly dump —
+# same encryption (age, the repo's tracked public key in
+# backups-public-key.txt), running on GitHub's infrastructure instead of
+# Joe's, stored as a 90-day workflow artifact instead of the R2 archive, so
+# the two paths share no single point of failure.
+#
+# SAME SCRIPT, NOT A SECOND IMPLEMENTATION (rule a8c55a47: a manual path and
+# an automated path doing the same job must be the same code). This
+# workflow calls bin/backup-dump.sh completely unmodified in its command
+# logic. Three env vars — BACKUP_DATABASE_URL, BACKUP_SKIP_R2,
+# BACKUP_OUTPUT_DIR — switch the script onto this path without touching
+# what runs on Joe's Mac every night; all three are unset there, so the
+# local nightly is byte-identical to before this file existed.
+#
+# READ-ONLY, DEDICATED CREDENTIAL. Connects as carr_backup
+# (migrations/0119_backup_role.sql): SELECT on every table in every schema,
+# now and future, and nothing else — no INSERT/UPDATE/DELETE/DDL anywhere,
+# not a member of carr_writer/carr_reader/carr_jobs. A leaked
+# BACKUP_DATABASE_URL secret can produce a read-only copy of the database
+# and nothing more.
+#
+# PROVISIONING — DONE ONCE, BY THE MAIN SESSION, NEVER BY THIS FILE. No
+# secret is created or handled anywhere in this workflow; these three steps
+# are the only place a value is chosen, and none of them touch this repo:
+#   1. carr_backup is created by 0119 with a random, unrecorded placeholder
+#      password and cannot log in until this runs:
+#        alter role carr_backup password '<a real value, chosen by Joe>';
+#   2. Land a full connection string (role carr_backup, that password) as
+#      the repo secret this workflow reads:
+#        gh secret set BACKUP_DATABASE_URL
+#      (paste a postgres://carr_backup:<password>@<host>/<db>?sslmode=require URL when prompted — the neonctl-derivable shape, role carr_backup) # ci-secret-scan: allow — documentation example shape, not a real credential
+#   3. Only once both of the above are done, turn the schedule on:
+#        gh variable set CARR_CLOUD_BACKUP_ENABLED --body true
+# Until step 3, every SCHEDULED run exits neutral-success with a clear log
+# line and touches nothing — merging this file cannot start firing at
+# 02:35 UTC before the secret exists. workflow_dispatch (manual runs) is
+# deliberately exempt from the same gate, the same asymmetry
+# automerge-pilot.yml uses for CARR_AUTOMERGE_PILOT_ENABLED, so the main
+# session can test-run this once BACKUP_DATABASE_URL is set but before
+# flipping the nightly schedule on.
+#
+# ACTIONS ARE PINNED TO COMMIT SHAs, not tags — same rule and the same two
+# pins ci.yml and automerge-pilot.yml already use.
+
+name: Nightly backup (cloud)
+
+on:
+  schedule:
+    # 02:35 UTC. Joe's local nightly chain runs at 02:05 LOCAL time
+    # (bin/nightly.sh) — deliberately offset so the two independent backups
+    # never land in the same minute of GitHub's scheduler queue or the same
+    # moment against Neon.
+    - cron: "35 2 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: carr-nightly-backup-cloud
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    name: pg_dump -> age-encrypt -> artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Gate the schedule on CARR_CLOUD_BACKUP_ENABLED
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ vars.CARR_CLOUD_BACKUP_ENABLED }}" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "CARR_CLOUD_BACKUP_ENABLED is not 'true' and this is a scheduled run — exiting neutral-success, nothing ran."
+            echo "This gate exists so merging backup-nightly.yml cannot start firing at 02:35 UTC before BACKUP_DATABASE_URL is provisioned."
+            echo "Provisioning steps are in this workflow file's own header comment. To test before flipping the switch, run it manually (workflow_dispatch)."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.gate.outputs.enabled == 'true'
+
+      - name: Install postgresql-client-18 (PGDG apt repo) and age
+        if: steps.gate.outputs.enabled == 'true'
+        # Ubuntu's own default postgresql-client is well behind Postgres 18
+        # (the Neon server version), and pg_dump refuses to dump a server
+        # newer than itself — this is the one dependency that cannot be a
+        # version mismatch. The PGDG repo is the project's own; the
+        # codename is read from the runner's own /etc/os-release rather
+        # than hardcoded so this keeps working if/when ubuntu-latest moves
+        # to a newer LTS. zsh: bin/backup-dump.sh's shebang, same reason
+        # ci.yml installs it for bin/review-council-runner.sh. age: Ubuntu's
+        # own universe repo carries it; no PGDG dependency for that one.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl ca-certificates gnupg zsh age
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          printf 'Types: deb\nURIs: https://apt.postgresql.org/pub/repos/apt\nSuites: %s-pgdg\nComponents: main\nSigned-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\n' \
+            "$CODENAME" | sudo tee /etc/apt/sources.list.d/pgdg.sources > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-18
+          pg_dump --version
+          age --version
+
+      - name: Dump, age-encrypt, and check the size floor
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          # Never inline a secret into a run: command — env indirection only,
+          # same as CARR_CI_DATABASE_URL in ci.yml / automerge-pilot.yml.
+          # Not a literal credential (a GitHub secret reference), so
+          # ops/ci-secret-scan.py's dsn-with-password pattern does not match
+          # this line and no inline allow marker is needed.
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          # The runner's disk dies with the job: no local copy to keep, and
+          # no reason to spend the R2 quota on a dump that is about to
+          # become the workflow artifact below.
+          BACKUP_SKIP_R2: "1"
+          BACKUP_OUTPUT_DIR: ${{ github.workspace }}/backup-out
+        run: zsh bin/backup-dump.sh
+        # No separate "verify the size floor" step: bin/backup-dump.sh exits
+        # nonzero on a short dump (see its own SIZE FLOOR comment) and a
+        # failed step here skips every step below by GitHub Actions' own
+        # default — the corrupt/incomplete dump never reaches the artifact
+        # upload.
+
+      - name: Confirm the size floor passed
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          echo "size-floor guard passed (bin/backup-dump.sh would have exited nonzero above otherwise) — uploading."
+          ls -la "${{ github.workspace }}/backup-out"
+
+      - name: Compute the artifact name (YYYYMMDD, UTC — matches the dump's own STAMP)
+        if: steps.gate.outputs.enabled == 'true'
+        id: stamp
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the encrypted dump as a workflow artifact
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: carr-backup-${{ steps.stamp.outputs.date }}
+          path: ${{ github.workspace }}/backup-out/carr-*.sql.age
+          if-no-files-found: error
+          retention-days: 90

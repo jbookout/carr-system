@@ -6,6 +6,10 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>local-briefs</string>
+    <string>launchd.run</string>
+    <string>/bin/zsh</string>
     <string>{{REPO}}/bin/local-briefs.sh</string>
   </array>
   <!-- Weekdays at 06:45 local, ahead of the morning heartbeat so it reads fresh

@@ -83,15 +83,42 @@ JUNK_REASONS = {"", "x", "y", "test", "testing", "tmp", "temp", "n/a", "na", "no
 MIN_REASON_CHARS = 8
 
 
+# A MENTION IS NOT AN INVOCATION, and the difference cost a live block within
+# minutes of this gate shipping. A python heredoc that merely CONTAINED the text
+# `gh api -X DELETE ...` — as an example inside a test — was refused as though it
+# were performing the delete. The store's markup scan already learned this shape:
+# prose ABOUT a defect has to stay writable, or the guard makes the subject
+# undiscussable.
+#
+# So the patterns are matched against COMMAND SEGMENTS that actually start with
+# the tool, not against the whole line. A segment is what follows a shell
+# separator, with any leading VAR=value assignments stripped — which is exactly
+# how `CARR_CHANGE_REASON="..." gh api ...` has to be read anyway.
+_SEPARATORS = re.compile(r"(?:\|\||&&|[;\n|])")
+_ENV_PREFIX = re.compile(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)+")
+_TOOLS = ("gh", "git", "launchctl", "wrangler", "npx")
+
+
+def _invocations(command: str) -> list[str]:
+    """Segments that plausibly RUN something, rather than quote it."""
+    out = []
+    for raw in _SEPARATORS.split(command):
+        segment = _ENV_PREFIX.sub("", raw.strip())
+        head = segment.split(None, 1)[0] if segment.split() else ""
+        head = os.path.basename(head)
+        if head in _TOOLS or head.startswith(("gh", "git", "launchctl", "wrangler")):
+            out.append(segment)
+    return out
+
+
 def classify(command: str) -> tuple[str, str] | None:
     """Return (kind, target) when this command CHANGES a setting, else None."""
-    for pattern, kind in PATTERNS:
-        if pattern.search(command):
-            return kind, _target(command)
-    if GH_API_WRITE.search(command):
-        path = GH_API_SETTINGS_PATH.search(command)
-        if path:
-            return "github_api", _target(command)
+    for segment in _invocations(command):
+        for pattern, kind in PATTERNS:
+            if pattern.search(segment):
+                return kind, _target(segment)
+        if GH_API_WRITE.search(segment) and GH_API_SETTINGS_PATH.search(segment):
+            return "github_api", _target(segment)
     return None
 
 
@@ -116,7 +143,36 @@ def _splittable(command: str) -> bool:
         return False
 
 
-def reason_of() -> str:
+# THE REASON TRAVELS IN THE COMMAND, NOT IN THE HOOK'S ENVIRONMENT.
+#
+# Found by using it, 2026-08-14, minutes after this gate went live. The obvious
+# spelling
+#
+#     CARR_CHANGE_REASON="..." gh api -X DELETE ...
+#
+# sets that variable for the `gh` process inside the shell. The hook is a
+# SEPARATE process that Claude Code spawns carrying the SESSION's environment, so
+# it never sees the prefix — and the gate refused every settings change with no
+# way on earth to satisfy it.
+#
+# The selftest passed anyway, because its harness handed the variable to the
+# hook's own process. That is the same shape as a seeded test error placed in
+# unreachable code: the assertion ran, and it was measuring something the
+# production path never does. Both were caught the same day, both by running the
+# thing rather than reading it.
+#
+# So the reason is parsed out of the COMMAND TEXT, which is what the hook is
+# actually handed. That is also the better design: the reason is visible in the
+# command, travels with it into the transcript, and cannot drift from the change
+# it explains. An exported variable still works as a fallback.
+REASON_IN_COMMAND = re.compile(
+    r"""\bCARR_CHANGE_REASON=(?:"([^"]*)"|'([^']*)'|(\S+))""")
+
+
+def reason_of(command: str = "") -> str:
+    match = REASON_IN_COMMAND.search(command or "")
+    if match:
+        return (match.group(1) or match.group(2) or match.group(3) or "").strip()
     return (os.environ.get("CARR_CHANGE_REASON") or "").strip()
 
 
@@ -201,7 +257,7 @@ def main() -> int:
 
     event = payload.get("hook_event_name") or "PreToolUse"
     session_id = payload.get("session_id") or "unknown"
-    reason = reason_of()
+    reason = reason_of(command)
 
     if event == "PreToolUse":
         if not reason_is_real(reason):

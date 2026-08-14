@@ -76,6 +76,19 @@ OWNED = ["ops/config/rule-enforcement-map.json", "ops/config/gate-baseline.json"
 # pull request beside each. One branch, force-updated, one pull request reused.
 GATES_BRANCH = "gates/enforcement-sync"
 
+# 2026-08-14, rule-enforceability audit (rule ab814a26: "a rule ships with its
+# enforcement decided at creation"). Before this, a newly activated rule that
+# this job picked up got an active_rule_ids entry and NOTHING ELSE — no
+# rule_controls entry at all, which ops/rule-enforcement-map-check.py now
+# refuses outright rather than silently defaulting. This job must never leave a
+# rule it just added in that state, so every id it adds also gets a placeholder
+# entry, honestly marked `unbuilt` rather than guessed at. Classifying a rule
+# (deny_gate vs judgment_ambient vs whatever it turns out to be) is a judgment
+# call this mechanical sync must not make on a human's behalf — see rule
+# 5e89c211, never spend a cognition token on a decision a predicate can make,
+# and the inverse of it: never let a predicate MAKE a decision that needed one.
+PENDING_PLANNED_CONTROL = "pending classification — see rule-enforceability audit 2026-08-14"
+
 
 sys.path.insert(0, os.path.join(REPO, "ops"))
 sys.path.insert(0, REPO)
@@ -349,6 +362,46 @@ def find_vault() -> tuple[str | None, ModuleType]:
     return mod.find_vault(), mod
 
 
+def pending_entry_line(rule_id: str, default_category: str) -> str:
+    """One compact JSON line for a newly-added rule with no classification yet.
+
+    Matches the map file's existing one-object-per-line style for rule_controls
+    entries. `ensure_ascii=False` keeps the em dash literal instead of escaping
+    it to `\\u2014`, matching the plain readable strings already in this file.
+    """
+    obj = {
+        "category": default_category,
+        "enforcement_class": "unbuilt",
+        "planned_control": PENDING_PLANNED_CONTROL,
+    }
+    return f'    "{rule_id}": {json.dumps(obj, ensure_ascii=False)}'
+
+
+def add_pending_rule_controls(text: str, new_ids: list[str], default_category: str) -> str | None:
+    """Append a placeholder rule_controls entry for every id in `new_ids` that
+    the file does not already classify. Returns the rewritten text, or None if
+    the rule_controls block could not be located (the caller SKIPs on None,
+    same convention as every other block lookup in this file).
+
+    Appends rather than reformatting the whole block for the same reason the
+    active_rule_ids rewrite above is a targeted splice and not a json.dump: a
+    full re-render would touch every existing hand-authored line and bury the
+    one real change in a diff nobody could review.
+    """
+    if not new_ids:
+        return text
+    m = re.search(r'("rule_controls": \{\n)(?P<body>.*?)(\n( *)\},\n *"active_rule_ids")',
+                 text, re.S)
+    if not m:
+        return None
+    body = m.group("body").rstrip()
+    if not body.endswith(","):
+        body += ","
+    new_lines = [pending_entry_line(rid, default_category) for rid in new_ids]
+    new_body = body + "\n" + ",\n".join(new_lines)
+    return text[: m.start("body")] + new_body + text[m.end("body") :]
+
+
 def main() -> int:
     if not (os.path.exists(map_path()) and os.path.exists(baseline_path())):
         print("sync-enforcement-map: SKIP map or baseline missing")
@@ -423,6 +476,23 @@ def main() -> int:
         line = m.group("indent") + "  " + ", ".join(f'"{r}"' for r in rendered)
         text = text[: m.start("body")] + line + text[m.end("body") :]
 
+    # Every id this run just added needs a rule_controls entry too, or the
+    # check now fails it outright as "no enforcement-map entry at all" — the
+    # exact silent-default gap the 2026-08-14 audit found. Ids already
+    # classified (a human beat this run to it) are left untouched.
+    existing_controls = set(data.get("rule_controls") or {})
+    newly_added = []
+    for _scope, added, _dropped in changed:
+        for rid in added:
+            if rid not in existing_controls and rid not in newly_added:
+                newly_added.append(rid)
+    if newly_added:
+        patched = add_pending_rule_controls(text, newly_added, data.get("default_category", "judgment_advisory"))
+        if patched is None:
+            print("sync-enforcement-map: SKIP cannot locate rule_controls block in map")
+            return 0
+        text = patched
+
     with open(map_path(), "w") as fh:
         fh.write(text)
 
@@ -431,6 +501,11 @@ def main() -> int:
     for scope, _a, _d in changed:
         if reread["active_rule_ids"][scope] != inventory[scope]:
             print(f"sync-enforcement-map: FAIL {scope} did not land; leaving as-is")
+            return 0
+    for rid in newly_added:
+        entry = reread.get("rule_controls", {}).get(rid)
+        if not isinstance(entry, dict) or entry.get("enforcement_class") != "unbuilt":
+            print(f"sync-enforcement-map: FAIL pending entry for {rid} did not land; leaving as-is")
             return 0
 
     # Re-stamp ONLY this file's contract hash, by targeted replacement so the
@@ -456,6 +531,8 @@ def main() -> int:
             bits.append(f"-{','.join(dropped)}")
         print(f"sync-enforcement-map: SYNCED {scope} {' '.join(bits)}")
         summary_bits.append(f"{scope} {' '.join(bits)}")
+    if newly_added:
+        print("sync-enforcement-map: labeled unbuilt/pending: " + ", ".join(newly_added))
     print("sync-enforcement-map: contract hash re-stamped; gate hashes untouched")
 
     if "--no-commit" in sys.argv:
