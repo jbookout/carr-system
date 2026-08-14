@@ -33,12 +33,42 @@ asking; it can tell that the same session is working through a roster.
 """
 import json
 import os
+import re
 import sys
 import time
 
 STATE = os.path.expanduser("~/.cache/carr/peer-broadcast-gate.json")
 WINDOW_SECONDS = 1800   # 30 minutes: long enough to span one investigation
 MAX_NAMED_PEERS = 2     # the third distinct named peer is a broadcast
+
+# A PEER IS ITS NAME. The ref is a disambiguator, not part of who it is.
+#
+# ListAgents prints `name [ref]`, and SendMessage REQUIRES that form whenever a
+# bare name is ambiguous or unconfirmed: "'x' is not an agent in this
+# conversation. Re-send with the ref to confirm you mean: x [d7e9b2]". This gate
+# keyed on the raw string, so `x` and `x [d7e9b2]` counted as two sessions.
+#
+# That deadlocked on 2026-08-14. A caller who had already reached `x` was told
+# `x [d7e9b2]` was "another one" — while the refusal listed `x` as already
+# messaged in the same sentence — and neither spelling could be sent: the bare
+# name was refused by the tool, the ref-qualified one by this gate. The single
+# targeted message this gate exists to encourage was the one thing that could
+# not be delivered.
+#
+# Anchored to the END and deliberately narrow: only a trailing bracketed token of
+# ref-shaped characters is stripped, so a name that merely contains a bracket is
+# untouched. Reply addresses return before this is ever consulted.
+REF_SUFFIX = re.compile(r"\s*\[[0-9A-Za-z._:-]+\]\s*$")
+
+
+def peer_identity(to: str) -> str:
+    """The stable key for a recipient: its name, with any trailing [ref] removed.
+
+    Falls back to the original string if stripping would leave nothing, so a
+    recipient that is ONLY a bracketed token still counts as a peer rather than
+    collapsing to empty and silently sharing one slot with every other such name.
+    """
+    return REF_SUFFIX.sub("", to).strip() or to
 
 
 def load(now):
@@ -49,8 +79,19 @@ def load(now):
         return {}
     # Drop anything older than the window so a long session is not punished for
     # a burst it sent hours ago.
-    return {who: ts for who, ts in data.items()
-            if isinstance(ts, (int, float)) and now - ts < WINDOW_SECONDS}
+    #
+    # Keys are normalised ON READ, not only on write, so state written before the
+    # ref fix heals itself instead of keeping a session deadlocked until the
+    # window expires. Where both spellings are present the NEWER timestamp wins,
+    # which is what the live path would have recorded had it always normalised.
+    fresh = {}
+    for who, ts in data.items():
+        if not isinstance(ts, (int, float)) or now - ts >= WINDOW_SECONDS:
+            continue
+        key = peer_identity(str(who))
+        if ts > fresh.get(key, 0):
+            fresh[key] = ts
+    return fresh
 
 
 def save(data):
@@ -81,10 +122,13 @@ def main():
     if to.startswith("uds:") or to.startswith("/"):
         return 0
 
+    # Identity is the name; `x` and `x [d7e9b2]` are one peer. See REF_SUFFIX.
+    who = peer_identity(to)
+
     now = time.time()
     seen = load(now)
-    if to in seen:            # re-messaging the same peer is a thread, not fan-out
-        seen[to] = now
+    if who in seen:           # re-messaging the same peer is a thread, not fan-out
+        seen[who] = now
         save(seen)
         return 0
 
@@ -116,7 +160,7 @@ def main():
             file=sys.stderr)
         return 2   # deny
 
-    seen[to] = now
+    seen[who] = now
     save(seen)
     return 0
 

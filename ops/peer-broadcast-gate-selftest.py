@@ -68,6 +68,63 @@ with tempfile.TemporaryDirectory() as d:
     check("continuing a thread with a reached peer stays allowed", codes == [0, 0, 0],
           f"got {codes}")
 
+# 4b. THE SAME PEER UNDER BOTH SPELLINGS IS STILL ONE PEER.
+#
+# The deadlock this closes, hit 2026-08-14. SendMessage refuses a bare name it
+# cannot resolve unambiguously — "'x' is not an agent in this conversation.
+# Re-send with the ref to confirm you mean: x [d7e9b2]" — so the caller must use
+# the ref form. The gate keyed on the raw string, so `x` and `x [d7e9b2]` counted
+# as two different sessions. A caller who had already reached `x` was then told
+# `x [d7e9b2]` was "another one", while the refusal text listed `x` as already
+# messaged in the same sentence. Neither spelling could be sent: bare was refused
+# by the tool, ref-qualified by the gate.
+#
+# Identity is the NAME. The ref is a disambiguator the tool asks for, not part of
+# who the peer is.
+# Asserted with the budget ALREADY FULL, which is the only form that proves
+# anything. With one peer reached there is spare allowance, so a second spelling
+# passes whether or not the gate understands it is the same session — the first
+# draft of these two cases passed against the unfixed gate for exactly that
+# reason. Filling the budget first makes the assertion about identity.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01", d)                       # reached bare
+    run("carr-ai-02 [bbb]", d)                 # budget now full
+    rc, out = run("carr-ai-01 [d7e9b2]", d)    # same peer as the first, ref-qualified
+    check("the ref-qualified form of a peer already reached by bare name is allowed",
+          rc == 0, f"rc={rc}: {out[:200]}")
+
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01 [aaa]", d)                 # reached ref-qualified
+    run("carr-ai-02 [bbb]", d)                 # budget now full
+    rc, out = run("carr-ai-01", d)             # same peer, bare
+    check("and the reverse: bare name after the ref-qualified form is allowed",
+          rc == 0, f"rc={rc}: {out[:200]}")
+
+# The budget must not be spent twice by one peer under two spellings, or two
+# genuine peers become unreachable after one.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01", d)
+    run("carr-ai-01 [aaa]", d)      # same peer, must not consume a second slot
+    rc, out = run("carr-ai-02 [bbb]", d)
+    check("two spellings of one peer consume ONE slot, not two", rc == 0,
+          f"rc={rc}: {out[:160]}")
+
+# And the gate must still count genuinely different peers, ref or not — the fix
+# must not become a way to spend an unlimited budget by varying the suffix.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01 [aaa]", d)
+    run("carr-ai-02 [bbb]", d)
+    rc, _ = run("carr-ai-03", d)
+    check("a genuinely third peer is still refused, bare or not", rc == 2, f"rc={rc}")
+
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01 [aaa]", d)
+    run("carr-ai-02 [bbb]", d)
+    rc, out = run("carr-ai-03 [ccc]", d)
+    check("the refusal lists peers by name, without the ref noise",
+          rc == 2 and "carr-ai-01" in out and "[aaa]" not in out,
+          f"rc={rc}: {out[:200]}")
+
 # 5. It must not touch any other tool.
 with tempfile.TemporaryDirectory() as d:
     run("carr-ai-01 [aaa]", d)
