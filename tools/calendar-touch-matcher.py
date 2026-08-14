@@ -20,6 +20,7 @@ Internal @carr.us addresses are reported separately and never counted as client
 contact.
 """
 
+import json
 import os
 import shutil
 import sqlite3
@@ -125,9 +126,19 @@ def read_calendar(days):
 
 
 def main():
-    days = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DAYS
+    # --json exists so an UNATTENDED caller can act on this instead of a human
+    # reading prose. bin/calendar-eventkit-capture.sh consumes it. The human
+    # report is unchanged and still the default: this adds a mode, it does not
+    # replace one.
+    argv = [a for a in sys.argv[1:] if a != "--json"]
+    as_json = "--json" in sys.argv
+    days = int(argv[0]) if argv else DEFAULT_DAYS
     by_email, by_domain = load_record_contacts()
-    print(f"record contacts loaded: {len(by_email)} emails, {len(by_domain)} domains")
+    # In --json mode stdout must be PARSEABLE and nothing else. This banner went
+    # to stdout ahead of the payload and would have made json.load choke on the
+    # first consumer — caught before shipping, not after.
+    print(f"record contacts loaded: {len(by_email)} emails, {len(by_domain)} domains",
+          file=sys.stderr if as_json else sys.stdout)
 
     rows = read_calendar(days)
     if rows is None:
@@ -153,6 +164,27 @@ def main():
             domain[email] = by_domain[dom]
         else:
             unknown[email] = dom
+
+    if as_json:
+        # EXACT matches only carry a record ref, because only an exact email
+        # match is evidence a named person was in the room. Domain matches say
+        # "someone from that org" and must never become a dated touch on an
+        # individual; they are reported for a human, never auto-logged.
+        json.dump({
+            "ok": True, "days": days,
+            "counts": {"emails": len(latest), "internal": len(internal),
+                       "exact": len(exact), "domain": len(domain),
+                       "unknown": len(unknown)},
+            "exact": [{"email": e, "ref": exact[e][0] if isinstance(exact[e], (list, tuple)) else exact[e],
+                       "label": str(exact[e]), "last_seen": latest[e],
+                       "events": [{"day": d, "title": t} for d, t in events[e][:5]]}
+                      for e in exact],
+            "domain": [{"email": e, "org": str(domain[e]), "last_seen": latest[e]} for e in domain],
+            "unknown": [{"email": e, "domain": d, "last_seen": latest[e]}
+                        for e, d in unknown.items()],
+        }, sys.stdout, indent=1, default=str)
+        print()
+        return 0
 
     print(f"window: last {days} days")
     print(f"distinct attendee emails: {len(latest)}  "
