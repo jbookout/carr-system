@@ -45,7 +45,7 @@ import tempfile
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "bin", "sync-enforcement-map.py")
 
-failures = []
+failures: list[str] = []
 
 
 def check(name, cond, detail=""):

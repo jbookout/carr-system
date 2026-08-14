@@ -15,7 +15,7 @@ import tempfile
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATE = os.path.join(REPO, "hooks", "peer-broadcast-gate.py")
 
-failures = []
+failures: list[str] = []
 
 
 def check(name, cond, detail=""):

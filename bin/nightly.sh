@@ -131,6 +131,33 @@ step() {                        # step <label> <command...>
 say "===== nightly chain begin ====="
 cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
 
+# ── ONE CHAIN AT A TIME (2026-08-14) ─────────────────────────────────────────
+# Until this existed, `./bin/nightly.sh` while the scheduled run was mid-flight
+# gave you two chains against one database and one vault. The measured cost, on
+# 2026-08-14: the second run's vault-drift check read the 30 files the first run
+# had just re-exported and reported all 30 as TAMPER. Nothing had been tampered
+# with — every quarantined diff was one line, the export timestamp. A drift
+# alarm that fires 30 times for a self-inflicted reason is an alarm nobody will
+# read on the night it means something.
+#
+# The false alarm is only the cheap symptom. Two chains also race on the export
+# ledger, the encrypted backup, the drift baseline each of them rewrites at the
+# end, and the consumer rebuilds — and the loser of any of those races writes a
+# file that no longer matches the database it was derived from.
+#
+# A duplicate run is a NO-OP, not a failure: exit 0, before the dead-man pings,
+# so a second run cannot ping /fail for a night the first run is handling fine.
+# The traps are here at top level and not inside carr_take_lock because zsh runs
+# an EXIT trap set inside a function when the FUNCTION returns — see the header
+# of bin/run-lock.sh, where that cost the first cut of this fix.
+source "$REPO/bin/run-lock.sh"
+if ! carr_take_lock nightly >> "$LOG" 2>&1; then
+  say "SKIP  chain already running — this invocation is a no-op (see the LOCKED line above)"
+  exit 0
+fi
+trap 'carr_release_lock; exit 143' INT TERM HUP
+trap 'carr_release_lock' EXIT
+
 # ONE ID FOR THE WHOLE NIGHT. Exported so every step, and anything a step itself
 # records, threads onto the same journey — `tools/ops-record.py trace <id>`
 # returns the night as one chain instead of a text file to read by hand.
@@ -434,6 +461,23 @@ export HC_BACKUP_RC="$BACKUP_RC"
 # stayed red from 08-08 to 08-10 with every dead-man check reporting healthy.
 export HC_CHAIN_RC="$rc_total"
 step "healthchecks dead-man pings"               ./bin/hc-ping.sh
+
+# ── TURN TONIGHT'S FAILURES INTO INCIDENTS (Program 3, 2026-08-14) ───────────
+# LAST, and after the pings on purpose. Every step above has now recorded its
+# outcome to the job-run ledger, so this sees the whole night rather than a
+# prefix of it. The pings stay ahead of it because a dead-man alarm must not wait
+# on anything that touches the database.
+#
+# WHY IT IS A STEP AND NOT A TAIL COMMAND: a step() call records ITSELF to the
+# ledger, so an assess that starts failing is visible the same way every other
+# step is. An assessment nobody assesses is the blind spot this whole program
+# exists to remove.
+#
+# It opens an incident for each job whose LATEST run failed, appends a fact to
+# one that is already open rather than raising a second, and moves an incident to
+# monitoring when its job starts passing again. It cannot close one — the grant
+# withholds resolved_at, so only a human declares an incident resolved (0117).
+step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/ops-record.py assess --environment production
 
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="

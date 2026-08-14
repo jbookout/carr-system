@@ -181,6 +181,90 @@ def load_expected_writers():
         return set(ALWAYS_EXPECTED), f"{type(exc).__name__}: {exc}"
 
 
+def export_target_paths():
+    """target key -> vault-relative path, from the LIVE registry. The ledger
+    stores hashes per TARGET; the tamper pass works in PATHS. Hand-copying the
+    mapping between them is the drift this whole file exists to catch, so it is
+    read from exporters/targets.py or not used at all."""
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from exporters import targets as _targets  # noqa: PLC0415 (deliberate late import)
+        return {key: rel for key, (rel, _builder) in _targets.TARGETS.items()}
+    except Exception:
+        return {}
+
+
+def load_export_ledger():
+    """vault-relative path -> {sha256 the exporter recorded writing there}.
+
+    exporters/common.py stores sha256 of the written file in export_run.file_sha
+    on every LIVE export and never on a draft one, so this is an exact record of
+    what the legitimate writer last put on disk. Returns (ledger, note); note is
+    a human-readable reason when the ledger could not be read, and an unreadable
+    ledger degrades to baseline-only comparison rather than to silence.
+    """
+    env_path = os.path.expanduser("~/.config/carr/db.env")
+    url = os.environ.get("CARR_DB_EXPORTER_URL") or os.environ.get("CARR_DB_JOBS_URL")
+    if not url and os.path.exists(env_path):
+        for key in ("CARR_DB_EXPORTER_URL=", "CARR_DB_JOBS_URL="):
+            for line in open(env_path):
+                if line.startswith(key):
+                    url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+            if url:
+                break
+    if not url:
+        return {}, "no exporter credential — tamper falls back to the baseline alone"
+    paths = export_target_paths()
+    if not paths:
+        return {}, "exporters/targets.py did not import — tamper falls back to the baseline alone"
+    try:
+        import psycopg  # noqa: PLC0415 (deliberate late import; absent in some venvs)
+        with psycopg.connect(url, connect_timeout=15) as conn:
+            cur = conn.cursor()
+            cur.execute("select 1 from information_schema.columns "
+                        "where table_name='export_run' and column_name='file_sha'")
+            if not cur.fetchone():
+                return {}, "export_run.file_sha not present on this database (migration 0073)"
+            cur.execute("""
+                select distinct on (target) target, file_sha
+                  from export_run
+                 where status='ok' and file_sha is not null
+                 order by target, ran_at desc""")
+            ledger = {}
+            for target, sha in cur.fetchall():
+                rel = paths.get(target)
+                if rel:
+                    ledger.setdefault(rel, set()).add(sha)
+            return ledger, None
+    except Exception as exc:
+        return {}, f"{type(exc).__name__}: {exc} — tamper falls back to the baseline alone"
+
+
+def tamper_verdict(relpath, baseline_sha, current_sha, ledger):
+    """None when the file is accounted for; otherwise the reason it is TAMPER.
+
+    Tamper if and only if the bytes on disk match NEITHER the baseline snapshot
+    NOR the last hash the exporter recorded for that path. The second clause is
+    what stops a legitimate re-export between two baselines — the hourly rule
+    refresh, a session's export, a second chain — from reading as tampering. The
+    first clause is what still catches a hand-edit, and it is not negotiable:
+    bytes that no legitimate writer claims are a finding.
+    """
+    if current_sha is None:
+        return "generated file deleted since last rebaseline"
+    if baseline_sha is not None and current_sha == baseline_sha:
+        return None
+    known = ledger.get(relpath)
+    if known and current_sha in known:
+        return None
+    if not known:
+        return ("hash changed since last rebaseline and there is no exporter-recorded "
+                "hash for this target to check it against")
+    return ("hash changed since last rebaseline and does not match what the exporter "
+            "recorded writing (rewritten by something other than the export)")
+
+
 def load_corpus_mirror_set():
     """Vault-relative paths already covered by the EXISTING doctrine-mirror
     drift check (tools/corpus-sync.py, driven off corpus/corpus-set.tsv) — that
@@ -721,33 +805,51 @@ def run_check(args):
                            - datetime.fromisoformat(baseline["generated_at"])).total_seconds() / 3600
         print(f"\nregistry tamper check: baseline {baseline_age_h:.1f}h old, "
               f"{len(bfiles)} registered file(s)")
+        # THE SECOND ORACLE (2026-08-14). The baseline alone cannot tell a
+        # legitimate re-export from a tamper, because the nightly export is not
+        # the only legitimate writer: the hourly rule refresh writes five of
+        # these files, any session running a live export writes them, and every
+        # render carries an `Exported:` timestamp so its bytes change on every
+        # pass regardless. On 2026-08-14 that reported 30 TAMPERs whose entire
+        # diff was that one timestamp line. export_run.file_sha records what the
+        # exporter actually wrote, so it answers the question exactly; see
+        # tamper_verdict for the rule and tools/test-drift-export-ledger.py for
+        # the cases it must satisfy.
+        ledger, ledger_note = load_export_ledger()
+        if ledger_note:
+            print(f"  export ledger UNAVAILABLE ({ledger_note}); a legitimate re-export "
+                  f"since the baseline will read as TAMPER this run")
+        else:
+            print(f"  export ledger: {len(ledger)} target(s) carry a recorded write hash")
+        reexported = []
         for relpath in sorted(bfiles):
             binfo = bfiles[relpath]
             if binfo.get("sha256") is None:
                 continue  # wasn't on disk at rebaseline time either — nothing to compare
             full = os.path.join(root, relpath)
-            if not os.path.isfile(full):
-                tamper_findings.append({
-                    "path": relpath, "type": "tamper",
-                    "reason": "generated file deleted since last rebaseline",
-                    "baseline_sha256": binfo["sha256"], "current_sha256": None,
-                })
+            cur_sha = sha256_of(full) if os.path.isfile(full) else None
+            if cur_sha == binfo["sha256"]:
                 continue
-            cur_sha = sha256_of(full)
-            if cur_sha != binfo["sha256"]:
-                tamper_findings.append({
-                    "path": relpath, "type": "tamper",
-                    "reason": "hash changed since last rebaseline (rewritten outside "
-                              "the nightly export)",
-                    "baseline_sha256": binfo["sha256"], "current_sha256": cur_sha,
-                })
+            reason = tamper_verdict(relpath, binfo["sha256"], cur_sha, ledger)
+            if reason is None:
+                reexported.append(relpath)
+                continue
+            tamper_findings.append({
+                "path": relpath, "type": "tamper", "reason": reason,
+                "baseline_sha256": binfo["sha256"], "current_sha256": cur_sha,
+            })
+        if reexported:
+            print(f"  {len(reexported)} registered file(s) re-exported since the baseline "
+                  f"(bytes match the exporter's own record — not tamper): "
+                  + ", ".join(reexported[:6])
+                  + (f", +{len(reexported) - 6} more" if len(reexported) > 6 else ""))
         if tamper_findings:
             print(f"  {len(tamper_findings)} TAMPERED file(s):")
             for tf in tamper_findings:
                 print(f"    TAMPER  {tf['path']}  ({tf['reason']})")
         else:
-            print("  no tamper detected — every registered file matches its post-export "
-                  "baseline hash")
+            print("  no tamper detected — every registered file matches either its "
+                  "post-export baseline hash or the exporter's own record of writing it")
         new_since_baseline = sorted(p for p in expected if p not in bfiles
                                      and os.path.isfile(os.path.join(root, p)))
         if new_since_baseline:

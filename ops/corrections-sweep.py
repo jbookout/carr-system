@@ -38,14 +38,14 @@ import sys
 from collections import defaultdict
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+from lib.loadpy import load_module_from_path  # noqa: E402
 
 # The partner-turn filter, imported from the instrument that owns it. That module
 # spent weeks with an inverted filter; the fix now carries 25 assertions and a
 # second copy here would be a second thing to get wrong.
-_spec = importlib.util.spec_from_file_location(
+_baselines = load_module_from_path(
     "displacement_baselines", os.path.join(REPO, "tools", "displacement-baselines.py"))
-_baselines = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_baselines)
 
 # A correction is the partner saying the system got it wrong. These are his shapes,
 # taken from turns he actually typed rather than invented: blunt, short, often

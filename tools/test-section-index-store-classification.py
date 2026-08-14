@@ -44,7 +44,7 @@ spec.loader.exec_module(bsi)
 sys.path.insert(0, REPO)
 from lib.record_sources import _strip_vault_prefix  # noqa: E402
 
-failures = []
+failures: list[str] = []
 
 
 def check(name, got, expected):

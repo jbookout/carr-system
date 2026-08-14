@@ -85,9 +85,9 @@ def main() -> int:
             if ALLOWED in line:
                 continue
             if any(m in line for m in MARKERS):
-                rid = re.search(r"`#([0-9a-f]{8})`", line)
+                rid_match = re.search(r"`#([0-9a-f]{8})`", line)
                 hits.append((os.path.basename(path), n,
-                             rid.group(1) if rid else "unknown rule"))
+                             rid_match.group(1) if rid_match else "unknown rule"))
 
     if not hits:
         print("rule-render-markup: OK no tool-call markup in any rule")

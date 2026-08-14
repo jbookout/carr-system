@@ -284,6 +284,46 @@ export function compareVersion(current, baseVersion) {
 // Recursive, because two of the affected flags are not top-level: add-premises
 // carries also_listing_side inside ownership[] and force_new one level deeper
 // inside ownership[].new_party.
+// ── THE MARKUP WRITE DOOR (2026-08-14) ───────────────────────────────────────
+// ops/store-markup-scan.py has been catching this AFTER the fact for weeks: a
+// caller composes several long fields as one block of text, a field swallows its
+// own closing tag, and every parameter after that tag is stored NULL. Six active
+// shared rules carried it on 2026-08-13, the oldest four days old, five with a
+// partner's verbatim quote absorbed into the rule statement.
+//
+// A detector cannot un-write a NULL, and this record layer refuses to edit a
+// closed row on purpose — "a closed loop is history" — so damage that lands and
+// is then closed is permanent. The write door is the only place it can actually
+// be stopped, which is here.
+//
+// CORRUPTION vs MENTION is the same structural test ops/store-markup-scan.py's
+// classify() uses, deliberately, because two doors disagreeing about one row is
+// worse than either rule alone: the field swallowed ITS OWN closing tag, or it
+// carries a bare marker that ate whatever should have followed. Markers quoted
+// in backticks on one line are prose ABOUT the defect — the rule documenting it,
+// the loops that tracked the cleanup, this comment — and must stay writable.
+const TOOL_CALL_MARKERS = ["<parameter", "</parameter", "<invoke", "</invoke"];
+
+export function looksLikeToolCallMarkup(field, value) {
+  if (typeof value !== "string" || value === "") return false;
+  // close_outcome's own closing tag is </outcome>; the scan strips the close_
+  // prefix the same way, and the two must not disagree about the same row.
+  const ownCloser = `</${String(field).replace(/^close_/, "")}>`;
+  if (value.includes(ownCloser)) return true;
+  for (const marker of TOOL_CALL_MARKERS) {
+    let idx = value.indexOf(marker);
+    while (idx !== -1) {
+      const before = value.lastIndexOf("`", idx);
+      const after = value.indexOf("`", idx);
+      const quoted = before !== -1 && after !== -1
+        && !value.slice(before, after).includes("\n");
+      if (!quoted) return true;
+      idx = value.indexOf(marker, idx + 1);
+    }
+  }
+  return false;
+}
+
 export function coerceArgsToSchema(schema, args, path = "") {
   if (!schema || !args || typeof args !== "object" || Array.isArray(args)) return args;
   const props = schema.properties;
@@ -293,6 +333,22 @@ export function coerceArgsToSchema(schema, args, path = "") {
     const v = args[key];
     if (v === undefined || v === null) continue;
     const where = path ? `${path}.${key}` : key;
+    // Refused BEFORE any coercion or type branch: a leaked tag makes the value
+    // wrong whatever its declared type, and the fields this lands in (body,
+    // source_note, outcome) are plain strings that would otherwise sail through
+    // untouched. The error names the field and the fix, because the caller that
+    // does this is mid-way through composing several long fields and needs to be
+    // told which one ran into the next.
+    if (looksLikeToolCallMarkup(key, v)) {
+      throw new ToolError({
+        error: "tool_call_markup_in_value", field: where,
+        hint: `${where} contains tool-call markup (a leaked </${String(key).replace(/^close_/, "")}> `
+          + `or <parameter …> tag). The field ran into the one after it, and every field `
+          + `after the leak would be stored empty. Pass each field as its own argument `
+          + `rather than composing them as one block of text, then retry. Prose ABOUT `
+          + `this defect is allowed when the markers are quoted in backticks.`,
+      });
+    }
     // A union is ambiguous by design; coercing one would destroy the other.
     if (spec.oneOf || spec.anyOf || Array.isArray(spec.type)) continue;
     if (spec.type === "boolean") {
