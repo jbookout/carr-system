@@ -62,6 +62,10 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/staging-observation-tracker.py",
           "timeout": 20
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/settings-change-gate.py"
         }
       ]
     },
@@ -123,6 +127,10 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/staging-observation-tracker.py",
           "timeout": 20
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/settings-change-gate.py"
         }
       ]
     }
