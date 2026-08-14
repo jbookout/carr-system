@@ -477,6 +477,32 @@ def _(assert_):
             f"an ordinary hand-authored .md must still be UNEXPECTED: {hand}")
 
 
+@case("the portability mirror is a known derived writer, not UNEXPECTED")
+def _(assert_):
+    # Added 2026-08-14. The chain's own portability-mirror step writes hundreds
+    # of .md files into Backups/portability-mirror, and on the first clean run
+    # after the tamper fix they came back as 301 UNEXPECTED modifications —
+    # this watch reporting the chain that runs it. Same class as Graph-System/
+    # and the same remedy: a wholesale-regenerated derived tree is named by its
+    # prefix, never enumerated. Its freshness is owned by the health check's
+    # portability-mirror row, so nothing goes unwatched.
+    d = fresh_dirs("mirror")
+    write(d["root"], "Backups/portability-mirror/md/distillation/a-note.md", "# derived\n")
+    write(d["root"], "Backups/portability-mirror/MANIFEST.md", "# manifest\n")
+    write(d["root"], "hand-authored.md", "# mine\n")
+    rc, out, err = run(d)
+    assert_(rc == 0, f"seed run should exit 0, got {rc}\nstderr={err}")
+    mirror = [ln for ln in out.splitlines() if "portability-mirror" in ln]
+    assert_(mirror, "the mirror files should appear in the report")
+    assert_(all("UNEXPECTED" not in ln for ln in mirror),
+            f"the portability mirror must not classify as UNEXPECTED: {mirror}")
+    assert_(any("derived" in ln for ln in mirror),
+            f"the portability mirror should classify as a derived writer: {mirror}")
+    hand = [ln for ln in out.splitlines() if "hand-authored.md" in ln]
+    assert_(any("UNEXPECTED" in ln for ln in hand),
+            f"an ordinary hand-authored .md must still be UNEXPECTED: {hand}")
+
+
 @case("--rebaseline --only re-snapshots the named paths and carries the rest forward")
 def _(assert_):
     d = fresh_dirs("partial")

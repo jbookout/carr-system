@@ -149,6 +149,8 @@ ALWAYS_EXPECTED = {
     "DNA/compiled-rules-shared.md",
     "00_Context/compiled-rules-joe.md",
     "DNA/compiled-rules-dell.md",
+    # written by bin/local-briefs.sh (com.carr.local-briefs), not an export target
+    "00_Context/today.md",
 }
 
 # ---------------------------------------------------------------- ingest wiring
@@ -334,7 +336,21 @@ def scan(root):
 # this reason; this is that same knowledge, applied to the second scanner.
 # Prefix-matched rather than set-matched on purpose: the tree is regenerated
 # wholesale, so its members change nightly and enumerating them would drift.
-DERIVED_DIRS = ("Graph-System/",)
+#
+# Backups/portability-mirror/ joined it on 2026-08-14, and it is THIS CHAIN's
+# own output: the portability-mirror step in bin/nightly.sh writes the whole
+# tree, both copies, every night. On the first clean run after the tamper fix
+# its 301 files came back as UNEXPECTED modifications — the watch reporting the
+# chain that runs it, one layer up from the tamper false positive it had just
+# stopped reporting. Same remedy, same reason it is a prefix: the tree is
+# regenerated wholesale, so enumerating its members would drift within a day.
+# Nothing goes unwatched by this — the mirror's freshness is owned by the health
+# check's portability-mirror row, and its content is a derived copy of the store
+# that is overwritten nightly and never read as a source.
+DERIVED_DIRS = {
+    "Graph-System/": "./run.sh graph-system",
+    "Backups/portability-mirror/": "the portability mirror step in bin/nightly.sh",
+}
 
 
 def classify(relpath, expected, corpus_mirror):
@@ -342,8 +358,9 @@ def classify(relpath, expected, corpus_mirror):
         return "expected-writer: exporter"
     if relpath in corpus_mirror:
         return "expected-writer: corpus-mirror (see tools/corpus-sync.py)"
-    if relpath.startswith(DERIVED_DIRS):
-        return "expected-writer: derived (see ./run.sh graph-system)"
+    for prefix, writer in DERIVED_DIRS.items():
+        if relpath.startswith(prefix):
+            return f"expected-writer: derived (see {writer})"
     return "UNEXPECTED"
 
 
