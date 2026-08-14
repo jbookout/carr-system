@@ -50,6 +50,16 @@ DANGEROUS = [
     ("restore-dot",     "git restore ."),
     ("checkout-dot",    "git checkout -- ."),
     ("stash-bare",      "git stash"),
+    # A drop with NO ref silently takes the most recent stash, which on a shared
+    # checkout is very likely another session's. Named or nothing — the same
+    # standard `git add <paths>` and `git stash push -- <paths>` already meet.
+    ("stash-drop-bare", "git stash drop"),
+    # pop and apply WRITE the stash back into the working tree, which is the
+    # two-writer hazard itself and stays refused however explicitly it is named.
+    ("stash-pop",       "git stash pop stash@{0}"),
+    ("stash-apply",     "git stash apply stash@{1}"),
+    # clear destroys EVERY stash, including stashes this session never made.
+    ("stash-clear",     "git stash clear"),
 ]
 
 # The two exemptions added 2026-08-14, each pinned in BOTH directions — the
@@ -95,6 +105,17 @@ SAFE = [
     ("branch-list",   "git branch -a"),
     ("reflog",        "git reflog -8"),
     ("stash-list",    "git stash list"),
+    # STASH SUBCOMMANDS THAT NEVER TOUCH THE WORKING TREE, added 2026-08-14
+    # after the gate refused `git stash drop stash@{0}` on a dirty tree. The
+    # hazard this gate exists to stop is one session capturing or overwriting
+    # ANOTHER session's working-tree changes. Reading the stash list cannot do
+    # that, and dropping a stash the caller NAMES cannot either — it is the same
+    # explicit-naming standard `git add <paths>` and `git stash push -- <paths>`
+    # already satisfy. Refusing them left a stash nobody could clear, which is
+    # how a gate teaches people to work around it.
+    ("stash-show",    "git stash show --name-only stash@{0}"),
+    ("stash-drop-named", "git stash drop stash@{0}"),
+    ("stash-show-p",  "git stash show -p stash@{2}"),
     ("worktree-list", "git worktree list"),
     ("not-git",       "python3 ops/conduct-gate-selftest.py"),
 ]
