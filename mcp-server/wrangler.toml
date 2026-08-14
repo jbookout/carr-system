@@ -124,6 +124,23 @@ compatibility_date = "2026-07-01"
 compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
 
+# `routes = []` IS LOAD-BEARING AND CAUSED A PRODUCTION INCIDENT BY ITS ABSENCE.
+# 2026-08-13 00:27 UTC: this block was first written without it, on the
+# assumption that declaring no routes meant inheriting none. Wrangler treats
+# `routes` as an INHERITABLE key, so the staging Worker inherited all three
+# production custom domains and took them over on deploy — api.doctorcre.com,
+# api.practicecre.com and dealroom.doctorcre.com all began answering from
+# carr-mcp-staging, which is bound to the EMPTY staging database. /release on
+# api.doctorcre.com returned doctrine_generation null, "doctrine_meta has no row
+# with id=1", for about two minutes until production was redeployed and
+# reclaimed them.
+#
+# An empty list OVERRIDES the inherited value; omitting the key inherits it. The
+# difference between those two is a live outage, so it is written down here
+# rather than left to whoever reads the wrangler docs next. Never delete this
+# line to "tidy up" — its emptiness is the whole point.
+routes = []
+
 [env.staging.assets]
 directory = "../dealroom"
 binding = "ASSETS"
