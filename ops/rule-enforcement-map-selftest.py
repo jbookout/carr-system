@@ -160,6 +160,203 @@ def case_sync_adds_pending_unbuilt():
         subprocess.run(["rm", "-rf", repo, vault])
 
 
+def case_sync_prunes_a_retired_rule():
+    """The mirror of the case above, and the half that was missing.
+
+    RETIRING a rule is not the reverse of activating one, because the map holds
+    a retired id in TWO more places than the inventory the sync rewrites: its
+    `rule_controls` entry and whatever `category_overrides` list named it. The
+    sync computed `dropped` and then did nothing with it, so on 2026-08-14 rule
+    a225b744 was retired, the render lost it, the inventory lost it, and the two
+    stragglers stayed — which the checker correctly rejects as "override
+    references unknown rule" plus "entries reference inactive/unknown rule(s)".
+    Every session that booted afterwards was told the enforcement layer had
+    changed and the gates must not be treated as in force, which is the exact
+    outage this whole script was written to end. Adding a rule was tested;
+    removing one was not, so only half the loop was ever closed.
+
+    `cccccccc` retires here holding BOTH stragglers — a rule_controls entry and
+    a session_task_rail override — so a fix that cleans one and forgets the
+    other still fails this case.
+    """
+    name = "sync job prunes a retired rule from controls AND overrides"
+    repo = tempfile.mkdtemp(prefix="syncmap-retire-selftest-")
+    vault = tempfile.mkdtemp(prefix="syncmap-retire-vault-")
+    try:
+        os.makedirs(os.path.join(repo, "ops", "config"), exist_ok=True)
+        import shutil as _shutil
+        _shutil.copyfile(
+            os.path.join(REPO, "ops", "rule-enforcement-map-check.py"),
+            os.path.join(repo, "ops", "rule-enforcement-map-check.py"))
+        map_path = os.path.join(repo, "ops", "config", "rule-enforcement-map.json")
+        baseline_path = os.path.join(repo, "ops", "config", "gate-baseline.json")
+
+        seed = copy.deepcopy(BASE)
+        seed["rule_controls"]["cccccccc"] = {
+            "category": "session_task_rail", "enforcement_class": "surfacing",
+            "binding_moment": "at session start", "control": "real",
+            "exceptions": "none"}
+        seed["active_rule_ids"]["shared"] = ["aaaaaaaa", "cccccccc", "dddddddd"]
+        seed["category_overrides"]["session_task_rail"] = ["cccccccc"]
+        with open(map_path, "w", encoding="utf-8") as fh:
+            json.dump(seed, fh, indent=2)
+            fh.write("\n")
+        import hashlib
+        seed_hash = hashlib.sha256(open(map_path, "rb").read()).hexdigest()
+        with open(baseline_path, "w", encoding="utf-8") as fh:
+            json.dump({"contracts": {"rule-enforcement-map.json": seed_hash}}, fh)
+
+        os.makedirs(os.path.join(vault, "DNA"), exist_ok=True)
+        os.makedirs(os.path.join(vault, "00_Context"), exist_ok=True)
+        # cccccccc is GONE from the render — the moment a rule gets retired and
+        # the hourly refresh re-renders without it.
+        with open(os.path.join(vault, "DNA", "compiled-rules-shared.md"), "w") as fh:
+            fh.write("- one `#aaaaaaaa`\n- two `#dddddddd`\n")
+        with open(os.path.join(vault, "00_Context", "compiled-rules-joe.md"), "w") as fh:
+            fh.write("- three `#bbbbbbbb`\n")
+
+        sync_spec = importlib.util.spec_from_file_location(
+            "sync_enforcement_map_retire", os.path.join(REPO, "bin", "sync-enforcement-map.py"))
+        sync_mod = importlib.util.module_from_spec(sync_spec)
+        sync_spec.loader.exec_module(sync_mod)
+        sync_mod.REPO = repo
+
+        prior_argv = sys.argv[:]
+        prior_vault_env = os.environ.get("CARR_VAULT")
+        os.environ["CARR_VAULT"] = vault
+        sys.argv = [prior_argv[0], "--no-commit"]
+        try:
+            rc_code = sync_mod.main()
+        finally:
+            sys.argv = prior_argv
+            if prior_vault_env is None:
+                os.environ.pop("CARR_VAULT", None)
+            else:
+                os.environ["CARR_VAULT"] = prior_vault_env
+
+        if rc_code != 0:
+            print(f"FAIL  {name}: sync main() returned {rc_code}")
+            return False
+
+        with open(map_path, encoding="utf-8") as fh:
+            synced = json.load(fh)
+
+        if "cccccccc" in (synced.get("rule_controls") or {}):
+            print(f"FAIL  {name}: retired rule still has a rule_controls entry")
+            return False
+        still_named = [cat for cat, ids in (synced.get("category_overrides") or {}).items()
+                       if "cccccccc" in ids]
+        if still_named:
+            print(f"FAIL  {name}: retired rule still named by override(s) {still_named}")
+            return False
+        # The rules that did NOT retire must survive untouched — a prune that
+        # over-reaches is worse than one that under-reaches.
+        if "aaaaaaaa" not in (synced.get("rule_controls") or {}) \
+                or synced["category_overrides"].get("hard_pre_action") != ["aaaaaaaa"]:
+            print(f"FAIL  {name}: the prune took a surviving rule with it")
+            return False
+
+        source_ids = {"shared": ["aaaaaaaa", "dddddddd"], "joe": ["bbbbbbbb"]}
+        errors = mod.validate(synced, source_ids)
+        ok = not errors
+        print(f"{'PASS' if ok else 'FAIL'}  {name}: {errors or 'valid'}")
+        return ok
+    finally:
+        subprocess.run(["rm", "-rf", repo, vault])
+
+
+def case_sync_prunes_an_already_stranded_rule():
+    """The case the first version of the prune got wrong, found on live data.
+
+    A prune keyed off THIS RUN'S `dropped` only fires on the run that notices
+    the retirement. By the time the fix existed, the unfixed job had already
+    synced the inventory (commit c666629 on main), so every later run saw the
+    inventory in parity, took the early "OK already in parity" return, and left
+    the stragglers wedged in the file permanently — the gate staying broken with
+    the repair sitting right there. A repair that only works if it runs before
+    the damage is not a repair.
+
+    So the fixture here has an inventory ALREADY in parity with the renders and a
+    rule_controls entry plus an override for an id no render carries. Nothing is
+    `dropped`; the run must still notice and clean it.
+    """
+    name = "sync job prunes a rule stranded by an earlier run, inventory already in parity"
+    repo = tempfile.mkdtemp(prefix="syncmap-stranded-selftest-")
+    vault = tempfile.mkdtemp(prefix="syncmap-stranded-vault-")
+    try:
+        os.makedirs(os.path.join(repo, "ops", "config"), exist_ok=True)
+        import shutil as _shutil
+        _shutil.copyfile(
+            os.path.join(REPO, "ops", "rule-enforcement-map-check.py"),
+            os.path.join(repo, "ops", "rule-enforcement-map-check.py"))
+        map_path = os.path.join(repo, "ops", "config", "rule-enforcement-map.json")
+        baseline_path = os.path.join(repo, "ops", "config", "gate-baseline.json")
+
+        seed = copy.deepcopy(BASE)
+        # cccccccc is NOT in any inventory — an earlier run already removed it
+        # from there and could not remove it from these two places.
+        seed["rule_controls"]["cccccccc"] = {
+            "category": "session_task_rail", "enforcement_class": "surfacing",
+            "binding_moment": "at session start", "control": "real",
+            "exceptions": "none"}
+        seed["category_overrides"]["session_task_rail"] = ["cccccccc"]
+        with open(map_path, "w", encoding="utf-8") as fh:
+            json.dump(seed, fh, indent=2)
+            fh.write("\n")
+        import hashlib
+        seed_hash = hashlib.sha256(open(map_path, "rb").read()).hexdigest()
+        with open(baseline_path, "w", encoding="utf-8") as fh:
+            json.dump({"contracts": {"rule-enforcement-map.json": seed_hash}}, fh)
+
+        os.makedirs(os.path.join(vault, "DNA"), exist_ok=True)
+        os.makedirs(os.path.join(vault, "00_Context"), exist_ok=True)
+        # Renders match the inventory exactly — this run has nothing to sync.
+        with open(os.path.join(vault, "DNA", "compiled-rules-shared.md"), "w") as fh:
+            fh.write("- one `#aaaaaaaa`\n- two `#dddddddd`\n")
+        with open(os.path.join(vault, "00_Context", "compiled-rules-joe.md"), "w") as fh:
+            fh.write("- three `#bbbbbbbb`\n")
+
+        sync_spec = importlib.util.spec_from_file_location(
+            "sync_enforcement_map_stranded", os.path.join(REPO, "bin", "sync-enforcement-map.py"))
+        sync_mod = importlib.util.module_from_spec(sync_spec)
+        sync_spec.loader.exec_module(sync_mod)
+        sync_mod.REPO = repo
+
+        prior_argv = sys.argv[:]
+        prior_vault_env = os.environ.get("CARR_VAULT")
+        os.environ["CARR_VAULT"] = vault
+        sys.argv = [prior_argv[0], "--no-commit"]
+        try:
+            rc_code = sync_mod.main()
+        finally:
+            sys.argv = prior_argv
+            if prior_vault_env is None:
+                os.environ.pop("CARR_VAULT", None)
+            else:
+                os.environ["CARR_VAULT"] = prior_vault_env
+
+        if rc_code != 0:
+            print(f"FAIL  {name}: sync main() returned {rc_code}")
+            return False
+
+        with open(map_path, encoding="utf-8") as fh:
+            synced = json.load(fh)
+        if "cccccccc" in (synced.get("rule_controls") or {}):
+            print(f"FAIL  {name}: stranded rule still has a rule_controls entry")
+            return False
+        if any("cccccccc" in ids for ids in (synced.get("category_overrides") or {}).values()):
+            print(f"FAIL  {name}: stranded rule is still named by an override")
+            return False
+
+        source_ids = {"shared": ["aaaaaaaa", "dddddddd"], "joe": ["bbbbbbbb"]}
+        errors = mod.validate(synced, source_ids)
+        ok = not errors
+        print(f"{'PASS' if ok else 'FAIL'}  {name}: {errors or 'valid'}")
+        return ok
+    finally:
+        subprocess.run(["rm", "-rf", repo, vault])
+
+
 def main():
     cases = [
         case("exact coverage: one entry per honest shape", copy.deepcopy(BASE), True),
@@ -195,6 +392,8 @@ def main():
              True,
              {"shared": ["aaaaaaaa"], "joe": []}),
         case_sync_adds_pending_unbuilt(),
+        case_sync_prunes_a_retired_rule(),
+        case_sync_prunes_an_already_stranded_rule(),
     ]
     print(f"rule-enforcement-map-selftest: {sum(cases)}/{len(cases)} passed")
     return 0 if all(cases) else 1

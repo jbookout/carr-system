@@ -402,6 +402,95 @@ def add_pending_rule_controls(text: str, new_ids: list[str], default_category: s
     return text[: m.start("body")] + new_body + text[m.end("body") :]
 
 
+def end_of_object(text: str, i: int) -> int:
+    """Index just past the `{...}` that begins at text[i], strings respected.
+
+    Written as a scan rather than a regex because a rule_controls entry is a
+    JSON object on one line in the real map and pretty-printed over several in
+    the selftest fixture; a line-shaped pattern would quietly handle only one
+    of those and pass its own test while leaving the live file broken.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    while i < len(text):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    raise ValueError("unterminated object in the enforcement map")
+
+
+def drop_retired_entries(text: str, gone: list[str]) -> str | None:
+    """Erase every trace of a retired rule from the map's other two homes.
+
+    WHY THIS EXISTS, and why the script was half-finished without it. Activating
+    a rule and retiring one are not mirror images. An activation only has to add
+    to `active_rule_ids` (the inventory splice above) and mint a placeholder in
+    `rule_controls`. A retirement has to REMOVE from three places, because the
+    map also holds a `rule_controls` entry per rule and, for anything not
+    advisory, a `category_overrides` list naming it. main() computed `dropped`
+    and threw it away, so those two stragglers survived every retirement.
+
+    Measured, not theorised: rule a225b744 was retired on 2026-08-14, the render
+    dropped it, the sync dropped it from the inventory, and the checker then
+    failed with "override references unknown rule a225b744" plus "entries
+    reference inactive/unknown rule(s): a225b744". hooks/gate-integrity.py reads
+    that failure as the enforcement layer having changed, so every session that
+    booted afterwards was told not to treat any gate as in force — the same
+    outage this script exists to prevent, arriving through the one direction it
+    never handled.
+
+    Returns the rewritten text, or None if any id is not a plain rule id (the
+    caller SKIPs on None rather than running a substitution it cannot bound).
+    """
+    if not gone:
+        return text
+    for rule_id in gone:
+        if not re.fullmatch(r"[0-9a-f]{8}", rule_id):
+            return None
+        quoted = re.escape(f'"{rule_id}"')
+
+        # 1. category_overrides — a string element in a list. Three shapes, and
+        #    the sole-element one has to become `[]` rather than a dangling
+        #    comma. Safe to run over the whole file: the inventory splice has
+        #    already removed this id from active_rule_ids, and its rule_controls
+        #    key is followed by a colon, so neither can match these patterns.
+        text = re.sub(quoted + r",\s*", "", text)
+        text = re.sub(r",\s*" + quoted + r"(?=\s*\])", "", text)
+        text = re.sub(r"\[\s*" + quoted + r"\s*\]", "[]", text)
+
+        # 2. rule_controls — an object member. Cut the whole member plus one
+        #    separating comma, taking the PRECEDING comma when it was last so
+        #    the block does not end on a dangling one.
+        match = re.search(r"\n[ \t]*" + quoted + r":[ \t]*\{", text)
+        if not match:
+            continue
+        end = end_of_object(text, text.index("{", match.end() - 1))
+        tail = text[end:]
+        if tail.lstrip().startswith(","):
+            cut_start, cut_end = match.start(), end + tail.index(",") + 1
+        else:
+            previous_comma = text.rfind(",", 0, match.start())
+            cut_start = previous_comma if previous_comma != -1 else match.start()
+            cut_end = end
+        text = text[:cut_start] + text[cut_end:]
+    return text
+
+
 def main() -> int:
     if not (os.path.exists(map_path()) and os.path.exists(baseline_path())):
         print("sync-enforcement-map: SKIP map or baseline missing")
@@ -454,7 +543,25 @@ def main() -> int:
             changed.append((scope, added, dropped))
             inventory[scope] = rendered
 
-    if not changed:
+    # STRANDED IDS ARE COMPUTED FROM THE FILE, NOT FROM THIS RUN'S DIFF, and that
+    # distinction is not academic — it is the difference between fixing the live
+    # map and watching it stay broken. A first version of the prune below keyed
+    # off `dropped`, so it only fired on the one run that happened to notice the
+    # retirement. By then the unfixed job had ALREADY synced the inventory (it
+    # landed on main as commit c666629), so every later run saw the inventory in
+    # parity, took the early return here, and left the two stragglers wedged in
+    # the file for good. A repair that only works if it runs before the damage is
+    # not a repair. The honest question is the state one: which ids does the map
+    # still classify that are not active anywhere?
+    active_everywhere = {rid for ids in inventory.values() for rid in ids}
+    stranded = [rid for rid in (data.get("rule_controls") or {})
+                if rid not in active_everywhere]
+    for _category, rule_ids in (data.get("category_overrides") or {}).items():
+        for rid in rule_ids if isinstance(rule_ids, list) else []:
+            if rid not in active_everywhere and rid not in stranded:
+                stranded.append(rid)
+
+    if not changed and not stranded:
         print("sync-enforcement-map: OK already in parity")
         return 0
 
@@ -493,6 +600,24 @@ def main() -> int:
             return 0
         text = patched
 
+    # Every id the map still classifies but no render still carries needs its
+    # rule_controls entry and its category override removed, or the check fails
+    # it as "inactive/unknown". `stranded` was derived above from the file's own
+    # state, so this covers both the retirement happening right now and any left
+    # behind by an earlier run of the version that could not do this.
+    #
+    # An id that merely MOVED SCOPE (shared to joe, or back) is dropped from one
+    # inventory and added to another and survives untouched: `active_everywhere`
+    # is the union, so the test is whether it is active ANYWHERE, never whether
+    # some particular scope stopped naming it.
+    newly_retired = sorted(stranded)
+    if newly_retired:
+        pruned = drop_retired_entries(text, newly_retired)
+        if pruned is None:
+            print("sync-enforcement-map: SKIP retired id is not a plain rule id")
+            return 0
+        text = pruned
+
     with open(map_path(), "w") as fh:
         fh.write(text)
 
@@ -507,6 +632,17 @@ def main() -> int:
         if not isinstance(entry, dict) or entry.get("enforcement_class") != "unbuilt":
             print(f"sync-enforcement-map: FAIL pending entry for {rid} did not land; leaving as-is")
             return 0
+    # The prune is verified against the re-read file for the same reason every
+    # other write here is: an `ok` from a substitution says the pattern ran, not
+    # that the value left the file (rule c53beeaa).
+    for rid in newly_retired:
+        if rid in (reread.get("rule_controls") or {}):
+            print(f"sync-enforcement-map: FAIL {rid} still has a rule_controls entry; leaving as-is")
+            return 0
+        for category, ids in (reread.get("category_overrides") or {}).items():
+            if rid in ids:
+                print(f"sync-enforcement-map: FAIL {rid} still named by {category}; leaving as-is")
+                return 0
 
     # Re-stamp ONLY this file's contract hash, by targeted replacement so the
     # rest of the baseline is byte-identical. Gate-SCRIPT hashes stay frozen:
@@ -533,6 +669,13 @@ def main() -> int:
         summary_bits.append(f"{scope} {' '.join(bits)}")
     if newly_added:
         print("sync-enforcement-map: labeled unbuilt/pending: " + ", ".join(newly_added))
+    if newly_retired:
+        print("sync-enforcement-map: pruned controls + overrides for retired: "
+              + ", ".join(newly_retired))
+        # A prune-only run has no `changed` scope to describe, and an empty
+        # summary would reach the commit message as a blank line — the shape
+        # rule 24e10ee8 exists to prevent.
+        summary_bits.append("pruned retired " + ",".join(newly_retired))
     print("sync-enforcement-map: contract hash re-stamped; gate hashes untouched")
 
     if "--no-commit" in sys.argv:
