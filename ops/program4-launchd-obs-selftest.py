@@ -224,6 +224,59 @@ def main() -> int:
           elapsed < 10, f"elapsed={elapsed:.1f}s")
     check("the timeout is logged durably", "TIMEOUT" in tail_log(), tail_log()[-400:])
 
+    # ── 7. bin/refresh-rules.sh's own exit code is honest ───────────────────
+    # Found while building this package: the script always ended via its
+    # trailing `tail | mv` log-trim, so its own exit code was whatever THAT
+    # returned (0) regardless of a FAIL logged above it. Wrapped by
+    # with-run-record.sh, that meant a real export failure would still be
+    # recorded as succeeded. Fixed by threading an EXIT_CODE variable to an
+    # explicit `exit $EXIT_CODE` at the bottom. Proven here WITHOUT ever
+    # running a live refresh: CARR_REFRESH_RULES_EXPORT_CMD (a test-only hook
+    # the script itself defines, inert unless set) substitutes a stub in
+    # place of the real network/DB-touching export, and HOME is pointed at an
+    # empty fixture directory so the script's hardcoded $HOME/carr-system
+    # never resolves to the real checkout.
+    print("\n7. bin/refresh-rules.sh propagates its own internal failure honestly")
+    refresh_script = os.path.join(REPO, "bin", "refresh-rules.sh")
+    if not os.path.exists(refresh_script):
+        check("bin/refresh-rules.sh exists", False, refresh_script)
+    else:
+        fixture_home = tempfile.mkdtemp(prefix="carr-selftest-refresh-rules-home-")
+        os.makedirs(os.path.join(fixture_home, ".config", "carr"), exist_ok=True)
+        os.makedirs(os.path.join(fixture_home, "carr-system", "out"), exist_ok=True)
+        with open(os.path.join(fixture_home, ".config", "carr", "db.env"), "w") as fh:
+            fh.write("# selftest fixture — never read for a real credential\n")
+
+        def make_stub(exit_code: int) -> str:
+            stub_dir = tempfile.mkdtemp(prefix="carr-selftest-refresh-rules-stub-")
+            stub_path = os.path.join(stub_dir, "stub-export")
+            with open(stub_path, "w", encoding="utf-8") as fh:
+                fh.write(f"#!/bin/sh\nexit {exit_code}\n")
+            os.chmod(stub_path, 0o755)
+            return stub_path
+
+        env = dict(os.environ)
+        env["HOME"] = fixture_home
+        env["CARR_REFRESH_RULES_EXPORT_CMD"] = make_stub(9)
+        proc = subprocess.run(["/bin/zsh", refresh_script], capture_output=True,
+                               text=True, timeout=30, env=env)
+        check("a stubbed export failure makes the SCRIPT's own exit code nonzero "
+              "(the bug: it used to always be 0, from the trailing tail/mv chain)",
+              proc.returncode != 0, f"rc={proc.returncode}")
+        check("...and it carries the REAL failing exit code through (exit_9), "
+              "not a generic 1 — so with-run-record.sh's failure_class is accurate",
+              proc.returncode == 9, f"rc={proc.returncode}")
+        log_path = os.path.join(fixture_home, "carr-system", "out", "rules-refresh.log")
+        log_text = open(log_path, encoding="utf-8").read() if os.path.exists(log_path) else ""
+        check("the durable log still names the failure (FAIL rules refresh rc=9)",
+              "FAIL rules refresh rc=9" in log_text, log_text)
+
+        env["CARR_REFRESH_RULES_EXPORT_CMD"] = make_stub(0)
+        proc = subprocess.run(["/bin/zsh", refresh_script], capture_output=True,
+                               text=True, timeout=30, env=env)
+        check("a stubbed export SUCCESS still exits 0 — the fix does not touch "
+              "the success path", proc.returncode == 0, f"rc={proc.returncode}")
+
     print(f"\nTIER 1: {len(PASSES)} passed, {len(FAILURES)} failed")
 
     # ── TIER 2 — only with a real (staging) DATABASE_URL already set ────────

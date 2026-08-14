@@ -12,11 +12,33 @@
 # night's only DB visitor. Pure code, no model (T0 per model-tiering).
 #
 # SKIP-not-FAIL: missing env = exit 0 with a SKIP line, per house convention.
+#
+# EXIT CODE HONESTY (Program 4 follow-up). This script used to end via the
+# `tail | mv` log-trim below, so its own exit code was always whatever THAT
+# returned — 0, regardless of a FAIL logged above it. bin/with-run-record.sh
+# now wraps this job and records succeeded/failed off the real exit code, so a
+# silent-0 exit meant a night this export actually failed would still be
+# recorded as succeeded. EXIT_CODE carries the real outcome to the bottom,
+# where the script now exits with it explicitly.
 REPO="$HOME/carr-system"
 LOG="$REPO/out/rules-refresh.log"
 [ -f "$HOME/.config/carr/db.env" ] || { echo "$(date -u +%FT%TZ) SKIP no db.env" >> "$LOG"; exit 0; }
 cd "$REPO" || exit 1
-if CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules >> "$LOG" 2>&1; then
+
+EXIT_CODE=0
+
+# TEST HOOK ONLY — never set by launchd or a real "Run Now". Lets
+# ops/program4-launchd-obs-selftest.py substitute a stub for the real
+# network/DB-touching export below, so the exit-code fix is provable without
+# a live refresh ever running. The real invocation is untouched when unset.
+if [ -n "${CARR_REFRESH_RULES_EXPORT_CMD:-}" ]; then
+  test_cmd=(${(z)CARR_REFRESH_RULES_EXPORT_CMD})
+  run_export() { "${test_cmd[@]}"; }
+else
+  run_export() { CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules; }
+fi
+
+if run_export >> "$LOG" 2>&1; then
   echo "$(date -u +%FT%TZ) OK rules refreshed" >> "$LOG"
   # Activating a rule updates the renders above but NOT the enforcement map,
   # whose inventory must match the render order exactly. That gap fired twice
@@ -57,6 +79,8 @@ if CARR_EXPORT_LIVE=1 ./run.sh export --only compiled-rules >> "$LOG" 2>&1; then
 else
   rc=$?  # capture BEFORE the date subshell resets $? — the old line always logged rc=0
   echo "$(date -u +%FT%TZ) FAIL rules refresh rc=$rc" >> "$LOG"
+  EXIT_CODE=$rc
 fi
 # keep the log from growing forever: trim to the last 500 lines
 tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+exit $EXIT_CODE
