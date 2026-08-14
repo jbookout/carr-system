@@ -107,7 +107,13 @@ KNOWN_HOSTS = (
     # the architecture-research shortlist ("read each one 1 at a time") — the
     # first legitimate tuning of the widened WebFetch gate, hours after it
     # shipped. All are read-only documentation/paper hosts.
-    "arxiv.org", "anthropic.com", "humanlayer.dev", "mem0.ai",
+    # claude.com sits beside anthropic.com for the same reason and the same
+    # owner, and its absence had a daily cost: the standard Claude Code
+    # attribution line links there, so every `gh pr create` carrying it was
+    # refused as an unrecognised host. That happened three times in one session
+    # on 2026-08-14, each time to a real PR. The available workaround is to
+    # strip the link, which quietly drops the attribution it exists to give.
+    "arxiv.org", "anthropic.com", "claude.com", "humanlayer.dev", "mem0.ai",
     "langchain.com", "emergentmind.com",
     # blotato.io: the media-upload backend of the ALREADY-SANCTIONED Blotato
     # connector. Its create-post tool takes public mediaUrls, and the only way
