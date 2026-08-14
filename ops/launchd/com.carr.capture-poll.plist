@@ -16,10 +16,20 @@
     <key>Label</key>
     <string>com.carr.capture-poll</string>
 
+    <!-- Program 4 follow-up: the heartbeat interval flag below (spelled out in
+         ProgramArguments, not here: a double hyphen is illegal inside an XML
+         comment, the same defect PR #97 fixed once already for the scheduled
+         flag on notes-sweep's own plist) throttles the succeeded row to at
+         most one per 1800s (30 min): recording all ~288 fires/day would be
+         noise from a quiet inbox. A failure is still recorded immediately
+         regardless (see ops/config/services.json's own note on this
+         service's retuned cadence). -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>
         <string>{{REPO}}/bin/run-scheduled.sh</string>
+        <string>--heartbeat-interval</string>
+        <string>1800</string>
         <string>capture-poll</string>
         <string>launchd.run</string>
         <string>{{REPO}}/tools/dictation-rig/bin/capture-poll.sh</string>

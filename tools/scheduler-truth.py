@@ -107,14 +107,37 @@ def wrapped(pl: dict[str, Any]) -> bool:
     return any("run-scheduled.sh" in str(a) for a in pl.get("ProgramArguments", []))
 
 
+# bin/run-scheduled.sh's own optional flags (Program 4 follow-up), each
+# consuming exactly one value. Kept in sync with that script's flag-parsing
+# loop by hand — there being only two of them and both single-value is what
+# makes hand-sync tolerable; a third flag should make this a shared table
+# instead of two copies.
+WRAPPER_FLAGS_WITH_VALUE = {"--heartbeat-interval", "--also-heartbeat"}
+
+
 def wrapper_service(pl: dict[str, Any]) -> str:
-    """The service key a wrapped plist reports under: the argument right after
-    the wrapper path. Reading it back is what catches a copy-paste that wrapped
-    a job under a neighbour's key — the failure mode of rewiring seven files."""
+    """The service key a wrapped plist reports under: the first positional
+    argument after the wrapper path and any of ITS OWN flags. Before Program 4's
+    heartbeat throttle this was simply "the argument right after the wrapper
+    path" — now a plist that inserts --heartbeat-interval 1800 ahead of the
+    service key would misread the flag NAME itself as the key unless those
+    flags are skipped exactly the way bin/run-scheduled.sh's own parser skips
+    them. Reading it back is what catches a copy-paste that wrapped a job
+    under a neighbour's key — the failure mode of rewiring seven files."""
     args = [str(a) for a in pl.get("ProgramArguments", [])]
     for i, a in enumerate(args):
-        if "run-scheduled.sh" in a and i + 1 < len(args):
-            return args[i + 1]
+        if "run-scheduled.sh" not in a:
+            continue
+        j = i + 1
+        while j < len(args):
+            tok = args[j]
+            if tok in WRAPPER_FLAGS_WITH_VALUE:
+                j += 2
+                continue
+            if tok == "--":
+                j += 1
+            return args[j] if j < len(args) else ""
+        return ""
     return ""
 
 
@@ -185,7 +208,19 @@ def main() -> int:
                   f"Add it to ops/config/services.json")
 
     for key, svc in sorted(launchd_declared.items()):
-        if f"com.carr.{key}" not in repo:
+        if f"com.carr.{key}" in repo:
+            continue
+        # A service can RIDE another job's plist instead of owning one under
+        # its own name (Program 4's carr-local-edge-node: no LaunchAgent of
+        # its own, recorded via --also-heartbeat on partner-ping's wake). Its
+        # own deploy_mechanism says so explicitly, so honor that declaration
+        # rather than assuming plist filename always equals service key — only
+        # a service with NO plist anywhere the registry points to is drift.
+        rides_another_plist = any(
+            env.get("deploy_mechanism", "").startswith("ops/launchd/")
+            and os.path.basename(env["deploy_mechanism"]).removesuffix(".plist") in repo
+            for env in svc.get("environments", []))
+        if not rides_another_plist:
             drift(f"REGISTERED, NO PLIST     {key} — services.json declares a "
                   f"launchd service with no plist in ops/launchd/")
 

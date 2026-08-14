@@ -2,7 +2,9 @@
 # run-scheduled.sh — make a launchd job's outcome durable, without touching the
 # job. Program 4's first slice.
 #
-#   usage: bin/run-scheduled.sh <service-key> <run-key> <command> [args...]
+#   usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS]
+#                                [--also-heartbeat SERVICE]
+#                                <service-key> <run-key> <command> [args...]
 #
 # WHY THIS EXISTS, measured 2026-08-14. `tools/ops-record.py health` read 21 of
 # its 25 registered service/environment rows at "last seen never" — only
@@ -61,13 +63,70 @@
 # 2026-08-14 the settings-change gate shipped two defects and both were the same
 # shape: a test that exercised a path production never takes (team loop T75).
 # The line the suite reads is the line the 02:05 run writes.
+#
+# ── THROTTLING FOR HIGH-FREQUENCY JOBS (Program 4 follow-up) ─────────────────
+# partner-ping wakes every 2 minutes and capture-poll every 5; recording every
+# fire would be ~1000 rows/day of noise from two channels that are usually
+# fine. Both flags below are entirely optional and inert unless a caller
+# passes them, so every existing invocation — all seven current plists — is
+# untouched byte-for-byte.
+#
+#   --heartbeat-interval SECONDS   Record a SUCCEEDED row for this job's own
+#                                  key at most once per this many seconds (a
+#                                  state file under out/run-scheduled-state/).
+#                                  Every non-succeeded outcome — failed,
+#                                  skipped, timed_out, cancelled — is still
+#                                  recorded immediately and CLEARS the
+#                                  throttle, so a recovery posts on the very
+#                                  next fire instead of waiting out a stale
+#                                  interval. Omitted (the default): record
+#                                  every fire, which is every existing job's
+#                                  actual behavior today.
+#   --also-heartbeat SERVICE       On the SAME wake, also record an
+#                                  independent SUCCEEDED row for a second,
+#                                  unrelated service — riding this job's cron
+#                                  slot as the cheapest true signal that the
+#                                  Mac is awake and launchd is actually firing
+#                                  agents (PROP-010's local edge node).
+#                                  Subject to the SAME --heartbeat-interval,
+#                                  tracked independently of the primary job.
+#                                  Always its own SECOND provenance line
+#                                  (key=launchd.heartbeat), so it is asserted
+#                                  on exactly the way the primary line is —
+#                                  the "provenance line is the tested surface"
+#                                  property above extends to it unchanged.
+#
+# Neither flag touches the job itself: the child still runs exactly once,
+# unmodified, and nothing here can change what it does, prints, or returns —
+# only what this script decides to WRITE afterward.
 
 set -u
 
 EX_USAGE=64
 
+HEARTBEAT_INTERVAL=0
+ALSO_HEARTBEAT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --heartbeat-interval)
+      if [ "$#" -lt 2 ]; then
+        print -ru2 -- "usage: --heartbeat-interval requires a value"
+        exit $EX_USAGE
+      fi
+      HEARTBEAT_INTERVAL="$2"; shift 2 ;;
+    --also-heartbeat)
+      if [ "$#" -lt 2 ]; then
+        print -ru2 -- "usage: --also-heartbeat requires a value"
+        exit $EX_USAGE
+      fi
+      ALSO_HEARTBEAT="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
 if [ $# -lt 3 ]; then
-  print -ru2 -- "usage: bin/run-scheduled.sh <service-key> <run-key> <command> [args...]"
+  print -ru2 -- "usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS] [--also-heartbeat SERVICE] <service-key> <run-key> <command> [args...]"
   print -ru2 -- "  e.g. bin/run-scheduled.sh nightly-record-layer rules.refresh /bin/zsh {{REPO}}/bin/refresh-rules.sh"
   exit $EX_USAGE
 fi
@@ -124,20 +183,93 @@ esac
 corr=()
 [ -n "${CARR_CORRELATION_ID:-}" ] && corr=(--correlation "$CARR_CORRELATION_ID")
 
-set -A argv "$PY" "$REPO/tools/ops-record.py" run \
-  --service "$SERVICE" --key "$RUN_KEY" --state "$state" \
-  --exit-code "$rc" --started-at "$STARTED" \
-  --source-kind wrapper --source-ref bin/run-scheduled.sh \
-  --detail "$RUN_KEY exited $rc" "${fclass[@]}" "${corr[@]}"
-
 mkdir -p "$REPO/out" 2>/dev/null
-"${argv[@]}" >> "$LOG" 2>&1
-recorder_exit=$?
+
+# ── throttle a high-frequency SUCCEEDED row ──────────────────────────────────
+# Inert when HEARTBEAT_INTERVAL is 0 (the default, and every existing job's
+# real invocation today): should_record is always 1 below, so this is a no-op
+# for the six jobs that never pass the flag.
+STATE_DIR="$REPO/out/run-scheduled-state"
+STATE_FILE="$STATE_DIR/$SERVICE.$RUN_KEY.last-success"
+should_record=1
+if [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  if [ -f "$STATE_FILE" ]; then
+    last="$(cat "$STATE_FILE" 2>/dev/null || print -r -- 0)"
+    now_epoch="$(date -u +%s)"
+    elapsed=$(( now_epoch - last ))
+    [ "$elapsed" -lt "$HEARTBEAT_INTERVAL" ] && should_record=0
+  fi
+fi
+
+if [ "$should_record" -eq 1 ]; then
+  set -A argv "$PY" "$REPO/tools/ops-record.py" run \
+    --service "$SERVICE" --key "$RUN_KEY" --state "$state" \
+    --exit-code "$rc" --started-at "$STARTED" \
+    --source-kind wrapper --source-ref bin/run-scheduled.sh \
+    --detail "$RUN_KEY exited $rc" "${fclass[@]}" "${corr[@]}"
+  "${argv[@]}" >> "$LOG" 2>&1
+  recorder_exit=$?
+  record_action=recorded
+  if [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    date -u +%s > "$STATE_FILE" 2>/dev/null
+  fi
+else
+  argv=()
+  recorder_exit=throttled
+  record_action=throttled
+fi
+
+# A non-succeeded outcome always clears the throttle, so the recovery — the
+# next succeeded fire — posts immediately rather than waiting out a stale
+# interval. A silent recovery is exactly the kind of silence this ledger
+# exists to make visible.
+if [ "$state" != "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then
+  rm -f "$STATE_FILE" 2>/dev/null
+fi
 
 # One line, always, whatever happened. The run key and service are the job's own
 # identifiers, the detail is a key and a number: nothing here is a secret and
-# nothing is client content.
-print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') run-scheduled key=$RUN_KEY service=$SERVICE child_exit=$rc state=$state recorder_exit=$recorder_exit argv=${argv[*]}" >> "$LOG"
+# nothing is client content. record_action sits BEFORE recorder_exit and argv
+# stays the trailing field exactly as before, so every existing regex-based
+# check against this line (name=value, argv= to end of line) is unaffected —
+# it only ever gains the new field, never loses or reorders an old one.
+print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') run-scheduled key=$RUN_KEY service=$SERVICE child_exit=$rc state=$state record_action=$record_action recorder_exit=$recorder_exit argv=${argv[*]}" >> "$LOG"
+
+# ── an independent heartbeat riding this same wake (carr-local-edge-node) ────
+# Deliberately NOT gated on the primary job's own outcome above: a broken
+# partner-ping query says nothing about whether the Mac is awake, and tying
+# the edge node's presence signal to one unrelated script's health would make
+# it only as reliable as that script.
+if [ -n "$ALSO_HEARTBEAT" ]; then
+  HB_RUN_KEY="launchd.heartbeat"
+  HB_STATE_FILE="$STATE_DIR/$ALSO_HEARTBEAT.$HB_RUN_KEY.last-success"
+  hb_should_record=1
+  if [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null && [ -f "$HB_STATE_FILE" ]; then
+    hb_last="$(cat "$HB_STATE_FILE" 2>/dev/null || print -r -- 0)"
+    hb_now="$(date -u +%s)"
+    hb_elapsed=$(( hb_now - hb_last ))
+    [ "$hb_elapsed" -lt "$HEARTBEAT_INTERVAL" ] && hb_should_record=0
+  fi
+  if [ "$hb_should_record" -eq 1 ]; then
+    set -A hb_argv "$PY" "$REPO/tools/ops-record.py" run \
+      --service "$ALSO_HEARTBEAT" --key "$HB_RUN_KEY" --state succeeded \
+      --exit-code 0 --started-at "$STARTED" \
+      --source-kind wrapper --source-ref bin/run-scheduled.sh \
+      --detail "heartbeat via $SERVICE/$RUN_KEY" "${corr[@]}"
+    "${hb_argv[@]}" >> "$LOG" 2>&1
+    hb_recorder_exit=$?
+    hb_record_action=recorded
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    date -u +%s > "$HB_STATE_FILE" 2>/dev/null
+  else
+    hb_argv=()
+    hb_recorder_exit=throttled
+    hb_record_action=throttled
+  fi
+  print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') run-scheduled key=$HB_RUN_KEY service=$ALSO_HEARTBEAT child_exit=0 state=succeeded record_action=$hb_record_action recorder_exit=$hb_recorder_exit argv=${hb_argv[*]}" >> "$LOG"
+fi
 
 # The job's answer, never this script's.
 exit $rc

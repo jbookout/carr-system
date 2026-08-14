@@ -60,6 +60,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from typing import Any, Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -275,6 +276,198 @@ def tier1() -> None:
           tail_line("selftest.enoent"))
 
 
+# ── tier 1b: --heartbeat-interval / --also-heartbeat (Program 4 follow-up) ───
+# partner-ping (2 min) and capture-poll (5 min) would otherwise flood ops.run
+# with ~1000 succeeded rows/day. --heartbeat-interval throttles a job's own
+# succeeded row to at most one per interval, failures always record and clear
+# the throttle, and --also-heartbeat records a second, independent row for
+# carr-local-edge-node (PROP-010's local-Mac presence signal) riding the same
+# wake. Same no-mock discipline as tier1() above: this drives the REAL
+# wrapper as a subprocess and reads the REAL provenance line back — no
+# injectable recorder. Every check here keys off a fresh uuid4 service or run
+# key, so exact substring/line matching is correct regardless of how much
+# history out/run-scheduled.log already carries (the failure mode a windowed
+# line-diff hit during this package's own development).
+
+def drive_flags(flags: list, service: str, run_key: str, script: str,
+                 env: Optional[dict[str, str]] = None) -> Any:
+    """Run the real wrapper with leading flags, service, run key, then an
+    `/bin/sh -c <script>` child — returns the CompletedProcess."""
+    return subprocess.run(
+        [WRAPPER, *flags, service, run_key, "/bin/sh", "-c", script],
+        capture_output=True, text=True, timeout=120,
+        env=env if env is not None else unreachable_env(), cwd=REPO)
+
+
+def last_line_for(run_key: str, service: str) -> str:
+    """The wrapper's own provenance line naming BOTH this run key and this
+    service — last one wins. Distinct from tail_line() (run key alone)
+    because --also-heartbeat's line always carries the fixed run key
+    launchd.heartbeat, so multiple heartbeat services in one test run need
+    the service name to disambiguate which line is whose."""
+    try:
+        with open(LOG) as fh:
+            hits = [ln.rstrip("\n") for ln in fh
+                    if f"key={run_key} " in ln and f"service={service} " in ln]
+    except FileNotFoundError:
+        return ""
+    return hits[-1] if hits else ""
+
+
+def tier1_throttle() -> None:
+    print("\nTIER 1b — --heartbeat-interval and --also-heartbeat throttle "
+          "without ever hiding a failure")
+
+    # ── backward compatibility: no flags behaves exactly as tier1 proved ────
+    # (already covered end-to-end by tier1() above, which passes zero flags on
+    # every call — restated here as the explicit contract this section adds
+    # flags on TOP of, never in place of.)
+
+    # ── a fresh interval records; an immediate repeat throttles ─────────────
+    rk = "selftest.throttle." + uuid.uuid4().hex[:8]
+    p1 = drive_flags(["--heartbeat-interval", "1800"],
+                      "carr-selftest-probe", rk, "exit 0")
+    check("first success inside a fresh interval is recorded",
+          field(tail_line(rk), "record_action") == "recorded", tail_line(rk))
+    check("...exit code still passes through untouched",
+          p1.returncode == 0, f"got {p1.returncode}")
+
+    p2 = drive_flags(["--heartbeat-interval", "1800"],
+                      "carr-selftest-probe", rk, "exit 0")
+    check("a second success inside the SAME interval is throttled",
+          field(tail_line(rk), "record_action") == "throttled", tail_line(rk))
+    check("...recorder_exit says so rather than a stale/misleading number",
+          field(tail_line(rk), "recorder_exit") == "throttled", tail_line(rk))
+    check("...argv is empty — no recorder call was made to throttle",
+          field(tail_line(rk), "argv") == "", tail_line(rk))
+    check("...and the child's exit code is UNCHANGED by being throttled",
+          p2.returncode == 0, f"got {p2.returncode}")
+
+    # ── a failure inside the same interval is never throttled ───────────────
+    p3 = drive_flags(["--heartbeat-interval", "1800"],
+                      "carr-selftest-probe", rk, "exit 9")
+    check("a FAILURE inside the same interval is recorded immediately, "
+          "not throttled", field(tail_line(rk), "record_action") == "recorded",
+          tail_line(rk))
+    check("...state is failed with the real exit code's failure class",
+          field(tail_line(rk), "state") == "failed"
+          and "--failure-class exit_9" in tail_line(rk), tail_line(rk))
+    check("...and the failure itself is still the child's own exit code",
+          p3.returncode == 9, f"got {p3.returncode}")
+
+    # ── that failure cleared the throttle: the NEXT success posts right away ─
+    p4 = drive_flags(["--heartbeat-interval", "1800"],
+                      "carr-selftest-probe", rk, "exit 0")
+    check("a recovery right after a failure is recorded, not throttled — "
+          "the failure cleared the interval", p4.returncode == 0 and
+          field(tail_line(rk), "record_action") == "recorded", tail_line(rk))
+
+    # ── --also-heartbeat rides the same wake as an independent second row ───
+    hb_service = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
+    rk2 = "selftest.hb." + uuid.uuid4().hex[:8]
+    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_service],
+                "carr-selftest-probe", rk2, "exit 0")
+    hb_line = last_line_for("launchd.heartbeat", hb_service)
+    check("--also-heartbeat writes its OWN provenance line, "
+          "key=launchd.heartbeat", hb_line != "", hb_line)
+    check("...for the named heartbeat service, not the primary job's service",
+          field(hb_line, "service") == hb_service, hb_line)
+    check("...state is succeeded — the heartbeat is a presence signal, "
+          "not the child job's outcome", field(hb_line, "state") == "succeeded",
+          hb_line)
+    check("...recorder argv names the heartbeat service and its fixed key",
+          f"--service {hb_service}" in hb_line and "--key launchd.heartbeat" in hb_line,
+          hb_line)
+
+    # ── the heartbeat's own throttle is independent of the primary job's ────
+    rk3 = "selftest.hb2." + uuid.uuid4().hex[:8]
+    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_service],
+                "carr-selftest-probe", rk3, "exit 0")
+    hb_line2 = last_line_for("launchd.heartbeat", hb_service)
+    check("a second wake's heartbeat (same service, fresh primary run key) "
+          "is STILL throttled — the interval tracks the heartbeat service, "
+          "not the primary job's run key",
+          field(hb_line2, "record_action") == "throttled", hb_line2)
+
+    # ── the heartbeat never depends on the primary job's own outcome ────────
+    hb_service2 = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
+    rk4 = "selftest.hbfail." + uuid.uuid4().hex[:8]
+    proc = drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_service2],
+                        "carr-selftest-probe", rk4, "exit 7")
+    check("the primary job's own failure still passes through untouched",
+          proc.returncode == 7, f"got {proc.returncode}")
+    check("the primary job's own line records the real failure",
+          field(tail_line(rk4), "state") == "failed", tail_line(rk4))
+    hb_line3 = last_line_for("launchd.heartbeat", hb_service2)
+    check("...and the heartbeat STILL records succeeded on the same wake — "
+          "the edge node's presence signal never depends on the wrapped "
+          "job's own success", field(hb_line3, "state") == "succeeded", hb_line3)
+
+    # ── zero flags is unaffected: the field exists but always says recorded ─
+    rk5 = "selftest.noflags." + uuid.uuid4().hex[:8]
+    drive_flags([], "carr-selftest-probe", rk5, "exit 0")
+    check("with no --heartbeat-interval, record_action is always 'recorded' "
+          "— the new field never changes behavior for the six jobs that "
+          "never pass it", field(tail_line(rk5), "record_action") == "recorded",
+          tail_line(rk5))
+
+
+# ── tier 1c: bin/refresh-rules.sh's own exit code (Program 4 follow-up) ──────
+# Found while building this package: the script always ended via its trailing
+# `tail | mv` log-trim, so its own exit code was always whatever THAT
+# returned (0) regardless of a FAIL logged above it — wrapped here, a real
+# export failure would still be recorded as succeeded. Fixed by threading an
+# EXIT_CODE variable to an explicit `exit $EXIT_CODE` at the bottom. Proven
+# WITHOUT ever running a live refresh: CARR_REFRESH_RULES_EXPORT_CMD (a
+# test-only hook the script itself defines, inert unless set) substitutes a
+# stub for the real network/DB-touching export, and HOME points at an empty
+# fixture directory so the script's hardcoded $HOME/carr-system never
+# resolves to the real checkout.
+
+def tier1_refresh_rules() -> None:
+    print("\nTIER 1c — bin/refresh-rules.sh propagates its own internal "
+          "failure honestly")
+    script = os.path.join(REPO, "bin", "refresh-rules.sh")
+    if not check("bin/refresh-rules.sh exists", os.path.exists(script), script):
+        return
+
+    fixture_home = tempfile.mkdtemp(prefix="carr-selftest-refresh-rules-home-")
+    os.makedirs(os.path.join(fixture_home, ".config", "carr"), exist_ok=True)
+    os.makedirs(os.path.join(fixture_home, "carr-system", "out"), exist_ok=True)
+    with open(os.path.join(fixture_home, ".config", "carr", "db.env"), "w") as fh:
+        fh.write("# selftest fixture — never read for a real credential\n")
+
+    def make_stub(exit_code: int) -> str:
+        stub_dir = tempfile.mkdtemp(prefix="carr-selftest-refresh-rules-stub-")
+        stub_path = os.path.join(stub_dir, "stub-export")
+        with open(stub_path, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\nexit {exit_code}\n")
+        os.chmod(stub_path, 0o755)
+        return stub_path
+
+    env = dict(os.environ)
+    env["HOME"] = fixture_home
+    env["CARR_REFRESH_RULES_EXPORT_CMD"] = make_stub(9)
+    proc = subprocess.run(["/bin/zsh", script], capture_output=True,
+                           text=True, timeout=30, env=env)
+    check("a stubbed export failure makes the SCRIPT's own exit code nonzero "
+          "(the bug: it used to always be 0, from the trailing tail/mv chain)",
+          proc.returncode != 0, f"rc={proc.returncode}")
+    check("...and it carries the REAL failing exit code through (9), not a "
+          "generic 1 — so bin/run-scheduled.sh's failure_class is accurate",
+          proc.returncode == 9, f"rc={proc.returncode}")
+    log_path = os.path.join(fixture_home, "carr-system", "out", "rules-refresh.log")
+    log_text = open(log_path, encoding="utf-8").read() if os.path.exists(log_path) else ""
+    check("the durable log still names the failure (FAIL rules refresh rc=9)",
+          "FAIL rules refresh rc=9" in log_text, log_text)
+
+    env["CARR_REFRESH_RULES_EXPORT_CMD"] = make_stub(0)
+    proc = subprocess.run(["/bin/zsh", script], capture_output=True,
+                           text=True, timeout=30, env=env)
+    check("a stubbed export SUCCESS still exits 0 — the fix does not touch "
+          "the success path", proc.returncode == 0, f"rc={proc.returncode}")
+
+
 # ── tier 2 ───────────────────────────────────────────────────────────────────
 
 def tier2() -> None:
@@ -355,6 +548,8 @@ def main() -> int:
     print("run-scheduled-selftest — bin/run-scheduled.sh must never change what "
           "a job does, prints, or returns")
     tier1()
+    tier1_throttle()
+    tier1_refresh_rules()
     tier2()
     print()
     if FAILED:
