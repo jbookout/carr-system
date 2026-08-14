@@ -138,11 +138,57 @@ done
 
 say()  { print -r -- "$*"; }
 step() { print -r -- ""; print -r -- "== $*"; }
-die()  { print -r -- ""; print -r -- "REHEARSAL FAILED: $*" >&2; exit 1; }
+die()  { print -r -- ""; print -r -- "REHEARSAL FAILED: $*" >&2; DIE_REASON="$*"; exit 1; }
+
+# ── EVIDENCE STATE (Program 4) ────────────────────────────────────────────────
+# Doctrine's exit bar for this drill is "recurring isolated restore from actual
+# artifact, timed, integrity checked, application verified, AND RECORDED" — until
+# now the PASS/FAIL below printed to a terminal that nobody is watching on a
+# scheduled Tuesday run, and its evidence died with that terminal. Tracked from
+# here so record_rehearsal(), called from the EXIT trap below, can build ONE
+# ops.run row no matter which exit point below is actually taken — a die() in
+# preflight, a failed branch/restore, a failed verification, or the ordinary
+# PASS/FAIL at the bottom. Pre-declared, not left to spring into existence
+# wherever first assigned, because `set -u` is on: a trap reading a variable no
+# earlier line touched is a hard error, and the earliest exit points are exactly
+# the ones least likely to have touched most of these (verified empirically —
+# see the note in cleanup() below).
+#
+# RECORD_REHEARSAL is decided HERE, once, from flags already fully parsed by the
+# time execution reaches this line. --preflight and --verify-only both return
+# before phase 1 ever reads production, and neither one rehearses anything, so
+# neither gets a row (dry-run-doctrine-gates precedent: a check is not the thing
+# it checks).
+RECORD_REHEARSAL=1
+[ "$PREFLIGHT_ONLY" -eq 1 ] && RECORD_REHEARSAL=0
+[ "$VERIFY_ONLY" -eq 1 ] && RECORD_REHEARSAL=0
+SCRIPT_START_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SCRIPT_START_EPOCH="$(date +%s)"
+RESTORE_START_ISO=""
+RESTORE_START_EPOCH=""
+DIE_REASON=""
+DUMP=""
+DUMP_BYTES=""
+DUMP_STAMP=""
+PROD_TABLES=""
+PROD_ROWS=""
+REHEARSE_SUMMARY=""
+REST_PCT=""
+REST_ROWS=""
+REST_TABLES=""
 
 BRANCH_ID=""
 WORKDIR=""
 cleanup() {
+  # rc MUST be captured as the very first statement, before any other command —
+  # even a bare `[ ]` test — runs and overwrites $?. This is the exit status the
+  # script is about to leave with, and record_rehearsal() below needs the real
+  # one. Verified empirically: a zsh EXIT trap that never calls `exit` itself
+  # leaves that pending status untouched no matter what the trap body does
+  # afterward, so nothing below — including a failure inside record_rehearsal
+  # itself — can turn a passing rehearsal red or a failing one green.
+  local rc=$?
+
   # Runs on every exit path, including a failure or a Ctrl-C. Plaintext first:
   # if only one of the two teardowns can happen, it must be the one holding
   # production data in the clear.
@@ -164,8 +210,160 @@ cleanup() {
       say "            $NEONCTL branches delete $BRANCH_ID --project-id $PROJECT_ID" >&2
     fi
   fi
+
+  record_rehearsal "$rc"
 }
 trap cleanup EXIT INT TERM
+
+# ── record_rehearsal: the ONE ops.run row (Program 4) ─────────────────────────
+# Called only from cleanup() above, so it runs from EVERY exit path a real
+# (non-preflight, non-verify-only) invocation can take. Never recomputes a
+# number this script already computed elsewhere — it reads REHEARSE_SUMMARY,
+# built from the SAME awk pass that decided PASS/FAIL in phase 4, so the ledger
+# and the human-facing report can never quietly disagree.
+#
+# THREE FAILURE BUCKETS, chosen from two checkpoints this script already passes
+# through on a good run — not from the exit code, which is always a bare 1 here
+# (this script has no per-cause exit codes the way a wrapped child process
+# would), so "exit_$rc" would be true every time and tell a reader nothing:
+#   preflight_failed    — died before production's baseline could even be read
+#                          (missing tool, missing key, bad/missing/small dump,
+#                          Neon or production unreachable). PROD_TABLES is unset.
+#   restore_failed       — production's baseline WAS read, but branch creation
+#                          or the decrypt/load itself failed. PROD_TABLES is set,
+#                          REHEARSE_SUMMARY is not.
+#   verification_failed  — the restore completed and phase 4's row-count
+#                          comparison found a real problem (or the 90% floor).
+#                          REHEARSE_SUMMARY is set.
+# The coarse bucket is for spotting a pattern across weeks; the full reason —
+# DIE_REASON or the comparison numbers — goes in --detail for the one week that
+# needs it read in full.
+#
+# RECORDING NEVER FAILS THE REHEARSAL (house pattern, bin/nightly.sh's
+# record_run / bin/run-scheduled.sh): its own exit code is never checked by a
+# caller of this function, and cleanup()'s captured rc is what the script
+# actually exits with regardless of what happens here. It is also never
+# hidden — a recorder that cannot reach the database says so LOUD, on stderr,
+# because a rehearsal whose evidence silently failed to land is exactly the
+# false comfort this whole drill exists to rule out.
+record_rehearsal() {                      # record_rehearsal <exit-code>
+  local rc="$1"
+  [ "$RECORD_REHEARSAL" -eq 1 ] || return 0
+
+  local state=succeeded
+  local fclass=()
+  if [ "$rc" -ne 0 ]; then
+    state=failed
+    local reason_bucket
+    if [ -n "$REHEARSE_SUMMARY" ]; then
+      reason_bucket=verification_failed
+    elif [ -n "$PROD_TABLES" ]; then
+      reason_bucket=restore_failed
+    else
+      reason_bucket=preflight_failed
+    fi
+    fclass=(--failure-class "$reason_bucket")
+  fi
+
+  # THE RTO CLOCK. started_at is RESTORE_START_ISO — captured right before the
+  # decrypt+load pipe in phase 3, deliberately AFTER branch provisioning so a
+  # slow Neon API call never inflates the number a human reads as "how long
+  # does restore take" — falling back to the script's own start for a run that
+  # never got that far. ended_at is left unset below, so ops-record.py's own
+  # terminal-state default (now()) becomes the moment THIS call runs, which is
+  # after phase 4's verification completes — together giving duration_ms the
+  # full decrypt+restore+verify wall time, computed by the database from these
+  # two timestamps rather than by this shell.
+  local started="${RESTORE_START_ISO:-$SCRIPT_START_ISO}"
+
+  # ONE LINE THAT ANSWERS "how long does restore take and from which artifact"
+  # without archaeology — the measured seconds and the dump's own date/size,
+  # restated here rather than left for a human to derive from started_at/
+  # ended_at, because detail is what gets read first.
+  local detail
+  if [ -n "$REHEARSE_SUMMARY" ]; then
+    local dur=$(( $(date +%s) - ${RESTORE_START_EPOCH:-$SCRIPT_START_EPOCH} ))
+    detail="dump=${DUMP:t} (${DUMP_BYTES:-?}B, taken ${DUMP_STAMP:-unknown}) restored ${REST_PCT:-?}% of production (${REST_TABLES:-?}/${PROD_TABLES:-?} tables, ${REST_ROWS:-?}/${PROD_ROWS:-?} rows) — decrypt+restore+verify took ${dur}s"
+  elif [ -n "$DUMP" ]; then
+    detail="dump=${DUMP:t} (${DUMP_BYTES:-?}B, taken ${DUMP_STAMP:-unknown}) — ${DIE_REASON:-aborted before verification}"
+  else
+    detail="${DIE_REASON:-aborted during preflight, before a dump was selected}"
+  fi
+  # ops.run's detail column is one redacted line: no secrets, no client
+  # content — and nothing here is either, only a filename, a byte count, a
+  # percentage and a duration.
+  detail="${detail[1,400]}"
+
+  # THE PROVENANCE LINE IS THE TESTED SURFACE (same discipline as
+  # bin/run-scheduled.sh's out/run-scheduled.log line). Printed BEFORE the call
+  # is attempted and independent of whether it lands, so
+  # ops/restore-rehearse-record-selftest.py can assert the exact
+  # state/failure_class/detail this function derived from a fixture without a
+  # live database — and so a human reading the transcript sees what SHOULD have
+  # been recorded even on the one run where the recorder itself could not reach
+  # the database.
+  say "  evidence: state=$state exit_code=$rc${fclass:+ failure_class=${fclass[2]}} started_at=$started"
+  say "            detail: $detail"
+
+  local py="$REPO/.venv/bin/python"
+  [ -x "$py" ] || py=python3
+  local out
+  if out="$("$py" "$REPO/tools/ops-record.py" run \
+        --service restore-rehearse-weekly --key restore.rehearsal \
+        --state "$state" --exit-code "$rc" --started-at "$started" \
+        --source-kind collector --source-ref bin/restore-rehearse.sh \
+        --detail "$detail" "${fclass[@]}" 2>&1)"; then
+    say "  evidence: recorded to ops.run ($out)"
+  else
+    # FAIL LOUD (house pattern). The rehearsal's own PASS/FAIL above is the
+    # operational answer and this can never touch it — but a second, silent
+    # failure here would be exactly the false comfort ops.v_service_
+    # environment_health's "silence is visible" design exists to rule out, so
+    # it gets its own loud line instead of a swallowed exit code.
+    print -r -- "" >&2
+    print -r -- "  EVIDENCE WARNING: the rehearsal result above is unaffected, but it" >&2
+    print -r -- "  was NOT recorded to ops.run — $out" >&2
+  fi
+}
+
+# parse_rehearse_summary — the ONE place REHEARSE_SUMMARY's key=value tokens
+# are read, called from phase 4 below AND from the selftest hook that follows,
+# so a test proves the exact parsing production uses rather than a copy of it.
+parse_rehearse_summary() {
+  [ -n "$REHEARSE_SUMMARY" ] || return 0
+  for kv in ${(z)REHEARSE_SUMMARY}; do
+    case "$kv" in
+      pct=*)         REST_PCT="${kv#pct=}" ;;
+      rest_rows=*)   REST_ROWS="${kv#rest_rows=}" ;;
+      rest_tables=*) REST_TABLES="${kv#rest_tables=}" ;;
+    esac
+  done
+}
+
+# TEST HOOK ONLY — never set by a scheduled task, launchd, or a real "Run Now".
+# Lets ops/restore-rehearse-record-selftest.py drive record_rehearsal() through
+# THIS SAME EXIT TRAP a real rehearsal uses: argument parsing, the
+# RECORD_REHEARSAL gate, cleanup(), the three-bucket failure logic and the real
+# `tools/ops-record.py run` call all execute for real — with fixture values
+# standing in for the Neon branch, the decrypt and the row-count comparison a
+# test must never actually perform. Same no-mock discipline as
+# bin/refresh-rules.sh's CARR_REFRESH_RULES_EXPORT_CMD: nothing below this
+# guard is reachable without CARR_RESTORE_REHEARSE_SELFTEST set, and no real
+# invocation ever sets it. Placed AFTER RECORD_REHEARSAL is decided (above) and
+# BEFORE anything is created (below), so a test can combine this with
+# --preflight or --verify-only to prove those two still record nothing even
+# with a fixture that would otherwise produce a full row.
+if [ -n "${CARR_RESTORE_REHEARSE_SELFTEST:-}" ]; then
+  DUMP="${CARR_RESTORE_REHEARSE_SELFTEST_DUMP:-}"
+  DUMP_BYTES="${CARR_RESTORE_REHEARSE_SELFTEST_BYTES:-}"
+  DUMP_STAMP="${CARR_RESTORE_REHEARSE_SELFTEST_STAMP:-}"
+  PROD_TABLES="${CARR_RESTORE_REHEARSE_SELFTEST_PROD_TABLES:-}"
+  PROD_ROWS="${CARR_RESTORE_REHEARSE_SELFTEST_PROD_ROWS:-}"
+  REHEARSE_SUMMARY="${CARR_RESTORE_REHEARSE_SELFTEST_SUMMARY:-}"
+  parse_rehearse_summary
+  DIE_REASON="${CARR_RESTORE_REHEARSE_SELFTEST_DIE_REASON:-}"
+  exit "${CARR_RESTORE_REHEARSE_SELFTEST_EXIT:-0}"
+fi
 
 # ── PHASE 0: preflight. Nothing is created and nothing is charged for until
 #    every one of these passes. Ordered cheapest-and-most-likely-missing first.
@@ -471,6 +669,13 @@ say "  ok    empty database $RESTORE_DB created on the branch"
 # comparison fails.
 ACL_FILTER='/^(ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMENT ON EXTENSION )/d'
 
+# EVIDENCE (Program 4): the RTO clock for "how long does restore take" starts
+# HERE — right before the actual decrypt+load — not at branch-create above, so
+# a slow Neon provisioning call never inflates the number a human reads as
+# restore time. Read by record_rehearsal() in the EXIT trap once the script
+# actually exits, which is after phase 4's verification has also completed.
+RESTORE_START_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RESTORE_START_EPOCH="$(date +%s)"
 say "  decrypting and loading (this is the slow step) ..."
 say "  note: stripping ownership/ACL statements the source dump carries (see comment)"
 set -o pipefail
@@ -601,14 +806,29 @@ awk -F'|' -v floor="$FLOOR_PCT" -v core="$CORE_TABLES" '
       pct = 100.0 * rtot / ptot
       printf "  restored total is %.1f%% of production (floor %d%%)\n", pct, floor
       if (pct < floor) { printf "  FAIL restored total is below the %d%% floor — the dump looks truncated\n", floor; fails++ }
+      # Machine-readable, for the --detail line tools/ops-record.py writes
+      # (Program 4). Filtered from the human-facing table below by the same
+      # grep that already strips AWKFAILS=. Reuses THIS pct rather than a
+      # second computation, so the evidence row and the printed report can
+      # never quietly disagree.
+      printf "REHEARSE_SUMMARY pct=%.1f rest_rows=%d rest_tables=%d prod_rows=%d prod_tables=%d\n",
+             pct, rtot, nres, ptot, npro
     }
     printf "AWKFAILS=%d\n", fails
   }
 ' "$PROD_COUNTS" "$REST_COUNTS" > "$WORKDIR/compare.txt"
 
-grep -v '^AWKFAILS=' "$WORKDIR/compare.txt"
+grep -v -e '^AWKFAILS=' -e '^REHEARSE_SUMMARY ' "$WORKDIR/compare.txt"
 FAILS="$(sed -n 's/^AWKFAILS=//p' "$WORKDIR/compare.txt")"
 : "${FAILS:=1}"
+
+# EVIDENCE (Program 4): pulled from the SAME awk pass that just decided
+# PASS/FAIL, never recomputed. Consumed by record_rehearsal() in the EXIT trap
+# — captured into plain shell variables here, rather than having the trap
+# reopen compare.txt, because cleanup()'s teardown deletes WORKDIR (and
+# everything in it) before record_rehearsal runs.
+REHEARSE_SUMMARY="$(sed -n 's/^REHEARSE_SUMMARY //p' "$WORKDIR/compare.txt")"
+parse_rehearse_summary
 
 say ""
 if [ "$FAILS" -eq 0 ]; then
