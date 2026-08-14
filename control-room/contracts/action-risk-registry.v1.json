@@ -1,0 +1,1304 @@
+{
+ "contract": "carr-action-risk-registry",
+ "version": "1.0.0",
+ "status": "phase1_derived",
+ "generated_by": "ops/action-risk-registry.py \u2014 DERIVED, never hand-edited",
+ "purpose": "One row per action the runtime can perform, naming which protection actually applies. The council made a canonical action-risk registry blocking before any mutation UI; a survey of all four planning documents found that none of their ladders reaches the runtime, so this describes what runs instead of reconciling what is written.",
+ "protections": {
+  "human_boundary": "humanOnly \u2014 the effect binds both partners, so a machine credential is refused",
+  "optimistic_concurrency": "base_version required; a stale version is refused as a question, never a silent overwrite",
+  "upsert_last_writer_wins": "ON CONFLICT DO UPDATE \u2014 deliberate for a lease or an idempotent re-assert",
+  "append_only": "inserts only; nothing to lose, so nothing to guard",
+  "read_only": "no write",
+  "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
+ },
+ "counts": {
+  "human_boundary": 14,
+  "append_only": 31,
+  "optimistic_concurrency": 13,
+  "read_only": 30,
+  "NONE": 13,
+  "upsert_last_writer_wins": 4
+ },
+ "the_gap": [
+  "complete-action",
+  "detach-decision",
+  "end-deal-review",
+  "link-parties",
+  "measure-placement",
+  "register-template",
+  "resolve-conflict",
+  "set-lead",
+  "set-next-action",
+  "set-next-step",
+  "triage-item",
+  "update-decision",
+  "update-document-status"
+ ],
+ "open_questions": [
+  "set-market-agent and set-national-account-owner assign ownership across the team the way reassign-deal does, and reassign-deal IS human_boundary. That asymmetry is Joe's ruling to make, because it changes what a machine credential may do.",
+  "attach-to-campaign carries piece_base_version on its reattach path only. The guard sits on the destructive path and the additive path stays cheap, which is correct \u2014 but that plain attach refuses an already-attached piece is implied by the reattach contract and was not separately verified."
+ ],
+ "verbs": {
+  "activate-rule": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Set a rule's status proposed -> active"
+  },
+  "add-critical-date": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "A critical_date \u2014 a date with consequences (LOI expiry, lease expiration, option window, earnout)"
+  },
+  "add-deal-note": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Append context or an answer to a deal's immutable thread"
+  },
+  "add-loop": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Open a new loop \u2014 a Joe/Dell task (kind open_loop), a partner handoff (team_loop), a cross-brain interrupt (action_required), or a parked idea (kind idea, which"
+  },
+  "add-party": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Create a party (person or org)"
+  },
+  "add-premises": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 7,
+    "upserts": 0
+   },
+   "does": "Capture a deal's premises: the building (matched by exact address or created), its space rows (suite, SF, basis), the premises linkage, and the counterparty spi"
+  },
+  "adjudicate-investigation-branch": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Owner-only branch judgment after evidence is present"
+  },
+  "amend-rule": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Correct the WORDS of an existing rule in place, keeping its id, created_at, taught_by, quote and activation history"
+  },
+  "attach-to-campaign": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 2,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Bind published content to the campaign it belongs to \u2014 the link that makes 259 metrics answerable"
+  },
+  "call-verb": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Invoke ANY live verb by name \u2014 the deploy-gap passthrough"
+  },
+  "capture-queue": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Pending capture proposals for active sessions"
+  },
+  "catch-me-up": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "The merged timeline (event + activity rows) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer (notes_path)"
+  },
+  "change-doctrine-sections": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Write SEVERAL sections of one document atomically \u2014 all commit or none do (the half-applied-rename preventer; P2's known gap, closed in P3)"
+  },
+  "claim-doctrine-sections": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Claim sections before a long edit (P3): a cooperative, expiring hint that warns other writers off before they spend tokens on overlapping work"
+  },
+  "close-investigation": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Owner-only termination"
+  },
+  "close-loop": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Close a loop \u2014 done, or deliberately dropped"
+  },
+  "complete-action": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 2,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Mark YOUR open ball on a subject DONE \u2014 the thing actually happened"
+  },
+  "confirm-merge": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor"
+  },
+  "counterparty-history": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Counterparty intelligence: every deal where we have faced this listing agent, landlord, owner, or property manager, and what happened"
+  },
+  "create-national-account": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 3,
+    "upserts": 0
+   },
+   "does": "Create one national-account parent org/client and assign its accountable partner"
+  },
+  "create-national-market-deal": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 5,
+    "upserts": 0
+   },
+   "does": "Create one market transaction under a national account: reuse or create the named franchisee sub-client under the parent org, then create exactly one deal and o"
+  },
+  "deal-board": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Open pipeline grouped by phase"
+  },
+  "deal-room-board": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "The Deal Room home read: Salesforce-linked work records plus their active/parked operating state, national-account portfolio summaries, current partner identity"
+  },
+  "decline-candidate": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Record that a HUMAN looked at a candidate and said no"
+  },
+  "detach-decision": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Take a decision back off a record it was wrongly attached to"
+  },
+  "doctrine-index": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "The document catalog: every doctrine document with its class, section count, staleness"
+  },
+  "doctrine-sections": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Batch-read up to 50 sections by id \u2014 current body, version, review state \u2014 in one round trip"
+  },
+  "dry-run-doctrine-gates": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Run the validation gates against a proposed write WITHOUT committing anything \u2014 the self-check an agent runs before spending a real write, and the shakedown har"
+  },
+  "edit-loop-header": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Rewrite the standing paragraph at the top of one loops section"
+  },
+  "end-deal-review": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Complete or abandon an open agenda and return its reviewed/skipped counts"
+  },
+  "find": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Search people, practices, buildings, deals, leads, vendors by name (fuzzy)"
+  },
+  "find-precedent": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "\"What have we ruled on a fork shaped like this before?\" \u2014 searches the RULING HISTORY, which nothing else could reach"
+  },
+  "get-call-context": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read the exact active Call Mode context for an explicit list of deal UUIDs"
+  },
+  "get-deal-room": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read one complete open Deal Room work record: board/workspace and active/parked fields, next actions, notes, critical dates, activity, parties, premises, curren"
+  },
+  "get-investigation": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read the complete durable reasoning trace for one investigation: signal, owner, branches, worker evidence packets, adjudications, and termination"
+  },
+  "integrity-digest": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "The heartbeat's lines: row counts, export freshness (dead-man; stale/last_ok per target), writes_by_dell_24h, norm_owed_open, merge_queue, triage queue"
+  },
+  "investigation-neighborhood": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "List only the active allowlisted hypothesis edges available from one node kind for this investigation's signal type"
+  },
+  "lead-hot": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Scored, unsuppressed leads (score, lane, est_lease_event, next_action_date)"
+  },
+  "link-parties": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Record an intro-graph edge (a party_link row): who knows whom, who can introduce whom, who REFERRED whom"
+  },
+  "list-verbs": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "The LIVE verb registry \u2014 names, descriptions, write flags, input schemas \u2014 straight from the deployed Worker, bypassing the connector's cached tool list"
+  },
+  "log-activity": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Log a business touch (call, email, meeting, tour, text, note, LOI"
+  },
+  "log-capture": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Log a learning-source capture into the Source Material capture log \u2014 one row per source (podcast, article, video, portal session, thread)"
+  },
+  "log-decision": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 2,
+    "upserts": 0
+   },
+   "does": "Record a SETTLED decision and its rationale \u2014 the thing that stops it being relitigated next session"
+  },
+  "log-outreach": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 3,
+    "deletes": 0,
+    "inserts": 2,
+    "upserts": 0
+   },
+   "does": "THE DISPOSITION STEP: say what happened after you actually tried to reach someone, in ONE action"
+  },
+  "loop-board": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Every open loop with its domain, what it is blocked on, and its version \u2014 the live answer to 'what is still open and what is it waiting on'"
+  },
+  "loop-headers": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read the standing paragraph that sits at the top of each loops section \u2014 the header prose of open-loops"
+  },
+  "measure-placement": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 3,
+    "upserts": 0
+   },
+   "does": "Record what one placement actually did \u2014 including, and especially, that it could not be measured"
+  },
+  "merge-vendor-rows": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 6,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "HUMAN-confirmed merge of two vendor rows that ride the SAME party \u2014 a duplicate role, not a duplicate person"
+  },
+  "new-client": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Create a client over a party; mints the next C-ref (roster_ref)"
+  },
+  "new-deal": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 2,
+    "upserts": 0
+   },
+   "does": "Create a deal on an existing client"
+  },
+  "new-doctrine-doc": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Create a doctrine document in the store \u2014 the database-first home for prose that used to live as vault markdown (rule 14181e60)"
+  },
+  "new-lead": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Create a lead over a new or existing party; mints the next L-ref atomically"
+  },
+  "new-vendor": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Create a vendor over a party; sets vendor stage; mints V-<CODE>-### (pass the category code explicitly: CPA, LEN, GC"
+  },
+  "next-signals": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read deterministic analytical signals awaiting investigation"
+  },
+  "open-campaign": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Open a campaign: the object that says what a run of content is FOR, so its results can later be judged instead of admired"
+  },
+  "open-investigation": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Claim one deterministic signal and make the verified human sponsor its single reasoning owner"
+  },
+  "open-investigation-branch": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Open one hypothesis branch from an allowlisted diagnostic route"
+  },
+  "patch-deal-field": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Patch one Deal Room cell using its last-seen event as the field base"
+  },
+  "prepare-document": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Produce a document RECORD and its fill plan for one deal from a registered template: pulls the deal, client, premises, newest our-side negotiation round and lea"
+  },
+  "presence-lease": {
+   "protection": "upsert_last_writer_wins",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 1
+   },
+   "does": "Acquire or refresh this actor's field-level Deal Room presence for about three seconds"
+  },
+  "promote-pool": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 3,
+    "upserts": 0
+   },
+   "does": "Promote a candidate_pool row into a real lead: mints the party, mints the next L-ref, copies the identity, contact and est-lease-event stamps across, points the"
+  },
+  "read-deal-reconciliation": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read the minimal all-deal reconciliation record"
+  },
+  "read-doctrine": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read a whole doctrine document \u2014 one round trip, snapshot-served"
+  },
+  "read-loop": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read ONE loop and its current version"
+  },
+  "reassign-deal": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Move a deal onto the client it actually belongs to"
+  },
+  "record-branch-evidence": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Attach a worker evidence packet to an open branch"
+  },
+  "record-counter": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 2,
+    "upserts": 0
+   },
+   "does": "Log a negotiation round: whose paper (side), the economics (rate REQUIRES its basis \u2014 never a bare number), TI, free rent, term, PLUS what that side CLAIMED abo"
+  },
+  "record-defect": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "File ONE defect: a claim the system made that was not true, with what WAS true beside it"
+  },
+  "record-finding": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Land ONE open-source research or enrichment finding as a record_flag row"
+  },
+  "record-signal": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Record a signal produced by deterministic code"
+  },
+  "register-template": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Register (or re-version) a CARR template so prepare-document can fill it"
+  },
+  "release-doctrine-claims": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Release claims you hold \u2014 the done-editing half of claim-doctrine-sections"
+  },
+  "resolve-candidate": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 2,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Human gate for one capture proposal"
+  },
+  "resolve-conflict": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Resolve an open Deal Room cell conflict in one call by applying value a or b through the normal field patch/event path"
+  },
+  "resolve-doctrine-rules": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Resolve which doctrine sections are OPERATIVE given the live edge graph (P3): live OVERRIDES/SUPERSEDES suppress their targets, EXCEPTION_TO reports as a scoped"
+  },
+  "resolve-post-call-candidate": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 3,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Human-only resolution for one Call Mode proposal"
+  },
+  "retire-doctrine-section": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Retire a section (status='retired'): it leaves snapshots and search but its history stays queryable forever"
+  },
+  "retire-rule": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Withdraw a rule \u2014 proposed OR active \u2014 by setting status='retired'"
+  },
+  "revert-deal-field": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Undo one Deal Room field change only when it is still the latest change to that exact field"
+  },
+  "review-deal": {
+   "protection": "upsert_last_writer_wins",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 1
+   },
+   "does": "Mark one deal reviewed or skipped in an open agenda"
+  },
+  "score-campaign": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Close a campaign with a VERDICT against the criterion it was opened with \u2014 the act that turns a pile of metrics into an answer"
+  },
+  "search-doctrine": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Full-text search over current doctrine revisions (Postgres FTS, websearch syntax: quoted phrases, OR, -exclusions)"
+  },
+  "set-doctrine-refs": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Replace a section's outbound links and typed edges in one atomic act"
+  },
+  "set-lead": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 2,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "THE handoff: make joe or dell the current lead on a deal"
+  },
+  "set-market-agent": {
+   "protection": "upsert_last_writer_wins",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 1
+   },
+   "does": "Set the stated local-market agent on a national-account deal"
+  },
+  "set-national-account-owner": {
+   "protection": "upsert_last_writer_wins",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 1
+   },
+   "does": "Assign Joe or Dell as the accountable partner for a national-account portfolio without changing individual deal owners"
+  },
+  "set-next-action": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 2,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Set YOUR one open ball on a subject (replaces your previous open one; Dell's stays untouched \u2014 one ball per person per subject)"
+  },
+  "set-next-step": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 2,
+    "deletes": 0,
+    "inserts": 2,
+    "upserts": 0
+   },
+   "does": "Append a new current next step"
+  },
+  "source-attribution": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Prospecting ROI: per source lane, the funnel pool -> promoted -> leads -> clients -> deals -> commissions"
+  },
+  "stale-records": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Active deals gone quiet 14+ days, measured on last_touch (see v_last_touch; a deal inherits its client's touch since 0033)"
+  },
+  "stamp-touch": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Truck shorthand for log-activity: one-line call/text stamp"
+  },
+  "standing-context": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store \u2014 the taught r"
+  },
+  "start-deal-review": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Start a Team Book or national-account agenda"
+  },
+  "state-as-of": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "\"What did the record SAY about this on date X?\" \u2014 replays the field-level change log for one record up to an instant"
+  },
+  "teach": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Write a rule from the human's own words (status: proposed \u2014 it activates only via activate-rule, also human-gated)"
+  },
+  "today-triage": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "What needs attention now: due next-actions (next_action"
+  },
+  "triage-item": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Close the loop on ONE inbox item a human has looked at: say what it became"
+  },
+  "update-deal": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Field-level change to a deal (phase, segment, outcome, notes_path, salesforce_id)"
+  },
+  "update-decision": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Correct a decision entry already recorded by log-decision \u2014 a wrong or missing title, rationale, human_quote or provenance \u2014 or ATTACH it to the record(s) it go"
+  },
+  "update-document-status": {
+   "protection": "NONE",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Record what a HUMAN says happened to a prepared document \u2014 sets document status: draft -> handed_to_joe -> sent"
+  },
+  "update-loop": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Change an open loop \u2014 its text, its owner, its marker, or which section it sits in"
+  },
+  "update-party-contact": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Promote a VERIFIED contact fact onto a party: phone (office), cell (mobile), email, title, city, county \u2014 CONTACT FACTS ONLY"
+  },
+  "update-vendor": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 1,
+    "upserts": 0
+   },
+   "does": "Field-level change to a vendor (stage, seeking, offers, referral_active, territory, out_of_market)"
+  },
+  "who-do-we-know": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "\"Who gets me to X?\" \u2014 walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops (walks"
+  },
+  "write-doctrine-section": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Write ONE section of a doctrine document \u2014 create it (base_version 0) or replace its body (base_version = current_version from a fresh read)"
+  }
+ }
+}
