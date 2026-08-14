@@ -29,7 +29,7 @@
     "staging-attribution-gate.py": "cf05a3bf8a04a8e741962de11a83a0e904f24a039a15ebb450b9a61ae714e247",
     "staging-observation-tracker.py": "3a0ebd27fdb8bdf4eaee745be408afe281e62c017813f829e9d7611ca91cef90",
     "cmd_text.py": "27103bb25b3f40024fa370a44418d0ca643e220c6b3fda62b29aadd15634dee2",
-    "peer-broadcast-gate.py": "c28a303041cacccb7240c04a0ee97907db8d104af3e23ec5792835e2dbbc74ba",
+    "peer-broadcast-gate.py": "3f8766dfd092efc661c8a0cbc312e03fdf02bddd1371cdbc42c8d87ebf1ef57b",
     "settings-change-gate.py": "e1e4013ec0b0d3f1ed23f6247b3ab1f58f589f75e77180e987696fb985caec57",
     "canonical-edit-gate.py": "2b808572416c1a61ebb3720892b8f19dc01f066ebdca023eadcbaeb5343665a6",
     "worktree-self-plumb.py": "7885ff90d4db26c7dd4e53b74ba95db3f8d2b1f7d1fe56df048fd56171ae40c8",
