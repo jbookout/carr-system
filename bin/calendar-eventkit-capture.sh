@@ -114,7 +114,20 @@ echo "calendar-capture: read OK — ${SCANNED:-?} events scanned"
 # thrown away, which is the same shape as answering emptily instead of refusing.
 MATCH_JSON="$REPO/out/calendar-touch-proposals.json"
 MATCH_ERR="$REPO/out/calendar-matcher.err"
-if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json \
+# --from-dump, and this is the whole reason the job works unattended. The
+# matcher's default path opens the local Calendar DATABASE, which needs FULL DISK
+# ACCESS granted to the responsible process — held by a terminal, NOT by a launchd
+# agent. The first real fire died there: "cannot read the calendar database. This
+# is a Full Disk Access answer, not an empty calendar." The bundle above already
+# read the same meetings through EventKit under a permission that DOES survive
+# into the agent, so the match runs off its dump and the pipeline needs ONE grant
+# instead of two. Verified identical output both ways: 1 exact, 0 domain, 2 unknown.
+DUMP="$REPO/out/calendar-attendees.json"
+if [ ! -s "$DUMP" ]; then
+  echo "calendar-capture: FAIL the bundle read OK but wrote no dump at $DUMP" >&2
+  exit 1
+fi
+if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json --from-dump "$DUMP" \
         > "$MATCH_JSON" 2> "$MATCH_ERR"; then
   echo "calendar-capture: FAIL the matcher did not complete" >&2
   sed 's/^/    /' "$MATCH_ERR" >&2
