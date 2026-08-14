@@ -39,6 +39,63 @@ from datetime import date
 # move with it — never edit a row's date individually.
 CUTOFF = date(2026, 8, 21)
 
+# CLOSED EARLY, PER PARTNER — Joe, 2026-08-14: "I'm ALREADY migrated over fully.
+# there is no need for anything running on my side of the system to wait until
+# august 21 to retire ... that way i can fix any issues that pop up in the
+# meantime before dell's system fully retires its aug 21 items."
+#
+# What prompted it: the nightly drift watch reported two new hand-authored .md
+# files in the vault, and they were LEGITIMATE under the temporary rows below —
+# the weekly social batch writing its own report to disk. The gate was working;
+# the allowance was the hole.
+#
+# WHY THIS IS PER PARTNER AND NOT ONE DATE. The first cut of this change closed
+# the rows for everyone, which would have retired Dell's jobs a week before his
+# system migrates — the opposite of the intent. The date a temporary row dies is
+# a property of WHOSE MACHINE IS WRITING, because migration happened per partner:
+# Joe is done, Dell is not until 2026-08-21. Retiring Joe's early is deliberately
+# a staggered rollout — he absorbs the breakage first and fixes it while Dell's
+# side still works.
+#
+# WHY THE ROWS STAY IN THE FILE INSTEAD OF BEING DELETED. A deleted row falls
+# through to the generic deny message, which tells a job's author only that
+# markdown is closed. A retired row produces the SPECIFIC message below — "its
+# writer was supposed to be re-pointed" — which names what has to happen and to
+# which job. The diagnosis is the point.
+#
+# WHAT THIS BREAKS ON JOE'S MACHINE, ON PURPOSE AND LOUDLY: the weekly social
+# batch's report file, the weekly network brief's output, and client-intake's
+# dossier narrative. Each is filed as a loop naming the verb its content should
+# go through instead. The system's own design intends this — a retired row's
+# denial IS the alarm that a writer was never re-pointed.
+CLOSED_EARLY = date(2026, 8, 13)
+
+# Partners whose migration is COMPLETE, so every temporary row above dies for
+# them now instead of at CUTOFF. Add "dell" here when his side is migrated —
+# and when both are in, the rows and this set can go entirely.
+MIGRATED_PARTNERS = {"joe"}
+
+IDENTITY_FILE = "~/.config/carr/local-actor.json"
+
+
+def local_actor():
+    """Which partner's machine this is, from the same per-machine identity file
+    ops/cutover-readiness.py reads, or None if it cannot be established.
+
+    UNKNOWN FALLS BACK TO THE LATER DATE, deliberately. An unresolvable identity
+    on Dell's machine must not retire his rows a week early; on Joe's it resolves
+    fine, and if it ever stops resolving the health check's cutover-readiness row
+    says so out loud. Erring toward the old behaviour is the direction that
+    cannot break a partner who has not migrated.
+    """
+    import json as _json
+    import os as _os
+    try:
+        with open(_os.path.expanduser(IDENTITY_FILE)) as fh:
+            return (_json.load(fh).get("actor_slug") or "").strip() or None
+    except Exception:
+        return None
+
 # Machine-required bootstrap surfaces a session may legitimately hand-edit
 # before their content migrates. CLAUDE.md is a PARTIAL render (gist block is
 # exporter-owned; the prose around it is doctrine Joe edits). AGENTS.md is the
@@ -82,29 +139,39 @@ ALLOW_PATTERNS = {
 }
 
 
-def md_write_verdict(rel, today=None):
+def md_write_verdict(rel, today=None, actor=None):
     """None = allowed; else the deny reason for a vault-relative .md path.
 
     Caller has already established: path is inside the vault, ends .md, and is
     NOT a generated render (renders carry their own, earlier deny with a more
-    specific message). `today` is injectable for tests.
+    specific message). `today` and `actor` are injectable for tests.
     """
     today = today or date.today()
+    if actor is None:
+        actor = local_actor()
+    # A migrated partner's temporary rows are already dead; everyone else's run
+    # to CUTOFF. See MIGRATED_PARTNERS above for why this is per machine.
+    def _effective(retires):
+        return CLOSED_EARLY if actor in MIGRATED_PARTNERS else retires
     if rel in ALLOW_EXACT:
         return None
     for prefix in ALLOW_MACHINE_PREFIX:
         if rel.startswith(prefix):
             return None
-    retired_msg = (f"'{rel}' sat on a TEMPORARY manifest row that retired at the "
-                   f"doctrine-store cutoff. Its writer should have been re-pointed "
-                   f"at the store by P5 — this write is the alarm that it was not. "
-                   f"Route the content through a verb and fix the job.")
+    retired_msg = (f"'{rel}' sat on a TEMPORARY manifest row, and that row is now "
+                   f"CLOSED (Joe, 2026-08-14: \"we need to eliminate the ability to "
+                   f"write markdown at all. me or dell\" — brought forward from the "
+                   f"2026-08-21 cutoff). Its writer was supposed to be re-pointed at "
+                   f"the store, and this write is the alarm that it was not. Route the "
+                   f"content through a verb and fix the job: the posts, findings, "
+                   f"decisions and open items in a report each have one. A markdown "
+                   f"file reaches nobody and no query finds it.")
     for prefix, retires in ALLOW_PREFIX.items():
         if rel.startswith(prefix):
-            return None if today <= retires else retired_msg
+            return None if today <= _effective(retires) else retired_msg
     for pat, retires in ALLOW_PATTERNS.items():
         if pat.match(rel):
-            return None if today <= retires else retired_msg
+            return None if today <= _effective(retires) else retired_msg
     return (f"'{rel}': hand-authored markdown in the vault is closed (Joe, 2026-08-07: "
             f"\"i don't want anything written into .md files... database first\" — rule "
             f"14181e60, council decision 82a2fb62). The doctrine store is being built "
