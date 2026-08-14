@@ -100,6 +100,12 @@ INSTALL_EXEMPT = {
 
 DRIFT: list[str] = []
 
+# Set only when the database render was genuinely read. The verdict below
+# distinguishes 'every source agrees' from 'the four I could read agree',
+# because those are different sentences and only one of them is true when
+# the ledger is unreachable.
+REGISTRY_COMPARED = False
+
 
 def drift(line: str) -> None:
     DRIFT.append(line)
@@ -330,6 +336,8 @@ def main() -> int:
             with pg.connect(dsn, connect_timeout=10) as conn:
                 rows = conn.execute("select key from ops.service").fetchall()
             in_db = {r[0] for r in rows}
+            global REGISTRY_COMPARED
+            REGISTRY_COMPARED = True
             if not quiet:
                 print(f"\n  ops.service             {len(in_db):>3} row(s) in the "
                       f"database")
@@ -357,8 +365,18 @@ def main() -> int:
 
     # ── verdict ──────────────────────────────────────────────────────────────
     print()
-    if not DRIFT:
+    if not DRIFT and REGISTRY_COMPARED:
         print("scheduler-truth: no drift — every source agrees.")
+        return 0
+    if not DRIFT:
+        # Four sources agreed and the fifth was never read. Saying "every source
+        # agrees" here would be a false all-clear, which is the failure this
+        # whole tool was built to detect — and it printed exactly that until
+        # ops/degraded-mode-exercise.py cut the database off and caught it.
+        print("scheduler-truth: the four local sources agree. THE DATABASE "
+              "RENDER WAS NOT READ, so this is not a clean bill — a service "
+              "declared here and missing from ops.service would look identical "
+              "to this.")
         return 0
     print(f"scheduler-truth: {len(DRIFT)} drift finding(s)\n")
     for d in DRIFT:
