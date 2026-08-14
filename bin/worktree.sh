@@ -108,6 +108,9 @@ usage() {
   print -r -- "                                                a path reaches trees anywhere"
   print -r -- "       run.sh worktree --sweep [--dry-run]      reap merged+clean+idle(48h) trees"
   print -r -- "                                                through the same code as --remove"
+  print -r -- "       run.sh worktree --plumb [path]           link .venv/out/node_modules into a"
+  print -r -- "                                                worktree THIS script did not create"
+  print -r -- "                                                (default: the worktree at \$PWD)"
   exit 2
 }
 
@@ -287,6 +290,65 @@ case "$1" in
     # code a worktree removed by hand goes through (rule a8c55a47).
     remove_one "$wt" "$name" 0
     exit $?
+    ;;
+  --plumb)
+    shift
+    # TWO DOORS, ONE PLUMBING JOB (2026-08-14). `run.sh worktree <name>` links
+    # .venv/out/mcp-server-node_modules at CREATE time (see `link` calls at the
+    # bottom of this file). That covers worktrees THIS script creates. It does
+    # nothing for a worktree created by any other door — Claude Code's own
+    # native isolation (a bare `git worktree add` under .claude/worktrees/,
+    # with no call into this script at all), Codex, or a bare `git worktree
+    # add` typed by hand. A session that lands in one of those finds no
+    # mcp-server/node_modules, cannot run its own tooling, and the failure
+    # mode observed live is worse than an error: it falls back to running from
+    # the shared CANONICAL checkout instead — the exact multi-writer collision
+    # `run.sh worktree` exists to prevent (see the file header above).
+    #
+    # `--plumb [path]` is the same three links, callable against a worktree
+    # this script did not create. It reuses `link()` and `$CANON` verbatim —
+    # no second copy of the linking decision (rule a8c55a47: a manual path and
+    # an automated path doing the same job must be the same code). The boot
+    # hook (hooks/worktree-self-plumb.py) calls this with an explicit path;
+    # a human runs it bare from inside the worktree and gets the default below.
+    if [ $# -ge 1 ]; then
+      target="$1"
+      case "$target" in
+        */*|'~'*) wt="${target:A}" ;;
+        *)        wt="$HOME_DIR/$target" ;;
+      esac
+    else
+      # DEFAULT: the worktree containing the CURRENT directory, not $REPO —
+      # $REPO can itself be the canonical tree when this script is invoked by
+      # absolute path (the boot hook always does), so a plain path-based
+      # default would silently resolve to the wrong tree. `git rev-parse` with
+      # no `-C` reads the process's actual $PWD, which is always right for
+      # "the worktree I am standing in right now".
+      wt="$(git rev-parse --show-toplevel 2>/dev/null)"
+      if [ -z "$wt" ]; then
+        print -r -- "not inside a git worktree — pass a path: run.sh worktree --plumb <path>"
+        exit 2
+      fi
+      wt="${wt:A}"
+    fi
+    [ -d "$wt" ] || { print -r -- "no worktree at $wt"; exit 1; }
+    # Same two guards --remove uses, same reasons: never the canonical tree
+    # (it holds the real dirs, not links to them — there is nothing to plumb),
+    # and never a path this repo does not actually recognize as a worktree.
+    if [ "${wt:A}" = "${CANON:A}" ]; then
+      print -r -- "refusing to plumb the canonical tree: $CANON (nothing to plumb — it holds the real dirs)"
+      exit 2
+    fi
+    if ! git -C "$CANON" worktree list --porcelain | awk '/^worktree /{print $2}' \
+         | grep -qx -e "${wt:A}" -e "$wt"; then
+      print -r -- "not a registered worktree of this repo: $wt"
+      print -r -- "  ./run.sh worktree --list   shows the ones that are"
+      exit 2
+    fi
+    link "$CANON/.venv" "$wt/.venv"
+    link "$CANON/out"   "$wt/out"
+    [ -d "$CANON/mcp-server/node_modules" ] && link "$CANON/mcp-server/node_modules" "$wt/mcp-server/node_modules"
+    exit 0
     ;;
   --sweep)
     shift
