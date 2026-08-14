@@ -1315,6 +1315,20 @@ const BLOCKER_CLASSES = Object.freeze([
 // above; marker gets the identical up-front-validation treatment in add-loop.
 const LOOP_MARKERS = Object.freeze(["bell", "dated", "decision", "none"]);
 
+// THE THIRD LEG OF THAT SAME DEFECT (found 2026-08-14): kind is documented in
+// add-loop's inputSchema as a REQUIRED enum, but inputSchema is advisory (see
+// LOOP_MARKERS above) and nothing in the handler ever checked it. A call that
+// simply OMITTED kind sailed through: the placement ternary fell through to
+// section "open" (undefined is not "idea" and not "open_loop"), the loop_block
+// lookup ran with kind=NULL and matched nothing, and the caller got
+// {"error":"no_block","section":"open"} whose hint blamed "the loop importer"
+// — which had in fact run, for every kind, two weeks earlier. The thrown
+// payload even carried `kind: args.kind`, but undefined never survives JSON
+// serialization, so the one field that would have named the real mistake was
+// invisible. Validated up front like marker/domain/blocker, so a missing or
+// misspelled kind fails as itself instead of as a phantom importer failure.
+const LOOP_KINDS = Object.freeze(["open_loop", "team_loop", "action_required", "idea"]);
+
 // The detail field is where a determined session would smuggle the deferral back
 // in, so the phrases that mean "not now, no reason" are refused by name. This is
 // not a quality bar on writing; it is a check that the sentence names a WHO or a
@@ -2162,7 +2176,7 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       number: { type: "string", description: "the loop number as a human writes it, with or without the leading #" },
       loop_id: { type: "string", description: "exact uuid; wins over number" },
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"], description: "narrows an ambiguous number" },
+      kind: { type: "string", enum: LOOP_KINDS, description: "narrows an ambiguous number" },
     } },
     handler: async (c, _a, args) => {
       const cols = `id as loop_id, kind, number, domain, blocker_class, blocker_detail, status,
@@ -2198,7 +2212,7 @@ export const TOOLS = {
     write: false,
     description: "Every open loop with its domain, what it is blocked on, and its version — the live answer to 'what is still open and what is it waiting on'. THE GAP THIS CLOSES: that question used to be answered by reading a generated markdown render, which splits loops across four files by kind and is only as fresh as the last export; a session counting from those files gets a number that is both stale and partial. Defaults to open work loops. Pass blocker:'none' for the rows that predate the blocker requirement — that is the do-it-or-close-it pile, and the standing rule is never to re-file them. Every row carries its version, so a close needs no second read.",
     inputSchema: { type: "object", properties: {
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"], default: "open_loop" },
+      kind: { type: "string", enum: LOOP_KINDS, default: "open_loop" },
       status: { type: "string", enum: ["open", "done", "dropped", "any"], default: "open" },
       domain: { type: "string", description: "deals | prospecting | networking | marketing | business | system" },
       blocker: { type: "string", description: "a blocker class to filter to, or 'none' for rows naming no blocker, or 'any' for rows that name one" },
@@ -4575,7 +4589,7 @@ export const TOOLS = {
     description: "Open a new loop — a Joe/Dell task (kind open_loop), a partner handoff (team_loop), a cross-brain interrupt (action_required), or a parked idea (kind idea, which renders into 00_Context/idea-bank.md and is personal, never shared). Do NOT hand-edit open-loops.md, open-loops-backlog.md, action-required.md or team-loops.md; they are rendered from this. Markers carry meaning the heartbeat obeys: `bell` = actionable THIS WEEK (hard cap 3 PER DOMAIN — more than 3 means re-tier, not stack; read v_loop_bell_cap for breaches. The old cap was 5 across the whole hot list, written before domains existed: with six lanes that was under one bell each, so everything drifted to 'none' until the hot list held 21 items against a cap of 5), `dated` + due_on = silent until its day, `decision` = a ❓ the Monday brief surfaces, `none` = backlog. An open_loop with bell, or a dated one already due, lands hot; everything else lands in the backlog, which is the file's own rule. The action_required bar is deliberately high: only a new shared mechanism, a build the other side must replicate, or a protocol change — if everything is urgent, nothing is. THE DEFERRAL GATE: an open_loop is REFUSED unless it names `blocker` (a closed list of states of the world outside this session) and `blocker_detail` (the specific person, ruling, date or credential). There is no value meaning 'later'. Before filing one, ask whether this session could just do the work — if it could, do it and file nothing, because a session with the context already loaded is the cheapest builder this item will ever get.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"] },
+      kind: { type: "string", enum: LOOP_KINDS },
       domain: { type: "string", enum: ["deals","prospecting","networking","marketing","business","system"],
         description: "deals | prospecting | networking | marketing | business | system. Classify by WHAT THE WORK IS, not who appears in it: a vendor introducing a PROSPECT normally means real intent and is DEALS (prospecting only while no deal has formed); a vendor introducing a VENDOR is networking; connecting a prospect to a vendor is networking; connecting a client to a vendor on a LIVE deal is deals. Omit only when genuinely unclear — an unclassified loop renders in its own unsorted section, which is honest, but a loop nobody can find is a loop nobody does." },
       title: { type: "string", description: "team_loop 'Ask' / action_required 'Action needed'. Not used by open_loop, whose text is `body`." },
@@ -4594,6 +4608,16 @@ export const TOOLS = {
         description: "REQUIRED whenever `blocker` is set: the SPECIFIC thing, named. 'the landlord' is not a counterparty; 'Sanders, the listing broker on C-112' is. 'a ruling' is not a ruling; 'whether the 3% escalation cap applies to renewal years' is." } },
       required: ["idempotency_key", "kind", "owner"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "add-loop", args, async () => {
+      // kind decides EVERYTHING downstream — the deferral gate, the tier, and
+      // which block the row renders into — so it is checked before anything
+      // else. See LOOP_KINDS for the live defect this closes (2026-08-14: an
+      // omitted kind surfaced as a no_block error blaming the loop importer).
+      if (args.kind === undefined || args.kind === null)
+        throw new ToolError({ error: "missing_kind", allowed: LOOP_KINDS,
+          hint: "kind is required and decides where the loop lives: open_loop (a Joe/Dell task), team_loop (partner handoff), action_required (cross-brain interrupt), or idea (parked, personal)" });
+      if (!LOOP_KINDS.includes(args.kind))
+        throw new ToolError({ error: "unknown_kind", got: args.kind, allowed: LOOP_KINDS,
+          hint: "kind must be one of open_loop/team_loop/action_required/idea — see this verb's description for what each means" });
       if (!args.title && !args.body)
         throw new ToolError({ error: "empty_loop",
           hint: "a loop needs text: `body` for an open_loop, `title` for a team_loop or action_required" });
@@ -4725,7 +4749,7 @@ export const TOOLS = {
       idempotency_key: { type: "string" },
       loop_id: { type: "string" },
       number: { type: "string", description: "alternative to loop_id; refuses when the number is ambiguous, and several are" },
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"], description: "narrows an ambiguous number" },
+      kind: { type: "string", enum: LOOP_KINDS, description: "narrows an ambiguous number" },
       base_version: { type: "integer" },
       title: { type: "string" }, body: { type: "string" }, owner: { type: "string" },
       unblocks: { type: "string" }, source_note: { type: "string" },
@@ -4956,7 +4980,7 @@ export const TOOLS = {
       idempotency_key: { type: "string" },
       loop_id: { type: "string" },
       number: { type: "string", description: "alternative to loop_id; refuses when ambiguous" },
-      kind: { type: "string", enum: ["open_loop", "team_loop", "action_required", "idea"] },
+      kind: { type: "string", enum: LOOP_KINDS },
       base_version: { type: "integer" },
       outcome: { type: "string", description: "REQUIRED: what came of it, in your words" },
       resolution: { type: "string", enum: ["done", "dropped"] } },
