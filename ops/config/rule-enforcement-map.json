@@ -38,11 +38,13 @@
     "conduct_stop": {"implementation": ["hooks/conduct-stop-gate.py"], "test": ["ops/conduct-gate-selftest.py"], "failure_mode": "Stop block"},
     "delegation_tripwire": {"implementation": ["hooks/delegation-gate.py"], "test": ["ops/delegation-gate-selftest.py"], "failure_mode": "PreToolUse block"},
     "one_repo": {
-      "implementation": ["hooks/one-repo-gate.py"],
-      "test": ["ops/one-repo-gate-selftest.py"],
+      "implementation": ["hooks/one-repo-gate.py", "hooks/bash-write-gate.py"],
+      "test": ["ops/one-repo-gate-selftest.py", "ops/bash-write-gate-selftest.py"],
       "failure_mode": "deny"
     },
-    "record_home": {"implementation": ["hooks/record-home-gate.py", "hooks/guard-unattended.py"], "test": ["tools/test-record-home-gate.py", "ops/guard-selftest.py"], "failure_mode": "PreToolUse deny"},
+    "record_home": {
+      "implementation": ["hooks/record-home-gate.py", "hooks/bash-write-gate.py", "hooks/guard-unattended.py"],
+      "test": ["tools/test-record-home-gate.py", "ops/bash-write-gate-selftest.py", "ops/guard-selftest.py"], "failure_mode": "PreToolUse deny"},
     "egress_guard": {"implementation": ["hooks/guard-unattended.py"], "test": ["ops/guard-selftest.py"], "failure_mode": "PreToolUse deny"},
     "git_writer": {"implementation": ["hooks/git-writer-gate.py"], "test": ["ops/git-writer-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
     "escalation": {"implementation": ["hooks/escalation-gate.py"], "test": ["ops/escalation-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
