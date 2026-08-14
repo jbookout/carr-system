@@ -38,7 +38,19 @@
 # than discovered. --no-owner --no-acl for the same reason
 # bin/backup-dump.sh uses them: an embedded OWNER TO / GRANT names roles a fresh
 # database has never heard of, and the first such statement aborts the load.
-# Grants are rebuilt by the migrations, which are in git.
+#
+# "Grants are rebuilt by the migrations, which are in git" — this file's
+# original claim, and it has the same shelf life the role claim had: true only
+# while the granting migrations are PENDING. Once the ledger absorbs them, the
+# grants stop running anywhere, and a database built from this snapshot has the
+# roles (preamble below) holding NOTHING. That is exactly how CI's migration
+# class ran green while proving nothing about privileges — discovered 2026-08-14
+# on PR #75, where verifying carr_writer's insert on lead meant replaying
+# 0001-0004 by hand because the database CI builds could not answer the
+# question. So the snapshot carries the app roles' ACLs itself: the CARR GRANTS
+# section below reads them from production's catalogs and emits plain GRANTs,
+# scoped to the app roles only so no other principal's ACLs enter the tree.
+# tools/test-schema-snapshot-grants.py pins the shapes it must carry.
 #
 # THE ROLES THEMSELVES ARE NOT, and assuming they were is a bug this file shipped
 # on 2026-08-14. The reasoning above was true only while every role-creating
@@ -75,6 +87,12 @@ for c in /opt/homebrew/opt/libpq/bin/pg_dump /usr/local/opt/libpq/bin/pg_dump pg
   if command -v "$c" >/dev/null 2>&1; then PG_DUMP="$c"; break; fi
 done
 [ -n "$PG_DUMP" ] || { echo "schema-snapshot: no pg_dump found" >&2; exit 69; }
+
+PSQL=""
+for c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do
+  if command -v "$c" >/dev/null 2>&1; then PSQL="$c"; break; fi
+done
+[ -n "$PSQL" ] || { echo "schema-snapshot: no psql found (needed for the grants section)" >&2; exit 69; }
 [ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
 
 CHECK=0
@@ -97,13 +115,15 @@ cat > "$TMP" <<'ROLES'
 -- The roles still have to EXIST before the pending migrations that grant to
 -- them run, and they can no longer be got by replaying 0115: once this
 -- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
+-- carr_exporter aged into the same trap by way of 0006 and joined the list on
+-- 2026-08-14, when the grants section below started carrying its privileges.
 -- An existing role is left exactly as it is; a missing one is created NOLOGIN
 -- purely so privileges have somewhere to attach in a rebuilt environment.
 --
 do $$
 declare r text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_jobs'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_jobs','carr_exporter'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -114,6 +134,127 @@ ROLES
 
 if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" >> "$TMP"; then
   echo "schema-snapshot: pg_dump failed — nothing written" >&2
+  exit 1
+fi
+
+# THE CARR GRANTS SECTION. --no-acl stays — a raw ACL dump names Neon's own
+# principals and whatever login roles neonctl has minted per environment, and
+# the first grant naming an absent role aborts the load. Instead the app roles'
+# privileges are read from the catalogs and emitted as plain GRANTs, scoped by
+# grantee to exactly the four NOLOGIN roles the preamble creates. Membership
+# bundles may additionally name neondb_owner (0005/0006 grant it the bundles),
+# which every loading environment already has: .github/workflows/ci.yml creates
+# it for the same reason.
+#
+# The section rides AFTER the structure because a grant on a table that does
+# not exist yet aborts the load, and BEFORE the ledger because it is structure,
+# not data. Five shapes, each ordered deterministically so --check reports
+# drift and nothing else: schema usage, relation grants (tables, views,
+# sequences), column-scoped grants (0021, 0117 — where the columns OUTSIDE the
+# list are the point), function execute (0094, 0106), and memberships.
+GRANTS_SQL="$(mktemp)"
+cat > "$GRANTS_SQL" <<'GRANTSQL'
+with app(rolname) as (
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+)
+select format('grant %s on schema %s to %s;',
+              string_agg(distinct lower(a.privilege_type), ', '
+                         order by lower(a.privilege_type)),
+              n.nspname, r.rolname)
+  from pg_namespace n
+  cross join lateral aclexplode(n.nspacl) a
+  join pg_roles r on r.oid = a.grantee
+ where r.rolname in (select rolname from app)
+ group by n.nspname, r.rolname
+ order by n.nspname, r.rolname;
+
+with app(rolname) as (
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+)
+select format('grant %s on %s %s.%s to %s;',
+              string_agg(distinct lower(a.privilege_type), ', '
+                         order by lower(a.privilege_type)),
+              case c.relkind when 'S' then 'sequence' else 'table' end,
+              n.nspname, c.relname, r.rolname)
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  cross join lateral aclexplode(c.relacl) a
+  join pg_roles r on r.oid = a.grantee
+ where r.rolname in (select rolname from app)
+ group by n.nspname, c.relname, c.relkind, r.rolname
+ order by n.nspname, c.relname, r.rolname;
+
+with app(rolname) as (
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+)
+select format('grant %s (%s) on table %s.%s to %s;',
+              lower(a.privilege_type),
+              string_agg(att.attname, ', ' order by att.attnum),
+              n.nspname, c.relname, r.rolname)
+  from pg_attribute att
+  join pg_class c on c.oid = att.attrelid
+  join pg_namespace n on n.oid = c.relnamespace
+  cross join lateral aclexplode(att.attacl) a
+  join pg_roles r on r.oid = a.grantee
+ where r.rolname in (select rolname from app)
+   and not att.attisdropped
+ group by n.nspname, c.relname, r.rolname, a.privilege_type
+ order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
+
+with app(rolname) as (
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+)
+select format('grant execute on function %s.%s(%s) to %s;',
+              n.nspname, p.proname,
+              pg_get_function_identity_arguments(p.oid), r.rolname)
+  from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+  cross join lateral aclexplode(p.proacl) a
+  join pg_roles r on r.oid = a.grantee
+ where r.rolname in (select rolname from app)
+   and lower(a.privilege_type) = 'execute'
+ order by n.nspname, p.proname, r.rolname;
+
+with app(rolname) as (
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+)
+select format('grant %s to %s;', gr.rolname, mem.rolname)
+  from pg_auth_members m
+  join pg_roles gr  on gr.oid  = m.roleid
+  join pg_roles mem on mem.oid = m.member
+ where gr.rolname in (select rolname from app)
+   and mem.rolname in (select rolname from app union select 'neondb_owner')
+ order by gr.rolname, mem.rolname;
+GRANTSQL
+
+cat >> "$TMP" <<'GRANTHDR'
+--
+-- CARR GRANTS (bin/schema-snapshot.sh) — not produced by pg_dump.
+--
+-- The app roles' privileges, read from production's catalogs. Without them a
+-- database built from this file has the roles holding nothing, and CI's
+-- migration class answers has_table_privilege() with false for everything —
+-- the 2026-08-14 gap. Grantees are scoped to the preamble's four roles (plus
+-- neondb_owner, membership bundles only) so no other principal's ACLs can
+-- enter the tree. Shapes pinned by tools/test-schema-snapshot-grants.py.
+--
+
+GRANTHDR
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" -f "$GRANTS_SQL" >> "$TMP"; then
+  rm -f "$GRANTS_SQL"
+  echo "schema-snapshot: could not read the app-role grants — nothing written" >&2
+  exit 1
+fi
+rm -f "$GRANTS_SQL"
+
+# An empty grants section is the truncation problem in a new coat: production
+# certainly holds grants for these roles, so zero emitted statements means the
+# read failed in a way psql did not report, and committing the result would
+# silently define a database where the roles hold nothing — the exact gap this
+# section exists to close.
+if ! grep -q '^grant .* to carr_' "$TMP"; then
+  echo "schema-snapshot: grants section came back empty — nothing written" >&2
   exit 1
 fi
 

@@ -365,13 +365,46 @@ check_migration() {
     return
   fi
 
-  if DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration.log" "$PY" tools/migrate.py --apply --yes; then
-    local n
-    n="$(grep -c '^applying ' "$LOGDIR/migration.log" 2>/dev/null || echo 0)"
-    ok migration "committed schema loads; $n pending migration(s) apply on top of it"
-  else
+  if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration.log" "$PY" tools/migrate.py --apply --yes; then
     tail -30 "$LOGDIR/migration.log" >&2
     bad migration "a pending migration did not apply to the committed schema"
+    return
+  fi
+
+  # THE GRANTS CANARY, added 2026-08-14. The snapshot is pg_dump --no-acl, so
+  # for months this class built a database where the app roles existed and held
+  # NOTHING — has_table_privilege() false for every table, every role — and ran
+  # green anyway, because nothing ever asked. PR #75 paid for that: verifying
+  # carr_writer's insert on lead meant replaying 0001-0004 by hand. The CARR
+  # GRANTS section in db/schema.sql now carries the privileges; this asks the
+  # LIVE database whether they actually attached, which no text check on the
+  # snapshot can prove. One positive per grant shape, plus 0117's negative —
+  # the interlock where the ABSENT column is the point. A flattening bug that
+  # turned column grants into table grants would pass every positive and be
+  # caught only there.
+  if run_quiet "$LOGDIR/migration-grants.log" "$psql_bin" -X -v ON_ERROR_STOP=1 -Atq -d "$dsn" -c "
+    do \$\$ begin
+      if not has_table_privilege('carr_writer', 'public.lead', 'insert') then
+        raise exception 'carr_writer cannot insert into lead (the PR #75 case)'; end if;
+      if not has_schema_privilege('carr_jobs', 'ops', 'usage') then
+        raise exception 'carr_jobs lacks usage on schema ops (0115)'; end if;
+      if not has_column_privilege('carr_jobs', 'ops.incident', 'state', 'update') then
+        raise exception 'carr_jobs cannot update incident.state (0117)'; end if;
+      if has_column_privilege('carr_jobs', 'ops.incident', 'resolved_at', 'update') then
+        raise exception 'carr_jobs can update incident.resolved_at — 0117 interlock broken'; end if;
+      if not has_function_privilege('carr_reader', 'public.state_as_of(text, uuid, timestamptz)', 'execute') then
+        raise exception 'carr_reader cannot execute state_as_of (0106)'; end if;
+      if not pg_has_role('carr_exporter', 'carr_reader', 'member') then
+        raise exception 'carr_exporter lost its carr_reader bundle (0006)'; end if;
+    end \$\$;"; then
+    local n
+    # grep -c prints "0" AND exits nonzero on no match, so `|| echo 0` printed
+    # a second zero. `|| :` keeps the count grep already printed.
+    n="$(grep -c '^applying ' "$LOGDIR/migration.log" 2>/dev/null || :)"
+    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live"
+  else
+    tail -15 "$LOGDIR/migration-grants.log" >&2
+    bad migration "the app roles' grants did not survive into the built database"
   fi
 }
 
