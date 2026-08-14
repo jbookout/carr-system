@@ -35,8 +35,25 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
-BASELINE = os.path.join(REPO, "ops", "config", "gate-baseline.json")
+
+# RESOLVED AT CALL TIME, NOT IMPORT TIME, and that is the whole point.
+#
+# These were `MAP = os.path.join(REPO, ...)` constants until 2026-08-13. The
+# selftest redirects this module at a throwaway repo by setting `mod.REPO` after
+# importing it, which works for git() below (it reads REPO when it runs) and did
+# NOT work for the constants (already frozen to the real checkout). The module
+# was split-brained for the whole run: git operations went to the fixture while
+# every read and write of the map and the baseline went to the LIVE repo, so a
+# test whose docstring promises "never touches the real one" silently modified
+# ops/config/rule-enforcement-map.json and ops/config/gate-baseline.json on
+# every run. A module whose paths freeze at import cannot be pointed at a
+# fixture at all — functions can.
+def map_path() -> str:
+    return os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
+
+
+def baseline_path() -> str:
+    return os.path.join(REPO, "ops", "config", "gate-baseline.json")
 
 # The map keys its inventory by scope; each scope is rendered to its own file.
 RENDERS = {
@@ -52,9 +69,32 @@ ID_RE = re.compile(r"^`#?([0-9a-f]{8})`|^#### .*`#([0-9a-f]{8})`", re.M)
 OWNED = ["ops/config/rule-enforcement-map.json", "ops/config/gate-baseline.json"]
 
 
+# Variables git reads BEFORE it reads the working directory. Leaving them in
+# place means `cwd=REPO` decides nothing.
+_GIT_ENV_OVERRIDES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_PREFIX",
+)
+
+
 def git(*args, check=False):
-    """Run git in the repo and return (returncode, combined output)."""
-    p = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+    """Run git in the repo and return (returncode, combined output).
+
+    THE ENVIRONMENT IS SCRUBBED, and that is load-bearing rather than tidy.
+    `cwd=REPO` does not pin git to REPO: GIT_DIR outranks the working directory,
+    and every git hook exports it. This script runs on the hourly rules refresh
+    and COMMITS AND PUSHES two gate files, so inheriting a stray GIT_DIR means
+    committing the gate pair into whatever repository invoked us. Observed
+    2026-08-13 through the selftest, which drove this function under a hook-like
+    GIT_DIR and watched the commit land in the outer repo, sweeping an unrelated
+    file with it — the exact two-writer accident rule 308ef1de exists to stop.
+    """
+    env = dict(os.environ)
+    for var in _GIT_ENV_OVERRIDES:
+        env.pop(var, None)
+    p = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True,
+                       env=env)
     if check and p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout).strip())
     return p.returncode, (p.stdout + p.stderr).strip()
@@ -142,7 +182,7 @@ def find_vault() -> str | None:
 
 
 def main() -> int:
-    if not (os.path.exists(MAP) and os.path.exists(BASELINE)):
+    if not (os.path.exists(map_path()) and os.path.exists(baseline_path())):
         print("sync-enforcement-map: SKIP map or baseline missing")
         return 0
 
@@ -161,7 +201,7 @@ def main() -> int:
     # apart from another writer's is right now.
     preexisting = dirty_owned()
 
-    data = json.load(open(MAP))
+    data = json.load(open(map_path()))
     inventory = data.get("active_rule_ids") or {}
 
     changed = []
@@ -190,7 +230,7 @@ def main() -> int:
     # array style. A json.dump would reformat every array in the file and bury
     # a one-rule change in hundreds of lines of noise, which makes the diff
     # unreviewable — and an unreviewable gate diff is how this bug shipped.
-    text = open(MAP).read()
+    text = open(map_path()).read()
     for scope, _added, _dropped in changed:
         rendered = inventory[scope]
         block = re.compile(
@@ -204,11 +244,11 @@ def main() -> int:
         line = m.group("indent") + "  " + ", ".join(f'"{r}"' for r in rendered)
         text = text[: m.start("body")] + line + text[m.end("body") :]
 
-    with open(MAP, "w") as fh:
+    with open(map_path(), "w") as fh:
         fh.write(text)
 
     # Sanity: the file must still parse and still carry what we intended.
-    reread = json.load(open(MAP))
+    reread = json.load(open(map_path()))
     for scope, _a, _d in changed:
         if reread["active_rule_ids"][scope] != inventory[scope]:
             print(f"sync-enforcement-map: FAIL {scope} did not land; leaving as-is")
@@ -217,15 +257,15 @@ def main() -> int:
     # Re-stamp ONLY this file's contract hash, by targeted replacement so the
     # rest of the baseline is byte-identical. Gate-SCRIPT hashes stay frozen:
     # an automated full bless would launder a tampered gate into the baseline.
-    new_hash = hashlib.sha256(open(MAP, "rb").read()).hexdigest()
-    btext = open(BASELINE).read()
-    old_hash = json.load(open(BASELINE)).get("contracts", {}).get(
+    new_hash = hashlib.sha256(open(map_path(), "rb").read()).hexdigest()
+    btext = open(baseline_path()).read()
+    old_hash = json.load(open(baseline_path())).get("contracts", {}).get(
         "rule-enforcement-map.json"
     )
     if not old_hash or old_hash not in btext:
         print("sync-enforcement-map: SKIP no map contract hash in baseline")
         return 0
-    with open(BASELINE, "w") as fh:
+    with open(baseline_path(), "w") as fh:
         fh.write(btext.replace(old_hash, new_hash, 1))
 
     summary_bits = []
