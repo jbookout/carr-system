@@ -70,7 +70,48 @@ URL="$("$NEONCTL" connection-string production \
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
-if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" > "$TMP"; then
+# THE ROLE BOOTSTRAP GOES FIRST, and it is not decoration. --no-owner --no-acl
+# drops every OWNER TO and GRANT for the reason given above, and roles are
+# CLUSTER-level besides, so no schema dump could carry them. Migration 0115
+# created carr_reader, carr_writer and carr_jobs NOLOGIN precisely to cover
+# that: "so that privileges have somewhere to attach in a rebuilt environment
+# ... which carries no ACLs".
+#
+# That only worked while 0115 was PENDING. On 2026-08-14 this snapshot was
+# refreshed, 0115 moved into the ledger as already-applied, CI stopped running
+# it against the rebuilt database, and the next migration to grant anything —
+# 0117 — died with `role "carr_jobs" does not exist`, on a branch that had
+# touched neither migration. The cause aged into the snapshot and surfaced one
+# migration later.
+#
+# So the snapshot now declares them itself. Idempotent, NOLOGIN (a role that
+# cannot log in cannot become an unnoticed door), and emitted BEFORE the dump
+# body so any grant has its grantee already. Production is untouched: it has all
+# three with their real attributes and this block leaves an existing role
+# exactly as it is. neondb_owner is deliberately NOT here — it is Neon's, and
+# .github/workflows/ci.yml creates it for the same modelling reason.
+# Asserted by tools/test-schema-snapshot-roles.py.
+cat > "$TMP" <<'ROLES'
+--
+-- Role bootstrap (bin/schema-snapshot.sh). Not from pg_dump: --no-owner
+-- --no-acl drops ACLs by design and roles are cluster-level, so a database
+-- rebuilt from this file would have nothing for a later migration's GRANT to
+-- attach to. Idempotent and NOLOGIN; an existing role is left untouched.
+--
+do $$
+declare r text;
+begin
+  foreach r in array array['carr_reader','carr_writer','carr_jobs'] loop
+    if not exists (select 1 from pg_roles where rolname = r) then
+      execute format('create role %I nologin', r);
+    end if;
+  end loop;
+end $$;
+
+
+ROLES
+
+if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" >> "$TMP"; then
   echo "schema-snapshot: pg_dump failed — nothing written" >&2
   exit 1
 fi
