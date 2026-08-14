@@ -41,6 +41,18 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import scrubbed_env  # noqa: E402
+
+# WHY scrubbed_env AND NOT fixture_env. The git calls below act on REPO ON
+# PURPOSE — this file seeds a real defect into the real tree to prove CI catches
+# it. What it must never do is act on somewhere ELSE: GIT_DIR outranks cwd and
+# every git hook exports it, and ops/githooks/pre-push runs ops/ci.sh which runs
+# this file. Without the scrub, `git add -N` and `git rm --cached` below would
+# stage and unstage in whatever repository invoked the push. scrubbed_env keeps
+# the caller's identity, which a real repo operation wants. See ops/git_env.py.
+# Loop #371.
 CI = REPO / "ops" / "ci.sh"
 
 # Assembled at runtime so this source file does not itself contain a
@@ -148,7 +160,7 @@ def test_tracked_scripts_are_executable_in_git():
     index. A script can be executable locally and 100644 in git, which is exactly
     how CI died with exit 126. Check the INDEX, not the filesystem — the
     filesystem is the thing that lies here."""
-    out = subprocess.run(["git", "ls-files", "-s"], cwd=REPO,
+    out = subprocess.run(["git", "ls-files", "-s"], cwd=REPO, env=scrubbed_env(),
                          capture_output=True, text=True, check=True).stdout
     modes = {}
     for line in out.splitlines():
@@ -201,7 +213,7 @@ def test_secret_scanner_catches_and_respects_allow():
     seeded = REPO / "_ci_selftest_seed.env"
     try:
         seeded.write_text(SEED_DSN + "\n")
-        subprocess.run(["git", "add", "-N", str(seeded)], cwd=REPO, capture_output=True)
+        subprocess.run(["git", "add", "-N", str(seeded)], cwd=REPO, env=scrubbed_env(), capture_output=True)
         p = subprocess.run(scan, cwd=REPO, capture_output=True, text=True)
         check("a seeded credential is caught", p.returncode == 1)
         check("the finding never prints the credential value",
@@ -212,7 +224,7 @@ def test_secret_scanner_catches_and_respects_allow():
         check("an inline allow marker on the same line suppresses it", p.returncode == 0)
     finally:
         subprocess.run(["git", "rm", "--cached", "-q", "--force", str(seeded)],
-                       cwd=REPO, capture_output=True)
+                       cwd=REPO, env=scrubbed_env(), capture_output=True)
         seeded.unlink(missing_ok=True)
 
 

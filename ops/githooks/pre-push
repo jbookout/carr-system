@@ -130,9 +130,29 @@ if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
     # additions — so any commit from any session would have swept the whole repo
     # under one message. Origin was never touched; recovery was a mixed reset.
     #
-    # The selftests were never wrong. The environment they inherited was.
+    # ONE AMENDMENT from the loop #371 pass. Scrubbing here is the right FIRST
+    # line of defence and it stays. But "the selftests were never wrong" does not
+    # survive contact: a test that mutates whatever repository invoked it is
+    # wrong on its own terms, whoever set the variable. This hook is only ONE way
+    # ci.sh is reached — another git hook, a merge driver, `git rebase -x`, or a
+    # session that simply has GIT_DIR exported all get to the same selftests
+    # without passing through here. So the selftests scrub for themselves now
+    # (ops/git_env.py) and this remains the outer layer.
+    #
+    # THE LIST STAYS LITERAL HERE ON PURPOSE. Sourcing it from
+    # `python3 ops/git_env.py --unset-args` was tried and reverted: it defeats
+    # ops/hook-env-isolation-selftest.py, which deliberately checks that the
+    # stripping and the ci.sh call are ONE statically readable statement, and it
+    # puts a python dependency on the push path whose fallback would go stale in
+    # silence. A literal list that a test can read beats a clever one it cannot.
+    # ops/git-env-selftest.py fails if this list stops covering
+    # git_env.GIT_LOCATION_VARS, so the two cannot drift even though the words
+    # appear twice.
     env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX \
         -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+        -u GIT_COMMON_DIR -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES \
+        -u GIT_WORK_TREE_OVERRIDE -u GIT_CONFIG -u GIT_CONFIG_GLOBAL \
+        -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_COUNT \
         sh -c 'exec "$0"' "$REPO_ROOT/ops/ci.sh"
     if [ $? -ne 0 ]; then
       cat >&2 <<'EOF'
