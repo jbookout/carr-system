@@ -30,6 +30,25 @@ same window is the fan-out this exists to stop.
 
 It gates breadth, not content. It cannot tell whether a question was worth
 asking; it can tell that the same session is working through a roster.
+
+OWN SUBAGENTS ARE NOT PEERS (2026-08-14, second false positive that day). An
+orchestrating session spawned workers with the Agent tool and messaged them by
+agentId (`aabf255ee92301b74`); the gate counted each worker as a "session",
+filled the budget with them, and refused the session's own next worker. But the
+externalised-cost rationale above is the entire justification for denying, and
+it does not apply to a subagent: the reply lands in the asker's own context, so
+the asker pays the full cost itself. That is orchestration, not interrogation.
+
+The exemption is PROVEN, never pattern-matched. The hook payload carries this
+session's transcript_path, and the transcript records every Agent-tool spawn as
+a structural toolUseResult.agentId — so "is this recipient my own subagent" is
+answerable from ground truth, the same attribution stance as
+staging-attribution-gate.py. A recipient merely SHAPED like an agentId, or an
+id that appears only as text inside a message, stays a peer: matching on shape
+would let a session spend an unlimited budget on anything named like a hex
+token, and #70 already showed what keying identity on spelling does. No
+transcript, or an unreadable one, means no exemption — the gate keeps its
+protection rather than guessing.
 """
 import json
 import os
@@ -69,6 +88,36 @@ def peer_identity(to: str) -> str:
     collapsing to empty and silently sharing one slot with every other such name.
     """
     return REF_SUFFIX.sub("", to).strip() or to
+
+
+def own_subagent(who: str, transcript_path: str) -> bool:
+    """True iff THIS session's transcript records spawning agent `who`.
+
+    The Agent tool's spawn lands in the transcript as a toolUseResult carrying
+    agentId (verified against a live transcript, 2026-08-14, session db8cb4af).
+    Only that structural record counts. The line pre-filter is plain substring —
+    an agentId quoted inside a message string is escaped in the JSONL and never
+    parses out as toolUseResult.agentId, so text mentions cannot mint an
+    exemption. Any failure to read or parse means False: an unproven subagent
+    is charged as a peer, never waved through.
+    """
+    if not transcript_path:
+        return False
+    try:
+        with open(transcript_path, errors="ignore") as fh:
+            for line in fh:
+                if "agentId" not in line or who not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                result = rec.get("toolUseResult")
+                if isinstance(result, dict) and result.get("agentId") == who:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def load(now):
@@ -130,6 +179,15 @@ def main():
     if who in seen:           # re-messaging the same peer is a thread, not fan-out
         seen[who] = now
         save(seen)
+        return 0
+
+    # MESSAGING YOUR OWN SUBAGENT IS ORCHESTRATION, NOT BROADCAST — the asker
+    # pays the whole reply cost itself, so there is nobody this gate would be
+    # protecting. Exempt entirely: neither refused nor charged to the budget.
+    # Proven against the transcript's spawn records, never inferred from shape.
+    transcript = str(payload.get("transcript_path")
+                     or payload.get("transcriptPath") or "")
+    if own_subagent(who, transcript):
         return 0
 
     if len(seen) >= MAX_NAMED_PEERS:
