@@ -269,5 +269,29 @@ echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
 echo "  confirm it reports $SHIPPING. A deploy that returns success and a"
 echo "  registry that answers are two different claims (rule c53beeaa)."
-echo "  Then curl https://api.doctorcre.com/release and confirm git_sha.value"
-echo "  is $HEAD_SHA — that is the authoritative provenance check, not this file."
+# VERIFY THE ENVIRONMENT YOU JUST SHIPPED, NOT THE ONE YOU DIDN'T. This line
+# hardcoded the production URL for every target, so a `--env staging` deploy
+# ended by instructing the operator to curl api.doctorcre.com and look for the
+# staging commit there. Following that literally means either a false alarm (the
+# sha does not match, because production is correctly still production) or, far
+# worse, a false all-clear read off the wrong Worker entirely. Pointing a staging
+# verification at a production hostname is the exact confusion the 2026-08-13
+# routes incident was made of, and it survived in the script that ships the fix.
+#
+# /release now carries an `env` field, so the check is two-sided: the sha proves
+# WHICH BUILD answered and env proves WHICH DEPLOYMENT did. Neither alone is
+# enough — during the incident every other field was plausible or identical.
+# wrangler prints the deployed trigger URL above and its output is not captured
+# here, so the non-production branch NAMES that line rather than reconstructing a
+# hostname it would have to keep in sync with wrangler.toml. Being vague about
+# which URL is better than being precise about the wrong one.
+if [ "$TARGET_ENV" = "production" ]; then
+  VERIFY_URL="https://api.doctorcre.com/release"
+else
+  VERIFY_URL="<the workers.dev URL printed above>/release — NOT api.doctorcre.com, that is production"
+fi
+echo "  Then curl $VERIFY_URL and confirm BOTH:"
+echo "    git_sha.value is $HEAD_SHA   (which build answered)"
+echo "    env.value is \"$TARGET_ENV\"                        (which deployment answered)"
+echo "  That pair is the authoritative provenance check, not this file. env matters"
+echo "  because git_sha and schema are IDENTICAL across environments by design."
