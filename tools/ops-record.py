@@ -522,6 +522,35 @@ def cmd_deployment(args) -> int:
     return 0
 
 
+# ── settings-change ──────────────────────────────────────────────────────────
+def cmd_settings_change(args) -> int:
+    """Record one control-plane change. Called by hooks/settings-change-gate.py at
+    the moment of the change, never afterwards — the 2026-08-14 ruleset incident
+    was an authorised change whose only account died with an interrupted
+    session."""
+    try:
+        with connect("write") as conn, conn.cursor() as cur:
+            cur.execute(
+                """insert into ops.settings_change
+                       (kind, target, reason, outcome, session_id, actor, command, environment)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s)
+                   returning id""",
+                (args.kind, args.target, args.reason, args.outcome, args.session,
+                 args.actor, args.command, args.environment))
+            row = cur.fetchone()
+    except SystemExit:
+        raise
+    except Exception as e:                                   # noqa: BLE001
+        # The change has ALREADY HAPPENED by the time this runs. Failing loudly
+        # is right; failing in a way the caller treats as "so it did not happen"
+        # is not. The gate spools locally on any non-zero exit.
+        print(f"ops-record: could not record the settings change: "
+              f"{str(e).splitlines()[0][:200]}", file=sys.stderr)
+        return 1
+    print(row[0] if row else "")
+    return 0
+
+
 # ── trace ────────────────────────────────────────────────────────────────────
 def cmd_trace(args) -> int:
     try:
@@ -652,6 +681,18 @@ def main() -> int:
     d.add_argument("--source-ref", default="bin/deploy-worker.sh")
     d.add_argument("--detail")
 
+    sc = sub.add_parser("settings-change", help="record one control-plane change")
+    sc.add_argument("--kind", required=True)
+    sc.add_argument("--target", required=True)
+    sc.add_argument("--reason", required=True)
+    sc.add_argument("--outcome", required=True, choices=["applied", "failed"])
+    sc.add_argument("--session", required=True)
+    sc.add_argument("--actor")
+    sc.add_argument("--command")
+    sc.add_argument("--environment",
+                    choices=["local", "rehearsal", "staging", "production"],
+                    default="production")
+
     t = sub.add_parser("trace", help="read one correlation id back as a chain")
     t.add_argument("correlation")
 
@@ -671,6 +712,7 @@ def main() -> int:
         "trace": cmd_trace,
         "health": cmd_health,
         "assess": cmd_assess,
+        "settings-change": cmd_settings_change,
     }[args.cmd](args)
 
 

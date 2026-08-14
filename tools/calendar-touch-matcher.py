@@ -20,8 +20,10 @@ Internal @carr.us addresses are reported separately and never counted as client
 contact.
 """
 
+import datetime
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -125,13 +127,72 @@ def read_calendar(days):
     return rows
 
 
+
+
+_REF_SHAPE = re.compile(r"^[A-Z]{1,3}-[A-Z0-9-]+$")
+
+
+def _ref_of(label):
+    """The record ref out of a "<ref> / <name>" label, or the label itself.
+
+    Falls back to the whole label deliberately: the verbs resolve a deal NAME as
+    well as a ref, so a row that carried no ref is still addressable.
+    """
+    head = str(label).split(" / ", 1)[0].strip()
+    return head if _REF_SHAPE.match(head) else str(label)
+
+
+def read_dump(path, days):
+    """Same rows as read_calendar, built from the access bundle's EventKit dump.
+
+    WHY THIS EXISTS. read_calendar opens the local Calendar DATABASE, which macOS
+    guards with FULL DISK ACCESS — a grant that attaches to the responsible
+    process. That works from a terminal that holds it and FAILS under a launchd
+    agent, which is what the first real fire of the unattended capture hit:
+    "FATAL: cannot read the calendar database. This is a Full Disk Access answer,
+    not an empty calendar."
+
+    The access bundle already reads the same meetings through EventKit and holds
+    a permission that DOES survive into the agent. So the unattended path reads
+    its dump instead, and the whole pipeline needs ONE grant rather than two.
+    Reading the database stays the default for a human at a terminal.
+
+    Dump shape is {"<title>|<YYYY-MM-DD>": [attendee, ...]}.
+    """
+    with open(path) as fh:
+        dump = json.load(fh)
+    today = datetime.date.today()
+    floor = today - datetime.timedelta(days=days)
+    rows = []
+    for key, emails in dump.items():
+        title, _, day = key.rpartition("|")
+        try:
+            on = datetime.date.fromisoformat(day)
+        except ValueError:
+            continue
+        if on > today:
+            when = "upcoming"
+        elif on >= floor:
+            when = "past"
+        else:
+            continue          # outside the window entirely
+        for email in emails:
+            rows.append((email.strip().lower(), day, title, when))
+    return rows
+
+
 def main():
     # --json exists so an UNATTENDED caller can act on this instead of a human
     # reading prose. bin/calendar-eventkit-capture.sh consumes it. The human
     # report is unchanged and still the default: this adds a mode, it does not
     # replace one.
-    argv = [a for a in sys.argv[1:] if a != "--json"]
+    argv = [a for a in sys.argv[1:] if a != "--json" and not a.startswith("--from-dump")]
     as_json = "--json" in sys.argv
+    dump_path = None
+    for i, a in enumerate(sys.argv):
+        if a == "--from-dump" and i + 1 < len(sys.argv):
+            dump_path = sys.argv[i + 1]
+            argv = [x for x in argv if x != dump_path]
     days = int(argv[0]) if argv else DEFAULT_DAYS
     by_email, by_domain = load_record_contacts()
     # In --json mode stdout must be PARSEABLE and nothing else. This banner went
@@ -140,7 +201,7 @@ def main():
     print(f"record contacts loaded: {len(by_email)} emails, {len(by_domain)} domains",
           file=sys.stderr if as_json else sys.stdout)
 
-    rows = read_calendar(days)
+    rows = read_dump(dump_path, days) if dump_path else read_calendar(days)
     if rows is None:
         return 3
 
@@ -175,7 +236,12 @@ def main():
             "counts": {"emails": len(latest), "internal": len(internal),
                        "exact": len(exact), "domain": len(domain),
                        "unknown": len(unknown)},
-            "exact": [{"email": e, "ref": exact[e][0] if isinstance(exact[e], (list, tuple)) else exact[e],
+            # ref and LABEL are different things and the verbs want the ref.
+            # load_record_contacts joins them as "<ref> / <name>", so the first
+            # segment is the ref when there is one. A live write refused with
+            # subject_not_found because the whole label was sent as the ref —
+            # caught by an actual write attempt, not by reading the code.
+            "exact": [{"email": e, "ref": _ref_of(exact[e]),
                        "label": str(exact[e]), "last_seen": latest[e],
                        "events": [{"day": d, "title": t} for d, t in events[e][:5]]}
                       for e in exact],

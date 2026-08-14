@@ -114,7 +114,20 @@ echo "calendar-capture: read OK — ${SCANNED:-?} events scanned"
 # thrown away, which is the same shape as answering emptily instead of refusing.
 MATCH_JSON="$REPO/out/calendar-touch-proposals.json"
 MATCH_ERR="$REPO/out/calendar-matcher.err"
-if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json \
+# --from-dump, and this is the whole reason the job works unattended. The
+# matcher's default path opens the local Calendar DATABASE, which needs FULL DISK
+# ACCESS granted to the responsible process — held by a terminal, NOT by a launchd
+# agent. The first real fire died there: "cannot read the calendar database. This
+# is a Full Disk Access answer, not an empty calendar." The bundle above already
+# read the same meetings through EventKit under a permission that DOES survive
+# into the agent, so the match runs off its dump and the pipeline needs ONE grant
+# instead of two. Verified identical output both ways: 1 exact, 0 domain, 2 unknown.
+DUMP="$REPO/out/calendar-attendees.json"
+if [ ! -s "$DUMP" ]; then
+  echo "calendar-capture: FAIL the bundle read OK but wrote no dump at $DUMP" >&2
+  exit 1
+fi
+if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json --from-dump "$DUMP" \
         > "$MATCH_JSON" 2> "$MATCH_ERR"; then
   echo "calendar-capture: FAIL the matcher did not complete" >&2
   sed 's/^/    /' "$MATCH_ERR" >&2
@@ -158,17 +171,23 @@ repo = pathlib.Path(__file__).resolve().parent if False else pathlib.Path.cwd()
 failed = 0
 for e in d["exact"]:
     ev = (e["events"] or [{}])[0]
+    # log-activity with kind "meeting", NOT stamp-touch. stamp-touch is shorthand
+    # for a call or a text and its enum accepts only those two; a calendar meeting
+    # is neither, and the first live launchd fire was refused for exactly that —
+    # caught by the required-argument guard rather than written wrong.
+    day = ev.get("day", e["last_seen"])
     args = json.dumps({
         "idempotency_key": f"calcap-{e['email']}-{e['last_seen']}",
         "ref": e["ref"],
-        "happened_on": e["last_seen"],
-        "channel": "meeting",
-        "note": (f"Calendar evidence: {e['email']} attended "
-                 f"\"{ev.get('title','(untitled)')}\" on {ev.get('day', e['last_seen'])}. "
-                 f"Inferred from the local calendar by an exact email match; "
-                 f"not self-reported."),
+        "kind": "meeting",
+        "occurred_at": day,
+        "summary": f"Meeting: {ev.get('title', '(untitled)')}"[:180],
+        "detail": (f"Calendar evidence — {e['email']} was an attendee of "
+                   f"\"{ev.get('title','(untitled)')}\" on {day}. Matched to this "
+                   f"record by an exact email address. Captured automatically from "
+                   f"the local calendar; not self-reported."),
     })
-    r = subprocess.run(["./run.sh", "call", "stamp-touch", args],
+    r = subprocess.run(["./run.sh", "call", "log-activity", args],
                        capture_output=True, text=True)
     ok = '"ok": true' in r.stdout or '"ok":true' in r.stdout
     print(f"  {'logged touch  ' if ok else 'FAILED to log '} {e['ref']}  via {e['email']}")
