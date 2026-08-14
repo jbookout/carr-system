@@ -119,19 +119,84 @@ def _unreachable_env(base: dict[str, str] | None = None) -> dict[str, str]:
 _STAGING_DSN_CACHE: str | None = None
 
 
+def _plausible_neon_credential_exists() -> bool:
+    """Cheap, local, read-only mirror of tools/db-tap.py's OWN _neon_api_key()
+    lookup (NEON_API_KEY, else ~/.config/carr/db.env) — checked BEFORE ever
+    calling into neonctl. Exists because a credential-less machine is not
+    merely a fast failure: tools/db-tap.py's own docstring for
+    _neon_api_key() says it plainly — 'neonctl's saved browser login
+    expires... it PROMPTS, waits 60 seconds for a browser nobody is sitting
+    at, and times out' — and _project_id_by_name()'s subprocess call to
+    `neonctl projects list` carries exactly that timeout=60. On THIS
+    session's Mac, a keychain-cached neonctl login (or ~/.config/carr/db.env)
+    always answers fast, so this 60-second path is never exercised locally —
+    which is exactly the shape of bug the coordinator's report described:
+    'the drill reaching for something the runner does not have and failing
+    in a way your local run never sees.' Reproduced directly against this
+    CI-shaped worktree: `HOME=/empty PATH=$PATH` with no NEON_API_KEY set at
+    all made `bin/outage-drill.py --only model-provider-unavailable` — a
+    FULLY LOCAL drill with no staging dependency of its own — hang for over
+    60 seconds and get killed by the caller's own timeout, entirely from
+    main()'s startup evidence-service registration blocking on neonctl's
+    browser prompt. This check turns that into an immediate, honest
+    'unavailable' rather than a minute of silence."""
+    if os.environ.get("NEON_API_KEY", "").strip():
+        return True
+    db_env = Path.home() / ".config" / "carr" / "db.env"
+    try:
+        with open(db_env, encoding="utf-8") as fh:
+            return any(line.strip().startswith("NEON_API_KEY=") and
+                       line.split("=", 1)[1].strip().strip("\"'")
+                       for line in fh)
+    except OSError:
+        return False
+
+
 def staging_dsn() -> str:
     """The isolated staging Neon project's connection string, derived the
     SAME way tools/db-tap.py derives it — imported as a module rather than
     re-implemented, so there is exactly one place this logic lives (rule
-    a8c55a47). Raises SystemExit with db-tap's own message on failure (no
-    NEON_API_KEY, expired login, etc.) — that message already names the fix."""
+    a8c55a47).
+
+    ROOT CAUSE OF PR #145's CI FAILURE (run 31839514568), fixed here rather
+    than at each of this function's callers. db-tap.py's own dsn() calls
+    sys.exit(...) on any failure to derive a connection string — correct for
+    an operator typing a command at a terminal, wrong for a library call,
+    because SystemExit is NOT a subclass of Exception. It sails straight
+    through every `except Exception` guard elsewhere in this file (main()'s
+    startup registration, record_evidence(), and drill 1/2's own bodies),
+    and on the CI runner — no NEON_API_KEY, no ~/.config/carr, no cached
+    neonctl login — it did exactly that: the whole bin/outage-drill.py
+    process died at the FIRST staging touch, before either fully-local drill
+    (model-provider-unavailable, settings-change-db-outage) ever printed a
+    line, which is why all 5 of their selftest assertions failed together.
+    Reproduced locally: `NEON_API_KEY=garbage HOME=/empty` makes db_tap.dsn()
+    raise SystemExit exactly this way.
+
+    Converted to RuntimeError — an ordinary Exception — ONCE, here, so every
+    existing `except Exception` call site already does the right thing
+    without needing to know about this special case: main()'s startup
+    registration warns and continues, record_evidence() warns per-drill
+    without losing the drill's own already-printed verdict, and drills 1/2
+    (which genuinely need staging) become a clean SKIPPED result instead of
+    an uncaught crash — the portable behavior the ground rules ask for on
+    any surface that lacks a staging credential, CI included."""
     global _STAGING_DSN_CACHE
     if _STAGING_DSN_CACHE is None:
+        if not _plausible_neon_credential_exists():
+            raise RuntimeError(
+                "staging credential unavailable: no NEON_API_KEY and no "
+                "~/.config/carr/db.env — skipping fast rather than letting "
+                "neonctl fall through to its own up-to-60s interactive "
+                "browser-login prompt")
         spec = importlib.util.spec_from_file_location("carr_db_tap", REPO / "tools" / "db-tap.py")
         assert spec and spec.loader
         db_tap = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(db_tap)
-        _STAGING_DSN_CACHE = db_tap.dsn(project="staging")
+        try:
+            _STAGING_DSN_CACHE = db_tap.dsn(project="staging")
+        except SystemExit as e:
+            raise RuntimeError(f"staging credential unavailable: {e}") from e
     return _STAGING_DSN_CACHE
 
 
@@ -855,7 +920,13 @@ def main() -> int:
         except DrillUnavailable as e:
             result = DrillResult(k, None, f"SKIPPED — {e}", str(e), skipped=True, skip_reason=str(e))
         except Exception as e:                                     # noqa: BLE001
-            result = DrillResult(k, None, f"SKIPPED — the drill itself crashed: {e}",
+            # An unexpected exception (as opposed to a DrillUnavailable a
+            # drill raises deliberately) is STILL reported as a skip, never
+            # a hard crash of the whole harness — one drill's surprise
+            # (e.g. staging_dsn() failing on the very first line of a drill
+            # that needs it, on a surface with no staging credential) must
+            # never take down the drills that don't need what it needed.
+            result = DrillResult(k, None, f"SKIPPED — unexpected error: {e}",
                                   str(e), skipped=True, skip_reason=str(e))
 
         if result.skipped:
