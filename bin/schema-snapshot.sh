@@ -38,7 +38,24 @@
 # than discovered. --no-owner --no-acl for the same reason
 # bin/backup-dump.sh uses them: an embedded OWNER TO / GRANT names roles a fresh
 # database has never heard of, and the first such statement aborts the load.
-# Roles and grants are rebuilt by the migrations, which are in git.
+# Grants are rebuilt by the migrations, which are in git.
+#
+# THE ROLES THEMSELVES ARE NOT, and assuming they were is a bug this file shipped
+# on 2026-08-14. The reasoning above was true only while every role-creating
+# migration was still PENDING relative to this snapshot: 0115 declares
+# carr_reader, carr_writer and carr_jobs (NOLOGIN, 0021's idiom), so while the
+# ledger stopped at 0114 a fresh database got the roles by replaying it. The
+# moment a refresh advanced the ledger PAST 0115, that migration stopped being
+# pending, the role creation stopped running anywhere, and the next migration to
+# grant against those roles died with `role "carr_jobs" does not exist` — which
+# is exactly how CI failed on migration 0117.
+#
+# The snapshot is the base for every fresh database, so it has to carry the
+# roles itself rather than inherit them from a migration it has already absorbed.
+# Same idiom as 0115: an existing role is left exactly as it is — no password
+# touched, no attribute altered — and a missing one is created NOLOGIN, so a
+# rebuilt environment has somewhere for privileges to attach and no new door.
+# Production is untouched because production already has all three.
 #
 # Usage:
 #   bin/schema-snapshot.sh            # regenerate db/schema.sql from production
@@ -70,33 +87,18 @@ URL="$("$NEONCTL" connection-string production \
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
-# THE ROLE BOOTSTRAP GOES FIRST, and it is not decoration. --no-owner --no-acl
-# drops every OWNER TO and GRANT for the reason given above, and roles are
-# CLUSTER-level besides, so no schema dump could carry them. Migration 0115
-# created carr_reader, carr_writer and carr_jobs NOLOGIN precisely to cover
-# that: "so that privileges have somewhere to attach in a rebuilt environment
-# ... which carries no ACLs".
-#
-# That only worked while 0115 was PENDING. On 2026-08-14 this snapshot was
-# refreshed, 0115 moved into the ledger as already-applied, CI stopped running
-# it against the rebuilt database, and the next migration to grant anything —
-# 0117 — died with `role "carr_jobs" does not exist`, on a branch that had
-# touched neither migration. The cause aged into the snapshot and surfaced one
-# migration later.
-#
-# So the snapshot now declares them itself. Idempotent, NOLOGIN (a role that
-# cannot log in cannot become an unnoticed door), and emitted BEFORE the dump
-# body so any grant has its grantee already. Production is untouched: it has all
-# three with their real attributes and this block leaves an existing role
-# exactly as it is. neondb_owner is deliberately NOT here — it is Neon's, and
-# .github/workflows/ci.yml creates it for the same modelling reason.
-# Asserted by tools/test-schema-snapshot-roles.py.
+# THE ROLE PREAMBLE, first in the file so the roles exist before anything that
+# could reference them. See the header for why this cannot be left to 0115.
 cat > "$TMP" <<'ROLES'
 --
--- Role bootstrap (bin/schema-snapshot.sh). Not from pg_dump: --no-owner
--- --no-acl drops ACLs by design and roles are cluster-level, so a database
--- rebuilt from this file would have nothing for a later migration's GRANT to
--- attach to. Idempotent and NOLOGIN; an existing role is left untouched.
+-- CARR ROLE PREAMBLE (bin/schema-snapshot.sh) — not produced by pg_dump.
+--
+-- This dump is --no-owner --no-acl, so it names no roles and grants nothing.
+-- The roles still have to EXIST before the pending migrations that grant to
+-- them run, and they can no longer be got by replaying 0115: once this
+-- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
+-- An existing role is left exactly as it is; a missing one is created NOLOGIN
+-- purely so privileges have somewhere to attach in a rebuilt environment.
 --
 do $$
 declare r text;
@@ -107,7 +109,6 @@ begin
     end if;
   end loop;
 end $$;
-
 
 ROLES
 

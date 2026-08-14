@@ -1,8 +1,12 @@
 --
--- Role bootstrap (bin/schema-snapshot.sh). Not from pg_dump: --no-owner
--- --no-acl drops ACLs by design and roles are cluster-level, so a database
--- rebuilt from this file would have nothing for a later migration's GRANT to
--- attach to. Idempotent and NOLOGIN; an existing role is left untouched.
+-- CARR ROLE PREAMBLE (bin/schema-snapshot.sh) — not produced by pg_dump.
+--
+-- This dump is --no-owner --no-acl, so it names no roles and grants nothing.
+-- The roles still have to EXIST before the pending migrations that grant to
+-- them run, and they can no longer be got by replaying 0115: once this
+-- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
+-- An existing role is left exactly as it is; a missing one is created NOLOGIN
+-- purely so privileges have somewhere to attach in a rebuilt environment.
 --
 do $$
 declare r text;
@@ -13,7 +17,6 @@ begin
     end if;
   end loop;
 end $$;
-
 
 --
 -- PostgreSQL database dump
