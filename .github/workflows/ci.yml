@@ -22,9 +22,14 @@
 
 name: CI
 
+# push is main-only: a branch with an open PR already gets a run from the
+# pull_request event, so `branches: ["**"]` made every PR commit run (and email)
+# twice — the concurrency group can't dedupe them because push and pull_request
+# resolve to different refs. Branches without a PR are still covered by the
+# pre-push hook running the same ops/ci.sh.
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]
   pull_request:
   workflow_dispatch:
 
