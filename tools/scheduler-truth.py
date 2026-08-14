@@ -68,6 +68,24 @@ WRAPPER_EXEMPT = {
     "nightly-record-layer": "records each of its own steps under one correlation "
                             "id; a whole-chain row would be coarser than what it "
                             "already writes",
+    # KeepAlive servers. The wrapper records when its child EXITS, and a KeepAlive
+    # child exiting means launchd restarted it — so wrapping these would file a run
+    # row per restart and read as repeated failures of a service doing exactly what
+    # it was built to do. Up-or-down is the question they need answered, and no
+    # cadence and no run row can ask it. A liveness probe is the missing signal.
+    "call-mode": "KeepAlive server — needs a liveness probe, not a run row; the "
+                 "wrapper would record one row per restart",
+    "doc-engine": "KeepAlive server — same reason as call-mode",
+    "quill-dictate": "KeepAlive server — same reason as call-mode",
+}
+
+# A plist that is deliberately NOT installed here. Without this, the reconciliation
+# reports a drift line every run for a machine that is configured correctly, and a
+# permanent false line is how a real one stops being read.
+INSTALL_EXEMPT = {
+    "com.carr.fetch-allowlist": "SECONDARY MACHINE ONLY — on Joe's primary Mac the "
+                                "allowlist is regenerated as a step of the nightly "
+                                "chain, so this agent is correct to be absent here",
 }
 
 DRIFT: list[str] = []
@@ -175,6 +193,11 @@ def main() -> int:
 
     # ── repo vs machine ──────────────────────────────────────────────────────
     for lbl in sorted(set(repo) - set(inst)):
+        if lbl in INSTALL_EXEMPT:
+            if not quiet:
+                print(f"\n  n/a  {lbl}: not installed here on purpose — "
+                      f"{INSTALL_EXEMPT[lbl]}")
+            continue
         drift(f"IN REPO, NOT INSTALLED   {lbl} — ops/config-as-code.py install --apply")
     for lbl in sorted(set(inst) - set(repo)):
         drift(f"INSTALLED, NOT IN REPO   {lbl} — ops/config-as-code.py pull "
