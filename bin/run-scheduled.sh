@@ -189,7 +189,10 @@ mkdir -p "$REPO/out" 2>/dev/null
 # Inert when HEARTBEAT_INTERVAL is 0 (the default, and every existing job's
 # real invocation today): should_record is always 1 below, so this is a no-op
 # for the six jobs that never pass the flag.
-STATE_DIR="$REPO/out/run-scheduled-state"
+# Overridable so the selftest can point state at a throwaway dir instead of
+# littering (and once, poisoning) the shared one — out/ is symlinked into
+# every worktree, so a test that writes here writes to production state.
+STATE_DIR="${CARR_RUN_SCHEDULED_STATE_DIR:-$REPO/out/run-scheduled-state}"
 STATE_FILE="$STATE_DIR/$SERVICE.$RUN_KEY.last-success"
 should_record=1
 if [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then
@@ -211,7 +214,12 @@ if [ "$should_record" -eq 1 ]; then
   "${argv[@]}" >> "$LOG" 2>&1
   recorder_exit=$?
   record_action=recorded
-  if [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then
+  # Stamp ONLY when the row actually landed. Stamping on the attempt meant a
+  # failed recording (DB unreachable) silenced the next interval's fires too —
+  # observed live 2026-08-14: a dev-iteration selftest's failed write stamped
+  # carr-local-edge-node and the first real heartbeat came up 'throttled'
+  # against a row that never existed.
+  if [ "$recorder_exit" -eq 0 ] && [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then
     mkdir -p "$STATE_DIR" 2>/dev/null
     date -u +%s > "$STATE_FILE" 2>/dev/null
   fi
@@ -261,8 +269,11 @@ if [ -n "$ALSO_HEARTBEAT" ]; then
     "${hb_argv[@]}" >> "$LOG" 2>&1
     hb_recorder_exit=$?
     hb_record_action=recorded
-    mkdir -p "$STATE_DIR" 2>/dev/null
-    date -u +%s > "$HB_STATE_FILE" 2>/dev/null
+    # Same rule as the primary stamp above: only a landed row throttles.
+    if [ "$hb_recorder_exit" -eq 0 ]; then
+      mkdir -p "$STATE_DIR" 2>/dev/null
+      date -u +%s > "$HB_STATE_FILE" 2>/dev/null
+    fi
   else
     hb_argv=()
     hb_recorder_exit=throttled

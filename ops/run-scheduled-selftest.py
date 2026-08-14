@@ -60,6 +60,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from typing import Any, Optional
 
@@ -288,15 +289,51 @@ def tier1() -> None:
 # key, so exact substring/line matching is correct regardless of how much
 # history out/run-scheduled.log already carries (the failure mode a windowed
 # line-diff hit during this package's own development).
+#
+# STAMP-ONLY-ON-A-LANDED-ROW, observed live 2026-08-14. The first cut of this
+# throttle stamped the state file after every ATTEMPT, regardless of whether
+# the recorder actually reached the database. A dev-iteration selftest run
+# whose recorder pointed at an unreachable DB (recorder_exit=1, no row landed)
+# stamped carr-local-edge-node's state file in the SHARED
+# out/run-scheduled-state — out/ is symlinked into every worktree — so the
+# FIRST REAL heartbeat after install came up 'throttled' against a row that
+# never existed, and health read "last seen never". General form: a recorder
+# outage would silence every subsequent fire for the interval, which is
+# exactly the silence this wrapper's own header promises never to produce.
+# Fixed in bin/run-scheduled.sh: both stamp sites now write only when
+# recorder_exit -eq 0.
+#
+# WHAT THAT MEANS FOR THESE TESTS, and why they no longer test "does a second
+# fire throttle" by driving two fires back to back with an unreachable
+# recorder: under unreachable_env() recorder_exit is ALWAYS 1, so nothing
+# ever stamps, and a test built on "fire twice, expect throttled" would now
+# correctly get "recorded" both times — which is not a bug, it is the WRITE
+# side of the fix, tested in (a) below. The THROTTLE's READ side (given a
+# stamp, does a fresh one skip and a stale one not) still needs proving, and
+# is proven in (b) by pre-seeding the state file directly — no mock, no
+# injected recorder: a real file, in the real format the wrapper itself
+# writes (`date -u +%s`), read by the real wrapper. Every scenario below sets
+# CARR_RUN_SCHEDULED_STATE_DIR to a per-test mkdtemp via drive_flags()'s
+# state_dir parameter, so nothing here can ever touch the shared
+# out/run-scheduled-state again — the exact mechanism of the live incident.
 
 def drive_flags(flags: list, service: str, run_key: str, script: str,
-                 env: Optional[dict[str, str]] = None) -> Any:
+                 env: Optional[dict[str, str]] = None,
+                 state_dir: Optional[str] = None) -> Any:
     """Run the real wrapper with leading flags, service, run key, then an
-    `/bin/sh -c <script>` child — returns the CompletedProcess."""
+    `/bin/sh -c <script>` child — returns the CompletedProcess. state_dir, if
+    given, points CARR_RUN_SCHEDULED_STATE_DIR at a throwaway directory: the
+    default out/run-scheduled-state is symlinked into every worktree, so a
+    test that stamps there stamps production state for whatever real job
+    shares that service/run key — exactly the live incident this section's
+    header describes. Every throttle test below passes one."""
+    use_env = dict(env if env is not None else unreachable_env())
+    if state_dir is not None:
+        use_env["CARR_RUN_SCHEDULED_STATE_DIR"] = state_dir
     return subprocess.run(
         [WRAPPER, *flags, service, run_key, "/bin/sh", "-c", script],
         capture_output=True, text=True, timeout=120,
-        env=env if env is not None else unreachable_env(), cwd=REPO)
+        env=use_env, cwd=REPO)
 
 
 def last_line_for(run_key: str, service: str) -> str:
@@ -314,6 +351,22 @@ def last_line_for(run_key: str, service: str) -> str:
     return hits[-1] if hits else ""
 
 
+def stamp_path(state_dir: str, service: str, run_key: str) -> str:
+    """The exact path bin/run-scheduled.sh itself computes for a state
+    stamp: $STATE_DIR/$SERVICE.$RUN_KEY.last-success (primary) or
+    $STATE_DIR/$SERVICE.launchd.heartbeat.last-success (heartbeat, since
+    HB_RUN_KEY is always the fixed string launchd.heartbeat)."""
+    return os.path.join(state_dir, f"{service}.{run_key}.last-success")
+
+
+def seed_stamp(path: str, age_seconds: int = 0) -> None:
+    """Write a state file directly, the same one-line epoch-seconds format
+    `date -u +%s` produces — the no-mock way to test the throttle's READ
+    side without depending on a recorder call ever landing."""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(str(int(time.time()) - age_seconds))
+
+
 def tier1_throttle() -> None:
     print("\nTIER 1b — --heartbeat-interval and --also-heartbeat throttle "
           "without ever hiding a failure")
@@ -322,94 +375,182 @@ def tier1_throttle() -> None:
     # (already covered end-to-end by tier1() above, which passes zero flags on
     # every call — restated here as the explicit contract this section adds
     # flags on TOP of, never in place of.)
-
-    # ── a fresh interval records; an immediate repeat throttles ─────────────
-    rk = "selftest.throttle." + uuid.uuid4().hex[:8]
-    p1 = drive_flags(["--heartbeat-interval", "1800"],
-                      "carr-selftest-probe", rk, "exit 0")
-    check("first success inside a fresh interval is recorded",
-          field(tail_line(rk), "record_action") == "recorded", tail_line(rk))
-    check("...exit code still passes through untouched",
-          p1.returncode == 0, f"got {p1.returncode}")
-
-    p2 = drive_flags(["--heartbeat-interval", "1800"],
-                      "carr-selftest-probe", rk, "exit 0")
-    check("a second success inside the SAME interval is throttled",
-          field(tail_line(rk), "record_action") == "throttled", tail_line(rk))
-    check("...recorder_exit says so rather than a stale/misleading number",
-          field(tail_line(rk), "recorder_exit") == "throttled", tail_line(rk))
-    check("...argv is empty — no recorder call was made to throttle",
-          field(tail_line(rk), "argv") == "", tail_line(rk))
-    check("...and the child's exit code is UNCHANGED by being throttled",
-          p2.returncode == 0, f"got {p2.returncode}")
-
-    # ── a failure inside the same interval is never throttled ───────────────
-    p3 = drive_flags(["--heartbeat-interval", "1800"],
-                      "carr-selftest-probe", rk, "exit 9")
-    check("a FAILURE inside the same interval is recorded immediately, "
-          "not throttled", field(tail_line(rk), "record_action") == "recorded",
-          tail_line(rk))
-    check("...state is failed with the real exit code's failure class",
-          field(tail_line(rk), "state") == "failed"
-          and "--failure-class exit_9" in tail_line(rk), tail_line(rk))
-    check("...and the failure itself is still the child's own exit code",
-          p3.returncode == 9, f"got {p3.returncode}")
-
-    # ── that failure cleared the throttle: the NEXT success posts right away ─
-    p4 = drive_flags(["--heartbeat-interval", "1800"],
-                      "carr-selftest-probe", rk, "exit 0")
-    check("a recovery right after a failure is recorded, not throttled — "
-          "the failure cleared the interval", p4.returncode == 0 and
-          field(tail_line(rk), "record_action") == "recorded", tail_line(rk))
-
-    # ── --also-heartbeat rides the same wake as an independent second row ───
-    hb_service = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
-    rk2 = "selftest.hb." + uuid.uuid4().hex[:8]
-    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_service],
-                "carr-selftest-probe", rk2, "exit 0")
-    hb_line = last_line_for("launchd.heartbeat", hb_service)
-    check("--also-heartbeat writes its OWN provenance line, "
-          "key=launchd.heartbeat", hb_line != "", hb_line)
-    check("...for the named heartbeat service, not the primary job's service",
-          field(hb_line, "service") == hb_service, hb_line)
-    check("...state is succeeded — the heartbeat is a presence signal, "
-          "not the child job's outcome", field(hb_line, "state") == "succeeded",
-          hb_line)
-    check("...recorder argv names the heartbeat service and its fixed key",
-          f"--service {hb_service}" in hb_line and "--key launchd.heartbeat" in hb_line,
-          hb_line)
-
-    # ── the heartbeat's own throttle is independent of the primary job's ────
-    rk3 = "selftest.hb2." + uuid.uuid4().hex[:8]
-    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_service],
-                "carr-selftest-probe", rk3, "exit 0")
-    hb_line2 = last_line_for("launchd.heartbeat", hb_service)
-    check("a second wake's heartbeat (same service, fresh primary run key) "
-          "is STILL throttled — the interval tracks the heartbeat service, "
-          "not the primary job's run key",
-          field(hb_line2, "record_action") == "throttled", hb_line2)
-
-    # ── the heartbeat never depends on the primary job's own outcome ────────
-    hb_service2 = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
-    rk4 = "selftest.hbfail." + uuid.uuid4().hex[:8]
-    proc = drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_service2],
-                        "carr-selftest-probe", rk4, "exit 7")
-    check("the primary job's own failure still passes through untouched",
-          proc.returncode == 7, f"got {proc.returncode}")
-    check("the primary job's own line records the real failure",
-          field(tail_line(rk4), "state") == "failed", tail_line(rk4))
-    hb_line3 = last_line_for("launchd.heartbeat", hb_service2)
-    check("...and the heartbeat STILL records succeeded on the same wake — "
-          "the edge node's presence signal never depends on the wrapped "
-          "job's own success", field(hb_line3, "state") == "succeeded", hb_line3)
-
-    # ── zero flags is unaffected: the field exists but always says recorded ─
-    rk5 = "selftest.noflags." + uuid.uuid4().hex[:8]
-    drive_flags([], "carr-selftest-probe", rk5, "exit 0")
+    rk0 = "selftest.noflags." + uuid.uuid4().hex[:8]
+    drive_flags([], "carr-selftest-probe", rk0, "exit 0")
     check("with no --heartbeat-interval, record_action is always 'recorded' "
           "— the new field never changes behavior for the six jobs that "
-          "never pass it", field(tail_line(rk5), "record_action") == "recorded",
-          tail_line(rk5))
+          "never pass it", field(tail_line(rk0), "record_action") == "recorded",
+          tail_line(rk0))
+
+    # ── (a) a failed recording never arms the throttle ───────────────────────
+    # Every check in this block uses unreachable_env() — the recorder can
+    # never land a row, so recorder_exit is always nonzero and, under the
+    # fix, the state file must never appear no matter how many times this
+    # fires. This is the WRITE side of the fix: the live incident happened
+    # exactly here.
+    print("\n  (a) a failed recording never arms the throttle")
+    dir_a = tempfile.mkdtemp(prefix="carr-selftest-throttle-a-")
+    svc_a = "carr-selftest-probe"
+    rk_a = "selftest.throttle.nofile." + uuid.uuid4().hex[:8]
+    file_a = stamp_path(dir_a, svc_a, rk_a)
+
+    p1 = drive_flags(["--heartbeat-interval", "1800"], svc_a, rk_a, "exit 0",
+                      state_dir=dir_a)
+    check("first success still records the attempt (state=succeeded)",
+          field(tail_line(rk_a), "state") == "succeeded", tail_line(rk_a))
+    check("...but the recorder genuinely could not reach the database",
+          field(tail_line(rk_a), "recorder_exit") not in ("0", ""), tail_line(rk_a))
+    check("...and exit code passes through untouched", p1.returncode == 0,
+          f"got {p1.returncode}")
+    check("a failed recording writes NO state file — the fix's whole point",
+          not os.path.exists(file_a), f"exists={os.path.exists(file_a)}")
+
+    p2 = drive_flags(["--heartbeat-interval", "1800"], svc_a, rk_a, "exit 0",
+                      state_dir=dir_a)
+    check("with no state file armed, the SECOND success ALSO records — it "
+          "is not, and must not be, throttled by a recording that never "
+          "landed", field(tail_line(rk_a), "record_action") == "recorded",
+          tail_line(rk_a))
+    check("...that second attempt exits 0 untouched too", p2.returncode == 0,
+          f"got {p2.returncode}")
+    check("...and still no state file afterward", not os.path.exists(file_a),
+          f"exists={os.path.exists(file_a)}")
+
+    # ── (b) the throttle's READ side, proven by pre-seeding — no mock ───────
+    print("\n  (b) the throttle's read side, proven by pre-seeding the state "
+          "file directly")
+    dir_b = tempfile.mkdtemp(prefix="carr-selftest-throttle-b-")
+    svc_b = "carr-selftest-probe"
+
+    rk_fresh = "selftest.throttle.seed." + uuid.uuid4().hex[:8]
+    seed_stamp(stamp_path(dir_b, svc_b, rk_fresh), age_seconds=0)
+    drive_flags(["--heartbeat-interval", "1800"], svc_b, rk_fresh, "exit 0",
+                state_dir=dir_b)
+    check("a FRESH pre-seeded stamp throttles the next success — pure "
+          "read-side proof, no recorder success required to arm it",
+          field(tail_line(rk_fresh), "record_action") == "throttled",
+          tail_line(rk_fresh))
+
+    rk_stale = "selftest.throttle.stale." + uuid.uuid4().hex[:8]
+    seed_stamp(stamp_path(dir_b, svc_b, rk_stale), age_seconds=3600)
+    drive_flags(["--heartbeat-interval", "1800"], svc_b, rk_stale, "exit 0",
+                state_dir=dir_b)
+    check("a STALE pre-seeded stamp (older than the 1800s interval) does "
+          "NOT throttle", field(tail_line(rk_stale), "record_action") == "recorded",
+          tail_line(rk_stale))
+
+    # ── (c) a failure still clears a pre-seeded stamp ────────────────────────
+    print("\n  (c) a failure still clears a pre-seeded stamp")
+    dir_c = tempfile.mkdtemp(prefix="carr-selftest-throttle-c-")
+    svc_c = "carr-selftest-probe"
+    rk_c = "selftest.throttle.clear." + uuid.uuid4().hex[:8]
+    file_c = stamp_path(dir_c, svc_c, rk_c)
+    seed_stamp(file_c, age_seconds=0)
+
+    p3 = drive_flags(["--heartbeat-interval", "1800"], svc_c, rk_c, "exit 9",
+                      state_dir=dir_c)
+    check("a failure inside a throttle window is still recorded immediately, "
+          "not throttled", field(tail_line(rk_c), "record_action") == "recorded"
+          and field(tail_line(rk_c), "state") == "failed"
+          and "--failure-class exit_9" in tail_line(rk_c), tail_line(rk_c))
+    check("...and the failure itself is still the child's own exit code",
+          p3.returncode == 9, f"got {p3.returncode}")
+    check("...and it clears the PRE-SEEDED stamp — proving the clear works "
+          "regardless of how the stamp got there, not only on one this "
+          "process itself wrote", not os.path.exists(file_c),
+          f"exists={os.path.exists(file_c)}")
+
+    # ── (d) the --also-heartbeat path: the same rules, independently ────────
+    print("\n  (d) --also-heartbeat: the same stamp-only-on-a-landed-row "
+          "rules apply to the edge-node signal too")
+
+    # (d-a) a failed heartbeat recording never arms its own throttle.
+    dir_da = tempfile.mkdtemp(prefix="carr-selftest-hb-a-")
+    hb_da = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
+    file_da = stamp_path(dir_da, hb_da, "launchd.heartbeat")
+    rk_da1 = "selftest.hb.nofile1." + uuid.uuid4().hex[:8]
+    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_da],
+                "carr-selftest-probe", rk_da1, "exit 0", state_dir=dir_da)
+    hb_line_da1 = last_line_for("launchd.heartbeat", hb_da)
+    check("the heartbeat's own first attempt records (state=succeeded) even "
+          "though the recorder is unreachable",
+          field(hb_line_da1, "state") == "succeeded", hb_line_da1)
+    check("...recorder_exit shows the real failure",
+          field(hb_line_da1, "recorder_exit") not in ("0", ""), hb_line_da1)
+    check("a failed heartbeat recording writes NO state file",
+          not os.path.exists(file_da), f"exists={os.path.exists(file_da)}")
+
+    rk_da2 = "selftest.hb.nofile2." + uuid.uuid4().hex[:8]
+    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_da],
+                "carr-selftest-probe", rk_da2, "exit 0", state_dir=dir_da)
+    hb_line_da2 = last_line_for("launchd.heartbeat", hb_da)
+    check("with no state file armed, the heartbeat records on the NEXT wake "
+          "too, instead of wrongly throttling",
+          field(hb_line_da2, "record_action") == "recorded", hb_line_da2)
+
+    # (d-b) the heartbeat throttle's own read side, pre-seeded.
+    dir_db = tempfile.mkdtemp(prefix="carr-selftest-hb-b-")
+    hb_db = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
+    seed_stamp(stamp_path(dir_db, hb_db, "launchd.heartbeat"), age_seconds=0)
+    rk_db1 = "selftest.hb.seed." + uuid.uuid4().hex[:8]
+    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_db],
+                "carr-selftest-probe", rk_db1, "exit 0", state_dir=dir_db)
+    check("a FRESH pre-seeded heartbeat stamp throttles the next wake's "
+          "heartbeat", field(last_line_for("launchd.heartbeat", hb_db),
+          "record_action") == "throttled", last_line_for("launchd.heartbeat", hb_db))
+
+    seed_stamp(stamp_path(dir_db, hb_db, "launchd.heartbeat"), age_seconds=3600)
+    rk_db2 = "selftest.hb.stale." + uuid.uuid4().hex[:8]
+    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_db],
+                "carr-selftest-probe", rk_db2, "exit 0", state_dir=dir_db)
+    check("a STALE pre-seeded heartbeat stamp does NOT throttle",
+          field(last_line_for("launchd.heartbeat", hb_db), "record_action")
+          == "recorded", last_line_for("launchd.heartbeat", hb_db))
+
+    # (d-c) the heartbeat throttle is independent of the PRIMARY job's own
+    # outcome — there is no "heartbeat failed" state for a primary failure to
+    # clear FROM (the heartbeat's own state is always succeeded when it
+    # fires), and bin/run-scheduled.sh never clears HB_STATE_FILE on a
+    # primary failure by design: doing so would make the edge node's
+    # presence signal depend on an unrelated job's health again, exactly the
+    # coupling --also-heartbeat exists to avoid. Proven directly: a
+    # pre-seeded heartbeat stamp survives a primary job FAILURE untouched.
+    dir_dc = tempfile.mkdtemp(prefix="carr-selftest-hb-c-")
+    hb_dc = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
+    file_dc = stamp_path(dir_dc, hb_dc, "launchd.heartbeat")
+    seed_stamp(file_dc, age_seconds=0)
+    rk_dc = "selftest.hb.primaryfail." + uuid.uuid4().hex[:8]
+    proc_dc = drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_dc],
+                           "carr-selftest-probe", rk_dc, "exit 5", state_dir=dir_dc)
+    check("the primary job's own failure still passes through untouched",
+          proc_dc.returncode == 5, f"got {proc_dc.returncode}")
+    check("the primary job's own line records the real failure",
+          field(tail_line(rk_dc), "state") == "failed", tail_line(rk_dc))
+    hb_line_dc = last_line_for("launchd.heartbeat", hb_dc)
+    check("...the heartbeat STILL records succeeded on the same wake — its "
+          "presence signal never depends on the wrapped job's own success",
+          field(hb_line_dc, "state") == "succeeded", hb_line_dc)
+    check("a primary job FAILURE does not clear the heartbeat's own "
+          "pre-seeded stamp: it is STILL throttled",
+          field(hb_line_dc, "record_action") == "throttled", hb_line_dc)
+    check("...the pre-seeded heartbeat stamp file itself is untouched",
+          os.path.exists(file_dc), f"exists={os.path.exists(file_dc)}")
+
+    # ── the first heartbeat fire's line shape (unaffected by the fix) ───────
+    print("\n  (recap) --also-heartbeat's own provenance line shape")
+    dir_shape = tempfile.mkdtemp(prefix="carr-selftest-hb-shape-")
+    hb_shape = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
+    rk_shape = "selftest.hb.shape." + uuid.uuid4().hex[:8]
+    drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_shape],
+                "carr-selftest-probe", rk_shape, "exit 0", state_dir=dir_shape)
+    hb_line_shape = last_line_for("launchd.heartbeat", hb_shape)
+    check("--also-heartbeat writes its OWN provenance line, "
+          "key=launchd.heartbeat", hb_line_shape != "", hb_line_shape)
+    check("...for the named heartbeat service, not the primary job's service",
+          field(hb_line_shape, "service") == hb_shape, hb_line_shape)
+    check("...recorder argv names the heartbeat service and its fixed key",
+          f"--service {hb_shape}" in hb_line_shape
+          and "--key launchd.heartbeat" in hb_line_shape, hb_line_shape)
 
 
 # ── tier 1c: bin/refresh-rules.sh's own exit code (Program 4 follow-up) ──────
@@ -487,6 +628,7 @@ def tier2() -> None:
     probe_key = "carr-run-scheduled-probe"
     run_key = "selftest.forced-failure"
     corr = "9f9f9f9f-1111-4222-8333-444444444444"
+    corrs_to_clean = [corr]
 
     conn = psycopg.connect(dsn, autocommit=True)
     cur = conn.cursor()
@@ -533,10 +675,68 @@ def tier2() -> None:
             check("the row carries a real elapsed window, not a single instant",
                   started is not None and ended is not None and ended >= started,
                   f"{started} -> {ended}")
+
+        # ── the throttle's POSITIVE path, end to end against a real database ─
+        # Tier 1b proves the throttle's read side by pre-seeding a state file
+        # directly (unreachable_env() means no recorder call there ever
+        # lands, by design). This is the other half, the one tier 1 cannot
+        # reach: a REAL recorder success writes the stamp, and the very next
+        # fire is throttled BECAUSE of that landed row — the full loop the
+        # live incident broke, proven here with a real ops.run row, not a
+        # synthetic file. Isolated into its own throwaway state dir so this
+        # probe can never touch the shared out/run-scheduled-state either.
+        print("\n  (throttle positive path) a real landed success stamps, "
+              "and the next fire throttles because of it")
+        throttle_state_dir = tempfile.mkdtemp(prefix="carr-selftest-tier2-throttle-")
+        throttle_run_key = "selftest.throttle.tier2." + uuid.uuid4().hex[:8]
+        corr_land = str(uuid.uuid4())
+        corr_throttled = str(uuid.uuid4())
+        corrs_to_clean += [corr_land, corr_throttled]
+
+        env_land = dict(os.environ)
+        env_land["CARR_CORRELATION_ID"] = corr_land
+        env_land["CARR_RUN_SCHEDULED_STATE_DIR"] = throttle_state_dir
+        proc_land = subprocess.run(
+            [WRAPPER, "--heartbeat-interval", "1800", probe_key, throttle_run_key,
+             "/bin/sh", "-c", "exit 0"],
+            capture_output=True, text=True, env=env_land, cwd=REPO, timeout=120)
+        check("tier 2 throttle: the first real success exits 0",
+              proc_land.returncode == 0, f"got {proc_land.returncode}")
+
+        cur.execute("select count(*) from ops.run where correlation_id = %s",
+                    (corr_land,))
+        landed = cur.fetchone()
+        check("tier 2 throttle: that first fire's row actually landed in ops.run",
+              landed is not None and landed[0] == 1, str(landed))
+
+        stamp = os.path.join(throttle_state_dir,
+                              f"{probe_key}.{throttle_run_key}.last-success")
+        check("tier 2 throttle: a REAL landed row stamps the state file",
+              os.path.exists(stamp), f"exists={os.path.exists(stamp)}")
+
+        env_throttled = dict(os.environ)
+        env_throttled["CARR_CORRELATION_ID"] = corr_throttled
+        env_throttled["CARR_RUN_SCHEDULED_STATE_DIR"] = throttle_state_dir
+        proc_throttled = subprocess.run(
+            [WRAPPER, "--heartbeat-interval", "1800", probe_key, throttle_run_key,
+             "/bin/sh", "-c", "exit 0"],
+            capture_output=True, text=True, env=env_throttled, cwd=REPO, timeout=120)
+        check("tier 2 throttle: the SECOND immediate fire still exits 0 — "
+              "throttling never touches the wrapped exit code",
+              proc_throttled.returncode == 0, f"got {proc_throttled.returncode}")
+
+        cur.execute("select count(*) from ops.run where correlation_id = %s",
+                    (corr_throttled,))
+        throttled_count = cur.fetchone()
+        check("tier 2 throttle: the throttled second fire wrote NO ops.run "
+              "row at all — the stamp from the first fire worked",
+              throttled_count is not None and throttled_count[0] == 0,
+              str(throttled_count))
     finally:
         # Autocommit, same as tools/ops-record.py's own connections: there is no
         # transaction to roll back, so deleting what we inserted IS the isolation.
-        cur.execute("delete from ops.run where correlation_id = %s", (corr,))
+        for c in corrs_to_clean:
+            cur.execute("delete from ops.run where correlation_id = %s", (c,))
         cur.execute("""delete from ops.service_environment where service_id =
                        (select id from ops.service where key = %s)""", (probe_key,))
         cur.execute("delete from ops.service where key = %s", (probe_key,))
