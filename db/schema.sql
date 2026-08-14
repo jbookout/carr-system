@@ -1,4 +1,24 @@
 --
+-- CARR ROLE PREAMBLE (bin/schema-snapshot.sh) — not produced by pg_dump.
+--
+-- This dump is --no-owner --no-acl, so it names no roles and grants nothing.
+-- The roles still have to EXIST before the pending migrations that grant to
+-- them run, and they can no longer be got by replaying 0115: once this
+-- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
+-- An existing role is left exactly as it is; a missing one is created NOLOGIN
+-- purely so privileges have somewhere to attach in a rebuilt environment.
+--
+do $$
+declare r text;
+begin
+  foreach r in array array['carr_reader','carr_writer','carr_jobs'] loop
+    if not exists (select 1 from pg_roles where rolname = r) then
+      execute format('create role %I nologin', r);
+    end if;
+  end loop;
+end $$;
+
+--
 -- PostgreSQL database dump
 --
 
@@ -49,6 +69,29 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 --
 
 COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching based on trigrams';
+
+
+--
+-- Name: freshness(timestamp with time zone, timestamp with time zone); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.freshness(observed_at timestamp with time zone, expires_at timestamp with time zone) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  select case
+    when observed_at is null then 'missing'
+    when expires_at  is null then 'unknown'
+    when now() > expires_at  then 'stale'
+    else 'fresh'
+  end
+$$;
+
+
+--
+-- Name: FUNCTION freshness(observed_at timestamp with time zone, expires_at timestamp with time zone); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.freshness(observed_at timestamp with time zone, expires_at timestamp with time zone) IS 'The four freshness states from control-room/contracts/entity-schemas.v1.json. unknown is NOT stale: it means the observation carried no expiry, so nobody can say. Never collapse the two.';
 
 
 --
@@ -538,6 +581,391 @@ CREATE TABLE neon_auth.verification (
 
 
 --
+-- Name: deployment; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.deployment (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    state text NOT NULL,
+    git_sha text,
+    release_ref text,
+    deployed_by_actor text,
+    verb_count integer,
+    schema_highest_migration text,
+    doctrine_generation integer,
+    started_at timestamp with time zone,
+    ended_at timestamp with time zone,
+    read_back_at timestamp with time zone,
+    verification_evidence_ref text,
+    failure_class text,
+    rollback_of uuid,
+    source_kind text NOT NULL,
+    source_ref text NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    detail text,
+    CONSTRAINT a_failed_deployment_names_its_class CHECK (((state <> 'failed'::text) OR (failure_class IS NOT NULL))),
+    CONSTRAINT a_terminal_deployment_has_ended CHECK (((state <> ALL (ARRAY['complete'::text, 'failed'::text, 'aborted'::text, 'rolled_back'::text, 'superseded'::text])) OR (ended_at IS NOT NULL))),
+    CONSTRAINT complete_requires_a_production_read_back CHECK (((state <> 'complete'::text) OR (read_back_at IS NOT NULL))),
+    CONSTRAINT deployment_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
+    CONSTRAINT deployment_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
+    CONSTRAINT deployment_state_check CHECK ((state = ANY (ARRAY['planned'::text, 'rehearsing'::text, 'ready'::text, 'awaiting_approval'::text, 'deploying'::text, 'verifying'::text, 'complete'::text, 'failed'::text, 'aborted'::text, 'rolled_back'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: TABLE deployment; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.deployment IS 'One attempt to place a release into one environment, RECORDED when it happens. /release answers what is serving now; this answers what was serving then, which is the question a failure investigation asks.';
+
+
+--
+-- Name: incident; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.incident (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ref text NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    title text NOT NULL,
+    severity text NOT NULL,
+    state text DEFAULT 'detected'::text NOT NULL,
+    environment text NOT NULL,
+    owner_actor text,
+    next_action text,
+    business_impact text,
+    banner_state text,
+    detected_source text NOT NULL,
+    detected_at timestamp with time zone DEFAULT now() NOT NULL,
+    monitoring_until timestamp with time zone,
+    recovery_evidence_ref text,
+    resolved_at timestamp with time zone,
+    root_cause text,
+    reviewed_at timestamp with time zone,
+    followup_disposition text,
+    source_kind text NOT NULL,
+    source_ref text NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    signature text,
+    CONSTRAINT incident_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
+    CONSTRAINT incident_severity_check CHECK ((severity ~ '^SEV-[0-4]$'::text)),
+    CONSTRAINT incident_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
+    CONSTRAINT incident_state_check CHECK ((state = ANY (ARRAY['detected'::text, 'triaged'::text, 'investigating'::text, 'mitigating'::text, 'monitoring'::text, 'resolved'::text, 'reviewed'::text]))),
+    CONSTRAINT resolved_requires_recovery_evidence_and_monitoring CHECK (((state <> ALL (ARRAY['resolved'::text, 'reviewed'::text])) OR ((recovery_evidence_ref IS NOT NULL) AND (monitoring_until IS NOT NULL) AND (resolved_at IS NOT NULL)))),
+    CONSTRAINT reviewed_requires_a_followup_disposition CHECK (((state <> 'reviewed'::text) OR ((followup_disposition IS NOT NULL) AND (reviewed_at IS NOT NULL))))
+);
+
+
+--
+-- Name: TABLE incident; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.incident IS 'The operational incident. NOT the same thing as public.defect, which records claims the system made and the truth they collided with — that table has no severity, service, environment or lifecycle, and is kept unchanged.';
+
+
+--
+-- Name: COLUMN incident.signature; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.incident.signature IS 'service|environment|run_key|failure_class — the identity of a recurring failure. Two OPEN incidents cannot share one (see the partial unique index). Null is allowed for incidents a human opens by hand, which have no automatic recurrence to collapse.';
+
+
+--
+-- Name: incident_fact; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.incident_fact (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    incident_id uuid NOT NULL,
+    text text NOT NULL,
+    source_ref text NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: incident_hypothesis; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.incident_hypothesis (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    incident_id uuid NOT NULL,
+    text text NOT NULL,
+    confidence text NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    settled_as text,
+    CONSTRAINT incident_hypothesis_confidence_check CHECK ((confidence = ANY (ARRAY['unconfirmed'::text, 'low'::text, 'medium'::text, 'high'::text]))),
+    CONSTRAINT incident_hypothesis_settled_as_check CHECK ((settled_as = ANY (ARRAY['confirmed'::text, 'refuted'::text])))
+);
+
+
+--
+-- Name: TABLE incident_hypothesis; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.incident_hypothesis IS 'Separate from incident_fact by doctrine. A hypothesis can be settled, and a settled one keeps its own row rather than being promoted into a fact — the history of what was believed during an outage is the review material.';
+
+
+--
+-- Name: incident_link; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.incident_link (
+    incident_id uuid NOT NULL,
+    kind text NOT NULL,
+    ref text NOT NULL,
+    note text,
+    CONSTRAINT incident_link_kind_check CHECK ((kind = ANY (ARRAY['run'::text, 'deployment'::text, 'work_request'::text, 'defect'::text, 'decision'::text])))
+);
+
+
+--
+-- Name: incident_service; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.incident_service (
+    incident_id uuid NOT NULL,
+    service_id uuid NOT NULL
+);
+
+
+--
+-- Name: run; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.run (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    kind text NOT NULL,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    run_key text NOT NULL,
+    state text NOT NULL,
+    failure_class text,
+    exit_code integer,
+    attempt integer DEFAULT 1 NOT NULL,
+    started_at timestamp with time zone,
+    ended_at timestamp with time zone,
+    duration_ms integer GENERATED ALWAYS AS (
+CASE
+    WHEN ((started_at IS NOT NULL) AND (ended_at IS NOT NULL)) THEN ((EXTRACT(epoch FROM (ended_at - started_at)) * (1000)::numeric))::integer
+    ELSE NULL::integer
+END) STORED,
+    source_kind text NOT NULL,
+    source_ref text NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    evidence_ref text,
+    detail text,
+    CONSTRAINT a_failure_names_its_class CHECK (((state <> ALL (ARRAY['failed'::text, 'timed_out'::text])) OR (failure_class IS NOT NULL))),
+    CONSTRAINT a_run_that_ended_also_started CHECK (((ended_at IS NULL) OR (started_at IS NOT NULL))),
+    CONSTRAINT a_terminal_run_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text])) OR (ended_at IS NOT NULL))),
+    CONSTRAINT run_attempt_check CHECK ((attempt >= 1)),
+    CONSTRAINT run_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
+    CONSTRAINT run_kind_check CHECK ((kind = ANY (ARRAY['job'::text, 'check'::text]))),
+    CONSTRAINT run_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
+    CONSTRAINT run_state_check CHECK ((state = ANY (ARRAY['scheduled'::text, 'queued'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text, 'stale'::text, 'unknown'::text])))
+);
+
+
+--
+-- Name: TABLE run; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.run IS 'The job-run ledger and the synthetic golden-workflow ledger, one shape, as the frozen Run contract defines them. Holds NO business payload: evidence_ref points, detail is one redacted line.';
+
+
+--
+-- Name: service; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.service (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    key text NOT NULL,
+    name text NOT NULL,
+    purpose text,
+    family text,
+    criticality text DEFAULT 'medium'::text NOT NULL,
+    owner_actor text NOT NULL,
+    repo_path text,
+    runtime text,
+    runbook_ref text,
+    registered_at timestamp with time zone DEFAULT now() NOT NULL,
+    retired_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT service_criticality_check CHECK ((criticality = ANY (ARRAY['low'::text, 'medium'::text, 'high'::text, 'critical'::text])))
+);
+
+
+--
+-- Name: TABLE service; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.service IS 'The service catalog as ROWS. It existed as prose in the Program 0 inventory and as frozen JSON contracts; a catalog nothing can query is a document.';
+
+
+--
+-- Name: service_dependency; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.service_dependency (
+    service_id uuid NOT NULL,
+    depends_on_id uuid NOT NULL,
+    note text,
+    CONSTRAINT a_service_does_not_depend_on_itself CHECK ((service_id <> depends_on_id))
+);
+
+
+--
+-- Name: TABLE service_dependency; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.service_dependency IS 'Upstream/downstream blast radius. The BDUF requires every dependency graphic to have an accessible list equivalent; this table IS that list, and the graphic is derived from it rather than the other way round.';
+
+
+--
+-- Name: service_environment; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.service_environment (
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    endpoint text,
+    deploy_mechanism text,
+    expected_cadence_seconds integer,
+    cadence_grace_seconds integer DEFAULT 0 NOT NULL,
+    notes text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT service_environment_cadence_grace_seconds_check CHECK ((cadence_grace_seconds >= 0)),
+    CONSTRAINT service_environment_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
+    CONSTRAINT service_environment_expected_cadence_seconds_check CHECK (((expected_cadence_seconds IS NULL) OR (expected_cadence_seconds > 0)))
+);
+
+
+--
+-- Name: COLUMN service_environment.expected_cadence_seconds; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.service_environment.expected_cadence_seconds IS 'How long an observation of this service in this environment stays believable when the run does not declare its own expiry. NULL means unscheduled, which makes every observation unknown rather than fresh — deliberately.';
+
+
+--
+-- Name: v_check_run; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_check_run AS
+ SELECT id,
+    correlation_id,
+    kind,
+    service_id,
+    environment,
+    run_key,
+    state,
+    failure_class,
+    exit_code,
+    attempt,
+    started_at,
+    ended_at,
+    duration_ms,
+    source_kind,
+    source_ref,
+    observed_at,
+    expires_at,
+    evidence_ref,
+    detail
+   FROM ops.run
+  WHERE (kind = 'check'::text);
+
+
+--
+-- Name: v_job_run; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_job_run AS
+ SELECT id,
+    correlation_id,
+    kind,
+    service_id,
+    environment,
+    run_key,
+    state,
+    failure_class,
+    exit_code,
+    attempt,
+    started_at,
+    ended_at,
+    duration_ms,
+    source_kind,
+    source_ref,
+    observed_at,
+    expires_at,
+    evidence_ref,
+    detail
+   FROM ops.run
+  WHERE (kind = 'job'::text);
+
+
+--
+-- Name: v_service_environment_health; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_service_environment_health AS
+ WITH latest AS (
+         SELECT DISTINCT ON (r.service_id, r.environment) r.service_id,
+            r.environment,
+            r.state,
+            r.observed_at,
+            r.expires_at,
+            r.run_key,
+            r.failure_class,
+            r.source_kind,
+            r.source_ref,
+            r.correlation_id
+           FROM ops.run r
+          WHERE (r.state = ANY (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text]))
+          ORDER BY r.service_id, r.environment, r.observed_at DESC
+        )
+ SELECT se.service_id,
+    s.key AS service_key,
+    s.name AS service_name,
+    s.criticality,
+    se.environment,
+    l.run_key AS last_run_key,
+    l.state AS last_run_state,
+    l.failure_class AS last_failure_class,
+    l.correlation_id AS last_correlation_id,
+    l.observed_at,
+    COALESCE(l.expires_at, (l.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision))) AS expires_at,
+    ops.freshness(l.observed_at, COALESCE(l.expires_at, (l.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision)))) AS freshness_state,
+    COALESCE(l.source_kind, 'registry'::text) AS source_kind,
+    COALESCE(l.source_ref, 'ops.service_environment'::text) AS source_ref,
+        CASE
+            WHEN (l.state IS NULL) THEN 'unknown'::text
+            WHEN (ops.freshness(l.observed_at, COALESCE(l.expires_at, (l.observed_at + make_interval(secs => ((se.expected_cadence_seconds + se.cadence_grace_seconds))::double precision)))) <> 'fresh'::text) THEN 'unknown'::text
+            WHEN (l.state = ANY (ARRAY['failed'::text, 'timed_out'::text])) THEN 'unavailable'::text
+            WHEN (l.state = ANY (ARRAY['skipped'::text, 'cancelled'::text])) THEN 'degraded'::text
+            WHEN (l.state = 'succeeded'::text) THEN 'healthy'::text
+            ELSE 'unknown'::text
+        END AS health
+   FROM ((ops.service_environment se
+     JOIN ops.service s ON ((s.id = se.service_id)))
+     LEFT JOIN latest l ON (((l.service_id = se.service_id) AND (l.environment = se.environment))))
+  WHERE (s.retired_at IS NULL);
+
+
+--
+-- Name: VIEW v_service_environment_health; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON VIEW ops.v_service_environment_health IS 'THE ONLY PLACE HEALTH IS EXPRESSED, and it is derived. The premortem names false health from stale collectors as the second most likely catastrophe; a stored health column is that failure mechanism. A silent collector reads unknown here because no green was ever written down.';
+
+
+--
 -- Name: work_request; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -563,6 +991,7 @@ CREATE TABLE ops.work_request (
     started_at timestamp with time zone,
     closed_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    correlation_id uuid,
     CONSTRAINT blocked_needs_a_named_blocker CHECK (((state <> 'blocked'::text) OR ((blocker_code IS NOT NULL) AND (blocker_detail IS NOT NULL)))),
     CONSTRAINT confirmed_close_needs_accepted_verification CHECK (((state <> 'confirmed_closed'::text) OR (verification_accepted_at IS NOT NULL))),
     CONSTRAINT side_exits_record_a_reason CHECK (((state <> ALL (ARRAY['declined'::text, 'superseded'::text, 'failed'::text])) OR (exit_reason IS NOT NULL))),
@@ -577,6 +1006,97 @@ CREATE TABLE ops.work_request (
 --
 
 COMMENT ON TABLE ops.work_request IS 'The canonical Work Request. States come from control-room/contracts/state-machines.v1.json; the Workspace projection is defined by control-room/contracts/work-request-projection.v1.json and is derived, never stored. TRANSITIONS ARE SERVER-ENFORCED, not enforced here: doctrine requires it and the guards need evidence a CHECK cannot see. This table guarantees only that a row is never in an undefined state and never violates an invariant the machine declares about states.';
+
+
+--
+-- Name: COLUMN work_request.correlation_id; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.work_request.correlation_id IS 'Nullable on purpose: rows predate correlation, and a work request captured by hand has no journey behind it. Present when the request came out of a traced failure.';
+
+
+--
+-- Name: v_trace; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_trace AS
+ SELECT d.correlation_id,
+    'deployment'::text AS kind,
+    COALESCE(d.release_ref, "left"(d.git_sha, 12), (d.id)::text) AS ref,
+    d.state,
+    COALESCE(d.ended_at, d.started_at, d.observed_at) AS occurred_at,
+    d.environment,
+    s.key AS service_key,
+    d.failure_class,
+    d.detail,
+    d.source_kind,
+    d.source_ref,
+    d.observed_at,
+    d.expires_at,
+    ops.freshness(d.observed_at, d.expires_at) AS freshness_state,
+    d.id AS row_id
+   FROM (ops.deployment d
+     JOIN ops.service s ON ((s.id = d.service_id)))
+UNION ALL
+ SELECT r.correlation_id,
+    r.kind,
+    r.run_key AS ref,
+    r.state,
+    COALESCE(r.ended_at, r.started_at, r.observed_at) AS occurred_at,
+    r.environment,
+    s.key AS service_key,
+    r.failure_class,
+    r.detail,
+    r.source_kind,
+    r.source_ref,
+    r.observed_at,
+    r.expires_at,
+    ops.freshness(r.observed_at, r.expires_at) AS freshness_state,
+    r.id AS row_id
+   FROM (ops.run r
+     JOIN ops.service s ON ((s.id = r.service_id)))
+UNION ALL
+ SELECT i.correlation_id,
+    'incident'::text AS kind,
+    i.ref,
+    i.state,
+    i.detected_at AS occurred_at,
+    i.environment,
+    NULL::text AS service_key,
+    NULL::text AS failure_class,
+    i.title AS detail,
+    i.source_kind,
+    i.source_ref,
+    i.observed_at,
+    i.expires_at,
+    ops.freshness(i.observed_at, i.expires_at) AS freshness_state,
+    i.id AS row_id
+   FROM ops.incident i
+UNION ALL
+ SELECT w.correlation_id,
+    'work_request'::text AS kind,
+    w.ref,
+    w.state,
+    w.captured_at AS occurred_at,
+    NULL::text AS environment,
+    NULL::text AS service_key,
+    w.blocker_code AS failure_class,
+    w.title AS detail,
+    'registry'::text AS source_kind,
+    'ops.work_request'::text AS source_ref,
+    w.updated_at AS observed_at,
+    NULL::timestamp with time zone AS expires_at,
+    ops.freshness(w.updated_at, NULL::timestamp with time zone) AS freshness_state,
+    w.id AS row_id
+   FROM ops.work_request w
+  WHERE (w.correlation_id IS NOT NULL);
+
+
+--
+-- Name: VIEW v_trace; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON VIEW ops.v_trace IS 'THE PROGRAM 3 GATE. One correlation id returns the whole journey — deploy, golden-workflow check, job run, incident, work request — in time order, every link carrying its own source and freshness. Read-only by construction: a view over four tables with no insert rule.';
 
 
 --
@@ -7507,6 +8027,102 @@ ALTER TABLE ONLY neon_auth.verification
 
 
 --
+-- Name: deployment deployment_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.deployment
+    ADD CONSTRAINT deployment_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: incident_fact incident_fact_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_fact
+    ADD CONSTRAINT incident_fact_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: incident_hypothesis incident_hypothesis_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_hypothesis
+    ADD CONSTRAINT incident_hypothesis_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: incident_link incident_link_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_link
+    ADD CONSTRAINT incident_link_pkey PRIMARY KEY (incident_id, kind, ref);
+
+
+--
+-- Name: incident incident_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident
+    ADD CONSTRAINT incident_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: incident incident_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident
+    ADD CONSTRAINT incident_ref_key UNIQUE (ref);
+
+
+--
+-- Name: incident_service incident_service_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_service
+    ADD CONSTRAINT incident_service_pkey PRIMARY KEY (incident_id, service_id);
+
+
+--
+-- Name: run run_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.run
+    ADD CONSTRAINT run_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: service_dependency service_dependency_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.service_dependency
+    ADD CONSTRAINT service_dependency_pkey PRIMARY KEY (service_id, depends_on_id);
+
+
+--
+-- Name: service_environment service_environment_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.service_environment
+    ADD CONSTRAINT service_environment_pkey PRIMARY KEY (service_id, environment);
+
+
+--
+-- Name: service service_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.service
+    ADD CONSTRAINT service_key_key UNIQUE (key);
+
+
+--
+-- Name: service service_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.service
+    ADD CONSTRAINT service_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: work_request work_request_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -8787,6 +9403,76 @@ CREATE INDEX verification_identifier_idx ON neon_auth.verification USING btree (
 
 
 --
+-- Name: deployment_correlation_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX deployment_correlation_idx ON ops.deployment USING btree (correlation_id);
+
+
+--
+-- Name: deployment_env_observed_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX deployment_env_observed_idx ON ops.deployment USING btree (environment, observed_at DESC);
+
+
+--
+-- Name: incident_correlation_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX incident_correlation_idx ON ops.incident USING btree (correlation_id);
+
+
+--
+-- Name: incident_one_open_per_signature; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX incident_one_open_per_signature ON ops.incident USING btree (signature) WHERE (state <> ALL (ARRAY['resolved'::text, 'reviewed'::text]));
+
+
+--
+-- Name: INDEX incident_one_open_per_signature; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON INDEX ops.incident_one_open_per_signature IS 'The deduplication rule as a constraint. monitoring counts as OPEN on purpose: a service that fails again while we are watching it recover is the same incident continuing, not a second one starting.';
+
+
+--
+-- Name: incident_open_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX incident_open_idx ON ops.incident USING btree (state, detected_at DESC) WHERE (state <> 'reviewed'::text);
+
+
+--
+-- Name: run_correlation_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX run_correlation_idx ON ops.run USING btree (correlation_id);
+
+
+--
+-- Name: run_open_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX run_open_idx ON ops.run USING btree (state, observed_at DESC) WHERE (state = ANY (ARRAY['scheduled'::text, 'queued'::text, 'running'::text]));
+
+
+--
+-- Name: INDEX run_open_idx; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON INDEX ops.run_open_idx IS 'Partial on purpose: terminal runs accumulate forever and the common question is what is in flight or stuck.';
+
+
+--
+-- Name: run_service_env_observed_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX run_service_env_observed_idx ON ops.run USING btree (service_id, environment, observed_at DESC);
+
+
+--
 -- Name: work_request_state_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -9632,6 +10318,94 @@ ALTER TABLE ONLY neon_auth.member
 
 ALTER TABLE ONLY neon_auth.session
     ADD CONSTRAINT "session_userId_fkey" FOREIGN KEY ("userId") REFERENCES neon_auth."user"(id) ON DELETE CASCADE;
+
+
+--
+-- Name: deployment deployment_rollback_of_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.deployment
+    ADD CONSTRAINT deployment_rollback_of_fkey FOREIGN KEY (rollback_of) REFERENCES ops.deployment(id);
+
+
+--
+-- Name: deployment deployment_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.deployment
+    ADD CONSTRAINT deployment_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id);
+
+
+--
+-- Name: incident_fact incident_fact_incident_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_fact
+    ADD CONSTRAINT incident_fact_incident_id_fkey FOREIGN KEY (incident_id) REFERENCES ops.incident(id) ON DELETE CASCADE;
+
+
+--
+-- Name: incident_hypothesis incident_hypothesis_incident_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_hypothesis
+    ADD CONSTRAINT incident_hypothesis_incident_id_fkey FOREIGN KEY (incident_id) REFERENCES ops.incident(id) ON DELETE CASCADE;
+
+
+--
+-- Name: incident_link incident_link_incident_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_link
+    ADD CONSTRAINT incident_link_incident_id_fkey FOREIGN KEY (incident_id) REFERENCES ops.incident(id) ON DELETE CASCADE;
+
+
+--
+-- Name: incident_service incident_service_incident_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_service
+    ADD CONSTRAINT incident_service_incident_id_fkey FOREIGN KEY (incident_id) REFERENCES ops.incident(id) ON DELETE CASCADE;
+
+
+--
+-- Name: incident_service incident_service_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.incident_service
+    ADD CONSTRAINT incident_service_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id);
+
+
+--
+-- Name: run run_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.run
+    ADD CONSTRAINT run_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id);
+
+
+--
+-- Name: service_dependency service_dependency_depends_on_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.service_dependency
+    ADD CONSTRAINT service_dependency_depends_on_id_fkey FOREIGN KEY (depends_on_id) REFERENCES ops.service(id) ON DELETE CASCADE;
+
+
+--
+-- Name: service_dependency service_dependency_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.service_dependency
+    ADD CONSTRAINT service_dependency_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE CASCADE;
+
+
+--
+-- Name: service_environment service_environment_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.service_environment
+    ADD CONSTRAINT service_environment_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE CASCADE;
 
 
 --
@@ -11662,6 +12436,10 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0112_loop_number_unique_open.sql	88e6a043ecdd923b84f1118993a0351a0f7ee6100d28efc786575eb455c18ac9	2026-08-13 21:30:15.468462+00
 0113_schema_ledger_view.sql	6e496cd2b0f9ad33eb1c576a4d025cc9ac1426f96e4c7b0536b59f296a488a76	2026-08-13 21:30:15.682358+00
 0114_ops_schema_work_request.sql	a89e520d34ca3ade8f3f234d17684ddfa45c997dd17c3cbf8de61028ffbe5921	2026-08-13 21:34:54.264624+00
+0013a_historical_client_status_vocabulary.sql	efb2bdec24e9ed8ea9597a38e7bec5b06681a36bb95b4e305aa8cf59a5522ce6	2026-08-14 02:00:09.337726+00
+0115_ops_observability.sql	b4962c412c5de6c70002ea1b74a8d75f585cbf260a5622e8dd1bd41989c29478	2026-08-14 02:00:09.88795+00
+0116_incident_signature.sql	9267e4799295a3c888a053ce018607140bcca5115b9c38ab77d151f098743070	2026-08-14 11:07:52.632609+00
+0117_collector_incident_grants.sql	25f46a6ade52dbea6a2e6e13072cec0510b992cbfd68424f8f310d0db2bb0e07	2026-08-14 11:21:39.42866+00
 \.
 
 

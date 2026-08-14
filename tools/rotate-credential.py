@@ -240,6 +240,12 @@ def rotate_api_key(label: str) -> int:
     old_ids = {k["id"] for k in before} if isinstance(before, list) else set()
 
     created = neon("POST", "/api_keys", old, {"key_name": label})
+    # Neon answers this endpoint with an object. A list back means the API
+    # shape moved under us, and rotating a credential is the last place to
+    # guess: say so and leave the working key alone.
+    if not isinstance(created, dict):
+        sys.exit("rotate-credential: Neon returned an unexpected shape for the new key "
+                 "— nothing changed, old key intact")
     new_key = created.get("key")
     new_id = created.get("id")
     if not new_key or not new_id:

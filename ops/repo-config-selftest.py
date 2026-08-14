@@ -36,8 +36,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # .invalid is reserved by RFC 2606 precisely so it can never be a real address.
 TEST_IDENTITY_SUFFIX = "@example.invalid"
 
-failures = []
-repaired = []
+failures: list[str] = []
+repaired: list[str] = []
 
 
 def git(*args):

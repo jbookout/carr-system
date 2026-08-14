@@ -25,11 +25,11 @@ import os
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+from lib.loadpy import load_module_from_path  # noqa: E402
 GUARD = os.path.join(REPO, "hooks", "guard-unattended.py")
 
-spec = importlib.util.spec_from_file_location("guard_unattended", GUARD)
-guard = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(guard)
+guard = load_module_from_path("guard_unattended", GUARD)
 
 LINKEDIN = "https:" + "//www.linkedin.com/posts/example-123"
 XPOST = "https:" + "//x.com/joebookout/status/123"
