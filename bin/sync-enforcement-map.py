@@ -69,13 +69,8 @@ ID_RE = re.compile(r"^`#?([0-9a-f]{8})`|^#### .*`#([0-9a-f]{8})`", re.M)
 OWNED = ["ops/config/rule-enforcement-map.json", "ops/config/gate-baseline.json"]
 
 
-# Variables git reads BEFORE it reads the working directory. Leaving them in
-# place means `cwd=REPO` decides nothing.
-_GIT_ENV_OVERRIDES = (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_PREFIX",
-)
+sys.path.insert(0, os.path.join(REPO, "ops"))
+from git_env import scrubbed_env  # noqa: E402
 
 
 def git(*args, check=False):
@@ -90,11 +85,8 @@ def git(*args, check=False):
     GIT_DIR and watched the commit land in the outer repo, sweeping an unrelated
     file with it — the exact two-writer accident rule 308ef1de exists to stop.
     """
-    env = dict(os.environ)
-    for var in _GIT_ENV_OVERRIDES:
-        env.pop(var, None)
     p = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True,
-                       env=env)
+                       env=scrubbed_env())
     if check and p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout).strip())
     return p.returncode, (p.stdout + p.stderr).strip()

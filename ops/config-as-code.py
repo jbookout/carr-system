@@ -75,30 +75,18 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # PR #19. It is not merged and not on origin/main, so this stands alone rather
 # than importing something that does not exist yet; consolidate onto that helper
 # when it lands, and delete this.
-_GIT_LOCATION_VARS = (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
-    "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import scrubbed_env as _git_env  # noqa: E402
 
-
-def _git_env():
-    """os.environ minus every variable that can redirect a git call off -C."""
-    env = dict(os.environ)
-    for var in _GIT_LOCATION_VARS:
-        env.pop(var, None)
-    # GIT_CONFIG_COUNT declares how many KEY_<n>/VALUE_<n> pairs follow; drop the
-    # count and every pair it covers, since any one of them can carry
-    # core.worktree. Bounded rather than trusted: a malformed or absurd count
-    # must not turn this into an unbounded loop.
-    try:
-        count = int(env.pop("GIT_CONFIG_COUNT", "") or 0)
-    except ValueError:
-        count = 0
-    for n in range(max(0, min(count, 1000))):
-        env.pop(f"GIT_CONFIG_KEY_{n}", None)
-        env.pop(f"GIT_CONFIG_VALUE_{n}", None)
-    return env
+# CONSOLIDATED into ops/git_env.py (loop #371). This file carried its own
+# _GIT_LOCATION_VARS tuple and _git_env() because git_env.py was not yet on main
+# when the scrub landed here in PR #20 — importing something unmerged would have
+# traded a real hole for an ImportError, so the local copy was correct at the
+# time and is redundant now. The bounded GIT_CONFIG_COUNT loop that lived here
+# was the better implementation and went the other way: git_env.scrubbed_env()
+# now uses it, because the original spun on a hostile count.
+#
+# Aliased to _git_env so the five call sites below are untouched by this change.
 
 
 def _find_vault():

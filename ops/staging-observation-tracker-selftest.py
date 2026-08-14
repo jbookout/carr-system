@@ -23,23 +23,41 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "staging-observation-tracker.py")
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("staging_observation_tracker", HOOK)
 assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
+def git(repo, *args, check=True):
+    """Every git call this file makes, confined to `repo`.
+
+    THE ENV ARGUMENT IS THE WHOLE POINT. `cwd=repo` alone is not isolation:
+    git reads GIT_DIR before the working directory, and every git hook exports
+    GIT_DIR. ops/githooks/pre-push runs ops/ci.sh which runs this file, so
+    before 2026-08-13 a plain `git push` made the three calls below rewrite the
+    REAL repo's user.email to selftest@example.com and commit to it. Verified by
+    running this file against a clone with GIT_DIR exported: the clone's
+    identity changed and its HEAD moved. See ops/git_env.py. Loop #371.
+    """
+    return subprocess.run(["git", *args], cwd=repo, check=check,
+                          env=fixture_env(), capture_output=True, text=True)
+
+
 def make_fixture_repo():
     """A disposable git repo with one committed, tracked file."""
     repo = tempfile.mkdtemp(prefix="sot-fixture-repo-")
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "selftest@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "selftest"], cwd=repo, check=True)
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "selftest@example.com")
+    git(repo, "config", "user.name", "selftest")
     tracked = os.path.join(repo, "tracked.txt")
     with open(tracked, "w") as fh:
         fh.write("original content\n")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-q", "-m", "initial")
     return repo
 
 
@@ -190,8 +208,8 @@ def case_accumulates_across_multiple_calls():
         second = os.path.join(repo, "second.txt")
         with open(second, "w") as fh:
             fh.write("second tracked file\n")
-        subprocess.run(["git", "add", "second.txt"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-q", "-m", "second file"], cwd=repo, check=True)
+        git(repo, "add", "second.txt")
+        git(repo, "commit", "-q", "-m", "second file")
 
         session = "sot-case-5"
         mod.handle(pre_payload(repo, session, "call-1"), repo=repo)
