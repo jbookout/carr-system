@@ -415,14 +415,44 @@ def corpus_render_write_target(cmd):
         return None                                   # fail open, same as siblings
 
 
+# WIDENED 2026-08-14 BY A SWEEP, after the raw-device rule was found missing the
+# ordinary spelling of its own command while somebody picked an example for an
+# unrelated fixture. Probing every rule against the real ways its command is
+# written turned up eight misses across four rules — and none of it had ever
+# surfaced, because no fixture asserted these rules FIRE. The suite tested the
+# allow side and the network side and took the destructive side on trust. A rule
+# with no fire-asserting test is indistinguishable from a rule that does not
+# work. ops/guard-selftest.py now pins each one.
+#
+# DEVICE FAMILIES STAY ENUMERATED, never a bare /dev/ match: /dev/null,
+# /dev/tty and /dev/stderr are everyday redirection targets, and refusing those
+# would break ordinary work within the hour.
+_DEV = r"/dev/(sd|disk|rdisk|nvme|vd|hd)"
+
 RULES = [
     # 1. destructive filesystem
     (re.compile(r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+", re.I), "recursive/forced delete"),
+    # `find ... -delete` removes exactly what rm -rf removes, one directory walk
+    # at a time, and was the only whole-tree delete this table did not see. It
+    # keeps the same safe-zone waiver as rm, so the routine scratch cleanup
+    # (`find <scratch> -name '*.pyc' -delete`) is unaffected.
+    (re.compile(r"\bfind\b[^|;&]*\s-delete\b", re.I), "recursive/forced delete"),
     (re.compile(r"\b(shred|srm)\b", re.I), "secure delete"),
-    (re.compile(r">\s*/dev/(sd|disk|rdisk)", re.I), "raw device write"),
-    (re.compile(r"\bmkfs\b|\bdiskutil\s+erase", re.I), "filesystem format"),
+    # Three ways to write a raw device, not one. The original pattern saw only
+    # shell redirection, so `dd of=<device>` — the form anyone actually reaches
+    # for, and the one in every disk-imaging guide — went straight through.
+    (re.compile(r">\s*" + _DEV, re.I), "raw device write"),
+    (re.compile(r"\bdd\b[^|;&]*\bof=" + _DEV, re.I), "raw device write"),
+    (re.compile(r"\btee\b[^|;&]*\s" + _DEV, re.I), "raw device write"),
+    # newfs_* is the macOS spelling of mkfs, and partitionDisk destroys just as
+    # completely as eraseDisk while reading like a layout change.
+    (re.compile(r"\bmkfs\b|\bnewfs_\w+\b|\bdiskutil\s+(erase|partitionDisk|reformat)", re.I),
+     "filesystem format"),
     # 2. git history rewrite
-    (re.compile(r"git\s+push\b[^|;&]*(--force\b|--force-with-lease\b|\s-f\b)", re.I), "force push"),
+    # A leading + on a refspec IS a force push — the same overwrite with none of
+    # the flags this rule was watching for.
+    (re.compile(r"git\s+push\b[^|;&]*(--force\b|--force-with-lease\b|\s-f\b|\s\+\S+:)", re.I),
+     "force push"),
     (re.compile(r"git\s+reset\s+--hard\b", re.I), "hard reset"),
     (re.compile(r"git\s+(filter-repo|filter-branch)\b", re.I), "history rewrite"),
     (re.compile(r"git\s+clean\s+-[a-zA-Z]*f", re.I), "forced clean"),
