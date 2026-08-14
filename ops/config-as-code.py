@@ -50,7 +50,51 @@ import subprocess
 import sys
 
 HOME = os.path.expanduser("~")
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
+REPO_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _canonical_repo(here):
+    """The MAIN checkout, even when this runs from a linked worktree.
+
+    WHY THIS IS NOT just `here` (fixed 2026-08-13). {{REPO}} tokenizes paths
+    inside the MACHINE's installed config — launchd plists, settings.json — and
+    the machine has exactly ONE installation, which always points at the main
+    checkout. Deriving the token from this file's own location meant that running
+    from a linked worktree tokenized to the WORKTREE path, so every live item
+    referencing the real checkout compared unequal. Measured the same day: the
+    identical command reported `OK — 36 items, repo matches machine` in the main
+    checkout and `DRIFT — 18 of 36 items` from a worktree, on an unchanged
+    machine. Nothing had drifted.
+
+    That false positive was not cosmetic. It failed the config-as-code class in
+    pre-push CI, which blocked pushing from a worktree — and working from a
+    worktree is the standing remedy when the shared tree is busy, so the check
+    broke the escape hatch. Worse, its stated remedy is `config-as-code.py pull`,
+    which would have captured the machine's absolute paths INTO the repo,
+    destroying the {{REPO}} templating that exists so Dell's clone works at a
+    different path. Following the advice would have made the repo unportable.
+
+    git's own answer is authoritative and cheap: --git-common-dir resolves to the
+    MAIN repository's .git from inside any linked worktree (a worktree's own
+    --git-dir points into .git/worktrees/<name>). Falls back to `here` when git
+    is unavailable or this is not a checkout at all, which is the pre-existing
+    behaviour and correct for the non-worktree case."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", here, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=15)
+        if out.returncode == 0 and out.stdout.strip():
+            common = out.stdout.strip()          # .../carr-system/.git
+            root = os.path.dirname(common)
+            if root and os.path.isdir(root):
+                return os.path.abspath(root)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return here
+
+
+REPO = _canonical_repo(REPO_HERE)
 
 # `git -C <path>` IS NOT A GUARANTEE OF WHICH REPOSITORY YOU HIT. Every variable
 # below outranks both -C and the working directory, and git exports several of

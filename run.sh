@@ -107,6 +107,11 @@ case "${1:-}" in
   # first, because most of the backlog predates the blocker gate and a ranking
   # that hid that would look authoritative and be noise.
   next)         shift; "$REPO/.venv/bin/python" "$REPO/tools/db-tap.py" run "$REPO/tools/closest-first.py" "$@" ;;
+  # `next-migration` (2026-08-13): the next free migration number, read from
+  # origin/main AND every linked worktree's migrations/ — not from `ls` in
+  # whichever tree you happen to be standing in, which cannot see a number a
+  # concurrent session has already taken. Read-only. See tools/next-migration.py.
+  next-migration) shift; python3 "$REPO/tools/next-migration.py" "$@" ;;
   # The report-card rubric (loop #220, DRAFT). One entry point for both paths:
   # a human runs this, and the monthly audit runs this. Rule a8c55a47 — the
   # manual path and the automated path that do the same job must be the SAME
