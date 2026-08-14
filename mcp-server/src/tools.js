@@ -8,6 +8,7 @@
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
 import { investigationTools } from "./investigation.js";
+import { investigationMethodTools } from "./investigation-methods.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -6473,3 +6474,8 @@ Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
 // Bounded investigation control plane (0098): deterministic signals, one
 // reasoning owner, evidence-only worker packets, explicit branch termination.
 Object.assign(TOOLS, investigationTools({ withEnvelope, writeEvent, ToolError }));
+
+// Coverage-first batch conservation for systematic investigations (0116):
+// declarative matchers, explicit candidate/refusal accounting, append-only
+// model waves, independent revalidation, and validated-only release receipts.
+Object.assign(TOOLS, investigationMethodTools({ withEnvelope, writeEvent, ToolError }));

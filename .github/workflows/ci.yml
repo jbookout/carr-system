@@ -63,6 +63,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The semantic-security class compares only this branch's net-new
+          # changes with origin/main. A shallow checkout cannot prove ancestry.
+          fetch-depth: 0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -115,4 +119,7 @@ jobs:
           # (installed Claude Code settings, macOS launchd). Each one prints its
           # reason in the output; nothing is dropped silently.
           CARR_CI_PORTABLE_ONLY: "1"
+          # PRs compare with their base; pushes (including main) compare with
+          # the exact pre-push commit. Strict mode refuses a missing/stale SHA.
+          CARR_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ops/ci.sh --strict

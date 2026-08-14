@@ -87,7 +87,7 @@ done
 # mean this script behaved differently in its two callers — which is the exact
 # failure this one-script design exists to prevent. Plain arrays and a case
 # statement run identically on both.
-CLASS_ORDER="unit contract gates secret dependency migration binding artifact"
+CLASS_ORDER="unit contract gates secret dependency migration binding artifact semantic"
 
 class_desc() {
   case "$1" in
@@ -99,6 +99,7 @@ class_desc() {
     migration)  echo "seeded bad migration / trigger permission" ;;
     binding)    echo "seeded binding or config drift" ;;
     artifact)   echo "seeded artifact mismatch (verb loss)" ;;
+    semantic)   echo "changed high-risk surface without its independent evidence class" ;;
     *)          echo "" ;;
   esac
 }
@@ -120,8 +121,9 @@ FAILED_CLASSES=""
 HARD_FAILED=0
 SKIPPED=0
 RAN=0
+PASSED_CLASSES=""
 
-ok()   { RAN=$((RAN+1)); printf '  \033[32mOK\033[0m    %-11s %s\n' "$1" "${2:-}"; }
+ok()   { RAN=$((RAN+1)); PASSED_CLASSES="$PASSED_CLASSES $1"; printf '  \033[32mOK\033[0m    %-11s %s\n' "$1" "${2:-}"; }
 bad()  { RAN=$((RAN+1)); printf '  \033[31mFAIL\033[0m  %-11s %s\n' "$1" "${2:-}"; FAILED=$((FAILED+1)); FAILED_CLASSES="$FAILED_CLASSES $1"; }
 hard() { bad "$1" "${2:-}"; HARD_FAILED=$((HARD_FAILED+1)); }
 skip() { RAN=$((RAN+1)); printf '  \033[33mSKIP\033[0m  %-11s %s\n' "$1" "${2:-}"; SKIPPED=$((SKIPPED+1)); }
@@ -361,6 +363,37 @@ check_artifact() {
   fi
 }
 
+# ---------------------------------------------------------------- semantic
+# A deterministic changed-file prefilter accounts for high-risk edits against
+# the independent CI classes that ACTUALLY passed earlier in this invocation.
+# Merely naming evidence on a command line would turn intent into proof, so this
+# function derives every evidence token from PASSED_CLASSES instead.
+check_semantic() {
+  local base="${CARR_CI_BASE_SHA:-}"
+  if [ -z "$base" ] && git rev-parse --verify origin/main >/dev/null 2>&1; then
+    base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+  fi
+
+  set -- "$PY" ops/ci-semantic-security.py
+  [ "$STRICT" = "1" ] && set -- "$@" --strict
+  [ -n "$base" ] && set -- "$@" --base "$base"
+  case " $PASSED_CLASSES " in *" unit "*)
+    case " $PASSED_CLASSES " in *" contract "*) set -- "$@" --evidence worker-contract ;; esac
+  esac
+  case " $PASSED_CLASSES " in *" gates "*)
+    set -- "$@" --evidence ci-selftest --evidence workflow-security ;;
+  esac
+  case " $PASSED_CLASSES " in *" dependency "*) set -- "$@" --evidence dependency-security ;; esac
+  case " $PASSED_CLASSES " in *" migration "*) set -- "$@" --evidence migration-safety ;; esac
+
+  if run_quiet "$LOGDIR/semantic.log" "$@"; then
+    ok semantic "$(tail -1 "$LOGDIR/semantic.log")"
+  else
+    cat "$LOGDIR/semantic.log" >&2
+    hard semantic "changed high-risk work is unaccounted or the inspection refused"
+  fi
+}
+
 # ---------------------------------------------------------------- run
 echo "carr-system CI — $(git rev-parse --short HEAD) on $(git rev-parse --abbrev-ref HEAD)"
 [ "$STRICT" = "1" ] && echo "  strict: a SKIP counts as a failure"
@@ -437,6 +470,8 @@ if [ "$SKIPPED" -gt 0 ] && [ "$STRICT" = "1" ]; then
 fi
 if [ "$SKIPPED" -gt 0 ]; then
   echo "CI passed — $SKIPPED class(es) skipped locally (they run in CI under --strict)"
+elif [ -n "$ONLY" ]; then
+  echo "CI passed — selected class '$ONLY' green (other classes not run)"
 else
   echo "CI passed — every class green"
 fi

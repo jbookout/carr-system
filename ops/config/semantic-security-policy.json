@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "high_risk_patterns": [
+    "migrations/**",
+    "worker/**",
+    "mcp-server/**",
+    "ops/**",
+    "*.sql",
+    "**/*.sql",
+    "Dockerfile",
+    "**/Dockerfile",
+    "package.json",
+    "**/package.json",
+    "package-lock.json",
+    "**/package-lock.json",
+    "requirements*.txt",
+    "requirements*.lock",
+    ".github/workflows/**"
+  ],
+  "rules": [
+    {
+      "id": "database-migration",
+      "patterns": ["migrations/**", "*.sql", "**/*.sql"],
+      "required_tests": ["migration-safety"]
+    },
+    {
+      "id": "worker-or-mcp-boundary",
+      "patterns": ["worker/**", "mcp-server/**"],
+      "required_tests": ["worker-contract"]
+    },
+    {
+      "id": "ci-or-security-automation",
+      "patterns": ["ops/**"],
+      "required_tests": ["ci-selftest"]
+    },
+    {
+      "id": "workflow-security",
+      "patterns": [".github/workflows/**"],
+      "required_tests": ["workflow-security"]
+    },
+    {
+      "id": "dependency-or-container-supply-chain",
+      "patterns": ["Dockerfile", "**/Dockerfile", "package.json", "**/package.json", "package-lock.json", "**/package-lock.json", "requirements*.txt", "requirements*.lock"],
+      "required_tests": ["dependency-security"]
+    }
+  ]
+}
