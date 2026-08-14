@@ -16,6 +16,11 @@ Usage:
   .venv/bin/python tools/db-tap.py run pipelines/backfill_document_attachments.py [--apply ...]
   .venv/bin/python tools/db-tap.py --branch rehearse-0026 run tools/migrate.py --apply --yes
 
+--project staging (before the mode) targets the ISOLATED STAGING PROJECT, a
+separate Neon project that shares no data or credentials with production. That
+separation is the point: a Neon BRANCH lives inside production's project and
+starts as a copy of its data, so it is not isolation.
+
 --branch <name> (before the mode) targets a Neon branch instead of production —
 the rehearse-on-branch pattern through the same no-substitution path (added
 2026-07-31, Fable seat session 4, for the 0026 rehearsal).
@@ -90,15 +95,76 @@ def _neon_api_key() -> str:
     return ""
 
 
-def dsn(branch: str = "production") -> str:
+# The two Neon PROJECTS, which is the isolation boundary that matters. A Neon
+# BRANCH lives inside its parent project and starts as a copy of its data, so a
+# branch of production is NOT isolated from production — it IS production's data
+# under another name. Gate G1 requires an environment that cannot reach
+# production's data or credentials, and only a separate project delivers that.
+# Created 2026-08-13 alongside this change.
+# Each project carries its own DEFAULT BRANCH NAME, because they differ and
+# assuming otherwise fails at the neonctl call: the production project's primary
+# branch is named "production", while a freshly created Neon project's is "main".
+# Production is PINNED BY ID and staging is RESOLVED BY NAME, and the asymmetry
+# is deliberate. Production's id must never drift to whatever a lookup happens to
+# return — a name collision or a typo that silently repointed it at another
+# project is the worst failure this file could have. Staging, by contrast, is
+# rebuilt whenever it needs to be (it holds nothing that cannot be regenerated),
+# and pinning its id meant editing this file on every rebuild — a step someone
+# forgets, after which the tool writes to a project that no longer exists or,
+# worse, to whatever inherited the id.
+PROJECTS = {
+    "production": {"id": "steep-field-48688294", "default_branch": "production"},
+    "staging":    {"name": "carr-staging", "default_branch": "main"},
+}
+NEON_ORG = "org-dry-dew-75906281"
+
+
+def _project_id_by_name(name: str, env: dict) -> str:
+    """Resolve a Neon project id from its name. Never prints a connection string;
+    the projects list carries ids and names only."""
+    out = subprocess.run(
+        [NEONCTL, "projects", "list", "--org-id", NEON_ORG, "--output", "json"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    if out.returncode != 0:
+        sys.exit(f"db-tap: could not list Neon projects (rc={out.returncode}): {out.stderr.strip()[:200]}")
+    try:
+        payload = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        sys.exit("db-tap: Neon project list was not valid JSON")
+    rows = payload if isinstance(payload, list) else payload.get("projects", [])
+    matches = [r["id"] for r in rows if r.get("name") == name]
+    if not matches:
+        sys.exit(f"db-tap: no Neon project named '{name}'. Create it, then retry.")
+    if len(matches) > 1:
+        sys.exit(f"db-tap: {len(matches)} Neon projects named '{name}' — refusing to guess which.")
+    return matches[0]
+
+
+def dsn(branch=None, project: str = "production") -> str:
+    """Connection string for a branch of a named PROJECT.
+
+    The value is returned to the caller and never printed. neonctl prints the
+    URI with its password embedded when run bare, which is how a live credential
+    ended up in a session transcript on 2026-08-13 while creating the staging
+    project — that project was destroyed and rebuilt with output suppressed
+    rather than left with a credential that had been written down. Every path
+    through this file keeps that property: derive, use, never echo.
+    """
+    spec = PROJECTS.get(project)
+    if spec is None:
+        sys.exit(f"db-tap: unknown project '{project}' (known: {', '.join(PROJECTS)})")
     key = _neon_api_key()
     env = {**os.environ,
            "PATH": "/usr/local/opt/node@22/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")}
     if key:
         env["NEON_API_KEY"] = key
+    project_id = spec.get("id") or _project_id_by_name(spec["name"], env)
+    if branch is None:
+        branch = spec["default_branch"]
     out = subprocess.run(
         [NEONCTL, "connection-string", branch,
-         "--project-id", "steep-field-48688294",
+         "--project-id", project_id,
          "--role-name", "neondb_owner"],
         capture_output=True, text=True, timeout=60, env=env,
     )
@@ -172,14 +238,19 @@ def append_receipt(actor: str, mode: str, target: str, host: str, reason: str,
 
 def main() -> None:
     argv = sys.argv[1:]
-    branch = "production"
+    branch = None            # None = use the project's own default branch
+    project = "production"
     reason = ""
-    while argv and argv[0] in ("--branch", "--reason"):
+    while argv and argv[0] in ("--branch", "--reason", "--project"):
         flag = argv[0]
         if len(argv) < 2:
             sys.exit(f"{flag} needs a value")
         if flag == "--branch":
             branch = argv[1]
+        elif flag == "--project":
+            project = argv[1]
+            # A named project's default branch is its own "production" branch in
+            # Neon's vocabulary; only override when the caller also asked for one.
         else:
             reason = argv[1]
         argv = argv[2:]
@@ -189,10 +260,27 @@ def main() -> None:
     target_abs = target if os.path.isabs(target) else os.path.join(REPO, target)
     if not os.path.exists(target_abs):
         sys.exit(f"no such file: {target_abs}")
-    url = dsn(branch)
+    url = dsn(branch, project)
     os.chdir(REPO)
 
+    # THE READ-ONLY DEFAULT IS A PRODUCTION PROTECTION, NOT A UNIVERSAL ONE.
+    # Break-glass exists because an unintended write against the live record
+    # layer is unrecoverable. Staging is a separate Neon project holding no
+    # production data, and writing to it is the entire reason it exists —
+    # requiring break-glass there would train everyone to type CARR_BREAK_GLASS=1
+    # routinely, which is precisely how a protection stops protecting the thing
+    # it was built for. So staging is writable and production is not.
     engaged = _engaged(reason)
+    # THE READ-ONLY DEFAULT IS A PRODUCTION PROTECTION, NOT A UNIVERSAL ONE, and
+    # writability is a SEPARATE question from break-glass. Break-glass exists
+    # because an unintended write against the live record layer is unrecoverable;
+    # it logs a receipt and announces itself. Staging is a separate Neon project
+    # holding no production data, and writing to it is the entire reason it
+    # exists. Requiring break-glass there would mean a receipt for every routine
+    # staging load and would train everyone to type CARR_BREAK_GLASS=1 by habit —
+    # exactly how a protection stops protecting the thing it was built for.
+    # So: staging is writable WITHOUT being break-glass.
+    writable = engaged or project != "production"
     env = {**os.environ}
 
     if engaged:
@@ -217,7 +305,7 @@ def main() -> None:
         # event this receipt records, not success. Do not roll this line back
         # if the run then fails.
         append_receipt(actor, mode, target, host, reason)
-    else:
+    elif not writable:
         # Default posture: PGOPTIONS is a standard libpq env var honored the
         # same way whether the subprocess is psql (sql mode) or a Python
         # script connecting via psycopg/psycopg2 off DATABASE_URL (run mode,
@@ -237,7 +325,7 @@ def main() -> None:
         env.setdefault("CLOUDFLARE_ACCOUNT_ID", "12ccca77eb49142a6be8eb84c0d6a3a0")
         rc = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"), target_abs, *extra], env=env).returncode
 
-    if not engaged and rc != 0:
+    if not writable and rc != 0:
         print(
             "refused (or failed) while running read-only. To write, set "
             'CARR_BREAK_GLASS=1 and pass --reason "..." — see tools/db-tap.py.',

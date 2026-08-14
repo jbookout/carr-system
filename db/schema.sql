@@ -11670,3 +11670,337 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 --
 
 
+--
+-- PostgreSQL database dump
+--
+
+
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- Data for Name: activity_kind; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.activity_kind (slug, label, is_contact) FROM stdin;
+call	Call	t
+email_out	Email Out	t
+email_in	Email In	t
+meeting	Meeting	t
+tour	Tour	t
+text	Text	t
+counter_sent	Counter Sent	t
+counter_received	Counter Received	t
+loi	LOI	t
+lease_signed	Lease Signed	t
+note	Note	f
+task	Task	f
+analysis	Analysis	f
+\.
+
+
+--
+-- Data for Name: actor; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.actor (id, slug, kind, display_name, email, active, phone) FROM stdin;
+722901b8-efb3-4bd6-bef0-c5d481c0a35e	dell	human	Dell McCraney	\N	t	\N
+c659db8e-1920-4ddf-b795-ae30b8bd3380	automation	automation	Scheduled jobs	\N	t	\N
+c16ce9d1-0b9e-4306-baab-dabaedda9961	system	system	System (migrations, exporters)	\N	t	\N
+b6c38b27-d006-4fad-9c38-49edf3130a07	joe	human	Joe Bookout	joe.bookout@carr.us	t	850.361.2208
+8876e348-71da-48d9-92e9-15d9a87d4529	smoke-probe	automation	Smoke Probe	\N	t	\N
+65385eb1-033c-42d2-97df-cb1511927d9f	codex-reviewer	automation	Codex Reviewer (Automatic Review Council)	\N	t	\N
+c585dd75-5aa0-44e1-8947-71d9688abb91	grok-reviewer	automation	Grok Reviewer (Automatic Review Council)	\N	t	\N
+eec6654d-4433-4a93-9b22-61decbd3aa4e	quill-joe-mac	automation	Quill capture rig (Joe MacBook Pro)	\N	t	\N
+9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	codex	automation	Codex CLI (outside-model agent surface, loop #227)	\N	t	\N
+3118c9e4-82a4-45c9-bf36-b7ebaba0549d	grok	automation	Grok Build CLI (outside-model agent surface, loop #227)	\N	t	\N
+88c9d50d-1ed0-4cc1-a779-68de9bba4554	claude	automation	Claude Code (sponsored runtime agent, 0095)	\N	t	\N
+63923291-cea4-426f-8a78-d21512e15a45	joe-local	automation	Joe (local)	\N	t	\N
+\.
+
+
+--
+-- Data for Name: client_status; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.client_status (slug, label, sort, is_active_pipeline, note) FROM stdin;
+roster	Roster	10	f	In the book, unworked. Bulk universe: on the roster, not on the daily active book. Nobody has committed to working this record yet.
+cold	Cold	20	f	Approached, no traction. NOT on the active book, and that is deliberate (Joe, 2026-07-31 ~12:30pm CT — this SUPERSEDES 0014's note, which said "ON THE WORKING BOOK ... Appears in clients-active.md"). His reasoning: a cold client is usually ghosting, you never pester, and the abundance mindset says work the live ones. Cold is a separate not-top-of-mind category, not a queue to grind. It comes back the moment there is a deal.
+engaged	Engaged	30	t	Live relationship, no open deal. On the active book.
+active_deal	Active deal	40	t	Open deal in progress. On the active book.
+paused	Paused	50	f	Deliberately on hold. NOT on the active book (Joe, 2026-07-31 ~12:30pm CT — SUPERSEDES 0014, which flagged paused pipeline-active). A pause can run longer than a year; a paused client sitting in the daily book is noise. An open deal still pulls the client back on regardless of this status.
+past_client	Past client	60	f	Deals concluded, relationship kept. Off the active book until a new deal opens; a past client is a referral source, not a task.
+\.
+
+
+--
+-- Data for Name: client_type; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.client_type (slug, label) FROM stdin;
+independent	Independent
+group	Group practice
+dso	DSO
+franchise	Franchise
+regional_system	Regional system
+national_account	National account
+\.
+
+
+--
+-- Data for Name: contact_state; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.contact_state (slug, label, contactable, sort) FROM stdin;
+active	Active — normal contact	t	10
+nurture	Nurture — long-cycle cadence only	t	20
+paused	Paused — do not contact until a date	f	30
+do_not_contact	Do not contact — standing, with a reason	f	40
+\.
+
+
+--
+-- Data for Name: deal_lane; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.deal_lane (slug, label, sort, note) FROM stdin;
+territory	Territory	10	Inside Joe and Dell's own market: South Alabama through the Florida Panhandle. The default lane and the one the pipeline work is built around.
+national	National	20	A national-account deal, worked under a brand-level relationship and usually outside the home territory. A LANE, not a segment and not a vertical: a national deal still has a vertical, and a territory deal can belong to a national account. National accounts are a separate business model (DNA/Leads/pipeline-craft.md Part C).
+\.
+
+
+--
+-- Data for Name: deal_phase; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.deal_phase (slug, label, sort) FROM stdin;
+pending	Pending	10
+research	Research	20
+site_selection	Site selection	30
+negotiation	Negotiation	40
+closing	Closing	70
+closed	Closed	80
+legal	Legal	50
+due_diligence	Due Diligence	60
+\.
+
+
+--
+-- Data for Name: deal_type_ref; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.deal_type_ref (slug, label, sort) FROM stdin;
+lease	Lease	10
+purchase	Purchase	20
+sale_leaseback	Sale Leaseback	30
+build_to_suit	Build to Suit	40
+renewal	Renewal	50
+relocation	Relocation	60
+additional_office	Additional Office	70
+startup	Start Up	80
+expansion	Expansion	90
+other	Other	100
+\.
+
+
+--
+-- Data for Name: diagnostic_route; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.diagnostic_route (route_key, signal_kind, from_kind, relation, to_kind, test_verb, input_contract, minimum_effect, active, created_by, created_at) FROM stdin;
+deal_stagnation.next_action_gap	deal_stagnation	deal_stagnation	may_be_explained_by	next_action_gap	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["next_actions", "next_step", "next_date"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 07:19:27.907776+00
+deal_stagnation.relationship_inactivity	deal_stagnation	deal_stagnation	may_be_explained_by	relationship_inactivity	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["last_touch", "activity", "participants"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 07:19:27.907776+00
+deal_stagnation.critical_date_pressure	deal_stagnation	deal_stagnation	may_be_explained_by	critical_date_pressure	get-deal-room	{"deal": "signal.subject_ref", "inspect": ["critical_dates", "documents", "phase"]}	\N	t	c16ce9d1-0b9e-4306-baab-dabaedda9961	2026-08-13 07:19:27.907776+00
+\.
+
+
+--
+-- Data for Name: doctrine_edge_type; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.doctrine_edge_type (edge_type, acyclic, precedence_rank, description) FROM stdin;
+OVERRIDES	t	10	source wins where both apply
+SUPERSEDES	t	20	target is historical, source replaces it
+EXCEPTION_TO	t	30	source carves a scoped exception out of target
+DEPENDS_ON	t	\N	integrity only — target must stay live
+APPLIES_TO	f	\N	scope binding, no precedence
+CONFLICTS_WITH	f	\N	detected conflict — BLOCKS commit unless an OVERRIDES/SUPERSEDES edge resolves it
+\.
+
+
+--
+-- Data for Name: doctrine_review_policy; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.doctrine_review_policy (id, name, max_age_days, revalidate_on_dep_change, content_classes) FROM stdin;
+787d9649-467d-4887-b1a2-6659176e62e6	standing-doctrine	180	t	{playbook,sop,reference}
+67de5b2b-d0b5-4f0a-8fe3-1a2586f7b618	routing	90	t	{index}
+766982f1-b4ef-459f-85be-d03d17d4bd09	narrative	\N	t	{dossier_narrative,distillation}
+\.
+
+
+--
+-- Data for Name: lead_lane; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.lead_lane (slug, label) FROM stdin;
+renewal	Renewal radar
+new_entity	New entity (corp filings)
+relocation	Relocation
+upstream	Upstream radar (PECOS/NPPES)
+associate	Associate lane
+\.
+
+
+--
+-- Data for Name: lead_stage; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.lead_stage (slug, label, sort) FROM stdin;
+engaged	Engaged	100
+outreach_active	Outreach Active	100
+active_deal	Active Deal	100
+qualified	Qualified	100
+new	New	100
+nurture_drip	Nurture (Drip)	100
+closed_won	Closed-Won	100
+opportunity	Opportunity	100
+closed_lost	Closed-Lost	900
+do_not_contact	Do Not Contact	910
+\.
+
+
+--
+-- Data for Name: loop_domain; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.loop_domain (slug, label, sort) FROM stdin;
+marketing	Marketing — social, newsletter, content, profile	40
+business	Business — everything else business-side	50
+system	System — record layer, repo, automation, hosting	60
+deals	Deals — active transactions (incl. vendor intros on a live deal)	10
+prospecting	Prospecting — lead generation and lead conversion	20
+networking	Networking — vendor meetings, new vendors, vendor-to-vendor, prospect-to-vendor	30
+\.
+
+
+--
+-- Data for Name: negotiation_claim_type; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.negotiation_claim_type (slug, label, falsifiable, derived, reversal_test, sort) FROM stdin;
+finality	Best and final	t	f	REVERSED when the same side later files a round improved in our favour on any economic axis. Re-sending identical numbers is not a reversal.	10
+authority	Authority limit — "the owner will not go below X"	t	f	REVERSED when the same side later proposes a rate better for us than the stated floor (negotiation_claim.stated_floor, defaulting to the claim round's own rate).	20
+walk_away	Walk-away — "we are done"	t	f	REVERSED by the existence of ANY later round from the same side. No further test is needed: continuing to negotiate is the contradiction.	30
+deadline	Deadline — "this dies on Friday"	t	t	REVERSED when the same side files a round dated after the deadline. DERIVED: the deadline is negotiation_round.expires_on and is NOT logged here. See the header.	40
+competing_interest	Competing interest — "another tenant is looking"	f	f	NOT FALSIFIABLE. We can never observe whether the other tenant existed. Loggable so the tactic is visible in the history; permanently excluded from every score by falsifiable = false, which v_counterparty_bluff joins on rather than hardcoding.	50
+\.
+
+
+--
+-- Data for Name: participant_role; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.participant_role (slug, label, side) FROM stdin;
+support	Support	\N
+referring_agent	Referring Agent	\N
+investor	Investor	\N
+capital_partner	Capital Partner	\N
+lead	Lead	actor
+client_contact	Client Contact	party
+listing_side	Listing Side	party
+\.
+
+
+--
+-- Data for Name: party_link_kind; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.party_link_kind (slug, label, sort) FROM stdin;
+knows	Knows	10
+intro	Intro	20
+intro_received	Intro received	30
+can_introduce	Can introduce	40
+works_with	Works with	50
+referral	Referral	60
+intro_requested	Intro requested (we asked)	45
+introduced	Introduced (completed)	50
+referred	Referred (business sent)	60
+\.
+
+
+--
+-- Data for Name: submarket_condition; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.submarket_condition (slug, label, tightness, note, sort) FROM stdin;
+soft	Soft — oversupplied	-1	Vacancy is available and competing. A concession here costs the other side little; holding firm in a soft market is the version that means something.	10
+balanced	Balanced	0	Neither side is carried by the market. This is the condition under which a negotiation score is closest to measuring the negotiator.	20
+tight	Tight — landlord-favoured	1	Little competing space. A counterparty who concedes nothing here may simply not need to; that is leverage, and 0064 tags it rather than crediting it as skill.	30
+\.
+
+
+--
+-- Data for Name: vendor_category; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.vendor_category (slug, label, sort) FROM stdin;
+lender	Banker / Lender	10
+cpa	CPA / Financial	20
+attorney	Attorney	30
+broker	Practice Broker / Consultant	40
+gc	General Contractor	50
+architect	Architect / Design	60
+supply	Supply / Equipment Rep	70
+insurance	Insurance	80
+it	IT Services	90
+marketing	Marketing / Demographics	100
+developer	Developer / Investor	110
+sbdc	SBDC Consultant	120
+franchise	Franchise Development	130
+doctor	Doctor (networking)	140
+financial_advisor	Financial Advisor / Wealth	25
+practice_consultant	Practice Management Consultant	45
+practice_admin	Practice Administrator / Coordinator	145
+healthcare_exec	Healthcare Industry Executive	150
+\.
+
+
+--
+-- Data for Name: vendor_disposition; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.vendor_disposition (slug, label, workable, sort) FROM stdin;
+active	Active — in the network	t	10
+parked	Parked — deliberately dormant, drip only	f	20
+avoid	Avoid — ruled out as a partner, with a reason	f	30
+\.
+
+
+--
+-- Data for Name: vendor_relationship_level; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.vendor_relationship_level (level, label, note) FROM stdin;
+0	Prospective	Identified as worth knowing. No two-way contact yet. TRIGGER OUT: they reply, or you meet.
+1	Building	First TWO-WAY contact has happened — they replied or you met. An outbound attempt alone does not count. TRIGGER OUT: value moves in either direction (an intro, a referral, a deal).
+2	Established	Value has moved in EITHER direction at least once. TRIGGER OUT: value moves BOTH ways, more than once.
+3	Core	Reciprocal and repeated — value both ways, more than once. Protect these.
+\.
+
+
+--
+-- PostgreSQL database dump complete
+--
+
+

@@ -152,6 +152,15 @@ fi
 
 step "vault drift watch (check, first)"              env CARR_DRIFT_INGEST=1 ./.venv/bin/python ops/vault-drift-watch.py --check
 
+# SCHEMA SNAPSHOT DRIFT, added 2026-08-13 with the snapshot itself. db/schema.sql
+# is now what builds staging AND what CI's migration check applies pending
+# migrations on top of. If production's structure moves and the committed file
+# does not, both of those keep passing against a shape that no longer exists —
+# a green check measuring the wrong database, which is the failure mode this
+# whole session kept finding. It runs HERE and not in CI because it needs
+# production, and CI cannot reach production by construction.
+step "schema snapshot drift (db/schema.sql vs production)" ./bin/schema-snapshot.sh --check
+
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
 # credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first

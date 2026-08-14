@@ -28,9 +28,14 @@
 #     a wrong call puts a data move where it will be replayed against an empty
 #     database — the exact failure being fixed.
 #
-# NO DATA, EVER. --schema-only means structure and nothing else: no clients, no
-# deals, no parties, no notes. That is what makes this file safe to commit at
-# all, and it is not a flag to relax. --no-owner --no-acl for the same reason
+# NO BUSINESS DATA, EVER. Three things go in and nothing else: the STRUCTURE
+# (--schema-only), the APPLIED-MIGRATION LEDGER, and the REFERENCE VOCABULARY
+# named in the explicit list below. No clients, no deals, no parties, no notes,
+# no events. That is what makes this file safe to commit, and the vocabulary list
+# is hand-checked rather than pattern-matched precisely so it can never widen
+# into business data by accident. pipelines/staging-isolation-proof.sql asserts
+# the business tables are empty after a load, so a mistake here is caught rather
+# than discovered. --no-owner --no-acl for the same reason
 # bin/backup-dump.sh uses them: an embedded OWNER TO / GRANT names roles a fresh
 # database has never heard of, and the first such statement aborts the load.
 # Roles and grants are rebuilt by the migrations, which are in git.
@@ -84,6 +89,44 @@ if ! "$PG_DUMP" --data-only --no-owner --no-acl --table=schema_migrations "$URL"
   exit 1
 fi
 
+# REFERENCE VOCABULARY IS A THIRD CATEGORY, and leaving it out made the first
+# staging build useless. It is neither structure nor business data: closed sets
+# like the eight deal phases or the six client statuses, seeded by migrations,
+# pointed at by foreign keys. A database with the structure and none of these
+# cannot hold a single row — client.status is a foreign key to client_status,
+# which was empty. Verified on the first staging load: 115 tables, 0 statuses.
+#
+# THE LIST IS EXPLICIT AND HAND-CHECKED, never pattern-matched. Every table below
+# was counted on production first (2 to 18 rows each, all closed vocabularies).
+# A pattern like "small tables" or "tables seeded by a migration" would sweep in
+# client, party and event, which the same migrations also insert into — dumping
+# those would put real client data in a tracked file, which is the one outcome
+# this whole design exists to prevent.
+#
+# DELIBERATELY EXCLUDED, and worth stating rather than leaving to inference:
+#   * system_config (21 rows) — operational settings, not vocabulary, and the
+#     kind of table where a value that should never be committed can appear.
+#     Staging can set its own.
+#   * client, party, deal, event and every other business table — the point.
+# `actor` (12 rows) IS included: internal actor identities (joe, dell, system,
+# automation) that events carry foreign keys to. Not client data.
+VOCAB_TABLES="activity_kind client_status client_type contact_state deal_lane \
+deal_phase deal_type_ref lead_lane lead_stage loop_domain negotiation_claim_type \
+participant_role party_link_kind vendor_category vendor_disposition \
+vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
+doctrine_review_policy actor"
+
+VOCAB_ARGS=""
+for t in $VOCAB_TABLES; do
+  VOCAB_ARGS="$VOCAB_ARGS --table=$t"
+done
+
+# shellcheck disable=SC2086
+if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; then
+  echo "schema-snapshot: could not dump the reference vocabulary — nothing written" >&2
+  exit 1
+fi
+
 # A truncated dump is the failure mode that matters: pg_dump has lost a Neon
 # connection mid-stream before (2026-08-07, on the nightly backup). A short file
 # that parses is worse than no file, because it would silently define a smaller
@@ -124,4 +167,4 @@ fi
 
 mkdir -p "$REPO/db"
 cp "$TMP" "$OUT"
-echo "wrote $OUT ($(wc -l < "$OUT" | tr -d ' ') lines, schema only, no data)"
+echo "wrote $OUT ($(wc -l < "$OUT" | tr -d ' ') lines: structure + migration ledger + reference vocabulary; no business data)"
