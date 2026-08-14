@@ -533,13 +533,29 @@ def test_grok_lane():
           "--sandbox" in codex_cmd and "read-only" in codex_cmd)
     check("build_codex_command carries the prompt", fake_prompt in codex_cmd)
 
+    # --dangerously-bypass-hook-trust (added 2026-08-14 to build_codex_command)
+    # is a DIFFERENT class of flag from everything else on this list — it does
+    # not touch approvals or the sandbox, it only lets Codex run hooks (OUR OWN
+    # gate code, e.g. guard-unattended.py) without the interactive trust prompt
+    # an unattended `codex exec` can never satisfy. Without it, EVERY
+    # PreToolUse hook is SILENTLY SKIPPED (verified live 2026-08-14, see
+    # ops/codex-hook-smoke.sh) — so for an invocation carrying our own
+    # hooks.json this flag turns enforcement ON, the opposite of a bypass. It
+    # is allow-listed by exact token below rather than exempted from the
+    # substring scan, so any OTHER "--dangerously-*" flag (e.g. a real
+    # --dangerously-bypass-approvals-and-sandbox) still fails this test.
+    ALLOWED_DANGEROUS_FLAGS = ("--dangerously-bypass-hook-trust",)
     FORBIDDEN_FLAGS = ("--always-approve", "--yolo", "bypassPermissions",
-                        "--dangerously", "--permission-mode=bypassPermissions")
+                        "--permission-mode=bypassPermissions")
     for cmd_name, cmd in (("grok", grok_cmd), ("codex", codex_cmd)):
         joined = " ".join(cmd)
         for forbidden in FORBIDDEN_FLAGS:
             check(f"SAFETY: {cmd_name} command NEVER carries {forbidden!r}",
                   forbidden not in joined)
+        unlisted_dangerous = [tok for tok in cmd if tok.startswith("--dangerously")
+                               and tok not in ALLOWED_DANGEROUS_FLAGS]
+        check(f"SAFETY: {cmd_name} command carries no unlisted --dangerously* flag",
+              not unlisted_dangerous, f"found: {unlisted_dangerous}")
 
     # --- output parsing: a captured REAL envelope shape (from this build's own
     # live `grok -p ... --output-format json` run), offline, no live call.
