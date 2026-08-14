@@ -215,10 +215,25 @@ def main():
             ("a braced shell variable", 'echo "x" > "${OUT}/report.md"'),
             ("a command substitution", 'echo "x" > "$(mktemp -d)/notes.md"'),
             ("a glob target", 'echo "x" > out/*.json'),
+            # THE SECOND LIVE FALSE POSITIVE, found the same hour as the first and
+            # by the same route: a verification command of my own. The heredoc
+            # scan paired two loose tests — "contains a path literal" and,
+            # separately, "contains a write indicator" — so a script that READ one
+            # file and WROTE another had the read path judged as a write target.
+            # That fires on most scripts. A path must now sit inside the write
+            # call itself.
+            ("a heredoc script that reads one file and writes another",
+             'python3 <<PY\n'
+             'src = "{deals}"\n'
+             'print(open(src).read())\n'
+             'open("/tmp/out.txt","w").write("done")\n'
+             'PY'),
+            ("a path mentioned in a list beside an unrelated write",
+             'python3 -c \'paths=["{deals}"]; open("/tmp/x.txt","w").write(str(paths))\''),
             ("a heredoc with no file target", "python3 <<'PY'\nprint(1)\nPY"),
         ]
         for label, cmd in allowed:
-            rc, err = run(cmd, vault, home)
+            rc, err = run(cmd.replace("{deals}", deals), vault, home)
             check(f"allowed: {label}", rc == 0, f"exit {rc}: {err[:160]}")
 
         # ── FAIL OPEN ───────────────────────────────────────────────────────
