@@ -34,14 +34,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "ops"))
+from lib.loadpy import load_module_from_path  # noqa: E402
 
-import importlib.util
-_spec = importlib.util.spec_from_file_location("cutover_readiness", REPO / "ops" / "cutover-readiness.py")
-cr = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cr)
+cr = load_module_from_path("cutover_readiness", str(REPO / "ops" / "cutover-readiness.py"))
 
 VERBOSE = "-v" in sys.argv[1:]
-CASES = []
+CASES: list[tuple] = []
 
 
 def case(name, fn):

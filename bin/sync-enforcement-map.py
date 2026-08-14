@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+from types import ModuleType
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -70,7 +71,9 @@ OWNED = ["ops/config/rule-enforcement-map.json", "ops/config/gate-baseline.json"
 
 
 sys.path.insert(0, os.path.join(REPO, "ops"))
+sys.path.insert(0, REPO)
 from git_env import scrubbed_env  # noqa: E402
+from lib.loadpy import load_module_from_path  # noqa: E402
 
 
 def git(*args, check=False):
@@ -155,21 +158,22 @@ def commit_and_push(summary: str, preexisting: list[str]) -> None:
     print("sync-enforcement-map: pushed")
 
 
-def find_vault() -> str | None:
-    """Locate the Drive vault the renders live in.
+def find_vault() -> tuple[str | None, ModuleType]:
+    """Locate the Drive vault the renders live in, and hand back the checker
+    module that found it (main() needs its `ids` parser too).
 
     Mirrors ops/rule-enforcement-map-check.py rather than inventing a second
     search order — a manual path and an automated path that do the same job
     must be the same code, and two different vault searches would drift.
+
+    The return annotation said `str | None` while the body returned a pair. Both
+    callers already unpacked two values, so nothing was broken at runtime, but it
+    is what the type-check tripwire was reporting on 2026-08-14 and it made the
+    signature a lie about the only thing a signature is for.
     """
     sys.path.insert(0, os.path.join(REPO, "ops"))
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "map_check", os.path.join(REPO, "ops", "rule-enforcement-map-check.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = load_module_from_path(
+        "map_check", os.path.join(REPO, "ops", "rule-enforcement-map-check.py"))
     return mod.find_vault(), mod
 
 

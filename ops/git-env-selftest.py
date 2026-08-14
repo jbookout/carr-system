@@ -17,7 +17,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_env import fixture_env, scrubbed_env, GIT_LOCATION_VARS  # noqa: E402
 
-failures = []
+failures: list[str] = []
 
 
 def check(name, cond, detail=""):

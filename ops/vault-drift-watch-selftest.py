@@ -55,7 +55,7 @@ VERBOSE = "-v" in sys.argv[1:]
 # races. TMPDIR keeps it in the sandbox's scratch area rather than /tmp.
 SCRATCH_BASE = tempfile.mkdtemp(prefix="vault-drift-watch-selftest-")
 
-CASES = []
+CASES: list[tuple] = []
 
 
 def case(name):

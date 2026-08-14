@@ -64,7 +64,7 @@ CI = REPO / "ops" / "ci.sh"
 # a fixture that trips the gate it tests is a false positive forever.
 SEED_DSN = "DATABASE_URL=" + "postgres://prod:" + "hunter2hunter2" + "@ep-x.neon.tech/carr"
 
-RESULTS = []
+RESULTS: list[tuple] = []
 
 
 def check(label, ok, detail=""):

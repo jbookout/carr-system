@@ -41,7 +41,8 @@ def parse_routes(text: str):
     removed. None means the key was ABSENT, which is the dangerous case and is
     kept distinct from an explicit empty list.
     """
-    top, envs = [], {}
+    top: list = []
+    envs: dict = {}
     section, buf, collecting = None, "", False
 
     for raw in text.splitlines():
