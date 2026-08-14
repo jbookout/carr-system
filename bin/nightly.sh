@@ -261,6 +261,18 @@ step "schema snapshot drift (db/schema.sql vs production)" ./bin/schema-snapshot
 step "cadence engine (spawn owed next actions)"      ./.venv/bin/python pipelines/cadence_engine.py --apply
 step "availability matcher (digest, never sent)"     ./.venv/bin/python pipelines/availability_matcher.py
 
+# UPSTREAM CORROBORATE (fixed 2026-08-14): writes Automation/pre-entity-watch.json
+# and, in the same run, maps it into candidate_pool via map_radar_lanes' writer-
+# side hook (ORDER 26b) — both need CARR_DB_JOBS_URL, same as the two writing
+# steps above, so it belongs in this group. Runs before the exports and well
+# before "consumers" below, because build-lead-board.py reads
+# pre-entity-watch.json as one of its segment feeds — a run after that step
+# would leave the board a full night stale. This step had silently never run
+# nightly before: it existed only as a hand-run command, which is why
+# candidate_pool saw no renewal-radar/upstream writes between 2026-08-01 and
+# 2026-08-07.
+step "upstream corroborate (pre-entity-watch + pool mapping)" ./run.sh corroborate
+
 # FETCH ALLOWLIST (2026-08-09): regenerate the record-derived practice domains
 # the egress guard unions with its KNOWN_HOSTS. Runs AFTER the writing steps so a
 # client added tonight is fetchable tomorrow, and BEFORE the exports because it

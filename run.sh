@@ -36,7 +36,7 @@ deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" \
 lead_board()   { "$PY" "$REPO/generators/build-lead-board.py" "$VAULT" "$@"; }
 lead_promote() { shift; "$PY" "$REPO/pipelines/lead-promote.py" "$VAULT" "$@"; }  # ORDER 29b flip: venv, records-mode reads (parity byte-identical 2026-08-05)
 renewal_feed() { "$PY" "$REPO/generators/build-renewal-feed.py" "$VAULT"; }  # ORDER 29b flip: venv, records-mode suppressor (parity byte-identical 2026-08-05)
-corroborate()  { python3 "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
+corroborate()  { "$PY" "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
 space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
 graph()        { "$PY" "$REPO/pipelines/build-graph-notes.py" "$VAULT" "$@" \
                  && "$PY" "$REPO/pipelines/build-graph-structure.py" "$VAULT" "$@"; }

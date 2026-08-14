@@ -190,9 +190,11 @@ def main():
     # This script has just written Automation/pre-entity-watch.json above.
     # Map that file's rows into candidate_pool NOW, in this same run, instead
     # of leaving the pool to wait on a separate hand-run of map_radar_lanes.
-    # run.sh's `corroborate` target runs this under plain `python3` (no
-    # psycopg on that interpreter today), so the import itself is guarded —
-    # a missing dependency here must never take down the lane run that just
+    # run.sh's `corroborate` target now runs this under the repo venv (fixed
+    # 2026-08-14 — it ran under plain `python3`, with no psycopg, until then),
+    # but the import stays guarded: any OTHER caller that invokes this file
+    # under a bare interpreter (see the corp-filings SOP fallback) must not
+    # have a missing dependency here take down the lane run that just
     # succeeded at its real job.
     try:
         if _REPO not in sys.path:
