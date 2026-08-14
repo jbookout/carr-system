@@ -48,7 +48,23 @@ _id=0
 CALL_ATTEMPTS=3
 CALL_RETRY_SLEEP=0
 
-TALLY="$(mktemp -t smoke-transport-tally)"
+# EXPLICIT XXXXXX TEMPLATE, because `mktemp -t <prefix>` is not portable: BSD
+# mktemp (macOS) appends a random suffix to the prefix, while GNU coreutils
+# treats -t as deprecated and demands a template ending in at least six X's,
+# failing with "too few X's" and printing nothing. TALLY then held the empty
+# string, every `wc -l < ""` failed, and all four count assertions reported
+# `curl ran  time(s)` with no number at all. The content assertions passed the
+# whole time, so this looked like a product failure and was not one. It passed
+# the local pre-push hook on this Mac and failed on the ubuntu runner
+# (2026-08-14, run 31842748722) — CI catching exactly what a one-platform
+# check cannot.
+TALLY="$(mktemp "${TMPDIR:-/tmp}/smoke-transport-tally.XXXXXX")"
+if [ -z "${TALLY:-}" ] || [ ! -f "$TALLY" ]; then
+  # Never let a broken counter degrade into empty assertions again — an
+  # unusable tally must stop the run, not quietly compare "" against 3.
+  print -r -- "  FAIL  could not create the invocation-counter temp file"
+  exit 1
+fi
 trap 'rm -f "$TALLY"' EXIT
 tally_reset() { : > "$TALLY"; }
 tally_count() { wc -l < "$TALLY" | tr -d ' '; }
