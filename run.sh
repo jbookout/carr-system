@@ -8,6 +8,7 @@
 #   ./run.sh review-queue  — rebuild the ONE review queue (out/review-queue/), a surface only
 #   ./run.sh brief-pack    — the four brief sections as callable units (out/brief-pack/)
 #   ./run.sh restore-rehearse — prove the encrypted backups actually restore (needs the age key)
+#   ./run.sh key-recovery-test — prove the OFFLINE PAPER key copy alone can recover a backup
 #   ./run.sh call-mode     — inspect or operate the local Quill Call Mode bridge
 # CARR_VAULT overrides the vault path (default: Joe's Drive mount).
 
@@ -64,6 +65,14 @@ verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" 
 # does not carry — pass --identity or set CARR_AGE_IDENTITY. --preflight runs the
 # checks alone and creates nothing.
 restore_rehearse(){ shift; "$REPO/bin/restore-rehearse.sh" "$@"; }
+# The key-recovery test (Program 4). Proves the OFFLINE PAPER copy of the age
+# private key — never the stored ~/.config/carr/age-key.txt — can actually
+# recover a backup: types the paper key (silent, never echoed), derives its
+# public key and compares it to backups-public-key.txt (decisive: a mismatch
+# means the paper copy is wrong and nothing else runs), then on a match hands
+# the typed identity's PATH to the unmodified restore rehearsal above. One
+# command; the key never touches a transcript, a log, an argv, or the repo.
+key_recovery_test(){ "$REPO/bin/key-recovery-test.sh" "$@"; }
 # `call` (2026-08-08): fire ONE record verb from a terminal. Wraps
 # mcp-server/local-verb.mjs, which runs the REAL src/tools.js registry, and feeds
 # it the DSN from tools/db-tap.py so a human does not have to produce one by
@@ -90,6 +99,7 @@ case "${1:-}" in
   brief-pack)   brief_pack "$@" ;;
   verify-emails) verify_emails "$@" ;;
   restore-rehearse) restore_rehearse "$@" ;;
+  key-recovery-test) shift; key_recovery_test "$@" ;;
   call)         call_verb "$@" ;;
   call-mode)    shift; python3 "$REPO/tools/dictation-rig/bin/call-mode.py" "$@" ;;
   # retrieve runs on the repo venv since the store pass (P4 dual-read) needs psycopg;
@@ -123,5 +133,5 @@ case "${1:-}" in
   # three, two of which (the .venv and out/ symlinks) are invisible until
   # something breaks on a path that is simply not there.
   worktree)     shift; "$REPO/bin/worktree.sh" "$@" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|key-recovery-test|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
 esac
