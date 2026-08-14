@@ -12,6 +12,16 @@ is additive by instruction: the lanes write their files exactly as before, the
 mappers read those files, and the board keeps its file mode as the fallback.
 Retirement is Wave 4's, recorded as a death sentence in the shim registry.
 
+WAVE 4 HAS REACHED TWO LANES (2026-08-14). The relocating-owner and
+national-accounts lane files are retired under ORDER 29b(b)'s death sentences:
+their rows were mapped into the pool by this module and live there under
+source='relocating-owner' and source='national-accounts', where the board's
+records mode and v_export_pool_all already read them. Those two lanes are gone
+from LANES below — a mapper holding the path of a dead file is an executable
+reference the deprecation register rightly refuses to clear — and their lane
+notes survive as comments at the LANES table, because a comment breaks nothing
+when the file drops. The three remaining lanes still write and still map.
+
 THE SOCKET IS THE DOOR, not a decoration. Every mapped row lands as an
 `ingest_inbox` row first — source = the lane slug, external_id = the row's
 natural key, payload = the lane object VERBATIM — and is then filed, with
@@ -159,25 +169,27 @@ def _lane_renewal(x):
             "est": est, "est_basis": est_basis}
 
 
-def _lane_relocating(x):
-    return {"org": None, "score": None,
-            "score_basis": NO_SCORE.format(lane="relocating-owner")
-                           + " The lane ranks by CONFIDENCE (HIGH/MEDIUM/LOW), carried in "
-                             "source_row and shown by the board."}
-
-
-def _lane_national(x):
-    return {"org": val(x.get("n")) or None, "score": None,
-            "score_basis": ("national accounts are CURATED and human-review by design "
-                            "(Joe, 2026-07-22): the lane exists precisely because the "
-                            "private-practice score calls a big expanding system a false "
-                            "positive. A score here would re-import the bug.")}
-
-
 NO_SCORE = ("unscored at map time: the {lane} lane's output carries no score column. "
             "Inventing one would put a fabricated rank in front of Joe at the board.")
 
-NA_SEG = "🏥 NATIONAL ACCOUNT — multi-location / expanding"
+# RETIRED LANES (Wave 4, 2026-08-14) — mapping done, entries removed, history kept:
+#
+#   relocating-owner    read Automation/relocating-owner-leads.json ("out-of-state
+#                       new licensees who own a territory parcel"). Unscored: the
+#                       lane ranks by CONFIDENCE (HIGH/MEDIUM/LOW), carried in
+#                       source_row and shown by the board.
+#   national-accounts   read DNA/Team/national-accounts.json ("curated multi-location
+#                       / expanding healthcare organisations"). Deliberately never
+#                       scored: national accounts are CURATED and human-review by
+#                       design (Joe, 2026-07-22) — the lane exists precisely because
+#                       the private-practice score calls a big expanding system a
+#                       false positive, and a score here would re-import the bug.
+#                       The file carried no 's'; the board's segment constant
+#                       "🏥 NATIONAL ACCOUNT — multi-location / expanding" was
+#                       stamped at map time and rides on the pool rows.
+#
+# Their rows live in candidate_pool under those two source slugs; every basis
+# sentence above is also stamped verbatim on the rows themselves.
 
 LANES = {
     "corp-filings": {
@@ -194,17 +206,6 @@ LANES = {
         "path": VAULT / "Automation/renewal-radar.json",
         "what": "CoStar lease-event / owner-occupier / institutional rows",
         "fields": _lane_renewal,
-    },
-    "relocating-owner": {
-        "path": VAULT / "Automation/relocating-owner-leads.json",
-        "what": "out-of-state new licensees who own a territory parcel",
-        "fields": _lane_relocating,
-    },
-    "national-accounts": {
-        "path": VAULT / "DNA/Team/national-accounts.json",
-        "what": "curated multi-location / expanding healthcare organisations",
-        "fields": _lane_national,
-        "segment": NA_SEG,      # the file carries no 's'; the board supplies this constant
     },
 }
 
