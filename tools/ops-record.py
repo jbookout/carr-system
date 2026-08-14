@@ -244,7 +244,23 @@ def cmd_run(args) -> int:
     corr = correlation_of(args.correlation)
     try:
         with connect("write") as conn, conn.cursor() as cur:
-            sid = service_id(cur, args.service)
+            try:
+                sid = service_id(cur, args.service)
+            except SystemExit as e:
+                # AN UNREGISTERED SERVICE IS A CONFIGURATION STATE, NOT A FAILED
+                # STEP — on the COLLECTOR path only. service_id() refuses loudly
+                # because that is right for an operator typing a command: they
+                # want the registry named and the run rejected. A wrapper calling
+                # this once per step wants the opposite. Without this, a database
+                # that has the ops schema but an unseeded catalog makes
+                # bin/nightly.sh print the same refusal ten times a night, which
+                # is strictly worse than the missing-schema case it already
+                # handles — and worse than silence, because a log that cries
+                # every night is a log nobody reads. 78 is the same EX_CONFIG
+                # code the missing schema returns, so the wrapper's existing
+                # "say it once and stop" path covers both without new logic.
+                print(str(e), file=sys.stderr)   # already carries the prefix
+                return 78
             cur.execute(
                 """insert into ops.run
                        (kind, correlation_id, service_id, environment, run_key, state,
