@@ -45,6 +45,9 @@ import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.loadpy import load_module_from_path  # noqa: E402
+from lib.pgrow import fetch_one, fetch_scalar  # noqa: E402
 
 try:
     import psycopg
@@ -71,12 +74,9 @@ def main() -> int:
     if not dsn:
         sys.exit("program3-incident-gate: DATABASE_URL is not set")
 
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
+    ops_record = load_module_from_path(
         "ops_record",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "ops-record.py"))
-    ops_record = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ops_record)
 
     now = datetime.now(timezone.utc)
     env = "staging"
@@ -89,7 +89,7 @@ def main() -> int:
                values ('incident-gate-probe', 'Program 3 incident gate probe',
                        'Data', 'critical', 'joe')
                returning id""")
-        service_id = cur.fetchone()[0]
+        service_id = fetch_scalar(cur)
         cur.execute(
             """insert into ops.service_environment
                    (service_id, environment, expected_cadence_seconds)
@@ -107,7 +107,7 @@ def main() -> int:
                    returning correlation_id""",
                 (corr or uuid.uuid4(), service_id, env, run_key, state, failure_class,
                  at or now, at or now, at or now, (at or now) + timedelta(hours=1)))
-            return cur.fetchone()[0]
+            return fetch_scalar(cur)
 
         # ── 1. A FAILURE RAISES EXACTLY ONE INCIDENT ────────────────────────
         print("1. a failure raises one incident, carrying the correlation of the run")
@@ -136,14 +136,14 @@ def main() -> int:
         again = ops_record.assess(cur, environment=env, window_hours=24)
         check("no second incident was opened", again == 0, f"opened {again}")
         cur.execute("select count(*) from ops.incident where environment = %s", (env,))
-        check("still exactly one incident", cur.fetchone()[0] == 1)
+        check("still exactly one incident", fetch_scalar(cur) == 1)
 
         cur.execute("select count(*) from ops.incident_fact where incident_id = %s", (inc_id,))
-        facts = cur.fetchone()[0]
+        facts = fetch_scalar(cur)
         check("the recurrence was appended as a fact", facts >= 2, f"{facts} fact(s)")
 
         cur.execute("select count(*) from ops.incident_hypothesis where incident_id = %s", (inc_id,))
-        check("the tool wrote no hypotheses", cur.fetchone()[0] == 0,
+        check("the tool wrote no hypotheses", fetch_scalar(cur) == 0,
               "a machine reading an exit code has no theory and must not invent one")
 
         # ── 4. A DIFFERENT FAILURE IS ITS OWN INCIDENT ──────────────────────
@@ -155,11 +155,11 @@ def main() -> int:
         # ── 5. A SKIP IS NOT A FAILURE ──────────────────────────────────────
         print("\n5. a skipped step raises nothing")
         cur.execute("select count(*) from ops.incident where environment = %s", (env,))
-        before = cur.fetchone()[0]
+        before = fetch_scalar(cur)
         record("nightly.cadence-engine", "skipped", at=now + timedelta(minutes=7))
         skipped = ops_record.assess(cur, environment=env, window_hours=24)
         cur.execute("select count(*) from ops.incident where environment = %s", (env,))
-        after = cur.fetchone()[0]
+        after = fetch_scalar(cur)
         check("a skip opened no incident", skipped == 0 and after == before,
               "exit 78 means not-configured, and alarming on it fires every night")
 
@@ -170,7 +170,7 @@ def main() -> int:
         cur.execute(
             """select state, recovery_evidence_ref, monitoring_until, resolved_at
                  from ops.incident where id = %s""", (inc_id,))
-        state, evidence, monitoring_until, resolved_at = cur.fetchone()
+        state, evidence, monitoring_until, resolved_at = fetch_one(cur)
         check("the incident moved to monitoring", state == "monitoring", f"state {state!r}")
         check("it carries recovery evidence", bool(evidence))
         check("it carries a monitoring interval", monitoring_until is not None)
@@ -181,7 +181,7 @@ def main() -> int:
         cur.execute(
             """select count(*) from ops.incident
                 where environment = %s and state = 'detected'""", (env,))
-        check("the unrecovered incident stayed open", cur.fetchone()[0] == 1)
+        check("the unrecovered incident stayed open", fetch_scalar(cur) == 1)
 
         # ── 7. THE INCIDENT IS REACHABLE FROM THE TRACE ─────────────────────
         print("\n7. the incident appears in the same trace as the run that caused it")

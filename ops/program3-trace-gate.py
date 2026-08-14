@@ -62,22 +62,9 @@ import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.pgrow import fetch_one  # noqa: E402
 
-
-def fetch_one(cur):
-    """cur.fetchone() that refuses to return None.
-
-    Every call site here follows an `insert ... returning id` or a scalar
-    select, so a missing row means the statement did not do what this gate
-    assumes — and `fetch_one(cur)[0]` reports that as `TypeError: 'NoneType'
-    object is not subscriptable`, three frames from anything meaningful, in a
-    2am log. Named failure beats a traceback.
-    """
-    row = cur.fetchone()
-    if row is None:
-        raise AssertionError("expected one row back and got none — the statement "
-                             "above returned nothing")
-    return row
 
 
 try:
