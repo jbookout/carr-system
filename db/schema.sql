@@ -1111,6 +1111,30 @@ UNION ALL
     i.id AS row_id
    FROM ops.incident i
 UNION ALL
+ SELECT f.correlation_id,
+    'incident_fact'::text AS kind,
+    i.ref,
+    i.state,
+    f.recorded_at AS occurred_at,
+    i.environment,
+    NULL::text AS service_key,
+    NULL::text AS failure_class,
+    f.text AS detail,
+    i.source_kind,
+    i.source_ref,
+    f.recorded_at AS observed_at,
+    i.expires_at,
+    ops.freshness(f.recorded_at, i.expires_at) AS freshness_state,
+    f.id AS row_id
+   FROM (( SELECT incident_fact.id,
+            incident_fact.incident_id,
+            incident_fact.text,
+            incident_fact.recorded_at,
+            ("substring"(incident_fact.source_ref, '^correlation:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'::text))::uuid AS correlation_id
+           FROM ops.incident_fact) f
+     JOIN ops.incident i ON ((i.id = f.incident_id)))
+  WHERE ((f.correlation_id IS NOT NULL) AND (f.correlation_id IS DISTINCT FROM i.correlation_id))
+UNION ALL
  SELECT w.correlation_id,
     'work_request'::text AS kind,
     w.ref,
@@ -1134,7 +1158,7 @@ UNION ALL
 -- Name: VIEW v_trace; Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON VIEW ops.v_trace IS 'THE PROGRAM 3 GATE. One correlation id returns the whole journey — deploy, golden-workflow check, job run, incident, work request — in time order, every link carrying its own source and freshness. Read-only by construction: a view over four tables with no insert rule.';
+COMMENT ON VIEW ops.v_trace IS 'THE PROGRAM 3 GATE. One correlation id returns the whole journey — deploy, golden-workflow check, job run, incident, RECURRENCE of an already-open incident, work request — in time order, every link carrying its own source and freshness. Read-only by construction: a view over the ops tables with no insert rule. The recurrence arm (0123) reads ops.incident_fact.source_ref, where mcp-server/src/trace.js stores the correlation id of every failure after the first one that opened the incident.';
 
 
 --
@@ -12459,6 +12483,7 @@ grant insert, select, update on table public.building_ownership to carr_writer;
 grant select on table public.cadence_rule to carr_jobs;
 grant insert, select, update on table public.cadence_rule to carr_writer;
 grant insert, select, update on table public.campaign to carr_writer;
+grant insert, select, update on table public.candidate_pool to carr_jobs;
 grant insert, select, update on table public.candidate_pool to carr_writer;
 grant insert, select, update on table public.capture_candidate to carr_writer;
 grant insert, select, update on table public.capture_post_call_action to carr_writer;
@@ -12542,7 +12567,7 @@ grant insert, select on table public.export_run to carr_exporter;
 grant insert, select, update on table public.export_run to carr_writer;
 grant insert, select on table public.growth_snapshot to carr_jobs;
 grant select on table public.growth_snapshot to carr_reader;
-grant select on table public.ingest_inbox to carr_jobs;
+grant insert, select, update on table public.ingest_inbox to carr_jobs;
 grant insert, select, update on table public.ingest_inbox to carr_writer;
 grant insert, select, update on table public.investigation_branch to carr_writer;
 grant insert, select, update on table public.investigation_evidence to carr_writer;
@@ -12669,11 +12694,13 @@ grant select on table public.v_defect_class to carr_writer;
 grant select on table public.v_expired_verification to carr_jobs;
 grant select on table public.v_expired_verification to carr_reader;
 grant select on table public.v_expired_verification to carr_writer;
+grant select on table public.v_export_clients to carr_jobs;
 grant select on table public.v_export_clients to carr_reader;
 grant select on table public.v_export_clients_active to carr_reader;
 grant select on table public.v_export_deals to carr_reader;
 grant select on table public.v_export_dossier_analysis to carr_exporter;
 grant select on table public.v_export_dossier_subject to carr_exporter;
+grant select on table public.v_export_leads to carr_jobs;
 grant select on table public.v_export_leads to carr_reader;
 grant select on table public.v_export_loops to carr_exporter;
 grant select on table public.v_export_loops_closed to carr_exporter;
@@ -12934,6 +12961,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0120_backup_role_sequences.sql	a8b20e5a2a8602394ded89852e976df3e8a644bedb8dcfe6c04001cd31ec3254	2026-08-14 16:14:27.222819+00
 0121_registry_writer_grants.sql	29940125bc7e286eb5bddef93edc4de5ec25205ae747891f9210f3b67b00f2c6	2026-08-14 19:50:27.228399+00
 0122_worker_trace.sql	e8f18df1ce59c92efb8433f8c6935b5592705aa1a2ff048411143642e2a6b7ce	2026-08-14 21:21:12.203596+00
+0123_trace_incident_recurrence.sql	e28e05fe17fa5e0524a5307b58d58520bcde7b57789e8930d18c9d95a585a1df	2026-08-14 21:48:49.951818+00
+0124_radar_lane_jobs_grants.sql	587e9c078e4066ca417383faaa19467984c3e2388325724667418d3c4cd0dd54	2026-08-14 21:52:41.207778+00
 \.
 
 
