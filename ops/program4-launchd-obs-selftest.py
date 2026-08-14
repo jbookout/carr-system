@@ -81,12 +81,22 @@ def run_wrapper(args: list[str], env: dict) -> subprocess.CompletedProcess:
                            timeout=30, env=env)
 
 
-def tail_log(n: int = 40) -> str:
+def tail_log(n: int | None = None) -> str:
+    """The WHOLE log by default. out/with-run-record.log accumulates across
+    every run of this file during development (it is not trimmed, unlike
+    e.g. rules-refresh.log), so a fixed-size line window is not safe to diff
+    against — two "last N lines" snapshots taken moments apart can each be a
+    DIFFERENT window once the file exceeds N lines, sharing no common prefix
+    even though nothing but appends happened between them. Every check here
+    keys off a fresh uuid4 service name instead, so exact substring/count
+    matching against the full content is correct regardless of file size."""
     if not os.path.exists(LOG):
         return ""
     with open(LOG, encoding="utf-8") as fh:
-        lines = fh.readlines()
-    return "".join(lines[-n:])
+        text = fh.read()
+    if n is None:
+        return text
+    return "".join(text.splitlines(keepends=True)[-n:])
 
 
 def clear_state(service: str) -> None:
@@ -161,26 +171,34 @@ def main() -> int:
     print("\n4. heartbeat throttle (partner-ping / capture-poll shape)")
     svc4 = "selftest-throttle-" + uuid.uuid4().hex[:8]
     clear_state(svc4)
+
+    def n_attempts(service: str, state: str) -> int:
+        # An EXACT count keyed on this test's own unique service name, over
+        # the WHOLE log — robust regardless of how much history the file
+        # already carries, unlike diffing two line-windows (see tail_log()).
+        return tail_log().count(
+            f"ATTEMPT service={service} key=launchd.{service} state={state}")
+
+    def n_throttles(service: str) -> int:
+        return tail_log().count(f"THROTTLE service={service} key=launchd.{service}")
+
     p1 = run_wrapper([svc4, "--heartbeat-interval", "1800", "--", "/bin/sh", "-c", "exit 0"],
                       unreachable_db_env())
     check("first success inside a fresh interval is recorded",
-          f"service={svc4} " in tail_log() and "state=succeeded" in tail_log(),
-          tail_log()[-400:])
-    log_before = tail_log(200)
+          n_attempts(svc4, "succeeded") == 1, f"count={n_attempts(svc4, 'succeeded')}")
+
     p2 = run_wrapper([svc4, "--heartbeat-interval", "1800", "--", "/bin/sh", "-c", "exit 0"],
                       unreachable_db_env())
-    log_after = tail_log(200)
-    new_lines = log_after[len(log_before):] if log_after.startswith(log_before) else log_after
     check("a second success inside the SAME interval is throttled (no new ATTEMPT row)",
-          f"THROTTLE service={svc4}" in new_lines and "ATTEMPT" not in new_lines,
-          new_lines)
+          n_attempts(svc4, "succeeded") == 1 and n_throttles(svc4) == 1,
+          f"attempts={n_attempts(svc4, 'succeeded')} throttles={n_throttles(svc4)}")
     check("both throttled fires still exit 0 — throttling never touches the wrapped exit code",
           p1.returncode == 0 and p2.returncode == 0)
+
     p3 = run_wrapper([svc4, "--heartbeat-interval", "1800", "--", "/bin/sh", "-c", "exit 9"],
                       unreachable_db_env())
     check("a FAILURE inside the same interval is recorded immediately regardless of throttle",
-          f"service={svc4} key=launchd.{svc4} state=failed exit_code=9" in tail_log(),
-          tail_log()[-400:])
+          n_attempts(svc4, "failed") == 1, f"count={n_attempts(svc4, 'failed')}")
     check("...and the failure itself is still returned as the wrapper's exit code",
           p3.returncode == 9)
     clear_state(svc4)
