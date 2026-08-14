@@ -78,6 +78,16 @@ KNOWN_HOSTS = (
     # Microsoft identity + Graph: the carr.us mailbox is Microsoft 365, and the
     # draft transport talks to these two and nothing else on Microsoft's side.
     "login.microsoftonline.com", "graph.microsoft.com", "outlook.office365.com",
+    # The staging Worker's ONLY address. It is deliberately workers.dev and not a
+    # custom domain: on 2026-08-13 a staging deploy without `routes = []`
+    # inherited all three production custom domains and served api.doctorcre.com
+    # from the empty staging database for about two minutes. Staging now attaches
+    # to workers.dev alone, which ops/deploy-attachment-check.py verifies before
+    # any non-production deploy — so this hostname is exactly how a session
+    # reaches staging WITHOUT touching production, and blocking it pushes anyone
+    # verifying a staging deploy toward the production URL instead. That is the
+    # confusion the incident was made of, which is why it is listed here.
+    "carr-mcp-staging.joe-bookout-carr-us.workers.dev",
     "api.practicecre.com", "api.doctorcre.com", "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
