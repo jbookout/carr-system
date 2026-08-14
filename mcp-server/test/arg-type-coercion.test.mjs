@@ -23,7 +23,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TOOLS, ToolError, executeRegisteredTool, coerceArgsToSchema } from "../src/tools.js";
+import { TOOLS, ToolError, executeRegisteredTool, coerceArgsToSchema, assertRequiredArgs } from "../src/tools.js";
 
 const S = (properties) => ({ type: "object", properties });
 
@@ -219,5 +219,97 @@ test("every verb's inputSchema is walkable without throwing on well-typed args",
   for (const [name, tool] of Object.entries(TOOLS)) {
     assert.doesNotThrow(() => coerceArgsToSchema(tool.inputSchema, {}),
       `coerceArgsToSchema threw walking ${name}`);
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// REQUIRED ARGUMENTS, added 2026-08-14 after the same choke point let a verb
+// answer confidently with nothing.
+//
+// THE DEFECT. Every verb declares `required` in its inputSchema and NOTHING
+// enforced it. mcp.js passes rpc.params.arguments straight through, and the
+// local CLI path does too, so a required field that was misspelled — or simply
+// absent — arrived as undefined and the handler ran anyway. search-doctrine
+// builds websearch_to_tsquery('english', undefined), which is not an error in
+// Postgres: it matches nothing. Measured live before this fix:
+//
+//     search-doctrine {"query":"HIPAA"}  ->  ok:true, hits:[], total:0
+//     search-doctrine {}                 ->  ok:true, hits:[], total:0
+//     search-doctrine {"q":"HIPAA"}      ->  20 hits
+//
+// A call carrying NO ARGUMENTS AT ALL returned a clean, confident empty answer.
+//
+// WHY THAT IS WORSE THAN A CRASH, and the reason this is not cosmetic: an empty
+// result set is indistinguishable from a genuine absence. On 2026-08-14 a
+// session searched doctrine for a settled council ruling, was handed total:0,
+// and concluded the ruling did not exist — then filed a defect saying the
+// doctrine read path was broken. The ruling was there. The parameter name was
+// wrong. Rule c53beeaa already says an ok:true confirms the call PARSED and
+// never that the values landed; this is that rule enforced at the door.
+//
+// The near-miss suggestion exists because that is the actual failure mode: the
+// caller had the schema in front of them and still sent `query` for `q`.
+
+test("required: a missing required argument is refused, not answered emptily", () => {
+  const schema = { type: "object", properties: { q: { type: "string" } }, required: ["q"] };
+  assert.throws(() => assertRequiredArgs(schema, {}),
+    (e) => e instanceof ToolError && /missing_required/.test(JSON.stringify(e.payload)));
+});
+
+test("required: a MISNAMED argument is refused and the near-miss is named", () => {
+  const schema = { type: "object", properties: { q: { type: "string" } }, required: ["q"] };
+  try {
+    assertRequiredArgs(schema, { query: "HIPAA" });
+    assert.fail("should have thrown");
+  } catch (e) {
+    const p = JSON.stringify(e.payload);
+    assert.match(p, /missing_required/);
+    assert.match(p, /"q"/, "must name the field it wanted");
+    assert.match(p, /query/, "must echo the unrecognised key the caller sent");
+  }
+});
+
+test("required: read-doctrine's real shape — document vs slug/doc_id", () => {
+  const schema = { type: "object", properties: { document: { type: "string" } },
+                   required: ["document"] };
+  for (const wrong of [{ slug: "x" }, { doc_id: "x" }]) {
+    assert.throws(() => assertRequiredArgs(schema, wrong),
+      (e) => /missing_required/.test(JSON.stringify(e.payload)),
+      `${JSON.stringify(wrong)} must be refused`);
+  }
+  assert.doesNotThrow(() => assertRequiredArgs(schema, { document: "x" }));
+});
+
+test("required: null and empty string are absent; false and 0 are PRESENT", () => {
+  const schema = { type: "object",
+                   properties: { flag: { type: "boolean" }, n: { type: "integer" },
+                                 s: { type: "string" } },
+                   required: ["flag", "n", "s"] };
+  // A caller who genuinely means false or zero has supplied the argument.
+  assert.doesNotThrow(() => assertRequiredArgs(schema, { flag: false, n: 0, s: "x" }));
+  // null and "" carry no instruction and are what an unset template produces.
+  assert.throws(() => assertRequiredArgs(schema, { flag: false, n: 0, s: "" }),
+    (e) => /missing_required/.test(JSON.stringify(e.payload)));
+  assert.throws(() => assertRequiredArgs(schema, { flag: null, n: 0, s: "x" }),
+    (e) => /missing_required/.test(JSON.stringify(e.payload)));
+});
+
+test("required: a schema with no required list accepts anything", () => {
+  assert.doesNotThrow(() =>
+    assertRequiredArgs({ type: "object", properties: { a: { type: "string" } } }, {}));
+  assert.doesNotThrow(() => assertRequiredArgs(undefined, {}));
+});
+
+test("required: every verb that declares required fields is actually guarded", () => {
+  // The choke point must apply to ALL of them, not a hand-kept list — that is
+  // the whole reason this lives in executeRegisteredTool.
+  const withRequired = Object.entries(TOOLS)
+    .filter(([, t]) => Array.isArray(t?.inputSchema?.required) && t.inputSchema.required.length);
+  assert.ok(withRequired.length > 20,
+    `expected many verbs to declare required fields, found ${withRequired.length}`);
+  for (const [name, t] of withRequired) {
+    assert.throws(() => assertRequiredArgs(t.inputSchema, {}),
+      (e) => e instanceof ToolError,
+      `${name} declares required ${JSON.stringify(t.inputSchema.required)} but an empty call was accepted`);
   }
 });
