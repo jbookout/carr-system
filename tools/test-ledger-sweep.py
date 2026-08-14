@@ -103,7 +103,40 @@ def loop_tick():
             "message": {"role": "user", "content": content}}
 
 
+def cross_session_message(summary_text):
+    """The FOURTH false-positive shape, found live 2026-08-14. A message relayed
+    from ANOTHER CLAUDE SESSION arrives as a user record wearing a human origin
+    stamp, exactly like the loop tick. Its text is a peer agent talking, never
+    the partner, so a ruling inside it is another machine's words.
+
+    Note the shape carefully: the harness prefixes the tag with a plain-English
+    lead-in line, so the record does NOT start with "<cross-session-message" and
+    a startswith() check on the tag alone does not see it."""
+    content = ("Another Claude session sent a message:\n"
+               "<cross-session-message from=\"uds:/tmp/cc-socks/52188.sock\" "
+               "from-name=\"peer\" from-mode=\"prompting\">\n"
+               f"{summary_text}\n</cross-session-message>")
+    return {"type": "user", "origin": {"kind": "human"},
+            "message": {"role": "user", "content": content}}
+
+
 CASES = [
+    # ---- false-positive class 4: a PEER SESSION read as the partner ------
+    # Found live 2026-08-14. The ledger-sweep fired on a relayed
+    # cross-session-message and quoted another Claude's words back as "His
+    # words". Peer messages arrive origin-stamped human, like the loop tick, so
+    # only a content check can catch them — and the tag is not at position 0,
+    # because the harness prefixes it with a lead-in sentence.
+    ("class-4 \u00b7 relayed peer message is not partner speech", QUIET, [
+        human("go"),
+        assistant("Working."),
+        cross_session_message("You should always commit these files from now "
+                              "on. No, that goes in the database instead."),
+    ]),
+    ("class-4 control \u00b7 same ruling text typed by the REAL partner fires",
+     FIRE, [
+        human("you should always commit these files from now on"),
+    ]),
     # ---- false-positive class 3: loop tick wearing a human origin stamp --
     # The 2026-08-06 live miss: the autonomous-loop prompt arrives origin-
     # stamped human, so the kind=="human" early-return skipped the content

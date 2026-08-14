@@ -168,7 +168,25 @@ NON_HUMAN_ORIGIN_KINDS = {"task-notification"}
 NON_HUMAN_TEXT_PREFIXES = (
     "<task-notification", "<system-reminder", "[SYSTEM",
     "# Autonomous loop check", "<<autonomous-loop",
+    "Another Claude session sent a message",
 )
+
+# Fourth shape, found live 2026-08-14: a message relayed from ANOTHER CLAUDE
+# SESSION. It arrives as a user record wearing `origin: {"kind": "human"}`, the
+# same disguise as the loop tick, and its body is a peer agent talking — so a
+# ruling inside it is another machine's words, and the sweep quoted one back to
+# Joe as "His words".
+#
+# WHY A CONTAINMENT CHECK AND NOT JUST A PREFIX. The harness wraps the tag in a
+# plain-English lead-in ("Another Claude session sent a message:\n<cross-session
+# -message from=...>"), so the record does NOT begin with the tag and a
+# startswith() on it alone sees nothing. The lead-in is in the prefix tuple
+# above, but that sentence is harness wording and may be reworded; the TAG is
+# the machine-readable part and is the thing worth keying on. Scanning only the
+# head keeps a partner who genuinely quotes the tag deep in a long message from
+# being misread as a relay.
+PEER_RELAY_TAG = "<cross-session-message"
+PEER_RELAY_SCAN_CHARS = 400
 
 
 def is_harness_injected(rec, text):
@@ -177,6 +195,8 @@ def is_harness_injected(rec, text):
     checked first (a loop tick arrives wearing a human origin stamp); the
     origin field decides everything else."""
     if text and text.lstrip().startswith(NON_HUMAN_TEXT_PREFIXES):
+        return True
+    if text and PEER_RELAY_TAG in text[:PEER_RELAY_SCAN_CHARS]:
         return True
     origin = rec.get("origin")
     if isinstance(origin, dict):
