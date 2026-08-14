@@ -31,10 +31,13 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 
-# The roles the system's own migrations grant to. neondb_owner is excluded on
-# purpose: it is Neon's, exists on every Neon project and on no vanilla
-# Postgres, and .github/workflows/ci.yml creates it for that reason.
-EXPECTED_ROLES = ["carr_reader", "carr_writer", "carr_jobs"]
+# The roles the system's own migrations grant to. carr_exporter joined on
+# 2026-08-14: 0006 created it, the ledger absorbed 0006, and the grants
+# section (test-schema-snapshot-grants.py) carries its privileges — which
+# need a role to attach to. neondb_owner is excluded on purpose: it is
+# Neon's, exists on every Neon project and on no vanilla Postgres, and
+# .github/workflows/ci.yml creates it for that reason.
+EXPECTED_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter"]
 
 failures: list[str] = []
 checked = 0

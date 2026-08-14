@@ -5,13 +5,15 @@
 -- The roles still have to EXIST before the pending migrations that grant to
 -- them run, and they can no longer be got by replaying 0115: once this
 -- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
+-- carr_exporter aged into the same trap by way of 0006 and joined the list on
+-- 2026-08-14, when the grants section below started carrying its privileges.
 -- An existing role is left exactly as it is; a missing one is created NOLOGIN
 -- purely so privileges have somewhere to attach in a rebuilt environment.
 --
 do $$
 declare r text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_jobs'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_jobs','carr_exporter'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -852,6 +854,42 @@ CREATE TABLE ops.service_environment (
 --
 
 COMMENT ON COLUMN ops.service_environment.expected_cadence_seconds IS 'How long an observation of this service in this environment stays believable when the run does not declare its own expiry. NULL means unscheduled, which makes every observation unknown rather than fresh — deliberately.';
+
+
+--
+-- Name: settings_change; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.settings_change (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    kind text NOT NULL,
+    target text NOT NULL,
+    reason text NOT NULL,
+    outcome text NOT NULL,
+    session_id text NOT NULL,
+    actor text,
+    command text,
+    environment text,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    CONSTRAINT a_reason_has_to_say_something CHECK ((length(btrim(reason)) >= 8)),
+    CONSTRAINT settings_change_environment_check CHECK (((environment IS NULL) OR (environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text])))),
+    CONSTRAINT settings_change_outcome_check CHECK ((outcome = ANY (ARRAY['applied'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: TABLE settings_change; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.settings_change IS 'Every change to a control plane this system does not own — GitHub rulesets, Actions variables and secrets, branch protection, launchd jobs, git config, Worker secrets. Written by hooks/settings-change-gate.py AT THE MOMENT OF THE CHANGE, because a record that waits for the session to finish dies with it.';
+
+
+--
+-- Name: COLUMN settings_change.reason; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.settings_change.reason IS 'Why the change was made, in the words of whoever made it. The 2026-08-14 ruleset incident was not a missing change log — it was a missing REASON: the change itself was discoverable from GitHub''s own version history within minutes, and still nobody could tell an authorised change from tampering.';
 
 
 --
@@ -8123,6 +8161,14 @@ ALTER TABLE ONLY ops.service
 
 
 --
+-- Name: settings_change settings_change_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.settings_change
+    ADD CONSTRAINT settings_change_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: work_request work_request_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -9470,6 +9516,20 @@ COMMENT ON INDEX ops.run_open_idx IS 'Partial on purpose: terminal runs accumula
 --
 
 CREATE INDEX run_service_env_observed_idx ON ops.run USING btree (service_id, environment, observed_at DESC);
+
+
+--
+-- Name: settings_change_kind_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX settings_change_kind_idx ON ops.settings_change USING btree (kind, recorded_at DESC);
+
+
+--
+-- Name: settings_change_recorded_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX settings_change_recorded_idx ON ops.settings_change USING btree (recorded_at DESC);
 
 
 --
@@ -12294,6 +12354,402 @@ ALTER TABLE ONLY public.vendor
 
 
 --
+-- CARR GRANTS (bin/schema-snapshot.sh) — not produced by pg_dump.
+--
+-- The app roles' privileges, read from production's catalogs. Without them a
+-- database built from this file has the roles holding nothing, and CI's
+-- migration class answers has_table_privilege() with false for everything —
+-- the 2026-08-14 gap. Grantees are scoped to the preamble's four roles (plus
+-- neondb_owner, membership bundles only) so no other principal's ACLs can
+-- enter the tree. Shapes pinned by tools/test-schema-snapshot-grants.py.
+--
+
+grant usage on schema ops to carr_jobs;
+grant usage on schema ops to carr_reader;
+grant usage on schema ops to carr_writer;
+grant usage on schema public to carr_exporter;
+grant usage on schema public to carr_jobs;
+grant usage on schema public to carr_reader;
+grant usage on schema public to carr_writer;
+grant insert on table ops.deployment to carr_jobs;
+grant select on table ops.deployment to carr_reader;
+grant insert, select, update on table ops.deployment to carr_writer;
+grant insert, select on table ops.incident to carr_jobs;
+grant select on table ops.incident to carr_reader;
+grant insert, select, update on table ops.incident to carr_writer;
+grant insert, select on table ops.incident_fact to carr_jobs;
+grant select on table ops.incident_fact to carr_reader;
+grant insert, select, update on table ops.incident_fact to carr_writer;
+grant select on table ops.incident_hypothesis to carr_jobs;
+grant select on table ops.incident_hypothesis to carr_reader;
+grant insert, select, update on table ops.incident_hypothesis to carr_writer;
+grant insert, select on table ops.incident_link to carr_jobs;
+grant select on table ops.incident_link to carr_reader;
+grant insert, select, update on table ops.incident_link to carr_writer;
+grant select on table ops.incident_service to carr_jobs;
+grant select on table ops.incident_service to carr_reader;
+grant insert, select, update on table ops.incident_service to carr_writer;
+grant insert, select on table ops.run to carr_jobs;
+grant select on table ops.run to carr_reader;
+grant insert, select on table ops.run to carr_writer;
+grant select on table ops.service to carr_jobs;
+grant select on table ops.service to carr_reader;
+grant insert, select, update on table ops.service to carr_writer;
+grant select on table ops.service_dependency to carr_reader;
+grant insert, select, update on table ops.service_dependency to carr_writer;
+grant select on table ops.service_environment to carr_jobs;
+grant select on table ops.service_environment to carr_reader;
+grant insert, select, update on table ops.service_environment to carr_writer;
+grant insert, select on table ops.settings_change to carr_jobs;
+grant select on table ops.settings_change to carr_reader;
+grant insert, select on table ops.settings_change to carr_writer;
+grant select on table ops.v_check_run to carr_reader;
+grant select on table ops.v_check_run to carr_writer;
+grant select on table ops.v_job_run to carr_reader;
+grant select on table ops.v_job_run to carr_writer;
+grant select on table ops.v_service_environment_health to carr_reader;
+grant select on table ops.v_service_environment_health to carr_writer;
+grant select on table ops.v_trace to carr_reader;
+grant select on table ops.v_trace to carr_writer;
+grant select on table ops.work_request to carr_reader;
+grant insert, select, update on table ops.work_request to carr_writer;
+grant insert, select, update on table public.activity to carr_writer;
+grant insert, select, update on table public.actor to carr_writer;
+grant insert, select, update on table public.actor_profile to carr_writer;
+grant insert, select, update on table public.agreement to carr_writer;
+grant insert, select, update on table public.ammo_item to carr_writer;
+grant insert, select, update on table public.attachment to carr_writer;
+grant select on table public.availability to carr_jobs;
+grant insert, select, update on table public.availability to carr_writer;
+grant insert, select, update on table public.building to carr_writer;
+grant insert, select, update on table public.building_ownership to carr_writer;
+grant select on table public.cadence_rule to carr_jobs;
+grant insert, select, update on table public.cadence_rule to carr_writer;
+grant insert, select, update on table public.campaign to carr_writer;
+grant insert, select, update on table public.candidate_pool to carr_writer;
+grant insert, select, update on table public.capture_candidate to carr_writer;
+grant insert, select, update on table public.capture_post_call_action to carr_writer;
+grant insert, select, update on table public.capture_post_call_candidate to carr_writer;
+grant insert, select, update on table public.capture_post_call_report to carr_writer;
+grant insert, select, update on table public.capture_session to carr_writer;
+grant insert, select, update on table public.client to carr_writer;
+grant insert, select, update on table public.client_status to carr_writer;
+grant insert, select, update on table public.client_type to carr_writer;
+grant select on table public.code_subject to carr_exporter;
+grant select on table public.code_subject to carr_reader;
+grant insert, select on table public.code_subject to carr_writer;
+grant insert, select, update on table public.commission to carr_writer;
+grant insert, select, update on table public.commission_allocation to carr_writer;
+grant insert, select, update on table public.comp to carr_writer;
+grant insert, select, update on table public.content_piece to carr_jobs;
+grant insert, select, update on table public.content_piece to carr_writer;
+grant insert, select, update on table public.critical_date to carr_writer;
+grant insert, select, update on table public.deal to carr_writer;
+grant insert, select, update on table public.deal_conflict to carr_writer;
+grant insert, select, update on table public.deal_market_assignment to carr_writer;
+grant insert, select on table public.deal_note to carr_writer;
+grant insert, select, update on table public.deal_participant to carr_writer;
+grant insert, select, update on table public.deal_phase to carr_writer;
+grant insert, select, update on table public.deal_presence_lease to carr_writer;
+grant insert, select, update on table public.deal_review_item to carr_writer;
+grant insert, select, update on table public.deal_review_session to carr_writer;
+grant select on table public.defect to carr_exporter;
+grant select on table public.defect to carr_reader;
+grant insert, select on table public.defect to carr_writer;
+grant select on table public.diagnostic_route to carr_reader;
+grant select on table public.diagnostic_route to carr_writer;
+grant insert, select, update on table public.doc_template to carr_writer;
+grant insert, select, update on table public.doctrine_change_item to carr_writer;
+grant insert, select, update on table public.doctrine_change_set to carr_writer;
+grant delete, insert, select, update on table public.doctrine_claim to carr_writer;
+grant select on table public.doctrine_document to carr_exporter;
+grant select on table public.doctrine_document to carr_reader;
+grant insert, select, update on table public.doctrine_document to carr_writer;
+grant select on table public.doctrine_edge to carr_exporter;
+grant select on table public.doctrine_edge to carr_reader;
+grant insert, select, update on table public.doctrine_edge to carr_writer;
+grant select on table public.doctrine_edge_type to carr_exporter;
+grant select on table public.doctrine_edge_type to carr_reader;
+grant select on table public.doctrine_edge_type to carr_writer;
+grant select on table public.doctrine_gate_check to carr_exporter;
+grant select on table public.doctrine_gate_check to carr_reader;
+grant insert, select, update on table public.doctrine_gate_check to carr_writer;
+grant select on table public.doctrine_gate_finding to carr_exporter;
+grant insert, select, update on table public.doctrine_gate_finding to carr_writer;
+grant select on table public.doctrine_gate_run to carr_exporter;
+grant insert, select, update on table public.doctrine_gate_run to carr_writer;
+grant select on table public.doctrine_link to carr_exporter;
+grant select on table public.doctrine_link to carr_reader;
+grant delete, insert, select, update on table public.doctrine_link to carr_writer;
+grant select on table public.doctrine_meta to carr_exporter;
+grant select on table public.doctrine_meta to carr_reader;
+grant insert, select, update on table public.doctrine_meta to carr_writer;
+grant select on table public.doctrine_migration_batch to carr_exporter;
+grant insert, select, update on table public.doctrine_migration_batch to carr_writer;
+grant select on table public.doctrine_review_policy to carr_exporter;
+grant select on table public.doctrine_review_policy to carr_reader;
+grant insert, select, update on table public.doctrine_review_policy to carr_writer;
+grant select on table public.doctrine_revision to carr_exporter;
+grant select on table public.doctrine_revision to carr_reader;
+grant insert, select, update on table public.doctrine_revision to carr_writer;
+grant select on table public.doctrine_section to carr_exporter;
+grant select on table public.doctrine_section to carr_reader;
+grant insert, select, update on table public.doctrine_section to carr_writer;
+grant select on table public.doctrine_slug_alias to carr_reader;
+grant insert, select, update on table public.doctrine_slug_alias to carr_writer;
+grant select on table public.doctrine_snapshot to carr_exporter;
+grant select on table public.doctrine_snapshot to carr_reader;
+grant insert, select, update on table public.doctrine_snapshot to carr_writer;
+grant select on table public.document to carr_jobs;
+grant insert, select, update on table public.document to carr_writer;
+grant insert, select on table public.event to carr_jobs;
+grant insert, select, update on table public.event to carr_writer;
+grant insert, select, update on table public.experiment to carr_writer;
+grant insert, select on table public.export_run to carr_exporter;
+grant insert, select, update on table public.export_run to carr_writer;
+grant insert, select on table public.growth_snapshot to carr_jobs;
+grant select on table public.growth_snapshot to carr_reader;
+grant select on table public.ingest_inbox to carr_jobs;
+grant insert, select, update on table public.ingest_inbox to carr_writer;
+grant insert, select, update on table public.investigation_branch to carr_writer;
+grant insert, select, update on table public.investigation_evidence to carr_writer;
+grant insert, select, update on table public.investigation_run to carr_writer;
+grant insert, select, update on table public.lead to carr_writer;
+grant insert, select, update on table public.lead_lane to carr_writer;
+grant insert, select, update on table public.lead_stage to carr_writer;
+grant insert, select, update on table public.lease to carr_writer;
+grant select on table public.loop_block to carr_exporter;
+grant select on table public.loop_block to carr_reader;
+grant insert, select, update on table public.loop_block to carr_writer;
+grant select on table public.loop_domain to carr_exporter;
+grant select on table public.loop_domain to carr_reader;
+grant select on table public.loop_domain to carr_writer;
+grant select on table public.loop_item to carr_exporter;
+grant select on table public.loop_item to carr_reader;
+grant insert, select, update on table public.loop_item to carr_writer;
+grant select on table public.marketing_subject to carr_exporter;
+grant select on table public.marketing_subject to carr_reader;
+grant insert, select, update on table public.marketing_subject to carr_writer;
+grant select on table public.media_recommendation to carr_exporter;
+grant select on table public.media_recommendation to carr_reader;
+grant insert, select, update on table public.media_recommendation to carr_writer;
+grant insert, select, update on table public.national_account_owner to carr_writer;
+grant select on table public.negotiation_claim to carr_reader;
+grant insert, select, update on table public.negotiation_claim to carr_writer;
+grant select on table public.negotiation_claim_type to carr_reader;
+grant select on table public.negotiation_claim_type to carr_writer;
+grant insert, select, update on table public.negotiation_round to carr_writer;
+grant insert, select on table public.next_action to carr_jobs;
+grant insert, select, update on table public.next_action to carr_writer;
+grant insert, select, update on table public.parcel to carr_writer;
+grant insert, select, update on table public.party to carr_writer;
+grant insert, select, update on table public.party_link to carr_writer;
+grant select on table public.party_link_kind to carr_writer;
+grant insert, select, update on table public.placement to carr_jobs;
+grant insert, select, update on table public.placement to carr_writer;
+grant select on table public.placement_measurement to carr_exporter;
+grant insert, select on table public.placement_measurement to carr_jobs;
+grant select on table public.placement_measurement to carr_reader;
+grant insert, select on table public.placement_measurement to carr_writer;
+grant insert, select, update on table public.placement_metric to carr_jobs;
+grant insert, select, update on table public.placement_metric to carr_writer;
+grant insert, select, update on table public.premises to carr_writer;
+grant insert, select, update on table public.premises_space to carr_writer;
+grant insert, select, update on table public.record_flag to carr_writer;
+grant insert, select, update on table public.record_source to carr_writer;
+grant select, usage on sequence public.ref_client_seq to carr_writer;
+grant select, usage on sequence public.ref_lead_seq to carr_writer;
+grant select, usage on sequence public.ref_vendor_seq to carr_writer;
+grant insert, select, update on table public.registration to carr_writer;
+grant insert, select, update on table public.rule to carr_writer;
+grant insert, select, update on table public.schema_migrations to carr_writer;
+grant insert, select, update on table public.search_candidate to carr_writer;
+grant insert, select, update on table public.sensitive_blob to carr_writer;
+grant insert, select, update on table public.signal_event to carr_writer;
+grant insert, select, update on table public.source_capture to carr_writer;
+grant insert, select, update on table public.space to carr_writer;
+grant select on table public.space_search to carr_jobs;
+grant insert, select, update on table public.space_search to carr_writer;
+grant select on table public.submarket_condition to carr_reader;
+grant select on table public.submarket_condition to carr_writer;
+grant select on table public.system_config to carr_exporter;
+grant insert, select, update on table public.system_config to carr_writer;
+grant insert, select, update on table public.tool_call to carr_writer;
+grant select on table public.tool_read_call to carr_exporter;
+grant select on table public.tool_read_call to carr_reader;
+grant insert on table public.tool_read_call to carr_writer;
+grant select on table public.v_campaign_scorecard to carr_exporter;
+grant select on table public.v_campaign_scorecard to carr_reader;
+grant select on table public.v_campaign_scorecard to carr_writer;
+grant select on table public.v_capture_candidate_queue to carr_reader;
+grant select on table public.v_capture_session_status to carr_reader;
+grant select on table public.v_claim_card to carr_exporter;
+grant select on table public.v_claim_card to carr_jobs;
+grant select on table public.v_claim_card to carr_reader;
+grant select on table public.v_claim_card to carr_writer;
+grant select on table public.v_code_finding to carr_exporter;
+grant select on table public.v_code_finding to carr_reader;
+grant select on table public.v_code_finding to carr_writer;
+grant select on table public.v_compiled_rules to carr_jobs;
+grant select on table public.v_compiled_rules to carr_reader;
+grant select on table public.v_counterparty_bluff to carr_reader;
+grant select on table public.v_counterparty_bluff to carr_writer;
+grant select on table public.v_counterparty_history to carr_reader;
+grant select on table public.v_counterparty_history to carr_writer;
+grant select on table public.v_counterparty_scorecard to carr_reader;
+grant select on table public.v_counterparty_scorecard to carr_writer;
+grant select on table public.v_deal_board to carr_reader;
+grant select on table public.v_deal_reconciliation_read to carr_reader;
+grant select on table public.v_deal_room_account to carr_reader;
+grant select on table public.v_deal_room_account to carr_writer;
+grant select on table public.v_deal_room_action to carr_reader;
+grant select on table public.v_deal_room_action to carr_writer;
+grant select on table public.v_deal_room_activity to carr_reader;
+grant select on table public.v_deal_room_activity to carr_writer;
+grant select on table public.v_deal_room_board to carr_reader;
+grant select on table public.v_deal_room_board to carr_writer;
+grant select on table public.v_deal_room_critical_date to carr_reader;
+grant select on table public.v_deal_room_deal to carr_reader;
+grant select on table public.v_deal_room_deal to carr_writer;
+grant select on table public.v_deal_room_document to carr_reader;
+grant select on table public.v_deal_room_document to carr_writer;
+grant select on table public.v_deal_room_event to carr_reader;
+grant select on table public.v_deal_room_negotiation to carr_reader;
+grant select on table public.v_deal_room_negotiation to carr_writer;
+grant select on table public.v_deal_room_note to carr_reader;
+grant select on table public.v_deal_room_participant to carr_reader;
+grant select on table public.v_deal_room_participant to carr_writer;
+grant select on table public.v_deal_room_premises to carr_reader;
+grant select on table public.v_deal_room_premises to carr_writer;
+grant select on table public.v_deal_room_presence to carr_reader;
+grant select on table public.v_deal_room_session to carr_reader;
+grant select on table public.v_deal_room_session to carr_writer;
+grant select on table public.v_decision_entry to carr_exporter;
+grant select on table public.v_decision_entry to carr_reader;
+grant select on table public.v_decision_entry to carr_writer;
+grant select on table public.v_defect to carr_exporter;
+grant select on table public.v_defect to carr_reader;
+grant select on table public.v_defect to carr_writer;
+grant select on table public.v_defect_class to carr_exporter;
+grant select on table public.v_defect_class to carr_reader;
+grant select on table public.v_defect_class to carr_writer;
+grant select on table public.v_expired_verification to carr_jobs;
+grant select on table public.v_expired_verification to carr_reader;
+grant select on table public.v_expired_verification to carr_writer;
+grant select on table public.v_export_clients to carr_reader;
+grant select on table public.v_export_clients_active to carr_reader;
+grant select on table public.v_export_deals to carr_reader;
+grant select on table public.v_export_dossier_analysis to carr_exporter;
+grant select on table public.v_export_dossier_subject to carr_exporter;
+grant select on table public.v_export_leads to carr_reader;
+grant select on table public.v_export_loops to carr_exporter;
+grant select on table public.v_export_loops_closed to carr_exporter;
+grant select on table public.v_export_pool to carr_exporter;
+grant select on table public.v_export_pool_all to carr_exporter;
+grant select on table public.v_export_source_captures to carr_reader;
+grant select on table public.v_export_source_captures to carr_writer;
+grant select on table public.v_export_vendors to carr_reader;
+grant select on table public.v_field_history to carr_exporter;
+grant select on table public.v_field_history to carr_reader;
+grant select on table public.v_field_history to carr_writer;
+grant select on table public.v_growth_slope to carr_jobs;
+grant select on table public.v_growth_slope to carr_reader;
+grant select on table public.v_ingest_backlog to carr_jobs;
+grant select on table public.v_ingest_backlog to carr_reader;
+grant select on table public.v_integrity_digest to carr_reader;
+grant select on table public.v_investigation to carr_reader;
+grant select on table public.v_investigation to carr_writer;
+grant select on table public.v_last_touch to carr_reader;
+grant select on table public.v_lead_client_best to carr_exporter;
+grant select on table public.v_lead_client_best to carr_reader;
+grant select on table public.v_lead_client_best to carr_writer;
+grant select on table public.v_lead_client_link to carr_exporter;
+grant select on table public.v_lead_client_link to carr_reader;
+grant select on table public.v_lead_client_link to carr_writer;
+grant select on table public.v_lead_hot to carr_reader;
+grant select on table public.v_loop_no_blocker to carr_exporter;
+grant select on table public.v_loop_no_blocker to carr_reader;
+grant select on table public.v_loop_no_blocker to carr_writer;
+grant select on table public.v_loop_promotion_due to carr_reader;
+grant select on table public.v_loop_promotion_due to carr_writer;
+grant select on table public.v_loops to carr_reader;
+grant select on table public.v_loops to carr_writer;
+grant select on table public.v_marketing_measurement_coverage to carr_exporter;
+grant select on table public.v_marketing_measurement_coverage to carr_reader;
+grant select on table public.v_marketing_measurement_coverage to carr_writer;
+grant select on table public.v_md_ledger_entry to carr_exporter;
+grant select on table public.v_md_ledger_entry to carr_reader;
+grant select on table public.v_md_ledger_entry to carr_writer;
+grant select on table public.v_media_recommendation to carr_exporter;
+grant select on table public.v_media_recommendation to carr_reader;
+grant select on table public.v_media_recommendation to carr_writer;
+grant select on table public.v_negotiation_deal to carr_reader;
+grant select on table public.v_negotiation_deal to carr_writer;
+grant select on table public.v_negotiation_position to carr_reader;
+grant select on table public.v_negotiation_position to carr_writer;
+grant select on table public.v_party_graph to carr_reader;
+grant select on table public.v_party_graph to carr_writer;
+grant select on table public.v_placement_measurement to carr_exporter;
+grant select on table public.v_placement_measurement to carr_reader;
+grant select on table public.v_placement_measurement to carr_writer;
+grant select on table public.v_placement_metric_latest to carr_exporter;
+grant select on table public.v_placement_metric_latest to carr_reader;
+grant select on table public.v_placement_metric_latest to carr_writer;
+grant select on table public.v_pool to carr_reader;
+grant select on table public.v_precedent to carr_exporter;
+grant select on table public.v_precedent to carr_reader;
+grant select on table public.v_precedent to carr_writer;
+grant select on table public.v_rate_normalized to carr_reader;
+grant select on table public.v_record_flag_subject to carr_exporter;
+grant select on table public.v_record_flag_subject to carr_reader;
+grant select on table public.v_record_flag_subject to carr_writer;
+grant select on table public.v_ref_index to carr_jobs;
+grant select on table public.v_ref_index to carr_reader;
+grant select on table public.v_ref_index to carr_writer;
+grant select on table public.v_role_timeouts to carr_reader;
+grant select on table public.v_schema_ledger to carr_exporter;
+grant select on table public.v_schema_ledger to carr_reader;
+grant select on table public.v_signal_queue to carr_reader;
+grant select on table public.v_signal_queue to carr_writer;
+grant select on table public.v_source_attribution to carr_reader;
+grant select on table public.v_source_attribution to carr_writer;
+grant select on table public.v_stale_records to carr_reader;
+grant select on table public.v_subject_timeline to carr_reader;
+grant select on table public.v_today_triage to carr_reader;
+grant select on table public.v_vendor_level_suggestion to carr_reader;
+grant select on table public.v_vendor_needs_type to carr_reader;
+grant insert, select, update on table public.vendor to carr_writer;
+grant select on table public.vendor_category to carr_writer;
+grant select on table public.vendor_disposition to carr_writer;
+grant select on table public.vendor_relationship_level to carr_writer;
+grant insert, select, update on table public.vendor_stage to carr_writer;
+grant update (state, next_action, monitoring_until, recovery_evidence_ref, observed_at, expires_at) on table ops.incident to carr_jobs;
+grant select (id, slug, kind, display_name) on table public.actor to carr_jobs;
+grant select (id, slug) on table public.actor to carr_reader;
+grant select (id, address, city, state, name, sub_type) on table public.building to carr_jobs;
+grant select (id, roster_ref, party_id, status, owner_id) on table public.client to carr_jobs;
+grant select (id, client_id, name) on table public.deal to carr_jobs;
+grant select (deal_id, actor_id, role, to_at) on table public.deal_participant to carr_jobs;
+grant select (id, registry_ref, party_id, est_lease_event, client_id, owner_id) on table public.lead to carr_jobs;
+grant select (slug, side) on table public.participant_role to carr_writer;
+grant select (id, name) on table public.party to carr_jobs;
+grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
+grant select (key, value) on table public.system_config to carr_jobs;
+grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
+grant execute on function public.capture_call_context(requested_deal_ids uuid[]) to carr_reader;
+grant execute on function public.capture_call_context(requested_deal_ids uuid[]) to carr_writer;
+grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_exporter;
+grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_reader;
+grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_writer;
+grant carr_exporter to neondb_owner;
+grant carr_exporter to neondb_owner;
+grant carr_jobs to neondb_owner;
+grant carr_reader to carr_exporter;
+grant carr_reader to neondb_owner;
+grant carr_reader to neondb_owner;
+grant carr_writer to neondb_owner;
+grant carr_writer to neondb_owner;
+--
 -- PostgreSQL database dump
 --
 
@@ -12440,6 +12896,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0115_ops_observability.sql	b4962c412c5de6c70002ea1b74a8d75f585cbf260a5622e8dd1bd41989c29478	2026-08-14 02:00:09.88795+00
 0116_incident_signature.sql	9267e4799295a3c888a053ce018607140bcca5115b9c38ab77d151f098743070	2026-08-14 11:07:52.632609+00
 0117_collector_incident_grants.sql	25f46a6ade52dbea6a2e6e13072cec0510b992cbfd68424f8f310d0db2bb0e07	2026-08-14 11:21:39.42866+00
+0118_settings_change.sql	062bcfbb196bcd131a185fd045cd4194846623b16e9650858eed2495b1fe8996	2026-08-14 13:08:24.514561+00
 \.
 
 
