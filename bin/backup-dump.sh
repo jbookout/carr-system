@@ -19,14 +19,39 @@
 # story; the short version is that in `pg_dump | age > f` the pipeline's exit
 # status is AGE's, age encrypts an empty stream without complaint, and so a
 # pg_dump that died mid-transfer was invisible to `set -e`.
+#
+# CHANGED 2026-08-14 (PROGRAM 4, THE MAC-INDEPENDENT COPY): this script now
+# serves BOTH the local nightly (Joe's Mac) and the GitHub Actions nightly
+# workflow — rule a8c55a47, a manual path and an automated path doing the
+# same job must be the same code, never a second implementation. Three env
+# vars, all optional and all unset on Joe's Mac, so local behavior is
+# byte-identical to before this change:
+#   BACKUP_DATABASE_URL — if set, used AS-IS instead of resolving the
+#     production owner DSN through neonctl. Actions has no neonctl login and
+#     should never need one: it connects as the dedicated read-only
+#     carr_backup role (migrations/0119_backup_role.sql) via a GitHub secret.
+#   BACKUP_SKIP_R2=1 — skips the R2 archive step below. A GitHub runner's
+#     disk dies with the job, so there is no local copy to keep and no
+#     reason to spend the R2 quota a second time on the same night's dump;
+#     the encrypted file goes to the workflow artifact (90-day retention)
+#     instead. See .github/workflows/backup-nightly.yml.
+#   BACKUP_OUTPUT_DIR — overrides where the dump (and the size-floor's
+#     previous-dump lookup) lives. Defaults to $REPO/backups, exactly as
+#     before.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/usr/local/opt/node@22/bin:/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
 PUBKEY="$(cat "$REPO/backups-public-key.txt")"
-URL="$("$REPO/mcp-server/node_modules/.bin/neonctl" connection-string production \
-      --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
+if [ -n "${BACKUP_DATABASE_URL:-}" ]; then
+  URL="$BACKUP_DATABASE_URL"
+else
+  URL="$("$REPO/mcp-server/node_modules/.bin/neonctl" connection-string production \
+        --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
+fi
 STAMP="$(date -u +%Y%m%d)"
-OUT="$REPO/backups/carr-$STAMP.sql.age"
+OUTDIR="${BACKUP_OUTPUT_DIR:-$REPO/backups}"
+mkdir -p "$OUTDIR"
+OUT="$OUTDIR/carr-$STAMP.sql.age"
 # --no-owner --no-acl ADDED 2026-08-02, and the reason is a real failure, not style.
 # The first genuine restore rehearsal ever run against these dumps died with
 #   ERROR: permission denied to change default privileges
@@ -59,12 +84,26 @@ fi
 # rather than 90%: the database legitimately grows and shrinks night to night,
 # and a guard that cries wolf gets switched off. A truncated dump is not 40%
 # short, it is three orders of magnitude short — 200 bytes against 17 MB.
-SIZE="$(stat -f%z "$OUT.tmp")"
+#
+# size_bytes() ADDED 2026-08-14 (PROGRAM 4): this used to be inline `stat
+# -f%z`, which is BSD stat and Mac-only. GNU stat (the GitHub Actions
+# runner) takes -f to mean something else entirely ("file system status",
+# not "format") and this would silently do the wrong thing there rather than
+# fail loud. bin/worktree.sh hit the identical BSD-vs-GNU split for a
+# different stat call and settled on shelling out to Python for the one
+# piece of stdlib both platforms carry unmodified; same fix, same reason,
+# here. Bare `python3` rather than "$REPO/.venv/bin/python": the Actions
+# runner never provisions this repo's venv (it only needs postgresql-client
+# and age — see .github/workflows/backup-nightly.yml), and os.path.getsize
+# needs nothing beyond the standard library. Byte counts are identical to
+# the old `stat -f%z` on macOS, so local behavior is unchanged.
+size_bytes() { python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$1"; }
+SIZE="$(size_bytes "$OUT.tmp")"
 FLOOR=1048576
-PREV="$(ls -t "$REPO/backups"/carr-*.sql.age 2>/dev/null | grep -vxF "$OUT" | head -1 || true)"
+PREV="$(ls -t "$OUTDIR"/carr-*.sql.age 2>/dev/null | grep -vxF "$OUT" | head -1 || true)"
 PREV_SIZE=0
 if [ -n "${PREV:-}" ]; then
-  PREV_SIZE="$(stat -f%z "$PREV")"
+  PREV_SIZE="$(size_bytes "$PREV")"
   if [ "$(( PREV_SIZE / 2 ))" -gt "$FLOOR" ]; then
     FLOOR="$(( PREV_SIZE / 2 ))"
   fi
@@ -80,27 +119,37 @@ if [ "$SIZE" -lt "$FLOOR" ]; then
 fi
 mv "$OUT.tmp" "$OUT"
 # keep 14 dailies in backups/ (local, gitignored); the R2 archive keeps everything forever
-ls -t "$REPO/backups"/carr-*.sql.age 2>/dev/null | tail -n +15 | xargs rm -f 2>/dev/null || true
+ls -t "$OUTDIR"/carr-*.sql.age 2>/dev/null | tail -n +15 | xargs rm -f 2>/dev/null || true
 
-# Archive to R2 (ORDER 20's quota-guarded uploader, ORDER 42b's replacement for the
-# git-commit step). Same production URL already resolved above is reused as
-# DATABASE_URL so the real system_config.r2.quota_gb cap is consulted instead of
-# the script defaulting blind. A quota refusal is reported, not fatal: the local
-# dump in backups/ stands either way (rc=0 from the archiver), same posture the
-# document pipeline takes on its OWED path.
-ARCHIVE_JSON="$(cd "$REPO" && DATABASE_URL="$URL" .venv/bin/python bin/backup-archive-r2.py "$OUT" 2>&1)" \
-  || { echo "R2 archive step failed (backup itself is fine, sitting at $OUT):" >&2
-       echo "$ARCHIVE_JSON" >&2; }
-# `|| true` is load-bearing under pipefail (added 2026-08-07): grep exits 1 when
-# the archiver printed no key, and without it that would abort the script AFTER
-# a good backup was already taken and archived.
-R2_KEY="$(print -r -- "$ARCHIVE_JSON" | grep -m1 '"key"' | sed -E 's/.*"key": *"([^"]+)".*/\1/' || true)"
-# Size reported in EXACT BYTES, not `du -h`. du floors at the 4K block size, so
-# on 2026-08-07 the success line read "(4.0K)" for a 200-byte corrupt backup —
-# the one number that would have exposed the failure could not physically be
-# displayed small enough to look wrong.
-if [ -n "${R2_KEY:-}" ]; then
-  echo "backup ok -> $OUT ($SIZE bytes, floor was $FLOOR) -> R2 archive: $R2_KEY"
+# BACKUP_SKIP_R2=1 ADDED 2026-08-14 (PROGRAM 4): the GitHub Actions runner's
+# disk does not survive past the job, so there is no local copy to keep and
+# no reason to spend the R2 quota archiving a dump that already goes to the
+# workflow artifact (90-day retention — see .github/workflows/backup-nightly.yml).
+# Unset on Joe's Mac, so the local nightly still archives to R2 exactly as
+# before.
+if [ -n "${BACKUP_SKIP_R2:-}" ]; then
+  echo "backup ok -> $OUT ($SIZE bytes, floor was $FLOOR) -> R2 archive: skipped (BACKUP_SKIP_R2)"
 else
-  echo "backup ok -> $OUT ($SIZE bytes, floor was $FLOOR) -> R2 archive: see stderr above"
+  # Archive to R2 (ORDER 20's quota-guarded uploader, ORDER 42b's replacement for the
+  # git-commit step). Same production URL already resolved above is reused as
+  # DATABASE_URL so the real system_config.r2.quota_gb cap is consulted instead of
+  # the script defaulting blind. A quota refusal is reported, not fatal: the local
+  # dump in backups/ stands either way (rc=0 from the archiver), same posture the
+  # document pipeline takes on its OWED path.
+  ARCHIVE_JSON="$(cd "$REPO" && DATABASE_URL="$URL" .venv/bin/python bin/backup-archive-r2.py "$OUT" 2>&1)" \
+    || { echo "R2 archive step failed (backup itself is fine, sitting at $OUT):" >&2
+         echo "$ARCHIVE_JSON" >&2; }
+  # `|| true` is load-bearing under pipefail (added 2026-08-07): grep exits 1 when
+  # the archiver printed no key, and without it that would abort the script AFTER
+  # a good backup was already taken and archived.
+  R2_KEY="$(print -r -- "$ARCHIVE_JSON" | grep -m1 '"key"' | sed -E 's/.*"key": *"([^"]+)".*/\1/' || true)"
+  # Size reported in EXACT BYTES, not `du -h`. du floors at the 4K block size, so
+  # on 2026-08-07 the success line read "(4.0K)" for a 200-byte corrupt backup —
+  # the one number that would have exposed the failure could not physically be
+  # displayed small enough to look wrong.
+  if [ -n "${R2_KEY:-}" ]; then
+    echo "backup ok -> $OUT ($SIZE bytes, floor was $FLOOR) -> R2 archive: $R2_KEY"
+  else
+    echo "backup ok -> $OUT ($SIZE bytes, floor was $FLOOR) -> R2 archive: see stderr above"
+  fi
 fi
