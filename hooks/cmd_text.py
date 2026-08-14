@@ -33,10 +33,35 @@ import re
 # A heredoc opener: <<EOF, <<-EOF, <<'EOF', <<"EOF".
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
-# A quoted -m/--message argument. Unquoted -m words are NOT stripped: a bare
-# `-m dont-run-git-add-A` is one shell word with no spaces, so it cannot contain
-# a command anyway, and matching it loosely would strip real text after it.
-_DASH_M_RE = re.compile(r"(?:-m|--message)\s+(?:'[^']*'|\"[^\"]*\")")
+# The flags that carry PROSE, and whose quoted argument is therefore data.
+#
+# `-m/--message` was the original entry. The rest joined it on 2026-08-14 after
+# the fourth false refusal in a day: opening a pull request whose --body
+# DESCRIBED the very command being fixed
+#
+#     gh pr create --title "..." --body "...git stash drop <ref>..."
+#
+# was refused as though it were running one. Same category error the module
+# exists to end, arriving through a flag nobody had listed. The workaround —
+# writing the body to a file — is exactly the outcome the docstring above warns
+# about, because it teaches whoever hits it that the gate is noise.
+#
+# LONG FORMS ONLY for the additions, deliberately. Single letters collide across
+# tools (`-b` is a branch to git and a body elsewhere, `-d` is delete to one and
+# description to another), and a collision here would make the gate stop looking
+# at a real command. `-m` keeps its short form because it is unambiguous in
+# every tool this repo drives.
+#
+# Unquoted arguments are NOT stripped, for the reason the original comment gave:
+# a bare `--body dont-run-git-add-A` is one shell word with no spaces, so it
+# cannot hide a command anyway, and matching it loosely would swallow the real
+# text after it. An unterminated quote matches nothing and so strips nothing,
+# which is the fail-closed direction.
+_PROSE_FLAGS = ("-m", "--message", "--body", "--title", "--comment",
+                "--notes", "--description", "--subject")
+_DASH_M_RE = re.compile(
+    r"(?:" + "|".join(re.escape(f) for f in _PROSE_FLAGS) + r")"
+    r"\s+(?:'[^']*'|\"[^\"]*\")")
 
 
 def strip_inert_text(cmd):
