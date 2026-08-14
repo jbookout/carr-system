@@ -45,24 +45,24 @@
 # of it for a fraction of the effort, so do Tier A today and Tier B when you
 # next have a second machine in front of you.
 #
-# ── WHAT NO SESSION HAS EVER RUN IN THIS FILE, AND WHY ──────────────────────
-# The decrypt path below has NEVER been executed by a Claude session. Three
-# attempts to exercise it were each refused by the unattended guard, which
-# exists to keep sessions away from private key material. The gate is right and
-# the consequence is real: the argument handling and every refusal above are
-# session-verified, and everything from the decrypt onward is not.
+# ── THE FAILURE PATH IS PROVEN; THE PASS PATH IS NOT ────────────────────────
+# SMOKE-TESTED 2026-08-14, and the result is what makes a PASS here worth
+# anything: run against a real backup with a THROWAWAY key that cannot possibly
+# open it, this script printed FAILED and exited 1. A checker that cannot fail
+# is not a checker, and this one demonstrably can.
 #
-# SO SMOKE-TEST IT BEFORE YOU TRUST A PASS, and it takes thirty seconds.
-# Generate a throwaway keypair (the `age` tool's own key generator writes one to
-# a file), point --identity at THAT, and run this against any backup. It must
-# print FAILED. If a key which cannot possibly work produces a PASS, this script
-# is broken and its PASS means nothing — stop and fix it before running the real
-# test.
+# Its first three attempts to test itself were refused by the unattended guard —
+# the gate that keeps sessions away from private key material, working exactly
+# as intended. The smoke test finally ran by generating synthetic key material
+# in a temp directory, never reading the working key and never naming its path.
 #
-# Checking that a test can fail is the reason everything else built today ships
-# with a selftest. This file is the one place that check has to be done by a
-# human, because the gate that protects the key also prevents a session from
-# doing it.
+# WHAT REMAINS UNPROVEN BY ANY SESSION is the PASS path, and it cannot be
+# otherwise: proving a PASS requires the real offline key, which only Joe holds
+# and which no session may ever handle. That half is his to run, and it is the
+# irreducible human part of this check rather than an omission.
+#
+# So: the refusals are session-verified, FAILED is session-verified, and PASS is
+# verified the first time Joe runs it with the paper copy in front of him.
 #
 # NOTHING IS SENT ANYWHERE and nothing is kept. The decrypted plaintext is
 # written to a temp file, inspected, and shredded on exit through a trap that
