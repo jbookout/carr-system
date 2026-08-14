@@ -3291,6 +3291,57 @@ export const TOOLS = {
     }),
   },
 
+  // [loop #383] Found by the 2026-08-14 health audit: L-118 and L-135 are live
+  // clients stuck on lead_stage 'nurture_drip' mid-deal, still on the receiving
+  // end of the prospecting newsletter, because nothing in the 89-verb registry
+  // could move an EXISTING lead's stage. new-lead and promote-pool are
+  // creation-only. log-outreach's disposition step touches lead.stage too, but
+  // only on the two CLOSING outcomes (not_interested -> closed_lost,
+  // do_not_contact -> do_not_contact) — there was no way to move a lead FORWARD
+  // through its own funnel, or to correct one an import or a stuck drip left
+  // behind. update-lead is that writer.
+  "update-lead": {
+    write: true,
+    description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, lead: { type: "string" },
+      base_version: { type: "integer" },
+      fields: { type: "object", description: "subset of: stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
+      required: ["idempotency_key","lead","base_version","fields"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
+      const s = await resolveSubject(c, args.lead);
+      if (s.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: s });
+      await versionGuard(c, "lead", s.id, args.base_version);
+      const allowed = ["stage","lane","segment","source_type","source_detail","suppressed",
+                       "est_lease_event","next_action_date","notes_path","notes","event_source",
+                       "event_confidence","report_back_due","drip_campaign","drip_added","sf_deal"];
+      const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
+      if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // Pre-validate rather than letting the FK abort the transaction, same reason
+      // new-lead checks stage/lane up front: once the violation fires the
+      // transaction is poisoned and cannot even run the query that would list the
+      // valid slugs, so the caller gets nothing to correct with.
+      for (const [field, table] of [["stage", "lead_stage"], ["lane", "lead_lane"]]) {
+        if (!keys.includes(field) || args.fields[field] === null) continue;
+        const hit = await c.query(`select 1 from ${table} where slug=$1`, [args.fields[field]]);
+        if (!hit.rows.length) {
+          const all = await c.query(`select slug from ${table} order by slug`);
+          throw new ToolError({ error: `unknown_${field}`, got: args.fields[field],
+            valid: all.rows.map(x => x.slug),
+            hint: `${field} is a foreign key into ${table}; pass one of the listed slugs, never the label.` });
+        }
+      }
+      const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [s.id])).rows[0];
+      const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
+      await c.query(`update lead set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
+        [actor.id, ...keys.map(k => args.fields[k]), s.id]);
+      for (const k of keys)
+        await writeEvent(c, actor, "update-lead", "lead", s.id,
+          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
+      return { ok: true, updated: keys };
+    }),
+  },
+
   // [0069, loop #199] The promotion path from evidence to live contact data. Before
   // this verb, record-finding could store a verified cell/email/title beside the
   // record but NOTHING could write it onto the party — contact-enrichment-weekly
