@@ -113,7 +113,28 @@ if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
     echo "  pre-push: CARR_SKIP_CI=1 — quality checks skipped for this command" >&2
   else
     echo "  pre-push: running ops/ci.sh before this push leaves the machine…" >&2
-    if ! "$REPO_ROOT/ops/ci.sh"; then
+    # STRIP THE HOOK'S GIT ENVIRONMENT BEFORE RUNNING CI, and this is not hygiene —
+    # it is the fix for a bug that destroyed local main on 2026-08-14.
+    #
+    # Git exports GIT_DIR (and usually GIT_INDEX_FILE) to every hook. Those
+    # variables OVERRIDE cwd for any child `git` process. CI runs selftests that
+    # build throwaway repositories with tempfile.mkdtemp and then call git with
+    # cwd set to that temp path — which is correct, sandboxed code, and which git
+    # ignored entirely here, because GIT_DIR pointed at the live repository.
+    #
+    # So every one of those fixture commits landed on the LIVE checkout, on
+    # whatever branch happened to be current. The damage, found by a peer session:
+    # local main sitting on a commit whose tree held THREE files, six commits ahead
+    # of origin, five of them selftest artifacts named "seed", "seed unrelated" and
+    # one stamped with the fixture hash +deadbeef, with all 818 paths staged as
+    # additions — so any commit from any session would have swept the whole repo
+    # under one message. Origin was never touched; recovery was a mixed reset.
+    #
+    # The selftests were never wrong. The environment they inherited was.
+    env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX \
+        -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+        sh -c 'exec "$0"' "$REPO_ROOT/ops/ci.sh"
+    if [ $? -ne 0 ]; then
       cat >&2 <<'EOF'
 
   ────────────────────────────────────────────────────────────────
