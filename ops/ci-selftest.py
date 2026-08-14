@@ -395,6 +395,66 @@ def test_dep_check_detects_a_stale_lock():
         check("a comment-only edit does NOT invalidate the lock", p.returncode == 0)
 
 
+def test_typecheck_catches_a_seeded_type_error():
+    """The typecheck class must REFUSE a type error, not merely exist.
+
+    The class landed in #60 and was proven to block by hand. The permanent test
+    was not written, and this is the class that most needs one, because #60's own
+    commit message records that its FIRST attempt at that proof was a FALSE PASS:
+    the seed was appended to tools/health-check.py, whose module body ends in
+    sys.exit(rc). Everything after a NoReturn call at module level is unreachable
+    and mypy does not check unreachable code, so the test was measuring dead
+    code while reporting that the gate worked.
+
+    That is precisely the failure ci-selftest.py exists to catch — a check that
+    reports green having examined nothing — and a hand-run proof does not stop it
+    coming back. Hence: its own file, module level, asserted both ways.
+
+    Module level is load-bearing. mypy.ini sets check_untyped_defs = False, so
+    an error inside an unannotated function body is not reported at all and this
+    test would pass for the wrong reason a second time.
+    """
+    fixture = "tools/_ci_selftest_typecheck_fixture.py"
+    with seeded_paths(fixture):
+        rc, out = run(["--only", "typecheck"])
+        check("typecheck passes on the committed tree", rc == 0,
+              f"rc={rc} out={out[-400:]}")
+
+        (REPO / fixture).write_text(
+            "# fixture written by ops/ci-selftest.py — removed on exit.\n"
+            "# Module level on purpose: check_untyped_defs = False means an error\n"
+            "# inside an unannotated function body would not be reported.\n"
+            "x: int = 'not an int'\n")
+        rc, out = run(["--only", "typecheck"])
+        check("a seeded type error makes the typecheck class FAIL", rc == 1,
+              f"rc={rc} out={out[-400:]}")
+        check("the failing run names the typecheck class",
+              "typecheck" in ANSI.sub("", out).lower(), f"out={out[-400:]}")
+
+    rc, out = run(["--only", "typecheck"])
+    check("removing the seed turns the class green again", rc == 0,
+          f"rc={rc} out={out[-400:]}")
+
+
+def test_type_check_script_resolves_mypy_in_both_homes():
+    """bin/type-check.sh runs in two environments and must not fork.
+
+    Joe's Mac has a .venv; the GitHub runner pip-installs requirements.lock into
+    the system python and has none. The script prefers the venv and falls back to
+    PATH. Absent mypy exits 78 (EX_CONFIG), which the nightly chain reads as SKIP
+    and --strict then refuses in CI — so the check cannot go quietly missing,
+    which is the distinction rule 88e9b5eb draws between "not possible" and
+    "not authorized".
+    """
+    src = (REPO / "bin" / "type-check.sh").read_text()
+    check("type-check.sh falls back to mypy on PATH", "command -v mypy" in src)
+    check("absent mypy exits 78 (EX_CONFIG), not 0", "exit 78" in src)
+    check("mypy is pinned in the lockfile so the runner has it",
+          "mypy==" in (REPO / "requirements.lock").read_text())
+    check("ci.sh's typecheck class calls the script rather than mypy directly",
+          "bin/type-check.sh" in CI.read_text())
+
+
 def test_lock_is_not_platform_specific():
     """pip freeze drops environment markers, which made the lock Mac-only and
     killed the first CI run on pyobjc. Anything darwin-only must carry its
@@ -512,6 +572,8 @@ def main():
                test_tracked_scripts_are_executable_in_git,
                test_secret_scanner_catches_and_respects_allow,
                test_dep_check_detects_a_stale_lock,
+               test_typecheck_catches_a_seeded_type_error,
+               test_type_check_script_resolves_mypy_in_both_homes,
                test_lock_is_not_platform_specific,
                test_migration_filenames_match_the_runner,
                test_known_gaps_all_expire,

@@ -5,8 +5,14 @@
 # it catches shape mistakes in data hand-offs (text where a date should be,
 # None where a row was assumed), not truth mistakes — output verification
 # (protocol rule 28) remains the real safety net above this.
-# 19 legacy files are grandfathered with "# mypy: ignore-errors" headers, each
-# carrying its own removal instruction; coverage densifies as sessions touch them.
+# THE GRANDFATHER LIST IS EMPTY (verified 2026-08-14). This header used to say
+# "19 legacy files are grandfathered with # mypy: ignore-errors headers"; those
+# headers were self-removing and every one of them has since been removed, so
+# the sweep now covers every file it names with no exemptions at all. Stating
+# the CONDITION rather than a count, per rule b01edd26 — the old number went
+# stale silently, and it told sessions a legacy-noise bucket existed, which is
+# the one place a real regression can be waved off as already known.
+# If you add an exemption, say why here; a green run means green everywhere.
 # Manual path is THE SAME script (rule a8c55a47): ./bin/type-check.sh
 # Risk color GREEN: read-only, writes nothing, sends nothing.
 # WHERE mypy COMES FROM, and why this is not just ./.venv/bin/mypy any more.
