@@ -30,6 +30,7 @@ Exit 1 on any hit, so the refresh logs a FAIL instead of a silent OK.
 import os
 import re
 import sys
+from glob import glob
 
 MARKERS = ("<parameter", "</parameter", "<invoke", "</invoke")
 
@@ -40,12 +41,30 @@ ALLOWED = "Assert no field contains"
 
 
 def find_vault():
-    for base in (os.path.expanduser(
-            "~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
-            "My Drive/CARR AI"),):
-        if os.path.isdir(base):
-            return base
-    return None
+    """Resolve the render root without assuming Joe's Google account.
+
+    This used to hardcode GoogleDrive-joe.bookout.carr.us@gmail.com as its only
+    candidate, which made the check a FALSE GREEN anywhere else: no match ->
+    find_vault() returns None -> main() prints "SKIP vault not reachable" and
+    returns 0 -> bin/refresh-rules.sh, the one sanctioned way to refresh the
+    rules, reads that as a pass. Dell's Mac is a different Google account, so
+    the check that exists to keep tool-call markup out of the rules would have
+    passed there without ever opening a file. Same resolver as
+    ops/rule-enforcement-map-check.py: CARR_VAULT wins, then any GoogleDrive-*
+    account, then the legacy ~/My Drive path.
+    """
+    configured = os.environ.get("CARR_VAULT")
+    if configured:
+        expanded = os.path.abspath(os.path.expanduser(configured))
+        return expanded if os.path.isdir(expanded) else None
+    home = os.path.expanduser("~")
+    hits = sorted(glob(os.path.join(
+        home, "Library", "CloudStorage", "GoogleDrive-*", "My Drive", "CARR AI"
+    )))
+    legacy = os.path.join(home, "My Drive", "CARR AI")
+    if os.path.isdir(legacy):
+        hits.append(legacy)
+    return hits[0] if hits else None
 
 
 def main() -> int:

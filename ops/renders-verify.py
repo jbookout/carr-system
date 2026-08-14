@@ -64,7 +64,13 @@ def main() -> int:
         return 2
 
     # map target -> vault path via the exporter registry (parsed like the gate does)
-    sys.path.insert(0, os.path.expanduser("~/carr-system"))
+    # Script-relative, NOT expanduser("~/carr-system"). On a clone outside $HOME
+    # the exporters import below failed, this printed "SKIP: registry
+    # unreadable" and returned 2 — so the render-TAMPER detector reported itself
+    # skipped instead of running. ci.sh's own doctrine is that skipped is not
+    # passed; a path bug must not be what decides which one this is.
+    sys.path.insert(0, os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")))
     try:
         from exporters.targets import TARGETS
         paths = {k: rel for k, (rel, _fn) in TARGETS.items()}

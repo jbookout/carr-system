@@ -16,7 +16,12 @@ import os
 import re
 import sys
 
-REPO = os.path.expanduser("~/carr-system")
+# Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
+# (tests) and c4d040d (gates). exporters/targets.py already locates THIS script
+# script-relative and then runs it, so on a clone outside $HOME the caller found
+# the file and the file crashed on open(REPO/mcp-server/src/tools.js), taking
+# the abilities export down with it.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def verbs():
