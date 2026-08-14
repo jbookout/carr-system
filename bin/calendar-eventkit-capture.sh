@@ -108,9 +108,28 @@ SCANNED="$(printf '%s' "$RUN_LOG" | sed -n 's/.*events scanned: \([0-9]*\).*/\1/
 echo "calendar-capture: read OK — ${SCANNED:-?} events scanned"
 
 # ---------------------------------------------------------------- 2. the match
+# The matcher's stderr is KEPT, not discarded. The first launchd fire of this
+# job failed with "the matcher did not complete" and nothing else, because this
+# line sent the reason to /dev/null — a job reporting a failure it has already
+# thrown away, which is the same shape as answering emptily instead of refusing.
 MATCH_JSON="$REPO/out/calendar-touch-proposals.json"
-if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json > "$MATCH_JSON" 2>/dev/null; then
-  echo "calendar-capture: FAIL the matcher did not complete" >&2; exit 1
+MATCH_ERR="$REPO/out/calendar-matcher.err"
+if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json \
+        > "$MATCH_JSON" 2> "$MATCH_ERR"; then
+  echo "calendar-capture: FAIL the matcher did not complete" >&2
+  sed 's/^/    /' "$MATCH_ERR" >&2
+  # The matcher reads the local Calendar database directly, which is a SEPARATE
+  # macOS permission from the EventKit read above: Full Disk Access, granted to
+  # the responsible process. A launchd agent's responsible process is not the
+  # terminal that was granted it, so a read that works by hand can still fail
+  # here — name that plainly rather than leaving a bare "did not complete".
+  if grep -qiE "operation not permitted|unable to open|authoriz|permission" "$MATCH_ERR"; then
+    echo "  This reads the local Calendar database, which needs FULL DISK ACCESS" >&2
+    echo "  for the process launchd runs — a separate grant from the calendar" >&2
+    echo "  permission the bundle already holds." >&2
+    exit 4
+  fi
+  exit 1
 fi
 
 "$PY" - "$MATCH_JSON" "$DRY" "$DAYS" <<'PYEOF'
