@@ -172,6 +172,49 @@ case("Codex non-CARR cwd cannot target tilde CARR", codex_exec(
     "const r = await tools.exec_command({cmd: 'rm -rf ~/carr-system/lib'});",
     "/private/tmp"), DENY)
 
+# ── DESCRIBING A DESTRUCTIVE COMMAND IS NOT RUNNING ONE ──────────────────────
+#
+# Extends the carve-out this guard already makes for SQL keywords in prose
+# (loop #240): the patterns stay exactly as strict, and are simply consulted
+# against the part of the command the shell will actually EXECUTE. A quoted
+# --body and a heredoc body are handed to a program as bytes.
+#
+# Measured, not theorised. On 2026-08-14 this guard refused a pull-request
+# comment whose body reported fixing the very command it named, minutes after
+# the sibling writer gate was fixed for the identical category error. The
+# workaround both times was to move the text into a file, which is how a gate
+# teaches people to route around it.
+#
+# BOTH DIRECTIONS ARE PINNED BELOW, because a carve-out tested only on the
+# side that permits is how a fail-closed guard quietly stops closing.
+case("a --body describing a forced clean is allowed",
+     bash('gh pr comment 134 --body "verified: git clean -fd is refused here"'), ALLOW)
+case("a --body describing a hard reset is allowed",
+     bash('gh pr create --body "the gate catches git reset --hard origin/main"'), ALLOW)
+case("a --body describing a force push is allowed",
+     bash('gh pr create --title "x" --body "never git push --force to main"'), ALLOW)
+case("a --body describing a recursive delete is allowed",
+     bash('gh issue comment 9 --body "do not run rm -rf on the vault"'), ALLOW)
+case("a heredoc describing a forced clean is allowed",
+     bash('cat <<\'EOF\'\ngit clean -fd wipes untracked work\nEOF'), ALLOW)
+
+case("a real forced clean is still refused",
+     bash("git clean -fd"), DENY)
+case("a real forced clean AFTER a described one is still refused",
+     bash('gh pr create --body "about git clean" && git clean -fd'), DENY)
+case("a real hard reset alongside a described one is still refused",
+     bash('git reset --hard origin/main # as the body said'), DENY)
+case("a quoted command that IS executed is still refused",
+     bash('bash -c "git clean -fd"'), DENY)
+case("an unquoted flag argument does not shield what follows",
+     bash("gh pr create --body plain && rm -rf /Users/booko/important"), DENY)
+# The catastrophic labels keep NO prose carve-out, deliberately. A wiped disk
+# is unrecoverable, the phrase is vanishingly rare in honest prose, and the
+# cost of the occasional false refusal there is a rephrase — not the hour a
+# restore costs. Conservatism belongs at the extremes.
+case("a disk format keeps no prose carve-out even in a body",
+     bash('gh pr create --body "never run diskutil eraseDisk JHFS+ X /dev/disk2"'), DENY)
+
 
 def main():
     verbose = "-v" in sys.argv[1:]
