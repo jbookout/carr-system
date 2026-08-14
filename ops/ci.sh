@@ -265,7 +265,21 @@ PYEOF
   done
   # gate-integrity is the baseline check itself: a gate edited without a
   # re-bless in the same commit (rule c0b38d80) fails here.
-  run_quiet "$LOGDIR/gate-integrity.log" "$PY" hooks/gate-integrity.py \
+  #
+  # --strict IS LOAD-BEARING AND WAS MISSING UNTIL 2026-08-14. Without it this
+  # call could never fail: gate-integrity returns 0 on every path including its
+  # failure path, deliberately, because it is also a SessionStart hook and a
+  # boot check that wedges a session is worse than the drift it reports. So
+  # this line announced a baseline check it never performed. Pull request #102,
+  # cut before #99 merged, then overwrote main's baseline and dropped two gates
+  # from it with CI green the whole way. --strict fails on repository-content
+  # findings only (a hash that does not match, a blessed gate gone, a gate
+  # nothing blessed) and never on machine state a runner legitimately lacks.
+  #
+  # THIS IS THE ONLY LAYER THAT CAN CATCH THAT OVERWRITE. The pre-commit
+  # co-change check cannot: the clobber happens inside GitHub's merge, where no
+  # local hook runs.
+  run_quiet "$LOGDIR/gate-integrity.log" "$PY" hooks/gate-integrity.py --strict \
     || { failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
   if [ -n "$failures" ]; then
     bad gates "failed:$failures"

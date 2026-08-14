@@ -603,13 +603,36 @@ def main():
         names = [os.path.basename(a) for a in rest if not a.startswith("-")]
         return bless(names or None)
 
+    # --strict is for CI, and CONTENT is the half of the report it may fail on.
+    #
+    # WHY THE SPLIT EXISTS (found 2026-08-14 by watching it fail). ops/ci.sh has
+    # always called this script and its own comment claimed a gate edited
+    # without a re-bless "fails here". It could not: every path below returns 0,
+    # deliberately, because this is a SessionStart hook and a boot check that
+    # wedges a session is worse than the drift it reports. So CI announced a
+    # baseline check it never performed — and pull request #102, cut before #99
+    # merged, overwrote main's baseline and dropped two gates with CI green the
+    # whole way. The pre-commit co-change check cannot see that one: the
+    # overwrite happens inside GitHub's merge, where no local hook runs, which
+    # leaves CI as the only layer that can catch it.
+    #
+    # CONTENT problems are facts about the repository — a hash that does not
+    # match, a blessed gate gone, a gate nothing blessed. True on every machine
+    # and on a bare runner. ENVIRONMENT problems (live settings wiring, the
+    # Codex adapter, the vault-backed rule map) depend on a configured machine,
+    # and a runner legitimately has none of it. Failing CI on those would get
+    # --strict deleted within a week, and then it protects nothing.
     problems = []
+    content_problems = []
+    strict = "--strict" in sys.argv
 
     if not os.path.exists(BASELINE):
         print("GATE INTEGRITY: no baseline yet — run "
               "`python3 hooks/gate-integrity.py --bless` after reviewing the gates. "
               "Until then, gate tampering is UNDETECTED.")
-        return 0
+        # No baseline at all IS a content fact, and a repository that lost it
+        # must not merge: that is indistinguishable from deleting the evidence.
+        return 1 if strict else 0
 
     base = json.load(open(BASELINE)).get("hashes", {})
     now = current()
@@ -617,24 +640,29 @@ def main():
     base_contracts = baseline_data.get("contracts", {})
     now_contracts = current_contracts()
 
+    def content(problem):
+        """A fact about the repository — the half --strict may fail CI on."""
+        content_problems.append(problem)
+        problems.append(problem)
+
     for name, want in base.items():
         got = now.get(name)
         if got is None:
-            problems.append(f"MISSING: hooks/{name} is GONE — that gate is off")
+            content(f"MISSING: hooks/{name} is GONE — that gate is off")
         elif want and got != want:
-            problems.append(f"CHANGED: hooks/{name} no longer matches the blessed baseline")
+            content(f"CHANGED: hooks/{name} no longer matches the blessed baseline")
     for name, got in now.items():
         if name not in base and got:
-            problems.append(f"UNBLESSED: hooks/{name} exists but is not in the baseline")
+            content(f"UNBLESSED: hooks/{name} exists but is not in the baseline")
     for name, want in base_contracts.items():
         got = now_contracts.get(name)
         if got is None:
-            problems.append(f"MISSING: ops/config/{name} is GONE — its wiring contract is off")
+            content(f"MISSING: ops/config/{name} is GONE — its wiring contract is off")
         elif want and got != want:
-            problems.append(f"CHANGED: ops/config/{name} no longer matches the blessed baseline")
+            content(f"CHANGED: ops/config/{name} no longer matches the blessed baseline")
     for name, got in now_contracts.items():
         if name not in base_contracts and got:
-            problems.append(f"UNBLESSED: ops/config/{name} exists but is not in the baseline")
+            content(f"UNBLESSED: ops/config/{name} exists but is not in the baseline")
 
     map_valid, map_err = rule_enforcement_map_matches_inventory()
     if not map_valid:
@@ -694,8 +722,18 @@ def main():
               "finding: something disabled a gate. On 2026-08-08 a plugin "
               "install silently deleted the entire hooks block and all five "
               "gates were off for a day, found by accident.")
+        if strict and content_problems:
+            print()
+            print("--strict: FAILING on the repository-content findings above. "
+                  "A gate whose baseline entry is missing, stale, or absent must "
+                  "not merge — that is the one drift no local hook can catch, "
+                  "because a stale branch's baseline overwrites main inside "
+                  "GitHub's own merge.")
         print("=" * 70)
-        return 0
+        # Bare invocation ALWAYS returns 0: this is a SessionStart hook and it
+        # must never wedge a session. Only --strict, which nothing interactive
+        # passes, converts a content finding into a failing exit code.
+        return 1 if (strict and content_problems) else 0
 
     # THE BANNER STATES THE RULING, IT DOES NOT NAG FOR A REJECTED OPTION.
     #
