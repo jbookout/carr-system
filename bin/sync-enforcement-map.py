@@ -122,6 +122,21 @@ def git_in(worktree: str, *args, extra_env: dict | None = None):
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
+def read_owned(path: str) -> str | None:
+    """The current bytes of one owned path, or None if it cannot be read.
+
+    None is returned rather than raising so a vanished or unreadable file can
+    never take the hourly refresh down; it simply compares unequal to whatever
+    this run derives, which lands it in the conservative branch — treated as
+    another writer's and left alone.
+    """
+    try:
+        with open(os.path.join(REPO, path), encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
 def dirty_owned() -> list[str]:
     """Which of OWNED already have uncommitted changes, before this run writes.
 
@@ -196,7 +211,11 @@ def publish_via_branch(summary: str, preexisting: list[str]) -> None:
     # local HEAD on a busy machine is not what the repository actually holds.
     rc, _ = git("diff", "--quiet", "origin/main", "--", *OWNED)
     if rc == 0:
-        restore_owned()
+        # Already upstream — the pull request from an earlier run has merged. The
+        # working copies are LEFT AS THEY ARE and deliberately not restored to
+        # HEAD: on a busy machine HEAD is routinely behind origin/main, so
+        # restoring would overwrite correct content with a stale copy and put
+        # this machine straight back out of parity.
         print("sync-enforcement-map: pair already matches origin/main — nothing to publish")
         return
 
@@ -250,22 +269,32 @@ def publish_via_branch(summary: str, preexisting: list[str]) -> None:
         print(f"sync-enforcement-map: pushed the pair to {GATES_BRANCH}")
         open_or_note_pr(summary)
     finally:
+        # ONLY the throwaway worktree is cleaned up. The derived pair STAYS in the
+        # canonical tree — see below.
         git("worktree", "remove", "--force", wt)
         shutil.rmtree(tmp, ignore_errors=True)
-        restore_owned()
 
 
-def restore_owned() -> None:
-    """Put the canonical tree's copies back to HEAD, leaving it clean.
-
-    The content is not lost — it is on the branch and in the pull request. What
-    this prevents is the canonical checkout sitting permanently dirty on two
-    files, which would make the NEXT run's dirty_owned() read them as another
-    writer's in-flight work and refuse to sync for ever after.
-    """
-    rc, out = git("checkout", "--", *OWNED)
-    if rc != 0:
-        print(f"sync-enforcement-map: WARN could not restore the working copies — {out}")
+# THE PAIR IS LEFT IN PLACE, and restoring it was a real outage in miniature.
+#
+# The first version of this branch-publishing path restored the working copies to
+# HEAD after pushing, so the canonical tree stayed clean. That looked tidy and was
+# wrong: the map went straight back to its stale content, the parity checker kept
+# failing, and hooks/gate-integrity.py therefore told EVERY session at boot that
+# the enforcement layer had changed and the gates must not be treated as in force.
+# Observed within minutes of shipping it, 2026-08-14.
+#
+# The pair is derived data whose whole purpose is to be correct ON THIS MACHINE.
+# It does not need to be committed here to be right, it needs to be PRESENT. So
+# the derived content stays, this machine is in parity immediately, and the commit
+# travels separately through the branch and its pull request.
+#
+# The cost is that the canonical tree carries two modified files until that pull
+# request merges and the tree pulls — minutes, not for ever, and self-clearing:
+# once origin/main holds the same content the run above returns early without
+# touching anything. dirty_owned() alone could not tell that leftover apart from
+# another writer's edit, which is why main() now compares CONTENT rather than
+# just asking which paths are dirty.
 
 
 def open_or_note_pr(summary: str) -> None:
@@ -338,7 +367,18 @@ def main() -> int:
     # Captured BEFORE anything is written: once this script edits the pair they
     # are dirty by definition, so the only moment we can tell our own change
     # apart from another writer's is right now.
-    preexisting = dirty_owned()
+    #
+    # CONTENT, NOT JUST THE PATH LIST, since 2026-08-14. The pair is now left in
+    # place after publishing rather than restored (see publish_via_branch), so on
+    # the next run the previous run's OWN output is sitting there dirty. A guard
+    # that reads any dirty owned file as another writer's work would then refuse
+    # for ever, and the map would never sync again — which is worse than the
+    # divergence it was protecting against, because a stale map makes every
+    # session boot believing the gates are not in force.
+    #
+    # The discriminator is what the file SAYS. Held here and compared against
+    # what this run derives; if they match, that dirt is ours.
+    before = {p: read_owned(p) for p in dirty_owned()}
 
     data = json.load(open(map_path()))
     inventory = data.get("active_rule_ids") or {}
@@ -421,6 +461,12 @@ def main() -> int:
     if "--no-commit" in sys.argv:
         print("sync-enforcement-map: --no-commit given; leaving the pair modified")
         return 0
+
+    # NOW the two-writer question can be answered honestly: a path that was dirty
+    # before this run counts as another writer's only if what it held DIFFERS
+    # from what this run just derived. Identical content is this job's own
+    # previous output, left in place deliberately.
+    preexisting = [p for p, was in before.items() if was != read_owned(p)]
     publish_via_branch("; ".join(summary_bits), preexisting)
     return 0
 

@@ -179,12 +179,18 @@ check("the pair reached the gates branch on origin",
       ["ops/config/gate-baseline.json", "ops/config/rule-enforcement-map.json"],
       f"branch carries {origin_branch_files(origin, mod.GATES_BRANCH)}")
 
-# The canonical tree must be left CLEAN. If the two files stayed modified here,
-# the next hour's dirty_owned() would read them as another writer's in-flight
-# work and refuse to sync for ever after — the job would silently stop.
-check("the canonical tree is left clean, not permanently dirty",
-      git(repo, "status", "--porcelain").stdout.strip() == "",
-      f"tree still dirty: {git(repo, 'status', '--porcelain').stdout!r}")
+# THE DERIVED PAIR STAYS IN THE TREE, and this assertion is the reverse of what
+# it said for one afternoon. Restoring the working copies after publishing looked
+# tidy and caused a real outage in miniature: the map reverted to its stale
+# content, the parity checker kept failing, and hooks/gate-integrity.py therefore
+# told EVERY session at boot that the enforcement layer had changed and the gates
+# must not be treated as in force. The pair is derived data whose job is to be
+# correct ON THIS MACHINE — it does not need to be committed here to be right, it
+# needs to be present. The commit travels separately, through the branch.
+check("the derived pair is LEFT in the tree, so this machine is in parity now",
+      '"synced": 1' in open(
+          os.path.join(repo, "ops/config/rule-enforcement-map.json")).read(),
+      "publishing restored the working copy and put the map back to stale")
 
 # Idempotence: a second run with the same content must not stack a second commit
 # on the branch. The hourly schedule makes this the common case, not the edge one.
@@ -196,6 +202,24 @@ check("a repeat run does not stack a second commit on the branch",
                      capture_output=True, text=True, env=fixture_env()
                      ).stdout.strip() == "2",
       "the branch grew a commit per run")
+
+# THE OTHER HALF OF LEAVING IT DIRTY, and the failure it would otherwise cause.
+# The pair now sits modified in the tree between runs. dirty_owned() alone reads
+# any dirty owned file as another writer's in-flight work — so on the very next
+# run the job would refuse, print "a human must commit the pair", and silently
+# stop syncing for ever. main() therefore compares CONTENT: dirt matching what
+# this run derives is its own leftover, not a second writer. Asserted through
+# main() rather than publish_via_branch(), because main() is where that
+# comparison lives and calling the publisher directly would skip it.
+env_run = {**os.environ, "HOME": os.environ.get("HOME", "")}
+before_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+mod.REPO = repo
+rc_second = mod.main()
+check("a second run over its own leftovers does not refuse as 'another writer'",
+      rc_second == 0, f"main() returned {rc_second}")
+check("and that second run committed nothing on the fixture's main",
+      git(repo, "rev-parse", "HEAD").stdout.strip() == before_head,
+      "the second run moved HEAD")
 
 # 2. THE GUARD. Another writer already had the pair modified: refuse outright.
 repo, origin = make_repo()
