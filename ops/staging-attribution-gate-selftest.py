@@ -60,6 +60,13 @@ def fire(cmd, transcript=None, session="selftest"):
 
 
 WHOLESALE_DENY = [
+    # The other direction, so the exemption above cannot widen unnoticed: a REAL
+    # wholesale command sitting after a heredoc is still refused, and an
+    # unterminated heredoc strips nothing at all (the helper fails closed).
+    ("heredoc-then-real-add-all",
+     "git commit -F- <<'MSG'\nharmless prose\nMSG\ngit add -A"),
+    ("heredoc-unclosed-hiding-add-all",
+     "git commit -F- <<'MSG'\ngit add -A"),
     ("add-A", "git add -A"),
     ("add-a", "git add -a"),
     ("add-dot", "git add ."),
@@ -72,6 +79,14 @@ WHOLESALE_DENY = [
 ]
 
 PASS_THROUGH_ALLOW = [
+    # Writing ABOUT whole-tree staging is not doing it. This gate refused a
+    # commit whose own staging was correctly path-named, because the MESSAGE
+    # explained why the wholesale forms are banned — 2026-08-14, on the commit
+    # for the sibling gate's fix for exactly the same defect.
+    ("msg-heredoc-mentions-add-all",
+     "git add hooks/x.py && git commit -q -F- <<'MSG'\nexplain why git add -A is banned\nMSG"),
+    ("msg-dash-m-mentions-commit-a",
+     "git add hooks/x.py && git commit -m 'why git commit -am is refused'"),
     ("status", "git status --short"),
     ("log", "git log --oneline -5"),
     ("not-git", "python3 ops/conduct-gate-selftest.py"),
