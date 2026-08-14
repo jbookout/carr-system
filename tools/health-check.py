@@ -1551,4 +1551,36 @@ except Exception as e:
     print(f"  ⚠︎ deploy provenance check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# --- worktrees (2026-08-14) ---------------------------------------------------
+# A worktree that never gets reaped is not a fault by itself, but the count was
+# the FIRST symptom noticed of the underlying gap: 22 existed live the day this
+# was written, 10 with branches already merged into origin/main, one 443 commits
+# behind. This row is not a metric without a bound action (rule 590b11e1) — it
+# runs the real sweep in --dry-run (read-only, nothing removed) and reports
+# exactly what ./run.sh worktree --sweep would do, computed live every time
+# rather than a count anyone could let go stale.
+print("\nworktrees")
+try:
+    _wt_sh = os.path.join(REPO_ROOT, "bin", "worktree.sh")
+    if not os.path.exists(_wt_sh):
+        print("  -- worktrees          bin/worktree.sh not present; skipped")
+    else:
+        _wtp = subprocess.run(["zsh", _wt_sh, "--sweep", "--dry-run"],
+                               cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
+        _wtm = re.search(r"(\d+) total, (\d+) reaped, (\d+) kept", _wtp.stdout)
+        if _wtp.returncode != 0 or not _wtm:
+            print(f"  ⚠︎ worktrees          sweep --dry-run failed or unparseable · on breach: "
+                  f"run ./run.sh worktree --sweep --dry-run by hand and read the output")
+            rc = 1
+        else:
+            _wt_total, _wt_reaped, _wt_kept = _wtm.groups()
+            if int(_wt_reaped) > 0:
+                print(f"  → worktrees          {_wt_total} total, {_wt_reaped} reapable, "
+                      f"{_wt_kept} kept · ./run.sh worktree --sweep")
+            else:
+                print(f"  OK worktrees          {_wt_total} total, 0 reapable")
+except Exception as e:
+    print(f"  ⚠︎ worktrees check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)

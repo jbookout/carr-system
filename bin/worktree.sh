@@ -36,8 +36,32 @@
 # here prevents that — it is a convention, stated because an unstated one is how
 # this morning's failures happened.
 #
+# TWO LIFECYCLE GAPS, closed 2026-08-14 with nine sessions running concurrently:
+#
+#   CREATE PATH FRESHNESS. A new worktree branched from LOCAL main, which
+#   nothing on a busy machine keeps fresh — a fresh worktree's diff landed
+#   against a stale base and misdiagnosed what had actually changed. The
+#   create path now fetches origin before deciding a base, and defaults NEW
+#   branches to origin/main when it exists. `--from` still overrides outright;
+#   attaching an EXISTING branch is unchanged (there is no base to pick).
+#
+#   --sweep. Nothing ever reaped a finished worktree — 22 existed live when
+#   this was written, 10 with branches already merged into origin/main, one
+#   443 commits behind. `--sweep [--dry-run]` reaps a worktree only when ALL
+#   THREE hold: its branch is an ancestor of origin/main, its tree is clean
+#   (the identical test --remove uses), and no file in it was touched in the
+#   last 48 hours (the guard against reaping a live session's tree — a session
+#   touches its worktree by editing files, which is the one signal that
+#   cannot be faked by git metadata living outside the tree). It removes
+#   through the SAME code --remove uses (rule a8c55a47: a manual path and an
+#   automated path doing the same job must be the same code), so an automatic
+#   reap carries the identical dirty-refusal and restore-on-refusal safety as
+#   a removal Joe types by hand.
+#
 # Risk colour GREEN: creates a checkout and two symlinks, writes nothing outside
-# the repo, sends nothing.
+# the repo, sends nothing. --sweep additionally REMOVES worktrees, but only
+# ones already proven merged, clean, and idle — the same removal --remove
+# already performs on request.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,17 +74,26 @@ CANON="${CANON:h}"                      # strip the trailing /.git
 [ -d "$CANON" ] || CANON="$REPO"
 HOME_DIR="$CANON/.claude/worktrees"     # the convention already in use here
 
+# Same resolution ops/ci.sh uses: prefer the venv, fall back to whatever
+# python3 is on PATH. Only used for the 48h idle scan (newest_mtime_age_h
+# below) — everything else in this script is plain git/POSIX.
+PY="$CANON/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
 # NEVER NAME A VARIABLE `path` IN ZSH. It is tied to the PATH array, so a scalar
 # assignment silently destroys the command search path — the first cut of this
 # script did exactly that and died on "command not found: mkdir" three lines
 # later, with nothing in the error pointing at the cause. Hence `wt` throughout.
 
 usage() {
-  print -r -- "usage: run.sh worktree <name> [--from <base>]   create (branch = <name>)"
+  print -r -- "usage: run.sh worktree <name> [--from <base>]   create (branch = <name>;"
+  print -r -- "                                                base defaults to origin/main)"
   print -r -- "       run.sh worktree --list                   show every worktree"
   print -r -- "       run.sh worktree --remove <name|path>     remove one (refuses if dirty)"
   print -r -- "                                                a name resolves under $HOME_DIR;"
   print -r -- "                                                a path reaches trees anywhere"
+  print -r -- "       run.sh worktree --sweep [--dry-run]      reap merged+clean+idle(48h) trees"
+  print -r -- "                                                through the same code as --remove"
   exit 2
 }
 
@@ -72,6 +105,127 @@ link() {                                # link <target> <linkname>
   fi
   ln -sfn "$target" "$name"
   print -r -- "  ok  $(basename "$name") -> $target"
+}
+
+# ---------------------------------------------------------------------------
+# REMOVAL PLUMBING — shared by --remove and --sweep, so a worktree reaped
+# automatically goes through the EXACT code path a worktree removed by hand
+# goes through (rule a8c55a47). PLUMBING_DROPPED is a single scratch global
+# rather than a returned/parsed value on purpose: this script is strictly
+# sequential (one removal happens at a time, start to finish, before the next
+# begins), so a scratch global is simpler and safer than threading an array
+# through a command substitution — `${(@f)$(...)}` on TRULY empty output is a
+# known zsh footgun (it can yield one empty-string element instead of zero),
+# which would hand restore_plumbing a bogus name and `ln -sfn` a bare
+# "$CANON/" target. A global array populated by a plain for-loop cannot do
+# that: unset, it is simply empty.
+typeset -ga PLUMBING_DROPPED
+
+# drop_plumbing <wt> — drop THIS SCRIPT's own untracked symlinks (.venv, out,
+# mcp-server/node_modules) so the dirty-check below judges the session's own
+# work, not this script's handiwork. Sets PLUMBING_DROPPED to what it actually
+# dropped (may be empty).
+#
+# UNTRACKED IS THE TEST, NOT -L. The original test was `[ -L ]` alone, on the
+# reasoning that only a symlink is ever unlinked so a genuine .venv is kept
+# and correctly reported dirty. A TRACKED symlink is still a symlink, so that
+# reasoning has a hole: dropping one deletes a tracked file, which makes the
+# tree dirty and fires the refusal on dirt this script just created. Branch
+# dealroom-chrome-tidy tracks .venv and hit exactly that on 2026-08-13 —
+# refused, and left without its .venv either way. Asking git whether the path
+# is tracked closes it: plumbing this script made is untracked by definition,
+# so anything tracked is somebody's work and is never touched.
+drop_plumbing() {
+  local wt="$1" l
+  PLUMBING_DROPPED=()
+  for l in .venv out mcp-server/node_modules; do
+    if [ -L "$wt/$l" ] && ! git -C "$wt" ls-files --error-unmatch "$l" >/dev/null 2>&1; then
+      rm "$wt/$l" && PLUMBING_DROPPED+=("$l")
+    fi
+  done
+}
+
+# restore_plumbing <wt> — put back exactly what the last drop_plumbing took.
+# RESTORE ON ANY PATH THAT DOES NOT REMOVE, always: the first version of this
+# script returned the tree minus its .venv on a refusal, so the next command
+# run in there failed on a path that was simply not there — the same
+# invisible breakage the create path exists to prevent.
+restore_plumbing() {
+  local wt="$1" l
+  for l in "${PLUMBING_DROPPED[@]}"; do ln -sfn "$CANON/$l" "$wt/$l"; done
+}
+
+# is_dirty <wt> — exit 0 if the tree has uncommitted work. Call only AFTER
+# drop_plumbing, or this script's own symlinks read as somebody's work.
+is_dirty() { [ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ]; }
+
+# dirty_count <wt> — number of dirty-status lines, for --sweep's report only.
+dirty_count() { git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d ' '; }
+
+# newest_mtime_age_h <wt> — hours since the newest file mtime in <wt>,
+# excluding the three symlinked plumbing dirs. This IS the 48h guard against
+# reaping a live session's tree: a session interacts with its worktree by
+# editing files, and edits land inside <wt> itself — the shared gitdir under
+# $CANON/.git/worktrees/<name>/ does NOT live in <wt>, so `git status`,
+# `git fetch`, even a commit's ref update, do not move this number; only a
+# real file edit does. Piped through Python for portability: ops/ci.sh runs
+# this repo's suites on a GitHub ubuntu runner too, and BSD `stat -f` (used
+# elsewhere in this repo, e.g. bin/nightly.sh) is macOS-only.
+newest_mtime_age_h() {
+  "$PY" - "$1" <<'PYEOF'
+import os, sys, time
+root = sys.argv[1]
+skip = {os.path.join(root, "out"), os.path.join(root, ".venv"),
+        os.path.join(root, "mcp-server", "node_modules")}
+newest = 0.0
+for dirpath, dirnames, filenames in os.walk(root):
+    if dirpath in skip:
+        dirnames[:] = []
+        continue
+    dirnames[:] = [d for d in dirnames if os.path.join(dirpath, d) not in skip]
+    for f in filenames:
+        p = os.path.join(dirpath, f)
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if mt > newest:
+            newest = mt
+print(f"{(time.time() - newest) / 3600:.2f}" if newest else "999999")
+PYEOF
+}
+
+# remove_one <wt> <name> <dry:0|1> — THE removal code. --remove calls this
+# directly; --sweep calls it too. REFUSE ON DIRTY, always, and restore the
+# plumbing BEFORE printing, never after: putting it after made the tree's
+# repair depend on surviving output — a caller piping this to `head` closes
+# the pipe after two lines, the third print takes SIGPIPE, and the script
+# dies before it can put the links back (found 2026-08-13, only reproduced
+# under a pipe). Returns 0 on removed-or-would-remove, 1 on refused/failed.
+remove_one() {
+  local wt="$1" name="$2" dry="${3:-0}"
+  drop_plumbing "$wt"
+  if is_dirty "$wt"; then
+    restore_plumbing "$wt"
+    print -r -- "REFUSED — $name has uncommitted work:"
+    git -C "$wt" status --porcelain | sed 's/^/    /'
+    print -r -- "Commit it there (naming paths), or remove the directory yourself if it is truly scrap."
+    return 1
+  fi
+  if [ "$dry" = "1" ]; then
+    restore_plumbing "$wt"
+    print -r -- "would remove $name (branch kept)"
+    return 0
+  fi
+  # The other non-removing path: git itself can refuse (a submodule, a locked
+  # worktree, a file it cannot delete). Same rule as the dirty refusal — a
+  # tree that survives keeps its plumbing.
+  if git -C "$CANON" worktree remove "$wt"; then
+    print -r -- "removed $name (branch kept)"
+    return 0
+  fi
+  restore_plumbing "$wt"
+  return 1
 }
 
 [ $# -ge 1 ] || usage
@@ -113,68 +267,142 @@ case "$1" in
       print -r -- "  ./run.sh worktree --list   shows the ones that are"
       exit 2
     fi
-    # Drop the symlinks THIS script created, before judging the tree dirty.
-    # They are plumbing, not work, and leaving them in made the dirty-check
-    # refuse its own handiwork — caught on the first live removal.
-    #
-    # UNTRACKED IS THE TEST, NOT -L. The original test was `[ -L ]` alone, on
-    # the reasoning that only a symlink is ever unlinked so a genuine .venv is
-    # kept and correctly reported dirty. A TRACKED symlink is still a symlink,
-    # so that reasoning has a hole: dropping one deletes a tracked file, which
-    # makes the tree dirty and fires the refusal below on dirt this script has
-    # just created. Branch dealroom-chrome-tidy tracks .venv and hit exactly
-    # that on 2026-08-13 — refused, and left without its .venv either way.
-    # Asking git whether the path is tracked closes it: plumbing this script
-    # made is untracked by definition, so anything tracked is somebody's work
-    # and is never touched.
-    typeset -a dropped; dropped=()
-    for l in .venv out mcp-server/node_modules; do
-      if [ -L "$wt/$l" ] && ! git -C "$wt" ls-files --error-unmatch "$l" >/dev/null 2>&1; then
-        rm "$wt/$l" && dropped+=("$l")
+    # The drop-symlinks / dirty-refusal / remove-or-restore sequence used to
+    # live inline here. It is now remove_one (defined above), shared with
+    # --sweep, so a worktree reaped automatically goes through the identical
+    # code a worktree removed by hand goes through (rule a8c55a47).
+    remove_one "$wt" "$name" 0
+    exit $?
+    ;;
+  --sweep)
+    shift
+    dry=0
+    case "${1:-}" in
+      --dry-run) dry=1; shift ;;
+    esac
+    [ $# -eq 0 ] || usage
+
+    # STEP 1: prune. Clears registered entries whose directory is already gone
+    # from disk — there is nothing left to lose, so this runs even under
+    # --dry-run; a dangling administrative entry is bookkeeping, not work.
+    git -C "$CANON" worktree prune
+
+    # STEP 2: fetch, so "merged into origin/main" means TODAY's origin/main,
+    # not whatever this machine last happened to see — same warn-and-continue
+    # as the create path below. An offline sweep reports against the last
+    # known origin/main rather than refuse outright.
+    if ! git -C "$CANON" fetch -q origin; then
+      print -r -- "  !! fetch origin failed (offline?) — sweeping against last-known origin/main"
+    fi
+    have_origin_main=0
+    git -C "$CANON" show-ref --verify --quiet "refs/remotes/origin/main" && have_origin_main=1
+
+    total=0
+    reaped=0
+    kept=0
+
+    # Parse `git worktree list --porcelain` by hand: a block is
+    #   worktree <path>  [bare]  HEAD <sha>  [branch refs/heads/<name>]  <blank>
+    # flush_entry handles one finished block. The loop calls it right before
+    # starting the NEXT block; one more call after the loop handles the last
+    # block, since there is no trailing blank `worktree` line to trigger it.
+    cur_path=""
+    cur_head=""
+    cur_branch=""
+    cur_bare=0
+
+    flush_entry() {
+      [ -n "$cur_path" ] || return 0
+      local p="$cur_path" head="$cur_head" branch="$cur_branch" bare="$cur_bare"
+      cur_path=""; cur_head=""; cur_branch=""; cur_bare=0
+
+      [ "${p:A}" = "${CANON:A}" ] && return 0   # never the canonical tree
+      [ "$bare" = "1" ] && return 0              # no working tree to judge
+      [ -d "$p" ] || return 0                    # prune (above) should have caught this
+
+      total=$((total+1))
+      local nm="${p:t}"
+
+      # condition (i): branch tip is an ancestor of origin/main
+      local merged=0 ahead="?" behind="?"
+      if [ -n "$branch" ] && [ "$have_origin_main" = "1" ]; then
+        git -C "$CANON" merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/main" \
+          2>/dev/null && merged=1
+        local ab
+        ab="$(git -C "$CANON" rev-list --left-right --count \
+              "refs/heads/$branch...refs/remotes/origin/main" 2>/dev/null)"
+        ahead="${ab%%$'\t'*}"; behind="${ab##*$'\t'}"
       fi
-    done
-    # RESTORE ON ANY PATH THAT DOES NOT REMOVE. A refusal must leave the tree
-    # exactly as it was found: the first version returned the tree minus its
-    # .venv, so the next command run in there failed on a path that was simply
-    # not there — the same invisible breakage the create path exists to prevent.
-    restore_dropped() {
-      local l
-      for l in $dropped; do ln -sfn "$CANON/$l" "$wt/$l"; done
+
+      # condition (ii): clean, by the SAME test --remove uses (rule a8c55a47)
+      drop_plumbing "$p"
+      local dcount; dcount="$(dirty_count "$p")"
+      restore_plumbing "$p"
+      local dirty=0; [ "${dcount:-0}" != "0" ] && dirty=1
+
+      # condition (iii): idle 48h+
+      local age_h; age_h="$(newest_mtime_age_h "$p")"
+
+      # last-commit age, for the report line only
+      local ref="${branch:+refs/heads/$branch}"
+      [ -z "$ref" ] && ref="$head"
+      local lc_epoch lc_age
+      lc_epoch="$(git -C "$CANON" log -1 --format=%ct "$ref" 2>/dev/null)"
+      if [ -n "$lc_epoch" ]; then
+        lc_age="$(( ( $(date +%s) - lc_epoch ) / 3600 ))h"
+      else
+        lc_age="?"
+      fi
+
+      local branch_label="${branch:-<detached:${head[1,8]}>}"
+      local stat_line
+      stat_line="$(printf '%-24s branch=%-28s last-commit=%-6s %s/%s ahead/behind  dirty=%s' \
+                   "$nm" "$branch_label" "$lc_age" "$ahead" "$behind" "$dcount")"
+
+      if [ -z "$branch" ] || [ "$have_origin_main" != "1" ]; then
+        print -r -- "  KEEP  $stat_line  — cannot verify merge state (detached HEAD or no origin/main)"
+        kept=$((kept+1))
+      elif [ "$merged" != "1" ]; then
+        print -r -- "  KEEP  $stat_line  — unmerged"
+        kept=$((kept+1))
+      elif [ "$dirty" = "1" ]; then
+        print -r -- "  KEEP  $stat_line  — dirty"
+        kept=$((kept+1))
+      elif [ "${age_h%%.*}" -le 48 ]; then
+        print -r -- "  KEEP  $stat_line  — active, touched ${age_h}h ago (<48h guard)"
+        kept=$((kept+1))
+      else
+        print -r -- "  REAP  $stat_line  — merged, clean, idle ${age_h}h"
+        if remove_one "$p" "$nm" "$dry"; then
+          reaped=$((reaped+1))
+        else
+          kept=$((kept+1))
+        fi
+      fi
     }
-    # REFUSE ON DIRTY, always. A worktree exists to hold work in progress, so
-    # removing one is the single most likely way to lose some. The check is
-    # cheap and the failure it prevents is not recoverable from git.
-    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
-      # RESTORE BEFORE PRINTING, never after. Putting it after the messages made
-      # the tree's repair depend on surviving output: a caller piping this to
-      # `head` closes the pipe after two lines, the third print takes SIGPIPE,
-      # and the script dies before it can put the links back — the very damage
-      # this restore exists to prevent, reappearing only under a pipe. Found
-      # 2026-08-13 when a verification run using `| head -2` reported the links
-      # MISSING while the identical unpiped command left them intact.
-      restore_dropped
-      print -r -- "REFUSED — $name has uncommitted work:"
-      git -C "$wt" status --porcelain | sed 's/^/    /'
-      print -r -- "Commit it there (naming paths), or remove the directory yourself if it is truly scrap."
-      exit 1
-    fi
-    # The other non-removing path: git itself can refuse (a submodule, a locked
-    # worktree, a file it cannot delete). Same rule as the dirty refusal — a
-    # tree that survives keeps its plumbing.
-    if git -C "$CANON" worktree remove "$wt"; then
-      print -r -- "removed $name (branch kept)"
-      exit 0
-    fi
-    restore_dropped
-    exit 1
+
+    while IFS= read -r ln; do
+      case "$ln" in
+        worktree\ *) flush_entry; cur_path="${ln#worktree }" ;;
+        HEAD\ *)     cur_head="${ln#HEAD }" ;;
+        branch\ *)   cur_branch="${ln#branch refs/heads/}" ;;
+        bare)        cur_bare=1 ;;
+      esac
+    done < <(git -C "$CANON" worktree list --porcelain)
+    flush_entry
+
+    print -r -- ""
+    print -r -- "$total total, $reaped reaped, $kept kept"
+    exit 0
     ;;
 esac
 
 name="$1"; shift
-base="main"
+base=""
+base_override=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --from) base="${2:-main}"; shift 2 ;;
+    --from) base="${2:-main}"; base_override=1; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -198,6 +426,21 @@ if git -C "$CANON" show-ref --verify --quiet "refs/heads/$name"; then
   git -C "$CANON" worktree add "$wt" "$name" || exit 1
   print -r -- "attached existing branch $name"
 else
+  # CREATE PATH FRESHNESS (2026-08-14). Local main is chronically stale on a
+  # machine running this many concurrent sessions — a NEW branch off it diffs
+  # and diagnoses against the wrong base. Fetch before deciding the base, and
+  # default to origin/main when it exists. --from still wins outright: an
+  # explicit base is never second-guessed by a fetch.
+  if ! git -C "$CANON" fetch -q origin; then
+    print -r -- "  !! fetch origin failed (offline?) — branching from local state"
+  fi
+  if [ "$base_override" != "1" ]; then
+    if git -C "$CANON" show-ref --verify --quiet "refs/remotes/origin/main"; then
+      base="origin/main"
+    else
+      base="main"
+    fi
+  fi
   git -C "$CANON" worktree add -b "$name" "$wt" "$base" || exit 1
   print -r -- "branched $name from $base"
 fi
