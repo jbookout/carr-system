@@ -324,6 +324,166 @@ def cmd_run(args) -> int:
     return 0
 
 
+# ── assess: failures become incidents ────────────────────────────────────────
+# THE LAST UNBUILT ELEMENT OF PROGRAM 3. ops.incident shipped in 0115 with a
+# lifecycle, separated facts and hypotheses, and constraints that refuse a
+# dishonest close — and nothing ever wrote to it. On the night of 2026-08-14 the
+# nightly chain failed five steps; the ledger caught all five and not one became
+# an incident, because a table with no writer is a schema.
+#
+# IT JUDGES THE LATEST OBSERVATION, NOT THE HISTORY. For each job the question is
+# "what did this thing do most recently?" — not "has it ever failed in the
+# window". Alarming on history means an incident that can never clear while a
+# week-old failure is still inside the window, and a service that recovered an
+# hour ago keeps paging. The latest terminal run is the state of the world.
+#
+# IT NEVER WRITES A HYPOTHESIS. A machine reading an exit code has no theory
+# about the cause, and putting a guess where a human looks for evidence is the
+# thing the facts/hypotheses split exists to prevent. Facts only, each with the
+# run that produced it as its source.
+
+SEVERITY_BY_CRITICALITY = {
+    "critical": "SEV-1",   # service unavailable
+    "high":     "SEV-2",   # major workflow degraded
+    "medium":   "SEV-3",   # contained, with a workaround
+    "low":      "SEV-3",
+}
+
+# How long a recovered service is watched before a human may call it resolved.
+# The doctrine requires a monitoring interval on resolution; this is the interval
+# the machine proposes, never the resolution itself.
+MONITORING_HOURS = 24
+
+
+def _next_incident_ref(cur) -> str:
+    cur.execute(
+        """select coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1
+             from ops.incident
+            where ref like 'INC-' || to_char(now(), 'YYYYMMDD') || '-%'""")
+    return f"INC-{datetime.now(timezone.utc):%Y%m%d}-{cur.fetchone()[0]:02d}"
+
+
+def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
+    """Turn the latest run of every job into incident state. Returns how many
+    incidents were OPENED (recoveries and appends are not openings)."""
+    opened = 0
+
+    cur.execute(
+        """select distinct on (r.service_id, r.environment, r.run_key)
+                  r.id, r.service_id, s.key, s.criticality, r.environment,
+                  r.run_key, r.state, r.failure_class, r.correlation_id, r.detail
+             from ops.run r
+             join ops.service s on s.id = r.service_id
+            where r.state in ('succeeded','failed','timed_out','cancelled','skipped')
+              and r.observed_at > now() - make_interval(hours => %s)
+              and (%s::text is null or r.environment = %s)
+              and s.retired_at is null
+         order by r.service_id, r.environment, r.run_key, r.observed_at desc""",
+        (window_hours, environment, environment))
+    latest = cur.fetchall()
+
+    for (run_id, service_id_, service_key, criticality, env, run_key,
+         state, failure_class, correlation_id, detail) in latest:
+
+        if state in ("failed", "timed_out"):
+            signature = f"{service_key}|{env}|{run_key}|{failure_class or ''}"
+            cur.execute(
+                """select id from ops.incident
+                    where signature = %s and state not in ('resolved','reviewed')""",
+                (signature,))
+            row = cur.fetchone()
+
+            if row is None:
+                # A NEW incident. The unique index over open incidents is what
+                # actually guarantees there is only ever one; this lookup is the
+                # polite path to the same answer.
+                cur.execute(
+                    """insert into ops.incident
+                           (ref, correlation_id, title, severity, state, environment,
+                            owner_actor, next_action, detected_source, detected_at,
+                            source_kind, source_ref, signature, observed_at, expires_at)
+                       values (%s,%s,%s,%s,'detected',%s,'joe',%s,%s, now(),
+                               'collector','tools/ops-record.py assess',%s, now(),
+                               now() + make_interval(hours => %s))
+                       returning id""",
+                    (_next_incident_ref(cur), correlation_id,
+                     f"{run_key} failed on {service_key} ({env})",
+                     SEVERITY_BY_CRITICALITY.get(criticality, "SEV-3"), env,
+                     f"read the trace: ops-record trace {correlation_id}",
+                     f"job-run ledger: {run_key}",
+                     signature, MONITORING_HOURS))
+                incident_id = cur.fetchone()[0]
+                opened += 1
+            else:
+                incident_id = row[0]
+
+            # Link the run and record it as a FACT — but only once per run, or a
+            # repeated assess would grow the fact list without new information.
+            cur.execute(
+                """insert into ops.incident_link (incident_id, kind, ref, note)
+                   values (%s, 'run', %s, %s)
+                   on conflict do nothing
+                   returning incident_id""",
+                (incident_id, str(run_id), run_key))
+            if cur.fetchone() is not None:
+                cur.execute(
+                    """insert into ops.incident_fact (incident_id, text, source_ref)
+                       values (%s, %s, %s)""",
+                    (incident_id,
+                     f"{run_key} on {service_key} ({env}) ended {state}"
+                     + (f", failure class {failure_class}" if failure_class else "")
+                     + (f" — {detail}" if detail else ""),
+                     f"ops.run:{run_id}"))
+
+        elif state == "succeeded":
+            # RECOVERY IS NOT RESOLUTION. One green run says the symptom stopped,
+            # not that the cause is understood — so this moves the incident to
+            # monitoring with evidence and an interval, and leaves resolved_at
+            # null for a human. The database would refuse the dishonest version
+            # anyway; this does not try it.
+            cur.execute(
+                """update ops.incident
+                      set state = 'monitoring',
+                          recovery_evidence_ref = %s,
+                          monitoring_until = now() + make_interval(hours => %s),
+                          next_action = %s
+                    where signature like %s
+                      and state in ('detected','triaged','investigating','mitigating')""",
+                (f"ops.run:{run_id}", MONITORING_HOURS,
+                 f"watch until {MONITORING_HOURS}h clear, then close with an outcome",
+                 f"{service_key}|{env}|{run_key}|%"))
+
+        # skipped and cancelled raise nothing. exit 78 means a step ran, found
+        # something it needs absent, wrote nothing and said so — alarming on that
+        # fires every night until a credential lands, which is exactly how a
+        # system teaches people to stop reading its alarms.
+
+    return opened
+
+
+def cmd_assess(args) -> int:
+    with connect("write") as conn, conn.cursor() as cur:
+        opened = assess(cur, environment=args.environment, window_hours=args.window_hours)
+        conn.commit()
+        cur.execute(
+            """select ref, severity, state, title, next_action
+                 from ops.incident
+                where state not in ('resolved','reviewed')
+                  and (%s::text is null or environment = %s)
+             order by severity, detected_at""",
+            (args.environment, args.environment))
+        live = cur.fetchall()
+
+    print(f"assess: {opened} incident(s) opened · {len(live)} live incident(s)")
+    for ref, severity, state, title, next_action in live:
+        print(f"  {severity}  {state:<12} {ref}  {title}")
+        if next_action:
+            print(f"        next: {next_action}")
+    if not live:
+        print("  nothing is broken that the ledger can see")
+    return 0
+
+
 # ── deployment ───────────────────────────────────────────────────────────────
 def cmd_deployment(args) -> int:
     if args.state == "complete" and not args.read_back_at:
@@ -497,6 +657,12 @@ def main() -> int:
 
     sub.add_parser("health", help="derived health of every registered service")
 
+    a = sub.add_parser("assess", help="turn the latest run of every job into incident state")
+    a.add_argument("--environment",
+                   choices=["local", "rehearsal", "staging", "production"])
+    a.add_argument("--window-hours", type=int, default=24,
+                   help="how far back to look for each job's latest run")
+
     args = p.parse_args()
     return {
         "sync-registry": cmd_sync_registry,
@@ -504,6 +670,7 @@ def main() -> int:
         "deployment": cmd_deployment,
         "trace": cmd_trace,
         "health": cmd_health,
+        "assess": cmd_assess,
     }[args.cmd](args)
 
 
