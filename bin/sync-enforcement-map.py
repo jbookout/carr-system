@@ -31,8 +31,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from types import ModuleType
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -69,6 +71,11 @@ ID_RE = re.compile(r"^`#?([0-9a-f]{8})`|^#### .*`#([0-9a-f]{8})`", re.M)
 # never `git add -A` in a tree that regularly holds another session's work.
 OWNED = ["ops/config/rule-enforcement-map.json", "ops/config/gate-baseline.json"]
 
+# The branch this job publishes on. STABLE rather than timestamped: an hourly job
+# that minted a new branch name every run would leave a litter of them and a new
+# pull request beside each. One branch, force-updated, one pull request reused.
+GATES_BRANCH = "gates/enforcement-sync"
+
 
 sys.path.insert(0, os.path.join(REPO, "ops"))
 sys.path.insert(0, REPO)
@@ -95,6 +102,26 @@ def git(*args, check=False):
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
+def git_in(worktree: str, *args, extra_env: dict | None = None):
+    """git(), but rooted in the throwaway publish worktree.
+
+    A separate function rather than a cwd argument on git(), because the two have
+    genuinely different safety stories and blurring them is how one of them loses
+    its guard. git() is pinned to REPO and must never drift off it. This one is
+    pinned to a directory THIS PROCESS just created, does the committing, and is
+    the only place a commit is allowed to happen at all. Both scrub the
+    environment for the same reason: an inherited GIT_DIR outranks cwd, so
+    without scrubbing this would commit into whatever repository invoked the
+    hourly refresh.
+    """
+    env = scrubbed_env()
+    if extra_env:
+        env.update(extra_env)
+    p = subprocess.run(["git", *args], cwd=worktree, capture_output=True,
+                       text=True, env=env)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
 def dirty_owned() -> list[str]:
     """Which of OWNED already have uncommitted changes, before this run writes.
 
@@ -114,7 +141,7 @@ def dirty_owned() -> list[str]:
     return out
 
 
-def commit_and_push(summary: str, preexisting: list[str]) -> None:
+def publish_via_branch(summary: str, preexisting: list[str]) -> None:
     """Commit the synced pair, or say loudly why it was not committed.
 
     THIS IS THE HALF THAT WAS MISSING. The first version of this script derived
@@ -136,26 +163,142 @@ def commit_and_push(summary: str, preexisting: list[str]) -> None:
         print("sync-enforcement-map: FAIL a human must commit the pair")
         return
 
-    rc, out = git("commit", *OWNED, "-m",
-                  f"gates: sync enforcement map inventory ({summary}) and "
-                  "re-stamp its baseline hash\n\n"
-                  "Automated by bin/sync-enforcement-map.py on the hourly rules "
-                  "refresh. Both paths land in ONE commit because a map change "
-                  "without its baseline is what took the gates down on "
-                  "2026-08-12.")
+    # ── PUBLISHED THROUGH A BRANCH, NEVER COMMITTED ON main ──────────────────
+    #
+    # CHANGED 2026-08-14, and the old behaviour is why. This used to
+    # `git commit` the pair on whatever branch the canonical tree was on — which
+    # is always main — and then `git push origin HEAD`. main is protected, so the
+    # push was refused every time and the commit stayed local. Not a theory;
+    # out/rules-refresh.log carries it verbatim:
+    #
+    #   sync-enforcement-map: committed the pair
+    #   sync-enforcement-map: FAIL push refused, commit is local only — ... on main
+    #
+    # One stranded commit per run, hourly, unattended. That is the machine half of
+    # how ~/carr-system reached nine unpushed commits by 2026-08-14, and it made
+    # this job the largest single producer of the divergence it was meant to end.
+    # ops/githooks/pre-commit now refuses a commit on main outright, so the old
+    # path would not merely strand — it would fail.
+    #
+    # The pair is therefore built in a THROWAWAY WORKTREE on a stable branch cut
+    # from origin/main, pushed there, and offered as a pull request. The canonical
+    # tree is never committed to and is left exactly as clean as it was found,
+    # which also keeps the next run's dirty_owned() check honest: leaving the
+    # files modified here would make the following hour read them as another
+    # writer's work and refuse for ever.
+    rc, _ = git("fetch", "origin", "main")
     if rc != 0:
-        print(f"sync-enforcement-map: FAIL commit refused — {out}")
+        print("sync-enforcement-map: FAIL could not fetch origin/main — nothing published")
         return
-    print("sync-enforcement-map: committed the pair")
 
-    rc, out = git("push", "origin", "HEAD")
-    if rc != 0:
-        # Deliberately does NOT pull/rebase. Moving shared HEAD unattended is
-        # the hazard the two-writer rule names; a local commit that still needs
-        # a push is recoverable, a bad rebase is not.
-        print(f"sync-enforcement-map: FAIL push refused, commit is local only — {out}")
+    # NOTHING TO PUBLISH is the common case once a PR has merged and this tree
+    # has pulled. Checked against origin/main rather than local HEAD, because
+    # local HEAD on a busy machine is not what the repository actually holds.
+    rc, _ = git("diff", "--quiet", "origin/main", "--", *OWNED)
+    if rc == 0:
+        restore_owned()
+        print("sync-enforcement-map: pair already matches origin/main — nothing to publish")
         return
-    print("sync-enforcement-map: pushed")
+
+    tmp = tempfile.mkdtemp(prefix="carr-gates-sync-")
+    wt = os.path.join(tmp, "wt")
+    try:
+        # -B resets the branch to origin/main every run, so a stale attempt from
+        # a previous hour is replaced rather than built upon. The branch name is
+        # STABLE on purpose: repeated runs update one branch and reuse one pull
+        # request instead of littering a new one every hour.
+        rc, out = git("worktree", "add", "--quiet", "-B", GATES_BRANCH, wt, "origin/main")
+        if rc != 0:
+            print(f"sync-enforcement-map: FAIL could not create the publish worktree — {out}")
+            return
+
+        for path in OWNED:
+            shutil.copyfile(os.path.join(REPO, path), os.path.join(wt, path))
+
+        rc, out = git_in(wt, "add", *OWNED)
+        if rc != 0:
+            print(f"sync-enforcement-map: FAIL could not stage the pair — {out}")
+            return
+        rc, out = git_in(wt, "diff", "--cached", "--quiet")
+        if rc == 0:
+            print("sync-enforcement-map: the branch already carries this pair — nothing new")
+            return
+
+        rc, out = git_in(wt, "commit", "-m",
+                         f"gates: sync enforcement map inventory ({summary}) and "
+                         "re-stamp its baseline hash\n\n"
+                         "Automated by bin/sync-enforcement-map.py on the hourly rules "
+                         "refresh. Both paths land in ONE commit because a map change "
+                         "without its baseline is what took the gates down on "
+                         "2026-08-12.\n\n"
+                         "Published on a branch rather than committed on main: main is "
+                         "protected, so the old direct commit could never be pushed and "
+                         "stranded on the canonical checkout once an hour.")
+        if rc != 0:
+            print(f"sync-enforcement-map: FAIL commit refused — {out}")
+            return
+
+        # CARR_SKIP_CI because the remote required check is the real gate and this
+        # runs unattended once an hour; a full local CI pass per run would put
+        # minutes of work on a schedule to re-prove what the PR proves anyway.
+        rc, out = git_in(wt, "push", "--force", "origin",
+                         f"HEAD:refs/heads/{GATES_BRANCH}",
+                         extra_env={"CARR_SKIP_CI": "1"})
+        if rc != 0:
+            print(f"sync-enforcement-map: FAIL push refused — {out}")
+            return
+        print(f"sync-enforcement-map: pushed the pair to {GATES_BRANCH}")
+        open_or_note_pr(summary)
+    finally:
+        git("worktree", "remove", "--force", wt)
+        shutil.rmtree(tmp, ignore_errors=True)
+        restore_owned()
+
+
+def restore_owned() -> None:
+    """Put the canonical tree's copies back to HEAD, leaving it clean.
+
+    The content is not lost — it is on the branch and in the pull request. What
+    this prevents is the canonical checkout sitting permanently dirty on two
+    files, which would make the NEXT run's dirty_owned() read them as another
+    writer's in-flight work and refuse to sync for ever after.
+    """
+    rc, out = git("checkout", "--", *OWNED)
+    if rc != 0:
+        print(f"sync-enforcement-map: WARN could not restore the working copies — {out}")
+
+
+def open_or_note_pr(summary: str) -> None:
+    """Offer the branch as a pull request, or say plainly that it is waiting.
+
+    gh may not be authenticated in a launchd environment, and that is not a
+    failure of the sync — the pair is already safe on the branch. Saying so
+    beats a traceback in a log nobody reads.
+    """
+    if shutil.which("gh") is None:
+        print(f"sync-enforcement-map: branch pushed, no gh on PATH — land it with "
+              f"`gh pr create --base main --head {GATES_BRANCH}`")
+        return
+    p = subprocess.run(
+        ["gh", "pr", "create", "--base", "main", "--head", GATES_BRANCH,
+         "--title", f"gates: sync enforcement map inventory ({summary})",
+         "--body",
+         "Automated by `bin/sync-enforcement-map.py` on the hourly rules refresh.\n\n"
+         "The enforcement map and its gate baseline move together — a map change "
+         "without its baseline is what took the gates down on 2026-08-12.\n\n"
+         "Published on a branch because `main` is protected: the previous version "
+         "of this job committed directly on `main`, could never push, and stranded "
+         "one commit per run on the canonical checkout."],
+        cwd=REPO, capture_output=True, text=True, env=scrubbed_env())
+    out = (p.stdout + p.stderr).strip()
+    if p.returncode == 0:
+        print(f"sync-enforcement-map: opened {out.splitlines()[-1] if out else 'a pull request'}")
+    elif "already exists" in out:
+        print("sync-enforcement-map: the open pull request for this branch was updated")
+    else:
+        print(f"sync-enforcement-map: branch pushed, PR not opened — {out}")
+        print(f"sync-enforcement-map: land it with "
+              f"`gh pr create --base main --head {GATES_BRANCH}`")
 
 
 def find_vault() -> tuple[str | None, ModuleType]:
@@ -278,7 +421,7 @@ def main() -> int:
     if "--no-commit" in sys.argv:
         print("sync-enforcement-map: --no-commit given; leaving the pair modified")
         return 0
-    commit_and_push("; ".join(summary_bits), preexisting)
+    publish_via_branch("; ".join(summary_bits), preexisting)
     return 0
 
 

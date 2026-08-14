@@ -43,6 +43,20 @@ gh pr create --base main --head <name> --title "..." --body "..."
 gh pr merge <n> --squash --delete-branch
 ```
 
+**And do not COMMIT on main either.** `ops/githooks/pre-commit` refuses it. The
+push half was always blocked; the commit half was not, so a commit made on main
+in `~/carr-system` simply stranded there — that checkout reached NINE unpushed
+commits on 2026-08-14, existing on no other machine, and took an hour to
+reconcile. Work in your own tree instead:
+
+```
+./run.sh worktree <name>
+cd .claude/worktrees/<name>
+```
+
+Reconciling that checkout is the one real exception, and it is a commit on main
+by definition: `CARR_ALLOW_MAIN_COMMIT=1 git commit ...`, for one command only.
+
 ## Checks
 
 `ops/ci.sh` is the ONE check script. The GitHub workflow and the pre-push hook

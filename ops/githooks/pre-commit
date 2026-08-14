@@ -1,0 +1,90 @@
+#!/bin/sh
+# pre-commit — main is not a place commits land. Branch instead.
+#
+# WHY THIS EXISTS, measured rather than argued. `main` moves only through a
+# merged pull request with green CI; the branch ruleset enforces that on the
+# server. Nothing enforced the LOCAL half, so a commit could still land on main
+# in ~/carr-system — the checkout several sessions share and the one launchd
+# runs — where its push is then refused and the commit simply strands.
+#
+# On 2026-08-14 that checkout held NINE commits that existed on no other machine,
+# roughly 1,800 insertions, including work nobody had a copy of. Reconciling it
+# took an hour and four merge-conflict resolutions, and during that single
+# reconciliation the tree diverged again three more times.
+#
+# THE DOMINANT SOURCE WAS NOT A CARELESS HUMAN, and that is the point. It was the
+# hourly rules refresh: bin/sync-enforcement-map.py regenerates the gate pair,
+# commits it on whatever branch the canonical tree is on, and pushes. The push is
+# refused because main is protected, and out/rules-refresh.log says so verbatim:
+#
+#   sync-enforcement-map: committed the pair
+#   sync-enforcement-map: FAIL push refused, commit is local only — ... 70fd470 on main
+#
+# One stranded commit per run, on a schedule, with nobody watching. That script
+# now publishes through a branch instead; this hook is what stops the next thing
+# that tries, including a session that means well.
+#
+# WHAT THIS IS AND IS NOT, in the same terms as pre-push beside it. It is an
+# accident-stopper, not a security control: anyone can bypass it with --no-verify,
+# by unsetting core.hooksPath, or by editing this file. That is fine and expected.
+# It exists to catch the commit nobody meant to strand, which is the only kind
+# that has ever happened here.
+#
+# THE ANSWER IT POINTS AT ALREADY EXISTED. bin/worktree.sh gives a session its own
+# tree in one command, and the git writer gate's own deny text has recommended it
+# since 2026-08-10. This hook is the half that makes the recommendation bite.
+
+PROTECTED="main"
+
+# Deliberate escape hatch, same shape and spelling as pre-push's
+# CARR_ALLOW_MAIN_PUSH. Set it for ONE command, never export it in a profile:
+#   CARR_ALLOW_MAIN_COMMIT=1 git commit -m "..."
+#
+# The legitimate case is reconciling the canonical checkout itself — landing a
+# merge that brings main back in line — which by definition happens on main.
+if [ "$CARR_ALLOW_MAIN_COMMIT" = "1" ]; then
+  exit 0
+fi
+
+# --show-current is empty on a detached HEAD, which is exactly the answer wanted:
+# a bisect, a `git worktree add <sha>`, and a CI checkout are all detached, none
+# of them is main, and a hook that guessed otherwise would be a false positive on
+# every one of them. Compared as a whole string, so `maintenance` and `main-ish`
+# are not caught by a substring.
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+
+[ "$branch" = "$PROTECTED" ] || exit 0
+
+# Nothing is unstaged, reset, or discarded here — the work stays exactly where it
+# is, staged and intact, and moves to a branch with the caller still holding it.
+cat >&2 <<EOF
+
+  ────────────────────────────────────────────────────────────────
+  COMMIT REFUSED — this is 'main', and main only moves through a PR
+  ────────────────────────────────────────────────────────────────
+
+  Your changes are untouched and still staged. Nothing was lost.
+
+  main is protected: a direct push is refused, so a commit made here
+  cannot leave this machine. It strands, this checkout diverges, and
+  the next session to pull has to untangle it. That has happened —
+  nine commits deep, once, and they existed nowhere else.
+
+  DO THIS INSTEAD — your own tree, in one command:
+
+      ./run.sh worktree <name>
+      cd .claude/worktrees/<name>
+      # commit there, then:
+      git push origin HEAD:refs/heads/<name>
+      gh pr create --base main --head <name> --title "..." --body "..."
+
+  Already committed elsewhere and just need this landed? Push the
+  branch and open the PR; CI is the gate, not this hook.
+
+  If you genuinely need to commit on main — reconciling this very
+  checkout is the real case — say so for one command:
+
+      CARR_ALLOW_MAIN_COMMIT=1 git commit ...
+
+EOF
+exit 1
