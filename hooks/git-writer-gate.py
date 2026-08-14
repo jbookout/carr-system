@@ -56,7 +56,13 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-REPO = os.path.expanduser("~/carr-system")
+# Script-relative, NOT expanduser("~/carr-system") — same fix as
+# hooks/record-home-gate.py and the tools/test-*.py suites (commit fad87a4).
+# A clone outside $HOME (CI checks out to /home/runner/work/carr-system/
+# carr-system; Dell's clone need not sit at ~) made REPO a directory that does
+# not exist, which here is worse than a bad log path: the `git -C REPO status`
+# below silently returns nothing, so the gate reads a dirty tree as clean.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
 

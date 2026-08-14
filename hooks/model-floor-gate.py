@@ -54,7 +54,12 @@ import re
 import sys
 from datetime import datetime, timezone
 
-REPO = os.path.expanduser("~/carr-system")
+# Script-relative, NOT expanduser("~/carr-system") — same fix as
+# hooks/record-home-gate.py and the tools/test-*.py suites (commit fad87a4).
+# A clone outside $HOME makes CONFIG a path that does not exist, and this gate
+# fails open when it cannot read its floors — so the failure mode is a gate
+# that reports healthy while enforcing nothing.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LOG = os.path.join(REPO, "out", "hook-guard.log")
 CONFIG = os.path.join(REPO, "ops", "config", "model-floors.json")
 CACHE_DIR = os.path.join(REPO, "out", "model-floor-cache")

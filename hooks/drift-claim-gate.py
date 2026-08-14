@@ -46,7 +46,12 @@ import re
 import sys
 from datetime import datetime, timezone
 
-REPO = os.path.expanduser("~/carr-system")
+# Script-relative, NOT expanduser("~/carr-system") — same fix as
+# hooks/record-home-gate.py and the tools/test-*.py suites (commit fad87a4).
+# Log path only here, so a clone outside $HOME loses the audit trail rather
+# than mis-enforcing. DECISIONS below stays expanduser on purpose: that one is
+# the Drive vault, which really is $HOME-relative and is not the repo.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LOG = os.path.join(REPO, "out", "hook-guard.log")
 DECISIONS = os.path.expanduser("~/My Drive/CARR AI/00_Context/decision-history.md")
 
