@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""
+loose-work-gate-selftest.py — acceptance test for hooks/loose-work-gate.py,
+written before the gate (rule e65efc68).
+
+WHY THE GATE EXISTS, in Joe's words on 2026-08-14: "why the fuck am i having to
+tell every session to commit its work? this is insane."
+
+He was right, and the mechanism is specific. Detection already existed —
+tools/health-check.py reports loose tracked files — but it runs in the NIGHTLY
+CHAIN, once a day, into a report somebody has to read, long after the session
+that left the work has ended. So the human noticing was the fastest detector on
+the machine.
+
+Five hooks already run at Stop: conduct, completion-evidence, ledger-sweep,
+context-handoff, scheduled-run-record. Every one of them checks what a session
+SAYS. None checks what it LEFT. This is that one.
+
+WHAT IT MUST GET RIGHT, which is mostly about what it must NOT do:
+
+  1. ONLY THIS SESSION'S FILES. Several sessions share one working tree, and on
+     2026-08-14 it held three loose files belonging to three different sessions.
+     A gate that flagged all of them would make every session responsible for
+     every other session's mess — which is how the nine-session broadcast
+     happened, and strictly worse than the problem. The transcript names what
+     THIS session wrote; nothing else is its business.
+
+  2. SILENCE WHEN THERE IS NOTHING. This runs at the end of every session. A
+     gate that speaks when there is nothing to say gets muted, and then it is
+     not a gate.
+
+  3. FAIL OPEN, ALWAYS. A missing transcript, an unreadable file, git not
+     answering — none of it may strand a session. The failure mode of an
+     over-eager Stop hook is a session that cannot end.
+
+  4. AN ESCAPE THAT WORKS. Leaving work loose is sometimes correct: handing a
+     tree to another session, or parking mid-investigation. Same idiom as the
+     gates beside it.
+
+Runs with no repo state of its own: every case builds a throwaway git repo and a
+throwaway transcript.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+GATE = os.path.join(REPO, "hooks", "loose-work-gate.py")
+
+failures: list[str] = []
+
+
+def check(name, cond, detail=""):
+    if cond:
+        print(f"  ok   {name}")
+    else:
+        print(f"  FAIL {name} {detail}")
+        failures.append(name)
+
+
+def git(repo, *args):
+    """git in the fixture, with any inherited GIT_* location vars REMOVED.
+
+    Removed, not blanked. The first version set GIT_DIR="" and GIT_WORK_TREE=""
+    and every git call died with `fatal: not a git repository: ''` — an empty
+    GIT_DIR is not an unset one, it is a path that does not exist. The fixture
+    repo was therefore never created, and ELEVEN of the fifteen checks below went
+    green against it: with no repo, the gate correctly failed open and returned 0,
+    which is the same 0 most of these cases assert. A test suite passing because
+    its fixture is absent is the exact failure this file exists to catch in the
+    gate, so it is worth the paragraph.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
+                        "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE")}
+    p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
+                       env=env)
+    if p.returncode != 0 and args and args[0] in ("init", "add", "commit", "config"):
+        raise SystemExit(f"fixture setup failed: git {' '.join(args)}\n{p.stderr}")
+    return p
+
+
+def make_repo(tmp):
+    repo = os.path.join(tmp, "repo")
+    os.makedirs(repo)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "t@example.invalid")
+    git(repo, "config", "user.name", "t")
+    with open(os.path.join(repo, "tracked.txt"), "w") as fh:
+        fh.write("seed\n")
+    with open(os.path.join(repo, "other.txt"), "w") as fh:
+        fh.write("seed\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "seed")
+    return repo
+
+
+def transcript(tmp, written_paths, name="t.jsonl"):
+    """A transcript in which this session wrote each of `written_paths`."""
+    p = os.path.join(tmp, name)
+    with open(p, "w") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"content": "go"}}) + "\n")
+        for path in written_paths:
+            fh.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "name": "Write",
+                     "input": {"file_path": path, "content": "x"}}]},
+            }) + "\n")
+    return p
+
+
+def run(repo, transcript_path, env=None):
+    payload = json.dumps({"session_id": "s1", "transcript_path": transcript_path,
+                          "cwd": repo})
+    e = {**os.environ, "CARR_LOOSE_WORK_REPO": repo}
+    if env:
+        e.update(env)
+    p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
+                       text=True, env=e, timeout=60)
+    return p.returncode, (p.stdout + p.stderr)
+
+
+print("\nloose-work-gate — a session does not end leaving its own work loose")
+
+if not os.path.exists(GATE):
+    print(f"  FAIL the gate does not exist at {GATE}")
+    sys.exit(1)
+
+# 1. THE CORE CASE: this session wrote a tracked file and left it modified.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    target = os.path.join(repo, "tracked.txt")
+    with open(target, "w") as fh:
+        fh.write("modified by this session\n")
+    rc, out = run(repo, transcript(tmp, [target]))
+    check("a session that left its own tracked file modified is stopped", rc == 2,
+          f"rc={rc}")
+    check("the refusal names the file", "tracked.txt" in out, out[:200])
+    check("the refusal says how to land it", "worktree" in out or "commit" in out,
+          out[:200])
+    check("the refusal names its escape hatch", "CARR_ALLOW_LOOSE_WORK" in out,
+          out[:200])
+
+# 2. ANOTHER SESSION'S LOOSE FILE IS NOT THIS SESSION'S PROBLEM.
+#    The failure this prevents is every session being made responsible for a
+#    shared tree, which is how the nine-session broadcast happened.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    mine = os.path.join(repo, "tracked.txt")
+    theirs = os.path.join(repo, "other.txt")
+    with open(theirs, "w") as fh:                 # somebody else's edit
+        fh.write("another session was here\n")
+    rc, out = run(repo, transcript(tmp, [mine]))  # this session wrote a DIFFERENT file
+    check("another session's loose file does not stop this one", rc == 0, f"rc={rc}")
+    check("...and is not even mentioned", "other.txt" not in out, out[:200])
+
+# 3. SILENCE WHEN THERE IS NOTHING TO SAY.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    target = os.path.join(repo, "tracked.txt")
+    with open(target, "w") as fh:
+        fh.write("modified\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-q", "-m", "committed it")
+    rc, out = run(repo, transcript(tmp, [target]))
+    check("a session that committed its work ends silently", rc == 0, f"rc={rc}")
+    check("...and prints nothing at all", out.strip() == "", repr(out[:120]))
+
+# 4. THE ESCAPE HATCH.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    target = os.path.join(repo, "tracked.txt")
+    with open(target, "w") as fh:
+        fh.write("deliberately parked\n")
+    rc, _ = run(repo, transcript(tmp, [target]), env={"CARR_ALLOW_LOOSE_WORK": "1"})
+    check("CARR_ALLOW_LOOSE_WORK=1 lets a session park work deliberately", rc == 0,
+          f"rc={rc}")
+
+# 5. FAIL OPEN ON EVERY BROKEN INPUT. An over-eager Stop hook strands sessions.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    rc, _ = run(repo, os.path.join(tmp, "does-not-exist.jsonl"))
+    check("a missing transcript never blocks", rc == 0, f"rc={rc}")
+
+    bad = os.path.join(tmp, "bad.jsonl")
+    with open(bad, "w") as fh:
+        fh.write("{not json\n")
+    rc, _ = run(repo, bad)
+    check("a malformed transcript never blocks", rc == 0, f"rc={rc}")
+
+    p = subprocess.run([sys.executable, GATE], input="{not json",
+                       capture_output=True, text=True, timeout=60)
+    check("a malformed payload never blocks", p.returncode == 0, f"rc={p.returncode}")
+
+    rc, _ = run(os.path.join(tmp, "not-a-repo"), transcript(tmp, ["/tmp/x.txt"]))
+    check("a path that is not a git repo never blocks", rc == 0, f"rc={rc}")
+
+# 6. It must not re-fire while the session is already stopping.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    target = os.path.join(repo, "tracked.txt")
+    with open(target, "w") as fh:
+        fh.write("modified\n")
+    payload = json.dumps({"session_id": "s1", "stop_hook_active": True,
+                          "transcript_path": transcript(tmp, [target]), "cwd": repo})
+    p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
+                       text=True, timeout=60,
+                       env={**os.environ, "CARR_LOOSE_WORK_REPO": repo})
+    check("it does not re-fire once the session is already stopping",
+          p.returncode == 0, f"rc={p.returncode}")
+
+# 7. A file written OUTSIDE the repo is not this gate's business.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    outside = os.path.join(tmp, "scratch.txt")
+    with open(outside, "w") as fh:
+        fh.write("scratchpad work\n")
+    rc, out = run(repo, transcript(tmp, [outside]))
+    check("a write outside the repo is ignored", rc == 0, f"rc={rc}: {out[:120]}")
+
+print()
+if failures:
+    print(f"FAIL {len(failures)} check(s): {', '.join(failures)}")
+    sys.exit(1)
+print("OK all checks passed")
