@@ -117,11 +117,34 @@ def load(module_name, filename):
         return None
 
 
+UNRESOLVED = re.compile(r"[$`*?]")
+
+
 def is_real_target(token):
-    """A path we should ask about, as opposed to a stream or a device."""
+    """A path we should ask about, as opposed to a stream, a device, or a guess.
+
+    THE UNRESOLVED CASE IS SKIPPED, and it is skipped because guessing produced a
+    live false positive within a minute of this gate going in. `echo x > "$D/NOTES.md"`
+    reaches this hook with `$D` UNEXPANDED — the shell has not run yet, and a
+    PreToolUse hook never sees the expansion. The first version treated that text
+    as a relative path, joined it to cwd, and because that session's cwd was the
+    vault it produced `<vault>/$D/NOTES.md`, judged that vault markdown, and
+    refused an ordinary write into a scratch directory.
+
+    That is exactly the over-parsing the originating loop warned breeds the habit
+    of switching a gate off, and it is worse than the gap it replaces: a false
+    DENY blocks real work every time it fires, where a false ALLOW merely fails
+    to catch something. A target whose value is not knowable at hook time is
+    therefore not judged at all — it joins the residual already named in the
+    docstring instead of being answered with a guess.
+
+    Globs are skipped for the same reason: `> out/*.json` names no single file.
+    """
     if not token or token.startswith("&"):
         return False
     if token.startswith("/dev/"):
+        return False
+    if UNRESOLVED.search(token):
         return False
     return True
 
