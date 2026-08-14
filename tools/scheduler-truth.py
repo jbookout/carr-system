@@ -72,11 +72,21 @@ WRAPPER_EXEMPT = {
     # child exiting means launchd restarted it — so wrapping these would file a run
     # row per restart and read as repeated failures of a service doing exactly what
     # it was built to do. Up-or-down is the question they need answered, and no
-    # cadence and no run row can ask it. A liveness probe is the missing signal.
-    "call-mode": "KeepAlive server — needs a liveness probe, not a run row; the "
-                 "wrapper would record one row per restart",
-    "doc-engine": "KeepAlive server — same reason as call-mode",
-    "quill-dictate": "KeepAlive server — same reason as call-mode",
+    # run row from the wrapper can ask it.
+    #
+    # THE MISSING SIGNAL IS NO LONGER MISSING (2026-08-14). bin/probe-keepalive.py
+    # asks the question every 10 minutes and records the answer, so these three
+    # are exempt from the WRAPPER while being fully observed — which is a
+    # different state from the one this list described when it was written, and
+    # worth spelling out so nobody "fixes" the exemption by wrapping them.
+    "call-mode": "KeepAlive server — probed by bin/probe-keepalive.py (TCP "
+                 "connect to 127.0.0.1:4682); the wrapper would record one row "
+                 "per restart",
+    "doc-engine": "KeepAlive server — probed by bin/probe-keepalive.py (TCP "
+                  "connect to 127.0.0.1:4680); same wrapper reason as call-mode",
+    "quill-dictate": "KeepAlive server — probed by bin/probe-keepalive.py, "
+                     "process liveness only (no port to knock on); same wrapper "
+                     "reason as call-mode",
 }
 
 # A plist that is deliberately NOT installed here. Without this, the reconciliation

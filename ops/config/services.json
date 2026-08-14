@@ -568,7 +568,9 @@
         {
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.call-mode.plist",
-          "notes": "KeepAlive agent, not a scheduled job. THE HEALTH QUESTION IS 'is it up', NEVER 'did it fire recently', and the two are not interchangeable: a KeepAlive process that exits has been RESTARTED, so a run row per exit would read as repeated failures of a service that is working exactly as designed. Registered without a cadence so its failure is representable rather than invented; a liveness probe is the signal it actually needs and does not exist yet."
+                    "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 900,
+          "notes": "KeepAlive server, so the health question is 'is it up' and never 'did it fire recently'. bin/probe-keepalive.py answers it every 10 min by opening a TCP connection to 127.0.0.1:4682 — a connect proves it is ACCEPTING, which is a real answer rather than a PID sighting. Still exempt from bin/run-scheduled.sh: the wrapper records on child exit, and a KeepAlive child exiting means launchd restarted it. The 30-minute cadence means one missed probe pass is not an alarm."
         }
       ]
     },
@@ -585,7 +587,9 @@
         {
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.doc-engine.plist",
-          "notes": "KeepAlive agent. Same reasoning as call-mode: up-or-down is the question, and no cadence can ask it. Its plist pins an explicit interpreter because launchd's PATH resolves python3 to macOS 3.9, which cannot parse the file (found 2026-08-08)."
+                    "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 900,
+          "notes": "KeepAlive server. Probed every 10 min by a TCP connect to 127.0.0.1:4680, which proves it is ACCEPTING rather than merely running. Same wrapper exemption and the same reason as call-mode. Proven end to end on 2026-08-14: stopping the agent produced SEV-3 INC-20260814-08 within one probe pass, and restarting it moved the incident to monitoring."
         }
       ]
     },
@@ -602,7 +606,9 @@
         {
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.quill-dictate.plist",
-          "notes": "KeepAlive agent. Deliberately a separate label and binary from the meeting-mode consent watcher so the two dictation modes stay visibly distinct."
+                    "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 900,
+          "notes": "KeepAlive server with NO PORT TO KNOCK ON, so its probe is process liveness only — a weaker claim than the other two, and the run detail says which signal was used so the row is never read as more than it is. A wedged process and a healthy one both have a PID. Same wrapper exemption and reason as call-mode."
         }
       ]
     },
@@ -656,6 +662,25 @@
           "notes": "WatchPaths-triggered; silence is normal, so no cadence. Its script lives OUTSIDE the repo, under ~/Movies, which means it is not version-controlled and would not survive the Mac — worth naming here because the catalog is where that kind of exposure becomes visible."
         }
       ]
+    },
+    {
+      "key": "keepalive-probe",
+      "name": "KeepAlive server liveness probe",
+      "purpose": "Asks the three long-running servers whether they are up, and writes the answer to the ledger.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "bin/probe-keepalive.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.keepalive-probe.plist",
+          "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 900,
+          "notes": "Wakes every 10 min; cadence declared at 30 min so one missed pass is not an alarm. It is itself wrapped by bin/run-scheduled.sh, because a watcher whose own failure is invisible is the one thing nothing watches. It returns EX_CONFIG (78) rather than a failure when NOTHING could be recorded at all, since three records failing on one pass is an unreachable ledger rather than three simultaneous outages — and a probe that alarmed every 10 minutes on a Mac whose credential had not loaded would be the smoke-suite mistake again."
+        }
+      ]
     }
   ],
 
@@ -667,6 +692,7 @@
     { "service": "notes-sweep", "depends_on": "neon-record-layer" },
     { "service": "partner-ping", "depends_on": "neon-record-layer" },
     { "service": "capture-poll", "depends_on": "neon-record-layer" },
+    { "service": "keepalive-probe", "depends_on": "neon-record-layer" },
     { "service": "npi-sweep-weekly", "depends_on": "neon-record-layer" },
     { "service": "social-metrics-pull-weekly", "depends_on": "neon-record-layer" },
     { "service": "social-batch-weekly", "depends_on": "neon-record-layer" },
