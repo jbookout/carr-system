@@ -22,6 +22,22 @@ VAULT = os.path.expanduser(
 
 DENY, ALLOW = "deny", "allow"
 
+# THIS MACHINE'S VERDICT FOR A JOB-OUTPUT PATH, and why it is computed instead
+# of written down. Those rows retire PER PARTNER (Joe migrated 2026-08-14, Dell
+# at the 8/21 cutoff), so the honest expectation for a real hook invocation
+# depends on whose machine is running the test. Hardcoding Joe's answer passed
+# on his Mac and failed on the GitHub runner, which has no identity file and so
+# resolves as unmigrated — caught by CI on the first push of that change.
+#
+# The per-partner LOGIC is pinned exactly by the unit cases below, which inject
+# the actor and need no machine. What these subprocess cases prove is the layer
+# above it: that the hook actually consults the manifest and applies its verdict
+# end to end, on whatever machine is running.
+sys.path.insert(0, os.path.join(REPO, "hooks"))
+from md_manifest import MIGRATED_PARTNERS, local_actor  # noqa: E402
+
+JOB_OUTPUT = DENY if local_actor() in MIGRATED_PARTNERS else ALLOW
+
 CASES = [
     # (label, expected, tool, tool_input)
     ("A · generated render (shared rules)", DENY, "Write",
@@ -41,11 +57,11 @@ CASES = [
     # client-intake agent writes on purpose. Guarding the directory blocked those
     # too, and over-blocking a partner's own writing surface is how a gate ends up
     # switched off. The set is the exporter's own DOSSIER_FILES list.
-    ("P0+ · intake file in prospects/ now DENIED (closed 2026-08-14)", DENY, "Write",
+    ("P0+ · intake file in prospects/ follows this machine's partner", JOB_OUTPUT, "Write",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/Beasley-intake.md", "new_string": "x"}),
-    ("P0+ · enterprise file in prospects/ now DENIED (closed 2026-08-14)", DENY, "Edit",
+    ("P0+ · enterprise file in prospects/ follows this machine's partner", JOB_OUTPUT, "Edit",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/AltaPointe-enterprise.md", "new_string": "x"}),
-    ("P0+ · a name not in DOSSIER_FILES is DENIED too (closed 2026-08-14)", DENY, "Write",
+    ("P0+ · a name not in DOSSIER_FILES is DENIED too (closed 2026-08-14)", JOB_OUTPUT, "Write",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/BrandNewClient.md", "content": "x"}),
     ("A · hunt-ledger (was unguarded)", DENY, "Edit",
      {"file_path": f"{VAULT}/DNA/Network/hunt-ledger.md", "new_string": "x"}),
@@ -86,7 +102,7 @@ CASES = [
      {"file_path": f"{VAULT}/CLAUDE.md", "new_string": "rev 11: weekends are off"}),
     ("allow · AGENTS.md edit (manifest exact)", ALLOW, "Edit",
      {"file_path": f"{VAULT}/AGENTS.md", "new_string": "x"}),
-    ("P0+ · weekly brief output now DENIED (closed 2026-08-14)", DENY, "Write",
+    ("P0+ · weekly brief output follows this machine's partner", JOB_OUTPUT, "Write",
      {"file_path": f"{VAULT}/DNA/Network/briefs/2026-08-10-network-brief.md", "content": "x"}),
     ("allow · repo file, outside the vault", ALLOW, "Write",
      {"file_path": os.path.join(REPO, "specs", "some-spec.md"), "content": "spec"}),
