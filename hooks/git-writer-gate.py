@@ -80,7 +80,19 @@ DANGEROUS = [
     # the most dangerous form — it pockets the WHOLE tree including another
     # writer's files — and a \s+ requirement missed it entirely because there is
     # nothing after the word. Caught by the selftest.
-    ("stash_all",       re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?stash\b(?!\s+(?:list|show|push\s+[^\n]*--\s+\S))", re.I)),
+    #
+    # `drop <ref>` JOINED THE EXEMPTIONS 2026-08-14, after this gate refused
+    # `git stash drop stash@{0}` on a dirty tree and left behind a stash nobody
+    # could clear. The hazard here is one session capturing or overwriting
+    # ANOTHER session's WORKING TREE. Dropping a stash the caller NAMES touches
+    # no tree at all, and meets the same explicit-naming standard `git add
+    # <paths>` and `git stash push -- <paths>` already meet. What stays refused
+    # is the whole rest of the family, each for its own reason: bare `drop`
+    # silently takes the most recent stash, which on a shared checkout is
+    # probably someone else's; `pop` and `apply` write a stash back INTO the
+    # tree, which is the hazard itself; and `clear` destroys every stash on the
+    # machine, including ones this session never made.
+    ("stash_all",       re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?stash\b(?!\s+(?:list|show|drop\s+\S|push\s+[^\n]*--\s+\S))", re.I)),
 ]
 
 
