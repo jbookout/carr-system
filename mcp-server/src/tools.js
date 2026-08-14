@@ -166,6 +166,62 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
      identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
 }
 
+// [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
+// add-party (kind='org', name='Ruff House Resort') refused twice with
+// unique_violation on party_org_identity_uniq while a read-only tap of the same
+// database found zero matching rows — because the collision was with the verb's
+// OWN uncommitted work. The call carried org_name restating the org itself, so
+// org_party_id() minted the org inside the open transaction, the main insert then
+// asserted the same normalised identity a second time, the index refused, and the
+// rollback erased both rows. Deterministic under fresh keys, invisible in the data.
+//
+// The guard below is IDENTITY-BASED and asks the database's own org_identity_key()
+// — never a JS re-implementation, per that function's comment ("EXTEND this
+// function rather than invent a second normalisation rule"). An org_name with a
+// genuinely different identity stays legal on an org row: party.org_id is how a
+// parent/sub-org structure (a national account over its franchisees) is expressed
+// — see reassign-deal. Only the self-reference is dropped, and the caller is told.
+// Shared by add-party and add-premises' new_party path (rule a8c55a47: two paths
+// doing the same job must be the same code).
+async function employerOrgId(c, actorId, kind, name, orgName) {
+  if (!orgName) return { orgId: null, selfNamed: false };
+  if (kind === "org") {
+    const k = await c.query(
+      "select org_identity_key($1) = org_identity_key($2) as same_org", [orgName, name]);
+    if (k.rows[0]?.same_org) return { orgId: null, selfNamed: true };
+  }
+  const o = await c.query("select org_party_id($1,$2) as id", [orgName, actorId]);
+  return { orgId: o.rows[0].id, selfNamed: false };
+}
+
+// The residual collision: an existing LIVE org that slipped the similarity guard
+// (or was force_new'd past it) still trips party_org_identity_uniq on the insert.
+// That refusal is correct — the index's comment says a same-name collision is
+// resolved by disambiguating the NAME, never by weakening the key — but a raw
+// unique_violation names an index, not a next step. Run the insert under a
+// SAVEPOINT, and on this one constraint roll back to it and hand back the
+// surviving row so the caller can reuse it or rename theirs.
+//
+// The savepoint is load-bearing, not ceremony: after any SQL error the enclosing
+// transaction is aborted (25P02) and every later statement — including
+// withEnvelope's own tool_call insert — would fail until a rollback. Catching the
+// error in JS and simply querying on (as new-deal's 23505 mapper does) trades one
+// opaque error for another.
+async function insertOrgPartyGuarded(c, savepoint, insertSql, insertParams, name) {
+  await c.query(`savepoint ${savepoint}`);
+  try {
+    return { row: (await c.query(insertSql, insertParams)).rows[0] };
+  } catch (e) {
+    if (e.code !== "23505" || e.constraint !== "party_org_identity_uniq") throw e;
+    await c.query(`rollback to savepoint ${savepoint}`);
+    const existing = await c.query(
+      `select id, name, email, city from party
+        where kind='org' and merged_into is null and deleted_at is null
+          and org_identity_key(name) = org_identity_key($1)`, [name]);
+    return { conflict: existing.rows };
+  }
+}
+
 // [loop #278] The ONE place a decision gets mirrored onto the record it governs.
 // log-decision calls it at creation and update-decision calls it after the fact, so
 // attaching late and attaching at the time produce byte-identical rows — a manual path
@@ -2746,19 +2802,31 @@ export const TOOLS = {
       // running total. Placeholders like '(TBD — enrich)' deliberately still mint
       // separately: collapsing those would assert six unrelated people share an
       // employer, which is a fabricated fact, not a merge.
-      let orgId = null;
-      if (args.org_name) {
-        const o = await c.query("select org_party_id($1,$2) as id", [args.org_name, actor.id]);
-        orgId = o.rows[0].id;
-      }
-      const r = await c.query(
+      const kind = args.kind || "person";
+      const emp = await employerOrgId(c, actor.id, kind, args.name, args.org_name);
+      const insertSql =
         `insert into party (kind,name,org_id,phone,email,city,state,county,specialty,created_by,updated_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10) returning id`,
-        [args.kind || "person", args.name, orgId, args.phone || null, args.email || null,
-         args.city || null, args.state || null, args.county || null, args.specialty || null, actor.id]);
-      await writeEvent(c, actor, "add-party", "party", r.rows[0].id,
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10) returning id`;
+      const insertParams =
+        [kind, args.name, emp.orgId, args.phone || null, args.email || null,
+         args.city || null, args.state || null, args.county || null, args.specialty || null, actor.id];
+      let row;
+      if (kind === "org") {
+        const g = await insertOrgPartyGuarded(c, "add_party_org", insertSql, insertParams, args.name);
+        if (g.conflict)
+          return { needs_confirm: true, candidates: g.conflict,
+                   hint: "a live organisation with this exact normalised identity already exists — " +
+                         "reuse it, or disambiguate the NAME (the way 'Carr Riggs Ingram (advisory)' " +
+                         "does); the identity key is never weakened, even under force_new" };
+        row = g.row;
+      } else {
+        row = (await c.query(insertSql, insertParams)).rows[0];
+      }
+      await writeEvent(c, actor, "add-party", "party", row.id,
         { new: { name: args.name }, idempotency_key: args.idempotency_key });
-      return { ok: true, party_id: r.rows[0].id };
+      return { ok: true, party_id: row.id,
+               ...(emp.selfNamed ? { note: "org_name ignored: it names this organisation itself " +
+                 "(an org is not its own employer; pass org_name on an org only for a PARENT org)" } : {}) };
     }),
   },
 
@@ -2868,18 +2936,28 @@ export const TOOLS = {
                 hint: "similar parties exist; pass party_ref if it is one of them (when it has a ref), or new_party.force_new:true after the human confirms it is a different person" });
           }
           // Same generator, second site — see the note in add-party. 0059's unique
-          // index makes the old blind insert a unique_violation waiting to happen.
-          let orgId = null;
-          if (o.new_party.org_name) {
-            const og = await c.query("select org_party_id($1,$2) as id",
-                                     [o.new_party.org_name, actor.id]);
-            orgId = og.rows[0].id;
+          // index makes the old blind insert a unique_violation waiting to happen,
+          // and defect 18b12fda proved the self-collision variant (org restating
+          // itself in org_name) fires even against clean data. Same helpers as
+          // add-party; the conflict surfaces as a THROW here, per this site's
+          // deliberate divergence noted above.
+          const npKind = o.new_party.kind || "person";
+          const npEmp = await employerOrgId(c, actor.id, npKind, o.new_party.name, o.new_party.org_name);
+          const npSql = `insert into party (kind, name, org_id, created_by, updated_by)
+             values ($1,$2,$3,$4,$4) returning id`;
+          const npParams = [npKind, o.new_party.name, npEmp.orgId, actor.id];
+          if (npKind === "org") {
+            const g = await insertOrgPartyGuarded(c, "add_premises_org", npSql, npParams, o.new_party.name);
+            if (g.conflict)
+              throw new ToolError({ error: "needs_confirm", name: o.new_party.name,
+                candidates: g.conflict,
+                hint: "a live organisation with this exact normalised identity already exists — " +
+                      "pass its ref as party_ref, or disambiguate the NAME; the identity key is " +
+                      "never weakened, even under force_new" });
+            partyId = g.row.id;
+          } else {
+            partyId = (await c.query(npSql, npParams)).rows[0].id;
           }
-          const np = await c.query(
-            `insert into party (kind, name, org_id, created_by, updated_by)
-             values ($1,$2,$3,$4,$4) returning id`,
-            [o.new_party.kind || "person", o.new_party.name, orgId, actor.id]);
-          partyId = np.rows[0].id;
         } else throw new ToolError({ error: "ownership_needs_party",
           hint: "each ownership row carries party_ref or new_party" });
         await c.query(
