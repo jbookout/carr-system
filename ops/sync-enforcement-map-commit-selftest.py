@@ -37,6 +37,7 @@ resolves map_path()/baseline_path() at call time. Loop #367.
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -267,6 +268,51 @@ check("the unrelated file was NOT swept into the published commit",
 check("the unrelated file is still modified and left alone",
       "unrelated.txt" in git(repo, "status", "--porcelain").stdout,
       "restoring the owned pair reached beyond the two paths it owns")
+
+# ── 4. RETIRING A RULE MUST CLEAN THE MAP, not just the inventory ───────────
+#
+# The gap this covers cost every session on the machine. add_pending_rule_controls
+# handled the ADD side — a newly active rule gets an entry or the checker fails it
+# as "no enforcement-map entry at all". Nothing handled REMOVE, so a retired rule
+# kept its rule_controls entry and its category_overrides reference, and the same
+# checker failed the other way. That check feeds gate-integrity, so on 2026-08-14
+# one retired rule (a225b744) made every session boot being told the enforcement
+# layer had changed and the gates must not be treated as in force.
+_MAP = """{
+  "default_category": "judgment_advisory",
+  "rule_controls": {
+    "aaaaaaaa": {"category": "session_task_rail"},
+    "deadbeef": {"category": "session_task_rail"},
+    "bbbbbbbb": {"category": "judgment_advisory"}
+  },
+  "active_rule_ids": {
+    "shared": ["aaaaaaaa", "bbbbbbbb"]
+  },
+  "category_overrides": {
+    "session_task_rail": ["aaaaaaaa", "deadbeef"]
+  }
+}
+"""
+_text, _removed = mod.prune_retired(_MAP, {"aaaaaaaa", "bbbbbbbb"})
+check("the retired rule is reported as pruned", _removed == ["deadbeef"],
+      f"got {_removed}")
+_reparsed = json.loads(_text)
+check("its rule_controls entry is gone",
+      "deadbeef" not in _reparsed["rule_controls"],
+      f'rule_controls: {list(_reparsed["rule_controls"])}')
+check("its category_overrides reference is gone",
+      "deadbeef" not in _reparsed["category_overrides"]["session_task_rail"],
+      f'overrides: {_reparsed["category_overrides"]["session_task_rail"]}')
+check("the ACTIVE rules are untouched",
+      set(_reparsed["rule_controls"]) == {"aaaaaaaa", "bbbbbbbb"}
+      and _reparsed["category_overrides"]["session_task_rail"] == ["aaaaaaaa"],
+      "pruning reached beyond the retired rule")
+
+# Nothing to prune must be a genuine no-op, or an hourly job would rewrite the map
+# every run and churn a pull request for no reason.
+_same, _none = mod.prune_retired(_MAP, {"aaaaaaaa", "bbbbbbbb", "deadbeef"})
+check("a map with nothing retired is left byte-identical",
+      _same == _MAP and _none == [], f"removed {_none}")
 
 print()
 if failures:

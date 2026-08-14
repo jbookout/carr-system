@@ -402,6 +402,61 @@ def add_pending_rule_controls(text: str, new_ids: list[str], default_category: s
     return text[: m.start("body")] + new_body + text[m.end("body") :]
 
 
+def prune_retired(text: str, active: set[str]) -> tuple[str, list[str]]:
+    """Drop every rule_controls entry and category_overrides reference whose rule
+    is no longer active. Returns the rewritten text and the ids removed.
+
+    THE ASYMMETRY THIS CLOSES. add_pending_rule_controls() above already handles
+    the ADD side — a newly activated rule gets an entry, or the checker fails it
+    as "active rule(s) with no enforcement-map entry at all". Nothing handled the
+    REMOVE side, so retiring a rule left its entry behind and the same checker
+    failed the other way: "enforcement-map entries reference inactive/unknown
+    rule(s)". That check feeds hooks/gate-integrity.py, so ONE retired rule made
+    every session on the machine boot being told the enforcement layer had
+    changed and the gates must not be treated as in force. a225b744 did exactly
+    that on 2026-08-14, about two hours after it was retired.
+
+    Keyed on the ACTIVE SET rather than on this run's `dropped` list, deliberately:
+    a rule retired during an earlier run is already stale by the time anyone
+    notices, so pruning only what changed in this run would never clear the
+    backlog. This way the job heals a map it did not break.
+
+    Line-oriented for rule_controls because the file keeps one entry per line,
+    and a targeted splice for the override arrays — same reasoning as every other
+    rewrite here: a json.dump would reformat the whole file and bury a one-rule
+    change in a diff nobody could review.
+    """
+    removed: list[str] = []
+
+    m = re.search(r'("rule_controls": \{\n)(?P<body>.*?)(\n( *)\},\n *"active_rule_ids")',
+                  text, re.S)
+    if m:
+        kept = []
+        for line in m.group("body").split("\n"):
+            hit = re.match(r'\s*"([0-9a-f]{8})":', line)
+            if hit and hit.group(1) not in active:
+                removed.append(hit.group(1))
+                continue
+            kept.append(line)
+        body = "\n".join(kept).rstrip().rstrip(",")
+        text = text[: m.start("body")] + body + text[m.end("body") :]
+
+    ov = re.search(r'("category_overrides": \{\n)(?P<body>.*?)(\n *\})', text, re.S)
+    if ov:
+        body = ov.group("body")
+        for cat_m in list(re.finditer(r'"([a-z_]+)": \[(?P<ids>[^\]]*)\]', body)):
+            ids = re.findall(r'"([0-9a-f]{8})"', cat_m.group("ids"))
+            live = [i for i in ids if i in active]
+            if live != ids:
+                removed.extend(i for i in ids if i not in active)
+                body = body.replace(
+                    cat_m.group(0),
+                    f'"{cat_m.group(1)}": [' + ", ".join(f'"{i}"' for i in live) + "]")
+        text = text[: ov.start("body")] + body + text[ov.end("body") :]
+
+    return text, sorted(set(removed))
+
+
 def main() -> int:
     if not (os.path.exists(map_path()) and os.path.exists(baseline_path())):
         print("sync-enforcement-map: SKIP map or baseline missing")
@@ -454,7 +509,18 @@ def main() -> int:
             changed.append((scope, added, dropped))
             inventory[scope] = rendered
 
-    if not changed:
+    # A MAP CAN BE STALE WITHOUT THE INVENTORY CHANGING, which is the whole
+    # reason a225b744 sat there for hours. `changed` only notices when the
+    # RENDER ORDER moves; a rule retired between runs leaves active_rule_ids
+    # already correct while rule_controls and category_overrides still name it.
+    # Returning "already in parity" there is the job reporting success over a map
+    # the checker rejects — so the stale references are their own trigger.
+    active_now = {r for ids in inventory.values() for r in ids}
+    stale = ({k for k in (data.get("rule_controls") or {}) if k not in active_now}
+             | {r for ids in (data.get("category_overrides") or {}).values()
+                for r in (ids if isinstance(ids, list) else []) if r not in active_now})
+
+    if not changed and not stale:
         print("sync-enforcement-map: OK already in parity")
         return 0
 
@@ -492,6 +558,14 @@ def main() -> int:
             print("sync-enforcement-map: SKIP cannot locate rule_controls block in map")
             return 0
         text = patched
+
+    # The remove side, after the add side: a rule can be added to one scope and
+    # retired from another in the same run, and pruning last means the prune sees
+    # the entries this run just wrote rather than racing them.
+    text, pruned = prune_retired(text, active_now)
+    if pruned:
+        print("sync-enforcement-map: PRUNED retired rule(s) from the map: "
+              + ", ".join(pruned))
 
     with open(map_path(), "w") as fh:
         fh.write(text)
