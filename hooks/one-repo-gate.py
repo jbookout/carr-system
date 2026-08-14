@@ -74,6 +74,16 @@ REPO = os.environ.get("CARR_ONE_REPO_ROOT") or os.path.abspath(
 CODE_EXTENSIONS = (".py", ".js", ".mjs", ".ts", ".sql", ".sh")
 LOG = os.path.join(REPO, "out", "hook-guard.log")
 
+# THE ESCAPE, and it is not optional. This gate installs at USER level, so it sees
+# every session on the machine — including Life AI and any ordinary side project
+# that is a git repo and has every right to hold a .py file. A control that fires
+# on legitimate work and offers no way through is the one the originating loop
+# warned about by name: it "breeds the habit of disabling the gate", and a gate
+# somebody switched off protects nothing. Same idiom and same shape as
+# CARR_ALLOW_CANONICAL_EDIT and CARR_ALLOW_LOOSE_WORK — one variable, deliberate,
+# and logged every time so the escape is visible rather than silent.
+ESCAPE_VAR = "CARR_ALLOW_FOREIGN_REPO"
+
 DENY = (
     "BLOCKED by the CARR one-repo gate: {path}\n"
     "That is a NEW {ext} file inside {tree}, which is a git working tree and is "
@@ -83,7 +93,10 @@ DENY = (
     "home: work filed into another repo is not preserved, it is stranded "
     "somewhere nobody reads. That is not hypothetical — an entire system audit "
     "and two specs were lost that way once already.\n"
-    "Editing a file that already exists here is allowed; creating new code is not."
+    "Editing a file that already exists here is allowed; creating new code is not.\n"
+    "If this genuinely is not CARR work — a side project, Life AI, an ordinary "
+    "repo of your own — set {escape}=1 for that command and it will be allowed "
+    "and logged."
 )
 
 
@@ -159,8 +172,12 @@ def check(tool_input, cwd):
     if tree == home:
         return None                      # the repo, worktrees included (A)
 
+    if os.environ.get(ESCAPE_VAR) == "1":
+        log(f"ALLOW(escape-hatch) {path}")
+        return None
+
     return DENY.format(path=path, ext=extension,
-                       tree=os.path.dirname(tree) or tree)
+                       tree=os.path.dirname(tree) or tree, escape=ESCAPE_VAR)
 
 
 def main():

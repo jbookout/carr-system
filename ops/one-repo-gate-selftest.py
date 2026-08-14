@@ -104,7 +104,7 @@ def make_repo(path):
     return path
 
 
-def run(file_path, home_repo, tool="Write", cwd=None, raw_payload=None):
+def run(file_path, home_repo, tool="Write", cwd=None, raw_payload=None, escape=False):
     """Drive the gate. Returns (exit_code, stderr).
 
     CARR_ONE_REPO_ROOT points the gate at the fixture that stands in for
@@ -117,6 +117,9 @@ def run(file_path, home_repo, tool="Write", cwd=None, raw_payload=None):
         "cwd": cwd or os.path.dirname(file_path),
     })
     env = {**os.environ, "CARR_ONE_REPO_ROOT": home_repo}
+    env.pop("CARR_ALLOW_FOREIGN_REPO", None)
+    if escape:
+        env["CARR_ALLOW_FOREIGN_REPO"] = "1"
     for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
         env.pop(k, None)
     p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
@@ -195,7 +198,19 @@ def main():
             {"tool_name": "Write", "tool_input": {}}))
         check("a write with no file_path fails OPEN", rc == 0, f"exit {rc}")
 
-        # 12. A nested repo INSIDE the home tree is still foreign. This is the
+        # 12. THE ESCAPE. This gate installs at USER level and therefore sees Life
+        #     AI and every ordinary side project, all of which may legitimately
+        #     hold a .py file. A control that fires on legitimate work with no way
+        #     through is the one the originating loop named — it breeds the habit
+        #     of disabling the gate, and a gate somebody switched off protects
+        #     nothing. The refusal has to SAY so, or nobody finds the way through.
+        rc, err = run(os.path.join(foreign, "sideproject.py"), home)
+        check("the refusal names the escape variable",
+              "CARR_ALLOW_FOREIGN_REPO" in err, err[:200])
+        rc, _ = run(os.path.join(foreign, "sideproject.py"), home, escape=True)
+        check("the escape hatch allows the write", rc == 0, f"exit {rc}")
+
+        # 13. A nested repo INSIDE the home tree is still foreign. This is the
         #     rev-10 shape on a laptop: a scaffold repo cloned somewhere handy.
         nested = make_repo(os.path.join(home, "vendor-checkout"))
         rc, _ = run(os.path.join(nested, "setup.py"), home)
