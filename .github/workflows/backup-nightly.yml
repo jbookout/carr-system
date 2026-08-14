@@ -187,18 +187,43 @@ jobs:
       - name: Archive the encrypted dump to R2 (second off-Mac copy)
         if: steps.gate.outputs.enabled == 'true'
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_BACKUP_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # S3-compatible credentials, NOT the REST API token. A bucket-scoped
+          # R2 token ("Object Read & Write" on carr-documents alone) does not
+          # authorize wrangler's REST path
+          # /accounts/<id>/r2/buckets/<bucket>/objects/<key> — two live runs on
+          # 2026-08-14 (31837806854, 31838603722) both returned 403 there, the
+          # second with a freshly minted token, which ruled out a bad value and
+          # left the permission model as the cause. That REST path wants
+          # account-wide Workers R2 Storage Write. The S3 endpoint honors the
+          # narrow per-bucket grant, so the scope stays tight and the tooling
+          # changes instead.
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           STAMP: ${{ steps.stamp.outputs.date }}
         run: |
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-            echo "R2 archive SKIPPED: CLOUDFLARE_R2_BACKUP_TOKEN secret or CLOUDFLARE_ACCOUNT_ID variable is not set."
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [ -z "${ACCOUNT_ID:-}" ]; then
+            echo "R2 archive SKIPPED: R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets or CLOUDFLARE_ACCOUNT_ID variable is not set."
             echo "The workflow-artifact copy above still stands. See this file's header for provisioning."
             exit 0
           fi
           DUMP="$(ls "${GITHUB_WORKSPACE}/backup-out"/carr-*.sql.age | head -1)"
           KEY="backups/cloud/${STAMP}/$(basename "$DUMP")"
-          echo "archiving $(basename "$DUMP") ($(wc -c < "$DUMP" | tr -d ' ') bytes) -> r2://carr-documents/${KEY}"
-          npx --yes wrangler@4 r2 object put "carr-documents/${KEY}" \
-            --file "$DUMP" --remote --content-type application/octet-stream
-          echo "R2 archive OK -> ${KEY}"
+          SIZE="$(wc -c < "$DUMP" | tr -d ' ')"
+          ENDPOINT="https://${ACCOUNT_ID}.r2.cloudflarestorage.com"
+          echo "archiving $(basename "$DUMP") (${SIZE} bytes) -> r2://carr-documents/${KEY}"
+          aws s3api put-object --endpoint-url "$ENDPOINT" \
+            --bucket carr-documents --key "$KEY" --body "$DUMP" \
+            --content-type application/octet-stream > /dev/null
+          # Read back what landed and compare byte counts. An upload that
+          # reports success and stores a truncated object is the exact failure
+          # the Mac-side size floor exists to catch; the cloud copy gets the
+          # same treatment rather than trusting the exit code.
+          REMOTE="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
+            --bucket carr-documents --key "$KEY" --query ContentLength --output text)"
+          if [ "$REMOTE" != "$SIZE" ]; then
+            echo "R2 archive FAILED verification: local ${SIZE} bytes, stored ${REMOTE} bytes"
+            exit 1
+          fi
+          echo "R2 archive OK -> ${KEY} (${REMOTE} bytes, read back and matched)"
