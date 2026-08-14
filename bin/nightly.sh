@@ -50,12 +50,64 @@ rc_total=0
 # steps they are named after instead of on the mere fact that the chain reached
 # the end. See the ping block at the bottom.
 LAST_STEP_RC=0
+
+# ── THE JOB-RUN LEDGER (Program 3, 2026-08-14) ───────────────────────────────
+# Until this existed, step() computed exactly the right outcome for every step,
+# including the SKIP distinction below that nothing else in the system makes,
+# and then threw it into a text file on one Mac. A morning question like "which
+# step failed, on which code, and what else broke at the same time" could only
+# be answered by a human reading out/nightly.log over somebody's shoulder. That
+# is the "terminal archaeology" Program 3's gate is named against.
+#
+# ONE CORRELATION ID PER NIGHT, exported so every step of one chain — and
+# anything a step itself records — threads onto the same journey. `ops-record
+# trace <id>` then returns the whole night as one chain.
+#
+# THE RUN KEY IS DERIVED FROM THE LABEL, up to the first parenthesis, so
+# "cadence engine (spawn owed next actions)" is always nightly.cadence-engine.
+# The parenthetical is where wording actually churns, so keeping it out of the
+# key means a reworded step keeps its history. Renaming the leading words DOES
+# start a new key, which is the tradeoff taken deliberately rather than changing
+# the signature of every call site in a chain that runs unattended tonight.
+#
+# RECORDING NEVER FAILS A STEP. The recorder's exit code is ignored on purpose.
+# It is also not hidden: a step that goes unrecorded makes this service read
+# `unknown` on the next health look rather than staying green, because
+# ops.v_service_environment_health derives health from the latest observation
+# and its freshness and stores no health anywhere. Silence is visible by design.
+LEDGER_OFF=0
+record_run() {                  # record_run <label> <state> <rc> <started_at>
+  [ "$LEDGER_OFF" -eq 1 ] && return 0
+  local key
+  # The '(' is escaped because zsh treats an unescaped one in a ${..%%..}
+  # pattern as globbing syntax and errors with "bad pattern" — caught by running
+  # the expression before shipping it, not by reading it.
+  key="nightly.$(print -r -- "${1%% \(*}" | tr 'A-Z ' 'a-z-' | tr -cd 'a-z0-9.-')"
+  local fclass=()
+  [ "$2" = "failed" ] && fclass=(--failure-class "exit_$3")
+  ./.venv/bin/python tools/ops-record.py run \
+      --service nightly-record-layer --key "$key" --state "$2" \
+      --exit-code "$3" --started-at "$4" --source-ref bin/nightly.sh \
+      --detail "$1" "${fclass[@]}" >> "$LOG" 2>&1
+  # 78 = the ops schema is not there yet (migration 0115 unapplied on this
+  # database). Say it once and stop trying, rather than printing the same line
+  # for every step — an error that repeats every night trains people to stop
+  # reading the log, which is the failure this chain already learned once.
+  if [ $? -eq 78 ]; then
+    LEDGER_OFF=1
+    say "SKIP  job-run ledger not configured on this database (migration 0115 unapplied) — steps will not be recorded tonight"
+  fi
+  return 0
+}
+
 step() {                        # step <label> <command...>
   local label="$1"; shift
+  local t0; t0="$(date -u +%FT%TZ)"
   say "START $label"
   LAST_STEP_RC=0
   if "$@" >> "$LOG" 2>&1; then
     say "OK    $label"
+    record_run "$label" succeeded 0 "$t0"
   else
     local rc=$?
     LAST_STEP_RC=$rc
@@ -67,8 +119,10 @@ step() {                        # step <label> <command...>
     # still appears in the log, so it is visible without being a failure.
     if [ "$rc" -eq 78 ]; then
       say "SKIP  $label (exit 78 — not configured; see the step's own message above)"
+      record_run "$label" skipped "$rc" "$t0"
     else
       say "FAIL  $label (exit $rc)"
+      record_run "$label" failed "$rc" "$t0"
       rc_total=1
     fi
   fi
@@ -76,6 +130,12 @@ step() {                        # step <label> <command...>
 
 say "===== nightly chain begin ====="
 cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
+
+# ONE ID FOR THE WHOLE NIGHT. Exported so every step, and anything a step itself
+# records, threads onto the same journey — `tools/ops-record.py trace <id>`
+# returns the night as one chain instead of a text file to read by hand.
+export CARR_CORRELATION_ID="$(uuidgen | tr 'A-Z' 'a-z')"
+say "correlation: $CARR_CORRELATION_ID"
 
 # WHICH CODE RAN. Added 2026-08-07. This chain executes whatever is checked out
 # in the working tree, and on 2026-08-07 the checked-out branch moved twice in
