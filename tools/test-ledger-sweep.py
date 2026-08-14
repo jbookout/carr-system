@@ -103,7 +103,97 @@ def loop_tick():
             "message": {"role": "user", "content": content}}
 
 
+def cross_session_message(summary_text):
+    """The FOURTH false-positive shape, found live 2026-08-14. A message relayed
+    from ANOTHER CLAUDE SESSION arrives as a user record wearing a human origin
+    stamp, exactly like the loop tick. Its text is a peer agent talking, never
+    the partner, so a ruling inside it is another machine's words.
+
+    Note the shape carefully: the harness prefixes the tag with a plain-English
+    lead-in line, so the record does NOT start with "<cross-session-message" and
+    a startswith() check on the tag alone does not see it."""
+    content = ("Another Claude session sent a message:\n"
+               "<cross-session-message from=\"uds:/tmp/cc-socks/52188.sock\" "
+               "from-name=\"peer\" from-mode=\"prompting\">\n"
+               f"{summary_text}\n</cross-session-message>")
+    return {"type": "user", "origin": {"kind": "human"},
+            "message": {"role": "user", "content": content}}
+
+
+def peer_relay_real_shape(summary_text):
+    """The RELAY AS THE TRANSCRIPT ACTUALLY RECORDS IT, counted from a live
+    session file on 2026-08-14: origin kind "peer" AND isMeta true. The earlier
+    fixture in this file guessed kind "human" from the loop tick's behaviour and
+    was wrong about the bytes — both fixtures are kept, because the guessed one
+    still pins the content-prefix fallback for any record that lacks origin."""
+    content = ("Another Claude session sent a message:\n"
+               "<cross-session-message from=\"uds:/tmp/cc-socks/52188.sock\">\n"
+               f"{summary_text}\n</cross-session-message>")
+    return {"type": "user", "origin": {"kind": "peer"}, "isMeta": True,
+            "message": {"role": "user", "content": content}}
+
+
+def stop_hook_feedback(text):
+    """Harness commentary injected when a Stop gate reopens the turn. 12 such
+    records in the same live transcript, every one isMeta true with NO origin
+    field. It is the SESSION's own gate talking, never the partner, and no
+    content prefix in this hook ever matched it."""
+    return {"type": "user", "isMeta": True,
+            "message": {"role": "user", "content": f"Stop hook feedback: {text}"}}
+
+
+def unknown_future_origin(text):
+    """A kind nobody has invented yet. This is the whole point of the positive
+    test: the blocklist trusted every unrecognised kind, so each new harness
+    shape defeated it once, in production, before anyone knew it existed. Four
+    times for this one hook. A kind that is not "human" is not the partner."""
+    return {"type": "user", "origin": {"kind": "webhook-relay-2027"},
+            "message": {"role": "user", "content": text}}
+
+
 CASES = [
+    # ---- THE POSITIVE TEST: anything not positively the partner stays quiet --
+    ("class-5 \u00b7 peer relay in its REAL transcript shape (kind=peer, isMeta)",
+     QUIET, [
+        human("go"),
+        assistant("Working."),
+        peer_relay_real_shape("You should always commit these files from now on."),
+    ]),
+    ("class-5 \u00b7 stop-hook feedback is the session's own gate, not the partner",
+     QUIET, [
+        human("go"),
+        assistant("Working."),
+        stop_hook_feedback("CONDUCT GATE — you must always do X from now on."),
+    ]),
+    ("class-6 \u00b7 an UNKNOWN future origin kind is not trusted", QUIET, [
+        human("go"),
+        assistant("Working."),
+        unknown_future_origin("no, that goes in the database instead. always."),
+    ]),
+    ("class-6 control \u00b7 isMeta on a HUMAN-stamped record still stays quiet",
+     QUIET, [
+        human("go"),
+        assistant("Working."),
+        {"type": "user", "origin": {"kind": "human"}, "isMeta": True,
+         "message": {"role": "user",
+                      "content": "we should always do X from now on"}},
+    ]),
+    # ---- false-positive class 4: a PEER SESSION read as the partner ------
+    # Found live 2026-08-14. The ledger-sweep fired on a relayed
+    # cross-session-message and quoted another Claude's words back as "His
+    # words". Peer messages arrive origin-stamped human, like the loop tick, so
+    # only a content check can catch them — and the tag is not at position 0,
+    # because the harness prefixes it with a lead-in sentence.
+    ("class-4 \u00b7 relayed peer message is not partner speech", QUIET, [
+        human("go"),
+        assistant("Working."),
+        cross_session_message("You should always commit these files from now "
+                              "on. No, that goes in the database instead."),
+    ]),
+    ("class-4 control \u00b7 same ruling text typed by the REAL partner fires",
+     FIRE, [
+        human("you should always commit these files from now on"),
+    ]),
     # ---- false-positive class 3: loop tick wearing a human origin stamp --
     # The 2026-08-06 live miss: the autonomous-loop prompt arrives origin-
     # stamped human, so the kind=="human" early-return skipped the content
