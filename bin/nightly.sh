@@ -356,10 +356,12 @@ step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 step "settings mirror (permission surface -> git)"   ./bin/sync-settings.sh --apply
 
 # Added 2026-08-06 (Joe's go, the Python-native answer to the Rust question,
-# loop #218): mypy over the whole repo, lenient config in mypy.ini, 19 legacy
-# files grandfathered with self-removing headers. Catches shape mistakes in
-# data hand-offs the night they land. A red here is a NEW regression, never
-# legacy noise — the baseline was green the day it was wired.
+# loop #218): mypy over the whole repo, lenient config in mypy.ini. The legacy
+# files that were grandfathered at wiring time carried self-removing headers and
+# are all gone (verified 2026-08-14), so the sweep now runs with no exemptions.
+# Catches shape mistakes in data hand-offs the night they land. A red here is a
+# NEW regression, never legacy noise — the baseline was green the day it was
+# wired, and there is no longer any legacy bucket for a red to hide in.
 step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 
 # Added 2026-08-13. The rules half of this defect is caught hourly by
