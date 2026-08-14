@@ -6,6 +6,10 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>rules-refresh</string>
+    <string>launchd.run</string>
+    <string>/bin/zsh</string>
     <string>{{REPO}}/bin/refresh-rules.sh</string>
   </array>
   <!-- Hourly, business hours only (7:00 through 20:00 local). Joe's cost ruling
