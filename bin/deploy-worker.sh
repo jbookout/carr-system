@@ -81,14 +81,22 @@ set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORKER_DIR="$REPO/mcp-server"
 COUNT_FILE="$WORKER_DIR/.last-deployed-verb-count"
+# Set again after argument parsing when a non-production env is chosen, so a
+# staging deploy can never overwrite the baseline production is measured against.
 WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
 
 CHECK_ONLY=0
 ALLOW_SHRINK=0
+TARGET_ENV="production"
 PINNED_RELEASE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check)         CHECK_ONLY=1 ;;
+    --env)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --env needs a name" >&2; exit 64; }
+      TARGET_ENV="$2"
+      shift
+      ;;
     --allow-shrink)  ALLOW_SHRINK=1 ;;
     --release-sha)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --release-sha needs a full commit SHA" >&2; exit 64; }
@@ -99,6 +107,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$TARGET_ENV" != "production" ]; then
+  COUNT_FILE="$WORKER_DIR/.last-deployed-verb-count.$TARGET_ENV"
+fi
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
@@ -124,6 +136,14 @@ if [ -n "$PINNED_RELEASE" ]; then
   git merge-base --is-ancestor "$PINNED_SHA" origin/main \
     || fail "approved release SHA is not an ancestor of fetched origin/main."
   echo "  OK  pinned approved release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
+elif [ "$TARGET_ENV" != "production" ]; then
+  # STAGING IS FOR CODE THAT IS NOT ON MAIN YET — that is the entire point of
+  # having it. Requiring origin/main here would mean the only way to rehearse a
+  # change is to merge it first, which inverts the purpose of a rehearsal
+  # environment. The clean-tree check below still applies, so what ships is
+  # always a commit someone can name and return to.
+  echo "  OK  env=$TARGET_ENV — branch check skipped on purpose (staging exists to run unmerged code)"
+  echo "      shipping $BRANCH @ $HEAD_SHA"
 elif [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
   BEHIND="$(git rev-list --count "HEAD..origin/main")"
   AHEAD="$(git rev-list --count "origin/main..HEAD")"
@@ -213,7 +233,11 @@ cd "$WORKER_DIR"
 # RELEASE_SHA: whichever of the two preflight branches ran above, HEAD_SHA is
 # already proven equal to it (the pinned branch fails otherwise), so it is
 # always the right value to stamp — no separate variable to keep in sync.
-"$WRANGLER" deploy --var "GIT_SHA:$HEAD_SHA"
+if [ "$TARGET_ENV" = "production" ]; then
+  "$WRANGLER" deploy --var "GIT_SHA:$HEAD_SHA"
+else
+  "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"
+fi
 
 # ---------- postflight ----------
 # THE MARKER WRITE IS PART OF THE SAME STEP THAT DEPLOYS, deliberately: there
