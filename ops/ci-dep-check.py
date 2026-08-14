@@ -276,7 +276,9 @@ def main() -> int:
         return write_lock()
 
     strict = "--strict" in sys.argv
-    problems, notes, skipped = [], [], []
+    problems: list[str] = []
+    notes: list[str] = []
+    skipped: list[str] = []
 
     check_python(problems, notes)
     check_npm(problems, notes, skipped, strict)
