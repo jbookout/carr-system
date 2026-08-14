@@ -106,6 +106,23 @@ def main():
           any("compiled-rules-shared" in p for p in paths.values()),
           f"sample={sorted(paths.values())[:3]}")
 
+    # 8. DERIVED_DIRS coverage. Both wholesale-regenerated graph trees classify
+    #    as derived, each naming its OWN generator — "Graph/" is a string prefix
+    #    of "Graph-System/", and the trailing slash is the only thing keeping
+    #    the two from shadowing each other's writer label. Pin all three edges:
+    #    Graph/ derived, Graph-System/ derived under its own writer, and a
+    #    sibling dir that merely starts with "Graph" still UNEXPECTED.
+    tag = vdw.classify("Graph/leads/Blair Stiles (lead).md", {}, {})
+    check("Graph/ files classify as derived (run.sh graph)",
+          "derived" in tag and "run.sh graph" in tag and "graph-system" not in tag,
+          f"tag={tag}")
+    tag = vdw.classify("Graph-System/nodes/foo.md", {}, {})
+    check("Graph-System/ keeps its own writer label",
+          "derived" in tag and "graph-system" in tag, f"tag={tag}")
+    tag = vdw.classify("Graphics/logo.md", {}, {})
+    check("a sibling dir starting with 'Graph' is still UNEXPECTED",
+          tag == "UNEXPECTED", f"tag={tag}")
+
     print(f"\npassed {checked - len(failures)} · failed {len(failures)}")
     return 1 if failures else 0
 

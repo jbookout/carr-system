@@ -353,8 +353,18 @@ def scan(root):
 # this way merging PR #57's DERIVED_DIRS change against the manifest-
 # verification work below — verification supersedes blanket exclusion
 # wherever the two approaches would otherwise collide on this one path.
+# Graph/ (no -System) is the SAME writer class again, missed a second time:
+# pipelines/build-graph-notes.py + build-graph-structure.py (both run by
+# `./run.sh graph`) wipe and atomically rebuild the whole Graph/ entity tree
+# from record-layer views on every run. Unregistered, each regeneration
+# false-flagged its files as UNEXPECTED in the ingest_inbox review queue
+# (confirmed 2026-08-14: Graph/leads/Blair Stiles (lead).md and Graph/leads/
+# Jeff Yee (lead).md, both verified by hand and rejected). The trailing slash
+# in each key keeps the two prefixes independent — "Graph-System/…" does not
+# startswith "Graph/" — so neither entry can shadow the other's writer label.
 DERIVED_DIRS = {
     "Graph-System/": "./run.sh graph-system",
+    "Graph/": "./run.sh graph",
 }
 
 # A FOURTH legitimate writer. Backups/portability-mirror/ is also a
