@@ -203,6 +203,18 @@ def main():
             ("a .md into a foreign repo (not the one-repo lane)",
              f'echo "x" > {foreign}/NOTES.md'),
             ("no redirect at all", "ls -la"),
+            # THE LIVE FALSE POSITIVE, and the case this suite was missing. Every
+            # fixture path above is an absolute literal, so nothing here exercised
+            # what a PreToolUse hook actually receives: unexpanded shell. The gate
+            # went live, and within a minute `echo x > "$D/NOTES.md"` was REFUSED —
+            # $D is not expanded before the hook runs, the literal text was joined
+            # to cwd, and that session's cwd was the vault, so an ordinary write
+            # into a scratch directory read as vault markdown. A false DENY blocks
+            # real work every time; a false ALLOW only misses something.
+            ("a target built from a shell variable", 'echo "x" > "$D/NOTES.md"'),
+            ("a braced shell variable", 'echo "x" > "${OUT}/report.md"'),
+            ("a command substitution", 'echo "x" > "$(mktemp -d)/notes.md"'),
+            ("a glob target", 'echo "x" > out/*.json'),
             ("a heredoc with no file target", "python3 <<'PY'\nprint(1)\nPY"),
         ]
         for label, cmd in allowed:
