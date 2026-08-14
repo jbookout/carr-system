@@ -82,6 +82,12 @@ export function auditIdentity(actor) {
     sponsoring_human_slug: scope.status === "personal" ? scope.sponsor : null,
     personal_scope: scope.status === "personal" ? `${scope.sponsor}-personal` : "none",
     authorization_class: actor.authorization_class || authorizationClassForActor(actor),
+    // Program 4 Gap A2 (2026-08-14, defect cae5be2e): the x-correlation-id of the
+    // Worker request that produced this write, set on the actor object by
+    // mcp.js's dispatch() from env.CORRELATION_ID (correlation.js). null for any
+    // caller that reaches a write handler without going through dispatch() —
+    // tests, and anything constructing an actor object by hand.
+    correlation_id: actor.correlation_id || null,
   };
 }
 
@@ -99,11 +105,11 @@ async function withEnvelope(client, actor, verb, args, fn) {
   const identity = auditIdentity(actor);
   await client.query(
     `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null,
      identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-     identity.authorization_class]);
+     identity.authorization_class, identity.correlation_id]);
   return result;
 }
 
@@ -157,13 +163,14 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
+     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
      actor.via || null, actor.client_id || null, identity.organization_tenant_id,
-     identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
+     identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
+     identity.correlation_id]);
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
@@ -4555,9 +4562,9 @@ export const TOOLS = {
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
            new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
-           organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
+           organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
          values (coalesce($1::timestamptz, now()), $2, 'log-decision', 'decision', $3,
-                 $4, 'human_stated', $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 $4, 'human_stated', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          -- to_char, not ::date: node-postgres hands a ::date back as a JS Date, and
          -- interpolating that into session_key produced
          -- "Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated Universal Time)-joe"
@@ -4575,7 +4582,8 @@ export const TOOLS = {
                                             quality_delta: qualityDelta } : {}) }),
          args.human_quote || null, args.rationale, args.idempotency_key,
          actor.via || null, actor.client_id || null, identity.organization_tenant_id,
-         identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
+         identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
+         identity.correlation_id]);
 
       const ev = r.rows[0];
       const sessionKey = args.session_key || `${ev.entry_date}-${actor.slug}`;

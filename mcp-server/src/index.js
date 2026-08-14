@@ -59,9 +59,21 @@
 // sets env.CORRELATION_ID for anything downstream to read, echoes the id back
 // as x-correlation-id on every response, and turns an uncaught throw into a
 // structured log line plus a 500 whose body carries the id — see
-// correlation.js's own header for the full reasoning and what this
-// deliberately does not yet do (no ops.* table write; the Worker writes to
-// none of them today).
+// correlation.js's own header for the full reasoning.
+//
+// TRACING THE FAILURE (Program 4, Gap A2, 2026-08-14, defect cae5be2e).
+// correlation.js stays exactly what its own header says it is — no database
+// driver, no ops.* write, Node-testable on its own. The database half lives in
+// trace.js's withFailureRecording, composed HERE, one layer inside
+// wrapWithCorrelation: `wrapWithCorrelation(withFailureRecording(routeRequest))`.
+// That ordering matters — wrapWithCorrelation sets env.CORRELATION_ID BEFORE
+// calling its handler argument, so by the time withFailureRecording runs, the
+// id it needs is already there. It records exactly two of the three classes
+// trace.js's header defines (any HTTP 5xx this Worker returns, and an
+// uncaught throw before it becomes wrapWithCorrelation's own 500) by wrapping
+// routeRequest's call and checking the response status; the third class
+// (mcpApiHandler's/protectedApiHandler's own actor-unresolved 401) is recorded
+// at its own call site below, since a 401 is invisible to a >=500 check.
 
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
@@ -74,6 +86,7 @@ import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
 import { wrapWithCorrelation } from "./correlation.js";
+import { withFailureRecording, scheduleFailureRecord, actorUnresolvedFailureClass } from "./trace.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -220,7 +233,17 @@ const protectedApiHandler = {
     if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
     if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
     const actor = actorFromProps(ctx.props);
-    if (!actor) return json({ error: "unauthorized" }, 401);
+    if (!actor) {
+      // Same reasoning as mcpApiHandler's identical check (mcp.js) — a
+      // provider-validated grant with no resolvable actor, not a routine
+      // unauthenticated 401. See trace.js's file header, class 3.
+      scheduleFailureRecord(env, ctx, {
+        routeKey: "pipeline/changes:unauthorized",
+        failureClass: actorUnresolvedFailureClass(),
+        detail: null,
+      });
+      return json({ error: "unauthorized" }, 401);
+    }
     return pipelineApi(request, env, actor);
   },
 };
@@ -514,7 +537,10 @@ async function routeRequest(request, env, ctx) {
 
 // Top-level export. wrapWithCorrelation covers every route above in one
 // place — see the CORRELATION note at the top of this file and
-// correlation.js's own header.
+// correlation.js's own header. withFailureRecording is composed INSIDE it
+// (see the TRACING THE FAILURE note at the top of this file for why that
+// ordering is load-bearing) so every route's >=500 responses and uncaught
+// throws are covered the same single-wrap way.
 export default {
-  fetch: wrapWithCorrelation(routeRequest),
+  fetch: wrapWithCorrelation(withFailureRecording(routeRequest)),
 };
