@@ -1,0 +1,95 @@
+# carr-system edge liveness — PROGRAM 4, THE OTHER HALF OF THE GATE.
+#
+# The gate reads: "loss of Joe's Mac does not DESTROY or SILENTLY STOP critical
+# operations." Destroy is covered twice as of 2026-08-14 — the local nightly
+# dump archives to R2, and backup-nightly.yml takes an independent encrypted
+# dump on GitHub's infrastructure. This file is the other verb.
+#
+# WHAT WAS ALREADY WATCHING. Four Healthchecks dead-man checks (exports, backup,
+# MCP, whole chain). They genuinely detect a dead Mac on their own, and they are
+# why this is a completion rather than a first line of defence.
+#
+# WHAT NOTHING WAS WATCHING. Those four checks watch the NIGHTLY CHAIN. This
+# system registers 33 production service rows, 17 of them launchd jobs that now
+# write durable run results, and NOTHING OFF THE MAC READ ANY OF IT — the whole
+# observability layer Program 3 built terminated in a table only reachable by a
+# human running `ops-record health` on the machine that failed. A wedged
+# capture-poll, a stopped rules-refresh, a Mac that is up but not working: every
+# dead-man check keeps pinging green, because the chain is fine.
+#
+# THE ALERT PATH IS THE FAILED WORKFLOW ITSELF. GitHub emails Joe when a
+# scheduled workflow fails, which is a channel with no dependency on the machine
+# being reported on. No new secret, no new service, no pager to configure.
+#
+# READ-ONLY, AND THE SAME CREDENTIAL THE CLOUD BACKUP ALREADY USES.
+# BACKUP_DATABASE_URL connects as carr_backup (migrations/0119_backup_role.sql):
+# SELECT on the CARR-owned public and ops schemas, now and future, and nothing
+# else — no INSERT/UPDATE/DELETE/DDL anywhere, and not a member of
+# carr_writer/carr_reader/carr_jobs. A reader that can only read is the correct
+# shape for a watchdog: it must never be able to change the thing it watches,
+# and 0121 deliberately did not widen it.
+#
+# EVERY SIX HOURS, not every five minutes. The shortest registered cadence that
+# can alarm is measured in hours, staleness does not become more true by being
+# noticed sooner, and a workflow that runs 288 times a day to say nothing is how
+# a repository's actions log becomes unreadable.
+#
+# IT DOES NOT PING HEALTHCHECKS and that is deliberate: those four checks watch
+# the chain, this watches the catalog, and folding a catalog verdict into a
+# chain check would make one red indistinguishable from the other.
+
+name: Edge liveness (cloud)
+
+on:
+  schedule:
+    # 05:10, 11:10, 17:10, 23:10 UTC. Offset ten past the hour so it never
+    # lands in the same scheduler minute as backup-nightly.yml (02:35) or the
+    # local chain (02:05 local), and never reads the ledger mid-write.
+    - cron: "10 5,11,17,23 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: carr-edge-liveness
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  liveness:
+    name: is anything that should be reporting not reporting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the one dependency this needs
+        run: pip install --disable-pip-version-check "psycopg[binary]"
+
+      # NEUTRAL WHEN UNCONFIGURED, following backup-nightly.yml's asymmetry: a
+      # SCHEDULED run with no credential exits clean and says so, so merging
+      # this file can never start emailing Joe about a secret that was never
+      # provisioned. edge-liveness.py returns 78 (EX_CONFIG) for that case, the
+      # same convention bin/nightly.sh and bin/run-scheduled.sh already use, and
+      # 78 is translated to success HERE rather than inside the script, so a
+      # human running it by hand still sees the honest code.
+      - name: Read the ledger from outside the machine it reports on
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set +e
+          python ops/edge-liveness.py
+          rc=$?
+          set -e
+          if [ "$rc" -eq 78 ]; then
+            echo "::notice::No database credential in this environment — nothing read, nothing claimed."
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::A registered service has gone quiet. The failure of this workflow IS the alert; the log above names which."
+          fi
+          exit $rc
