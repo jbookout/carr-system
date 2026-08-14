@@ -295,3 +295,58 @@ echo "    git_sha.value is $HEAD_SHA   (which build answered)"
 echo "    env.value is \"$TARGET_ENV\"                        (which deployment answered)"
 echo "  That pair is the authoritative provenance check, not this file. env matters"
 echo "  because git_sha and schema are IDENTICAL across environments by design."
+
+# ── POSTFLIGHT GOLDEN-WORKFLOW RUN, added 2026-08-14 (Phase 1 Program 3) ──────
+#
+# Everything above this line is an INSTRUCTION TO A HUMAN, and instructions to
+# humans are the thing Program 3 exists to stop relying on. smoke-reads.sh has
+# carried "RUN THIS AFTER EVERY WORKER DEPLOY" in its header since it was
+# written; the Program 0 inventory then found bin/smoke-and-record.sh among the
+# scripts with no caller anywhere. A post-deploy check that depends on somebody
+# remembering is a check whose coverage is unknown.
+#
+# PRODUCTION ONLY, AND THAT IS NOT LAZINESS. smoke-reads.sh defaults to the
+# production API and a staging deploy prints its workers.dev trigger URL from
+# wrangler rather than from anything this script holds — so pointing the suite at
+# a staging deploy would mean reconstructing a hostname this file would have to
+# keep in sync with wrangler.toml. Aiming post-deploy verification at the wrong
+# hostname is precisely what the 2026-08-13 routes incident was made of, and the
+# comment block above already refuses to do it for the human. It refuses here too.
+# For a staging deploy the printed instruction stands.
+#
+# The deploy and the check share ONE correlation id, which is the entire point:
+# a deploy that breaks a read verb now leaves a deployment and a failed check
+# under one id instead of two unrelated facts in two places.
+if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; then
+  echo ""
+  echo "== postflight: golden workflow suite =="
+  CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+  export CARR_CORRELATION_ID
+  CARR_ENV="$TARGET_ENV"
+  export CARR_ENV
+  echo "  correlation $CARR_CORRELATION_ID"
+  if "$REPO/bin/smoke-and-record.sh"; then
+    echo "  golden workflow suite PASSED against the deploy you just shipped."
+  else
+    smoke_rc=$?
+    if [ "$smoke_rc" -eq 78 ]; then
+      echo "  golden workflow suite SKIPPED — no probe token configured on this machine."
+      echo "  This deploy is UNVERIFIED by the suite. See the provisioning runbook in"
+      echo "  mcp-server/smoke-reads.sh. Not treated as a deploy failure."
+    else
+      echo ""
+      echo "  ***  GOLDEN WORKFLOW SUITE FAILED (exit $smoke_rc) AFTER THIS DEPLOY.  ***"
+      echo "  The Worker shipped and is answering wrongly, or the probe credential is"
+      echo "  refused. Read the output above, and read the failed check together with"
+      echo "  this deploy in one query:"
+      echo "      select * from ops.v_trace where correlation_id = '$CARR_CORRELATION_ID';"
+      echo "  Rolling back is bin/deploy-worker.sh --pinned-release <sha>."
+      exit 1
+    fi
+  fi
+  # Deliver the check run. Called through the interpreter rather than the exec
+  # bit because core.fileMode is false in this repo, so a mode set on one machine
+  # is not carried by the commit and cannot be relied on by a script.
+  if [ -x "$REPO/.venv/bin/python" ]; then LEDGER_PY="$REPO/.venv/bin/python"; else LEDGER_PY=python3; fi
+  "$LEDGER_PY" "$REPO/ops/run-ledger.py" flush >/dev/null 2>&1 || true
+fi

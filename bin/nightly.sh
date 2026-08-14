@@ -44,6 +44,55 @@ fi
 
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
+# ── PROGRAM 3: THIS CHAIN NOW LEAVES A TRACE THAT IS NOT A TEXT FILE ─────────
+#
+# Everything below this comment writes to ops.run (migration 0115) through
+# ops/run-ledger.py. THE POINT IS THE CORRELATION ID: the Program 3 gate is "one
+# traceable view explains a failed critical journey without terminal
+# archaeology", and until now the only account of a failed night was this log —
+# append-only text, on one Mac, readable only by a human with a shell on that
+# Mac, carrying no environment, no link to the deploy before it and no link to
+# anything it caused. One id per chain run turns those twenty independent lines
+# into one journey that ops.v_trace can return in a single query.
+#
+# out/nightly.log IS NOT REPLACED and should not be. It is the human's narrative
+# and it survives a database outage, which is exactly when it is read.
+CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+export CARR_CORRELATION_ID
+
+# ENVIRONMENT IS DECLARED HERE, NOT INFERRED DOWNSTREAM. The read contract says
+# environment is "required on each operational object and never inferred", and
+# the collector refuses to record without one rather than guessing — so the
+# declaration has to happen somewhere, and this is the honest place for it: this
+# file IS the production chain by construction, since it loads the production
+# exporter credential from ~/.config/carr/db.env a few lines above. An operator
+# rehearsing this chain elsewhere exports CARR_ENV first and that value wins.
+CARR_ENV="${CARR_ENV:-production}"
+export CARR_ENV
+
+LEDGER_PY="$REPO/.venv/bin/python"
+[ -x "$LEDGER_PY" ] || LEDGER_PY=python3
+
+# ledger_record <run_key> <state> <exit_code> <started> <ended> [failure_class]
+# Never allowed to affect the chain: run-ledger.py exits 0 on every path by
+# design, and this adds `|| true` on top so even a missing interpreter cannot
+# turn an observability problem into a nightly failure.
+ledger_record() {
+  "$LEDGER_PY" "$REPO/ops/run-ledger.py" record \
+    --service nightly-record-layer \
+    --run-key "$1" --state "$2" --exit-code "$3" \
+    --started "$4" --ended "$5" \
+    --source-kind wrapper --source-ref bin/nightly.sh \
+    ${6:+--failure-class "$6"} >> "$LOG" 2>&1 || true
+}
+
+# A stable key per step, derived from the step's label: lowercase, every run of
+# non-alphanumerics collapsed to one dash. Renaming a label renames its run_key
+# and starts a new history for that step — worth knowing before renaming one.
+ledger_key() {
+  print -r -- "nightly.$(print -r -- "$1" | tr 'A-Z' 'a-z' | sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-//' -e 's/-$//')"
+}
+
 rc_total=0
 # LAST_STEP_RC carries the outcome of the step that just ran (0 = OK, 78 = SKIP,
 # anything else = FAIL). Added 2026-08-07 so the dead-man pings can report on the
@@ -52,13 +101,34 @@ rc_total=0
 LAST_STEP_RC=0
 step() {                        # step <label> <command...>
   local label="$1"; shift
+  local key t0 t1
+  key="$(ledger_key "$label")"
+  t0="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   say "START $label"
   LAST_STEP_RC=0
   if "$@" >> "$LOG" 2>&1; then
     say "OK    $label"
+    t1="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    ledger_record "$key" succeeded 0 "$t0" "$t1"
   else
     local rc=$?
     LAST_STEP_RC=$rc
+    t1="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    # The ledger draws the SAME distinction this wrapper already drew and then
+    # threw away: 78 is EX_CONFIG, a step that ran, found no credential, wrote
+    # nothing and said so — recorded as 'skipped', which the run contract has a
+    # state for, and NOT as a failure. A skip logged as a failure is how an
+    # alarm becomes background noise, which is the reasoning immediately below.
+    if [ "$rc" -eq 78 ]; then
+      ledger_record "$key" skipped 78 "$t0" "$t1"
+    else
+      # 'step_nonzero_exit' is a deliberately coarse class. The wrapper genuinely
+      # cannot tell a timeout from a crash from a bad argument, and inventing a
+      # finer class it cannot support would put fiction in the one column whose
+      # value is that the tenth occurrence of a class is visible as a pattern.
+      # exit_code carries the specifics.
+      ledger_record "$key" failed "$rc" "$t0" "$t1" step_nonzero_exit
+    fi
     # 78 = EX_CONFIG: the step ran, found a credential or setting it needs is
     # absent, wrote nothing and said so. That is NOT a failed night. Treating it
     # as one would fire the alarm every single night until the credential lands,
@@ -74,8 +144,16 @@ step() {                        # step <label> <command...>
   fi
 }
 
-say "===== nightly chain begin ====="
+say "===== nightly chain begin (correlation $CARR_CORRELATION_ID, env $CARR_ENV) ====="
 cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
+
+# DRAIN FIRST, FOR THE RUN THAT DIED. Delivery is at-least-once: the collector
+# clears its spool only after the rows commit, so anything left on disk belongs
+# to a chain that was killed, lost power or hit an unreachable database before
+# its own flush. Draining here is what makes "the chain crashed" survivable as an
+# observation rather than a silence — the rows from the failed night arrive on
+# the following one, late but complete, instead of never.
+"$LEDGER_PY" "$REPO/ops/run-ledger.py" flush >> "$LOG" 2>&1 || true
 
 # WHICH CODE RAN. Added 2026-08-07. This chain executes whatever is checked out
 # in the working tree, and on 2026-08-07 the checked-out branch moved twice in
@@ -318,6 +396,27 @@ step "open-items dashboard (one-page view)"          ./.venv/bin/python generato
 # in its own output rather than letting a green row imply more than it proves.
 step "verb probe (worker gate + view sweep)"         ./.venv/bin/python ops/nightly-verb-probe.py
 
+# ── THE FULL VERB SUITE IS BACK IN THE CHAIN, 2026-08-14 (Program 3) ──────────
+# The paragraph above is now HISTORY rather than current instruction, and is kept
+# because the reasoning is the load-bearing part. What changed: the credential
+# the 2026-08-04 removal was forced by has been replaced with a narrower one
+# (PROBE_TOKENS -> a locked 'probe' profile), it is provisioned, and the suite
+# was verified honestly green — 33 passed, 0 failed, three profile-locked SKIPs —
+# BEFORE this line was added. See bin/smoke-and-record.sh for the whole account.
+#
+# It runs AFTER the verb probe rather than instead of it. The two cover different
+# failures and the cheap one should not be gated behind the expensive one: the
+# probe needs no credential and sweeps all 40 views, while this suite needs the
+# probe token and covers transport, dispatch and ANSWER CORRECTNESS — the class
+# where a verb responds 200 with a wrong answer, which no view sweep can see.
+#
+# A MISSING TOKEN IS A SKIP, A REFUSED TOKEN IS AN ALARM. smoke-and-record.sh
+# maps "no token configured" to 78 so an absent credential cannot alarm every
+# night until someone pastes one — that pattern is how this suite was lost the
+# first time. A token that EXISTS and is refused stays a failure, because it
+# means post-deploy verification has silently stopped happening.
+step "golden workflow suite (all read verbs, answer correctness)" ./bin/smoke-and-record.sh
+
 # PHASE 1 v2 (2026-08-13): vault drift watch --rebaseline, LAST functional step
 # — after every export and every other step that touches a vault or repo file,
 # so the snapshot it writes is the true post-chain state. This is what
@@ -352,10 +451,16 @@ export HC_BACKUP_RC="$BACKUP_RC"
 export HC_CHAIN_RC="$rc_total"
 step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 
+# DELIVER THIS CHAIN'S RUNS. Last, and deliberately after the dead-man pings:
+# the ledger is a record, not a gate, and it must never sit between a step and
+# the alarm that reports on it. Its own failure leaves the spool intact for the
+# next chain's opening drain, so a Neon outage tonight costs lateness, not data.
+"$LEDGER_PY" "$REPO/ops/run-ledger.py" flush >> "$LOG" 2>&1 || true
+
 if [ "$rc_total" -eq 0 ]; then
-  say "===== nightly chain OK ====="
+  say "===== nightly chain OK (correlation $CARR_CORRELATION_ID) ====="
 else
-  say "===== nightly chain FINISHED WITH FAILURES — see above ====="
+  say "===== nightly chain FINISHED WITH FAILURES — see above (correlation $CARR_CORRELATION_ID) ====="
 fi
 
 # Keep the log from growing without bound: last 2000 lines is several months.
