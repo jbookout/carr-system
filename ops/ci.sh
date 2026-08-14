@@ -25,16 +25,21 @@ fi
 # check is defined. A check added here appears in both callers for free, and
 # cannot be present in one and missing from the other.
 #
-# WHY BOTH CALLERS EXIST AT ALL. This repo is private on a free GitHub plan, and
-# both the branch-protection API and the newer rulesets API refuse:
-# "Upgrade to GitHub Pro or make this repository public." Verified live
-# 2026-08-13 against both endpoints. So GitHub Actions can RUN these checks and
-# report, but it cannot REQUIRE them before a merge. The pre-push hook is what
-# gives the checks teeth today, at no cost: a red tree does not leave the
-# machine. It is bypassable with --no-verify, and that is stated plainly rather
-# than papered over — it is an accident-stopper, the same honest framing
-# ops/githooks/pre-push already uses about itself. When GitHub Pro is enabled,
-# the workflow becomes a required status check and NOTHING here changes.
+# WHY BOTH CALLERS EXIST AT ALL. For most of this file's life the answer was that
+# GitHub could not enforce anything: both the branch-protection API and the newer
+# rulesets API refused with "Upgrade to GitHub Pro or make this repository
+# public" on a private free-plan repo, verified live against both endpoints.
+# Joe enabled Pro on 2026-08-13 and ruleset 20824501, "main: CI must be green",
+# is now active on main — required status check "ops/ci.sh --strict", plus no
+# force-push and no branch deletion. NOTHING in this file changed to make that
+# work, which was the point of writing it this way.
+#
+# THE PRE-PUSH HOOK STILL EARNS ITS PLACE, and is not made redundant by the
+# ruleset. It fails in SECONDS on the machine that wrote the change, before a
+# runner is ever asked for; the ruleset fails minutes later after a round trip.
+# It is bypassable with --no-verify and the ruleset is not, so they cover
+# different halves: the hook is the fast accident-stopper, the ruleset is the
+# one that cannot be talked out of it.
 #
 # SKIPPED IS NOT PASSED. Rule 88e9b5eb: "not authorized" and "not possible" are
 # different findings and must never be reported as the same one. A check that
