@@ -51,6 +51,7 @@ import plistlib
 
 import subprocess
 import sys
+from typing import Any, Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REPO_PLISTS = os.path.join(REPO, "ops", "launchd")
@@ -69,7 +70,7 @@ WRAPPER_EXEMPT = {
                             "already writes",
 }
 
-DRIFT = []
+DRIFT: list[str] = []
 
 
 def drift(line: str) -> None:
@@ -80,7 +81,7 @@ def label_of(path: str) -> str:
     return os.path.basename(path).replace(".plist", "")
 
 
-def read_plist(path: str) -> dict:
+def read_plist(path: str) -> dict[str, Any]:
     """Repo copies store {{REPO}}/{{HOME}}/{{VAULT}} placeholders (see
     ops/config-as-code.py) — plistlib does not care, and neither does anything
     below, which compares structure rather than resolved paths."""
@@ -91,7 +92,7 @@ def read_plist(path: str) -> dict:
         return {"__error__": str(exc)}
 
 
-def loaded_labels() -> set:
+def loaded_labels() -> Optional[set[str]]:
     """What launchd currently holds. `launchctl list` prints pid/status/label."""
     try:
         out = subprocess.run(["launchctl", "list"], capture_output=True,
@@ -102,11 +103,11 @@ def loaded_labels() -> set:
             if "com.carr." in ln}
 
 
-def wrapped(pl: dict) -> bool:
+def wrapped(pl: dict[str, Any]) -> bool:
     return any("run-scheduled.sh" in str(a) for a in pl.get("ProgramArguments", []))
 
 
-def wrapper_service(pl: dict) -> str:
+def wrapper_service(pl: dict[str, Any]) -> str:
     """The service key a wrapped plist reports under: the argument right after
     the wrapper path. Reading it back is what catches a copy-paste that wrapped
     a job under a neighbour's key — the failure mode of rewiring seven files."""
@@ -129,10 +130,10 @@ def main() -> int:
             for p in glob.glob(f"{INSTALLED}/com.carr.*.plist")}
     live = loaded_labels()
 
-    declared = {}
+    declared: dict[str, Any] = {}
     try:
-        for s in json.load(open(SERVICES))["services"]:
-            declared[s["key"]] = s
+        for svc in json.load(open(SERVICES))["services"]:
+            declared[svc["key"]] = svc
     except Exception as exc:  # noqa: BLE001
         print(f"scheduler-truth: cannot read {SERVICES}: {exc}", file=sys.stderr)
         return 2
@@ -194,9 +195,9 @@ def main() -> int:
     covered = uncovered = 0
     for key in sorted(launchd_declared):
         lbl = f"com.carr.{key}"
-        pl = repo.get(lbl)
-        if pl is None:
+        if lbl not in repo:
             continue
+        pl = repo[lbl]
         if key in WRAPPER_EXEMPT:
             if not quiet:
                 print(f"  n/a  {key:<24} {WRAPPER_EXEMPT[key]}")
@@ -244,6 +245,13 @@ def main() -> int:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "ops_record", os.path.join(REPO, "tools", "ops-record.py"))
+        # spec and spec.loader are Optional in the stubs, and both really can be
+        # None — a path that is not an importable source file gives back a spec
+        # of None rather than raising. Handled rather than asserted away: this
+        # whole section is additive, so "the loader is not there" belongs on the
+        # same branch as "the credential is not there" and prints, not raises.
+        if spec is None or spec.loader is None:
+            raise ImportError(f"{REPO}/tools/ops-record.py is not importable")
         ops_record = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(ops_record)
         ops_record._load_db_env()

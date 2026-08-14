@@ -60,12 +60,13 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import Any, Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WRAPPER = os.path.join(REPO, "bin", "run-scheduled.sh")
 LOG = os.path.join(REPO, "out", "run-scheduled.log")
 
-FAILED = []
+FAILED: list[str] = []
 
 
 def check(label: str, cond: bool, detail: str = "") -> bool:
@@ -79,7 +80,7 @@ def check(label: str, cond: bool, detail: str = "") -> bool:
 
 # ── tier 1 ───────────────────────────────────────────────────────────────────
 
-def unreachable_env() -> dict:
+def unreachable_env() -> dict[str, str]:
     """The environment a Mac has before its DB credential loads.
 
     Port 1 on loopback refuses instantly rather than hanging, so a suite that
@@ -107,7 +108,8 @@ def field(line: str, name: str) -> str:
     return m.group(1) if m else ""
 
 
-def drive(run_key: str, script: str, env: dict = None, cwd: str = None):
+def drive(run_key: str, script: str, env: Optional[dict[str, str]] = None,
+          cwd: Optional[str] = None) -> tuple[Any, str]:
     """Run the real wrapper over a real child, return (proc, provenance line)."""
     proc = subprocess.run(
         [WRAPPER, "carr-selftest-probe", run_key, "/bin/sh", "-c", script],
@@ -304,7 +306,9 @@ def tier2() -> None:
                        'Local Mac edge', 'low', 'joe', 'launchd')
                on conflict (key) do update set name = excluded.name
                returning id""", (probe_key,))
-        service_id = cur.fetchone()[0]
+        inserted = cur.fetchone()
+        assert inserted is not None, "the probe service insert returned no id"
+        service_id = inserted[0]
         cur.execute(
             """insert into ops.service_environment (service_id, environment)
                values (%s, 'production') on conflict do nothing""", (service_id,))
