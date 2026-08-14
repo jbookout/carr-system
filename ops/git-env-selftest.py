@@ -77,7 +77,15 @@ subprocess.run(["git", "config", "user.email", victim_email], cwd=victim,
 fixture = tempfile.mkdtemp(prefix="gitenv-fixture-")
 fenv = fixture_env(hostile)
 subprocess.run(["git", "init", "-q"], cwd=fixture, env=fenv, capture_output=True)
+# BOTH halves of the identity, and the omission of user.name here failed on the
+# ubuntu runner while passing on macOS. fixture_env() sets GIT_CONFIG_GLOBAL to
+# /dev/null and GIT_CONFIG_NOSYSTEM, which is the point of it — so there is no
+# global identity to fall back on, and git's auto-detection from the host account
+# succeeds on a Mac and does not on a bare runner. A test for portability that
+# itself depended on the host is the same defect it exists to catch.
 subprocess.run(["git", "config", "user.email", "fixture@example.invalid"],
+               cwd=fixture, env=fenv, capture_output=True)
+subprocess.run(["git", "config", "user.name", "fixture"],
                cwd=fixture, env=fenv, capture_output=True)
 with open(os.path.join(fixture, "x.txt"), "w") as fh:
     fh.write("x\n")
