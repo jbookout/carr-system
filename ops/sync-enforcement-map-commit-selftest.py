@@ -65,47 +65,13 @@ def load_module_for(repo):
     return mod
 
 
-# Every git variable that can redirect a command AWAY from its cwd. Git reads
-# these before it reads the working directory, so `cwd=repo` is not isolation on
-# its own — it is isolation only when nothing in the environment outranks it.
-_GIT_ENV_OVERRIDES = (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
-    "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_PREFIX",
-)
-
-
-def _fixture_env():
-    """The environment a fixture git call must run in.
-
-    WHY THIS EXISTS, found live 2026-08-13. `cwd=repo` was believed to be
-    isolation and is not: git honours GIT_DIR over the working directory, and
-    GIT_DIR is EXPORTED BY EVERY GIT HOOK. ops/githooks/pre-push runs ops/ci.sh,
-    ci.sh runs this selftest, and so on a plain `git push` from this machine the
-    fixture's own `git config user.email selftest@example.invalid` was written
-    into the REAL ~/carr-system/.git/config — the shared repo silently took the
-    test's identity, and any commit made in that window was authored by
-    "selftest". Reproduced from a clean clone: exporting GIT_DIR and running
-    this file rewrote the outer repo's user.email every time.
-
-    Stripping the variables is the fix rather than passing `-C repo`, because
-    -C changes the directory and GIT_DIR would still outrank it.
-    """
-    env = dict(os.environ)
-    for var in _GIT_ENV_OVERRIDES:
-        env.pop(var, None)
-    # Belt and braces: read no system or global config either, so the fixture
-    # cannot pick up Joe's identity and, more importantly, a `git config` that
-    # somehow escaped --local has nowhere real to land. Both take FILE paths.
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    env["GIT_CONFIG_GLOBAL"] = os.devnull
-    return env
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
 
 
 def git(repo, *args):
     return subprocess.run(["git", *args], cwd=repo, capture_output=True,
-                          text=True, env=_fixture_env())
+                          text=True, env=fixture_env())
 
 
 def make_repo():
