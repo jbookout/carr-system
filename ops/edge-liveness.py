@@ -78,7 +78,26 @@ def main() -> int:
         print("edge-liveness: psycopg unavailable — nothing read, nothing claimed.")
         return 78
 
-    with psycopg.connect(dsn, connect_timeout=20) as conn, conn.cursor() as cur:
+    # A DSN THAT IS PRESENT AND UNREACHABLE IS NOT THE SAME AS A SERVICE GOING
+    # QUIET, and until ops/degraded-mode-exercise.py cut the database off, this
+    # file could not tell them apart: the connection error propagated, the
+    # process exited 1, and the workflow's own error line announced "a
+    # registered service has gone quiet" — about a network blip, to Joe's inbox.
+    # A watchdog whose alarm text can be false is worse than one that stays
+    # quiet, because the next real alarm is read with the last false one in mind.
+    #
+    # EX_CONFIG here, and the workflow turns 78 into a visible warning rather
+    # than a passing silence, so an unreachable ledger is still SEEN without
+    # being reported as something it is not.
+    try:
+        conn_ctx = psycopg.connect(dsn, connect_timeout=20)
+    except Exception as exc:  # noqa: BLE001 — every connect failure reads the same
+        print(f"edge-liveness: the ledger is unreachable ({type(exc).__name__}) "
+              f"— nothing read, nothing claimed. This is NOT a report that a "
+              f"service has gone quiet, and must never be shown as one.")
+        return 78
+
+    with conn_ctx as conn, conn.cursor() as cur:
         # observed_at is the last time ANYTHING was heard from this service.
         # freshness_state is the view's own verdict against the registered
         # cadence, so the staleness rule lives in the database next to the

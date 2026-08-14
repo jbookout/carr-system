@@ -85,8 +85,15 @@ jobs:
           python ops/edge-liveness.py
           rc=$?
           set -e
+          # 78 covers both "no credential here" and "the ledger is unreachable".
+          # Neither is a service going quiet, so neither may fail this workflow
+          # and send Joe an alert whose text would be false. A WARNING rather
+          # than a notice, because an unreachable ledger that persists is worth
+          # seeing in the actions list — it means this watchdog has been blind,
+          # and a blind watchdog reporting nothing looks exactly like a healthy
+          # system. ops/degraded-mode-exercise.py is what caught this.
           if [ "$rc" -eq 78 ]; then
-            echo "::notice::No database credential in this environment — nothing read, nothing claimed."
+            echo "::warning::The ledger could not be read, so nothing was checked this run. This is NOT an all-clear — see the log for which case applied."
             exit 0
           fi
           if [ "$rc" -ne 0 ]; then
