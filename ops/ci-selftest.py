@@ -32,10 +32,14 @@ purpose, to the exact artifact that proved why.
     .venv/bin/python ops/ci-selftest.py     # exit 0 = all pass
 """
 
+import atexit
+import contextlib
+import json
 import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -69,6 +73,151 @@ def check(label, ok, detail=""):
 
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+# ---------------------------------------------------------------- seed safety
+# THIS FILE SEEDS REAL DAMAGE INTO THE LIVE WORKING TREE — that is the point of
+# it, because a check is only proven by making it fail. The danger is what
+# happens if the process does not reach its own cleanup line.
+#
+# It already did happen, on 2026-08-13 (loop #368). A seeded defect was left
+# behind — the `state-as-of` verb missing from mcp-server/src/tools.js, 46
+# deletions in one hunk — and the marker file that would have said so had
+# already been removed. ops/ci.sh --only artifact then failed with "would REMOVE
+# 1 verb(s): deployed 105, tree has 104", and because the pre-push hook runs the
+# full ci.sh, that blocked EVERY session on this machine from pushing anything,
+# for a reason unrelated to their own work. The failure names a verb deletion,
+# so the natural first read is that a person deleted a verb on purpose.
+#
+# WHY try/finally IS NOT ENOUGH, which is what this file relied on before.
+# `finally` runs on an exception and on a normal exit. It does NOT run on
+# SIGKILL, on a machine losing power, or when a parent harness kills the process
+# group on timeout — and a CI selftest is exactly the kind of long job something
+# else kills. A harness that seeds real damage and relies on reaching its own
+# cleanup line is one crash away from doing this again.
+#
+# WHAT REPLACES IT. The original bytes are written to a JOURNAL BEFORE anything
+# is modified, and the journal is removed only after a successful restore. So
+# the damage is never un-recorded: either the journal is absent (nothing is
+# seeded) or it names every path and holds its original content. Recovery then
+# needs no memory of what the run was doing.
+#
+#   * seeded_paths() restores on any ordinary exit path — normal, exception,
+#     SIGINT, SIGTERM — via finally plus atexit plus signal handlers.
+#   * On a kill that outruns all of those, the journal survives on disk, and the
+#     NEXT run finds it, restores every path from it, and REFUSES to start.
+#     Refusing matters: a run that silently repaired and continued would hide a
+#     crash that has already cost this machine a full push outage once.
+SEED_JOURNAL = REPO / "_ci_selftest_seed_journal.json"
+
+
+def _restore_from_journal(journal_data):
+    """Write every recorded path back to its original bytes. Returns the paths."""
+    restored = []
+    for rel, original in (journal_data.get("paths") or {}).items():
+        target = REPO / rel
+        if original is None:
+            # Path did not exist before the seed: the seed created it, so the
+            # restore is removal, not a write of the string "None".
+            if target.exists():
+                target.unlink()
+                restored.append(rel)
+            continue
+        if not target.exists() or target.read_text() != original:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(original)
+            restored.append(rel)
+    return restored
+
+
+def _recover_stale_journal():
+    """Called at import. A journal on disk means a previous run was killed."""
+    if not SEED_JOURNAL.exists():
+        return
+    try:
+        data = json.loads(SEED_JOURNAL.read_text())
+    except (OSError, ValueError) as exc:
+        print(f"FATAL: {SEED_JOURNAL.name} exists but is unreadable ({exc}).\n"
+              f"  A previous run seeded real damage into this tree and was killed before\n"
+              f"  restoring it. The journal is the only record of what was changed, so it\n"
+              f"  cannot be repaired automatically. Inspect the file and the tree by hand.",
+              file=sys.stderr)
+        sys.exit(1)
+    restored = _restore_from_journal(data)
+    SEED_JOURNAL.unlink(missing_ok=True)
+    # THE SHAPE OF THIS OUTPUT IS LOAD-BEARING, not decoration. ops/ci.sh's
+    # gates class runs each suite quietly and, on failure, prints only
+    # `tail -12` of its log. So a recovery and a genuinely broken check reach
+    # the terminal looking identical, and telling them apart is the difference
+    # between a thirty-second re-run and another evening like 2026-08-13. The
+    # banner is repeated at the END as well as the start, because the tail is
+    # what gets shown, and the last line is the ACTION rather than the diagnosis.
+    bar = "=" * 68
+    for line in (bar, "NOT A TEST FAILURE — a stale seed was recovered.", bar):
+        print(line, file=sys.stderr)
+    print("A previous run was killed while a seeded defect was live in the working",
+          file=sys.stderr)
+    print("tree. Every path it recorded has been restored from the journal:",
+          file=sys.stderr)
+    for rel in restored:
+        print(f"    restored  {rel}", file=sys.stderr)
+    if not restored:
+        print("    (every recorded path was already correct — nothing to undo)",
+              file=sys.stderr)
+    print("\nRefusing to start is deliberate: a silent repair would hide a crash that",
+          file=sys.stderr)
+    print("blocked every push on this machine for hours on 2026-08-13.", file=sys.stderr)
+    for line in (bar, "NOTHING IS BROKEN. RE-RUN THIS SUITE TO PROCEED.", bar):
+        print(line, file=sys.stderr)
+    # 75 is EX_TEMPFAIL — a transient condition the caller should retry, and
+    # distinct from 1. ci.sh treats any nonzero as a failed class, which stays
+    # correct because the push must still be blocked; the code simply carries
+    # the distinction for any caller that wants "retry me" rather than "a check
+    # is broken".
+    sys.exit(75)
+
+
+@contextlib.contextmanager
+def seeded_paths(*rels):
+    """Seed real damage into the named repo-relative paths, safely.
+
+    Records each path's original bytes to the journal BEFORE yielding, and
+    restores on every exit path this process can still control. A path that does
+    not exist yet is recorded as None so its restore is a deletion.
+    """
+    originals = {}
+    for rel in rels:
+        p = REPO / rel
+        originals[rel] = p.read_text() if p.exists() else None
+    SEED_JOURNAL.write_text(json.dumps(
+        {"pid": os.getpid(), "paths": originals}, indent=2))
+
+    done = {"restored": False}
+
+    def restore(*_args):
+        if done["restored"]:
+            return
+        done["restored"] = True
+        _restore_from_journal({"paths": originals})
+        SEED_JOURNAL.unlink(missing_ok=True)
+
+    prev = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            prev[sig] = signal.getsignal(sig)
+            signal.signal(sig, lambda s, f: (restore(), sys.exit(130)))
+        except (ValueError, OSError):
+            pass  # not on the main thread, or the platform refuses — finally still covers it
+    atexit.register(restore)
+    try:
+        yield
+    finally:
+        restore()
+        for sig, handler in prev.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
 
 
 def run(args, env=None, shell_cmd=None, timeout=600):
@@ -211,7 +360,7 @@ def test_secret_scanner_catches_and_respects_allow():
     check("the tree is currently clean of shaped credentials", rc == 0, f"rc={rc}")
 
     seeded = REPO / "_ci_selftest_seed.env"
-    try:
+    with seeded_paths("_ci_selftest_seed.env"):
         seeded.write_text(SEED_DSN + "\n")
         subprocess.run(["git", "add", "-N", str(seeded)], cwd=REPO, env=scrubbed_env(), capture_output=True)
         p = subprocess.run(scan, cwd=REPO, capture_output=True, text=True)
@@ -222,17 +371,17 @@ def test_secret_scanner_catches_and_respects_allow():
         seeded.write_text(SEED_DSN + "  # ci-secret-scan" + ": allow — selftest fixture\n")
         p = subprocess.run(scan, cwd=REPO, capture_output=True, text=True)
         check("an inline allow marker on the same line suppresses it", p.returncode == 0)
-    finally:
+        # The index entry is this test's own doing and is not content, so it is
+        # dropped here rather than by the journal, which restores file bytes.
         subprocess.run(["git", "rm", "--cached", "-q", "--force", str(seeded)],
                        cwd=REPO, env=scrubbed_env(), capture_output=True)
-        seeded.unlink(missing_ok=True)
 
 
 def test_dep_check_detects_a_stale_lock():
     req = REPO / "requirements.txt"
     original = req.read_text()
     dep = [sys.executable, str(REPO / "ops" / "ci-dep-check.py")]
-    try:
+    with seeded_paths("requirements.txt"):
         p = subprocess.run(dep, cwd=REPO, capture_output=True, text=True)
         check("dependency check passes on the committed tree", p.returncode == 0)
 
@@ -244,8 +393,6 @@ def test_dep_check_detects_a_stale_lock():
         req.write_text(original + "\n# a comment-only edit\n")
         p = subprocess.run(dep, cwd=REPO, capture_output=True, text=True)
         check("a comment-only edit does NOT invalidate the lock", p.returncode == 0)
-    finally:
-        req.write_text(original)
 
 
 def test_lock_is_not_platform_specific():
@@ -385,4 +532,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # BEFORE ANY TEST RUNS. A journal on disk means a previous run was killed
+    # with seeded damage live in the tree; this restores it and refuses to
+    # start. Deliberately not inside main(), so no future reordering of the
+    # test list can end up running a test before the tree is known good.
+    _recover_stale_journal()
     sys.exit(main())
