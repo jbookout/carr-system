@@ -74,6 +74,19 @@ for h in ("https://npiregistry.cms.hhs.gov/api/?version=2.1",
           "https://raw.githubusercontent.com/a/b"):
     case(f"known host {h[:48]}", fetch(h), ALLOW)
 
+# claude.com, added 2026-08-14. anthropic.com was already here; claude.com was
+# not, and the standard Claude Code attribution line links to it. So EVERY `gh
+# pr create` carrying the documented attribution was refused as "network send to
+# an unrecognised host", three times in one session, each one a real PR being
+# opened by a session doing exactly what the repo asks of it. The workaround is
+# to strip the link, which quietly costs the attribution the line exists for.
+# Same owner and same read-only class as anthropic.com; the guard's own refusal
+# text says to list a legitimate host here.
+case("gh pr create carrying the Claude Code attribution link",
+     bash('gh pr create --title t --body "fix\n\n'
+          'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
+case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
+
 # ── 2. DERIVED list (the B half): client practice sites, from the record ──────
 # THESE CARRY A LONG QUERY ON PURPOSE. A derived host gets the UNCONDITIONAL
 # pass, so it must be allowed even with a query the open-read class would refuse.
