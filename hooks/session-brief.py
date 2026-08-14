@@ -113,7 +113,7 @@ def dynamic_counts():
             + ratio)
 
 
-def nightly_verdict():
+def nightly_verdict(log: str | None = None) -> str:
     """One line when the last nightly chain ended red, nothing when it was clean.
 
     Added 2026-08-10. The chain had been exiting non-zero for three nights and
@@ -123,9 +123,19 @@ def nightly_verdict():
     the news now arrives at session start, where Joe cannot miss it.
 
     Deliberately SILENT on a good night: a line that prints every session is a
-    line nobody reads by the end of the week."""
-    log = os.path.expanduser("~/carr-system/out/nightly.log")
+    line nobody reads by the end of the week.
+
+    THE LAST run, not every run since the last green one (fixed 2026-08-14).
+    The accumulator was deduped at each boundary but never reset, so a day with
+    three red chains opened the next session by naming all of their failures at
+    once. That morning it named five, four of which had already been fixed, and
+    the session spent its first minutes working out which one was still real.
+    Naming a fixed failure costs the same trust as printing on a green night."""
+    log = log or os.path.expanduser("~/carr-system/out/nightly.log")
+    if not os.path.exists(log):
+        return ""
     fails: list[str] = []
+    last_run_fails: list[str] = []
     last_ok = None
     for line in open(log, errors="replace"):
         if "  FAIL  " in line:
@@ -133,16 +143,20 @@ def nightly_verdict():
         elif "chain OK" in line or "FINISHED WITH FAILURES" in line:
             last_ok = "chain OK" in line
             if last_ok:
-                fails = []
+                last_run_fails = []
             else:
                 seen, uniq = set(), []
                 for f in fails:
                     if f not in seen:
                         seen.add(f)
                         uniq.append(f)
-                fails = uniq
-    if last_ok is False and fails:
-        return (f" ⚠ THE LAST NIGHTLY CHAIN FAILED: {', '.join(fails)}. "
+                last_run_fails = uniq
+            # Either way this boundary ENDS a run: what follows belongs to the
+            # next one, and FAIL lines past the final boundary belong to a chain
+            # still in flight, which this verdict does not speak for.
+            fails = []
+    if last_ok is False and last_run_fails:
+        return (f" ⚠ THE LAST NIGHTLY CHAIN FAILED: {', '.join(last_run_fails)}. "
                 f"Say so in your first response; details in out/nightly.log and "
                 f"the 'nightly chain result' row of `./run.sh health`.")
     return ""
