@@ -175,8 +175,23 @@ check_types() {
     skip types "bin/type-check.sh not present"
     return
   fi
-  if run_quiet "$LOGDIR/types.log" ./bin/type-check.sh; then
+  local rc
+  run_quiet "$LOGDIR/types.log" ./bin/type-check.sh
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
     ok types "mypy clean across the repo's Python"
+  elif [ "$rc" -eq 78 ]; then
+    # 78 = EX_CONFIG, and bin/type-check.sh's own header names the contract:
+    # "Exit 78 (EX_CONFIG) when mypy is absent anywhere: the nightly chain reads
+    # 78". This branch was lost when two sessions built this class in parallel
+    # on 2026-08-14 and the one WITHOUT it merged second (#65 over #60), so a
+    # machine with no mypy read `bad types — mypy found shape mistakes`, which
+    # is both a false failure and a false explanation. It matters beyond tidiness
+    # because ops/githooks/pre-push runs this script: on a fresh clone, or on
+    # Dell's Mac before the venv exists, every push would be refused and the
+    # stated reason would send the reader hunting for type errors that are not
+    # there. CI on the runner is unaffected — mypy is pinned in requirements.lock.
+    skip types "mypy not installed (pinned in requirements.lock, so CI always has it)"
   else
     tail -25 "$LOGDIR/types.log" >&2
     bad types "mypy found shape mistakes — see the errors above"
