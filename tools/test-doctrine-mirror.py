@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -8,10 +10,13 @@ from doctrine_mirror import (
     EXCLUDED_TABLES,
     atomic_swap_tree,
     build_and_swap,
+    compute_file_hashes,
     export_tables,
     render_document_markdown,
+    render_output_manifest,
     render_rules_markdown,
     serialize_cell,
+    write_output_manifest,
 )
 
 
@@ -118,3 +123,62 @@ def test_excluded_tables_never_reach_writer(tmp_path: Path):
     assert EXCLUDED_TABLES == {"sensitive_blob", "tool_call"}
     assert seen == [("a_table", "a_table.csv"), ("z_table", "z_table.csv")]
     assert (table_count, row_count) == (2, 6)
+
+
+# ---------------------------------------------------------------------------
+# manifest.json — the machine-readable sibling to MANIFEST.md that
+# ops/vault-drift-watch.py verifies mirror regeneration against, so its
+# nightly UNEXPECTED alarm can tell a sanctioned re-export (hash matches what
+# the pipeline itself just wrote) from a foreign writer parking content in the
+# mirror (hash diverges, or the file carries no manifest entry at all).
+
+
+def test_compute_file_hashes_walks_every_file_with_posix_relpaths(tmp_path: Path):
+    (tmp_path / "md" / "policy").mkdir(parents=True)
+    (tmp_path / "md" / "policy" / "a.md").write_text("alpha", encoding="utf-8")
+    (tmp_path / "csv").mkdir()
+    (tmp_path / "csv" / "table.csv").write_text("h1,h2\n1,2\n", encoding="utf-8")
+    (tmp_path / "MANIFEST.md").write_text("# manifest\n", encoding="utf-8")
+
+    hashes = compute_file_hashes(tmp_path)
+
+    assert set(hashes) == {"md/policy/a.md", "csv/table.csv", "MANIFEST.md"}
+    assert hashes["md/policy/a.md"] == hashlib.sha256(b"alpha").hexdigest()
+    assert hashes["csv/table.csv"] == hashlib.sha256(b"h1,h2\n1,2\n").hexdigest()
+    assert hashes["MANIFEST.md"] == hashlib.sha256(b"# manifest\n").hexdigest()
+
+
+def test_render_output_manifest_is_stable_json_with_schema_and_count():
+    files = {"z.md": "deadbeef", "a.md": "beadfeed"}
+
+    text = render_output_manifest(STAMP, files)
+    data = json.loads(text)
+
+    assert data == {
+        "schema": 1,
+        "generated_at": STAMP,
+        "file_count": 2,
+        "files": {"z.md": "deadbeef", "a.md": "beadfeed"},
+    }
+    # sort_keys=True in the writer -> deterministic byte-for-byte output,
+    # which matters because this file is itself hashed and diffed by callers.
+    assert text.index('"a.md"') < text.index('"z.md"')
+
+
+def test_write_output_manifest_covers_every_prior_output_including_manifest_md(tmp_path: Path):
+    (tmp_path / "md" / "policy").mkdir(parents=True)
+    (tmp_path / "md" / "policy" / "a.md").write_text("alpha", encoding="utf-8")
+    (tmp_path / "MANIFEST.md").write_text("# manifest\n", encoding="utf-8")
+
+    out_path = write_output_manifest(tmp_path, STAMP)
+
+    assert out_path == tmp_path / "manifest.json"
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+    assert data["generated_at"] == STAMP
+    assert data["file_count"] == 2
+    assert data["files"]["md/policy/a.md"] == hashlib.sha256(b"alpha").hexdigest()
+    assert data["files"]["MANIFEST.md"] == hashlib.sha256(b"# manifest\n").hexdigest()
+    # manifest.json cannot list its own hash (it does not exist yet at the
+    # moment its own contents are computed) — that must never regress into a
+    # self-referential entry.
+    assert "manifest.json" not in data["files"]
