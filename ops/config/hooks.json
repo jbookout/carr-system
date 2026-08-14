@@ -94,6 +94,15 @@
           "timeout": 10
         }
       ]
+    },
+    {
+      "matcher": "SendMessage",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/peer-broadcast-gate.py"
+        }
+      ]
     }
   ],
   "PostToolUse": [

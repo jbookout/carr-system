@@ -28,7 +28,8 @@
     "session-brief.py": "1a3f9251feeb95ca9b688cda7ad1ea9b397f5549e89d35e7d3f807992ca0516d",
     "staging-attribution-gate.py": "cf05a3bf8a04a8e741962de11a83a0e904f24a039a15ebb450b9a61ae714e247",
     "staging-observation-tracker.py": "3a0ebd27fdb8bdf4eaee745be408afe281e62c017813f829e9d7611ca91cef90",
-    "cmd_text.py": "4f64738ffc6108ad7ee6e9de54b9db54516741e717196fc0fb8ecdc7ed1c400d"
+    "cmd_text.py": "4f64738ffc6108ad7ee6e9de54b9db54516741e717196fc0fb8ecdc7ed1c400d",
+    "peer-broadcast-gate.py": "d609169fbb74f3d192eb3b6fbe135ea9642509c1f412a750d99331c06d9cadf7"
   },
   "contracts": {
     "delegation-gate-hook.json": "e40833c685de0a915d4a15b96506ef2c4bff60cd70e70e240dbe274233b7dbd4",
