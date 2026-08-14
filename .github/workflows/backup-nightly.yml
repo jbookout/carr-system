@@ -111,7 +111,16 @@ jobs:
             "$CODENAME" | sudo tee /etc/apt/sources.list.d/pgdg.sources > /dev/null
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-18
-          pg_dump --version
+          # The runner image PREINSTALLS an older postgresql-client at
+          # /usr/bin, and it kept winning PATH over the PGDG install — the
+          # first live dispatch (run 31809578546, 2026-08-14) died with
+          # "aborting because of server version mismatch" exactly this way.
+          # GITHUB_PATH prepends for every LATER step, so the dump step's
+          # pg_dump resolves to 18; the assertion below fails THIS step
+          # loudly if the layout ever changes instead of letting the dump
+          # step rediscover the mismatch.
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/18/bin/pg_dump --version
           age --version
 
       - name: Dump, age-encrypt, and check the size floor
