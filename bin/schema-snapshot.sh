@@ -38,7 +38,24 @@
 # than discovered. --no-owner --no-acl for the same reason
 # bin/backup-dump.sh uses them: an embedded OWNER TO / GRANT names roles a fresh
 # database has never heard of, and the first such statement aborts the load.
-# Roles and grants are rebuilt by the migrations, which are in git.
+# Grants are rebuilt by the migrations, which are in git.
+#
+# THE ROLES THEMSELVES ARE NOT, and assuming they were is a bug this file shipped
+# on 2026-08-14. The reasoning above was true only while every role-creating
+# migration was still PENDING relative to this snapshot: 0115 declares
+# carr_reader, carr_writer and carr_jobs (NOLOGIN, 0021's idiom), so while the
+# ledger stopped at 0114 a fresh database got the roles by replaying it. The
+# moment a refresh advanced the ledger PAST 0115, that migration stopped being
+# pending, the role creation stopped running anywhere, and the next migration to
+# grant against those roles died with `role "carr_jobs" does not exist` — which
+# is exactly how CI failed on migration 0117.
+#
+# The snapshot is the base for every fresh database, so it has to carry the
+# roles itself rather than inherit them from a migration it has already absorbed.
+# Same idiom as 0115: an existing role is left exactly as it is — no password
+# touched, no attribute altered — and a missing one is created NOLOGIN, so a
+# rebuilt environment has somewhere for privileges to attach and no new door.
+# Production is untouched because production already has all three.
 #
 # Usage:
 #   bin/schema-snapshot.sh            # regenerate db/schema.sql from production
@@ -70,7 +87,32 @@ URL="$("$NEONCTL" connection-string production \
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
-if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" > "$TMP"; then
+# THE ROLE PREAMBLE, first in the file so the roles exist before anything that
+# could reference them. See the header for why this cannot be left to 0115.
+cat > "$TMP" <<'ROLES'
+--
+-- CARR ROLE PREAMBLE (bin/schema-snapshot.sh) — not produced by pg_dump.
+--
+-- This dump is --no-owner --no-acl, so it names no roles and grants nothing.
+-- The roles still have to EXIST before the pending migrations that grant to
+-- them run, and they can no longer be got by replaying 0115: once this
+-- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
+-- An existing role is left exactly as it is; a missing one is created NOLOGIN
+-- purely so privileges have somewhere to attach in a rebuilt environment.
+--
+do $$
+declare r text;
+begin
+  foreach r in array array['carr_reader','carr_writer','carr_jobs'] loop
+    if not exists (select 1 from pg_roles where rolname = r) then
+      execute format('create role %I nologin', r);
+    end if;
+  end loop;
+end $$;
+
+ROLES
+
+if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" >> "$TMP"; then
   echo "schema-snapshot: pg_dump failed — nothing written" >&2
   exit 1
 fi

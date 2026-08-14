@@ -53,6 +53,20 @@ except ImportError:
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def one(cur, what: str) -> tuple:
+    """fetchone() that says WHICH read came back empty. psycopg types it Optional
+    because a query legitimately may return no row; in this file every one of
+    these is a read that must have produced a row, so an empty result is a broken
+    assertion and should say so rather than raising a subscript error."""
+    row = cur.fetchone()
+    if row is None:
+        raise AssertionError(f"program3-incident-gate: {what} returned no row")
+    return row
+
+
 FAILURES: list[str] = []
 PASSES: list[str] = []
 
@@ -71,12 +85,15 @@ def main() -> int:
     if not dsn:
         sys.exit("program3-incident-gate: DATABASE_URL is not set")
 
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "ops_record",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "ops-record.py"))
-    ops_record = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ops_record)
+    # lib/loadpy.py, not a seventh copy of the importlib incantation:
+    # spec_from_file_location returns None for a path that moved, and the copies
+    # failed with "NoneType has no attribute exec_module" instead of naming the
+    # file. Extracted 2026-08-14 when 21 of the tripwire's 47 errors turned out
+    # to be those three lines in seven files.
+    sys.path.insert(0, os.path.join(REPO, "lib"))
+    from loadpy import load_module_from_path                      # noqa: E402
+    ops_record = load_module_from_path(
+        "ops_record", os.path.join(REPO, "tools", "ops-record.py"))
 
     now = datetime.now(timezone.utc)
     env = "staging"
@@ -89,7 +106,7 @@ def main() -> int:
                values ('incident-gate-probe', 'Program 3 incident gate probe',
                        'Data', 'critical', 'joe')
                returning id""")
-        service_id = cur.fetchone()[0]
+        service_id = one(cur, "the probe service insert")[0]
         cur.execute(
             """insert into ops.service_environment
                    (service_id, environment, expected_cadence_seconds)
@@ -107,7 +124,7 @@ def main() -> int:
                    returning correlation_id""",
                 (corr or uuid.uuid4(), service_id, env, run_key, state, failure_class,
                  at or now, at or now, at or now, (at or now) + timedelta(hours=1)))
-            return cur.fetchone()[0]
+            return one(cur, f"the {run_key} run insert")[0]
 
         # ── 1. A FAILURE RAISES EXACTLY ONE INCIDENT ────────────────────────
         print("1. a failure raises one incident, carrying the correlation of the run")
@@ -136,14 +153,14 @@ def main() -> int:
         again = ops_record.assess(cur, environment=env, window_hours=24)
         check("no second incident was opened", again == 0, f"opened {again}")
         cur.execute("select count(*) from ops.incident where environment = %s", (env,))
-        check("still exactly one incident", cur.fetchone()[0] == 1)
+        check("still exactly one incident", one(cur, "the incident count")[0] == 1)
 
         cur.execute("select count(*) from ops.incident_fact where incident_id = %s", (inc_id,))
-        facts = cur.fetchone()[0]
+        facts = one(cur, "the fact count")[0]
         check("the recurrence was appended as a fact", facts >= 2, f"{facts} fact(s)")
 
         cur.execute("select count(*) from ops.incident_hypothesis where incident_id = %s", (inc_id,))
-        check("the tool wrote no hypotheses", cur.fetchone()[0] == 0,
+        check("the tool wrote no hypotheses", one(cur, "the hypothesis count")[0] == 0,
               "a machine reading an exit code has no theory and must not invent one")
 
         # ── 4. A DIFFERENT FAILURE IS ITS OWN INCIDENT ──────────────────────
@@ -155,11 +172,11 @@ def main() -> int:
         # ── 5. A SKIP IS NOT A FAILURE ──────────────────────────────────────
         print("\n5. a skipped step raises nothing")
         cur.execute("select count(*) from ops.incident where environment = %s", (env,))
-        before = cur.fetchone()[0]
+        before = one(cur, "the incident count before the skip")[0]
         record("nightly.cadence-engine", "skipped", at=now + timedelta(minutes=7))
         skipped = ops_record.assess(cur, environment=env, window_hours=24)
         cur.execute("select count(*) from ops.incident where environment = %s", (env,))
-        after = cur.fetchone()[0]
+        after = one(cur, "the incident count after the skip")[0]
         check("a skip opened no incident", skipped == 0 and after == before,
               "exit 78 means not-configured, and alarming on it fires every night")
 
@@ -170,7 +187,7 @@ def main() -> int:
         cur.execute(
             """select state, recovery_evidence_ref, monitoring_until, resolved_at
                  from ops.incident where id = %s""", (inc_id,))
-        state, evidence, monitoring_until, resolved_at = cur.fetchone()
+        state, evidence, monitoring_until, resolved_at = one(cur, "the recovered incident")
         check("the incident moved to monitoring", state == "monitoring", f"state {state!r}")
         check("it carries recovery evidence", bool(evidence))
         check("it carries a monitoring interval", monitoring_until is not None)
@@ -181,7 +198,7 @@ def main() -> int:
         cur.execute(
             """select count(*) from ops.incident
                 where environment = %s and state = 'detected'""", (env,))
-        check("the unrecovered incident stayed open", cur.fetchone()[0] == 1)
+        check("the unrecovered incident stayed open", one(cur, "the open-incident count")[0] == 1)
 
         # ── 7. THE INCIDENT IS REACHABLE FROM THE TRACE ─────────────────────
         print("\n7. the incident appears in the same trace as the run that caused it")
