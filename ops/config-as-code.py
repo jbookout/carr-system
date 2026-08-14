@@ -51,6 +51,56 @@ import sys
 
 HOME = os.path.expanduser("~")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# `git -C <path>` IS NOT A GUARANTEE OF WHICH REPOSITORY YOU HIT. Every variable
+# below outranks both -C and the working directory, and git exports several of
+# them to every hook it runs — so anything reached from a hook inherits them.
+# That is the 2026-08-14 incident: a selftest whose fixture used cwd=mkdtemp()
+# ran its git commands against the live checkout instead, rewrote local main
+# onto its own seed commits, and marked the repository core.bare true.
+#
+# THIS FILE WAS ASSESSED AS READ-ONLY AND THAT WAS WRONG. Line ~844 runs
+# `git -C REPO config core.hooksPath ops/githooks`, which is a WRITE. Under an
+# inherited GIT_DIR that write lands in whatever repository the variable names,
+# not in REPO — so `config-as-code.py install` invoked from a hook could point a
+# different repository's hooksPath at this repo's ops/githooks. The four reads
+# are the milder half: misdirected, they yield a wrong drift verdict rather than
+# a wrong write, which is a lie in a checker whose entire job is detecting drift.
+#
+# GIT_CONFIG_COUNT is the subtle one and is why this list is not just GIT_DIR:
+# its KEY_<n>/VALUE_<n> pairs can set core.worktree and relocate a call with
+# GIT_DIR never appearing anywhere.
+#
+# A shared ops/git_env.py with the same job is in flight in another session's
+# PR #19. It is not merged and not on origin/main, so this stands alone rather
+# than importing something that does not exist yet; consolidate onto that helper
+# when it lands, and delete this.
+_GIT_LOCATION_VARS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
+    "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def _git_env():
+    """os.environ minus every variable that can redirect a git call off -C."""
+    env = dict(os.environ)
+    for var in _GIT_LOCATION_VARS:
+        env.pop(var, None)
+    # GIT_CONFIG_COUNT declares how many KEY_<n>/VALUE_<n> pairs follow; drop the
+    # count and every pair it covers, since any one of them can carry
+    # core.worktree. Bounded rather than trusted: a malformed or absurd count
+    # must not turn this into an unbounded loop.
+    try:
+        count = int(env.pop("GIT_CONFIG_COUNT", "") or 0)
+    except ValueError:
+        count = 0
+    for n in range(max(0, min(count, 1000))):
+        env.pop(f"GIT_CONFIG_KEY_{n}", None)
+        env.pop(f"GIT_CONFIG_VALUE_{n}", None)
+    return env
+
+
 def _find_vault():
     """The vault sits under a Drive mount named for the ACCOUNT, so a hardcoded
     default is Joe-only by construction — the exact defect this file exists to
@@ -250,7 +300,7 @@ def _is_primary():
     if not owner:
         return False
     me = subprocess.run(["git", "-C", REPO, "config", "user.email"],
-                        capture_output=True, text=True).stdout.strip()
+                        capture_output=True, text=True, env=_git_env()).stdout.strip()
     return me == owner
 
 
@@ -341,16 +391,16 @@ def hook_scripts_untracked():
         # check silently found nothing, which is worse than not having it.
         d = os.path.dirname(p)
         inside = subprocess.run(["git", "-C", d, "rev-parse", "--is-inside-work-tree"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, env=_git_env())
         if inside.returncode != 0 or inside.stdout.strip() != "true":
             continue                       # not in any git checkout: not ours to version
         # `git ls-files --error-unmatch` is the exact question: is this path in
         # the index? A file that is merely present is not a file that survives.
         rc = subprocess.run(["git", "-C", d, "ls-files", "--error-unmatch", p],
-                            capture_output=True).returncode
+                            capture_output=True, env=_git_env()).returncode
         if rc != 0:
             top = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"],
-                                 capture_output=True, text=True).stdout.strip()
+                                 capture_output=True, text=True, env=_git_env()).stdout.strip()
             rel = os.path.relpath(p, top) if top else p
             out.append((rel, "settings.json invokes it but git DOES NOT TRACK it"))
     return out
@@ -842,7 +892,7 @@ def cmd_install(apply):
                   + ("" if apply else "   [would set]"))
         if apply:
             subprocess.run(["git", "-C", REPO, "config", "core.hooksPath", "ops/githooks"],
-                           check=False)
+                           check=False, env=_git_env())
             for h in sorted(os.listdir(hooks_dir)):
                 p = os.path.join(hooks_dir, h)
                 if os.path.isfile(p):
