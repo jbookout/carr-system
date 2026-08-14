@@ -87,11 +87,12 @@ done
 # mean this script behaved differently in its two callers — which is the exact
 # failure this one-script design exists to prevent. Plain arrays and a case
 # statement run identically on both.
-CLASS_ORDER="unit types contract gates secret dependency migration binding artifact"
+CLASS_ORDER="unit types contract gates secret dependency migration binding artifact freshness"
 
 class_desc() {
   case "$1" in
     unit)       echo "seeded failing unit test" ;;
+    freshness)  echo "seeded stale rewrite of a generated config file" ;;
     types)      echo "seeded shape mistake in a data hand-off" ;;
     contract)   echo "seeded auth/schema contract break" ;;
     gates)      echo "seeded enforcement-layer regression" ;;
@@ -170,6 +171,31 @@ check_unit() {
 # SAME SCRIPT as the manual and nightly paths (rule a8c55a47) — bin/type-check.sh
 # holds the file list and the lenient mypy.ini, so there is nothing here to drift
 # out of step with them.
+# ---------------------------------------------------------------- freshness
+# THE LOST UPDATE, which review cannot catch and a merge conflict never reports.
+# Two branches that both rewrite a GENERATED file do not conflict — the second
+# silently replaces the first. It happened twice on 2026-08-14: an older copy of
+# the type-check class reverted the newer one, and a stale gate hash was restored
+# over a fresh bless, leaving main shipping a gate whose recorded hash did not
+# match its own file until somebody re-blessed by hand. Each branch passed CI
+# alone; the damage only existed once combined.
+#
+# LAST in CLASS_ORDER deliberately. It is the only class that reports on the
+# branch's RELATIONSHIP to main rather than on the tree's contents, so a real
+# defect in the code should surface before a "you are behind" message.
+check_freshness() {
+  if [ ! -f ops/stale-config-check.py ]; then
+    skip freshness "ops/stale-config-check.py not present"
+    return
+  fi
+  if run_quiet "$LOGDIR/freshness.log" "$PY" ops/stale-config-check.py; then
+    ok freshness "no generated config rewritten from a stale base"
+  else
+    cat "$LOGDIR/freshness.log" >&2
+    bad freshness "this branch would overwrite a generated file it never saw"
+  fi
+}
+
 check_types() {
   if [ ! -x bin/type-check.sh ]; then
     skip types "bin/type-check.sh not present"
