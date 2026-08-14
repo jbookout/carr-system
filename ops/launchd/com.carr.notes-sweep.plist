@@ -8,9 +8,14 @@
     idempotent transport job, not a conversation. Keeping it in launchd means
     quiet no-op scans do not create agent sessions or occupy a sessions panel.
 
-    `notes-sweep-post.sh --scheduled` owns the weekday 08:00–18:59 local gate;
-    this agent simply wakes hourly. The gate lives in the shared script so a
-    manual run and an unattended run still execute one implementation.
+    `notes-sweep-post.sh`, invoked with its scheduled flag, owns the weekday
+    08:00–18:59 local gate; this agent simply wakes hourly. The gate lives in
+    the shared script so a manual run and an unattended run still execute one
+    implementation. (That flag is spelled out in ProgramArguments below rather
+    than here: a double hyphen is illegal inside an XML comment, and writing it
+    made this the one plist in ops/launchd that no strict XML parser could read.
+    launchd and `plutil` both accept it, which is why it survived unnoticed —
+    found 2026-08-14 by tools/scheduler-truth.py on its first run.)
 
     Apple Notes is a local macOS application. This is a LaunchAgent, not a
     daemon: it runs only after Joe has logged in. `RunAtLoad` lets it catch up
@@ -22,6 +27,10 @@
 
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>notes-sweep</string>
+    <string>launchd.run</string>
     <string>/bin/zsh</string>
     <string>{{REPO}}/bin/notes-sweep-post.sh</string>
     <string>--scheduled</string>

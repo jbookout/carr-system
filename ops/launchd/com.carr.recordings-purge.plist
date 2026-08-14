@@ -9,9 +9,13 @@
     <string>com.carr.recordings-purge</string>
     <key>ProgramArguments</key>
     <array>
+        <string>/bin/zsh</string>
+        <string>{{REPO}}/bin/run-scheduled.sh</string>
+        <string>recordings-purge</string>
+        <string>launchd.run</string>
         <string>/bin/sh</string>
         <string>{{REPO}}/tools/dictation-rig/bin/purge-recordings.sh</string>
-    </array>
+      </array>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
