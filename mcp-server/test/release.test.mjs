@@ -152,8 +152,72 @@ test("buildRelease: never returns a secret — env is never echoed back, whateve
   ]) {
     assert.ok(!rendered.includes(secretValue), `leaked secret value: ${secretValue}`);
   }
-  // Only the one field this endpoint is FOR should surface from env.
+  // Only the two fields this endpoint is FOR should surface from env.
   assert.equal(out.git_sha.value, "e".repeat(40));
+  assert.equal(out.env.value, "unknown"); // CARR_ENV absent above, so: unknown
+});
+
+// --- environment identity (2026-08-14) -------------------------------------
+// The incident these pin: a staging Worker deployed without `routes = []`
+// inherited production's three custom domains and served api.doctorcre.com for
+// about two minutes. /release answered the whole time and could not say it was
+// staging. Its only symptom was doctrine_generation null, which reads as a
+// database fault ON PRODUCTION rather than as the wrong Worker answering.
+
+test("buildRelease: reports the environment it IS, from CARR_ENV", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", [{ applied_count: 120, highest_applied_migration: "0114_x.sql" }]],
+    ["doctrine_meta", [{ generation: 359 }]],
+  ]);
+  for (const name of ["production", "staging"]) {
+    const out = await buildRelease({
+      env: { GIT_SHA: "a".repeat(40), CARR_ENV: name },
+      sql, verbCount: 105, now: FIXED_NOW,
+    });
+    assert.deepEqual(out.env, { value: name, reason: null });
+  }
+});
+
+test("buildRelease: an unlabelled Worker reports unknown, and NEVER defaults to production", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", [{ applied_count: 120, highest_applied_migration: "0114_x.sql" }]],
+    ["doctrine_meta", [{ generation: 359 }]],
+  ]);
+  for (const env of [{}, { CARR_ENV: "" }, { CARR_ENV: null }]) {
+    const out = await buildRelease({ env, sql, verbCount: 105, now: FIXED_NOW });
+    assert.equal(out.env.value, "unknown");
+    assert.notEqual(out.env.value, "production");
+    assert.match(out.env.reason, /never assumed to be production/);
+  }
+});
+
+test("buildRelease: env is the ONLY field that separates the environments — the incident case", async () => {
+  // Staging's database is built from db/schema.sql, production's committed
+  // structure INCLUDING its schema_migrations ledger. So given the same commit,
+  // every other field a reader might reach for is identical. If this test ever
+  // fails because some other field now differs, that difference is incidental
+  // and must still not be read as identity.
+  const identicalSql = () => fakeSql([
+    ["v_schema_ledger", [{ applied_count: 120, highest_applied_migration: "0114_x.sql" }]],
+    ["doctrine_meta", [{ generation: 359 }]],
+  ]);
+  const sha = "b".repeat(40);
+  const prod = await buildRelease({
+    env: { GIT_SHA: sha, CARR_ENV: "production" },
+    sql: identicalSql(), verbCount: 105, now: FIXED_NOW,
+  });
+  const stage = await buildRelease({
+    env: { GIT_SHA: sha, CARR_ENV: "staging" },
+    sql: identicalSql(), verbCount: 105, now: FIXED_NOW,
+  });
+
+  assert.deepEqual(prod.git_sha, stage.git_sha);
+  assert.deepEqual(prod.schema, stage.schema);
+  assert.deepEqual(prod.doctrine_generation, stage.doctrine_generation);
+  assert.equal(prod.verb_count, stage.verb_count);
+  assert.notDeepEqual(prod.env, stage.env);
+  assert.equal(prod.env.value, "production");
+  assert.equal(stage.env.value, "staging");
 });
 
 test("buildRelease: response is JSON-safe (no undefined, no function, round-trips clean)", async () => {

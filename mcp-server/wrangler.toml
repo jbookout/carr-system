@@ -71,6 +71,25 @@ routes = [
   { pattern = "dealroom.doctorcre.com", custom_domain = true }
 ]
 
+# WHICH DEPLOYMENT IS ANSWERING. Added 2026-08-14, after the routes incident
+# below: for about two minutes api.doctorcre.com was served by carr-mcp-staging
+# and /release — the endpoint that exists to answer "what is production
+# running?" — could not say so. Its only symptom was doctrine_generation null,
+# which reads as a DATABASE fault on production, not as "you are talking to a
+# different Worker". Every other field was plausible or outright identical:
+# git_sha is the same commit in both environments, and schema is identical BY
+# CONSTRUCTION, because staging's database is built from db/schema.sql, which
+# carries production's committed schema_migrations ledger.
+#
+# `vars` IS INHERITABLE, exactly like `routes`. An env-level [env.X.vars] table
+# REPLACES this one wholesale rather than merging into it, so any var added here
+# later must also be added to [env.staging.vars] or staging silently loses it.
+# That is the same inheritance surprise documented at length below; it is written
+# here too because the next person to add a var will be reading this block, not
+# that one.
+[vars]
+CARR_ENV = "production"
+
 # One Worker + one asset binding is the smallest deployable structure. The
 # parallel Deal Room lane writes its no-build bundle directly under dealroom/;
 # src/dealroom-web.js also checks dist/ and falls back to public-shell/index.html.
@@ -140,6 +159,12 @@ workers_dev = true
 # rather than left to whoever reads the wrangler docs next. Never delete this
 # line to "tidy up" — its emptiness is the whole point.
 routes = []
+
+# Staging says so out loud, on every /release call. See the [vars] note in the
+# production block: this table REPLACES the top-level one rather than merging,
+# so a var added there must be repeated here.
+[env.staging.vars]
+CARR_ENV = "staging"
 
 [env.staging.assets]
 directory = "../dealroom"

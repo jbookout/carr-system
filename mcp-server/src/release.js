@@ -87,9 +87,35 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
     };
   }
 
+  // WHICH DEPLOYMENT AM I? Added 2026-08-14, the day a staging Worker deployed
+  // without `routes = []`, inherited all three production domains, and served
+  // api.doctorcre.com for about two minutes.
+  //
+  // Nothing else in this payload can answer that question. `schema` cannot, and
+  // that is not a gap but a consequence of the design: staging's database is
+  // built from db/schema.sql, production's COMMITTED structure INCLUDING its
+  // schema_migrations ledger, so highest_applied_migration and applied_count are
+  // byte-identical between the two environments by construction. git_sha cannot
+  // either — both environments deploy the same commit. verb_count and
+  // doctrine_generation happen to differ today, but only because staging holds
+  // no doctrine rows yet; neither is a declaration of identity, and reading them
+  // as one is the same "a signal that happens to correlate" mistake this whole
+  // endpoint exists to stop.
+  //
+  // So the endpoint whose entire purpose is "what is production running?" would
+  // have answered, during the incident, with a confident and completely
+  // plausible payload describing the wrong Worker. It reports what it IS now,
+  // from a per-environment var, declared rather than inferred. `unknown` when
+  // the var is absent, never a guess and never a default of "production" — an
+  // unlabelled deployment claiming to be production is the failure itself.
+  const environment = (env && env.CARR_ENV) || null;
+
   return {
     ok: true,
     ts: now().toISOString(),
+    env: environment
+      ? { value: environment, reason: null }
+      : { value: "unknown", reason: "CARR_ENV not set on this Worker — an unlabelled deployment is never assumed to be production" },
     verb_count: verbCount,
     git_sha: sha
       ? { value: sha, reason: null }
