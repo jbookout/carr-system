@@ -17,6 +17,31 @@ CATEGORIES = {
     "session_task_rail", "judgment_advisory",
 }
 
+# enforcement_class: the finer-grained, per-rule axis added 2026-08-14 after the
+# rule-enforceability audit found the gap in this file's own name — a rule with
+# NO rule_controls entry at all fell to default_category silently, reading
+# identically to a rule someone had actually reviewed and judged advisory.
+# `category` still says WHICH of the five house buckets a rule sits in;
+# `enforcement_class` says WHETHER something concrete backs that placement yet.
+ENFORCEMENT_CLASSES = {
+    "deny_gate", "stop_gate", "surfacing", "schema", "judgment_ambient", "unbuilt",
+}
+
+# The mechanical half of the backfill: a rule already sorted into one of the
+# four non-advisory categories is, by construction, backed by SOME concrete
+# control (the old check already required that). This is simply which shape of
+# control each category implies, read off the category_overrides' own control
+# catalog: hard_pre_action controls all fail with a block/deny, schema controls
+# are the record layer's own constraints, post_action_verification controls are
+# Stop-hook checks, and session_task_rail controls are advisory rails that
+# surface context rather than refuse anything.
+BUILT_CLASS_BY_CATEGORY = {
+    "hard_pre_action": "deny_gate",
+    "transactional_schema": "schema",
+    "post_action_verification": "stop_gate",
+    "session_task_rail": "surfacing",
+}
+
 
 def find_vault() -> str:
     """Resolve the transitional render root without assuming Joe's account."""
@@ -131,24 +156,67 @@ def validate(data: dict, source_ids: dict[str, list[str]] | None = None) -> list
         if n != 1:
             errors.append(f"override assigns {rule_id} {n} times")
     catalog = data.get("control_catalog", {})
-    controls = data.get("rule_controls", {})
-    if not isinstance(catalog, dict) or not isinstance(controls, dict):
+    rule_controls = data.get("rule_controls", {})
+    if not isinstance(catalog, dict) or not isinstance(rule_controls, dict):
         return errors + ["control_catalog and rule_controls must be objects"]
     expected_categories = {rule_id: category for category, rule_ids in overrides.items()
                            if isinstance(rule_ids, list) for rule_id in rule_ids}
-    if set(controls) != set(expected_categories):
-        missing = sorted(set(expected_categories) - set(controls))
-        extra = sorted(set(controls) - set(expected_categories))
+
+    # EVERY active rule needs an entry now, not just the ones some category
+    # override happened to name. `expected_all` maps every id in `flat` to the
+    # category it should carry: whatever override named it, or default_category
+    # when nothing did — the exact case the audit found silently falling through
+    # to "advisory" with nothing recording that the fall was ever decided.
+    default_category = data.get("default_category")
+    expected_all = {rule_id: expected_categories.get(rule_id, default_category)
+                    for rule_id in flat}
+    if set(rule_controls) != set(expected_all):
+        missing = sorted(set(expected_all) - set(rule_controls))
+        extra = sorted(set(rule_controls) - set(expected_all))
         if missing:
-            errors.append("non-advisory rules missing control metadata: " + ", ".join(missing))
+            errors.append("active rule(s) with no enforcement-map entry at all: "
+                          + ", ".join(missing))
         if extra:
-            errors.append("control metadata references advisory/unknown rules: " + ", ".join(extra))
-    for rule_id, category in expected_categories.items():
-        detail = controls.get(rule_id)
+            errors.append("enforcement-map entries reference inactive/unknown rule(s): "
+                          + ", ".join(extra))
+
+    for rule_id, category in expected_all.items():
+        detail = rule_controls.get(rule_id)
         if not isinstance(detail, dict):
-            continue
+            continue  # already reported above as missing
         if detail.get("category") != category:
             errors.append(f"{rule_id} metadata category does not match override")
+
+        enforcement_class = detail.get("enforcement_class")
+        if enforcement_class not in ENFORCEMENT_CLASSES:
+            errors.append(f"{rule_id} enforcement_class is missing or invalid")
+            continue
+
+        if enforcement_class == "judgment_ambient":
+            if category != "judgment_advisory":
+                errors.append(f"{rule_id} is judgment_ambient but categorized {category}")
+            why = detail.get("why_unenforceable")
+            if not isinstance(why, str) or not why.strip():
+                errors.append(f"{rule_id} judgment_ambient lacks why_unenforceable")
+            continue
+
+        if enforcement_class == "unbuilt":
+            planned = detail.get("planned_control")
+            if not isinstance(planned, str) or not planned.strip():
+                errors.append(f"{rule_id} unbuilt lacks planned_control")
+            continue
+
+        # The four BUILT classes: something concrete already refuses, verifies,
+        # surfaces, or schema-guards this rule, so it needs the same control
+        # metadata the old check always required — plus, now, agreement between
+        # the category it sits in and the shape of enforcement that backs it.
+        if category == "judgment_advisory":
+            errors.append(f"{rule_id} enforcement_class {enforcement_class} "
+                          "requires a non-advisory category override")
+        expected_built = BUILT_CLASS_BY_CATEGORY.get(category)
+        if expected_built and enforcement_class != expected_built:
+            errors.append(f"{rule_id} enforcement_class {enforcement_class} does not "
+                          f"match category {category} (expected {expected_built})")
         if not isinstance(detail.get("binding_moment"), str) or not detail["binding_moment"].strip():
             errors.append(f"{rule_id} lacks a concrete binding_moment")
         if not isinstance(detail.get("exceptions"), str):
@@ -186,6 +254,20 @@ def counts(data: dict) -> dict[str, int]:
     return {category: out[category] for category in sorted(CATEGORIES)}
 
 
+def enforcement_class_counts(data: dict) -> dict[str, int]:
+    """How many active rules sit in each enforcement_class — chiefly so `unbuilt`
+    (a rule everyone agrees needs a gate that does not exist yet) stays a number
+    a session sees every time, rather than a fact only visible by reading 199
+    JSON entries by hand.
+    """
+    out: Counter[str] = Counter()
+    rule_controls = data.get("rule_controls", {})
+    for detail in rule_controls.values():
+        if isinstance(detail, dict):
+            out[detail.get("enforcement_class", "?")] += 1
+    return {cls: out[cls] for cls in sorted(out)}
+
+
 def main() -> int:
     try:
         with open(MAP, encoding="utf-8") as fh:
@@ -221,8 +303,11 @@ def main() -> int:
         print("rule-enforcement-map: FAIL — " + "; ".join(errors))
         return 1
     c = counts(data)
+    ec = enforcement_class_counts(data)
     print(f"rule-enforcement-map: OK ({parity}) — " + ", ".join(
         f"{name}={c[name]}" for name in sorted(c)
+    ) + " | enforcement_class " + ", ".join(
+        f"{name}={ec[name]}" for name in sorted(ec)
     ))
     return 0
 

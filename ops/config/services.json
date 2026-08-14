@@ -32,6 +32,43 @@
     "honest answer for a service nobody has observed."
   ],
 
+  "_comment_scheduled_tasks": [
+    "THE CLAUDE CODE SCHEDULED TASKS (Program 3, 2026-08-14), registered below",
+    "the launchd services. One service per task, keyed IDENTICALLY to the",
+    "task's own directory name under ~/.claude/scheduled-tasks/<key>/SKILL.md",
+    "(that is also the taskId the scheduler reports and the name the launch",
+    "marker in each session's own transcript carries) — no separate mapping",
+    "table exists to fall out of sync with either. runtime is",
+    "'claude-code-scheduled-task': these are prompts a Claude session executes,",
+    "not a script with an exit code, so hooks/scheduled-run-record.py (a Stop",
+    "hook) derives the outcome from the session's own transcript",
+    "deterministically and records it here — see lib/scheduled_run.py.",
+    "",
+    "nightly-record-layer (above, under the launchd services) already exists as",
+    "a service for the launchd chain bin/nightly.sh runs; it is NOT duplicated",
+    "here. The Claude session that LAUNCHES that chain is recorded under that",
+    "SAME service but the fixed run_key 'scheduled-session' (see",
+    "lib/scheduled_run.py RUN_KEY), distinct from the chain's own 'nightly.*'",
+    "step keys, so the two can never collide.",
+    "",
+    "ONLY THE CURRENTLY-ENABLED TASKS ARE REGISTERED. x-reply-run-daily,",
+    "linkedin-engagement-daily and calendar-fetch-daily are disabled",
+    "(`list_scheduled_tasks`, checked 2026-08-14) and deliberately left",
+    "unregistered: a cadence-bound service for a task nobody is running would",
+    "read STALE forever, which is exactly the false-alarm failure mode",
+    "local-briefs' grace design and the launchd services above already learned",
+    "to avoid. Register one when its task is re-enabled — sync-registry retires",
+    "a service that leaves this file, never the reverse, so nothing is lost by",
+    "waiting.",
+    "",
+    "CADENCE for the weekly tasks uses the SAME 604800s/172800s (7 day cadence,",
+    "2 day grace) local-briefs already established for a task that can miss its",
+    "one weekly window if the Mac is asleep; the monthly tasks (which actually",
+    "fire once inside a several-day window via their own internal ledger gate,",
+    "per each SKILL.md) use 2592000s/518400s so the window itself is not",
+    "mistaken for drift."
+  ],
+
   "services": [
     {
       "key": "carr-mcp",
@@ -206,6 +243,242 @@
           "cadence_grace_seconds": 7200
         }
       ]
+    },
+
+    {
+      "key": "npi-sweep-weekly",
+      "name": "Weekly NPI new-provider sweep",
+      "purpose": "NPPES weekly file to territory lead digest and hot-leads dashboard.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/npi-sweep-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 30 7 * * 1",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
+    },
+    {
+      "key": "social-metrics-pull-weekly",
+      "name": "Weekly social analytics pull",
+      "purpose": "Pulls X/FB/IG/LinkedIn metrics and records them via measure-placement.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/social-metrics-pull-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 45 8 * * 3",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
+    },
+    {
+      "key": "social-batch-weekly",
+      "name": "Friday social batch",
+      "purpose": "Drafts + graphics for the following week, queued to Blotato as review-drafts.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/social-batch-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 0 8 * * 5",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
+    },
+    {
+      "key": "health-audit-monthly",
+      "name": "Monthly system health audit",
+      "purpose": "Re-scores the 12-category report card and appends a trend column.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/health-audit-monthly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 6-10 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
+          "expected_cadence_seconds": 2592000,
+          "cadence_grace_seconds": 518400
+        }
+      ]
+    },
+    {
+      "key": "idea-resurface-monthly",
+      "name": "Monthly idea-bank resurface",
+      "purpose": "Resurfaces idea-bank entries worth another look.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/idea-resurface-monthly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 5-11 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
+          "expected_cadence_seconds": 2592000,
+          "cadence_grace_seconds": 518400
+        }
+      ]
+    },
+    {
+      "key": "system-sweep-monthly",
+      "name": "Monthly size/prune sweep",
+      "purpose": "Prunes bloat ahead of the playbook review.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/system-sweep-monthly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 30 8 15-21 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
+          "expected_cadence_seconds": 2592000,
+          "cadence_grace_seconds": 518400
+        }
+      ]
+    },
+    {
+      "key": "playbook-review-monthly",
+      "name": "Monthly playbook review",
+      "purpose": "Reviews the playbooks after the size sweep.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/playbook-review-monthly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 15-21 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
+          "expected_cadence_seconds": 2592000,
+          "cadence_grace_seconds": 518400
+        }
+      ]
+    },
+    {
+      "key": "contact-enrichment-weekly",
+      "name": "Weekly contact enrichment slice",
+      "purpose": "Open-source contact enrichment, 40 records/run until the book is covered.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/contact-enrichment-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 * * 4",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
+    },
+    {
+      "key": "deal-history-research-weekly",
+      "name": "Weekly deal-history counterparty research",
+      "purpose": "Open-source research on Salesforce deal-history counterparties, 25 records/run.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/deal-history-research-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 0 10 * * 5",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
+    },
+    {
+      "key": "restore-rehearse-weekly",
+      "name": "Weekly backup restore rehearsal",
+      "purpose": "Proves the encrypted backups actually restore; PASS/FAIL against production row counts.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/restore-rehearse-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 40 7 * * 2 (runs bin/restore-rehearse.sh)",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
+    },
+    {
+      "key": "cc-update-audit",
+      "name": "Weekly Claude Code update audit",
+      "purpose": "On a Claude Code version change, audits what the release changes for CARR.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/cc-update-audit/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 45 9 * * 1",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
+    },
+    {
+      "key": "loop-drain-weekdays",
+      "name": "Weekday loop drain",
+      "purpose": "Works the claude-owned loop queue and closes loops by doing the work.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/loop-drain-weekdays/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 0 11 * * 1-5",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 172800,
+          "notes": "Weekdays only; the grace spans the weekend stand-down, same as local-briefs."
+        }
+      ]
+    },
+    {
+      "key": "radar-weekly",
+      "name": "Weekly Radar digest",
+      "purpose": "Scores the week's lead candidates across all lanes and carries lead-system maintenance.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/radar-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 15 8 * * 1",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800
+        }
+      ]
     }
   ],
 
@@ -216,6 +489,19 @@
     { "service": "local-briefs", "depends_on": "neon-record-layer" },
     { "service": "notes-sweep", "depends_on": "neon-record-layer" },
     { "service": "partner-ping", "depends_on": "neon-record-layer" },
-    { "service": "capture-poll", "depends_on": "neon-record-layer" }
+    { "service": "capture-poll", "depends_on": "neon-record-layer" },
+    { "service": "npi-sweep-weekly", "depends_on": "neon-record-layer" },
+    { "service": "social-metrics-pull-weekly", "depends_on": "neon-record-layer" },
+    { "service": "social-batch-weekly", "depends_on": "neon-record-layer" },
+    { "service": "health-audit-monthly", "depends_on": "neon-record-layer" },
+    { "service": "idea-resurface-monthly", "depends_on": "neon-record-layer" },
+    { "service": "system-sweep-monthly", "depends_on": "neon-record-layer" },
+    { "service": "playbook-review-monthly", "depends_on": "neon-record-layer" },
+    { "service": "contact-enrichment-weekly", "depends_on": "neon-record-layer" },
+    { "service": "deal-history-research-weekly", "depends_on": "neon-record-layer" },
+    { "service": "restore-rehearse-weekly", "depends_on": "neon-record-layer" },
+    { "service": "cc-update-audit", "depends_on": "neon-record-layer" },
+    { "service": "loop-drain-weekdays", "depends_on": "neon-record-layer" },
+    { "service": "radar-weekly", "depends_on": "neon-record-layer" }
   ]
 }
