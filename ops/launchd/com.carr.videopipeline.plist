@@ -7,8 +7,12 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>
+        <string>{{REPO}}/bin/run-scheduled.sh</string>
+        <string>videopipeline</string>
+        <string>launchd.run</string>
+        <string>/bin/zsh</string>
         <string>{{HOME}}/Movies/CARR Video Pipeline/Scripts/watch-encode.sh</string>
-    </array>
+      </array>
     <key>WatchPaths</key>
     <array>
         <string>{{HOME}}/Movies/CARR Video Pipeline/01_Drop_Horizontal</string>

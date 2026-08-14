@@ -20,8 +20,12 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/bin/zsh</string>
+        <string>{{REPO}}/bin/run-scheduled.sh</string>
+        <string>capture-watch</string>
+        <string>launchd.run</string>
         <string>{{REPO}}/tools/dictation-rig/bin/capture-watch.sh</string>
-    </array>
+      </array>
 
     <key>WatchPaths</key>
     <array>

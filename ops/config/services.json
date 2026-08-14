@@ -518,6 +518,144 @@
           "cadence_grace_seconds": 172800
         }
       ]
+    },
+    {
+      "key": "logitech-keymap",
+      "name": "Logitech modifier-key repair",
+      "purpose": "Re-applies the hidutil modifier mapping, which dies on reboot and on receiver replug.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "tools/dictation-rig/bin/logitech-keymap.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.logitech-keymap.plist",
+          "expected_cadence_seconds": 7200,
+          "cadence_grace_seconds": 3600,
+          "notes": "Wakes every 10 min and is idempotent by design, so a missed pass costs a keyboard that behaves oddly until the next one. The cadence is deliberately 2h rather than 10 min, with run-scheduled.sh's heartbeat throttle doing the same job it does for capture-poll: recording 144 identical successes a day would be noise, and a low-criticality cosmetic repair does not earn a row that goes stale within the hour."
+        }
+      ]
+    },
+    {
+      "key": "fetch-allowlist",
+      "name": "Record-derived egress host allowlist",
+      "purpose": "Regenerates the machine-local host allowlist so the egress guard does not silently fall back to the code list.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "ops/fetch-allowlist.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.fetch-allowlist.plist",
+          "notes": "NO CADENCE ON PURPOSE, and this one is not a scheduled job that happens to lack a schedule. The plist is SECONDARY MACHINE ONLY: on Joe's primary Mac the allowlist is regenerated as a step of the nightly chain, so this agent is deliberately not installed here and a cadence would report it missing every single day on the one machine where its absence is correct. It is registered so the service EXISTS in the catalog for the machines that do run it."
+        }
+      ]
+    },
+    {
+      "key": "call-mode",
+      "name": "Call-mode dictation server",
+      "purpose": "Long-running server backing meeting capture; holds the recording session state.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "tools/dictation-rig/bin/call-mode.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.call-mode.plist",
+          "notes": "KeepAlive agent, not a scheduled job. THE HEALTH QUESTION IS 'is it up', NEVER 'did it fire recently', and the two are not interchangeable: a KeepAlive process that exits has been RESTARTED, so a run row per exit would read as repeated failures of a service that is working exactly as designed. Registered without a cadence so its failure is representable rather than invented; a liveness probe is the signal it actually needs and does not exist yet."
+        }
+      ]
+    },
+    {
+      "key": "doc-engine",
+      "name": "Doc conversation server",
+      "purpose": "Long-running local server for the Doc conversational surface.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "tools/doc-convo/bin/convo-server.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.doc-engine.plist",
+          "notes": "KeepAlive agent. Same reasoning as call-mode: up-or-down is the question, and no cadence can ask it. Its plist pins an explicit interpreter because launchd's PATH resolves python3 to macOS 3.9, which cannot parse the file (found 2026-08-08)."
+        }
+      ]
+    },
+    {
+      "key": "quill-dictate",
+      "name": "Desk dictation agent",
+      "purpose": "Phase B desk dictation, distinct from meeting-mode consent capture.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "tools/dictation-rig/dictate/",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.quill-dictate.plist",
+          "notes": "KeepAlive agent. Deliberately a separate label and binary from the meeting-mode consent watcher so the two dictation modes stay visibly distinct."
+        }
+      ]
+    },
+    {
+      "key": "capture-watch",
+      "name": "Recording capture bridge, claim side",
+      "purpose": "Claims new recording sessions as they appear under ~/Recordings.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "tools/dictation-rig/bin/capture-watch.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.capture-watch.plist",
+          "notes": "WatchPaths-triggered, so SILENCE IS THE NORMAL STATE — it fires only when a recording session starts. Any cadence would cry wolf on every day Joe records nothing, which is most days, and an alarm that fires on a quiet day is how both partners learn to stop reading alarms."
+        }
+      ]
+    },
+    {
+      "key": "dictation-consent",
+      "name": "Recording consent announcer",
+      "purpose": "Plays the all-party consent announcement when a recording session begins.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "tools/dictation-rig/bin/consent-watch.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.dictation-consent.plist",
+          "notes": "WatchPaths-triggered; silence is normal, so no cadence. Criticality is HIGH despite being a small watcher: it is what makes the rig announce recording aloud, and Florida is an all-party-consent state. A failure here is a legal exposure rather than an inconvenience, which is why it is registered even though nothing can currently observe it firing."
+        }
+      ]
+    },
+    {
+      "key": "videopipeline",
+      "name": "Video encode watcher",
+      "purpose": "Encodes video dropped into the CARR Video Pipeline intake folder.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "(outside the repo: ~/Movies/CARR Video Pipeline/Scripts/watch-encode.sh)",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.videopipeline.plist",
+          "notes": "WatchPaths-triggered; silence is normal, so no cadence. Its script lives OUTSIDE the repo, under ~/Movies, which means it is not version-controlled and would not survive the Mac — worth naming here because the catalog is where that kind of exposure becomes visible."
+        }
+      ]
     }
   ],
 

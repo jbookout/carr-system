@@ -5,6 +5,10 @@
   <key>Label</key><string>com.carr.fetch-allowlist</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>fetch-allowlist</string>
+    <string>launchd.run</string>
     <string>{{REPO}}/.venv/bin/python</string>
     <string>{{REPO}}/ops/fetch-allowlist.py</string>
   </array>
