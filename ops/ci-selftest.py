@@ -133,19 +133,36 @@ def _recover_stale_journal():
         sys.exit(1)
     restored = _restore_from_journal(data)
     SEED_JOURNAL.unlink(missing_ok=True)
-    print("FATAL: a previous run of this selftest was killed while a seeded defect was",
+    # THE SHAPE OF THIS OUTPUT IS LOAD-BEARING, not decoration. ops/ci.sh's
+    # gates class runs each suite quietly and, on failure, prints only
+    # `tail -12` of its log. So a recovery and a genuinely broken check reach
+    # the terminal looking identical, and telling them apart is the difference
+    # between a thirty-second re-run and another evening like 2026-08-13. The
+    # banner is repeated at the END as well as the start, because the tail is
+    # what gets shown, and the last line is the ACTION rather than the diagnosis.
+    bar = "=" * 68
+    for line in (bar, "NOT A TEST FAILURE — a stale seed was recovered.", bar):
+        print(line, file=sys.stderr)
+    print("A previous run was killed while a seeded defect was live in the working",
           file=sys.stderr)
-    print("  live in the working tree. It has now been restored from the journal:",
+    print("tree. Every path it recorded has been restored from the journal:",
           file=sys.stderr)
     for rel in restored:
         print(f"    restored  {rel}", file=sys.stderr)
     if not restored:
         print("    (every recorded path was already correct — nothing to undo)",
               file=sys.stderr)
-    print("  Refusing to start, deliberately. A silent repair would hide a crash that\n"
-          "  blocked every push on this machine for hours on 2026-08-13. Re-run to proceed.",
+    print("\nRefusing to start is deliberate: a silent repair would hide a crash that",
           file=sys.stderr)
-    sys.exit(1)
+    print("blocked every push on this machine for hours on 2026-08-13.", file=sys.stderr)
+    for line in (bar, "NOTHING IS BROKEN. RE-RUN THIS SUITE TO PROCEED.", bar):
+        print(line, file=sys.stderr)
+    # 75 is EX_TEMPFAIL — a transient condition the caller should retry, and
+    # distinct from 1. ci.sh treats any nonzero as a failed class, which stays
+    # correct because the push must still be blocked; the code simply carries
+    # the distinction for any caller that wants "retry me" rather than "a check
+    # is broken".
+    sys.exit(75)
 
 
 @contextlib.contextmanager
