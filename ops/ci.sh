@@ -87,11 +87,12 @@ done
 # mean this script behaved differently in its two callers — which is the exact
 # failure this one-script design exists to prevent. Plain arrays and a case
 # statement run identically on both.
-CLASS_ORDER="unit contract gates secret dependency migration binding artifact"
+CLASS_ORDER="unit typecheck contract gates secret dependency migration binding artifact"
 
 class_desc() {
   case "$1" in
     unit)       echo "seeded failing unit test" ;;
+    typecheck)  echo "seeded type/shape error in a data hand-off" ;;
     contract)   echo "seeded auth/schema contract break" ;;
     gates)      echo "seeded enforcement-layer regression" ;;
     secret)     echo "seeded credential in the tree" ;;
@@ -338,6 +339,47 @@ check_binding() {
     bad binding "drift:$problems"
   else
     ok binding "worker config declared; installed wiring matches repo"
+  fi
+}
+
+# ---------------------------------------------------------------- typecheck
+# ADDED 2026-08-14, on the evidence of that day rather than in principle.
+#
+# The type-check tripwire had been red since 2026-08-08 with nobody told, and on
+# 2026-08-14 it was cleared to zero and went red twice more inside one hour —
+# three pull requests, each green on its own, broken in combination. That is the
+# textbook case for requiring every branch to be current with main before it
+# merges, and that requirement WOULD NOT HAVE CAUGHT ANY OF THEM, because the
+# type check was not part of CI at all. It ran only in the nightly chain, so a
+# type regression surfaced at 2am in a log nobody reads until morning, attributed
+# to nobody, hours after the author had moved on.
+#
+# So the fix is not merge ordering, it is putting the check in the gate. A
+# regression is now refused at the pull request that causes it.
+#
+# IT CALLS bin/type-check.sh RATHER THAN RUNNING mypy ITSELF (rule a8c55a47).
+# That script is the nightly chain's step and the manual path; if this class
+# spelled out its own directory list, the two would drift and CI would be
+# checking a different repo than the tripwire. Exit 78 means mypy is absent,
+# which is a skip, not a failure — and --strict refuses a skip, so it cannot go
+# quietly missing in CI.
+check_typecheck() {
+  run_quiet "$LOGDIR/typecheck.log" ./bin/type-check.sh
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    local n
+    # mypy says "Success: no issues found in N source files" when clean and
+    # "(checked N source files)" when not; the clean line is the one this branch
+    # sees, and matching only the other spelling is why this read "?" at first.
+    n="$(sed -n -e 's/.*no issues found in \([0-9]*\) source file.*/\1/p' \
+                 -e 's/.*checked \([0-9]*\) source file.*/\1/p' \
+                 "$LOGDIR/typecheck.log" | tail -1)"
+    ok typecheck "mypy clean over ${n:-?} source files"
+  elif [ "$rc" -eq 78 ]; then
+    skip typecheck "mypy not installed (pinned in requirements.lock, so CI always has it)"
+  else
+    grep -E "error:" "$LOGDIR/typecheck.log" | head -15 >&2
+    bad typecheck "$(grep -c 'error:' "$LOGDIR/typecheck.log" | tr -d ' ') type error(s) — see above"
   fi
 }
 
