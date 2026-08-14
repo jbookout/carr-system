@@ -26,23 +26,72 @@ HOOK = os.path.join(REPO, "hooks", "escalation-gate.py")
 CASES = [('schema-choice', 'clean up the database', 'Should the deleted_at column be nullable or use a sentinel date?', ['Nullable', 'Sentinel'], True), ('folder-structure', 'reorganise the vault', 'Which folder structure do you want for the exports?', ['Flat by domain', 'Nested by lifecycle'], True), ('naming', 'add the detector', 'What should I name the new view?', ['v_conduct_fires', 'v_gate_events'], True), ('refactor-scope', 'tidy the exporter', 'Do you want me to refactor the whole module or just the one function?', ['Whole module', 'Just the function'], True), ('job-schedule', 'set up the sweep', 'What time should the nightly job run?', ['2am', '4am'], True), ('sort-order', 'fix the render', 'Should loops sort by created date or by severity?', ['Created', 'Severity'], True), ('test-fixture', 'add coverage', 'Should the fixture live in ops/ or in tests/?', ['ops/', 'tests/'], True), ('hidden-in-options', 'improve things', 'Which approach do you prefer?', ['Rewrite the migration and drop the index', 'Patch the exporter script in place'], True), ('meeting-outcome', 'log my day', 'How did the meeting with Dr. Patel go?', ['Strong', 'Lukewarm', 'Dead'], False), ('vendor-verdict', 'log my day', 'Pursue or table this vendor?', ['Pursue', 'Table'], False), ('what-they-said', 'debrief me', 'What did the landlord say about the TI allowance?', ['Agreed', 'Pushed back', 'Did not come up'], False), ('delivery-grade', 'log the intro outcome', "What grade for the vendor's delivery on that intro?", ['A', 'B', 'C', 'F'], False), ('still-active', 'update the pipeline', 'Is Dr. Reeves still active, or has that gone cold?', ['Still active', 'Cold'], False), ('did-they-call', 'catch me up', 'Did they call you back this week?', ['Yes', 'No'], False), ('send-loi', 'handle the deal', 'Should I send the LOI to the listing agent today?', ['Send today', 'Hold'], False), ('publish-post', 'do the social batch', 'Do you want these published to LinkedIn?', ['Publish', 'Hold'], False), ('spend', 'sort the tooling', 'The plan renews at $240 Friday. Renew or cancel?', ['Renew', 'Cancel'], False), ('delete-records', 'clean the archive', 'Delete these 40 superseded rows permanently?', ['Delete', 'Keep'], False), ('client-tone', 'draft the follow-up', 'Which tone for the client email?', ['Warm', 'Direct'], False), ('weaken-gate', 'the gate is annoying', 'Should I disable the conduct hook so it stops blocking?', ['Disable', 'Keep'], False), ('widen-allowlist', 'curl is blocked', 'Do you want me to widen the egress allowlist to cover this host?', ['Widen', 'Leave it'], False), ('edit-settings', 'hooks are noisy', 'Should I edit settings.json to remove the lint hook?', ['Remove', 'Keep'], False), ('he-asked-options', 'lay out the options for the folder structure', 'Which folder structure do you want?', ['Flat', 'Nested'], False), ('he-asked-recommend', 'which would you recommend for the schema?', 'Nullable or sentinel?', ['Nullable', 'Sentinel'], False), ('he-said-ask-me', 'ask me before you pick the naming', 'What should I name the view?', ['v_a', 'v_b'], False)]
 
 
-def run_case(human, question, options):
+# ── the async spelling (rule e065aa82): add-loop calls that park a ruling ────
+# (name, human_last, tool_name, tool_input, expect_deny)
+LOOP_CASES = [
+    ("loop-internal-decision", "work the queue", "mcp__carr__add-loop",
+     {"kind": "open_loop", "owner": "Joe", "marker": "decision",
+      "body": "Should loops sort by created date or by severity in the render?"},
+     True),
+    ("loop-ruling-blocker", "work the queue", "mcp__carr__add-loop",
+     {"kind": "open_loop", "owner": "Joe", "blocker": "ruling",
+      "blocker_detail": "whether the exporter script should be refactored into modules",
+      "body": "restructure the exporter"},
+     True),
+    ("loop-protected-decision", "work the queue", "mcp__carr__add-loop",
+     {"kind": "open_loop", "owner": "Joe", "marker": "decision",
+      "body": "Send the LOI to the listing agent at the revised price, or hold?"},
+     False),
+    ("loop-boundary-decision", "work the queue", "mcp__carr__add-loop",
+     {"kind": "open_loop", "owner": "Joe", "marker": "decision",
+      "body": "Widen the egress allowlist so the enrichment fetch can reach the vendor host?"},
+     False),
+    ("loop-backlog-internal", "work the queue", "mcp__carr__add-loop",
+     {"kind": "open_loop", "owner": "Joe", "marker": "none",
+      "blocker": "capability", "blocker_detail": "needs the deploy token",
+      "body": "refactor the exporter into modules"},
+     False),
+    ("loop-he-asked", "ask me before you pick the naming", "mcp__carr__add-loop",
+     {"kind": "open_loop", "owner": "Joe", "marker": "decision",
+      "body": "What should the new view be named?"},
+     False),
+    ("record-defect-untouched", "work the queue", "mcp__carr__record-defect",
+     {"claimed": "the nightly render never ran", "actual": "schema drift"},
+     False),
+]
+
+
+def spawn(payload):
+    p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=30)
+    return p.returncode == 2
+
+
+def with_transcript(human, build_payload):
     fd, path = tempfile.mkstemp(suffix=".jsonl")
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(json.dumps({"type":"user","origin":{"kind":"user"},
                 "message":{"content":[{"type":"text","text":human}]}}) + "\n")
-        payload = {"tool_name":"AskUserQuestion","transcript_path":path,
-            "session_id":"selftest",
-            "tool_input":{"questions":[{"question":question,"header":"Q",
-                "multiSelect":False,
-                "options":[{"label":o,"description":""} for o in options]}]}}
-        p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
-                           capture_output=True, text=True, timeout=30)
-        return p.returncode == 2
+        return spawn(build_payload(path))
     finally:
         try: os.unlink(path)
         except Exception: pass
+
+
+def run_case(human, question, options):
+    return with_transcript(human, lambda path: {
+        "tool_name":"AskUserQuestion","transcript_path":path,
+        "session_id":"selftest",
+        "tool_input":{"questions":[{"question":question,"header":"Q",
+            "multiSelect":False,
+            "options":[{"label":o,"description":""} for o in options]}]}})
+
+
+def run_loop_case(human, tool_name, tool_input):
+    return with_transcript(human, lambda path: {
+        "tool_name": tool_name, "transcript_path": path,
+        "session_id": "selftest", "tool_input": tool_input})
 
 
 def main():
@@ -51,6 +100,13 @@ def main():
     passed = failed = 0; bad = []
     for name, human, q, opts, expect in CASES:
         got = run_case(human, q, opts)
+        ok = (got == expect)
+        passed, failed = (passed+1, failed) if ok else (passed, failed+1)
+        if not ok: bad.append(name)
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:24} "
+              f"want={'DENY ' if expect else 'allow'} got={'DENY' if got else 'allow'}")
+    for name, human, tool_name, tool_input, expect in LOOP_CASES:
+        got = run_loop_case(human, tool_name, tool_input)
         ok = (got == expect)
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)
         if not ok: bad.append(name)

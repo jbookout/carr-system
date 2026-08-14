@@ -101,6 +101,16 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/drift-claim-gate.py",
           "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/escalation-gate.py",
+          "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/blocker-decider-gate.py",
+          "timeout": 10
         }
       ]
     },
@@ -167,6 +177,11 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/scheduled-run-record.py",
           "timeout": 20
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/chat-lint-gate.py",
+          "timeout": 15
         },
         {
           "type": "command",

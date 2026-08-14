@@ -63,6 +63,16 @@ through rather than refusing it.
 FAILS OPEN on any error, same reasoning as conduct-stop-gate.py: a wedged
 session is worse than an unnecessary question.
 
+THE ASYNC SPELLING OF THE SAME OFFLOAD (rule e065aa82, extended 2026-08-14).
+AskUserQuestion is the synchronous way to park a decision on Joe; an add-loop
+call with marker='decision' (or blocker='ruling') is the asynchronous one — the
+❓ surfaces in the Monday brief and waits for a ruling. Same audience test, same
+four allow classes, applied to the loop's own text. This deliberately does NOT
+touch record-defect or any other loop kind: drift-claim-gate's rule that a
+defect must always be filable stands, and a backlog/bell/dated loop is work,
+not a parked question. Only the two spellings that literally ask Joe to decide
+are classified.
+
 AUDIT SIGNAL: every fire appends to out/conduct-gate.jsonl, the same ledger the
 Stop gate writes, so one count covers both moments.
 
@@ -176,6 +186,25 @@ def question_text(tool_input):
     return "\n".join(p for p in parts if p)
 
 
+def loop_text(tool_input):
+    """Flatten the fields of an add-loop call that carry the question. Same
+    whole-call principle as question_text: the subject cannot hide in
+    blocker_detail while the title stays neutral."""
+    if not isinstance(tool_input, dict):
+        return ""
+    fields = ("title", "body", "unblocks", "source_note", "blocker_detail")
+    return "\n".join(str(tool_input.get(f) or "") for f in fields
+                     if tool_input.get(f))
+
+
+def parks_a_decision(tool_input):
+    """Only the two spellings that literally await Joe's ruling."""
+    if not isinstance(tool_input, dict):
+        return False
+    return (tool_input.get("marker") == "decision"
+            or tool_input.get("blocker") == "ruling")
+
+
 def classify(blob, human_last):
     """Return (allow: bool, why: str)."""
     if not blob.strip():
@@ -220,6 +249,24 @@ REASON = (
     "system's own authority. Those still reach him."
 )
 
+LOOP_REASON = (
+    "ESCALATION GATE — refused. This loop parks an INTERNAL decision on Joe "
+    "(rule e065aa82), and internal decisions are yours to make and record.\n\n"
+    "marker='decision' and blocker='ruling' both mean the ❓ waits in the "
+    "Monday brief for Joe to rule. The gate is drawn by AUDIENCE, not by "
+    "difficulty: he decides client-facing, public-facing, money and "
+    "irreversible. Everything internal — schema, records, renders, jobs, "
+    "config, rules, refactors, procedure — you decide and report.\n\n"
+    "DO THIS INSTEAD: research until confident, pick the smallest reversible "
+    "option, execute it, record it with log-decision, and tell Joe in ONE "
+    "LINE what you did and why. If the work itself must wait on something "
+    "real, file the loop with the blocker that names that thing — not "
+    "'ruling' for a question you can answer.\n\n"
+    "This gate does NOT block: decision loops that are genuinely his "
+    "(client-facing, public, money, irreversible, or a boundary widening), "
+    "defect filings, or any bell/dated/backlog loop. Those still land."
+)
+
 
 def main():
     try:
@@ -230,11 +277,18 @@ def main():
 
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
-        if tool != "AskUserQuestion":
+        is_ask = tool == "AskUserQuestion"
+        is_loop = tool.startswith("mcp__") and tool.endswith("__add-loop")
+        if not (is_ask or is_loop):
             sys.exit(0)
 
         ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        blob = question_text(ti)
+        if is_ask:
+            blob = question_text(ti)
+        else:
+            if not parks_a_decision(ti):
+                sys.exit(0)
+            blob = loop_text(ti)
 
         # The human's own last turn, for the "he asked" exemption. Best-effort:
         # if the transcript is unreadable we simply lose one exemption and the
@@ -278,7 +332,7 @@ def main():
         audit({
             "ts": now(),
             "hook": "escalation-gate",
-            "classes": ["internal_ask"],
+            "classes": ["internal_ask" if is_ask else "internal_loop_parked"],
             "patterns": [f"escalation:{why}"],
             "session": payload.get("session_id"),
             "excerpt": " ".join(blob.split())[:400],
@@ -288,7 +342,7 @@ def main():
         # that does not parse the structured contract, exit 0 reads as ALLOW and
         # the gate fails open silently. Exit 2 blocks everywhere and hands
         # stderr back as the reason.
-        print(REASON, file=sys.stderr)
+        print(REASON if is_ask else LOOP_REASON, file=sys.stderr)
         sys.exit(2)
 
     except Exception as exc:
