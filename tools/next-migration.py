@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""next-migration.py — allocate the next migration number without colliding.
+
+WHY THIS EXISTS (2026-08-13). Migration numbers are a single global ordered
+namespace, and the method for picking the next one was `ls migrations/ | tail`.
+That reads ONE directory: the tree you happen to be standing in. It cannot see a
+number a concurrent session has already taken in a file it has not committed yet,
+and this machine runs many sessions against one repository with NINETEEN linked
+worktrees. Nine migrations landed on 2026-08-13 alone, from several sessions.
+
+The collision is not hypothetical and it is not rare: on 2026-08-12 a session
+wrote 0110, a peer took 0110 while it was writing, and it renumbered to 0111. The
+same shape recurred the next day. Each one costs a rename plus every reference
+that moved with it.
+
+WORKTREES MAKE THIS WORSE, WHICH IS THE POINT WORTH UNDERSTANDING. Isolating each
+session in its own tree is the right answer to sweeping another writer's FILES,
+and it is already standard here. But it is the wrong shape for a SHARED namespace:
+the more isolated the trees, the less any one session can see of what the others
+have already claimed. Isolation and allocation pull in opposite directions, so the
+allocation has to be done deliberately rather than by looking around.
+
+WHAT THIS READS, and why each source is needed:
+  1. origin/main            — every number already merged, including ones this
+                              checkout has not fetched into its working tree.
+  2. this tree's migrations/ — committed and uncommitted alike.
+  3. EVERY OTHER WORKTREE's migrations/ — the source `ls` cannot see and the one
+                              that actually causes the collisions. A peer's
+                              uncommitted 0112 is a real claim on 0112.
+
+It prints the next free number and, separately, names any number that is claimed
+only by an uncommitted file somewhere — because that is a number that will look
+free to anyone reading git alone, and is not.
+
+Risk colour GREEN: reads only. Writes nothing, creates nothing, sends nothing.
+
+Usage:
+  ./run.sh next-migration            # the next free number, and what is in flight
+  ./run.sh next-migration --quiet    # just the number, for scripting
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NUM = re.compile(r"^(\d{4})[_a-z0-9]*.*\.sql$", re.IGNORECASE)
+
+
+def run(args, cwd=REPO):
+    try:
+        r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=30)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def numbers_from_names(names):
+    """Map every 4-digit-prefixed .sql name to its int. Ignores anything else —
+    0013a_historical_client_status_vocabulary.sql is a real filename here, so the
+    pattern deliberately tolerates a suffix after the digits."""
+    out = {}
+    for n in names:
+        base = os.path.basename(n.strip())
+        m = NUM.match(base)
+        if m:
+            out.setdefault(int(m.group(1)), set()).add(base)
+    return out
+
+
+def merge(into, more, source):
+    for num, names in more.items():
+        for name in names:
+            into.setdefault(num, {}).setdefault(name, set()).add(source)
+
+
+def worktree_paths():
+    """Every checkout attached to this repository, the main one included."""
+    paths = []
+    for line in run(["git", "worktree", "list", "--porcelain"]).splitlines():
+        if line.startswith("worktree "):
+            paths.append(line.split(" ", 1)[1].strip())
+    return paths or [REPO]
+
+
+def main():
+    quiet = "--quiet" in sys.argv[1:]
+    claims = {}
+
+    # 1. everything merged on the remote
+    remote = run(["git", "ls-tree", "--name-only", "origin/main", "migrations/"])
+    merge(claims, numbers_from_names(remote.splitlines()), "origin/main")
+    if not remote:
+        print("WARNING: could not read origin/main — the number below is based only on "
+              "local trees and may collide with something already merged.", file=sys.stderr)
+
+    # 2 & 3. every worktree's migrations/ directory, on disk, committed or not
+    here = os.path.realpath(REPO)
+    for wt in worktree_paths():
+        mdir = os.path.join(wt, "migrations")
+        if not os.path.isdir(mdir):
+            continue
+        label = "this tree" if os.path.realpath(wt) == here else f"worktree {os.path.basename(wt)}"
+        try:
+            merge(claims, numbers_from_names(os.listdir(mdir)), label)
+        except OSError:
+            continue
+
+    if not claims:
+        print("0001", flush=True)
+        return 0
+
+    nxt = max(claims) + 1
+    if quiet:
+        print(f"{nxt:04d}")
+        return 0
+
+    print(f"next free migration number: {nxt:04d}")
+    print(f"  highest claimed: {max(claims):04d}")
+
+    # A number absent from origin/main is the dangerous case. It may be genuinely
+    # uncommitted, or committed on a branch that has not merged — the distinction
+    # does not matter to the collision and IS NOT ASSERTED HERE, because this
+    # function cannot tell them apart from a directory listing and a tool that
+    # guesses which it is would be stating something it did not check. What both
+    # cases share is the only thing that matters: origin/main does not show the
+    # number, so it looks free to anyone reading git, and it is not.
+    in_flight = []
+    for num in sorted(claims):
+        for name, sources in claims[num].items():
+            if "origin/main" not in sources:
+                in_flight.append((num, name, sorted(sources)))
+    if in_flight:
+        print("\n  CLAIMED BUT NOT ON origin/main — uncommitted, or on an unmerged")
+        print("  branch. Either way it looks free to anyone reading git, and is not:")
+        for num, name, sources in in_flight:
+            print(f"    {num:04d}  {name}  — in {', '.join(sources)}")
+        print("\n  Do not reuse those numbers. Re-run this immediately before you write "
+              "the file; another session may claim one while you are typing.")
+    else:
+        print("  every claimed number is on origin/main — nothing in flight elsewhere")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
