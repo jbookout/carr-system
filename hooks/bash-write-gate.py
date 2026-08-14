@@ -78,15 +78,30 @@ REDIRECT = re.compile(r"^\d*&?>{1,2}\|?$")          # '>', '>>', '2>', '&>', '>|
 REDIRECT_ATTACHED = re.compile(r"^\d*&?>{1,2}\|?(?=\S)")
 INTERPRETER_FLAG = {("python", "-c"), ("python3", "-c"), ("node", "-e"),
                     ("ruby", "-e"), ("perl", "-e")}
-# A path literal inside inline interpreter code: quoted, containing a separator
-# and an extension. Deliberately narrow — a bare word is not worth the noise.
-EMBEDDED_PATH = re.compile(r"""['"]([^'"\n]*/[^'"\n]*\.[A-Za-z0-9]{1,6})['"]""")
-# Write intent inside that code. Without one of these the literals are reads and
-# flagging them would refuse `python3 -c 'print(open(f).read())'`.
-WRITE_INTENT = re.compile(
-    r"""(open\s*\([^)]*['"][aw]x?\+?['"]|write_text|write_bytes|writeFileSync|"""
-    r"""appendFileSync|createWriteStream|\.write\(|>>\s*['"]|shutil\.(copy|move)|"""
-    r"""os\.rename|os\.replace|Path\([^)]*\)\s*\.\s*open\s*\([^)]*['"][aw])""")
+# A PATH INSIDE A WRITE CALL, not a path anywhere near one. The distinction cost
+# a second false positive on the day this shipped.
+#
+# The first version paired two loose tests: "does this code contain any path
+# literal" and, separately, "does this code contain any write indicator". Applied
+# to a `python3 <<PY ... PY` heredoc it flagged a path the script only READ,
+# because some other line in the same script wrote something else. A verification
+# command of my own tripped it, which is how it was found — and it would fire on
+# any script that reads one file and writes another, which is most scripts.
+#
+# Direction of error decides this, the same way it decided the unexpanded-variable
+# case above: a false DENY blocks real work every time it fires, a false ALLOW
+# only fails to catch something. So the path must sit INSIDE the write call
+# itself. That still covers the shape this gate was built for — the 2026-08-09
+# incident was `open("<vault file>","a").write(...)`, matched by the first pattern
+# here — and it stops guessing about paths that merely appear nearby.
+EMBEDDED_WRITE = [
+    # open("PATH", "w"|"a"|"x"|"wb"…)
+    re.compile(r"""open\s*\(\s*['"]([^'"\n]+)['"]\s*,\s*['"][awx]"""),
+    # Path("PATH").write_text(…) / .write_bytes(…) / .open("w")
+    re.compile(r"""Path\s*\(\s*['"]([^'"\n]+)['"]\s*\)\s*\.\s*(?:write_text|write_bytes|open\s*\(\s*['"][awx])"""),
+    # fs.writeFileSync("PATH", …) / appendFileSync / createWriteStream
+    re.compile(r"""(?:writeFileSync|appendFileSync|createWriteStream)\s*\(\s*['"]([^'"\n]+)['"]"""),
+]
 
 
 def log(line):
@@ -150,10 +165,18 @@ def is_real_target(token):
 
 
 def embedded_targets(code):
-    """Path literals inside inline interpreter code that ALSO writes something."""
-    if not WRITE_INTENT.search(code):
-        return []
-    return EMBEDDED_PATH.findall(code)
+    """Paths that inline interpreter code opens FOR WRITING, and nothing else.
+
+    Only what a write call names. A path the code merely reads, or mentions in a
+    list, or prints, is not a write target and must not be judged as one — see
+    EMBEDDED_WRITE above for what that cost when this was looser.
+    """
+    found = []
+    for pattern in EMBEDDED_WRITE:
+        for match in pattern.findall(code):
+            if match not in found:
+                found.append(match)
+    return found
 
 
 def extract_targets(command):
