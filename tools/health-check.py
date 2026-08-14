@@ -20,7 +20,11 @@ brand-new task is never mistaken for a broken one. See the scheduler section bel
 import json, os, sys, glob, time, re, subprocess, calendar
 from datetime import datetime, timedelta
 
-REPO_ROOT = os.path.expanduser("~/carr-system")
+# Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
+# (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
+# so fixing that script while its caller still resolved REPO_ROOT through $HOME
+# would have left the render-tamper check dead on any clone outside $HOME.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 VAULT = os.environ.get("CARR_VAULT",
     "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")

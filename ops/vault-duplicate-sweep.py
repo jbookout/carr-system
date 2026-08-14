@@ -38,7 +38,12 @@ from datetime import datetime, timezone
 VAULT = os.path.expanduser("~/My Drive/CARR AI")
 MIRROR = os.path.join(VAULT, "Backups/portability-mirror/md")
 CLAUDE_DIR = os.path.expanduser("~/.claude")
-REPO = os.path.expanduser("~/carr-system")
+# Script-relative, NOT expanduser("~/carr-system"). VAULT and CLAUDE_DIR above
+# stay expanduser on purpose — those really are $HOME-relative. REPO is not: on
+# a clone outside $HOME it became a directory that does not exist, and since it
+# is one of three scan bases the sweep just reported no duplicates in the repo
+# half rather than failing.
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Directories whose .md files are never candidates.
 SKIP_DIRS = {"_to_delete", "Backups", "Graph-System", "node_modules", ".git"}
