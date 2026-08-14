@@ -101,6 +101,11 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/drift-claim-gate.py",
           "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/escalation-gate.py",
+          "timeout": 10
         }
       ]
     },
