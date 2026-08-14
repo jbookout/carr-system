@@ -30,6 +30,14 @@
   Verified by OUTPUT, never by the schedule existing: out/calendar-capture.log
   carries one run block per fire, and a DENIED read exits 3 rather than reporting
   zero touches.
+
+  Program 4 follow-up: PR #97 closed the launchd-seven's recording gap
+  (rules-refresh, local-briefs, notes-sweep, capture-poll, partner-ping,
+  cc-version-sentinel, recordings-purge) and deliberately left this job out —
+  it did not yet have a services.json registration. It has one now (see that
+  file); routed through bin/run-scheduled.sh here so its own success/failure
+  becomes a durable ops.run row instead of living only in
+  out/calendar-capture.log. No throttle — weekday daily is already low-volume.
 -->
 <plist version="1.0">
 <dict>
@@ -38,6 +46,10 @@
 
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>calendar-eventkit</string>
+    <string>launchd.run</string>
     <string>/bin/sh</string>
     <string>{{REPO}}/bin/calendar-eventkit-capture.sh</string>
     <string>--days</string>
