@@ -56,7 +56,7 @@ import time
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKTREE_SH = os.path.join(REPO, "bin", "worktree.sh")
 
-results = []  # (label, ok, detail)
+results: list[tuple[str, bool, str]] = []
 
 
 def check(label, ok, detail=""):
