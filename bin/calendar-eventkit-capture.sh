@@ -171,17 +171,23 @@ repo = pathlib.Path(__file__).resolve().parent if False else pathlib.Path.cwd()
 failed = 0
 for e in d["exact"]:
     ev = (e["events"] or [{}])[0]
+    # log-activity with kind "meeting", NOT stamp-touch. stamp-touch is shorthand
+    # for a call or a text and its enum accepts only those two; a calendar meeting
+    # is neither, and the first live launchd fire was refused for exactly that —
+    # caught by the required-argument guard rather than written wrong.
+    day = ev.get("day", e["last_seen"])
     args = json.dumps({
         "idempotency_key": f"calcap-{e['email']}-{e['last_seen']}",
         "ref": e["ref"],
-        "happened_on": e["last_seen"],
-        "channel": "meeting",
-        "note": (f"Calendar evidence: {e['email']} attended "
-                 f"\"{ev.get('title','(untitled)')}\" on {ev.get('day', e['last_seen'])}. "
-                 f"Inferred from the local calendar by an exact email match; "
-                 f"not self-reported."),
+        "kind": "meeting",
+        "occurred_at": day,
+        "summary": f"Meeting: {ev.get('title', '(untitled)')}"[:180],
+        "detail": (f"Calendar evidence — {e['email']} was an attendee of "
+                   f"\"{ev.get('title','(untitled)')}\" on {day}. Matched to this "
+                   f"record by an exact email address. Captured automatically from "
+                   f"the local calendar; not self-reported."),
     })
-    r = subprocess.run(["./run.sh", "call", "stamp-touch", args],
+    r = subprocess.run(["./run.sh", "call", "log-activity", args],
                        capture_output=True, text=True)
     ok = '"ok": true' in r.stdout or '"ok":true' in r.stdout
     print(f"  {'logged touch  ' if ok else 'FAILED to log '} {e['ref']}  via {e['email']}")

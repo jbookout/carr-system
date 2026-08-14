@@ -23,6 +23,7 @@ contact.
 import datetime
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -127,6 +128,20 @@ def read_calendar(days):
 
 
 
+
+_REF_SHAPE = re.compile(r"^[A-Z]{1,3}-[A-Z0-9-]+$")
+
+
+def _ref_of(label):
+    """The record ref out of a "<ref> / <name>" label, or the label itself.
+
+    Falls back to the whole label deliberately: the verbs resolve a deal NAME as
+    well as a ref, so a row that carried no ref is still addressable.
+    """
+    head = str(label).split(" / ", 1)[0].strip()
+    return head if _REF_SHAPE.match(head) else str(label)
+
+
 def read_dump(path, days):
     """Same rows as read_calendar, built from the access bundle's EventKit dump.
 
@@ -221,7 +236,12 @@ def main():
             "counts": {"emails": len(latest), "internal": len(internal),
                        "exact": len(exact), "domain": len(domain),
                        "unknown": len(unknown)},
-            "exact": [{"email": e, "ref": exact[e][0] if isinstance(exact[e], (list, tuple)) else exact[e],
+            # ref and LABEL are different things and the verbs want the ref.
+            # load_record_contacts joins them as "<ref> / <name>", so the first
+            # segment is the ref when there is one. A live write refused with
+            # subject_not_found because the whole label was sent as the ref —
+            # caught by an actual write attempt, not by reading the code.
+            "exact": [{"email": e, "ref": _ref_of(exact[e]),
                        "label": str(exact[e]), "last_seen": latest[e],
                        "events": [{"day": d, "title": t} for d, t in events[e][:5]]}
                       for e in exact],
