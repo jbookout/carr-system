@@ -150,6 +150,27 @@ with tempfile.TemporaryDirectory() as tmp:
           r.returncode != 0, f"exit {r.returncode}")
     check("the refusal names the phantom path",
           "tools/widget.py" in (r.stdout + r.stderr))
+
+    # IT MUST SAY WHY IT READ THAT AS A CLAIM, not merely that it did.
+    #
+    # 2026-08-14: a commit message narrated two past incidents using the house
+    # `path — text` shape for files it did not touch. The gate was right to
+    # refuse — that shape MEANS "this commit changes this file" — but the
+    # refusal only said the path "is not in the staged diff", which reads as a
+    # bookkeeping complaint rather than a misused convention. The author reached
+    # for CARR_ALLOW_CLAIM_MISMATCH instead of rewriting the line, which is the
+    # weaker of the two doors the gate offers. A gate that does not explain
+    # itself gets escaped rather than obeyed.
+    out = r.stdout + r.stderr
+    check("the refusal quotes the line it objected to",
+          "now twice as fast" in out,
+          "the author cannot find which line to fix")
+    check("the refusal names the convention that made it a claim",
+          "—" in out and ("shape" in out.lower() or "convention" in out.lower()),
+          "it says WHAT it refused but not WHY it read that as a claim")
+    check("the refusal offers rewriting as well as escaping",
+          "sentence" in out.lower() or "prose" in out.lower(),
+          "only the escape hatch is offered, so the escape is what gets used")
     git(repo, "reset", "-q", check_rc=True)
 
     r = attempt(repo,
