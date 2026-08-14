@@ -95,6 +95,18 @@ def git(*args, check=False):
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
+def gh(*args):
+    """Run the GitHub CLI against this repo, same containment as git().
+
+    Scrubbed for the same reason git() is: gh shells out to git for repo
+    inference, and an inherited GIT_DIR would point that inference at whatever
+    repository invoked us.
+    """
+    p = subprocess.run(["gh", *args], cwd=REPO, capture_output=True, text=True,
+                       env=scrubbed_env())
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
 def dirty_owned() -> list[str]:
     """Which of OWNED already have uncommitted changes, before this run writes.
 
@@ -148,14 +160,45 @@ def commit_and_push(summary: str, preexisting: list[str]) -> None:
         return
     print("sync-enforcement-map: committed the pair")
 
-    rc, out = git("push", "origin", "HEAD")
+    # THE LANDING PATH IS A PR, NOT A DIRECT PUSH. Since 2026-08-13 the ruleset
+    # "main: CI must be green" refuses any push to main whose head commit lacks
+    # a passing `ops/ci.sh --strict` check — which a freshly created commit
+    # cannot have. The first morning under the ruleset proved what happens
+    # otherwise: this push failed silently into a log, the commit sat local-only,
+    # and humans hand-built the enforcement-map-sync branch twice (#35, #46).
+    # So the automation now walks through the same door as everyone else:
+    # push the commit to the sync branch, open a PR, set auto-merge, and let the
+    # required check decide. The local commit stays on this branch so sessions
+    # booting here read the synced pair immediately; origin/main receives the
+    # same content when the check goes green.
+    #
+    # --force is safe on this one branch by convention: enforcement-map-sync is
+    # owned by this job alone, and a newer sync superseding a stale one is the
+    # desired outcome. Deliberately still no pull/rebase: moving shared HEAD
+    # unattended is the hazard the two-writer rule names.
+    rc, out = git("push", "--force", "origin", "HEAD:refs/heads/enforcement-map-sync")
     if rc != 0:
-        # Deliberately does NOT pull/rebase. Moving shared HEAD unattended is
-        # the hazard the two-writer rule names; a local commit that still needs
-        # a push is recoverable, a bad rebase is not.
         print(f"sync-enforcement-map: FAIL push refused, commit is local only — {out}")
         return
-    print("sync-enforcement-map: pushed")
+    print("sync-enforcement-map: pushed to enforcement-map-sync")
+
+    title = f"gates: sync enforcement map inventory ({summary}) and re-stamp its baseline hash"
+    rc, out = gh("pr", "create", "--base", "main", "--head", "enforcement-map-sync",
+                 "--title", title, "--body",
+                 "Automated by bin/sync-enforcement-map.py on the hourly rules "
+                 "refresh. Lands via PR because the main ruleset refuses direct "
+                 "pushes; auto-merge is set so the required check is the only gate.")
+    if rc != 0 and "already exists" not in out:
+        print(f"sync-enforcement-map: FAIL PR not created — the commit is on "
+              f"enforcement-map-sync and needs a human to open the PR — {out}")
+        return
+    rc, out = gh("pr", "merge", "enforcement-map-sync", "--auto", "--squash")
+    if rc != 0:
+        print(f"sync-enforcement-map: FAIL auto-merge not set — the PR is open "
+              f"and needs a human to merge it — {out}")
+        return
+    print("sync-enforcement-map: PR open with auto-merge set; the required "
+          "check decides from here")
 
 
 def find_vault() -> tuple[str | None, ModuleType]:

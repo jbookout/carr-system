@@ -186,6 +186,28 @@ check("the unrelated file was NOT swept into the commit", "unrelated.txt" not in
 check("the unrelated file is still modified and left alone",
       "unrelated.txt" in git(repo, "status", "--porcelain").stdout)
 
+# 4. THE LANDING PATH. With a remote present, the push must reach the
+# enforcement-map-sync branch and NEVER main directly — main's ruleset refuses
+# a fresh commit anyway, and the point of the PR path is that the automation
+# walks through the same required-check door as everyone else. A local bare
+# repo stands in for origin; the gh calls that follow the push fail harmlessly
+# in the fixture (a filesystem remote is not a GitHub host, so no network).
+repo = make_repo()
+mod = load_module_for(repo)
+bare = tempfile.mkdtemp(prefix="syncmap-bare-")
+git(bare, "init", "-q", "--bare")
+git(repo, "remote", "add", "origin", bare)
+touch(repo, "ops/config/rule-enforcement-map.json", '{"synced": 3}\n')
+touch(repo, "ops/config/gate-baseline.json", '{"stamped": 3}\n')
+mod.commit_and_push("shared +cafef00d", [])
+remote_refs = git(bare, "for-each-ref", "--format=%(refname:short)").stdout.split()
+check("the push lands on the sync branch", "enforcement-map-sync" in remote_refs,
+      f"remote refs: {remote_refs}")
+check("the push never touches main directly", "main" not in remote_refs,
+      f"remote refs: {remote_refs}")
+check("the local commit survives the fixture's failed PR step",
+      git(repo, "status", "--porcelain").stdout.strip() == "")
+
 print()
 if failures:
     print(f"FAIL {len(failures)} check(s): {', '.join(failures)}")

@@ -6,13 +6,18 @@
 # written here it would run in CI and not at push time, and the two would drift
 # without anyone noticing — which is the failure this whole design avoids.
 #
-# WHAT THIS CAN AND CANNOT DO TODAY. It runs and reports. It cannot REQUIRE a
-# green result before a merge, because this repo is private on a free GitHub plan
-# and both the branch-protection API and the newer rulesets API refuse with
-# "Upgrade to GitHub Pro or make this repository public" (verified live against
-# both endpoints, 2026-08-13). Enforcement today comes from the pre-push hook.
-# When GitHub Pro is enabled, mark the `checks` job a required status check and
-# nothing in this file or in ops/ci.sh has to change.
+# HOW THIS IS ENFORCED. The `checks` job is the required status check in the
+# ruleset "main: CI must be green" (active since 2026-08-13, when the plan
+# upgrade made rulesets available). The ruleset deliberately does NOT require
+# branches to be up to date with main: with ~9 concurrent sessions plus
+# automation landing every few minutes and this check taking ~2m20s, a green PR
+# went stale faster than the check could rerun — PR #44 (2026-08-14) needed
+# three clean attempts and then a human bypass, which skips CI entirely. A
+# merge queue would give both properties, but GitHub offers it only on
+# org-owned repos, not this user-owned one (verified live against the rulesets
+# API, 2026-08-14). So the trade is: every merged PR ran this check green on
+# its own head, and the push run on main below is the detector for the rare
+# semantic conflict between two concurrently green PRs.
 #
 # ACTIONS ARE PINNED TO COMMIT SHAs, not to tags. Doctrine: "Pin dependencies and
 # CI actions" (end-state BDUF, s15 Security/supply chain). A tag is mutable — v7
@@ -28,11 +33,15 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A second push to the same branch cancels the first. Two runs of the same branch
-# racing tells you nothing extra and just delays the answer that matters.
+# A second push to the same branch cancels the first — two runs of the same
+# branch racing tells you nothing extra. EXCEPT on main: since PRs may merge
+# against a base that moved after their check ran, the run on each main push is
+# what detects a semantic conflict between two concurrently green PRs, and
+# canceling it would blind that detector at exactly the moment merges are
+# landing fast. Per-sha grouping on main means every merge gets its own run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
