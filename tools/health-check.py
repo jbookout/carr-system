@@ -1422,6 +1422,7 @@ try:
                       datetime.fromisoformat(_vdw["generated_at"]).timestamp()) / 3600
         _vdw_tamper = _vdw.get("tamper_count", 0)
         _vdw_unexpected = _vdw.get("unexpected_count", 0)
+        _vdw_mirror_verified = _vdw.get("mirror_verified_count", 0)
         _bl_str = f"{_vdw_baseline_age_h:.1f}h" if _vdw_baseline_age_h is not None else "NO BASELINE"
         if _vdw_tamper or _vdw_unexpected:
             print(f"  ⚠︎ vault-drift-watch     {_vdw_tamper} TAMPER + {_vdw_unexpected} "
@@ -1447,8 +1448,10 @@ try:
                   f"chain log for the 'vault drift watch (rebaseline)' step")
             rc = 1
         else:
-            print(f"  OK vault-drift-watch     0 tamper, 0 unexpected ({_vdw_age_h:.1f}h old "
-                  f"check, baseline {_vdw_baseline_age_h:.1f}h old)")
+            _mirror_note = (f", {_vdw_mirror_verified} mirror-verified" if _vdw_mirror_verified
+                             else "")
+            print(f"  OK vault-drift-watch     0 tamper, 0 unexpected{_mirror_note} "
+                  f"({_vdw_age_h:.1f}h old check, baseline {_vdw_baseline_age_h:.1f}h old)")
 except Exception as e:
     print(f"  ⚠︎ vault-drift-watch check failed ({type(e).__name__}: {e})")
     rc = 1

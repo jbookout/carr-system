@@ -30,6 +30,7 @@ Exit 0 if every case passes, 1 otherwise.
     ops/vault-drift-watch-selftest.py
     ops/vault-drift-watch-selftest.py -v
 """
+import hashlib
 import json
 import os
 import shutil
@@ -477,30 +478,201 @@ def _(assert_):
             f"an ordinary hand-authored .md must still be UNEXPECTED: {hand}")
 
 
-@case("the portability mirror is a known derived writer, not UNEXPECTED")
+# ---------------------------------------------------------------- v4 cases
+# (portability-mirror hash verification. 2026-08-14: the mirror's own 224
+# regenerated .md files were landing as UNEXPECTED every night — the tamper
+# fix above had already stopped calling that a tamper, but nothing yet told
+# the structural pass a sanctioned regeneration from a foreign write parked
+# in the same Backups/ path. Rather than a blanket DERIVED_DIRS exclusion —
+# which would blind this watch to exactly that foreign write — the mirror
+# step (pipelines/doctrine_mirror.py) now writes its own manifest.json
+# {relpath: sha256} at the end of every run, and these cases prove the four
+# ways a file under the mirror can be classified against it.)
+
+def mirror_manifest_json(files):
+    return json.dumps({"schema": 1, "generated_at": "2026-08-14T00:00:00Z",
+                        "file_count": len(files), "files": files})
+
+
+def sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@case("mirror: sha256 matches the mirror's own manifest.json -> mirror-verified, not UNEXPECTED")
 def _(assert_):
-    # Added 2026-08-14. The chain's own portability-mirror step writes hundreds
-    # of .md files into Backups/portability-mirror, and on the first clean run
-    # after the tamper fix they came back as 301 UNEXPECTED modifications —
-    # this watch reporting the chain that runs it. Same class as Graph-System/
-    # and the same remedy: a wholesale-regenerated derived tree is named by its
-    # prefix, never enumerated. Its freshness is owned by the health check's
-    # portability-mirror row, so nothing goes unwatched.
-    d = fresh_dirs("mirror")
-    write(d["root"], "Backups/portability-mirror/md/distillation/a-note.md", "# derived\n")
-    write(d["root"], "Backups/portability-mirror/MANIFEST.md", "# manifest\n")
-    write(d["root"], "hand-authored.md", "# mine\n")
+    d = fresh_dirs("mirror_verified")
+    v1 = "# v1\n"
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md", v1)
+    write(d["root"], "Backups/portability-mirror/manifest.json",
+          mirror_manifest_json({"md/policy/a.md": sha(v1)}))
+    rc1, _, err1 = run(d)
+    assert_(rc1 == 0, f"seed run should exit 0, got {rc1}\nstderr={err1}")
+
+    # A sanctioned regeneration: new bytes (the banner's timestamp moved, as
+    # it does every night) AND a manifest that was regenerated in lockstep,
+    # exactly what pipelines/doctrine_mirror.py's build_mirror() guarantees.
+    v2 = "# v2 — regenerated tonight\n"
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md", v2)
+    write(d["root"], "Backups/portability-mirror/manifest.json",
+          mirror_manifest_json({"md/policy/a.md": sha(v2)}))
+    rc2, out2, err2 = run(d)
+    assert_(rc2 == 0, f"a hash-verified mirror regeneration should exit 0, got {rc2}\nstderr={err2}")
+    mirror_lines = [ln for ln in out2.splitlines() if "md/policy/a.md" in ln]
+    assert_(mirror_lines, "the mirror file should appear in the report")
+    assert_(all("UNEXPECTED" not in ln for ln in mirror_lines),
+            f"a hash-verified mirror file must not be UNEXPECTED: {mirror_lines}")
+    assert_(any("mirror-verified" in ln for ln in mirror_lines),
+            f"the mirror file should classify as mirror-verified: {mirror_lines}")
+    assert_("1 mirror-verified" in out2,
+            f"the summary line should count exactly 1 mirror-verified file, got:\n{out2}")
+    summary = json.loads(open(d["summary"]).read())
+    assert_(summary["mirror_verified_count"] == 1 and summary["unexpected_count"] == 0,
+            f"summary should show 1 mirror-verified, 0 unexpected, got {summary}")
+
+
+@case("mirror: sha256 diverges from the mirror's own manifest.json -> still UNEXPECTED (real tamper signal)")
+def _(assert_):
+    d = fresh_dirs("mirror_divergent")
+    v1 = "# v1\n"
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md", v1)
+    write(d["root"], "Backups/portability-mirror/manifest.json",
+          mirror_manifest_json({"md/policy/a.md": sha(v1)}))
+    rc1, _, err1 = run(d)
+    assert_(rc1 == 0, f"seed run should exit 0, got {rc1}\nstderr={err1}")
+
+    # Something outside the pipeline rewrote the file; the manifest was NOT
+    # regenerated to match (unlike the sanctioned case above).
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md",
+          "# hand-edited outside the pipeline\n")
+    rc2, out2, err2 = run(d)
+    assert_(rc2 == 2, f"a mirror file whose hash diverges from its own manifest should exit 2, "
+                       f"got {rc2}\nstderr={err2}")
+    mirror_lines = [ln for ln in out2.splitlines() if "md/policy/a.md" in ln]
+    assert_(any("UNEXPECTED" in ln for ln in mirror_lines),
+            f"a divergent mirror file must still be UNEXPECTED: {mirror_lines}")
+    salvage_rows = [json.loads(l) for l in open(d["salvage"]).read().splitlines() if l.strip()]
+    row = next((r for r in salvage_rows if r["path"].endswith("md/policy/a.md")), None)
+    assert_(row is not None, "the divergent mirror file should produce a salvage row")
+    assert_("does not match the mirror's own manifest.json" in row["reason"],
+            f"the reason should name the sha256 mismatch, got: {row['reason']}")
+
+
+@case("mirror: extra file with no manifest.json entry -> still UNEXPECTED (foreign writer parked it)")
+def _(assert_):
+    d = fresh_dirs("mirror_extra")
+    v1 = "# v1\n"
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md", v1)
+    write(d["root"], "Backups/portability-mirror/manifest.json",
+          mirror_manifest_json({"md/policy/a.md": sha(v1)}))
+    rc1, _, err1 = run(d)
+    assert_(rc1 == 0, f"seed run should exit 0, got {rc1}\nstderr={err1}")
+
+    # A new file appears under the mirror, but manifest.json (unchanged) never
+    # claimed it — exactly what a foreign writer parking content there looks
+    # like.
+    write(d["root"], "Backups/portability-mirror/md/policy/surprise.md", "# not mine\n")
+    rc2, out2, err2 = run(d)
+    assert_(rc2 == 2, f"an unmanifested mirror file should exit 2, got {rc2}\nstderr={err2}")
+    mirror_lines = [ln for ln in out2.splitlines() if "surprise.md" in ln]
+    assert_(any("UNEXPECTED" in ln for ln in mirror_lines),
+            f"an unmanifested mirror file must be UNEXPECTED: {mirror_lines}")
+    salvage_rows = [json.loads(l) for l in open(d["salvage"]).read().splitlines() if l.strip()]
+    row = next((r for r in salvage_rows if r["path"].endswith("surprise.md")), None)
+    assert_(row is not None, "the unmanifested file should produce a salvage row")
+    assert_("no entry in its own manifest.json" in row["reason"],
+            f"the reason should say there is no manifest entry, got: {row['reason']}")
+
+
+@case("mirror: manifest.json entry whose file is missing -> still UNEXPECTED")
+def _(assert_):
+    d = fresh_dirs("mirror_missing")
+    v1 = "# v1\n"
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md", v1)
+    write(d["root"], "Backups/portability-mirror/manifest.json",
+          mirror_manifest_json({"md/policy/a.md": sha(v1)}))
+    rc1, _, err1 = run(d)
+    assert_(rc1 == 0, f"seed run should exit 0, got {rc1}\nstderr={err1}")
+
+    # The file is deleted but manifest.json is left exactly as it was — the
+    # manifest still promises this path exists.
+    os.remove(os.path.join(d["root"], "Backups/portability-mirror/md/policy/a.md"))
+    rc2, out2, err2 = run(d)
+    assert_(rc2 == 2, f"a manifest-promised but missing mirror file should exit 2, got {rc2}\n"
+                       f"stderr={err2}")
+    mirror_lines = [ln for ln in out2.splitlines() if "md/policy/a.md" in ln]
+    assert_(any("UNEXPECTED" in ln for ln in mirror_lines),
+            f"a manifest-promised missing file must be UNEXPECTED: {mirror_lines}")
+    salvage_rows = [json.loads(l) for l in open(d["salvage"]).read().splitlines() if l.strip()]
+    row = next((r for r in salvage_rows if r["path"].endswith("md/policy/a.md")), None)
+    assert_(row is not None, "the missing-but-manifested file should produce a salvage row")
+    assert_("lists this file but it is missing on disk" in row["reason"],
+            f"the reason should say the manifest lists a file that is gone, got: {row['reason']}")
+
+
+@case("mirror: a file AND its manifest entry both retired together -> not flagged (structural removal, not tamper)")
+def _(assert_):
+    d = fresh_dirs("mirror_retired")
+    v1 = "# v1\n"
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md", v1)
+    write(d["root"], "Backups/portability-mirror/manifest.json",
+          mirror_manifest_json({"md/policy/a.md": sha(v1)}))
+    rc1, _, err1 = run(d)
+    assert_(rc1 == 0, f"seed run should exit 0, got {rc1}\nstderr={err1}")
+
+    # A legitimate next regeneration: the underlying doctrine document was
+    # retired, so this run's manifest.json simply no longer mentions the
+    # path, and neither does the tree.
+    os.remove(os.path.join(d["root"], "Backups/portability-mirror/md/policy/a.md"))
+    write(d["root"], "Backups/portability-mirror/manifest.json", mirror_manifest_json({}))
+    rc2, out2, err2 = run(d)
+    assert_(rc2 == 0, f"a retirement reflected consistently in both the tree and the manifest "
+                       f"should exit 0, got {rc2}\nstderr={err2}")
+    mirror_lines = [ln for ln in out2.splitlines() if "md/policy/a.md" in ln]
+    assert_(all("UNEXPECTED" not in ln for ln in mirror_lines),
+            f"a consistent retirement must not be UNEXPECTED: {mirror_lines}")
+    assert_(any("mirror-regenerated" in ln for ln in mirror_lines),
+            f"a consistent retirement should classify as mirror-regenerated: {mirror_lines}")
+
+
+@case("mirror: no manifest.json at all -> fails visibly (UNEXPECTED), never silently trusted")
+def _(assert_):
+    d = fresh_dirs("mirror_no_manifest")
+    write(d["root"], "Backups/portability-mirror/md/policy/a.md", "# v1\n")
+    rc1, out1, err1 = run(d)
+    assert_(rc1 == 0, f"seed run should exit 0 (seed never trips exit 2), got {rc1}\nstderr={err1}")
+    assert_("no Backups/portability-mirror/manifest.json on disk" in out1,
+            f"a missing mirror manifest should say so plainly in the report, got:\n{out1}")
+    mirror_lines = [ln for ln in out1.splitlines() if "md/policy/a.md" in ln]
+    assert_(any("UNEXPECTED" in ln for ln in mirror_lines),
+            f"with no manifest to verify against, the mirror file must read UNEXPECTED rather "
+            f"than being silently trusted: {mirror_lines}")
+
+
+@case("mirror: DERIVED_DIRS wholesale trust must never cover the mirror prefix")
+def _(assert_):
+    # Guards the actual design decision: unlike Graph-System/, the mirror is
+    # NOT in DERIVED_DIRS. A blanket exclusion here would blind the watch to
+    # exactly the foreign write the earlier mirror cases prove get caught.
+    d = fresh_dirs("mirror_not_derived")
+    write(d["root"], "Backups/portability-mirror/md/policy/surprise.md", "# not from the pipeline\n")
+    # No manifest.json at all — if the mirror prefix were wholesale-trusted
+    # the way Graph-System/ is, this would read as "expected-writer: derived"
+    # with no verification. It must not.
     rc, out, err = run(d)
     assert_(rc == 0, f"seed run should exit 0, got {rc}\nstderr={err}")
-    mirror = [ln for ln in out.splitlines() if "portability-mirror" in ln]
-    assert_(mirror, "the mirror files should appear in the report")
-    assert_(all("UNEXPECTED" not in ln for ln in mirror),
-            f"the portability mirror must not classify as UNEXPECTED: {mirror}")
-    assert_(any("derived" in ln for ln in mirror),
-            f"the portability mirror should classify as a derived writer: {mirror}")
-    hand = [ln for ln in out.splitlines() if "hand-authored.md" in ln]
-    assert_(any("UNEXPECTED" in ln for ln in hand),
-            f"an ordinary hand-authored .md must still be UNEXPECTED: {hand}")
+    mirror_lines = [ln for ln in out.splitlines() if "surprise.md" in ln]
+    assert_(all("expected-writer: derived" not in ln for ln in mirror_lines),
+            f"the mirror prefix must never classify as blanket 'derived': {mirror_lines}")
+
+
+# PR #57 ("the drift watch stops reporting the chain that runs it") added a
+# case here asserting the mirror classifies "expected-writer: derived" —
+# the blanket DERIVED_DIRS exclusion this merge deliberately supersedes with
+# hash verification (see the DERIVED_DIRS comment in ops/vault-drift-watch.py
+# and the v4 cases above, especially "DERIVED_DIRS wholesale trust must never
+# cover the mirror prefix" just above this note). That case asserted the
+# opposite of the design this branch ships and is dropped rather than kept
+# disabled, so no test in this file contradicts another.
 
 
 @case("--rebaseline --only re-snapshots the named paths and carries the rest forward")

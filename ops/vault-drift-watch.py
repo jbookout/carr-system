@@ -337,31 +337,126 @@ def scan(root):
 # Prefix-matched rather than set-matched on purpose: the tree is regenerated
 # wholesale, so its members change nightly and enumerating them would drift.
 #
-# Backups/portability-mirror/ joined it on 2026-08-14, and it is THIS CHAIN's
-# own output: the portability-mirror step in bin/nightly.sh writes the whole
-# tree, both copies, every night. On the first clean run after the tamper fix
-# its 301 files came back as UNEXPECTED modifications — the watch reporting the
-# chain that runs it, one layer up from the tamper false positive it had just
-# stopped reporting. Same remedy, same reason it is a prefix: the tree is
-# regenerated wholesale, so enumerating its members would drift within a day.
-# Nothing goes unwatched by this — the mirror's freshness is owned by the health
-# check's portability-mirror row, and its content is a derived copy of the store
-# that is overwritten nightly and never read as a source.
+# Keyed by writer label (added 2026-08-14, PR #57) so classify()'s
+# "expected-writer: derived (see ...)" message names the actual generator
+# instead of hardcoding Graph-System's.
+#
+# Backups/portability-mirror/ was proposed for this same blanket-prefix
+# treatment the same day, in the same PR — same "wholesale regeneration,
+# don't enumerate" reasoning that fits Graph-System/. It does NOT belong
+# here: unlike Graph-System/, the mirror is verified against its own
+# manifest.json instead (see MIRROR_PREFIX / classify_mirror_file below). A
+# blanket exclusion here would trust the whole mirror tree wholesale,
+# blinding this watch to exactly the foreign writer parking content in a
+# Backups/ path that the alarm exists to catch; hash verification silences
+# the same nightly false alarm without giving up that coverage. Resolved
+# this way merging PR #57's DERIVED_DIRS change against the manifest-
+# verification work below — verification supersedes blanket exclusion
+# wherever the two approaches would otherwise collide on this one path.
 DERIVED_DIRS = {
     "Graph-System/": "./run.sh graph-system",
-    "Backups/portability-mirror/": "the portability mirror step in bin/nightly.sh",
 }
 
+# A FOURTH legitimate writer. Backups/portability-mirror/ is also a
+# wholesale nightly regeneration (pipelines/doctrine_mirror.py, invoked by
+# bin/nightly.sh's "portability mirror" step) — 224 files (222 doc snapshots
+# + rules.md + MANIFEST.md) that legitimately change bytes every single
+# night, because every snapshot carries a fresh UTC timestamp banner even
+# when the underlying content did not move.
+#
+# THE VERIFICATION: doctrine_mirror.py's build_mirror() writes root/
+# manifest.json at the end of every run — {relpath: sha256} for every file it
+# produced that run, computed by walking its own output tree, MANIFEST.md
+# included (see write_output_manifest in pipelines/doctrine_mirror.py). A
+# mirror file whose current sha256 matches that manifest's entry for the same
+# relpath is a sanctioned regeneration, full stop — not counted as UNEXPECTED,
+# reported instead in a distinct "mirror-verified" line so the fix stays
+# visible in the report. Everything else under the prefix still lands in
+# UNEXPECTED, because it is still the real signal the alarm exists for:
+#   - hash present in the manifest but does not match current bytes (tamper)
+#   - file exists under the mirror with no entry in manifest.json at all
+#     (a foreign writer parked it there — the manifest never claimed it)
+#   - manifest.json entry for a path with no file on disk (something deleted
+#     it after the pipeline's own atomic swap published the tree)
+#   - manifest.json itself missing or unreadable (fail visible, never silent)
+# A path that vanishes AND has no manifest entry either (the manifest's own
+# latest run also stopped producing it — a doctrine document retired from the
+# database) is a legitimate structural removal, not tamper; see
+# classify_mirror_file below.
+MIRROR_PREFIX = "Backups/portability-mirror/"
 
-def classify(relpath, expected, corpus_mirror):
+
+def load_mirror_manifest(root):
+    """{sub-relpath: sha256} from Backups/portability-mirror/manifest.json, or
+    (None, note) when it cannot be read. sub-relpath is relative to the mirror
+    root itself (e.g. "md/policy/foo.md"), matching manifest.json's own
+    schema — it does NOT carry the MIRROR_PREFIX every other path in this
+    watch is relative to. A missing or unreadable manifest degrades to "every
+    mirror path is UNEXPECTED this run" (see classify_mirror_file) rather than
+    silently trusting the tree — the same fail-visible posture as
+    load_expected_writers' FATAL-on-import-failure, just non-fatal here
+    because an isolated mirror manifest problem should not block the rest of
+    the check.
+    """
+    path = os.path.join(root, MIRROR_PREFIX, "manifest.json")
+    if not os.path.isfile(path):
+        return None, f"no {MIRROR_PREFIX}manifest.json on disk — nothing to verify mirror files against"
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        return None, f"{MIRROR_PREFIX}manifest.json unreadable: {type(exc).__name__}: {exc}"
+    files = data.get("files")
+    if not isinstance(files, dict):
+        return None, f"{MIRROR_PREFIX}manifest.json has no 'files' mapping"
+    return files, None
+
+
+def classify_mirror_file(sub, current_sha, mirror_manifest):
+    """Classify one path under MIRROR_PREFIX against the mirror's own
+    manifest.json. Returns (tag, reason). current_sha is None when the file
+    is not currently on disk (the DELETED case); mirror_manifest is None when
+    load_mirror_manifest could not read one.
+    """
+    if mirror_manifest is None:
+        return ("UNEXPECTED", "the mirror's own manifest.json could not be read — cannot verify")
+    entry_sha = mirror_manifest.get(sub)
+    if current_sha is None:
+        if entry_sha is not None:
+            return ("UNEXPECTED",
+                    "the mirror's manifest.json lists this file but it is missing on disk")
+        return ("expected-writer: mirror-regenerated (see pipelines/doctrine_mirror.py)",
+                "no longer produced by the mirror's latest regeneration — a structural "
+                "removal, not tamper")
+    if entry_sha is None:
+        return ("UNEXPECTED",
+                "this file exists under the mirror with no entry in its own manifest.json")
+    if current_sha != entry_sha:
+        return ("UNEXPECTED",
+                "this file's sha256 does not match the mirror's own manifest.json entry")
+    return ("expected-writer: mirror-verified (see pipelines/doctrine_mirror.py)",
+            "sha256 matches the mirror's own manifest.json — sanctioned regeneration")
+
+
+def classify(relpath, expected, corpus_mirror, current_sha=None, mirror_manifest=None):
     if relpath in expected:
         return "expected-writer: exporter"
     if relpath in corpus_mirror:
         return "expected-writer: corpus-mirror (see tools/corpus-sync.py)"
+    if relpath.startswith(MIRROR_PREFIX):
+        tag, _reason = classify_mirror_file(relpath[len(MIRROR_PREFIX):], current_sha, mirror_manifest)
+        return tag
     for prefix, writer in DERIVED_DIRS.items():
         if relpath.startswith(prefix):
             return f"expected-writer: derived (see {writer})"
     return "UNEXPECTED"
+
+
+def mirror_finding_reason(relpath, current_sha, mirror_manifest):
+    """The detailed reason behind an UNEXPECTED classify() call under
+    MIRROR_PREFIX, for the salvage payload's "reason" field."""
+    _tag, reason = classify_mirror_file(relpath[len(MIRROR_PREFIX):], current_sha, mirror_manifest)
+    return reason
 
 
 def write_manifest(manifest_path, root, files, unexpected_count, seed):
@@ -804,6 +899,11 @@ def run_check(args):
         return 1
 
     corpus_mirror = load_corpus_mirror_set()
+    mirror_manifest, mirror_manifest_note = load_mirror_manifest(root)
+    # Counts populated while classify() runs below (seed loop and
+    # report_group alike) — never hardcoded, so "N mirror-verified" always
+    # reflects what this run actually saw.
+    mirror_stats = {"verified": 0, "regenerated": 0, "unexpected": 0}
 
     print(f"vault drift watch --check — {datetime.now(timezone.utc).isoformat()}")
     print(f"root: {root}")
@@ -890,6 +990,27 @@ def run_check(args):
             old = {}
 
     print(f"\ntracked .md files: {len(new)}")
+    if mirror_manifest_note:
+        print(f"\nportability mirror verification: {mirror_manifest_note} — every path under "
+              f"{MIRROR_PREFIX} will read UNEXPECTED until a mirror run writes one")
+    else:
+        print(f"\nportability mirror verification: {MIRROR_PREFIX}manifest.json loaded, "
+              f"{len(mirror_manifest)} file(s) registered by the mirror's own last run")
+
+    def classify_tracking(p, current_sha):
+        """classify() plus mirror_stats bookkeeping — one call site for both
+        the seed loop and report_group so the counts can never drift apart
+        from what was actually printed."""
+        tag = classify(p, expected, corpus_mirror, current_sha=current_sha,
+                        mirror_manifest=mirror_manifest)
+        if p.startswith(MIRROR_PREFIX):
+            if tag.startswith("expected-writer: mirror-verified"):
+                mirror_stats["verified"] += 1
+            elif tag.startswith("expected-writer: mirror-regenerated"):
+                mirror_stats["regenerated"] += 1
+            elif tag == "UNEXPECTED":
+                mirror_stats["unexpected"] += 1
+        return tag
 
     unexpected_entries = []
     if seeding:
@@ -897,7 +1018,7 @@ def run_check(args):
               f"{manifest_path}. All {len(new)} file(s) report ADDED; this is expected seed "
               f"behavior, not drift.")
         for p in sorted(new):
-            print(f"  ADDED  {classify(p, expected, corpus_mirror):<55} {p}")
+            print(f"  ADDED  {classify_tracking(p, new[p]['sha256']):<55} {p}")
     else:
         added = sorted(p for p in new if p not in old)
         deleted = sorted(p for p in old if p not in new)
@@ -909,22 +1030,33 @@ def run_check(args):
                 return
             print(f"\n{label}: {len(paths)}")
             for p in paths:
-                tag = classify(p, expected, corpus_mirror)
+                cur_sha = new.get(p, {}).get("sha256")
+                tag = classify_tracking(p, cur_sha)
                 print(f"  {tag:<55} {p}")
                 if tag == "UNEXPECTED":
-                    unexpected_entries.append((label, p))
+                    if p.startswith(MIRROR_PREFIX):
+                        reason = mirror_finding_reason(p, cur_sha, mirror_manifest)
+                    else:
+                        reason = f"{label.lower()} — non-registry, non-corpus-mirror .md file"
+                    unexpected_entries.append((label, p, reason))
 
         report_group("ADDED", added)
         report_group("MODIFIED", modified)
         report_group("DELETED", deleted)
 
+    if mirror_stats["verified"] or mirror_stats["regenerated"] or mirror_stats["unexpected"]:
+        print(f"\nportability mirror: {mirror_stats['verified']} mirror-verified (sha256 matches "
+              f"the mirror's own manifest.json — sanctioned regeneration, not counted as "
+              f"UNEXPECTED), {mirror_stats['regenerated']} mirror-regenerated (retired between "
+              f"runs, not tamper), {mirror_stats['unexpected']} unexpected (still flagged)")
+
     write_manifest(manifest_path, root, new, unexpected_count=len(unexpected_entries), seed=seeding)
 
     unexpected_findings = []
-    for label, p in unexpected_entries:
+    for label, p, reason in unexpected_entries:
         unexpected_findings.append({
             "path": p, "type": "unexpected",
-            "reason": f"{label.lower()} — non-registry, non-corpus-mirror .md file",
+            "reason": reason,
             "baseline_sha256": old.get(p, {}).get("sha256"),
             "current_sha256": new.get(p, {}).get("sha256"),
         })
@@ -973,6 +1105,9 @@ def run_check(args):
         "total_findings": len(findings),
         "ingest_enabled": ingest_enabled,
         "baseline_present": baseline is not None,
+        "mirror_verified_count": mirror_stats["verified"],
+        "mirror_regenerated_count": mirror_stats["regenerated"],
+        "mirror_unexpected_count": mirror_stats["unexpected"],
     }
     summary_path = Path(args.summary)
     summary_path.parent.mkdir(parents=True, exist_ok=True)

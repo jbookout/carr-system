@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -311,12 +312,69 @@ def render_manifest(timestamp: str, doc_count: int, table_count: int, row_count:
     )
 
 
+def compute_file_hashes(root: Path) -> dict[str, str]:
+    """Return {relpath: sha256} for every regular file currently under root.
+
+    relpath is POSIX-style (forward slashes) and relative to root, matching
+    the schema ops/vault-drift-watch.py expects when it strips the vault's
+    Backups/portability-mirror/ prefix and looks up what remains.
+    """
+    hashes: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relpath = path.relative_to(root).as_posix()
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+        hashes[relpath] = digest.hexdigest()
+    return hashes
+
+
+def render_output_manifest(timestamp: str, files: Mapping[str, str]) -> str:
+    """Render manifest.json: the machine-readable sibling to MANIFEST.md.
+
+    This is what ops/vault-drift-watch.py's nightly UNEXPECTED alarm verifies
+    the mirror against, so a sanctioned regeneration (bytes match what this
+    pipeline itself just wrote) stops tripping the alarm while a foreign
+    writer parking content in the mirror — divergent bytes, or a path this
+    manifest never claimed — still does. sort_keys=True makes the output
+    byte-stable so a real content change is the only thing that moves it.
+    """
+    payload = {
+        "schema": 1,
+        "generated_at": timestamp,
+        "file_count": len(files),
+        "files": dict(files),
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def write_output_manifest(root: Path, timestamp: str) -> Path:
+    """Write root/manifest.json, hashing every file this run has produced so far.
+
+    Must run LAST, after MANIFEST.md (and everything else), so manifest.json
+    can vouch for MANIFEST.md too — otherwise the human-readable manifest
+    would itself land in the mirror with no verifiable entry. manifest.json
+    necessarily cannot vouch for its own bytes (they do not exist yet at the
+    moment they are computed); callers that need to tell "no entry because
+    this file is metadata" from "no entry because something foreign added
+    this file" already know manifest.json's own path and can skip it by name.
+    """
+    files = compute_file_hashes(root)
+    path = root / "manifest.json"
+    path.write_text(render_output_manifest(timestamp, files), encoding="utf-8")
+    return path
+
+
 def build_mirror(connection: Any, root: Path, timestamp: str) -> tuple[int, int, int]:
     doc_count = export_documents(connection, root, timestamp)
     export_rules(connection, root, timestamp)
     table_count, row_count = export_tables(connection, root / "csv")
     manifest = render_manifest(timestamp, doc_count, table_count, row_count)
     (root / "MANIFEST.md").write_text(manifest, encoding="utf-8")
+    write_output_manifest(root, timestamp)
     return doc_count, table_count, row_count
 
 
