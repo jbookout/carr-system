@@ -311,6 +311,39 @@ def test_known_gaps_all_expire():
         check("no known gaps outstanding (nothing suppressed)", True)
 
 
+def test_no_env_claims_a_production_hostname():
+    """The 2026-08-13 incident, pinned. A staging deploy took over
+    api.doctorcre.com, api.practicecre.com and dealroom.doctorcre.com because
+    wrangler inherits `routes` and [env.staging] did not override it. Production
+    answered from the empty staging database for about two minutes."""
+    import subprocess as sp
+    toml = REPO / "mcp-server" / "wrangler.toml"
+    checker = REPO / "ops" / "deploy-attachment-check.py"
+    if not toml.exists() or not checker.exists():
+        return
+    src = toml.read_text()
+    envs = re.findall(r"^\[env\.([A-Za-z0-9_-]+)\]", src, re.M)
+    for env in sorted(set(envs)):
+        r = sp.run([sys.executable, str(checker), str(toml), env],
+                   capture_output=True, text=True)
+        check(f"env '{env}' claims no production hostname", r.returncode == 0,
+              (r.stdout + r.stderr).strip()[:120])
+
+    # And the guard must still REFUSE the exact config that caused the incident.
+    import tempfile as tf
+    broken = "\n".join(l for l in src.splitlines() if l.strip() != "routes = []")
+    with tf.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+        fh.write(broken)
+        path = fh.name
+    try:
+        r = sp.run([sys.executable, str(checker), path, "staging"],
+                   capture_output=True, text=True)
+        check("removing `routes = []` is REFUSED, not silently allowed",
+              r.returncode == 1, f"rc={r.returncode}")
+    finally:
+        os.unlink(path)
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -322,7 +355,8 @@ def main():
                test_dep_check_detects_a_stale_lock,
                test_lock_is_not_platform_specific,
                test_migration_filenames_match_the_runner,
-               test_known_gaps_all_expire):
+               test_known_gaps_all_expire,
+               test_no_env_claims_a_production_hostname):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip

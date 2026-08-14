@@ -186,6 +186,19 @@ if [ "$DIRTY" != "0" ]; then
 fi
 echo "  OK  mcp-server/ and dealroom/ are clean"
 
+# ---------- preflight 2b: what this deploy will ATTACH to ----------
+# Every other preflight is about the ARTIFACT — right commit, clean tree, no verb
+# loss. All three passed on 2026-08-13 while a staging deploy took over all three
+# production custom domains, because nothing here looked at ATTACHMENT. This is
+# that check. Production is exempt: it is allowed to claim its own hostnames.
+if [ "$TARGET_ENV" != "production" ]; then
+  PYBIN="$REPO/.venv/bin/python"
+  [ -x "$PYBIN" ] || PYBIN=python3
+  if ! "$PYBIN" "$REPO/ops/deploy-attachment-check.py" "$WORKER_DIR/wrangler.toml" "$TARGET_ENV"; then
+    fail "refusing to deploy env=$TARGET_ENV — see the attachment check above."
+  fi
+fi
+
 # ---------- preflight 3: verb count did not shrink ----------
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 
