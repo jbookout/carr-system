@@ -14,6 +14,7 @@
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, auditIdentity } from "./tools.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -429,7 +430,16 @@ export async function dispatch(request, env, ctx, actor) {
   const scopedActor = { ...actor,
     authorization_class: authorizationClassForActor(actor),
     organization_tenant_id: organizationTenantForActor(actor),
-    operational_profile: profile };
+    operational_profile: profile,
+    // Program 4 Gap A2 (2026-08-14, defect cae5be2e): env.CORRELATION_ID is set
+    // per-request by correlation.js's wrapWithCorrelation, the same per-request
+    // env-mutation pattern this file already uses for env.ctx (see tools/call
+    // below: `env.ctx = ctx;`). Decorating it onto the actor here — rather than
+    // threading a new parameter through callTool -> executeRegisteredTool ->
+    // every verb handler — means every write verb's existing withEnvelope()/
+    // writeEvent() calls pick it up for free through auditIdentity(actor)
+    // (tools.js), with zero change to any individual verb.
+    correlation_id: env.CORRELATION_ID || null };
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 
@@ -492,7 +502,20 @@ export async function dispatch(request, env, ctx, actor) {
         return rpcError(-32601, `method not found: ${rpc.method}`);
     }
   } catch (e) {
-    return rpcError(-32603, "internal error", String(e).slice(0, 300));
+    // Program 4 Gap A2 (2026-08-14, defect cae5be2e): -32603 is the ONLY
+    // JSON-RPC code an uncaught exception can produce on this route (this is
+    // its sole call site), and /mcp always answers HTTP 200 for a JSON-RPC-
+    // level error — see trace.js's file header for why that makes this the
+    // one error code worth recording here. The detail string is the SAME
+    // truncated text already returned to the caller two lines below; nothing
+    // new is exposed by also recording it.
+    const detail = String(e).slice(0, 300);
+    scheduleFailureRecord(env, ctx, {
+      routeKey: `mcp:${rpc?.method || "unknown"}${rpc?.params?.name ? ":" + rpc.params.name : ""}`,
+      failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+      detail,
+    });
+    return rpcError(-32603, "internal error", detail);
   }
 }
 
@@ -502,7 +525,20 @@ export const mcpApiHandler = {
     const actor = actorFromProps(ctx.props);
     // Fails closed: a token whose grant does not name one of the two actors is
     // no better than no token at all.
-    if (!actor) return json({ error: "unauthorized" }, 401);
+    if (!actor) {
+      // Program 4 Gap A2 (2026-08-14, defect cae5be2e): NOT the routine
+      // unauthenticated-caller 401 (that never reaches this line — the
+      // OAuthProvider library refuses it before mcpApiHandler.fetch ever
+      // runs). This is a grant the PROVIDER ALREADY VALIDATED whose props
+      // still fail to name a known actor — a real identity/config problem.
+      // See trace.js's file header, class 3.
+      scheduleFailureRecord(env, ctx, {
+        routeKey: "mcp:unauthorized",
+        failureClass: actorUnresolvedFailureClass(),
+        detail: null,
+      });
+      return json({ error: "unauthorized" }, 401);
+    }
     return dispatch(request, env, ctx, actor);
   },
 };

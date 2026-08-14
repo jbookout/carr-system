@@ -166,6 +166,10 @@ test("runtime attribution and sponsor provenance survive without capability inhe
   assert.deepEqual(audit, {
     organization_tenant_id: "carr-internal", sponsoring_human_slug: "joe",
     personal_scope: "joe-personal", authorization_class: "sponsored_agent",
+    // Program 4 Gap A2 (2026-08-14): null here because `runtime` was built by
+    // hand (this test's own actor() helper), never decorated by mcp.js's
+    // dispatch() the way a real request's actor would be.
+    correlation_id: null,
   });
   assert.equal(authorizationClassForActor(runtime), "sponsored_agent");
   assert.equal(runtime.human, false);
