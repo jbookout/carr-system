@@ -58,8 +58,8 @@ RANKED REGISTRY LEADS (they carry L-### ids and stages), not prospects. Neither
 is a pool source. Reported rather than papered over with an empty mapper.
 
 Usage:
-  DATABASE_URL=... .venv/bin/python -m pipelines.map_radar_lanes --all [--dry-run]
-  DATABASE_URL=... .venv/bin/python -m pipelines.map_radar_lanes --lane renewal-radar
+  CARR_DB_JOBS_URL=... .venv/bin/python -m pipelines.map_radar_lanes --all [--dry-run]
+  CARR_DB_JOBS_URL=... .venv/bin/python -m pipelines.map_radar_lanes --lane renewal-radar
 """
 
 import argparse
@@ -339,24 +339,31 @@ def run_lane(slug, dry_run=False, refresh=False, strict=False, url=None, quiet=F
 
     NEVER RAISES for an unavailable credential or interpreter: the mapping
     step is secondary to the writer's own job (the JSON file), so any failure
-    to reach the database — no CARR_IMPORT_DB_URL/DATABASE_URL configured, or
-    any connection/query error — prints one SKIP line to stderr and returns
-    None. This matches the house SKIP-not-FAIL convention (bin/nightly.sh's
-    exit-78 steps: the step ran, found what it needs absent, and said so,
-    which is not a failed run). A bad slug is a programming error, not an
-    environment one, and still raises.
+    to reach the database — no CARR_DB_JOBS_URL/CARR_IMPORT_DB_URL/DATABASE_URL
+    configured, or any connection/query error — prints one SKIP line to stderr
+    and returns None. This matches the house SKIP-not-FAIL convention
+    (bin/nightly.sh's exit-78 steps: the step ran, found what it needs absent,
+    and said so, which is not a failed run). A bad slug is a programming
+    error, not an environment one, and still raises.
 
     Returns the per-lane report dict (see map_lane) on success, or None on
     skip.
     """
     if slug not in LANES:
         raise ValueError(f"unknown lane {slug!r} — choices: {sorted(LANES)}")
-    url = url or os.environ.get("CARR_IMPORT_DB_URL") or os.environ.get("DATABASE_URL")
+    # [ORDER 19a] CARR_DB_JOBS_URL is THE name: one nightly-jobs role for every
+    # unattended pipeline, not one credential per script. The older names stay
+    # as fallbacks so nothing that already works stops working.
+    url = (url
+           or os.environ.get("CARR_DB_JOBS_URL")
+           or os.environ.get("CARR_IMPORT_DB_URL")
+           or os.environ.get("DATABASE_URL"))
     if not url:
-        print(f"[map-radar-lane SKIP] {slug}: CARR_IMPORT_DB_URL / DATABASE_URL not set "
-              f"under this interpreter — pool mapping skipped, the lane file itself was "
-              f"still written normally. Catch this lane up by hand once a credential is "
-              f"configured: .venv/bin/python -m pipelines.map_radar_lanes --lane {slug}",
+        print(f"[map-radar-lane SKIP] {slug}: CARR_DB_JOBS_URL / CARR_IMPORT_DB_URL / "
+              f"DATABASE_URL not set under this interpreter — pool mapping skipped, the "
+              f"lane file itself was still written normally. Catch this lane up by hand "
+              f"once a credential is configured: "
+              f".venv/bin/python -m pipelines.map_radar_lanes --lane {slug}",
               file=sys.stderr)
         return None
     try:
@@ -410,9 +417,14 @@ def main():
     if not lanes:
         raise SystemExit("nothing to do: pass --all or --lane <slug>")
 
-    url = os.environ.get("CARR_IMPORT_DB_URL") or os.environ.get("DATABASE_URL")
+    # [ORDER 19a] CARR_DB_JOBS_URL is THE name: one nightly-jobs role for every
+    # unattended pipeline, not one credential per script. The older names stay
+    # as fallbacks so nothing that already works stops working.
+    url = (os.environ.get("CARR_DB_JOBS_URL")
+           or os.environ.get("CARR_IMPORT_DB_URL")
+           or os.environ.get("DATABASE_URL"))
     if not url:
-        raise SystemExit("CARR_IMPORT_DB_URL / DATABASE_URL not set")
+        raise SystemExit("CARR_DB_JOBS_URL / CARR_IMPORT_DB_URL / DATABASE_URL not set")
 
     rep = {}
     with psycopg.connect(url) as conn, conn.cursor() as cur:
