@@ -166,3 +166,39 @@ jobs:
           path: ${{ github.workspace }}/backup-out/carr-*.sql.age
           if-no-files-found: error
           retention-days: 90
+
+      # ── the second Mac-independent copy ──────────────────────────────────
+      # The artifact above is one off-Mac copy with a 90-day ceiling GitHub
+      # sets, not us. R2 is the copy we control the retention of, and until
+      # now every R2 backup object was written BY Joe's Mac — so a lost Mac
+      # meant no new copies anywhere. This step closes that: a scoped token
+      # (Object Read & Write, carr-documents only, minted 2026-08-14) lets the
+      # runner archive the same encrypted artifact it just proved.
+      #
+      # The key path deliberately says cloud/: a reader listing the bucket can
+      # tell at a glance which copies came from the Mac's nightly chain and
+      # which from this workflow, without opening either.
+      #
+      # SKIPS, never fails, when the token is absent — the artifact copy above
+      # has already succeeded by the time we reach here, and losing the second
+      # copy is not a reason to report the backup itself as broken. The log
+      # line says which happened, so a silent skip is not mistaken for a
+      # silent success.
+      - name: Archive the encrypted dump to R2 (second off-Mac copy)
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_BACKUP_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          STAMP: ${{ steps.stamp.outputs.date }}
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "R2 archive SKIPPED: CLOUDFLARE_R2_BACKUP_TOKEN secret or CLOUDFLARE_ACCOUNT_ID variable is not set."
+            echo "The workflow-artifact copy above still stands. See this file's header for provisioning."
+            exit 0
+          fi
+          DUMP="$(ls "${GITHUB_WORKSPACE}/backup-out"/carr-*.sql.age | head -1)"
+          KEY="backups/cloud/${STAMP}/$(basename "$DUMP")"
+          echo "archiving $(basename "$DUMP") ($(wc -c < "$DUMP" | tr -d ' ') bytes) -> r2://carr-documents/${KEY}"
+          npx --yes wrangler@4 r2 object put "carr-documents/${KEY}" \
+            --file "$DUMP" --remote --content-type application/octet-stream
+          echo "R2 archive OK -> ${KEY}"
