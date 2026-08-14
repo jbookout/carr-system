@@ -93,11 +93,32 @@ def read_env() -> dict[str, str]:
     return out
 
 
+def shell_quote(value: str) -> str:
+    """Single-quote a value so `set -a; . db.env` survives it.
+
+    THIS FILE HAS TWO PARSERS AND THEREFORE TWO CONTRACTS (rule 73381d78). Python
+    readers split on '=' and strip quotes, so they do not care. zsh SOURCES this
+    file — bin/migrate-prod.sh, bin/nightly.sh and every other shell job do
+    `set -a; . db.env` — and an unquoted '&' in a DSN is a background operator,
+    not a character.
+
+    The first version of this tool wrote the value bare. Every Python check
+    passed, both roles connected, and bin/migrate-prod.sh died with
+    "db.env:3: parse error near `&`" — the jobs DSN carries
+    &channel_binding=require. Caught only because a completion gate demanded a
+    fresh run of the shell path rather than a restatement of the Python one.
+
+    Single quotes because a postgres URL cannot contain one; the escape below
+    handles it anyway rather than trusting that."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 def write_env_key(key: str, value: str) -> None:
     """Replace exactly one key in db.env, atomically, preserving every other line
     including comments and blank lines. The original tool rebuilt the file from a
     filtered list, which is fine until a write is interrupted — os.replace makes
     the swap atomic so a crash can never leave a half-written credentials file."""
+    value = shell_quote(value)
     try:
         original = open(ENV_PATH, encoding="utf-8").read().splitlines()
     except OSError:
