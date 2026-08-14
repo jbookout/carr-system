@@ -50,6 +50,18 @@
 //   /capture/*  capture rig bridge, CAPTURE_TOKENS claim then opaque session token
 //
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
+//
+// CORRELATION (Program 3, Gap A, 2026-08-14). Every route above — every one —
+// flows through the single default export at the bottom of this file, so that
+// is where wrapWithCorrelation (correlation.js) wraps once: it resolves
+// x-correlation-id (a caller's own valid UUID is echoed back verbatim; a
+// missing or garbage one is replaced with a fresh one, never passed through),
+// sets env.CORRELATION_ID for anything downstream to read, echoes the id back
+// as x-correlation-id on every response, and turns an uncaught throw into a
+// structured log line plus a 500 whose body carries the id — see
+// correlation.js's own header for the full reasoning and what this
+// deliberately does not yet do (no ops.* table write; the Worker writes to
+// none of them today).
 
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
@@ -61,6 +73,7 @@ import { createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
+import { wrapWithCorrelation } from "./correlation.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -478,25 +491,30 @@ const dealroomHandler = createDealroomHandler({
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
 });
 
-// Top-level export. Everything not /mcp-with-a-matching-probe-or-review-token
-// flows into the OAuthProvider exactly as it always has — this wrapper adds
-// two narrow short-circuits and changes nothing else about the fetch surface.
+// Everything not /mcp-with-a-matching-probe-or-review-token flows into the
+// OAuthProvider exactly as it always has — this wrapper adds two narrow
+// short-circuits and changes nothing else about the fetch surface.
+async function routeRequest(request, env, ctx) {
+  if (new URL(request.url).pathname.startsWith("/capture/")) {
+    return captureHandler(env).fetch(request, env, ctx);
+  }
+  if (isDealroomRequest(request)) return dealroomHandler.fetch(request, env, ctx);
+  if (new URL(request.url).pathname === "/mcp") {
+    const probeActor = probeActorFor(request, env);
+    if (probeActor) return dispatch(request, env, ctx, probeActor);
+    const reviewActor = reviewActorFor(request, env);
+    if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+    const agentActor = agentActorFor(request, env);
+    if (agentActor) return dispatch(request, env, ctx, agentActor);
+    const localActor = localActorFor(request, env);
+    if (localActor) return dispatch(request, env, ctx, localActor);
+  }
+  return oauthProvider.fetch(request, env, ctx);
+}
+
+// Top-level export. wrapWithCorrelation covers every route above in one
+// place — see the CORRELATION note at the top of this file and
+// correlation.js's own header.
 export default {
-  async fetch(request, env, ctx) {
-    if (new URL(request.url).pathname.startsWith("/capture/")) {
-      return captureHandler(env).fetch(request, env, ctx);
-    }
-    if (isDealroomRequest(request)) return dealroomHandler.fetch(request, env, ctx);
-    if (new URL(request.url).pathname === "/mcp") {
-      const probeActor = probeActorFor(request, env);
-      if (probeActor) return dispatch(request, env, ctx, probeActor);
-      const reviewActor = reviewActorFor(request, env);
-      if (reviewActor) return dispatch(request, env, ctx, reviewActor);
-      const agentActor = agentActorFor(request, env);
-      if (agentActor) return dispatch(request, env, ctx, agentActor);
-      const localActor = localActorFor(request, env);
-      if (localActor) return dispatch(request, env, ctx, localActor);
-    }
-    return oauthProvider.fetch(request, env, ctx);
-  },
+  fetch: wrapWithCorrelation(routeRequest),
 };
