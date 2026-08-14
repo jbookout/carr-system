@@ -48,7 +48,7 @@
 #   --sweep. Nothing ever reaped a finished worktree — 22 existed live when
 #   this was written, 10 with branches already merged into origin/main, one
 #   443 commits behind. `--sweep [--dry-run]` reaps a worktree only when ALL
-#   THREE hold: its branch is an ancestor of origin/main, its tree is clean
+#   THREE hold: its branch is merged (see below), its tree is clean
 #   (the identical test --remove uses), and no file in it was touched in the
 #   last 48 hours (the guard against reaping a live session's tree — a session
 #   touches its worktree by editing files, which is the one signal that
@@ -57,6 +57,20 @@
 #   automated path doing the same job must be the same code), so an automatic
 #   reap carries the identical dirty-refusal and restore-on-refusal safety as
 #   a removal Joe types by hand.
+#
+#   MERGED means ancestor-of-origin/main OR cherry-equivalent (added
+#   2026-08-14, same day, once the ancestry test alone proved to under-report
+#   under squash/rebase merges: a branch whose content fully landed on
+#   origin/main under a different sha still reads unmerged by ancestry
+#   alone, and the sweep quietly stops reaping it forever). `git cherry
+#   origin/main <branch>` compares PATCH-IDs, not shas — if every line it
+#   prints starts with `-`, every commit on the branch is already upstream
+#   in substance. A kept tree whose cherry output mixes `-` and `+` is
+#   reported "partially landed"; a zero-reap run alongside an idle,
+#   behind-origin/main, still-unmerged tree prints a caveat pointing at
+#   `git cherry origin/main <branch>` as the by-hand check. The failure
+#   direction stays safe either way: anything this predicate still misses
+#   simply stays KEPT, same as before it existed.
 #
 # Risk colour GREEN: creates a checkout and two symlinks, writes nothing outside
 # the repo, sends nothing. --sweep additionally REMOVES worktrees, but only
@@ -300,6 +314,11 @@ case "$1" in
     total=0
     reaped=0
     kept=0
+    # Set when a KEPT tree is unmerged, idle >48h, and behind origin/main —
+    # exactly the shape a squash/rebase merge produces when the cherry
+    # predicate above also fails to catch it (a genuinely rewritten diff,
+    # not a clean patch-equivalent). Drives the point-3 caveat below.
+    stale_unmerged_kept=0
 
     # Parse `git worktree list --porcelain` by hand: a block is
     #   worktree <path>  [bare]  HEAD <sha>  [branch refs/heads/<name>]  <blank>
@@ -323,15 +342,43 @@ case "$1" in
       total=$((total+1))
       local nm="${p:t}"
 
-      # condition (i): branch tip is an ancestor of origin/main
-      local merged=0 ahead="?" behind="?"
+      # condition (i): branch tip is an ancestor of origin/main, OR every
+      # commit on the branch is patch-equivalent to one already on
+      # origin/main (2026-08-14, cherry predicate). Ancestry alone
+      # under-reports here: a squash or rebase merge lands the branch's
+      # content on origin/main under a DIFFERENT sha (rebase) or one
+      # combined sha (squash), so `merge-base --is-ancestor` says no even
+      # though nothing on the branch is actually missing upstream.
+      # `git cherry <upstream> <branch>` compares PATCH-IDs instead of
+      # ancestry: each line is prefixed `-` when a patch-equivalent commit
+      # is already upstream, `+` when it is not. Non-empty output where
+      # EVERY line is `-` means the branch's content is fully landed. The
+      # failure direction stays safe either way — a branch this predicate
+      # still misses (e.g. a genuinely rewritten diff) simply stays KEPT,
+      # same as before this existed.
+      local merged=0 ancestry_merged=0 ahead="?" behind="?"
+      local cherry_landed=0 cherry_partial=0
       if [ -n "$branch" ] && [ "$have_origin_main" = "1" ]; then
         git -C "$CANON" merge-base --is-ancestor "refs/heads/$branch" "refs/remotes/origin/main" \
-          2>/dev/null && merged=1
+          2>/dev/null && ancestry_merged=1
         local ab
         ab="$(git -C "$CANON" rev-list --left-right --count \
               "refs/heads/$branch...refs/remotes/origin/main" 2>/dev/null)"
         ahead="${ab%%$'\t'*}"; behind="${ab##*$'\t'}"
+
+        local cherry_out
+        cherry_out="$(git -C "$CANON" cherry "refs/remotes/origin/main" "refs/heads/$branch" 2>/dev/null)"
+        if [ -n "$cherry_out" ]; then
+          if ! print -r -- "$cherry_out" | grep -qv '^-'; then
+            cherry_landed=1
+          elif print -r -- "$cherry_out" | grep -q '^-' \
+               && print -r -- "$cherry_out" | grep -q '^+'; then
+            cherry_partial=1
+          fi
+        fi
+
+        merged=$ancestry_merged
+        [ "$merged" != "1" ] && [ "$cherry_landed" = "1" ] && merged=1
       fi
 
       # condition (ii): clean, by the SAME test --remove uses (rule a8c55a47)
@@ -363,8 +410,14 @@ case "$1" in
         print -r -- "  KEEP  $stat_line  — cannot verify merge state (detached HEAD or no origin/main)"
         kept=$((kept+1))
       elif [ "$merged" != "1" ]; then
-        print -r -- "  KEEP  $stat_line  — unmerged"
+        local reason="unmerged"
+        [ "$cherry_partial" = "1" ] && reason="unmerged (partially landed)"
+        print -r -- "  KEEP  $stat_line  — $reason"
         kept=$((kept+1))
+        if [ "${age_h%%.*}" -gt 48 ] 2>/dev/null \
+           && [ "${behind:-0}" != "0" ] && [ "${behind:-0}" != "?" ]; then
+          stale_unmerged_kept=1
+        fi
       elif [ "$dirty" = "1" ]; then
         print -r -- "  KEEP  $stat_line  — dirty"
         kept=$((kept+1))
@@ -372,7 +425,9 @@ case "$1" in
         print -r -- "  KEEP  $stat_line  — active, touched ${age_h}h ago (<48h guard)"
         kept=$((kept+1))
       else
-        print -r -- "  REAP  $stat_line  — merged, clean, idle ${age_h}h"
+        local via=""
+        [ "$ancestry_merged" != "1" ] && [ "$cherry_landed" = "1" ] && via=" (cherry-detected)"
+        print -r -- "  REAP  $stat_line  — merged, clean, idle ${age_h}h$via"
         if remove_one "$p" "$nm" "$dry"; then
           reaped=$((reaped+1))
         else
@@ -392,6 +447,13 @@ case "$1" in
     flush_entry
 
     print -r -- ""
+    # point 3: a zero-reap run alongside a kept tree that is unmerged,
+    # behind origin/main, and idle 48h+ is exactly the shape a squash
+    # merge produces when the cherry predicate above still could not prove
+    # it landed — flag it instead of reporting a silent clean sweep.
+    if [ "$reaped" = "0" ] && [ "$stale_unmerged_kept" = "1" ]; then
+      print -r -- "  caveat: ancestry can under-report merged content under squash merges — check a specific tree by hand with: git cherry origin/main <branch>"
+    fi
     print -r -- "$total total, $reaped reaped, $kept kept"
     exit 0
     ;;

@@ -25,7 +25,7 @@ directory holding a SYMLINK to the actual script: invoked from there, `$0`
 call the script makes lands in the scratch repo and its scratch origin —
 never in carr-system. This runs the REAL script, unmodified, not a mock of it.
 
-Seven cases:
+Nine cases:
   1. merged + clean + idle 48h+          -> reaped
   2. merged + clean but touched recently -> kept, reported active
   3. merged + dirty                      -> kept, reported
@@ -34,6 +34,15 @@ Seven cases:
   6. --dry-run                           -> reports the reap, removes nothing
   7. create path freshness: new worktree branches from origin/main (fetched),
      not stale local main; --from still overrides
+  8. cherry predicate (2026-08-14): a branch whose commit was landed on
+     origin/main from a SEPARATE clone (never merged/rebased/pushed from the
+     branch itself) is patch-equivalent but NOT an ancestor — the shape a
+     squash or rebase merge leaves behind. Clean + idle -> still reaped,
+     via `git cherry origin/main <branch>` rather than ancestry.
+  9. static check: the removal/sweep code path (REMOVAL PLUMBING through the
+     end of the --sweep case) contains no --force, -f, or -D token — a reap
+     that runs unattended must never carry a flag that overrides the dirty
+     refusal.
 
 Run: .venv/bin/python tools/test-worktree-sweep.py   # exit 0 = all pass
 """
@@ -294,6 +303,76 @@ def test_create_path_freshness():
     with_scratch(body)
 
 
+# ── 8. cherry predicate: patch-equivalent, not an ancestor -> reaped ────
+def test_reap_cherry_picked_patch_equivalent():
+    print("\n[8] cherry-picked onto origin/main (patch-equivalent, not ancestor) "
+          "+ clean + idle -> reaped via the cherry predicate")
+
+    def body(s):
+        # A normal branch commit, never pushed/merged from the branch itself.
+        wt = s.make_branch_worktree("wt-cherry", merged=False)
+
+        # Land the IDENTICAL patch on origin/main from a separate clone, as
+        # its own fresh commit. Same content -> same patch-id; different
+        # parent/message/author -> a different sha and NOT an ancestor of
+        # the branch's commit or vice versa. This is what a squash or
+        # rebase merge looks like from the original branch's point of view.
+        lander = os.path.join(s.tmp, "wt-cherry-lander")
+        git(["clone", "-q", s.origin, lander], s.tmp)
+        git(["config", "user.email", "t@example.com"], lander)
+        git(["config", "user.name", "t"], lander)
+        shutil.copy(os.path.join(wt, "wt-cherry.txt"),
+                    os.path.join(lander, "wt-cherry.txt"))
+        git(["add", "wt-cherry.txt"], lander)
+        git(["commit", "-q", "-m", "land wt-cherry (squashed elsewhere)"], lander)
+        git(["push", "-q", "origin", "main"], lander)
+
+        # Sanity check on the test fixture itself, not on worktree.sh: prove
+        # this really does exercise the NEW predicate and not the old
+        # ancestry one.
+        git(["fetch", "-q", "origin"], s.repo)
+        p_ancestor = run(["git", "merge-base", "--is-ancestor",
+                           "wt-cherry", "origin/main"], s.repo)
+        check("fixture sanity: branch tip is NOT an ancestor of origin/main",
+              p_ancestor.returncode != 0)
+
+        s.age_files(wt, hours_ago=72)
+        p = s.worktree_sh("--sweep")
+        check("sweep exits 0", p.returncode == 0, p.stdout + p.stderr)
+        check("directory removed from disk", not os.path.exists(wt))
+        check("gone from git worktree list", wt not in s.worktree_list())
+        check("summary reports 1 reaped", "1 reaped" in p.stdout, p.stdout)
+        check("reap line credits the cherry predicate, not ancestry",
+              "cherry-detected" in p.stdout, p.stdout)
+
+    with_scratch(body)
+
+
+# ── 9. static check: no force flag in the removal/sweep code path ───────
+def test_removal_code_has_no_force_flags():
+    print("\n[9] static check: the sweep/remove code path carries no "
+          "--force, -f, or -D token")
+
+    with open(WORKTREE_SH) as f:
+        text = f.read()
+
+    start_marker = "# REMOVAL PLUMBING — shared by --remove and --sweep"
+    start_idx = text.index(start_marker)
+    # The scope is everything from the removal plumbing through the end of
+    # the --sweep case body — the code an automated reap actually runs.
+    # The top-level `case "$1" in ... esac` closes right after --sweep, and
+    # the create-path logic (branch/base handling) begins after it, so the
+    # closing `esac` is the natural right edge of "the removal/sweep code".
+    esac_idx = text.index("\nesac", start_idx)
+    region = text[start_idx:esac_idx]
+
+    tokens = region.split()
+    forbidden = {"-f", "-D", "--force"}
+    hits = sorted(set(t for t in tokens if t in forbidden))
+    check("no --force/-f/-D token appears in the removal/sweep code",
+          not hits, f"found: {hits}")
+
+
 test_reap_merged_clean_idle()
 test_keep_merged_clean_fresh()
 test_keep_merged_dirty()
@@ -301,6 +380,8 @@ test_keep_unmerged()
 test_prune_deleted_directory()
 test_dry_run_removes_nothing()
 test_create_path_freshness()
+test_reap_cherry_picked_patch_equivalent()
+test_removal_code_has_no_force_flags()
 
 fails = [(label, detail) for label, ok, detail in results if not ok]
 total = len(results)
