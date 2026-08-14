@@ -440,14 +440,98 @@ for name, out_pat, max_age, inputs, note in WATCH:
 # `CARR_EXPORT_LIVE=1 ./run.sh export` rewrote it at 11:38 and the check reported "9.6h
 # drift" from that, not from the scheduler. It was measuring when a FILE was written, not
 # when the JOB ran. out/nightly.log is appended by bin/nightly.sh and by nothing else.
+#
+# ── THE LOG IS NOW THE FALLBACK, NOT THE SOURCE (2026-08-14) ─────────────────
+# "Appended by bin/nightly.sh and by nothing else" is true and was never the
+# problem. The problem is that the file gets TRIMMED. On 2026-08-14 this row
+# read "FIRED LATE — nearest attempt to the 08-14 02:00 window began 08:00, 6.0h
+# drift" and recommended `sudo pmset repeat wakeorpoweron`. Every part of that
+# was wrong: the job ledger shows the chain's first step started 02:05:05 local,
+# dead on schedule, and `pmset -g sched` already carried "wakepoweron at 1:55AM
+# every day". out/nightly.log held only two "chain begin" markers, both from
+# midday hand re-runs, and its first line was a mid-sentence fragment — the head
+# of the file, 02:05 marker included, had been cut off.
+#
+# THIS IS THE SECOND TIME THE SAME ROW SENT SOMEONE THE SAME WRONG WAY. The
+# block below already carries the 2026-08-11 post-mortem: "A session read that
+# row and went chasing a sleep problem that did not exist instead of the failing
+# step." It happened again on 08-14, to a session that had READ that warning.
+# A comment describing the trap does not disarm it; changing what the row reads
+# does.
+#
+# ops.run is what should have been read all along, and only exists to be: every
+# step of every chain records started_at durably, nothing trims it, and it
+# survives the machine. The log stays as the fallback for a cold Mac or an
+# absent credential — and when the fallback is what answered, the row SAYS SO,
+# because a row that silently changes its basis is how a wrong reading becomes
+# invisible.
+#
+# name, watched file, expected local hour, tolerance hours, start marker,
+# stale-after hours, wake-remedy note, LEDGER SERVICE KEY.
 SCHEDULE = [
     ("nightly-record-layer", "~/carr-system/out/nightly.log", 2, 2.5,
      "chain begin", 26,
      "the Mac slept through the window and no session opened to fire it on wake — the "
      "encrypted backup is the seventh step of that chain (it was step 3 when this note "
      "was written), so it is skipped for as long as no session opens. "
-     "Fix: sudo pmset repeat wakeorpoweron MTWRFSU 01:55:00"),
+     "Check `pmset -g sched` BEFORE recommending a wake schedule: on 2026-08-11 and "
+     "again on 2026-08-14 this remedy was printed at a Mac that already had one",
+     "nightly-record-layer"),
 ]
+
+
+def attempt_starts_from_ledger(service_key):
+    """Every ATTEMPT start for one service, as local epochs, oldest-first.
+
+    ops.run.started_at is written by the job itself as it begins each step, so
+    the earliest step of a chain IS that chain's firing time — the same question
+    the log marker was standing in for, answered by a record that cannot be
+    trimmed.
+
+    Returns None when the ledger cannot be reached at all, which is a different
+    answer from "it ran and there is nothing there" and must stay
+    distinguishable: the caller falls back to the log only on None.
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ops_record_hc",
+            os.path.expanduser("~/carr-system/tools/ops-record.py"))
+        if spec is None or spec.loader is None:
+            return None
+        ops_record = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ops_record)
+        with ops_record.connect("read") as conn, conn.cursor() as cur:
+            # Chain steps only. A whole-chain wrapper row, were one ever added,
+            # would double-count the same firing.
+            cur.execute(
+                """select extract(epoch from r.started_at)
+                     from ops.run r join ops.service s on s.id = r.service_id
+                    where s.key = %s and r.started_at is not null
+                      and r.started_at > now() - interval '14 days'
+                 order by r.started_at""",
+                (service_key,))
+            rows = [float(x[0]) for x in cur.fetchall()]
+        if not rows:
+            return None
+        # COLLAPSE STEPS INTO FIRINGS. The ledger holds one row per STEP — 249 of
+        # them for 2026-08-14 — and the caller's question is "when did the chain
+        # start", asked once per firing. Left uncollapsed, every step after the
+        # first reads as a separate re-run and the row would report 248 of them.
+        # A chain's steps run minutes apart and its firings hours apart, so an
+        # hour of silence is an unambiguous boundary; the first start of each
+        # cluster is that firing's attempt time.
+        firings = [rows[0]]
+        prev = rows[0]
+        for t in rows[1:]:
+            if t - prev > 3600:      # an hour of silence ends the previous chain
+                firings.append(t)
+            prev = t
+        return firings
+    except Exception:
+        # Absent credential, unapplied migration, unreachable Neon — all mean
+        # "ask the log", never "the job did not run".
+        return None
 
 
 def attempt_starts(path, marker):
@@ -485,21 +569,29 @@ def scheduled_window(want_hour, now=None):
 
 
 print("Schedule drift — did the job START when scheduled (not: did it succeed)")
-for name, out_pat, want_hour, tol_h, marker, stale_h, wake_note in SCHEDULE:
-    # SCHEDULE watches job artefacts, which may sit in the repo rather than the vault.
-    out = (newest(out_pat) if not out_pat.startswith(("~", "/"))
-           else (lambda h: h if os.path.exists(h) else None)(os.path.expanduser(out_pat)))
-    if not out:
-        print(f"  MISSING {name:<22} no file matches {out_pat}")
-        rc = 1
-        continue
-    starts = attempt_starts(out, marker)
-    if not starts:
-        print(f"  -- {name:<22} no '{marker}' marker in {os.path.basename(out)} — the "
-              f"last ATTEMPT cannot be read, and this row refuses to substitute the "
-              f"file's mtime, which is its last WRITE and a different question")
-        rc = 1
-        continue
+for name, out_pat, want_hour, tol_h, marker, stale_h, wake_note, svc_key in SCHEDULE:
+    # THE LEDGER FIRST. It is the only source here that cannot be trimmed, and
+    # the log's trimming is what produced two wrong readings of this row.
+    starts = attempt_starts_from_ledger(svc_key)
+    basis = "job ledger"
+    if starts is None:
+        # SCHEDULE watches job artefacts, which may sit in the repo rather than the vault.
+        out = (newest(out_pat) if not out_pat.startswith(("~", "/"))
+               else (lambda h: h if os.path.exists(h) else None)(os.path.expanduser(out_pat)))
+        if not out:
+            print(f"  MISSING {name:<22} the job ledger is unreachable and no file "
+                  f"matches {out_pat} — nothing here can say when this last ran")
+            rc = 1
+            continue
+        starts = attempt_starts(out, marker)
+        basis = f"{os.path.basename(out)}, which gets trimmed — treat with suspicion"
+        if not starts:
+            print(f"  -- {name:<22} the job ledger is unreachable and {os.path.basename(out)} "
+                  f"holds no '{marker}' marker — the last ATTEMPT cannot be read, and this "
+                  f"row refuses to substitute the file's mtime, which is its last WRITE and "
+                  f"a different question")
+            rc = 1
+            continue
     # MEASURE AGAINST THE WINDOW, NOT AGAINST THE NEWEST LINE. A hand re-run writes its
     # own marker, so "newest attempt" would hand a midday rescue the same false positive
     # the mtime reading produced. The question is whether SOME attempt landed near the
@@ -515,16 +607,18 @@ for name, out_pat, want_hour, tol_h, marker, stale_h, wake_note in SCHEDULE:
         print(f"  ⚠︎ {name:<22} NEVER FIRED — newest attempt began "
               f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(starts[-1]))}, "
               f"{(time.time() - starts[-1]) / 3600.0:.1f}h ago against a ~{stale_h}h "
-              f"cadence  · {wake_note}")
+              f"cadence  · read from the {basis}  · {wake_note}")
         rc = 1
     elif drift > tol_h:
         print(f"  ⚠︎ {name:<22} FIRED LATE — nearest attempt to the "
               f"{time.strftime('%m-%d %H:%M', time.localtime(due))} window began "
-              f"{time.strftime('%H:%M', lt)}, {drift:.1f}h drift  · {wake_note}{tail}")
+              f"{time.strftime('%H:%M', lt)}, {drift:.1f}h drift  · read from the "
+              f"{basis}  · {wake_note}{tail}")
         rc = 1
     else:
         print(f"  OK {name:<22} fired {time.strftime('%H:%M', lt)}, within {tol_h}h of "
-              f"~{want_hour:02d}:00 (whether it SUCCEEDED is the next row){tail}")
+              f"~{want_hour:02d}:00 per the {basis} (whether it SUCCEEDED is the next "
+              f"row){tail}")
 # --- did the chain WORK, not merely run (added 2026-08-10) -------------------
 # The drift row above answers "did it run on time" and nothing else, which is the
 # same defect the backup guard had: a success signal that never looks at the
