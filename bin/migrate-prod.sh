@@ -65,12 +65,43 @@ if [ -z "${NEON_API_KEY:-}" ]; then
   print -u2 "      ~/.config/carr/db.env to make this path unattended."
 fi
 
-DSN="$(neonctl connection-string production --role-name neondb_owner 2>/dev/null)"
+# PRODUCTION IS PINNED BY PROJECT ID, and that is not tidiness — it is the fix
+# for a real outage of this script.
+#
+# This line read `neonctl connection-string production --role-name neondb_owner`
+# until 2026-08-14 and worked for as long as the account held exactly ONE Neon
+# project. Program 1 created a second one (the isolated staging project), and
+# from that moment neonctl refused every invocation with "Multiple projects
+# found, please provide one with the --project-id option". Because the DSN was
+# captured with 2>/dev/null inside a `set -eu` script, the refusal produced
+# NOTHING: no message, no stderr, exit 1 and an empty log line. The one
+# sanctioned door for applying production migrations was closed for every
+# session on this machine and said nothing about why.
+#
+# The id, not the name. tools/db-tap.py pins production the same way and states
+# the reason: a name lookup can drift to whatever it happens to return, and a
+# name collision or typo that silently repointed this at another project is the
+# worst failure this file could have. Staging is resolved by name over there
+# because it is rebuilt often; production is never rebuilt.
+NEON_PROJECT_PRODUCTION="steep-field-48688294"
+
+DSN="$(neonctl connection-string production \
+        --project-id "$NEON_PROJECT_PRODUCTION" \
+        --role-name neondb_owner 2>/tmp/migrate-prod-neonctl.err)"
 if [[ -z "$DSN" ]]; then
-  stamp "FAIL no DSN from neonctl"
+  # SAY WHY. The old version swallowed neonctl's own explanation, which is how a
+  # one-word fix ("--project-id") stayed invisible. stderr is captured to a file
+  # rather than passed through because a connection string can appear in
+  # neonctl's output, and this script's contract is that no DSN ever reaches a
+  # terminal or a transcript.
+  reason="$(head -1 /tmp/migrate-prod-neonctl.err 2>/dev/null)"
+  rm -f /tmp/migrate-prod-neonctl.err
+  stamp "FAIL no DSN from neonctl: ${reason:-no error text}"
   print -u2 "could not derive the production owner DSN from neonctl (logged)."
+  print -u2 "neonctl said: ${reason:-nothing at all}"
   exit 1
 fi
+rm -f /tmp/migrate-prod-neonctl.err
 
 if [[ "${1:-}" == "--apply" ]]; then
   if DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" --apply --yes; then

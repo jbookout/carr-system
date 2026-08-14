@@ -241,9 +241,27 @@ def test_worktree_roundtrip():
         check("worktree checked out mcp-server/src/index.js",
               (path / "mcp-server" / "src" / "index.js").is_file())
 
-        listed = subprocess.run(["git", "-C", REPO, "worktree", "list"],
+        # COMPARE RESOLVED PATHS, NOT RAW STRINGS (fixed 2026-08-13). This
+        # assertion failed for everyone running CI from inside a linked worktree,
+        # and passed in the canonical checkout — so it read as a flaky test and
+        # was in fact a real, deterministic path bug in the test itself. Every
+        # worktree bin/worktree.sh creates SYMLINKS out/ back to the canonical
+        # tree (out/ is gitignored, so a fresh worktree has none, and ten-plus
+        # scripts hard-code it). WORKTREES_DIR lives under out/, so from a linked
+        # worktree `path` reads .../worktrees/<name>/out/review-council/... while
+        # git resolves the symlink and registers .../carr-system/out/... — the
+        # same directory, a different string. It mattered beyond neatness: the
+        # standing remedy for a busy shared tree is to work from a worktree, and
+        # a pre-push CI that fails there blocks the exact escape hatch it should
+        # protect. Resolving both sides compares identity instead of spelling.
+        def listed_worktrees():
+            out = subprocess.run(["git", "-C", REPO, "worktree", "list", "--porcelain"],
                                  capture_output=True, text=True, timeout=15).stdout
-        check("git worktree list shows the new worktree", str(path) in listed)
+            return {os.path.realpath(ln.split(" ", 1)[1].strip())
+                    for ln in out.splitlines() if ln.startswith("worktree ")}
+
+        real_path = os.path.realpath(path)
+        check("git worktree list shows the new worktree", real_path in listed_worktrees())
 
         # confirm nothing was written INTO the checkout (read-only in practice)
         status = subprocess.run(["git", "-C", str(path), "status", "--porcelain"],
@@ -253,9 +271,7 @@ def test_worktree_roundtrip():
         rcr.worktree_remove(test_request_id, repo=Path(REPO))
         check("worktree_remove deletes the directory", not path.exists())
 
-        listed_after = subprocess.run(["git", "-C", REPO, "worktree", "list"],
-                                       capture_output=True, text=True, timeout=15).stdout
-        check("git worktree list no longer shows it", str(path) not in listed_after)
+        check("git worktree list no longer shows it", real_path not in listed_worktrees())
     finally:
         # belt and braces: never leave a worktree registered even if an
         # assertion above raised mid-test.

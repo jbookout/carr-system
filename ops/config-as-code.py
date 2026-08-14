@@ -50,7 +50,89 @@ import subprocess
 import sys
 
 HOME = os.path.expanduser("~")
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
+REPO_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _canonical_repo(here):
+    """The MAIN checkout, even when this runs from a linked worktree.
+
+    WHY THIS IS NOT just `here` (fixed 2026-08-13). {{REPO}} tokenizes paths
+    inside the MACHINE's installed config — launchd plists, settings.json — and
+    the machine has exactly ONE installation, which always points at the main
+    checkout. Deriving the token from this file's own location meant that running
+    from a linked worktree tokenized to the WORKTREE path, so every live item
+    referencing the real checkout compared unequal. Measured the same day: the
+    identical command reported `OK — 36 items, repo matches machine` in the main
+    checkout and `DRIFT — 18 of 36 items` from a worktree, on an unchanged
+    machine. Nothing had drifted.
+
+    That false positive was not cosmetic. It failed the config-as-code class in
+    pre-push CI, which blocked pushing from a worktree — and working from a
+    worktree is the standing remedy when the shared tree is busy, so the check
+    broke the escape hatch. Worse, its stated remedy is `config-as-code.py pull`,
+    which would have captured the machine's absolute paths INTO the repo,
+    destroying the {{REPO}} templating that exists so Dell's clone works at a
+    different path. Following the advice would have made the repo unportable.
+
+    git's own answer is authoritative and cheap: --git-common-dir resolves to the
+    MAIN repository's .git from inside any linked worktree (a worktree's own
+    --git-dir points into .git/worktrees/<name>). Falls back to `here` when git
+    is unavailable or this is not a checkout at all, which is the pre-existing
+    behaviour and correct for the non-worktree case."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", here, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=15)
+        if out.returncode == 0 and out.stdout.strip():
+            common = out.stdout.strip()          # .../carr-system/.git
+            root = os.path.dirname(common)
+            if root and os.path.isdir(root):
+                return os.path.abspath(root)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return here
+
+
+REPO = _canonical_repo(REPO_HERE)
+
+# `git -C <path>` IS NOT A GUARANTEE OF WHICH REPOSITORY YOU HIT. Every variable
+# below outranks both -C and the working directory, and git exports several of
+# them to every hook it runs — so anything reached from a hook inherits them.
+# That is the 2026-08-14 incident: a selftest whose fixture used cwd=mkdtemp()
+# ran its git commands against the live checkout instead, rewrote local main
+# onto its own seed commits, and marked the repository core.bare true.
+#
+# THIS FILE WAS ASSESSED AS READ-ONLY AND THAT WAS WRONG. Line ~844 runs
+# `git -C REPO config core.hooksPath ops/githooks`, which is a WRITE. Under an
+# inherited GIT_DIR that write lands in whatever repository the variable names,
+# not in REPO — so `config-as-code.py install` invoked from a hook could point a
+# different repository's hooksPath at this repo's ops/githooks. The four reads
+# are the milder half: misdirected, they yield a wrong drift verdict rather than
+# a wrong write, which is a lie in a checker whose entire job is detecting drift.
+#
+# GIT_CONFIG_COUNT is the subtle one and is why this list is not just GIT_DIR:
+# its KEY_<n>/VALUE_<n> pairs can set core.worktree and relocate a call with
+# GIT_DIR never appearing anywhere.
+#
+# A shared ops/git_env.py with the same job is in flight in another session's
+# PR #19. It is not merged and not on origin/main, so this stands alone rather
+# than importing something that does not exist yet; consolidate onto that helper
+# when it lands, and delete this.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import scrubbed_env as _git_env  # noqa: E402
+
+# CONSOLIDATED into ops/git_env.py (loop #371). This file carried its own
+# _GIT_LOCATION_VARS tuple and _git_env() because git_env.py was not yet on main
+# when the scrub landed here in PR #20 — importing something unmerged would have
+# traded a real hole for an ImportError, so the local copy was correct at the
+# time and is redundant now. The bounded GIT_CONFIG_COUNT loop that lived here
+# was the better implementation and went the other way: git_env.scrubbed_env()
+# now uses it, because the original spun on a hostile count.
+#
+# Aliased to _git_env so the five call sites below are untouched by this change.
+
+
 def _find_vault():
     """The vault sits under a Drive mount named for the ACCOUNT, so a hardcoded
     default is Joe-only by construction — the exact defect this file exists to
@@ -250,7 +332,7 @@ def _is_primary():
     if not owner:
         return False
     me = subprocess.run(["git", "-C", REPO, "config", "user.email"],
-                        capture_output=True, text=True).stdout.strip()
+                        capture_output=True, text=True, env=_git_env()).stdout.strip()
     return me == owner
 
 
@@ -341,16 +423,16 @@ def hook_scripts_untracked():
         # check silently found nothing, which is worse than not having it.
         d = os.path.dirname(p)
         inside = subprocess.run(["git", "-C", d, "rev-parse", "--is-inside-work-tree"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, env=_git_env())
         if inside.returncode != 0 or inside.stdout.strip() != "true":
             continue                       # not in any git checkout: not ours to version
         # `git ls-files --error-unmatch` is the exact question: is this path in
         # the index? A file that is merely present is not a file that survives.
         rc = subprocess.run(["git", "-C", d, "ls-files", "--error-unmatch", p],
-                            capture_output=True).returncode
+                            capture_output=True, env=_git_env()).returncode
         if rc != 0:
             top = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"],
-                                 capture_output=True, text=True).stdout.strip()
+                                 capture_output=True, text=True, env=_git_env()).stdout.strip()
             rel = os.path.relpath(p, top) if top else p
             out.append((rel, "settings.json invokes it but git DOES NOT TRACK it"))
     return out
@@ -842,7 +924,7 @@ def cmd_install(apply):
                   + ("" if apply else "   [would set]"))
         if apply:
             subprocess.run(["git", "-C", REPO, "config", "core.hooksPath", "ops/githooks"],
-                           check=False)
+                           check=False, env=_git_env())
             for h in sorted(os.listdir(hooks_dir)):
                 p = os.path.join(hooks_dir, h)
                 if os.path.isfile(p):

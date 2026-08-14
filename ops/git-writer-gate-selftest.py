@@ -52,7 +52,40 @@ DANGEROUS = [
     ("stash-bare",      "git stash"),
 ]
 
+# The two exemptions added 2026-08-14, each pinned in BOTH directions — the
+# allow AND the case that must still be refused. An exemption tested only on the
+# side that permits is how a gate quietly stops gating.
+#
+# WORKTREE: the deny text tells the reader "to change branch, use a WORKTREE so
+# no other session's tree moves", and the gate then refused exactly that, because
+# it read the SHARED tree's dirtiness no matter where the command ran. The remedy
+# it recommends was unusable precisely when it was needed.
+#
+# PATH-SCOPED CHECKOUT: `git checkout <ref> -- <paths>` does not move HEAD and
+# rewrites only what it names, so it cannot cause the 2026-08-09 loss (a commit
+# sweeping unnamed files, then a branch move underneath everyone). It is exempt
+# only while none of the named paths is dirty — restoring a path that has no
+# uncommitted changes destroys nothing; restoring one that does is still refused.
+DANGEROUS += [
+    # A worktree path that does not exist, and a path outside the repo, must
+    # both fall back to judging the shared tree — otherwise `cd` anywhere
+    # convenient would be a way to talk the gate out of its own job.
+    ("wt-missing",    f"cd {os.path.join(REPO, '.claude', 'worktrees', 'nope')} && git checkout -b x"),
+    ("wt-outside",    "cd /tmp && git checkout main"),
+    # Prose is ignored, but only prose. A real command sitting after a heredoc,
+    # or an unterminated heredoc (where the body cannot be identified at all),
+    # must still be caught — the strip fails CLOSED by design.
+    ("heredoc-then-real", "git commit -F- <<'MSG'\nharmless prose\nMSG\ngit checkout main"),
+    ("heredoc-unclosed",  "git commit -F- <<'MSG'\ngit checkout main"),
+]
+
 SAFE = [
+    ("scoped-clean",  "git checkout HEAD -- README.md"),
+    # Writing ABOUT a dangerous command is not running one. Hit three times on
+    # 2026-08-14, twice on commit messages for the gate itself — whose whole
+    # subject is which git commands are safe.
+    ("msg-heredoc",   "git commit -q -F- <<'MSG'\nnever run git checkout main while dirty\nMSG"),
+    ("msg-dash-m",    "git commit -m 'explain why git add -A is banned'"),
     ("add-specific",  "git add bin/precheck.sh && git commit -m 'x'"),
     ("commit-plain",  "git commit -m 'already staged'"),
     ("status",        "git status --short"),
@@ -91,6 +124,34 @@ def main():
 
     dirty = tree_is_dirty()
     print(f"  working tree: {dirty} uncommitted path(s)")
+
+    # The other half of each 2026-08-14 exemption needs LIVE state to be a real
+    # test, so both are derived rather than hardcoded, and SKIPPED out loud when
+    # the state is absent. A case that silently disappears is how a suite starts
+    # reporting green about something it stopped checking.
+    tracked_dirty = subprocess.run(
+        ["git", "-C", REPO, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True).stdout.splitlines()
+    if tracked_dirty:
+        victim = tracked_dirty[0][3:].strip().strip('"')
+        DANGEROUS.append(("scoped-dirty", f"git checkout HEAD -- {victim}"))
+    else:
+        print("  SKIP scoped-dirty      (no modified tracked file to name)")
+
+    wt_root = os.path.join(REPO, ".claude", "worktrees")
+    live_wt = next((os.path.join(wt_root, d) for d in sorted(os.listdir(wt_root))
+                    if os.path.isdir(os.path.join(wt_root, d))), None) \
+        if os.path.isdir(wt_root) else None
+    if live_wt:
+        SAFE.append(("wt-branch-op", f"cd {live_wt} && git checkout -b probe"))
+        # The RELATIVE form, which is how these commands are actually written
+        # and which the first version of this exemption missed entirely — it
+        # resolved against the hook's cwd, so the very first real use after it
+        # shipped was refused.
+        rel = os.path.relpath(live_wt, REPO)
+        SAFE.append(("wt-branch-op-rel", f"cd {REPO} && cd {rel} && git checkout -b probe"))
+    else:
+        print("  SKIP wt-branch-op      (no worktree exists to run one in)")
     print()
 
     passed = failed = skipped = 0

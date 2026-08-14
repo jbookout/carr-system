@@ -1,0 +1,221 @@
+{
+  "_comment": [
+    "THE SERVICE AND ENVIRONMENT CATALOG, as a repository declaration.",
+    "",
+    "Program 3 names a 'service/environment catalog' among its nine elements. It",
+    "existed as PROSE in the Program 0 release-truth inventory and as frozen JSON",
+    "contracts under control-room/contracts/, and as zero rows anywhere. This file",
+    "is the declaration; tools/ops-record.py --sync-registry applies it into",
+    "ops.service and ops.service_environment. Never hand-edit those tables: the",
+    "repo is the source and the database is the render, which is the same posture",
+    "every other registry in this system takes.",
+    "",
+    "WHY environment IS 'production' FOR JOBS THAT RUN ON JOE'S MAC. The launchd",
+    "jobs are local edge agents by the BDUF's definition, but every one of them",
+    "reads and writes the PRODUCTION record layer. The environment field answers",
+    "'what was affected', not 'what machine was it typed on' — a Control Room",
+    "asking which environment last night's export damaged wants the first answer.",
+    "The machine is carried by runtime instead.",
+    "",
+    "CADENCE IS WHAT MAKES SILENCE DETECTABLE, so every scheduled service declares",
+    "one, and the grace is sized to the real schedule rather than to the ideal:",
+    "rules-refresh runs hourly between 07:00 and 20:00, so its true worst-case gap",
+    "is the ELEVEN HOURS overnight, and a 3600s cadence would read stale every",
+    "morning by design. local-briefs runs weekdays only and its grace spans the",
+    "weekend stand-down, the same lesson tools/health-check.py already learned the",
+    "expensive way. A cadence that cries wolf nightly is worse than none: it",
+    "trains people to stop reading alarms.",
+    "",
+    "A SERVICE WITH NO CADENCE IS NOT AN OVERSIGHT. carr-mcp is not scheduled, so",
+    "nothing about it goes stale on a clock; its health comes from synthetic",
+    "golden-workflow checks, and until those run it reads unknown — which is the",
+    "honest answer for a service nobody has observed."
+  ],
+
+  "services": [
+    {
+      "key": "carr-mcp",
+      "name": "CARR record and doctrine API (Cloudflare Worker)",
+      "purpose": "Every record verb, the doctrine store, the Deal Room web host, and OAuth.",
+      "family": "Edge and identity",
+      "criticality": "critical",
+      "owner_actor": "joe",
+      "repo_path": "mcp-server/src/index.js",
+      "runtime": "cloudflare-worker",
+      "environments": [
+        { "environment": "production", "endpoint": "api.practicecre.com", "deploy_mechanism": "bin/deploy-worker.sh" },
+        { "environment": "staging", "endpoint": "carr-mcp-staging.workers.dev", "deploy_mechanism": "bin/deploy-worker.sh --env staging" }
+      ]
+    },
+    {
+      "key": "neon-record-layer",
+      "name": "Neon Postgres record layer",
+      "purpose": "The canonical store. Every verb, generator, exporter and retrieval stops without it.",
+      "family": "Data",
+      "criticality": "critical",
+      "owner_actor": "joe",
+      "repo_path": "migrations/",
+      "runtime": "neon-postgres",
+      "environments": [
+        { "environment": "production", "deploy_mechanism": "bin/migrate-prod.sh" },
+        { "environment": "staging", "deploy_mechanism": "tools/db-tap.py --project staging run tools/migrate.py" }
+      ]
+    },
+    {
+      "key": "nightly-record-layer",
+      "name": "Nightly record-layer chain",
+      "purpose": "Cadence, matcher, exports, corpus push, consumers, graph, backup — in that order.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "bin/nightly.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.nightly-record-layer.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 7200,
+          "notes": "Daily at 02:05. Two hours of grace covers a long backup."
+        }
+      ]
+    },
+    {
+      "key": "rules-refresh",
+      "name": "Taught-rule refresh",
+      "purpose": "Re-renders the compiled rule files Dell's sessions boot from.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "bin/refresh-rules.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.rules-refresh.plist",
+          "expected_cadence_seconds": 39600,
+          "cadence_grace_seconds": 3600,
+          "notes": "Hourly 07:00-20:00 by fourteen calendar entries, so the real worst-case gap is the eleven hours overnight — not one hour."
+        }
+      ]
+    },
+    {
+      "key": "local-briefs",
+      "name": "Local brief pack and review queue",
+      "purpose": "Rebuilds brief-pack and review-queue every business morning.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "bin/local-briefs.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.local-briefs.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 172800,
+          "notes": "Weekdays 06:45. The grace spans the weekend stand-down; weekends are off for both partners."
+        }
+      ]
+    },
+    {
+      "key": "notes-sweep",
+      "name": "Apple Notes capture sweep",
+      "purpose": "Pulls new notes into the capture queue.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "bin/notes-sweep.applescript",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.notes-sweep.plist",
+          "expected_cadence_seconds": 3600,
+          "cadence_grace_seconds": 1800
+        }
+      ]
+    },
+    {
+      "key": "partner-ping",
+      "name": "Partner interrupt channel",
+      "purpose": "The Joe/Dell interrupt poll.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "pipelines/partner_ping.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.partner-ping.plist",
+          "expected_cadence_seconds": 120,
+          "cadence_grace_seconds": 180,
+          "notes": "Every two minutes. This job once logged 382 consecutive identical 'nothing new' lines over six days with a broken query, because a channel with nothing to say and a channel that cannot ask produce byte-identical output. A run row distinguishes them."
+        }
+      ]
+    },
+    {
+      "key": "capture-poll",
+      "name": "Capture queue poll",
+      "purpose": "Drains the capture inbox.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.capture-poll.plist",
+          "expected_cadence_seconds": 300,
+          "cadence_grace_seconds": 300
+        }
+      ]
+    },
+    {
+      "key": "cc-version-sentinel",
+      "name": "Claude Code version sentinel",
+      "purpose": "Watches for a Claude Code release that changes hook or settings behaviour.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "bin/cc-version-sentinel.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.cc-version-sentinel.plist",
+          "expected_cadence_seconds": 3600,
+          "cadence_grace_seconds": 1800
+        }
+      ]
+    },
+    {
+      "key": "recordings-purge",
+      "name": "Recording retention purge",
+      "purpose": "Deletes call recordings past their retention window.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.recordings-purge.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 7200
+        }
+      ]
+    }
+  ],
+
+  "dependencies": [
+    { "service": "carr-mcp", "depends_on": "neon-record-layer" },
+    { "service": "nightly-record-layer", "depends_on": "neon-record-layer" },
+    { "service": "rules-refresh", "depends_on": "neon-record-layer" },
+    { "service": "local-briefs", "depends_on": "neon-record-layer" },
+    { "service": "notes-sweep", "depends_on": "neon-record-layer" },
+    { "service": "partner-ping", "depends_on": "neon-record-layer" },
+    { "service": "capture-poll", "depends_on": "neon-record-layer" }
+  ]
+}

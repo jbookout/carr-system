@@ -338,15 +338,10 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
       echo "  ***  GOLDEN WORKFLOW SUITE FAILED (exit $smoke_rc) AFTER THIS DEPLOY.  ***"
       echo "  The Worker shipped and is answering wrongly, or the probe credential is"
       echo "  refused. Read the output above, and read the failed check together with"
-      echo "  this deploy in one query:"
-      echo "      select * from ops.v_trace where correlation_id = '$CARR_CORRELATION_ID';"
+      echo "  this deploy as ONE journey rather than two unrelated facts:"
+      echo "      .venv/bin/python tools/ops-record.py trace $CARR_CORRELATION_ID"
       echo "  Rolling back is bin/deploy-worker.sh --pinned-release <sha>."
       exit 1
     fi
   fi
-  # Deliver the check run. Called through the interpreter rather than the exec
-  # bit because core.fileMode is false in this repo, so a mode set on one machine
-  # is not carried by the commit and cannot be relied on by a script.
-  if [ -x "$REPO/.venv/bin/python" ]; then LEDGER_PY="$REPO/.venv/bin/python"; else LEDGER_PY=python3; fi
-  "$LEDGER_PY" "$REPO/ops/run-ledger.py" flush >/dev/null 2>&1 || true
 fi

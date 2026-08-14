@@ -21,22 +21,27 @@
 # write verbs replayed under frozen idempotency keys. It is not the retired
 # bearer rebuilt; that one authenticated as a full human actor on the full profile.
 #
-# It was ALSO re-armed only after the suite was made honestly green: on
+# It was ALSO re-armed only after the suite was made honestly green. On
 # 2026-08-14 it returned 31 passed / 3 failed, and all three were fixture drift
-# rather than regressions (an ungated probe-profile check, a whole-payload
-# substring match broken by a second matching org row, and a fixture whose "this
-# node has nothing blocked" premise had expired). Scheduling a red canary is what
-# created the background noise the first time. Do not re-arm a red suite; fix it
-# or gate it first.
+# rather than regressions — the system answered correctly in every case:
+#   * the auto-edge check had no probe-profile gate where five sibling checks do,
+#     so the server's correct not_in_profile refusal printed as a hard FAIL;
+#   * a whole-payload substring match for retired_aliases:0 broke when a second
+#     live org row, "Henry Schein, Inc.", began matching the same query;
+#   * a fixture asserting C-155 has nothing blocked expired when the ternary
+#     Joe->Tyrer edge was recorded, and reporting it is loop #133 working.
+# Scheduling a red canary is what created the background noise the first time.
+# DO NOT RE-ARM A RED SUITE; fix it or gate it first.
 #
 # TWO LEDGERS, ON PURPOSE, AND NEITHER REPLACES THE OTHER:
 #   export_run  — the dead-man freshness row `smoke`, which integrity-digest and
 #                 tools/health-check.py already read. Untouched.
-#   ops.run     — the Program 3 golden-workflow check run (kind='check'), which
+#   ops.run     — the Program 3 golden-workflow CHECK run, written through
+#                 tools/ops-record.py (the collector bin/nightly.sh uses). It
 #                 carries the correlation id, the environment and the provenance
-#                 that export_run has no columns for. This is what lets a failed
-#                 deploy, the check that caught it and the job that broke appear
-#                 in one ops.v_trace query.
+#                 that export_run has no columns for, which is what lets a deploy,
+#                 the check that caught its breakage and the job that failed all
+#                 appear in one `ops-record trace <id>`.
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
@@ -46,7 +51,6 @@ PY="$REPO/.venv/bin/python"
 STARTED="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 OUT="$(./mcp-server/smoke-reads.sh 2>&1)"
 probe_exit=$?
-ENDED="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 print -r -- "$OUT"
 
 # The REAL pass count, not the 17 that record-smoke.py defaults to — that default
@@ -57,22 +61,22 @@ passed="$(print -r -- "$OUT" | sed -n 's/^passed \([0-9]\{1,\}\) .*/\1/p' | tail
 
 "$PY" tools/record-smoke.py "$probe_exit" "$passed"
 
-# The Program 3 check run. run-ledger.py exits 0 on every path and `|| true` is
-# belt and braces: post-deploy verification must not be made less reliable by the
-# thing that records it. CARR_ENV/CARR_CORRELATION_ID are inherited when a chain
-# or a deploy exports them, so this check joins that journey rather than starting
-# a lone one; run by hand with neither set, it records nothing and says why.
+# The Program 3 check run. Its exit code is ignored for the same reason
+# bin/nightly.sh ignores it: a step that goes unrecorded must make the service
+# read `unknown` on the next health look, never fail the verification it was
+# observing. CARR_CORRELATION_ID is inherited when a chain or a deploy exports
+# one, so this check joins that journey instead of starting a lone one.
 if [ "$probe_exit" -eq 0 ]; then
-  "$PY" ops/run-ledger.py record --kind check --service carr-mcp \
-    --run-key golden.smoke-reads --state succeeded --exit-code 0 \
-    --started "$STARTED" --ended "$ENDED" \
-    --source-kind collector --source-ref bin/smoke-and-record.sh \
+  "$PY" tools/ops-record.py run --kind check --service carr-mcp \
+    --key golden.smoke-reads --state succeeded --exit-code 0 \
+    --started-at "$STARTED" --source-kind collector \
+    --source-ref bin/smoke-and-record.sh \
     --detail "$passed checks passed" || true
 else
-  "$PY" ops/run-ledger.py record --kind check --service carr-mcp \
-    --run-key golden.smoke-reads --state failed --exit-code "$probe_exit" \
-    --started "$STARTED" --ended "$ENDED" \
-    --source-kind collector --source-ref bin/smoke-and-record.sh \
+  "$PY" tools/ops-record.py run --kind check --service carr-mcp \
+    --key golden.smoke-reads --state failed --exit-code "$probe_exit" \
+    --started-at "$STARTED" --source-kind collector \
+    --source-ref bin/smoke-and-record.sh \
     --failure-class golden_workflow_check_failed \
     --detail "$passed checks passed before the suite failed" || true
 fi
