@@ -72,10 +72,20 @@ DANGEROUS += [
     # convenient would be a way to talk the gate out of its own job.
     ("wt-missing",    f"cd {os.path.join(REPO, '.claude', 'worktrees', 'nope')} && git checkout -b x"),
     ("wt-outside",    "cd /tmp && git checkout main"),
+    # Prose is ignored, but only prose. A real command sitting after a heredoc,
+    # or an unterminated heredoc (where the body cannot be identified at all),
+    # must still be caught — the strip fails CLOSED by design.
+    ("heredoc-then-real", "git commit -F- <<'MSG'\nharmless prose\nMSG\ngit checkout main"),
+    ("heredoc-unclosed",  "git commit -F- <<'MSG'\ngit checkout main"),
 ]
 
 SAFE = [
     ("scoped-clean",  "git checkout HEAD -- README.md"),
+    # Writing ABOUT a dangerous command is not running one. Hit three times on
+    # 2026-08-14, twice on commit messages for the gate itself — whose whole
+    # subject is which git commands are safe.
+    ("msg-heredoc",   "git commit -q -F- <<'MSG'\nnever run git checkout main while dirty\nMSG"),
+    ("msg-dash-m",    "git commit -m 'explain why git add -A is banned'"),
     ("add-specific",  "git add bin/precheck.sh && git commit -m 'x'"),
     ("commit-plain",  "git commit -m 'already staged'"),
     ("status",        "git status --short"),

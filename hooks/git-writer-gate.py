@@ -188,6 +188,37 @@ _CHECKOUT_PATHS_RE = re.compile(
     r"\bgit\s+(?:-C\s+\S+\s+)?checkout\s+(?P<ref>\S+)\s+--\s+(?P<paths>.+)$", re.I)
 
 
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_DASH_M_RE = re.compile(r"-m\s+(?:'[^']*'|\"[^\"]*\")")
+
+
+def strip_inert_text(cmd):
+    """Remove heredoc bodies and quoted -m messages before pattern matching.
+
+    Both are data the shell hands to a program, never commands the shell runs, so
+    a dangerous-looking string inside one is a description rather than an act.
+    Deliberately conservative in the direction that keeps the gate honest: the
+    heredoc body is removed only from its opening line to a line that is exactly
+    the delimiter, so an unterminated or malformed heredoc removes NOTHING and
+    the command is scanned whole. Failing closed here matters more than the
+    convenience, because this function's job is deciding what the gate is allowed
+    to stop looking at.
+    """
+    out = cmd
+    for m in _HEREDOC_RE.finditer(cmd):
+        delim = m.group(2)
+        lines = out.split("\n")
+        start = next((i for i, l in enumerate(lines) if m.group(0) in l), None)
+        if start is None:
+            continue
+        end = next((j for j in range(start + 1, len(lines))
+                    if lines[j].strip() == delim), None)
+        if end is None:
+            continue  # unterminated — scan it all rather than guess
+        out = "\n".join(lines[:start + 1] + lines[end:])
+    return _DASH_M_RE.sub("-m <message>", out)
+
+
 def path_scoped_checkout_paths(cmd):
     """The paths a `git checkout <ref> -- <paths>` names, or None if not that."""
     m = _CHECKOUT_PATHS_RE.search(cmd.strip())
@@ -213,9 +244,21 @@ def main():
         if "git" not in cmd:
             sys.exit(0)
 
+        # SCAN THE COMMANDS, NOT THE PROSE THEY CARRY. A heredoc body and a
+        # quoted -m message are DATA — they are never executed — yet the whole
+        # command string was being pattern-matched, so writing ABOUT a dangerous
+        # git command was refused as though it were one. Hit three times on
+        # 2026-08-14 alone: a .gitignore comment mentioning a staging command, and
+        # twice on commit messages for this very file, whose entire subject is
+        # which git commands are safe. The effect is perverse — it makes the fix
+        # for a gate the hardest thing to describe in its own commit — and the
+        # workaround it forces is writing the message to a file, which nobody
+        # will remember and which teaches people the gate is noise.
+        scannable = strip_inert_text(cmd)
+
         hit = None
         for name, pat in DANGEROUS:
-            if pat.search(cmd):
+            if pat.search(scannable):
                 hit = name
                 break
         if not hit:
