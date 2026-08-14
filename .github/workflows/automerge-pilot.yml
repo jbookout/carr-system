@@ -93,6 +93,15 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.merge_ref }}
           fetch-depth: 2
+          # THIS IS THE ONLY JOB THAT EXECUTES PULL-REQUEST CODE, so it is the
+          # only one that must not be handed a credential. checkout stores the
+          # job token in .git/config by default, and ops/ci.sh runs the PR's own
+          # test files a few steps below — mcp-server/test/ is an allowed pilot
+          # path, so that code is untrusted by construction. The token is scoped
+          # to contents:read and cannot merge anything, but a read token that
+          # leaves the runner is still a read token somebody else now holds.
+          # Nothing in this job talks to the remote after the checkout.
+          persist-credentials: false
 
       - id: parents
         name: Bind rehearsal merge to the planned base and head
