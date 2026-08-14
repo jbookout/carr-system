@@ -149,6 +149,8 @@ ALWAYS_EXPECTED = {
     "DNA/compiled-rules-shared.md",
     "00_Context/compiled-rules-joe.md",
     "DNA/compiled-rules-dell.md",
+    # written by bin/local-briefs.sh (com.carr.local-briefs), not an export target
+    "00_Context/today.md",
 }
 
 # ---------------------------------------------------------------- ingest wiring
@@ -334,20 +336,33 @@ def scan(root):
 # this reason; this is that same knowledge, applied to the second scanner.
 # Prefix-matched rather than set-matched on purpose: the tree is regenerated
 # wholesale, so its members change nightly and enumerating them would drift.
-DERIVED_DIRS = ("Graph-System/",)
+#
+# Keyed by writer label (added 2026-08-14, PR #57) so classify()'s
+# "expected-writer: derived (see ...)" message names the actual generator
+# instead of hardcoding Graph-System's.
+#
+# Backups/portability-mirror/ was proposed for this same blanket-prefix
+# treatment the same day, in the same PR — same "wholesale regeneration,
+# don't enumerate" reasoning that fits Graph-System/. It does NOT belong
+# here: unlike Graph-System/, the mirror is verified against its own
+# manifest.json instead (see MIRROR_PREFIX / classify_mirror_file below). A
+# blanket exclusion here would trust the whole mirror tree wholesale,
+# blinding this watch to exactly the foreign writer parking content in a
+# Backups/ path that the alarm exists to catch; hash verification silences
+# the same nightly false alarm without giving up that coverage. Resolved
+# this way merging PR #57's DERIVED_DIRS change against the manifest-
+# verification work below — verification supersedes blanket exclusion
+# wherever the two approaches would otherwise collide on this one path.
+DERIVED_DIRS = {
+    "Graph-System/": "./run.sh graph-system",
+}
 
-# A FOURTH legitimate writer, and the one exception to "a wholesale-regenerated
-# derived tree is named by its prefix, never enumerated" above. Backups/
-# portability-mirror/ is also a wholesale nightly regeneration (pipelines/
-# doctrine_mirror.py, invoked by bin/nightly.sh's "portability mirror" step) —
-# 224 files (222 doc snapshots + rules.md + MANIFEST.md) that legitimately
-# change bytes every single night, because every snapshot carries a fresh UTC
-# timestamp banner even when the underlying content did not move. Naming it a
-# DERIVED_DIRS prefix like Graph-System/ would make this watch trust the whole
-# tree wholesale — the alarm going blind to a foreign writer parking content in
-# a Backups/ path nobody else reads is exactly the failure mode this script
-# exists to catch, so that shortcut is refused on purpose (see MIRROR_PREFIX
-# below instead, which VERIFIES rather than excludes).
+# A FOURTH legitimate writer. Backups/portability-mirror/ is also a
+# wholesale nightly regeneration (pipelines/doctrine_mirror.py, invoked by
+# bin/nightly.sh's "portability mirror" step) — 224 files (222 doc snapshots
+# + rules.md + MANIFEST.md) that legitimately change bytes every single
+# night, because every snapshot carries a fresh UTC timestamp banner even
+# when the underlying content did not move.
 #
 # THE VERIFICATION: doctrine_mirror.py's build_mirror() writes root/
 # manifest.json at the end of every run — {relpath: sha256} for every file it
@@ -431,8 +446,9 @@ def classify(relpath, expected, corpus_mirror, current_sha=None, mirror_manifest
     if relpath.startswith(MIRROR_PREFIX):
         tag, _reason = classify_mirror_file(relpath[len(MIRROR_PREFIX):], current_sha, mirror_manifest)
         return tag
-    if relpath.startswith(DERIVED_DIRS):
-        return "expected-writer: derived (see ./run.sh graph-system)"
+    for prefix, writer in DERIVED_DIRS.items():
+        if relpath.startswith(prefix):
+            return f"expected-writer: derived (see {writer})"
     return "UNEXPECTED"
 
 

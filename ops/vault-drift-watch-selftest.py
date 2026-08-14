@@ -665,6 +665,16 @@ def _(assert_):
             f"the mirror prefix must never classify as blanket 'derived': {mirror_lines}")
 
 
+# PR #57 ("the drift watch stops reporting the chain that runs it") added a
+# case here asserting the mirror classifies "expected-writer: derived" —
+# the blanket DERIVED_DIRS exclusion this merge deliberately supersedes with
+# hash verification (see the DERIVED_DIRS comment in ops/vault-drift-watch.py
+# and the v4 cases above, especially "DERIVED_DIRS wholesale trust must never
+# cover the mirror prefix" just above this note). That case asserted the
+# opposite of the design this branch ships and is dropped rather than kept
+# disabled, so no test in this file contradicts another.
+
+
 @case("--rebaseline --only re-snapshots the named paths and carries the rest forward")
 def _(assert_):
     d = fresh_dirs("partial")

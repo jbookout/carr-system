@@ -9,7 +9,28 @@
 # carrying its own removal instruction; coverage densifies as sessions touch them.
 # Manual path is THE SAME script (rule a8c55a47): ./bin/type-check.sh
 # Risk color GREEN: read-only, writes nothing, sends nothing.
+# WHERE mypy COMES FROM, and why this is not just ./.venv/bin/mypy any more.
+# Since 2026-08-14 this script is also CI's `typecheck` class (ops/ci.sh), so it
+# runs in two environments: Joe's Mac, which has a .venv, and a GitHub runner,
+# which pip-installs requirements.lock into the system python and has no .venv
+# at all. One script, two homes — rule a8c55a47 says the manual path and the
+# automated path must be the SAME CODE, and the directory list below is the
+# thing that must not fork.
+#
+# Exit 78 (EX_CONFIG) when mypy is absent anywhere: the nightly chain reads 78
+# as SKIP rather than FAIL, and CI reads it as a skip that --strict then refuses.
+# Neither treats "the tool is missing" as "the code is broken".
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 2
-exec ./.venv/bin/mypy pipelines tools exporters lib generators shared fill-engine bin hooks ops
+
+MYPY="$REPO/.venv/bin/mypy"
+if [ ! -x "$MYPY" ]; then
+  MYPY="$(command -v mypy 2>/dev/null || true)"
+fi
+if [ -z "$MYPY" ] || [ ! -x "$MYPY" ]; then
+  echo "type-check: mypy is not installed (it is pinned in requirements.lock)" >&2
+  exit 78
+fi
+
+exec "$MYPY" pipelines tools exporters lib generators shared fill-engine bin hooks ops
