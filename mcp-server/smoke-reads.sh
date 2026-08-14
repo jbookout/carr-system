@@ -19,13 +19,20 @@
 # FORTY-FOUR checks as of the 2026-08-02 0066 marketing pass: seventeen plumbing
 # checks (ORDER 36's analysis write path was the seventeenth), SEVENTEEN
 # negative-answer probes, and TEN 0066 marketing probes at the very bottom.
-# Twenty-two of them sit behind five capability gates (org visibility, the
-# merge-split response shape, the unwalkable-edge report, the 0063 contract, and
-# 0066's two-stage worker/migration gate) and print SKIP rather than FAIL when
-# the Worker or the schema predates the fix they cover, so a healthy run is
-# anywhere from 22 to 44 — the script says which gate is closed and why.
+# Twenty-three of them sit behind SIX capability gates (org visibility, the
+# merge-split response shape, the unwalkable-edge report, the 0063 contract,
+# 0066's two-stage worker/migration gate, and — added 2026-08-14 — the auto-edge
+# path's 'probe' profile gate) and print SKIP rather than FAIL when the Worker,
+# the schema or the credential's profile predates or excludes the thing they
+# cover, so a healthy run is anywhere from 21 to 44 — the script says which gate
+# is closed and why.
 # The count had been stale at "eleven as of ORDER 19" since ORDER 27 — ORDERS 27,
 # 33, 34 and 36 each added a check without moving it. Recount when you add one.
+#
+# MEASURED 2026-08-14 under CARR_MCP_PROBE_TOKEN against production:
+# passed 33 · failed 0, with three SKIP blocks (auto-edge, record-counter 0063,
+# 0066 marketing) — all three profile-locked rather than broken. That is the
+# baseline a scheduled run is expected to reproduce; a drop below it is real.
 #
 # THE 0066 SECTION IS ALL REFUSALS, and that is not a shortcut — it is the only
 # safe shape for those verbs (a success probe would mint a permanent fake
@@ -337,7 +344,22 @@ check "source-attribution: lanes answer incl. the unattributed reconciler" \
 # production (ORDER 32's proven chain), so this exercises ref resolution +
 # kind validation + the conflict path (existing:true) without ever growing the
 # graph. Rep 1 may insert the one fixture activity row; every later rep replays.
+#
+# PROFILE-GATED 2026-08-14 (Program 3 triage). This was the SIXTH gate and it was
+# missing: the locked 'probe' profile (mcp-server/src/mcp.js) admits log-activity
+# but NOT log-activity carrying links[], which the server refuses as
+# not_in_profile — correctly, since an edge write is exactly what the narrow
+# profile exists to withhold. The check had no gate, so it printed a hard FAIL on
+# every probe-token run and read as a broken auto-edge path when nothing was
+# broken at all. It is a SKIP under 'probe' for the same reason the other five
+# gates are: the suite must not report a deliberate server-side lock as a
+# regression. Under a partner's OAuth session PROBE_MODE is 0 and it runs for real.
 echo
+if [ "$PROBE_MODE" -eq 1 ]; then
+  echo "  SKIP  auto-edge path — log-activity links[] is outside the locked 'probe' profile"
+  echo "        (server returns not_in_profile). Not a failure — that is the lock working."
+  echo "        Run under a partner's OAuth session to exercise the auto-edge path."
+else
 _l_ok=1; _l_why=""
 for i in $(seq 1 "$REPS"); do
   call log-activity '{"idempotency_key":"smoke-links-probe-permanent","ref":"V-BNK-013","kind":"note","summary":"smoke links probe — edge already exists, replayed for ever after","links":[{"from_ref":"V-BNK-013","to_ref":"C-155","kind":"intro"}]}'
@@ -355,6 +377,7 @@ if [ "$_l_ok" -eq 1 ]; then
 else
   echo "  FAIL  auto-edge path — $_l_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
 fi
 
 # --- ORDER 36: kind:analysis — the dossier write path --------------------------
@@ -584,8 +607,20 @@ if [ "$CAP_SPLIT" -eq 1 ]; then
   # …and the tombstones are still counted rather than deleted from the answer.
   # Paired with the zero-side probe below: together they prove retired_aliases is
   # read from the data and is not a constant in either direction.
+  # SCOPED 2026-08-14 (Program 3 triage). This forbade the string
+  # \"retired_aliases\":0 ANYWHERE in the payload, which was only ever correct
+  # while "Henry Schein" matched exactly one org row. A second live org row,
+  # "Henry Schein, Inc." (live_rows:1, refs:[null], no tombstones), now matches
+  # the same query and legitimately carries retired_aliases:0 — so the suite
+  # failed on a TRUE answer. The forbidden pattern is anchored to the Henry
+  # Schein object itself: [^}]* cannot cross the object boundary, and the
+  # trailing \", after Schein excludes "Henry Schein, Inc." (whose name has a
+  # bare comma there, not an escaped quote). The required side asserts a real
+  # P- tombstone is listed rather than a specific count, because the count grows
+  # with every merge and a hardcoded 16 would just be tomorrow's false failure.
   refute "…and its retired aliases are counted, not dropped" \
-         find '{"query":"Henry Schein"}' '\\"retired_aliases\\":0' '\\"retired_refs\\"'
+         find '{"query":"Henry Schein"}' \
+         '\\"name\\":\\"Henry Schein\\",[^}]*\\"retired_aliases\\":0' '\\"retired_refs\\":\[\\"P-'
   check  "…and retired_aliases really reads 0 for an org that has no tombstones" \
          find '{"query":"1st Med Transitions"}' '\\"retired_aliases\\":0' '1st Med Transitions'
 
@@ -656,10 +691,22 @@ if [ "$CAP_UNWALK" -eq 1 ]; then
   echo
   check "who-do-we-know V-CPA-036 surfaces Joe's own offered intro, one way or the other" \
         who-do-we-know '{"target":"V-CPA-036"}' 'Joe Bookout' '\\"unwalkable_edges\\"'
-  # The pair. A report that always lists something is not a report — C-155 has
-  # three walkable paths and nothing blocked, so its list must be empty.
+  # The pair. A report that always lists something is not a report, so the zero
+  # side needs a node that is genuinely in the graph, genuinely has a path, and
+  # genuinely has nothing blocked.
+  #
+  # FIXTURE MOVED C-155 -> V-BNK-013, 2026-08-14 (Program 3 triage). C-155 stopped
+  # being a valid zero-side the moment the ternary Joe->Tyrer 'introduced' edge
+  # was recorded (the shape migration 0051 defined, from = us): Joe is party
+  # P-1084 with no business ref, so that edge has from_ref null and lands in
+  # C-155's unwalkable_edges. The verb REPORTING it is loop #133 working exactly
+  # as designed — the suite was failing on correct behaviour, and the fixture's
+  # premise ("C-155 has nothing blocked"), not the system, is what expired.
+  # V-BNK-013 (Jon Shaw) is in_graph with one walkable path and an empty list.
+  # If this check ever fails, read it as "someone recorded a ref-less edge into
+  # Shaw" and re-verify the premise before touching the verb.
   check "…and the list is EMPTY where nothing is blocked, not a hardcoded fixture" \
-        who-do-we-know '{"target":"C-155"}' '\\"unwalkable_edges\\":\[\]'
+        who-do-we-know '{"target":"V-BNK-013"}' '\\"unwalkable_edges\\":\[\]'
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════

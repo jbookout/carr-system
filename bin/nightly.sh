@@ -378,6 +378,29 @@ step "open-items dashboard (one-page view)"          ./.venv/bin/python generato
 # in its own output rather than letting a green row imply more than it proves.
 step "verb probe (worker gate + view sweep)"         ./.venv/bin/python ops/nightly-verb-probe.py
 
+# ── THE FULL VERB SUITE IS BACK IN THE CHAIN, 2026-08-14 (Program 3) ──────────
+# The paragraph above is now HISTORY rather than current instruction, and is kept
+# because the reasoning is the load-bearing part. What changed: the credential
+# whose retirement forced the 2026-08-04 removal has been replaced by a narrower
+# one (PROBE_TOKENS -> a locked 'probe' profile, loop #192), it is provisioned,
+# and the suite was verified honestly green — 33 passed, 0 failed, three
+# profile-locked SKIPs — BEFORE this line was added. All three failures found on
+# the way there were fixture drift, not regressions; the system answered
+# correctly in every case. See bin/smoke-and-record.sh for the whole account.
+#
+# It runs AFTER the verb probe rather than instead of it. The two cover different
+# failures and the cheap one should not be gated behind the expensive one: the
+# probe needs no credential and sweeps all 40 views, while this suite needs the
+# probe token and covers transport, dispatch and ANSWER CORRECTNESS — the class
+# where a verb responds 200 with a wrong answer, which no view sweep can see.
+#
+# A MISSING TOKEN IS A SKIP, A REFUSED TOKEN IS AN ALARM. smoke-and-record.sh
+# maps "no token configured" to 78 so an absent credential cannot alarm every
+# night until someone pastes one — that pattern is how this suite was lost the
+# first time. A token that EXISTS and is refused stays a failure, because it
+# means post-deploy verification has silently stopped happening.
+step "golden workflow suite (read verbs, answer correctness)" ./bin/smoke-and-record.sh
+
 # PHASE 1 v2 (2026-08-13): vault drift watch --rebaseline, LAST functional step
 # — after every export and every other step that touches a vault or repo file,
 # so the snapshot it writes is the true post-chain state. This is what
