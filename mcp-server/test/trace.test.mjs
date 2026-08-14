@@ -184,6 +184,38 @@ test("recordWorkerFailure: a brand-new signature opens an incident and attaches 
   assert.ok(bump, "must bump freshness after attaching a fact");
 });
 
+// THIS TEST GUARDS A CROSS-LANGUAGE CONTRACT, which is why it exists separately
+// from the assertion two tests up that already checks the same string. A
+// RECURRING failure's correlation id is stored NOWHERE but in this source_ref
+// (the incident row's own correlation_id belongs to the FIRST failure of the
+// signature), and migrations/0123_trace_incident_recurrence.sql's ops.v_trace
+// arm is what reads it back — by parsing this exact prefix with this exact
+// regex. Renaming the prefix here would not fail a single JS test that
+// hardcodes both sides; it would silently stop every recurrence from tracing,
+// which is the defect 0123 closed. So the regex the SQL uses is asserted here,
+// against the JS that has to keep feeding it.
+test("recordWorkerFailure: a fact's source_ref matches the regex migration 0123's ops.v_trace arm parses", async () => {
+  // Character-for-character the pattern in 0123's substring(... from ...) call.
+  const V_TRACE_ARM_PATTERN =
+    /^correlation:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+  const { query, calls } = fakeQuery([
+    { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
+    { match: /select id from ops\.incident where signature/, rows: [{ id: "inc-open" }] }, // a RECURRENCE
+    { match: /select 1 from ops\.incident_fact/, rows: [] },
+  ]);
+  await recordWorkerFailure(query, {
+    environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
+  });
+
+  const fact = calls.find((c) => /insert into ops\.incident_fact/.test(c.text));
+  assert.ok(fact, "a recurrence must still attach a fact — it is the only record of its correlation id");
+  const sourceRef = fact.params[2];
+  const parsed = V_TRACE_ARM_PATTERN.exec(sourceRef);
+  assert.ok(parsed, `0123's v_trace arm cannot parse ${sourceRef} — recurrences would stop tracing`);
+  assert.equal(parsed[1], A_CORR, "the arm must recover the recurrence's own correlation id, unchanged");
+});
+
 test("recordWorkerFailure: NEVER writes state, resolved_at, recovery_evidence_ref or monitoring_until — closing an incident is a human's call", async () => {
   const svcId = "svc-1", incId = "inc-open";
   const { query, calls } = fakeQuery([
