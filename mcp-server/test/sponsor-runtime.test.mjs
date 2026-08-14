@@ -160,6 +160,20 @@ test("MCP routing admits only registered machine identities before normal profil
   );
 });
 
+test("locked reviewers have identity-scoped read membership, not ambient CRM access", async () => {
+  const reviewer = { slug: "codex-reviewer", human: false, review: true,
+    via: "review-token", operational_profile: "reviewer" };
+  await assert.rejects(
+    callTool({}, reviewer, "get-deal-room", { deal: "anything" }, "reviewer"),
+    (error) => error instanceof ToolError && error.payload.error === "not_in_profile" &&
+      error.payload.profile === "reviewer",
+  );
+  await assert.rejects(
+    callTool({}, reviewer, "search-doctrine", { query: "anything" }, "reviewer"),
+    (error) => error instanceof ToolError && error.payload.error === "not_in_profile",
+  );
+});
+
 test("runtime attribution and sponsor provenance survive without capability inheritance or rule bodies", () => {
   const runtime = actor("codex", "joe");
   const audit = auditIdentity(runtime);

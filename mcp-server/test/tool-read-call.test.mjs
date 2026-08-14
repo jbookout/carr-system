@@ -29,11 +29,13 @@ test("readCallInsertSQL: targets tool_read_call and carries the identity columns
   assert.match(text, /insert into tool_read_call/);
   assert.match(text, /verb, actor_slug, actor_id, ok, error_kind, via, client_id/);
   assert.match(text, /organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class/);
+  assert.match(text, /operational_profile/);
   // params order: verb, actor_slug (also feeds the actor_id subquery via $2),
-  // ok, error_kind, via, client_id, org_tenant, sponsoring_slug, personal_scope, auth_class
+  // ok, error_kind, via, client_id, org_tenant, sponsoring_slug, personal_scope,
+  // auth_class, operational_profile
   assert.deepEqual(params, [
     "standing-context", "joe", true, null, "oauth-google", "claude",
-    "carr-internal", "joe", "joe-personal", "verified_partner",
+    "carr-internal", "joe", "joe-personal", "verified_partner", "full",
   ]);
 });
 

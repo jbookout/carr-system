@@ -145,10 +145,9 @@ const PROFILES = {
   // profile is NOT selected by ?profile= — it is forced in dispatch() below
   // whenever the actor authenticated via a REVIEW_TOKENS bearer (see
   // reviewActorFor in index.js), and ?profile= is ignored entirely for that
-  // actor. Reads need no entry here at all: allowedIn() already grants every
-  // read verb in every profile (`if (!tool.write) return true;`), so "ALL
-  // reads + exactly record-finding" falls straight out of that existing rule
-  // plus this one-verb write set — no separate read allowlist to keep in sync.
+  // actor. Its read membership is declared separately below: boot context and
+  // verb discovery only. Code arrives through a detached read-only worktree;
+  // ambient CRM and doctrine reads add no review capability.
   //
   // WHY record-finding AND NOTHING ELSE. A reviewer's whole job is to land a
   // structured, sourced opinion beside a record or a commit — which is
@@ -164,6 +163,17 @@ const PROFILES = {
   // passing a different verb name (callTool's allowedIn() check enforces this
   // at call time, same as every other profile).
   reviewer: new Set(["record-finding"]),
+};
+
+// Locked machine identities get memberships, not ambient read access.  A
+// reviewer receives the one boot read it needs plus registry discovery; its
+// code evidence arrives through the detached read-only worktree, so exposing
+// CRM, doctrine, deal and personal-brain reads would add blast radius without
+// adding review capability.  Human-selected operational limiters (capture,
+// away, read) keep the historical all-read behavior because they run inside a
+// verified partner session and are risk limiters, not separate principals.
+const PROFILE_READS = {
+  reviewer: new Set(["standing-context", "list-verbs"]),
 };
 
 const PROFILE_NOTICE = {
@@ -197,8 +207,8 @@ const PROFILE_NOTICE = {
     "server-side by a PROBE_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
     "under any request. This is the smoke-probe machine actor, never a human seat.</notice>",
   reviewer:
-    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly one write verb, " +
-    "record-finding. Every other write verb refuses with not_in_profile — no advancing a deal, no " +
+    "\n\n<notice>This session runs on the REVIEWER profile: standing-context and list-verbs reads, " +
+    "plus exactly one write verb, record-finding. Every other tool refuses with not_in_profile — no advancing a deal, no " +
     "drafting a document, no touching a party or a rule. This profile is locked server-side by a " +
     "REVIEW_TOKENS bearer, not by ?profile=, and cannot be widened by this token under any request. " +
     "This is the Automatic Review Council's Codex-reviewer machine actor, never a human seat. Land " +
@@ -216,7 +226,10 @@ function profileFor(request) {
 
 function allowedIn(profile, name, tool) {
   if (profile === "full") return true;
-  if (!tool.write) return true;              // reads are allowed in every profile
+  if (!tool.write) {
+    const memberships = PROFILE_READS[profile];
+    return memberships ? memberships.has(name) : true;
+  }
   return PROFILES[profile].has(name);
 }
 
@@ -260,11 +273,12 @@ export function readCallInsertSQL(actor, verb, ok, errorKind) {
   const identity = auditIdentity(actor);
   return {
     text: `insert into tool_read_call (verb, actor_slug, actor_id, ok, error_kind, via, client_id,
-             organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-           values ($1, $2, (select id from actor where slug=$2), $3, $4, $5, $6, $7, $8, $9, $10)`,
+             organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class,
+             operational_profile)
+           values ($1, $2, (select id from actor where slug=$2), $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     params: [verb, actor.slug || null, ok, errorKind || null, actor.via || null, actor.client_id || null,
              identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-             identity.authorization_class],
+             identity.authorization_class, actor.operational_profile || "full"],
   };
 }
 

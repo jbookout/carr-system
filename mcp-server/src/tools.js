@@ -99,11 +99,12 @@ async function withEnvelope(client, actor, verb, args, fn) {
   const identity = auditIdentity(actor);
   await client.query(
     `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class,
+       operational_profile)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null,
      identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-     identity.authorization_class]);
+     identity.authorization_class, actor.operational_profile || "full"]);
   return result;
 }
 
@@ -157,13 +158,15 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
   await client.query(
     `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class,
+       operational_profile)
+     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
      actor.via || null, actor.client_id || null, identity.organization_tenant_id,
-     identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
+     identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
+     actor.operational_profile || "full"]);
 }
 
 // [loop #278] The ONE place a decision gets mirrored onto the record it governs.
@@ -198,10 +201,14 @@ async function mirrorDecision(client, actor, d) {
     // so the timeline shows the whole history — attached, retracted, attached again —
     // rather than quietly resurrecting a row somebody deliberately struck through.
     const dup = await client.query(
-      `select 1 from event
-        where subject_type = $1 and subject_id = $2 and field = 'decision'
-          and new_value->>'decision_id' = $3
-          and coalesce((new_value->>'retracted')::boolean, false) = false limit 1`,
+      `select 1 from event pointer
+        where pointer.subject_type = $1 and pointer.subject_id = $2 and pointer.field = 'decision'
+          and pointer.new_value->>'decision_id' = $3
+          and not exists (
+            select 1 from event detached
+             where detached.verb='detach-decision'
+               and detached.new_value->>'pointer_event_id'=pointer.id::text
+          ) limit 1`,
       [s.type, s.id, d.decision_id]);
     if (dup.rows.length) { attached.push({ ...s, already: true }); continue; }
 
@@ -2095,7 +2102,7 @@ export const TOOLS = {
 
   "integrity-digest": {
     write: false,
-    description: "The heartbeat's lines: row counts, export freshness (dead-man; stale/last_ok per target), writes_by_dell_24h, norm_owed_open, merge_queue, triage queue.",
+    description: "The heartbeat's lines: row counts, export freshness (dead-man; stale/last_ok per target), writes_by_dell_24h, norm_owed_open, merge_queue, triage queue, and the append-only audit-chain verifier.",
     inputSchema: { type: "object", properties: {} },
     handler: async (c) => ({ digest: (await c.query("select * from v_integrity_digest")).rows }),
   },
@@ -4288,9 +4295,10 @@ export const TOOLS = {
       const r = await c.query(
         `insert into event (occurred_at, actor_id, verb, subject_type, subject_id,
            new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
-           organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class)
+           organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class,
+           operational_profile)
          values (coalesce($1::timestamptz, now()), $2, 'log-decision', 'decision', $3,
-                 $4, 'human_stated', $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 $4, 'human_stated', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          -- to_char, not ::date: node-postgres hands a ::date back as a JS Date, and
          -- interpolating that into session_key produced
          -- "Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated Universal Time)-joe"
@@ -4308,7 +4316,8 @@ export const TOOLS = {
                                             quality_delta: qualityDelta } : {}) }),
          args.human_quote || null, args.rationale, args.idempotency_key,
          actor.via || null, actor.client_id || null, identity.organization_tenant_id,
-         identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class]);
+         identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
+         actor.operational_profile || "full"]);
 
       const ev = r.rows[0];
       const sessionKey = args.session_key || `${ev.entry_date}-${actor.slug}`;
@@ -4358,10 +4367,10 @@ export const TOOLS = {
   // existed" when the truth was that one existed and was fumbled — a defective record, not
   // history worth preserving. Joe: "create an update-decision verb and then update them".
   //
-  // MUTATES THE ENTRY, APPENDS THE AMENDMENT. The decision event itself is corrected in
-  // place so v_decision_entry and decision-history.md read the truth, AND a separate
-  // amend-decision event records what changed and why. Correcting the record without a
-  // trace would be the worse half of both options.
+  // APPENDS THE CORRECTION. The original decision event is immutable; the latest
+  // amend-decision row carries the complete corrected projection that
+  // v_decision_entry reads. This preserves both what was first recorded and what
+  // a reader should believe now without asking one mutable row to be both things.
   "update-decision": {
     write: true,
     description: "Correct a decision entry already recorded by log-decision — a wrong or missing title, rationale, human_quote or provenance — or ATTACH it to the record(s) it governs after the fact with `about`. Use for a DEFECTIVE record (a quote that was lost, a rationale that stated something untrue), never to rewrite what was actually decided: a decision that CHANGED is a new log-decision, because the old one really was the call at the time. Attaching is different from correcting and is always safe: it adds a pointer on the record's timeline, changes nothing about the entry itself, and re-attaching the same record is a no-op rather than a second pointer. Pass only the fields you are correcting. Re-derives quote_absent from whether a quote is present afterwards, and appends an amend-decision event recording the change.",
@@ -4378,9 +4387,28 @@ export const TOOLS = {
       reason: { type: "string", description: "why the entry needed correcting — recorded on the amendment" } },
       required: ["idempotency_key","decision_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-decision", args, async () => {
+      // The amendment stores a complete current projection. Serialize on the
+      // decision id before reading that projection so two corrections to
+      // different fields cannot both branch from the same snapshot and let the
+      // last committer erase the first one's change.
+      await c.query(
+        "select pg_advisory_xact_lock(hashtextextended('carr:decision:' || $1::text, 0))",
+        [args.decision_id]);
       const cur = (await c.query(
-        `select id, new_value, human_quote, agent_rationale from event
-          where subject_id = $1 and verb = 'log-decision' limit 1`, [args.decision_id])).rows[0];
+        `select base.id,
+                coalesce(amend.new_value->'current_new_value', base.new_value) as new_value,
+                case when amend.id is null then base.human_quote else amend.human_quote end as human_quote,
+                case when amend.id is null then base.agent_rationale else amend.agent_rationale end as agent_rationale
+           from event base
+           left join lateral (
+             select a.id, a.new_value, a.human_quote, a.agent_rationale
+               from event a
+              where a.subject_type='decision' and a.subject_id=base.subject_id
+                and a.verb='amend-decision' and a.new_value ? 'current_new_value'
+              order by a.recorded_at desc, a.id desc limit 1
+           ) amend on true
+          where base.subject_id = $1 and base.verb = 'log-decision' limit 1`,
+        [args.decision_id])).rows[0];
       if (!cur) throw new ToolError({ error: "decision_not_found", decision_id: args.decision_id,
         hint: "pass the decision_id log-decision returned, not the event_id" });
 
@@ -4409,11 +4437,6 @@ export const TOOLS = {
       if (mergedCost) { next.cost_delta = mergedCost; next.quality_delta = mergedQuality; }
       else { delete next.cost_delta; delete next.quality_delta; }
 
-      await c.query(
-        `update event set new_value = $1, human_quote = $2, agent_rationale = $3 where id = $4`,
-        [JSON.stringify(next), quote || null,
-         args.rationale !== undefined ? args.rationale : cur.agent_rationale, cur.id]);
-
       // [loop #278] Attach after the fact, through the SAME helper log-decision uses, so
       // a late attachment is indistinguishable from one made at the time. The mirror
       // carries the CURRENT title, which is right: an entry corrected here should not
@@ -4427,10 +4450,13 @@ export const TOOLS = {
       const changed = ["title","rationale","human_quote","provenance","cost_delta","quality_delta"]
         .filter(f => args[f] !== undefined);
       await writeEvent(c, actor, "amend-decision", "decision", args.decision_id,
-        { old: { quote_absent: nv.quote_absent },
-          new: { fields: changed, quote_absent: !quote,
+        { old: { current_new_value: nv, quote_present: Boolean(cur.human_quote) },
+          new: { current_new_value: next, fields: changed, quote_absent: !quote,
+                 amendment_reason: args.reason || null,
                  ...(attached.length ? { attached_to: attached.map(a => a.ref) } : {}) },
-          agent_rationale: args.reason || null, idempotency_key: args.idempotency_key });
+          human_quote: quote || null,
+          agent_rationale: args.rationale !== undefined ? args.rationale : cur.agent_rationale,
+          idempotency_key: args.idempotency_key });
 
       return { ok: true, decision_id: args.decision_id, amended: changed, quote_absent: !quote,
                about: attached.map(a => ({ type: a.type, id: a.id, ref: a.ref, already_attached: a.already })) };
@@ -4447,9 +4473,10 @@ export const TOOLS = {
   // field a human reads: its timeline summary is struck through with RETRACTED and the
   // reason, so the ruling can never be mistaken for a live one at a glance.
   //
-  // Same mutate-in-place-plus-append-the-amendment shape update-decision already uses:
-  // the pointer is corrected where it is read, and a separate detach-decision event
-  // records who retracted it and why.
+  // Same append-only projection shape update-decision uses: the pointer stays
+  // byte-for-byte intact and a detach-decision event changes how the timeline
+  // projects it. The record says attached -> detached without rewriting either
+  // fact after the fact.
   "detach-decision": {
     write: true,
     description: "Take a decision back off a record it was wrongly attached to. NOTHING IS DELETED: the pointer stays on the timeline as a permanent audit row, restated so a reader sees at a glance that it was retracted and why — a wrong attachment is a thing that happened, and hiding it would be the worse record. Use when a ruling was attached to a client, lead, vendor or party it is not actually about. NOT for a decision that has CHANGED (that is a new log-decision) and NOT for fixing the entry's own wording (that is update-decision). Re-attaching afterwards is allowed and writes a fresh live pointer beside the retracted one, so the timeline shows attached → retracted → attached rather than a row quietly coming back to life.",
@@ -4466,39 +4493,40 @@ export const TOOLS = {
 
       const s = await resolveSubject(c, args.from);
       const ptr = (await c.query(
-        `select id, new_value from event
-          where subject_type = $1 and subject_id = $2 and field = 'decision'
-            and new_value->>'decision_id' = $3
-          order by coalesce((new_value->>'retracted')::boolean, false), recorded_at desc
+        `select pointer.id, pointer.new_value, detached.id as detach_event_id,
+                detached.new_value->>'retraction_reason' as retracted_reason
+           from event pointer
+           left join lateral (
+             select d.id, d.new_value
+               from event d
+              where d.verb='detach-decision'
+                and d.new_value->>'pointer_event_id'=pointer.id::text
+              order by d.recorded_at desc, d.id desc limit 1
+           ) detached on true
+          where pointer.subject_type = $1 and pointer.subject_id = $2 and pointer.field = 'decision'
+            and pointer.new_value->>'decision_id' = $3
+          order by (detached.id is null) desc, pointer.recorded_at desc
           limit 1`,
         [s.type, s.id, args.decision_id])).rows[0];
       if (!ptr) throw new ToolError({ error: "not_attached", decision_id: args.decision_id, from: args.from,
         hint: "this decision has no pointer on that record — check catch-me-up on it first" });
 
       const nv = ptr.new_value || {};
-      if (nv.retracted)
+      if (ptr.detach_event_id)
         return { ok: true, decision_id: args.decision_id, from: args.from,
-                 already_retracted: true, reason: nv.retracted_reason || null,
+                 already_retracted: true, reason: ptr.retracted_reason || null,
                  hint: "this pointer was already retracted; nothing changed" };
 
       // The summary is the ONLY field v_subject_timeline surfaces, so the retraction has
       // to live there or a reader never sees it. The original text is kept verbatim
       // behind the marker and preserved whole in summary_before_retraction.
       const original = nv.summary || "";
-      const next = { ...nv,
-        retracted: true,
-        retracted_reason: args.reason,
-        retracted_by: actor.slug,
-        summary_before_retraction: original,
-        summary: `RETRACTED — not about this record (${args.reason}) — was: ${original}` };
-
-      await c.query("update event set new_value = $1 where id = $2",
-        [JSON.stringify(next), ptr.id]);
-
       await writeEvent(c, actor, "detach-decision", s.type, s.id, {
         field: "decision_retracted",
         old: { summary: original, decision_id: args.decision_id },
-        new: { summary: `retracted a decision pointer: ${args.reason}`, decision_id: args.decision_id },
+        new: { summary: `retracted a decision pointer: ${args.reason}`,
+               decision_id: args.decision_id, pointer_event_id: ptr.id,
+               retraction_reason: args.reason, summary_before_retraction: original },
         agent_rationale: args.reason, idempotency_key: args.idempotency_key });
 
       return { ok: true, decision_id: args.decision_id,
