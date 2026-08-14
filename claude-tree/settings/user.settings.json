@@ -152,6 +152,46 @@
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/git-writer-gate.py",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/staging-attribution-gate.py",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/staging-observation-tracker.py",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/executor-tier-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|mcp__claude-in-chrome__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/model-floor-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__(record-defect|add-loop)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/drift-claim-gate.py",
+            "timeout": 10
           }
         ]
       }
@@ -164,6 +204,16 @@
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/lint-gate.py",
             "timeout": 40
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/staging-observation-tracker.py",
+            "timeout": 20
           }
         ]
       }
