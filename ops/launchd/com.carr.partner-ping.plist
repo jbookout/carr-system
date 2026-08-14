@@ -23,6 +23,10 @@
 
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>partner-ping</string>
+    <string>launchd.run</string>
     <string>{{REPO}}/.venv/bin/python</string>
     <string>{{REPO}}/tools/db-tap.py</string>
     <string>run</string>

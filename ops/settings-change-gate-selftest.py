@@ -72,8 +72,16 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def run(command: str, event: str = "PreToolUse", env_extra: dict | None = None,
-        exit_code: int = 0) -> tuple[int, str]:
-    """Drive the hook the way Claude Code drives it: JSON on stdin."""
+        exit_code: int = 0, reason: str | None = None) -> tuple[int, str]:
+    """Drive the hook the way Claude Code drives it: JSON on stdin.
+
+    `reason` is prepended to the COMMAND, not exported into the hook's
+    environment, because that is the only path production has. The first version
+    of this file put it in the environment and every assertion passed against a
+    path the real gate never takes — the gate then refused every settings change
+    on this machine with no way to satisfy it."""
+    if reason is not None:
+        command = f'CARR_CHANGE_REASON="{reason}" ' + command
     payload = {
         "hook_event_name": event,
         "tool_name": "Bash",
@@ -138,14 +146,27 @@ def main() -> int:
         rc, out = run(command)
         check(f"allows: {command[:52]}", rc == 0, f"rc={rc} {out[:80]}")
 
-    print("\n3. a reason lets the change through")
+    print("\n3. a reason IN THE COMMAND lets the change through")
     for command, what in WRITES[:4]:
-        rc, out = run(command, env_extra={"CARR_CHANGE_REASON": "because Joe asked"})
-        check(f"allows {what} with a reason", rc == 0, f"rc={rc} {out[:90]}")
+        rc, out = run(command, reason="because Joe asked for it")
+        check(f"allows {what} with an inline reason", rc == 0, f"rc={rc} {out[:90]}")
+    rc, out = run(WRITES[0][0], env_extra={"CARR_CHANGE_REASON": "an exported reason works too"})
+    check("an exported reason still works as a fallback", rc == 0, f"rc={rc}")
+
+    print("\n3b. a MENTION is not an invocation")
+    mentions = [
+        ('python3 - <<EOF\nprint("gh api -X DELETE repos/o/r/actions/variables/Z")\nEOF',
+         "a heredoc quoting a settings call"),
+        ('echo "run gh api -X PATCH repos/o/r/rulesets/1 later"', "a quoted settings call"),
+        ('grep -rn "launchctl unload" ops/', "a grep for one"),
+    ]
+    for command, what in mentions:
+        rc, out = run(command)
+        check(f"allows {what}", rc == 0, f"rc={rc}")
 
     print("\n4. an empty or throwaway reason is not a reason")
     for bogus in ("", "   ", "x", "test"):
-        rc, out = run(WRITES[0][0], env_extra={"CARR_CHANGE_REASON": bogus})
+        rc, out = run(WRITES[0][0], reason=bogus)
         check(f"refuses reason {bogus!r}", rc == 2, f"rc={rc}")
 
     print("\n5. the post hook records the outcome, and distinguishes them")

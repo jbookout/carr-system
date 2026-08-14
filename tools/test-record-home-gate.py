@@ -22,6 +22,22 @@ VAULT = os.path.expanduser(
 
 DENY, ALLOW = "deny", "allow"
 
+# THIS MACHINE'S VERDICT FOR A JOB-OUTPUT PATH, and why it is computed instead
+# of written down. Those rows retire PER PARTNER (Joe migrated 2026-08-14, Dell
+# at the 8/21 cutoff), so the honest expectation for a real hook invocation
+# depends on whose machine is running the test. Hardcoding Joe's answer passed
+# on his Mac and failed on the GitHub runner, which has no identity file and so
+# resolves as unmigrated — caught by CI on the first push of that change.
+#
+# The per-partner LOGIC is pinned exactly by the unit cases below, which inject
+# the actor and need no machine. What these subprocess cases prove is the layer
+# above it: that the hook actually consults the manifest and applies its verdict
+# end to end, on whatever machine is running.
+sys.path.insert(0, os.path.join(REPO, "hooks"))
+from md_manifest import MIGRATED_PARTNERS, local_actor  # noqa: E402
+
+JOB_OUTPUT = DENY if local_actor() in MIGRATED_PARTNERS else ALLOW
+
 CASES = [
     # (label, expected, tool, tool_input)
     ("A · generated render (shared rules)", DENY, "Write",
@@ -41,11 +57,11 @@ CASES = [
     # client-intake agent writes on purpose. Guarding the directory blocked those
     # too, and over-blocking a partner's own writing surface is how a gate ends up
     # switched off. The set is the exporter's own DOSSIER_FILES list.
-    ("allow · hand-authored intake file in prospects/", ALLOW, "Write",
+    ("P0+ · intake file in prospects/ follows this machine's partner", JOB_OUTPUT, "Write",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/Beasley-intake.md", "new_string": "x"}),
-    ("allow · hand-authored enterprise file in prospects/", ALLOW, "Edit",
+    ("P0+ · enterprise file in prospects/ follows this machine's partner", JOB_OUTPUT, "Edit",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/AltaPointe-enterprise.md", "new_string": "x"}),
-    ("allow · a name not in DOSSIER_FILES", ALLOW, "Write",
+    ("P0+ · a name not in DOSSIER_FILES is DENIED too (closed 2026-08-14)", JOB_OUTPUT, "Write",
      {"file_path": f"{VAULT}/DNA/Clients/prospects/BrandNewClient.md", "content": "x"}),
     ("A · hunt-ledger (was unguarded)", DENY, "Edit",
      {"file_path": f"{VAULT}/DNA/Network/hunt-ledger.md", "new_string": "x"}),
@@ -86,7 +102,7 @@ CASES = [
      {"file_path": f"{VAULT}/CLAUDE.md", "new_string": "rev 11: weekends are off"}),
     ("allow · AGENTS.md edit (manifest exact)", ALLOW, "Edit",
      {"file_path": f"{VAULT}/AGENTS.md", "new_string": "x"}),
-    ("allow · weekly brief output (retiring prefix)", ALLOW, "Write",
+    ("P0+ · weekly brief output follows this machine's partner", JOB_OUTPUT, "Write",
      {"file_path": f"{VAULT}/DNA/Network/briefs/2026-08-10-network-brief.md", "content": "x"}),
     ("allow · repo file, outside the vault", ALLOW, "Write",
      {"file_path": os.path.join(REPO, "specs", "some-spec.md"), "content": "spec"}),
@@ -116,8 +132,29 @@ def manifest_unit_cases():
     from datetime import date, timedelta
     from md_manifest import md_write_verdict, CUTOFF
     cases = [
-        ("unit · brief prefix allowed before cutoff",
-         md_write_verdict("DNA/Network/briefs/x.md", today=CUTOFF) is None),
+        # CLOSED EARLY, PER PARTNER — Joe, 2026-08-14: he is fully migrated, so
+        # his side retires now and absorbs the breakage while Dell's still
+        # works. The staggering IS the requirement, so both halves are asserted:
+        # closing Dell early would be as wrong as leaving Joe open.
+        ("unit · a migrated partner's brief row is CLOSED before the old cutoff",
+         md_write_verdict("DNA/Network/briefs/x.md", today=CUTOFF,
+                          actor="joe") is not None),
+        ("unit · an UNMIGRATED partner keeps the row until the cutoff",
+         md_write_verdict("DNA/Network/briefs/x.md", today=CUTOFF,
+                          actor="dell") is None),
+        ("unit · and the unmigrated partner still closes AFTER the cutoff",
+         md_write_verdict("DNA/Network/briefs/x.md", today=CUTOFF + timedelta(days=1),
+                          actor="dell") is not None),
+        ("unit · an UNRESOLVABLE identity falls back to the later date, so a "
+         "broken identity file cannot retire an unmigrated partner early",
+         md_write_verdict("DNA/Network/briefs/x.md", today=CUTOFF,
+                          actor="unresolved-machine") is None),
+        ("unit · the social batch path is closed for a migrated partner",
+         md_write_verdict("Marketing/Social Media/x-batch-2026-08-24-week.md",
+                          today=CUTOFF, actor="joe") is not None),
+        ("unit · closed-row message names the ruling, not just the cutoff",
+         "eliminate the ability" in (md_write_verdict(
+             "DNA/Network/briefs/x.md", today=CUTOFF, actor="joe") or "")),
         ("unit · brief prefix DENIED after cutoff",
          md_write_verdict("DNA/Network/briefs/x.md",
                           today=CUTOFF + timedelta(days=1)) is not None),

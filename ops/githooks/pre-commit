@@ -36,6 +36,25 @@
 
 PROTECTED="main"
 
+# ── a gate change carries its bless (rule c0b38d80) ──────────────────────────
+# Violated twice for real (2026-08-12, 2026-08-14): a gate moved without
+# ops/config/gate-baseline.json and every later session started under a GATE
+# INTEGRITY FAILURE banner it could do nothing about. The commit is the one
+# moment the two can be forced to move together. The logic lives in
+# staged-gate-bless-check.py beside this file, which also verifies the staged
+# HASHES match — a bless of the wrong bytes is the 2026-08-13 false re-bless,
+# not a bless. Escape hatch, same idiom as the rest of this file:
+#   CARR_ALLOW_UNBLESSED_GATE=1 git commit ...
+# Guarded on python3 AND on the helper being present, because an
+# accident-stopper whose interpreter or file is missing must degrade to
+# silence, not to blocking every commit on the machine.
+hookdir="$(dirname "$0")"
+if [ "$CARR_ALLOW_UNBLESSED_GATE" != "1" ] \
+    && [ -f "$hookdir/staged-gate-bless-check.py" ] \
+    && command -v python3 >/dev/null 2>&1; then
+  python3 "$hookdir/staged-gate-bless-check.py" || exit 1
+fi
+
 # Deliberate escape hatch, same shape and spelling as pre-push's
 # CARR_ALLOW_MAIN_PUSH. Set it for ONE command, never export it in a profile:
 #   CARR_ALLOW_MAIN_COMMIT=1 git commit -m "..."
