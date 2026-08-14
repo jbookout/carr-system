@@ -289,6 +289,28 @@ PYEOF
     run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t" \
       || { failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2; }
   done
+
+  # SHELL TESTS, run under their own shebang rather than "$PY". The loop above
+  # globs only *.py and hands every match to the Python interpreter, so a shell
+  # test dropped into tools/ was collected by nobody and executed by nothing —
+  # it would sit in the tree looking like coverage while never running once.
+  # Some things under test here ARE shell (mcp-server/smoke-reads.sh), and a
+  # Python wrapper around them would only shell out to the same script.
+  # Everything else is identical to the loop above: same exclusion scope, same
+  # counting, same captured log and same 12-line tail on failure.
+  for t in tools/test-*.sh; do
+    [ -f "$t" ] || continue
+    local sbase; sbase="$(basename "$t")"
+    local swhy; swhy="$(excluded_reason "$sbase")"
+    if [ -n "$swhy" ]; then
+      skiplist="$skiplist $sbase"
+      printf '        \033[33mnot run\033[0m  %s — %s\n' "$sbase" "$swhy" >&2
+      continue
+    fi
+    count=$((count+1))
+    run_quiet "$LOGDIR/gate-$sbase.log" "$t" \
+      || { failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2; }
+  done
   # gate-integrity is the baseline check itself: a gate edited without a
   # re-bless in the same commit (rule c0b38d80) fails here.
   #
