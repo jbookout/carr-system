@@ -50,6 +50,13 @@ import re
 import sys
 from urllib.parse import urlsplit
 
+# The shared "tell a command apart from the prose it carries" helper, already
+# used by the writer and staging-attribution gates. Imported rather than copied
+# for the reason its own docstring gives: two copies of "what counts as inert"
+# drift silently, because each copy still passes its own tests.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cmd_text import strip_inert_text  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "hook-guard.log")
 DELEGATION_STATE = os.path.join(REPO, "out", "delegation-gate-state.json")
@@ -547,6 +554,29 @@ SQL_CONTEXT = re.compile(
 # accidentally inherit the SQL gate.
 SQL_LABELS = frozenset({"DROP", "TRUNCATE", "unqualified DELETE", "unqualified UPDATE"})
 
+# DESCRIBING A DESTRUCTIVE COMMAND IS NOT RUNNING ONE — the same carve-out this
+# guard already makes for SQL keywords in prose (loop #240), applied to the
+# command-shaped rules. The patterns stay exactly as strict; they are simply
+# consulted against the part of the command the shell will actually EXECUTE,
+# because a quoted --body and a heredoc body are handed to a program as bytes.
+#
+# Measured on 2026-08-14, three times in one session: a pull-request body
+# reporting a fix to the writer gate, a comment verifying that fix had landed,
+# and a probe command investigating this very guard were each refused for
+# naming the command they were about. The workaround every time was moving the
+# text into a file, which is precisely how a gate teaches people to route
+# around it — and a gate people route around has already stopped working.
+#
+# THE CATASTROPHIC LABELS ARE DELIBERATELY ABSENT from this set: filesystem
+# format, raw device write and the two private-key rules keep no carve-out at
+# all. A wiped disk or a leaked key is unrecoverable, those phrases are
+# vanishingly rare in honest prose, and the cost of a false refusal there is a
+# rephrase rather than a restore. Conservatism belongs at the extremes.
+PROSE_SAFE_LABELS = frozenset({
+    "force push", "hard reset", "history rewrite", "forced clean",
+    "recursive/forced delete", "secure delete",
+})
+
 
 def is_sql_context(cmd):
     """True when the command could actually reach a database."""
@@ -793,6 +823,13 @@ def check(cmd):
             # The patterns stay exactly as strict; they are simply consulted only when
             # the command could reach a database at all.
             if label in SQL_LABELS and not is_sql_context(cmd):
+                continue
+            # Prose ABOUT a destructive command is documentation. Consulted
+            # only for the command-shaped labels, and only when the pattern is
+            # absent from the executable remainder — so anything outside a
+            # quoted prose flag or a heredoc body is still scanned exactly as
+            # before. See PROSE_SAFE_LABELS for what is deliberately excluded.
+            if label in PROSE_SAFE_LABELS and not pat.search(strip_inert_text(cmd)):
                 continue
             return f"{label} — blocked by the CARR unattended guard"
 
