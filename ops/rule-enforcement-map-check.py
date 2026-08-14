@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+from datetime import date
 from glob import glob
 from collections import Counter
 
@@ -41,6 +42,45 @@ BUILT_CLASS_BY_CATEGORY = {
     "post_action_verification": "stop_gate",
     "session_task_rail": "surfacing",
 }
+
+# AN UNASSIGNED RULE MAY EXIST BRIEFLY AND MAY NOT PERSIST (rule ab814a26).
+#
+# bin/sync-enforcement-map.py mints a placeholder entry for every newly
+# ACTIVATED rule, on purpose and correctly: classifying a rule is a judgment
+# call a mechanical hourly job must not make on a human's behalf. So refusing
+# every placeholder outright would put every session on the machine into a
+# gate-integrity failure within an hour of the next taught rule, and the fix
+# would be to delete this check. A guard that punishes the honest interim state
+# gets removed, and then nothing is checked at all.
+#
+# The placeholder therefore carries the date it was minted and ages out. Before
+# 2026-08-14 nothing aged it: 132 rules — two thirds of the whole rule set —
+# sat at the same placeholder, and no check anywhere refused a single one of
+# them. "Pending classification" had become the resting state rather than a
+# transition, which is precisely what recitation-is-not-enforcement means.
+PLACEHOLDER_MARK = "pending classification"
+PLACEHOLDER_GRACE_DAYS = 14
+_PLACEHOLDER_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def stale_placeholder(planned: str, today: date | None = None) -> bool:
+    """True when a placeholder has outlived its grace window.
+
+    An UNDATED placeholder is stale immediately: it could never age out, so
+    leaving it unrefused would make the permanent state permanent by
+    construction — the exact shape being repaired here. Text that is not a
+    placeholder at all is never stale, however old the work it describes.
+    """
+    if not isinstance(planned, str) or PLACEHOLDER_MARK not in planned.lower():
+        return False
+    match = _PLACEHOLDER_DATE.search(planned)
+    if not match:
+        return True
+    try:
+        minted = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return True
+    return ((today or date.today()) - minted).days > PLACEHOLDER_GRACE_DAYS
 
 
 def find_vault() -> str:
@@ -204,6 +244,12 @@ def validate(data: dict, source_ids: dict[str, list[str]] | None = None) -> list
             planned = detail.get("planned_control")
             if not isinstance(planned, str) or not planned.strip():
                 errors.append(f"{rule_id} unbuilt lacks planned_control")
+            elif stale_placeholder(planned):
+                errors.append(
+                    f"{rule_id} has sat unclassified past the {PLACEHOLDER_GRACE_DAYS}-day "
+                    "window — assign its trigger (a stop-gate check, binding-moment "
+                    "surfacing, or recorded-ambient with a written reason) per rule "
+                    "ab814a26, or give it a real planned_control")
             continue
 
         # The four BUILT classes: something concrete already refuses, verifies,
