@@ -2653,6 +2653,12 @@ export const TOOLS = {
         hint: "if this is genuinely a second deal for the same client, give it a distinguishing name" });
 
       let r;
+      // SAVEPOINT, for the same reason insertOrgPartyGuarded takes one (defect
+      // 18b12fda's review, 2026-08-14): after the insert fails, the enclosing
+      // transaction is aborted (25P02) until rolled back, so the diagnostic
+      // queries below used to die on the poisoned transaction and replace both
+      // friendly answers with an opaque error. The mapping was dead code.
+      await c.query("savepoint new_deal_insert");
       try {
         r = await c.query(
           `insert into deal (client_id, name, deal_type, phase, segment, city, lane, salesforce_id,
@@ -2666,12 +2672,14 @@ export const TOOLS = {
         // Map the database's own guards to answers a caller can act on, rather than
         // leaking a raw driver error. The DB stays the authority on both vocabularies.
         if (e.code === "23505") {
+          await c.query("rollback to savepoint new_deal_insert");
           const held = await c.query("select name from deal where salesforce_id=$1", [args.salesforce_id]);
           throw new ToolError({ error: "salesforce_id_in_use", salesforce_id: args.salesforce_id,
             held_by: held.rows[0]?.name ?? null,
             hint: "one Opportunity maps to exactly one deal; check whether this deal already exists under another name" });
         }
         if (e.code === "23503") {
+          await c.query("rollback to savepoint new_deal_insert");
           // deal has three closed vocabularies behind FKs: deal_type_ref,
           // deal_phase and (since 0074) deal_lane. Name the right one.
           const con = e.constraint || "";
