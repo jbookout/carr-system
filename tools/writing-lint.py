@@ -56,6 +56,13 @@ RULES = [
      "Double hyphen doing an em dash's job.",
      "Same fix as an em dash: split the sentence or use a comma."),
 
+    # --- the healthcare-audience spelling that must never slip ----------
+    ("hipaa-spelling", "HARD", W.format("hippa"),
+     "HIPAA misspelled (rule 412d37d3: it is always HIPAA — Health Insurance "
+     "Portability and Accountability Act). To a healthcare audience the "
+     "misspelling reads as not knowing the industry.",
+     "Spell it HIPAA."),
+
     # --- flagged vocabulary, unambiguous senses -------------------------
     ("vocab", "HARD",
      W.format("(?:delve|delves|delved|delving|unlock|unlocks|unlocked|unlocking"
