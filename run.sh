@@ -105,7 +105,11 @@ case "${1:-}" in
   # retrieve runs on the repo venv since the store pass (P4 dual-read) needs psycopg;
   # fails soft to file-index-only on any machine without it.
   retrieve)     shift; CARR_VAULT="$VAULT" "$PY" "$REPO/tools/retrieve.py" "$@" ;;
-  health)       CARR_VAULT="$VAULT" python3 "$REPO/tools/health-check.py" ;;
+  # health runs on the repo venv for the same reason retrieve does: its ops-record
+  # pass needs psycopg. Under a bare python3 it died mid-report, and the rows it
+  # never reached were the nightly chain result and rules live — the two the
+  # session-start brief tells sessions to go read when it reports a failure.
+  health)       CARR_VAULT="$VAULT" "$PY" "$REPO/tools/health-check.py" ;;
   config)       shift; python3 "$REPO/ops/config-as-code.py" "$@" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
