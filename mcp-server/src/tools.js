@@ -4921,11 +4921,23 @@ export const TOOLS = {
         if (!/^\d+$/.test(next))
           throw new ToolError({ error: "bad_number", got: args.number,
             hint: "digits only — the renders sort on this and a free-form ref sorts wrong forever" });
-        if (args.renumber_reason === undefined)
-          throw new ToolError({ error: "renumber_reason_required",
-            hint: "rule 7105955b: a renumbered row is not an abandoned one, and the old number " +
-                  "survives in other rows' prose and in every render. Say why, in the same call." });
+        // THE REASON IS REQUIRED FOR A RENUMBER, NOT FOR SAYING WHICH ROW YOU
+        // MEAN. This check used to sit above the comparison, so it fired on the
+        // mere PRESENCE of `number` — and `number` is also this verb's
+        // documented way to identify a row ("alternative to loop_id" in its own
+        // input schema). The result: editing a loop by the number a human
+        // actually says was refused with an error about renumbering, and the
+        // only way through was to fetch the row with read-loop and pass
+        // loop_id, one extra round trip to work around a guard that was not
+        // guarding anything. Hit twice on 2026-08-14 clearing stale blockers.
+        // The guard itself is right (rule 7105955b); it was reading the wrong
+        // condition. Now it asks only when the number is genuinely CHANGING.
         if (next !== cur.number) {
+          if (args.renumber_reason === undefined)
+            throw new ToolError({ error: "renumber_reason_required",
+              from: cur.number, to: next,
+              hint: "rule 7105955b: a renumbered row is not an abandoned one, and the old number " +
+                    "survives in other rows' prose and in every render. Say why, in the same call." });
           // The uniqueness index added alongside this enforces it in the database;
           // this check exists so the caller gets the two colliding ids back instead
           // of a constraint name.
