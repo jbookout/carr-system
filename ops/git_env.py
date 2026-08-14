@@ -81,14 +81,20 @@ def scrubbed_env(base=None):
         env.pop(var, None)
     # GIT_CONFIG_COUNT drives the GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs,
     # which can carry core.worktree and relocate the call as surely as GIT_DIR.
-    count = env.pop("GIT_CONFIG_COUNT", None)
-    if count:
-        try:
-            for i in range(int(count)):
-                env.pop(f"GIT_CONFIG_KEY_{i}", None)
-                env.pop(f"GIT_CONFIG_VALUE_{i}", None)
-        except ValueError:
-            pass
+    #
+    # BOUNDED, NOT TRUSTED. The first version of this looped range(int(count))
+    # straight from the environment, so GIT_CONFIG_COUNT=999999999 would have
+    # spun here — a scrub function turned into a stall by the very input it does
+    # not trust. The bound came from the independent implementation in
+    # ops/config-as-code.py (PR #20), which got it right first and is the reason
+    # this consolidation kept the borrowed version rather than the original.
+    try:
+        count = int(env.pop("GIT_CONFIG_COUNT", "") or 0)
+    except ValueError:
+        count = 0
+    for n in range(max(0, min(count, 1000))):
+        env.pop(f"GIT_CONFIG_KEY_{n}", None)
+        env.pop(f"GIT_CONFIG_VALUE_{n}", None)
     return env
 
 
