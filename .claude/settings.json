@@ -11,6 +11,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"${HOME}/carr-system/hooks/worktree-self-plumb.py\"",
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }
