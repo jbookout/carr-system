@@ -112,6 +112,13 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+# INERT-TEXT HANDLING LIVES IN cmd_text.py — shared verbatim with
+# hooks/git-writer-gate.py, which refused the same prose one moment earlier for a
+# different reason. Two gates, one definition of what is not a command; two
+# copies would drift silently, since each would still pass its own tests.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cmd_text import strip_inert_text  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "staging-attribution-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "hook-guard.log")
@@ -349,12 +356,21 @@ def main():
         session_id = payload.get("session_id") or payload.get("sessionId")
         cwd = payload.get("cwd")
 
+        # SCAN THE COMMANDS, NOT THE PROSE THEY CARRY. A heredoc body and a
+        # quoted message are data the shell hands to a program, never commands it
+        # runs. This gate refused a commit whose staging was correctly
+        # path-named, purely because the MESSAGE explained why whole-tree staging
+        # is banned — the message had to be moved to a file to land. Same defect
+        # as hooks/git-writer-gate.py hit three times the same day, which is why
+        # the definition of "inert" is shared between them rather than copied.
+        scannable = strip_inert_text(cmd)
+
         # --- 1. Wholesale forms: refused outright, no override, regardless of
         #        tree state. ---
         wholesale_hit = None
-        if COMMIT_WHOLESALE.search(cmd):
+        if COMMIT_WHOLESALE.search(scannable):
             wholesale_hit = "commit_all"
-        elif ADD_WHOLESALE.search(cmd):
+        elif ADD_WHOLESALE.search(scannable):
             wholesale_hit = "add_all"
 
         if wholesale_hit:

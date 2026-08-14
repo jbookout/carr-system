@@ -108,12 +108,23 @@ def audit(rec):
         pass
 
 
-def dirty_files():
-    """Uncommitted paths in the shared tree — modified, staged, or untracked."""
+def dirty_files(tree=None, tracked_only=False):
+    """Uncommitted paths in a tree — modified, staged, and (by default) untracked.
+
+    tracked_only drops untracked files from the answer, and is used ONLY when
+    judging a worktree. A branch switch does not destroy untracked files — git
+    keeps them, or refuses outright when the target branch would overwrite one —
+    whereas the 2026-08-09 incident this gate exists for was MODIFIED TRACKED
+    files being swept into someone else's commit and then lost. A freshly created
+    worktree also always carries build output (mcp-server/node_modules), so
+    counting untracked files there would make the gate's own recommended remedy
+    permanently unusable from the moment it is created. The shared tree keeps the
+    stricter reading, because that is where other sessions actually live.
+    """
+    args = ["git", "-C", tree or REPO, "status", "--porcelain"]
+    args.append("--untracked-files=no" if tracked_only else "--untracked-files=all")
     try:
-        out = subprocess.run(
-            ["git", "-C", REPO, "status", "--porcelain", "--untracked-files=all"],
-            capture_output=True, text=True, timeout=20).stdout
+        out = subprocess.run(args, capture_output=True, text=True, timeout=20).stdout
     except Exception:
         return []
     files = []
@@ -121,6 +132,91 @@ def dirty_files():
         if len(line) > 3:
             files.append(line[3:].strip().strip('"'))
     return files
+
+
+# WHICH TREE IS THIS COMMAND ACTUALLY AIMED AT. This gate used to read the SHARED
+# checkout's dirtiness no matter where the command ran, which produced a refusal
+# that contradicted its own advice: the deny text says "to change branch, use a
+# WORKTREE so no other session's tree moves", and then a `git checkout -b` issued
+# from inside a worktree was refused anyway, because the MAIN tree was dirty.
+# Moving a worktree's branch cannot touch the main tree's files — separate
+# checkouts, separate indexes — so the shared tree's dirtiness is not evidence
+# about that command. Measured 2026-08-14: the remedy the gate recommends was
+# unusable while the condition it complains about was true, which is exactly when
+# a session needs it.
+_CD_RE = re.compile(r"\bcd\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))")
+_DASH_C_RE = re.compile(r"\bgit\s+-C\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))")
+
+
+def target_tree(cmd):
+    """The worktree this command operates in, or None for the shared checkout.
+
+    Only ever returns a path UNDER the repo's own worktrees directory. Anything
+    else — an unrelated repo, a path outside REPO — falls back to the shared
+    tree, so this can never be used to point the gate at a tree that makes it
+    look clean.
+    """
+    wt_root = os.path.realpath(os.path.join(REPO, ".claude", "worktrees"))
+    for rx in (_DASH_C_RE, _CD_RE):
+        for m in rx.finditer(cmd):
+            raw = next((g for g in m.groups() if g), None)
+            if not raw:
+                continue
+            raw = os.path.expanduser(raw)
+            # A RELATIVE PATH IS THE NATURAL FORM AND WAS BEING MISSED. Commands
+            # here routinely read `cd ~/carr-system && cd .claude/worktrees/x`,
+            # and resolving that against the HOOK's cwd rather than the repo made
+            # the exemption apply only to absolute paths — so the first real use
+            # of it after it shipped was refused. Relative candidates resolve
+            # against REPO, which is the only directory a relative `cd` in these
+            # commands is ever written against.
+            candidates = [raw] if os.path.isabs(raw) else [os.path.join(REPO, raw), raw]
+            for c in candidates:
+                try:
+                    cand = os.path.realpath(c)
+                except Exception:
+                    continue
+                # Still bounded exactly as before: under this repo's own
+                # worktrees directory, and actually present on disk.
+                if cand.startswith(wt_root + os.sep) and os.path.isdir(cand):
+                    return cand
+    return None
+
+
+# A PATH-SCOPED CHECKOUT IS NOT A BRANCH MOVE. `git checkout <ref> -- <paths>`
+# leaves HEAD exactly where it was and rewrites only the paths it names, so it
+# cannot make another session's files vanish the way the 2026-08-09 incident did
+# — that was `commit` sweeping unnamed files, then `checkout main` moving HEAD
+# underneath everyone. `git checkout -- <path>` was already exempt here; the form
+# WITH a ref was not, which is the narrow form the deny text itself points people
+# toward when they need one file back.
+#
+# The exemption is conditional, and the condition is the whole protection: it
+# applies only when NONE of the named paths is currently dirty. Restoring a path
+# that has no uncommitted changes destroys nothing. Restoring one that does is
+# still refused, because that is the case where somebody's in-flight work is
+# sitting in the file being overwritten.
+_CHECKOUT_PATHS_RE = re.compile(
+    r"\bgit\s+(?:-C\s+\S+\s+)?checkout\s+(?P<ref>\S+)\s+--\s+(?P<paths>.+)$", re.I)
+
+
+# INERT-TEXT HANDLING LIVES IN cmd_text.py — shared verbatim with
+# hooks/staging-attribution-gate.py, which refused the same prose one moment
+# later for a different reason. Two gates, one definition of what is not a
+# command. Two copies would drift silently, because each would still pass its
+# own tests.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cmd_text import strip_inert_text  # noqa: E402
+
+
+def path_scoped_checkout_paths(cmd):
+    """The paths a `git checkout <ref> -- <paths>` names, or None if not that."""
+    m = _CHECKOUT_PATHS_RE.search(cmd.strip())
+    if not m or m.group("ref").startswith("-"):
+        return None
+    raw = m.group("paths").split("&&")[0].split(";")[0].split("|")[0]
+    paths = [p.strip().strip("'\"") for p in raw.split() if p.strip()]
+    return paths or None
 
 
 def main():
@@ -138,18 +234,47 @@ def main():
         if "git" not in cmd:
             sys.exit(0)
 
+        # SCAN THE COMMANDS, NOT THE PROSE THEY CARRY. A heredoc body and a
+        # quoted -m message are DATA — they are never executed — yet the whole
+        # command string was being pattern-matched, so writing ABOUT a dangerous
+        # git command was refused as though it were one. Hit three times on
+        # 2026-08-14 alone: a .gitignore comment mentioning a staging command, and
+        # twice on commit messages for this very file, whose entire subject is
+        # which git commands are safe. The effect is perverse — it makes the fix
+        # for a gate the hardest thing to describe in its own commit — and the
+        # workaround it forces is writing the message to a file, which nobody
+        # will remember and which teaches people the gate is noise.
+        scannable = strip_inert_text(cmd)
+
         hit = None
         for name, pat in DANGEROUS:
-            if pat.search(cmd):
+            if pat.search(scannable):
                 hit = name
                 break
         if not hit:
             sys.exit(0)
 
-        dirty = dirty_files()
+        # Judge the tree the command is actually aimed at, not always the shared
+        # one. target_tree() only ever returns a path under this repo's own
+        # worktrees directory, so this cannot be pointed somewhere convenient.
+        tree = target_tree(cmd)
+        dirty = dirty_files(tree, tracked_only=bool(tree))
         if not dirty:
-            dlog(f"ALLOW({hit}) tree clean :: {cmd[:120]}")
+            where = f" in worktree {os.path.basename(tree)}" if tree else ""
+            dlog(f"ALLOW({hit}) tree clean{where} :: {cmd[:120]}")
             sys.exit(0)
+
+        # `git checkout <ref> -- <paths>` where every named path is clean: HEAD
+        # does not move and nothing uncommitted is overwritten, so there is
+        # nothing for this gate to protect.
+        scoped = path_scoped_checkout_paths(cmd)
+        if scoped:
+            collisions = [p for p in scoped
+                          if any(d == p or d.startswith(p.rstrip("/") + "/") for d in dirty)]
+            if not collisions:
+                dlog(f"ALLOW({hit}) path-scoped, named paths clean :: {cmd[:120]}")
+                sys.exit(0)
+            dirty = collisions  # report only what actually blocks it
 
         shown = "\n".join(f"    {f}" for f in dirty[:12])
         more = f"\n    ... and {len(dirty) - 12} more" if len(dirty) > 12 else ""
