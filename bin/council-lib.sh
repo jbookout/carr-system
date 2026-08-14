@@ -82,7 +82,18 @@ PRECHECK_EFFORT="low"
 
 # run_codex <brief> <out>          — council tier
 run_codex() {
+  # --dangerously-bypass-hook-trust: the hooks in ~/.codex/hooks.json are OUR
+  # OWN gate code (ops/config/codex-hooks.json is the tracked contract), not a
+  # third party's. Codex requires persisted hook trust granted interactively
+  # before it will run a hook at all, and an unattended `codex exec` never
+  # gets that prompt — so without this flag every PreToolUse hook (including
+  # guard-unattended.py) is SILENTLY SKIPPED, no denial, no warning. This flag
+  # runs already-enabled hooks without requiring that interactive trust — it
+  # is what turns enforcement ON for this unattended path. Verified live by a
+  # negative smoke 2026-08-14: the identical probe ran clean without the flag
+  # and was correctly blocked with it. See ops/codex-hook-smoke.sh.
   codex exec --sandbox read-only --skip-git-repo-check \
+    --dangerously-bypass-hook-trust \
     -c model="\"${CODEX_MODEL}\"" \
     -c model_reasoning_effort="\"${CODEX_EFFORT}\"" \
     "$(cat "$1")" < /dev/null > "$2" 2>"${2:r}.err"
@@ -97,7 +108,12 @@ run_grok() {
 
 # run_precheck <brief> <out>       — triage tier, NOT the council tier
 run_precheck() {
+  # --dangerously-bypass-hook-trust: same reasoning as run_codex above — these
+  # are our own gate hooks, and without persisted interactive trust codex
+  # silently skips them on an unattended run. This flag is what turns
+  # enforcement ON here too (verified by the same 2026-08-14 negative smoke).
   codex exec --sandbox read-only --skip-git-repo-check \
+    --dangerously-bypass-hook-trust \
     -c model="\"${PRECHECK_MODEL}\"" \
     -c model_reasoning_effort="\"${PRECHECK_EFFORT}\"" \
     "$(cat "$1")" < /dev/null > "$2" 2>"${2:r}.err"

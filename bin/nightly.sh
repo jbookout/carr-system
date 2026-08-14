@@ -297,6 +297,23 @@ EXPORTS_RC=$LAST_STEP_RC
 # half PARTIAL rather than failing on it — see ops/cutover-readiness.py.
 step "cutover readiness (store-first boot predicate)" ./.venv/bin/python ops/cutover-readiness.py
 
+# CODEX HOOK SMOKE (2026-08-14). Live negative proof that Codex's PreToolUse
+# hooks — this repo's OWN gate code, including guard-unattended.py — actually
+# fire on an unattended `codex exec` run, not merely that the config file
+# matches the tracked contract. Verified live the same day: plain `codex
+# exec` SILENTLY SKIPS every hook (no denial, no warning) unless it carries
+# --dangerously-bypass-hook-trust, because Codex requires persisted hook
+# trust granted only interactively, which an unattended run never has. That
+# flag is now on every sanctioned invocation site (bin/council-lib.sh,
+# pipelines/run_codex_review.py); this step is the ongoing check that it
+# keeps working, so a Codex CLI upgrade or config change that silently
+# reopens the gap gets caught here rather than in production.
+# tools/health-check.py reads this step's result record
+# (out/codex-hook-smoke.json) and goes red if it is ever missing or older
+# than 30 days — SKIP (78) on a machine with no Codex CLI installed, not a
+# nightly alarm nobody can fix.
+step "codex hook smoke (live negative PreToolUse proof)" ./ops/codex-hook-smoke.sh
+
 # CORPUS FLIP (2026-08-06): the doctrine tier is git-canonical now — corpus/ under this
 # repo, not the Drive, is the source of truth. This step pushes whatever changed in git
 # out to the Drive/vault/home render copies. It refuses to clobber a source-side hand-edit

@@ -664,7 +664,21 @@ def build_codex_command(codex_bin: str, prompt: str, cwd: Path) -> list[str]:
     # `-o/--output-last-message FILE` flag exists as a stronger capture if
     # stdout ever proves noisy; not adopted yet to keep the parser signature
     # untouched.
-    return [codex_bin, "exec", "--sandbox", "read-only", prompt]
+    #
+    # --dangerously-bypass-hook-trust: the hooks in ~/.codex/hooks.json are
+    # OUR OWN gate code (ops/config/codex-hooks.json is the tracked
+    # contract), and Codex requires persisted hook trust granted
+    # interactively before it will run a hook — trust an unattended `codex
+    # exec` never has. Without this flag every PreToolUse hook, including
+    # guard-unattended.py, is SILENTLY SKIPPED: no denial, no warning. This
+    # flag runs already-enabled hooks without requiring that interactive
+    # trust, which is what turns enforcement ON for this unattended path.
+    # Verified live 2026-08-14 by a negative smoke against the same shell
+    # invocation shape in bin/council-lib.sh (see ops/codex-hook-smoke.sh):
+    # the identical probe ran clean without the flag and was correctly
+    # blocked with it.
+    return [codex_bin, "exec", "--sandbox", "read-only",
+            "--dangerously-bypass-hook-trust", prompt]
 
 
 def build_grok_command(grok_bin: str, prompt: str, cwd: Path) -> list[str]:
