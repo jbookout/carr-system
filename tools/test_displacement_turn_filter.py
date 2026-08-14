@@ -14,11 +14,9 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location(
-    "displacement_baselines", HERE / "displacement-baselines.py"
-)
-db = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(db)
+sys.path.insert(0, str(HERE.parent))
+from lib.loadpy import load_module_from_path  # noqa: E402
+db = load_module_from_path("displacement_baselines", str(HERE / "displacement-baselines.py"))
 
 
 def rec(text):

@@ -63,6 +63,23 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
+
+def fetch_one(cur):
+    """cur.fetchone() that refuses to return None.
+
+    Every call site here follows an `insert ... returning id` or a scalar
+    select, so a missing row means the statement did not do what this gate
+    assumes — and `fetch_one(cur)[0]` reports that as `TypeError: 'NoneType'
+    object is not subscriptable`, three frames from anything meaningful, in a
+    2am log. Named failure beats a traceback.
+    """
+    row = cur.fetchone()
+    if row is None:
+        raise AssertionError("expected one row back and got none — the statement "
+                             "above returned nothing")
+    return row
+
+
 try:
     import psycopg
 except ImportError:
@@ -115,7 +132,7 @@ def main() -> int:
             """insert into ops.service (key, name, family, criticality, owner_actor)
                values ('gate-probe', 'Program 3 gate probe', 'Data', 'high', 'joe')
                returning id""")
-        service_id = cur.fetchone()[0]
+        service_id = fetch_one(cur)[0]
 
         cur.execute(
             """insert into ops.service_environment
@@ -171,7 +188,7 @@ def main() -> int:
             (f"INC-GATE-{corr.hex[:8]}", corr, env,
              now - timedelta(minutes=8), now - timedelta(minutes=8),
              now + timedelta(days=1)))
-        incident_id = cur.fetchone()[0]
+        incident_id = fetch_one(cur)[0]
         cur.execute("insert into ops.incident_service (incident_id, service_id) values (%s, %s)",
                     (incident_id, service_id))
 
@@ -191,7 +208,7 @@ def main() -> int:
         check("the chain is in time order",
               all(chain[i][3] <= chain[i + 1][3] for i in range(len(chain) - 1)))
         check("the deploy precedes the failure",
-              kinds and kinds[0] == "deployment", f"first link was {kinds[0] if kinds else 'nothing'}")
+              bool(kinds) and kinds[0] == "deployment", f"first link was {kinds[0] if kinds else 'nothing'}")
 
         # ── 2. EVERY ROW NAMES SOURCE AND FRESHNESS ─────────────────────────
         print("\n2. every link names its source and its freshness")
@@ -234,7 +251,7 @@ def main() -> int:
                values ('gate-probe-silent', 'Program 3 silent-collector probe',
                        'Data', 'high', 'joe')
                returning id""")
-        silent_id = cur.fetchone()[0]
+        silent_id = fetch_one(cur)[0]
         cur.execute(
             """insert into ops.service_environment
                    (service_id, environment, expected_cadence_seconds)
@@ -279,7 +296,7 @@ def main() -> int:
             """select health from ops.v_service_environment_health
                 where service_id = %s and environment = %s""",
             (silent_id, env))
-        check("a fresh success reads healthy", cur.fetchone()[0] == "healthy",
+        check("a fresh success reads healthy", fetch_one(cur)[0] == "healthy",
               "the view may be answering unknown unconditionally")
 
         # ── 5. THE READ ROLE CANNOT WRITE ───────────────────────────────────
@@ -289,7 +306,7 @@ def main() -> int:
                 """select has_table_privilege('carr_reader', %s, 'select'),
                           has_table_privilege('carr_reader', %s, 'insert')""",
                 (f"ops.{table}", f"ops.{table}"))
-            can_read, can_write = cur.fetchone()
+            can_read, can_write = fetch_one(cur)
             check(f"carr_reader may read ops.{table}", can_read)
             check(f"carr_reader may NOT write ops.{table}", not can_write)
 

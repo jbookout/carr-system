@@ -1221,10 +1221,10 @@ try:
             _this = (_crj.get("this_machine") or {}).get("resolved_identity") or "(unresolved)"
             _parts = _crj.get("partners") or {}
             _bits = []
-            for _p in ("joe", "dell"):
-                _st = (_parts.get(_p) or {}).get("status", "MISSING")
-                _short = "READY" if _st == "READY" else ("PARTIAL" if _st.startswith("PARTIAL") else "NOT READY")
-                _bits.append(f"{_p}={_short}")
+            for _partner in ("joe", "dell"):
+                _cr_st = (_parts.get(_partner) or {}).get("status", "MISSING")
+                _short = "READY" if _cr_st == "READY" else ("PARTIAL" if _cr_st.startswith("PARTIAL") else "NOT READY")
+                _bits.append(f"{_partner}={_short}")
             _summary = f"this machine={_this}; {', '.join(_bits)}"
             if not _crj.get("overall_ready", False):
                 print(f"  ⚠︎ cutover-readiness    {_summary} ({_crc_age_h:.1f}h old) · on breach: "
@@ -1499,15 +1499,15 @@ try:
     if _rel is not None:
         _sha_obj = _rel.get("git_sha") or {}
         _sha = _sha_obj.get("value")
-        _verbs = _rel.get("verb_count")
-        _gen = (_rel.get("doctrine_generation") or {}).get("value")
+        _rel_verbs = _rel.get("verb_count")
+        _rel_gen = (_rel.get("doctrine_generation") or {}).get("value")
         _schema = _rel.get("schema") or {}
 
         if not _sha:
             _reason = _sha_obj.get("reason") or "no reason given"
             print(f"  ⚠︎ release       git_sha NOT STAMPED — {_reason} · production's "
                   f"provenance cannot be checked against this checkout until the next "
-                  f"deploy goes through bin/deploy-worker.sh ({_verbs} verbs reported)")
+                  f"deploy goes through bin/deploy-worker.sh ({_rel_verbs} verbs reported)")
             rc = 1
         else:
             # The commit may not exist in this checkout's object database yet (a
@@ -1526,7 +1526,7 @@ try:
             if _known.returncode != 0:
                 print(f"  ✗✗ release       production SHA {_sha[:12]} is UNKNOWN to this "
                       f"checkout even after git fetch — this repo has NO record of the "
-                      f"commit production is running ({_verbs} verbs reported). Check "
+                      f"commit production is running ({_rel_verbs} verbs reported). Check "
                       f"whether it exists on another remote/branch or was force-pushed away")
                 rc = 1
             else:
@@ -1535,13 +1535,13 @@ try:
                 _fetch_note = " (needed a git fetch to find it)" if _fetched else ""
                 if _anc.returncode == 0:
                     print(f"  OK release       production is running {_sha[:12]}{_fetch_note} — "
-                          f"an ancestor of local HEAD ({_verbs} verbs, schema "
-                          f"{_schema.get('highest_applied_migration') or '?'}, doctrine gen {_gen})")
+                          f"an ancestor of local HEAD ({_rel_verbs} verbs, schema "
+                          f"{_schema.get('highest_applied_migration') or '?'}, doctrine gen {_rel_gen})")
                 else:
                     print(f"  ✗✗ release       production SHA {_sha[:12]} EXISTS in this repo's "
                           f"history but is NOT an ancestor of local HEAD{_fetch_note} — "
                           f"production is off main, or main has been rewritten since it "
-                          f"shipped ({_verbs} verbs reported)")
+                          f"shipped ({_rel_verbs} verbs reported)")
                     rc = 1
 
         if _schema.get("reason"):

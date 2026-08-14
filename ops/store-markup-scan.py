@@ -82,6 +82,26 @@ ACCEPTED_HISTORICAL = {
     "c17997bd-e442-4a6b-94e6-aac5ecbc5a78",  # idea #66
     "adbe90af-676f-4bc3-9619-27d3fc002045",  # idea #67
     "3b152875-25fb-4916-af63-60a46f042336",  # loop #342
+    # loop #374, the push-safety loop ("do not push from the working checkout
+    # until the pre-push fixture is restored"). Corrupted and closed 2026-08-14,
+    # AFTER the ruling above, so it does not inherit it and was not meant to —
+    # it is added here as its own decision, with the evidence, because that is
+    # what the paragraph above asks for.
+    #
+    # Ruled 2026-08-14 on Joe's "fix this", after establishing three things:
+    #   1. Nothing was lost. source_note swallowed </source_note> and the whole
+    #      unblocks field after it, but the absorbed text is still readable in
+    #      source_note, and both fields are transcribed verbatim into loop #379.
+    #   2. It cannot be repaired. update-loop refuses a closed row on purpose —
+    #      "a closed loop is history; open a new one rather than editing the
+    #      record of what happened" — and that refusal is the design working.
+    #   3. The loop was closed correctly on its merits at 05:57; the corruption
+    #      is cosmetic and does not touch what the record says happened.
+    # The cause is now closed at the write door (looksLikeToolCallMarkup in
+    # mcp-server/src/tools.js), so this set should stop growing rather than
+    # becoming the routine landing place for new damage. If it grows again, the
+    # guard is not holding and that is the thing to fix, not this list.
+    "c8da74bd-49ef-40b8-baa3-fca2f6bb64e3",  # loop #374
 }
 
 
@@ -149,7 +169,7 @@ def main() -> int:
         join pg_attribute a on a.attrelid = c.oid and a.attnum = any(i.indkey)
         where i.indisprimary and n.nspname = 'public'
     """)
-    pks = {}
+    pks: dict = {}
     for t, c in cur.fetchall():
         pks.setdefault(t, c)
 
