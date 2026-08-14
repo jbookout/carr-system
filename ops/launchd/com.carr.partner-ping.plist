@@ -21,12 +21,14 @@
   <key>Label</key>
   <string>com.carr.partner-ping</string>
 
+  <!-- Program 4: routed through bin/partner-ping-run.sh, which wraps the real
+       ping in bin/with-run-record.sh (throttled — see ops/config/services.json)
+       AND, on the same wake, records an independent heartbeat against
+       carr-local-edge-node — the registered signal that this Mac is awake and
+       running launchd at all. See bin/partner-ping-run.sh's own header. -->
   <key>ProgramArguments</key>
   <array>
-    <string>{{REPO}}/.venv/bin/python</string>
-    <string>{{REPO}}/tools/db-tap.py</string>
-    <string>run</string>
-    <string>pipelines/partner_ping.py</string>
+    <string>{{REPO}}/bin/partner-ping-run.sh</string>
   </array>
 
   <key>WorkingDirectory</key>

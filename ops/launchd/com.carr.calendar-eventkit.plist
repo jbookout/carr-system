@@ -36,8 +36,15 @@
   <key>Label</key>
   <string>com.carr.calendar-eventkit</string>
 
+  <!-- Program 4: routed through bin/with-run-record.sh so this job's own
+       success/failure becomes a durable ops.run row (it also now has a
+       services.json registration it lacked before — see that file). No
+       throttle — weekday daily is already low-volume. -->
   <key>ProgramArguments</key>
   <array>
+    <string>{{REPO}}/bin/with-run-record.sh</string>
+    <string>calendar-eventkit</string>
+    <string>--</string>
     <string>/bin/sh</string>
     <string>{{REPO}}/bin/calendar-eventkit-capture.sh</string>
     <string>--days</string>
