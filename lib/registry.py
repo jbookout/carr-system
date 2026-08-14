@@ -54,7 +54,14 @@ REGISTRY_COLUMNS = [
 # IDs deliberately taken out of service. Never reissued, never reported as loss.
 #   L-162 — Dell's joint-test row, 2026-07-09; deleted same day after Joe
 #           confirmed T6 (twin live). Intake Log: "L-162 stays retired".
-RETIRED_IDS = {162}
+#   L-209, L-210 — never real leads; correlate with a documented Neon
+#           database-branch rehearsal that never touched production. Zero
+#           creation/deletion trace in the production event tables. Joe
+#           approved retirement 2026-08-14 (registry-audit "[5] ids" gap).
+#   L-212, L-213, L-220 — never real leads; no trace in production, the repo,
+#           or the vault. Joe approved retirement 2026-08-14 (registry-audit
+#           "[5] ids" gap).
+RETIRED_IDS = {162, 209, 210, 212, 213, 220}
 
 ID_RE = re.compile(r"^L-0*(\d+)$")
 
