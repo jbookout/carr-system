@@ -62,8 +62,8 @@ def message_of(path: str) -> str:
     return "\n".join(lines)
 
 
-def claims_of(message: str) -> list[str]:
-    claimed = []
+def claims_of(message: str) -> list[tuple[str, str]]:
+    claimed: list[tuple[str, str]] = []
     # The re-bless claim is matched against the SUBJECT only. A body regularly
     # DISCUSSES past re-bless incidents in prose — this very hook's history
     # does — and a mention is not an invocation (the settings-change gate
@@ -71,9 +71,15 @@ def claims_of(message: str) -> list[str]:
     # commit does; that is where the claim lives.
     subject = message.splitlines()[0] if message.splitlines() else ""
     if REBLESS.search(subject):
-        claimed.append(BASELINE)
+        claimed.append((BASELINE, subject.strip()))
     for match in PATH_LINE.finditer(message):
-        claimed.append(match.group(1))
+        # Carry the whole line, not just the path. The refusal has to be able to
+        # QUOTE what it objected to: on 2026-08-14 a message narrated two past
+        # incidents in the `path — text` shape, the gate refused correctly, and
+        # the author could not tell which of several lines was the problem — so
+        # they took the escape hatch instead of rewriting one line.
+        line = message[match.start():].splitlines()[0].strip()
+        claimed.append((match.group(1), line))
     return claimed
 
 
@@ -99,7 +105,7 @@ def main() -> int:
     if not staged:
         return 0  # message-only amend: no diff to disagree with
 
-    missing = [c for c in claimed if c not in staged]
+    missing = [(c, line) for c, line in claimed if c not in staged]
     if not missing:
         return 0
 
@@ -109,18 +115,35 @@ def main() -> int:
         "  COMMIT REFUSED — the message claims what the diff does not do\n"
         "  ────────────────────────────────────────────────────────────────\n\n"
         "  Your changes are untouched and still staged. Nothing was lost.\n\n")
-    for c in missing:
+    shape_claim = False
+    for c, line in missing:
         if c == BASELINE and BASELINE not in message:
             sys.stderr.write(f"    the message says the baseline was re-blessed, "
                              f"but {BASELINE} is not in the staged diff\n")
+            sys.stderr.write(f"        {line}\n")
         else:
+            shape_claim = True
             sys.stderr.write(f"    the message names {c}, "
                              "which is not in the staged diff\n")
+            sys.stderr.write(f"        {line}\n")
+    if shape_claim:
+        # WHY, not just WHAT. Without this the refusal reads as bookkeeping —
+        # "that path is not in the diff" — and the obvious response is the escape
+        # hatch. Naming the convention makes the cheaper fix visible: it is one
+        # line of prose to rewrite, not an exemption to claim.
+        sys.stderr.write(
+            "\n"
+            "  A line that opens `path — text` is the house shape for \"this commit\n"
+            "  changes this file\", which is why it reads as a claim. If you are\n"
+            "  DESCRIBING that file rather than changing it — past incidents,\n"
+            "  history, an example — put the path inside a sentence instead of at\n"
+            "  the start of the line, and the gate stops seeing a claim.\n")
     sys.stderr.write(
         "\n"
         "  On 2026-08-13 a commit claimed a re-bless its diff did not carry,\n"
         "  and whoever read the message believed the gates were attested.\n"
-        "  Fix the message, or stage what it names. A partial amend that\n"
+        "  Fix the message, or stage what it names. Rewriting the line is the\n"
+        "  cheaper door and usually the right one. A partial amend that\n"
         "  legitimately describes files outside this delta can say so for\n"
         "  one command:\n\n"
         "      CARR_ALLOW_CLAIM_MISMATCH=1 git commit ...\n\n")
