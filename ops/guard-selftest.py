@@ -215,6 +215,46 @@ case("an unquoted flag argument does not shield what follows",
 case("a disk format keeps no prose carve-out even in a body",
      bash('gh pr create --body "never run diskutil eraseDisk JHFS+ X /dev/disk2"'), DENY)
 
+# ── EVERY DESTRUCTIVE RULE FIRES ON THE COMMAND IT IS NAMED FOR ──────────────
+#
+# Found by sweeping the rule table on 2026-08-14, after the raw-device rule was
+# noticed missing the ordinary spelling of its own command while picking an
+# example for the cases above. Eight spellings across four rules were not
+# caught, and none of it showed up because NO fixture asserted these rules fire
+# at all — the suite tested the guard's allow side and its network side, and
+# took the destructive side on trust.
+#
+# A rule with no fire-asserting test is indistinguishable from a rule that does
+# not work. That is the same argument the audit ledger makes about a gate that
+# never fires, applied one level down.
+#
+# The device families stay ENUMERATED rather than matching /dev/ broadly:
+# /dev/null, /dev/tty and /dev/stderr are everyday redirection targets and must
+# never be refused.
+_DISK = "/dev/" + "disk2"
+_SD = "/dev/" + "sda1"
+_NVME = "/dev/" + "nvme0n1"
+
+case("raw write via dd is refused", bash(f"dd if=/dev/zero of={_DISK}"), DENY)
+case("raw write via dd with sudo is refused", bash(f"sudo dd of={_DISK} if=x"), DENY)
+case("raw write to an nvme device is refused", bash(f"dd of={_NVME} if=/dev/zero"), DENY)
+case("raw write via tee is refused", bash(f"tee {_SD} < x"), DENY)
+case("redirection to a device is still refused", bash(f"cat x > {_DISK}"), DENY)
+case("redirect to /dev/null is NOT a device write", bash("echo hi > /dev/null"), ALLOW)
+case("redirect to /dev/stderr is NOT a device write", bash("echo hi > /dev/stderr"), ALLOW)
+
+case("mkfs is refused", bash(f"mkfs.ext4 {_SD}"), DENY)
+case("newfs is refused", bash(f"newfs_hfs {_DISK}"), DENY)
+case("repartitioning a disk is refused", bash(f"diskutil partitionDisk {_DISK} 1 GPT"), DENY)
+
+case("a plus-refspec force push is refused", bash("git push origin +main:main"), DENY)
+case("an ordinary push is still allowed", bash("git push origin main"), ALLOW)
+
+case("find -delete is refused outside a scratch zone",
+     bash("find /Users/booko/important -name '*.md' -delete"), DENY)
+case("find without -delete is still allowed",
+     bash("find /Users/booko/important -name '*.md'"), ALLOW)
+
 
 def main():
     verbose = "-v" in sys.argv[1:]
