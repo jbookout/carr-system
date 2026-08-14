@@ -2656,6 +2656,7 @@ CREATE TABLE public.event (
     personal_scope text,
     authorization_class text,
     organization_tenant_id text,
+    correlation_id uuid,
     CONSTRAINT event_cause_check CHECK ((cause = ANY (ARRAY['human_stated'::text, 'human_correction'::text, 'ingest_email'::text, 'ingest_calendar'::text, 'ingest_webhook'::text, 'import_migration'::text, 'import_salesforce'::text, 'automation_job'::text, 'learning_job'::text, 'system'::text]))),
     CONSTRAINT event_personal_scope_check CHECK (((personal_scope IS NULL) OR (personal_scope = ANY (ARRAY['joe-personal'::text, 'dell-personal'::text, 'none'::text])))),
     CONSTRAINT event_sponsoring_human_slug_check CHECK (((sponsoring_human_slug IS NULL) OR (sponsoring_human_slug = ANY (ARRAY['joe'::text, 'dell'::text]))))
@@ -2702,6 +2703,13 @@ COMMENT ON COLUMN public.event.authorization_class IS 'Server-derived authority 
 --
 
 COMMENT ON COLUMN public.event.organization_tenant_id IS 'Server-derived CARR organization tenant. Null before 0095 is historically unknown.';
+
+
+--
+-- Name: COLUMN event.correlation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.event.correlation_id IS 'Same column, same source, same nullability reasoning as tool_call.correlation_id — see that comment. Threaded through writeEvent() and log-decision''s own direct insert, the only two places that write this table.';
 
 
 --
@@ -4036,6 +4044,7 @@ CREATE TABLE public.tool_call (
     personal_scope text,
     authorization_class text,
     organization_tenant_id text,
+    correlation_id uuid,
     CONSTRAINT tool_call_personal_scope_check CHECK (((personal_scope IS NULL) OR (personal_scope = ANY (ARRAY['joe-personal'::text, 'dell-personal'::text, 'none'::text])))),
     CONSTRAINT tool_call_sponsoring_human_slug_check CHECK (((sponsoring_human_slug IS NULL) OR (sponsoring_human_slug = ANY (ARRAY['joe'::text, 'dell'::text]))))
 );
@@ -4067,6 +4076,13 @@ COMMENT ON COLUMN public.tool_call.authorization_class IS 'Server-derived author
 --
 
 COMMENT ON COLUMN public.tool_call.organization_tenant_id IS 'Server-derived CARR organization tenant. Null before 0095 is historically unknown.';
+
+
+--
+-- Name: COLUMN tool_call.correlation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.tool_call.correlation_id IS 'The x-correlation-id of the Worker request that produced this write, set from env.CORRELATION_ID (mcp-server/src/correlation.js) via the actor object mcp.js''s dispatch() decorates it onto. Nullable: rows predate this column, and a write made through local-verb.mjs''s direct-database break-glass path or any caller outside this Worker carries no Worker-minted id.';
 
 
 --
@@ -9778,6 +9794,13 @@ CREATE INDEX event_actor_idx ON public.event USING btree (actor_id, occurred_at)
 
 
 --
+-- Name: event_correlation_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX event_correlation_idx ON public.event USING btree (correlation_id) WHERE (correlation_id IS NOT NULL);
+
+
+--
 -- Name: event_deal_cursor_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10076,6 +10099,13 @@ CREATE INDEX source_capture_date_idx ON public.source_capture USING btree (captu
 --
 
 CREATE INDEX source_capture_session_trgm ON public.source_capture USING gin (session public.gin_trgm_ops);
+
+
+--
+-- Name: tool_call_correlation_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tool_call_correlation_idx ON public.tool_call USING btree (correlation_id) WHERE (correlation_id IS NOT NULL);
 
 
 --
@@ -12392,11 +12422,14 @@ grant insert, select, update on table ops.incident_service to carr_writer;
 grant insert, select on table ops.run to carr_jobs;
 grant select on table ops.run to carr_reader;
 grant insert, select on table ops.run to carr_writer;
+grant insert, select, update on table ops.service to carr_exporter;
 grant select on table ops.service to carr_jobs;
 grant select on table ops.service to carr_reader;
 grant insert, select, update on table ops.service to carr_writer;
+grant insert, select, update on table ops.service_dependency to carr_exporter;
 grant select on table ops.service_dependency to carr_reader;
 grant insert, select, update on table ops.service_dependency to carr_writer;
+grant insert, select, update on table ops.service_environment to carr_exporter;
 grant select on table ops.service_environment to carr_jobs;
 grant select on table ops.service_environment to carr_reader;
 grant insert, select, update on table ops.service_environment to carr_writer;
@@ -12897,6 +12930,10 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0116_incident_signature.sql	9267e4799295a3c888a053ce018607140bcca5115b9c38ab77d151f098743070	2026-08-14 11:07:52.632609+00
 0117_collector_incident_grants.sql	25f46a6ade52dbea6a2e6e13072cec0510b992cbfd68424f8f310d0db2bb0e07	2026-08-14 11:21:39.42866+00
 0118_settings_change.sql	062bcfbb196bcd131a185fd045cd4194846623b16e9650858eed2495b1fe8996	2026-08-14 13:08:24.514561+00
+0119_backup_role.sql	49494c9b14ea35a5896c33633fb94db39beeb3c69f2efccce8d804e66bfc3525	2026-08-14 14:26:48.084134+00
+0120_backup_role_sequences.sql	a8b20e5a2a8602394ded89852e976df3e8a644bedb8dcfe6c04001cd31ec3254	2026-08-14 16:14:27.222819+00
+0121_registry_writer_grants.sql	29940125bc7e286eb5bddef93edc4de5ec25205ae747891f9210f3b67b00f2c6	2026-08-14 19:50:27.228399+00
+0122_worker_trace.sql	e8f18df1ce59c92efb8433f8c6935b5592705aa1a2ff048411143642e2a6b7ce	2026-08-14 21:21:12.203596+00
 \.
 
 
