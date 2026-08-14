@@ -1,4 +1,24 @@
 --
+-- CARR ROLE PREAMBLE (bin/schema-snapshot.sh) — not produced by pg_dump.
+--
+-- This dump is --no-owner --no-acl, so it names no roles and grants nothing.
+-- The roles still have to EXIST before the pending migrations that grant to
+-- them run, and they can no longer be got by replaying 0115: once this
+-- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
+-- An existing role is left exactly as it is; a missing one is created NOLOGIN
+-- purely so privileges have somewhere to attach in a rebuilt environment.
+--
+do $$
+declare r text;
+begin
+  foreach r in array array['carr_reader','carr_writer','carr_jobs'] loop
+    if not exists (select 1 from pg_roles where rolname = r) then
+      execute format('create role %I nologin', r);
+    end if;
+  end loop;
+end $$;
+
+--
 -- PostgreSQL database dump
 --
 
@@ -631,6 +651,7 @@ CREATE TABLE ops.incident (
     source_ref text NOT NULL,
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone,
+    signature text,
     CONSTRAINT incident_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
     CONSTRAINT incident_severity_check CHECK ((severity ~ '^SEV-[0-4]$'::text)),
     CONSTRAINT incident_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
@@ -645,6 +666,13 @@ CREATE TABLE ops.incident (
 --
 
 COMMENT ON TABLE ops.incident IS 'The operational incident. NOT the same thing as public.defect, which records claims the system made and the truth they collided with — that table has no severity, service, environment or lifecycle, and is kept unchanged.';
+
+
+--
+-- Name: COLUMN incident.signature; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.incident.signature IS 'service|environment|run_key|failure_class — the identity of a recurring failure. Two OPEN incidents cannot share one (see the partial unique index). Null is allowed for incidents a human opens by hand, which have no automatic recurrence to collapse.';
 
 
 --
@@ -9396,6 +9424,20 @@ CREATE INDEX incident_correlation_idx ON ops.incident USING btree (correlation_i
 
 
 --
+-- Name: incident_one_open_per_signature; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX incident_one_open_per_signature ON ops.incident USING btree (signature) WHERE (state <> ALL (ARRAY['resolved'::text, 'reviewed'::text]));
+
+
+--
+-- Name: INDEX incident_one_open_per_signature; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON INDEX ops.incident_one_open_per_signature IS 'The deduplication rule as a constraint. monitoring counts as OPEN on purpose: a service that fails again while we are watching it recover is the same incident continuing, not a second one starting.';
+
+
+--
 -- Name: incident_open_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -12396,6 +12438,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0114_ops_schema_work_request.sql	a89e520d34ca3ade8f3f234d17684ddfa45c997dd17c3cbf8de61028ffbe5921	2026-08-13 21:34:54.264624+00
 0013a_historical_client_status_vocabulary.sql	efb2bdec24e9ed8ea9597a38e7bec5b06681a36bb95b4e305aa8cf59a5522ce6	2026-08-14 02:00:09.337726+00
 0115_ops_observability.sql	b4962c412c5de6c70002ea1b74a8d75f585cbf260a5622e8dd1bd41989c29478	2026-08-14 02:00:09.88795+00
+0116_incident_signature.sql	9267e4799295a3c888a053ce018607140bcca5115b9c38ab77d151f098743070	2026-08-14 11:07:52.632609+00
+0117_collector_incident_grants.sql	25f46a6ade52dbea6a2e6e13072cec0510b992cbfd68424f8f310d0db2bb0e07	2026-08-14 11:21:39.42866+00
 \.
 
 
