@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import os
 import re
 import sys
@@ -314,6 +315,11 @@ def enforcement_class_counts(data: dict) -> dict[str, int]:
     return {cls: out[cls] for cls in sorted(out)}
 
 
+# How long to let a refresh finish before re-reading. Long enough for a file
+# rewrite to land, short enough that a boot hook does not feel it.
+REREAD_SETTLE_SECONDS = 2.0
+
+
 def main() -> int:
     try:
         with open(MAP, encoding="utf-8") as fh:
@@ -346,8 +352,43 @@ def main() -> int:
             parity = "active render parity exact"
     errors = validate(data, source_ids)
     if errors:
-        print("rule-enforcement-map: FAIL — " + "; ".join(errors))
-        return 1
+        # A REFRESH IN FLIGHT IS NOT A DISABLED GATE, and until 2026-08-15 this
+        # check could not tell the two apart. The hourly rules-refresh
+        # regenerates the map and the renders it is compared against, takes no
+        # lock, and a check landing between the two halves compares a new
+        # inventory against an older render. On 2026-08-15 that produced a boot
+        # banner reading "GATE INTEGRITY FAILURE — the enforcement layer
+        # changed", instructing two sessions not to trust the gates and to treat
+        # it as evidence something had been disabled. Nothing had: the two boot
+        # banners printed 169 shared rules and then 168, a rule retired mid-run,
+        # and a later refresh cleared it untouched.
+        #
+        # THE COST OF LEAVING IT is not the wasted investigation. It is that a
+        # gate alarm firing for a self-inflicted timing reason teaches every
+        # session to skim past the alarm on the day a gate really is off — the
+        # same lesson the nightly chain already paid for when a duplicate run
+        # reported 30 files as tampered.
+        #
+        # So: re-read both sides once and re-validate before calling it. A real
+        # divergence survives a re-read; a refresh landing between two file
+        # reads does not. Failing twice still FAILS, loudly, with the same exit
+        # code — this narrows the false positive without softening the true one.
+        time.sleep(REREAD_SETTLE_SECONDS)
+        try:
+            with open(MAP, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if vault and source_ids is not None:
+                source_ids = {scope: ids(path)
+                              for scope, path in source_paths(vault).items()}
+        except Exception as exc:
+            print(f"rule-enforcement-map: FAIL — {'; '.join(errors)} "
+                  f"(re-read also failed: {exc})")
+            return 1
+        errors_after = validate(data, source_ids)
+        if errors_after:
+            print("rule-enforcement-map: FAIL — " + "; ".join(errors_after))
+            return 1
+        parity += "; cleared on re-read (a rules-refresh was in flight)"
     c = counts(data)
     ec = enforcement_class_counts(data)
     print(f"rule-enforcement-map: OK ({parity}) — " + ", ".join(
