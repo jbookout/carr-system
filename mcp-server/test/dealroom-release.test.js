@@ -131,8 +131,16 @@ test("Deal Room keeps accessibility and add-work controls available", async () =
   assert.doesNotMatch(app, /\$\('#addButton'\)/);
   assert.doesNotMatch(app, /persistentAddButton/);
   assert.match(app, /stickyAgentHeading/);
+  assert.match(html, />Color assist</);
   assert.match(css, /body\.color-assist tr\.attention/);
   assert.match(css, /body\.color-assist tr\.parked/);
+  // The colour-blind-friendly view has to survive on more than colour, which is
+  // the entire point of it: a pattern fill on the row and a shape cue on the
+  // phase and owner pickers. All three shipped and none of them was asserted, so
+  // a refactor could have dropped the non-colour half and left the tests green.
+  assert.match(css, /repeating-linear-gradient/);
+  assert.match(css, /cell-select\[data-phase\]/);
+  assert.match(css, /cell-select\[data-owner\]/);
   assert.match(css, /\.board-sticky\{position:sticky/);
   assert.match(css, /\.sticky-add-button\{/);
   assert.doesNotMatch(css, /\.persistent-add-button\{/);
