@@ -40,7 +40,7 @@
     "one-repo-gate.py": "c270b13ca8cb0365e0e4a08fd18b963c71ba9fdd5abbbd61c519507e7e6f8d5a",
     "bash-write-gate.py": "702846886b59a1244921b57621bca24290f882afce2249609213fe24e312b5ca",
     "write-effect-check.py": "cb7b931415817cd605737b3d83c877a2e24a4ee1d35b2f6d102acc93b595dcca",
-    "drift-assertion-gate.py": "9591199f8abcd958ebeed165771178488cf849de54b8fc42f156f86c4e14a824",
+    "drift-assertion-gate.py": "f1bec8bfe655a1c4b380ae6ea6b6308c0b377639d4875c8e49bfd49778e9c447",
     "refused_content.py": "aad1d3119bab85753d82486932a1770376f29e0481ae71b43f4101f2c16ef624",
     "weekend-quiet-gate.py": "03692eb5daed4f0725db990412ffc7dd686dad80cfee380d6611f7cbfed1f01b",
     "costar-lane-gate.py": "81dbc4974bafc2a17ce4d02a00d8a9546367dcccd9058bd4de04ec435abf11bf",
