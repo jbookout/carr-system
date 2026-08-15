@@ -49,6 +49,7 @@
     },
     "writing_lint": {"implementation": ["tools/writing-lint.py", "hooks/lint-gate.py", "hooks/chat-lint-gate.py"], "test": ["ops/chat-lint-gate-selftest.py", "baselines/writing-lint.txt"], "failure_mode": "advisory surfacing at write time \u2014 HARD findings are reported, not refused"},
     "weekend_quiet": {"implementation": ["hooks/weekend-quiet-gate.py"], "test": ["ops/weekend-quiet-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
+    "costar_lane": {"implementation": ["hooks/costar-lane-gate.py"], "test": ["ops/costar-lane-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
     "record_home": {
       "implementation": ["hooks/record-home-gate.py", "hooks/install-record-home-gate.py", "hooks/bash-write-gate.py", "hooks/guard-unattended.py", "hooks/write-effect-check.py"],
       "test": ["tools/test-record-home-gate.py", "ops/bash-write-gate-selftest.py", "ops/guard-selftest.py", "ops/write-effect-check-selftest.py"], "failure_mode": "PreToolUse deny"},
@@ -202,7 +203,7 @@
     "fb2b263d": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires knowing what other files reference the changed content."},
     "fc4d7753": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Structural-design judgment."},
     "b42f11a0": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Sizing/scope judgment against a stated future load."},
-    "f5d97b4a": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "PreToolUse deny on claude-in-chrome navigate/computer tools when target URL host matches costar.com."},
+    "f5d97b4a": {"category": "hard_pre_action", "enforcement_class": "deny_gate", "binding_moment": "a Chrome-extension tool call whose target host is costar.com", "control": "costar_lane", "exceptions": "none — the sanctioned Browser-pane lane is always open on the same URL, so a refusal never blocks the work"},
     "8aefcdce": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Division-of-labor judgment, not a single detectable action."},
     "f2d58a30": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Document-render check: client packet/proposal/LOI-recommendation templates refuse to render with an empty 'declined and why' block."},
     "48083552": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "In-person conversational discipline; unenforceable by any code gate."},
@@ -287,7 +288,7 @@
     ]
   },
   "category_overrides": {
-    "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807", "236ca227", "4a53ff82", "88e9b5eb", "ab814a26"],
+    "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807", "236ca227", "4a53ff82", "88e9b5eb", "ab814a26", "f5d97b4a"],
     "transactional_schema": ["faf1b643", "54e2bcb9", "c53beeaa", "d7e6de46", "5409731b", "9f15f21a", "23ea0607", "b42e217e", "4039b9b5"],
     "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4"],
     "session_task_rail": ["25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46", "d5dcfe26"]
