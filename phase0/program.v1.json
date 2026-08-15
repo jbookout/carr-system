@@ -1,7 +1,35 @@
 {
   "contract": "carr-integrated-phase0-program",
-  "version": "1.4.0",
-  "status": "phase0_planning_and_sponsor_identity_machine_gates_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
+  "version": "1.5.0",
+  "status": "phase0_complete_amended_roadmap_signed_off_by_joe_2026_08_15_phase1_foundation_authorized_at_p0_1",
+  "roadmap_signoff": {
+    "signed_off_on": "2026-08-15",
+    "signed_off_by": "Joe Bookout",
+    "human_quote": "Ok I'm signing off on it",
+    "decision_id": "fcb17e86-4515-43db-8606-1b5402e55d1b",
+    "what_it_opens": "Phase 1 Foundation construction, beginning at P0-1 canonical release truth, then Programs 1 through 6 in their ruled order.",
+    "phase0_exit_evidence": {
+      "uncoached_journeys": "12 run and scored, 6 pass, 4 partial, 2 fail; phase0/audit/journey-scorecard-2026-08-12.v1.json; every row coached=false; Joe's 2026-08-12 'Still counts' ruling on the journeySteps route-chip caveat is preserved on each affected row",
+      "observed_baselines": "5 of 5 captured; phase0/audit/baseline-measures-2026-08-13.v2.json; the superseded v1 set is tombstoned with deltas preserved",
+      "release_truth_inventory": "taken 2026-08-13; doctrine section s18-program-0-release-truth-inventory"
+    },
+    "still_gated_after_signoff": [
+      "No mutation UI before the canonical action-risk registry and the canonical Work Request state machine, both Phase 1 Foundation deliverables",
+      "No Production mutation before staging or rehearsal evidence, plan-bound approval, rollback readiness, and named post-deploy verification",
+      "Purchases, renames, and platform naming remain separately gated",
+      "Hermes on live data requires a second, separate Joe decision"
+    ],
+    "still_owed_by_joe_not_gating": "Release manifest, golden workflows, recovery point and recovery time objectives, and decision rights. These are business tolerances rather than machine facts; the Program 0 inventory's standing proposal is a 24-hour RPO, golden workflows of record lookup, the Deal Room and standing context, and Production release rights resting with Joe alone.",
+    "doctrine_receipts": {
+      "document": "carr-production-maturity-baseline",
+      "generation": 427,
+      "sections": [
+        "s26-phase-zero-action-register v3",
+        "s28-council-rulings-2026-08-12 v2"
+      ],
+      "change_set_id": "36b9db60-397d-4765-a804-d7a2f6503708"
+    }
+  },
   "decision_id": "176c80fe-0f84-43cc-8ab3-658b4eff385f",
   "operating_objective_decision_id": "5a514cb1-f06e-4864-bf09-6656ec2ed0f5",
   "artifact_freeze_decision_id": "1ed1f5f3-698b-4ee0-8f16-f54f5fa98e84",
@@ -16,7 +44,7 @@
   "human_quote": "i honestly plan to run a claude fable audit of both roadmaps, plus a council meeting between fable 5, 5.6 Sol, and SuperGrok 4.5 to produce a final version. this will likely occur wednesday night when i get my claude usage reset. I'm going to proceed with phase 0 for both roadmaps tonight that way we are prepared as soon as the final version is approved to start rolling out construction",
   "canonical_sources": [
     {
-      "title": "CARR Workspace \u2014 Big Design Up Front",
+      "title": "CARR Workspace — Big Design Up Front",
       "slug": "carr-workspace-bduf",
       "document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
       "generation": 344,
@@ -40,7 +68,7 @@
       }
     },
     {
-      "title": "CARR Control Room \u2014 Big Design Up Front",
+      "title": "CARR Control Room — Big Design Up Front",
       "slug": "carr-control-room-bduf",
       "document_id": "11fdc56f-9af5-47c9-92a7-bb392ca60bd6",
       "generation": 345,
@@ -64,7 +92,7 @@
       }
     },
     {
-      "title": "CARR Mature Software End State \u2014 Big Design Up Front",
+      "title": "CARR Mature Software End State — Big Design Up Front",
       "slug": "carr-mature-software-end-state-bduf",
       "document_id": "15d2250c-4821-4f83-9dc5-063f9470139d",
       "generation": 346,
@@ -75,8 +103,8 @@
       ],
       "receipt": "fresh_read_verified",
       "dependency_edges": [
-        "CARR Workspace \u2014 Big Design Up Front",
-        "CARR Control Room \u2014 Big Design Up Front",
+        "CARR Workspace — Big Design Up Front",
+        "CARR Control Room — Big Design Up Front",
         "CARR Production Maturity Baseline"
       ],
       "new_section": {
@@ -154,9 +182,9 @@
     },
     "production_mature_web_timing": {
       "planning_center": "approximately 12 weeks",
-      "evidence_range": "12\u201316 weeks"
+      "evidence_range": "12–16 weeks"
     },
-    "full_multi_platform_timing": "4\u20136 months, evidence-gated",
+    "full_multi_platform_timing": "4–6 months, evidence-gated",
     "hard_predecessor_chain": [
       "Website Completion",
       "installed Mac desktop parity",
@@ -164,15 +192,15 @@
       "iPad Tour Mode"
     ],
     "control_room_sequence": "Ship thin authoritative read-first operational visibility before mutable AgentOps; safely mutable AgentOps remains evidence- and approval-gated.",
-    "construction_gate": "No production construction before Joe approves the frontier-model council output from the latest qualified Claude, Codex, and Grok models, each run at exactly high effort."
+    "construction_gate": "SATISFIED 2026-08-15. The gate read: no production construction before Joe approves the frontier-model council output from the latest qualified Claude, Codex, and Grok models, each run at exactly high effort. The council ran 2026-08-12, Joe approved the recommendation the same day, and Joe signed off the amended roadmap set on 2026-08-15 (decision fcb17e86-4515-43db-8606-1b5402e55d1b). Construction is authorized at P0-1."
   },
   "incremental_cost_bands_usd_per_month": {
-    "phase0_or_pilot": "$5\u201320",
-    "mature_two_partner_web_operations": "$62\u201384",
-    "before_paid_incident_response": "$28\u201350",
-    "with_apple_reserve": "approximately $70\u201393",
-    "high_intentional_use": "$300\u2013500",
-    "source": "CARR Mature Software End State sections 25\u201328; estimates remain subject to measured usage and current vendor pricing."
+    "phase0_or_pilot": "$5–20",
+    "mature_two_partner_web_operations": "$62–84",
+    "before_paid_incident_response": "$28–50",
+    "with_apple_reserve": "approximately $70–93",
+    "high_intentional_use": "$300–500",
+    "source": "CARR Mature Software End State sections 25–28; estimates remain subject to measured usage and current vendor pricing."
   },
   "operating_objective": {
     "section_title": "Operating objective and AI-session displacement test",
@@ -197,7 +225,7 @@
     "workflow_promotion": "Promotion is explicit, attributed, reviewable, and gated by named evidence, immutable version, accountable owner, observation window, failure criteria and handling, rollback plan, adoption result, and cutover plan; in-flight work pins its workflow version and retirement preserves audit history and a rollback or replacement path.",
     "bounded_trial_rule": "A workflow trial must be possible in at most five business days, and may be shorter, using the governed thin primitives, with no new source of truth, destructive migration, parallel writer, or generic workflow engine.",
     "maintenance_budget": {
-      "normal_internal_target": "3\u20135 human hours per month",
+      "normal_internal_target": "3–5 human hours per month",
       "measurement_rule": "Measure actual human hours; do not invent a baseline or hide toil in agent or vendor cost.",
       "exception_rule": "Attribute material new scope, vendor or platform incidents, security events, and other approved exceptions separately from normal internal maintenance.",
       "toil_trigger": "More than five normal internal maintenance hours in each of two consecutive months creates prioritized toil-reduction work.",
@@ -341,7 +369,7 @@
       "Codex frontier seat",
       "Grok frontier seat"
     ],
-    "model_selection": "At preflight, select the latest, most advanced generally available qualified frontier model for each runtime family. Run every seat at exactly high effort\u2014neither below nor above; max and ultra are prohibited.",
+    "model_selection": "At preflight, select the latest, most advanced generally available qualified frontier model for each runtime family. Run every seat at exactly high effort—neither below nor above; max and ultra are prohibited.",
     "input": "the three canonical BDUFs, the governing Production Maturity Baseline, both Phase 0 artifact packages, independent verifier findings, every structured unresolved fork, the proposed Hermes Agent and Nous Portal candidate analysis at phase0/hermes-runtime-council-candidate.v1.json, the independent platform naming candidate at phase0/platform-naming-council-candidate.v1.json, the CARR human-seat and workspace-isolation candidate for more than 150 real estate agents at phase0/human-seat-workspace-isolation-council-candidate.v1.json, and the Drive-free system and Cowork-retirement candidate at phase0/drive-free-system-council-candidate.v1.json",
     "launch_packet": "phase0/council-launch-packet-2026-08-12.v1.json",
     "output_template": "phase0/council-disposition-ledger-template.v1.json",
