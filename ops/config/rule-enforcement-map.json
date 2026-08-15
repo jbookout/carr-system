@@ -56,7 +56,7 @@
     "weekend_quiet": {"implementation": ["hooks/weekend-quiet-gate.py"], "test": ["ops/weekend-quiet-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
     "commit_claims": {"implementation": ["ops/githooks/commit-claims-check.py", "ops/githooks/commit-msg"], "test": ["ops/commit-claims-selftest.py"], "failure_mode": "commit-msg refusal"},
     "staged_gate_bless": {"implementation": ["ops/githooks/staged-gate-bless-check.py", "ops/githooks/pre-commit"], "test": ["ops/gate-baseline-cochange-selftest.py"], "failure_mode": "pre-commit refusal"},
-    "chat_lint": {"implementation": ["hooks/chat-lint-gate.py"], "test": ["ops/chat-lint-gate-selftest.py"], "failure_mode": "Stop block"},
+    "chat_lint": {"implementation": ["hooks/chat-lint-gate.py"], "test": ["ops/chat-lint-gate-selftest.py", "ops/unlinked-file-ask-selftest.py"], "failure_mode": "Stop block"},
     "costar_lane": {"implementation": ["hooks/costar-lane-gate.py"], "test": ["ops/costar-lane-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
     "record_home": {
       "implementation": ["hooks/record-home-gate.py", "hooks/install-record-home-gate.py", "hooks/bash-write-gate.py", "hooks/guard-unattended.py", "hooks/write-effect-check.py"],
@@ -164,7 +164,7 @@
     "e6dec821": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging whether praise/agreement is warranted."},
     "f5beac20": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Judgment on what is worth capturing and where."},
     "6901cc3b": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Aspirational quality bar; 'would a busy partner resent this gap' is a judgment test."},
-    "8c1e6057": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "PostToolUse lint on outgoing partner-facing text: regex for a bare filename/path not wrapped as a markdown link, warn/refuse before send."},
+    "8c1e6057": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "a reply asking a partner to open, edit or review a file", "control": "chat_lint", "exceptions": "a mention with no ask, the session narrating its own reads, and code fences"},
     "5be2f462": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Point tools/writing-lint.py's existing 'contrast-reframe' + vocab HARD regexes at the assistant's own outgoing chat text via a Stop hook, not just vault files."},
     "c315befa": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Lint on outgoing questions/interview boxes: regex flags bare 'the draft lease/the LOI/the landlord' with no proper noun nearby, refuse."},
     "d8c9b1f0": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging whether something was actually surfaced to a human vs merely written."},
@@ -305,7 +305,7 @@
   "category_overrides": {
     "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807", "236ca227", "4a53ff82", "88e9b5eb", "ab814a26", "f5d97b4a", "24e10ee8", "c0b38d80", "e065aa82"],
     "transactional_schema": ["faf1b643", "54e2bcb9", "c53beeaa", "d7e6de46", "5409731b", "9f15f21a", "23ea0607", "b42e217e", "4039b9b5"],
-    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4", "1d50a3bb", "3a9dbafd", "b01edd26"],
+    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4", "1d50a3bb", "3a9dbafd", "b01edd26", "8c1e6057"],
     "session_task_rail": ["25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46", "d5dcfe26", "412d37d3"]
   }
 }
