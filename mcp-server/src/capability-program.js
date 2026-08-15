@@ -78,6 +78,7 @@ function programRow(row) {
     context: row.project_context || {}, executor_actor: row.executor_actor || null,
     blocker_code: row.blocker_code || null, blocker_detail: row.blocker_detail || null,
     completion_kind: row.completion_kind || null, completion_evidence: row.completion_evidence || null,
+    shape_required: Boolean(row.shape_required),
   };
 }
 
@@ -96,6 +97,7 @@ function sessionBrief(row) {
     `Data/risk: ${c.data_risk || "Unknown — stop before using sensitive data."}; effort: ${c.effort || "unknown"}.`,
     `Existing evidence: ${(c.evidence || []).join("; ") || "none recorded"}.`,
     `Completion meaning: ${c.completion_definition || "accepted evidence and independent verification"}.`,
+    p.shape_required ? `Implementation shape: required; read the current decision with read-work-shape ${p.ref}.` : "Implementation shape: already settled for this request; no new shape record is required.",
     "Work in an isolated worktree. Write acceptance tests first. Use the cheapest qualified executor. Never merge, deploy, mutate Production, communicate externally, spend, or mark this project complete from the build session. Return a candidate for an independent actor to attest; only a separate human-governed completion can slide the queue.",
   ].join("\n");
 }
@@ -178,6 +180,11 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         requireFixedProgram(args, ToolError);
         const row = await requireCurrent(c, ToolError, args.sequence, args.base_version);
         if (row.state !== "ready") throw new ToolError({ error: "invalid_state_transition", from: row.state, to: "claimed", required_from: "ready" });
+        if (row.shape_required) {
+          const shape = await c.query(`select work_request_version from ops.work_shape_revision where work_request_id=$1 order by version desc limit 1`, [row.id]);
+          const shapeWorkVersion = shape.rows[0] ? Number(shape.rows[0].work_request_version) : null;
+          if (shapeWorkVersion !== Number(row.version)) throw new ToolError({ error: "work_shape_required", reason: shapeWorkVersion === null ? "missing" : "stale_after_work_request_change", work_request: row.ref, work_request_version: Number(row.version), shape_work_request_version: shapeWorkVersion, resolution: "read the current Work Request and shape stream, then append a shape revision bound to the fresh Work Request version" });
+        }
         if (!fullSha(args.source_commit_sha) || !textPresent(args.worktree_ref)) throw new ToolError({ error: "capability_agent_session_identity_invalid", required: ["source_commit_sha (40 lowercase hex)","worktree_ref"] });
         const executor = (await c.query(`select id, slug from actor where slug=$1 and active=true`, [args.executor_actor])).rows[0];
         if (!executor) throw new ToolError({ error: "capability_executor_not_active", executor_actor: args.executor_actor });

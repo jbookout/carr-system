@@ -9,6 +9,7 @@
 import { doctrineTools } from "./doctrine.js";
 import { investigationTools } from "./investigation.js";
 import { capabilityProgramTools } from "./capability-program.js";
+import { workShapeTools } from "./work-shape.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -97,6 +98,13 @@ async function withEnvelope(client, actor, verb, args, fn) {
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
     hint: "generate a UUID per intended action; retries reuse the SAME key" });
   const hash = await requestHash({ ...args, idempotency_key: undefined });
+  // work-shape's append-only stream needs same-key serialization before its
+  // replay read: otherwise two first revisions can both see no tool_call row,
+  // and the loser reports a version conflict instead of the promised replay.
+  // Keep this scoped until the shared envelope's existing fake-client suites
+  // are migrated to model the extra query for every historical write verb.
+  if (verb === "write-work-shape")
+    await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
     if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
@@ -6779,3 +6787,6 @@ Object.assign(TOOLS, investigationTools({ withEnvelope, writeEvent, ToolError })
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
 Object.assign(TOOLS, capabilityProgramTools({ withEnvelope, writeEvent, ToolError }));
+
+// Evidence-backed implementation form, linked to canonical Work Requests.
+Object.assign(TOOLS, workShapeTools({ withEnvelope, writeEvent, ToolError }));
