@@ -98,6 +98,22 @@ class ReadRouterTests(unittest.TestCase):
             "target": "C-001", "max_depth": 2, "limit": 3,
         })
 
+    def test_accepted_descriptor_is_detached_from_proposal_and_server_values(self):
+        proposal = {
+            "schema_version": 1, "tool_name": "find", "arguments": {"query": "synthetic"},
+        }
+        accepted = self.route(proposal)
+        proposal["arguments"]["query"] = CANARY
+        self.assertEqual(accepted["route"]["arguments"], {"query": "synthetic"})
+
+        accepted["attribution"]["runtime_principal"] = CANARY
+        accepted["envelope_binding"]["case_id"] = CANARY
+        later = self.route({
+            "schema_version": 1, "tool_name": "find", "arguments": {"query": "later"},
+        })
+        self.assertEqual(later["attribution"], ai_read_router.SERVER_CONTEXT)
+        self.assertEqual(later["envelope_binding"]["case_id"], "AI-GROUND-001")
+
     def test_refuses_unknown_write_and_sensitive_targets_without_execution(self):
         self.assert_refused({"schema_version": 1, "tool_name": "not-a-real-tool", "arguments": {}}, "router_unknown_tool")
         self.assert_refused({"schema_version": 1, "tool_name": "add-loop", "arguments": {}}, "router_write_target_forbidden")

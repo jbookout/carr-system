@@ -89,6 +89,11 @@ def _canonical_digest(value: Any) -> str:
     ).hexdigest()
 
 
+def _detached(value: Any) -> Any:
+    """Return a JSON-value copy with no caller or module-owned aliases."""
+    return json.loads(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+
+
 def _validate_file_binding(value: Any, label: str) -> None:
     binding = _exact_object(value, FILE_BINDING_FIELDS, label)
     relative_path = binding["path"]
@@ -313,9 +318,9 @@ def route_read_only(proposal: Any, response_envelope: Any) -> dict[str, Any]:
         return _refuse("router_arguments_type_invalid")
     return {
         "state": "accepted",
-        "route": {"tool_name": name, "arguments": arguments},
-        "attribution": SERVER_CONTEXT,
-        "envelope_binding": envelope_binding,
+        "route": {"tool_name": name, "arguments": _detached(arguments)},
+        "attribution": _detached(SERVER_CONTEXT),
+        "envelope_binding": _detached(envelope_binding),
         "calls_models": False,
         "writes_records": False,
         "allowed_actions": [],
