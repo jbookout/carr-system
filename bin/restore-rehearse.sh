@@ -111,6 +111,7 @@ PREFLIGHT_ONLY=0
 KEEP_BRANCH=0
 VERIFY_ONLY=0
 WANT_DATE=""
+WANT_DUMP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --preflight)   PREFLIGHT_ONLY=1; shift ;;
@@ -129,6 +130,15 @@ while [ $# -gt 0 ]; do
     # onward) genuine early-buildout snapshots or truncated ones.
     --date)        [ $# -ge 2 ] || { echo "FAIL: --date needs YYYYMMDD" >&2; exit 2; }
                    WANT_DATE="$2"; shift 2 ;;
+    # --dump ADDED 2026-08-14, consolidating bin/verify-key-custody.sh into this
+    # path rather than leaving two scripts doing one job. Both --date and the
+    # `ls -t` default look ONLY in backups/, which is the copy that dies with
+    # this Mac. The question that actually matters for recovery is whether an
+    # OFF-MAC copy restores — the R2 archive object, or the GitHub Actions
+    # artifact — and neither of those lands in backups/. This takes an arbitrary
+    # path so the drill can be run against the copy that would survive.
+    --dump)        [ $# -ge 2 ] || { echo "FAIL: --dump needs a path" >&2; exit 2; }
+                   WANT_DUMP="$2"; shift 2 ;;
     --identity)    [ $# -ge 2 ] || { echo "FAIL: --identity needs a path" >&2; exit 2; }
                    IDENTITY="$2"; shift 2 ;;
     -h|--help)     sed -n '2,60p' "$0"; exit 0 ;;
@@ -408,7 +418,16 @@ esac
 
 # Newest dump. `ls -t` matches how backup-dump.sh prunes, so "newest" means the
 # same thing in both scripts.
-if [ -n "$WANT_DATE" ]; then
+if [ -n "$WANT_DUMP" ]; then
+  # An explicit path, which is how an OFF-MAC copy gets tested: the R2 object or
+  # the GitHub artifact, downloaded anywhere. Named loudly in the output because
+  # a rehearsal against a copy that would survive this Mac is a different and
+  # stronger claim than one against backups/, and the transcript should say which
+  # was run.
+  DUMP="$WANT_DUMP"
+  [ -f "$DUMP" ] || die "no such dump: $DUMP"
+  say "  ok    selected dump: $DUMP (--dump, an explicit path rather than backups/)"
+elif [ -n "$WANT_DATE" ]; then
   DUMP="$REPO/backups/carr-$WANT_DATE.sql.age"
   [ -f "$DUMP" ] || die "no dump for $WANT_DATE. Present: $(ls "$REPO"/backups/carr-*.sql.age 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
   say "  ok    selected dump: $(basename "$DUMP") (--date $WANT_DATE)"
