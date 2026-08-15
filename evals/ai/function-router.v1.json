@@ -14,13 +14,6 @@
     "path": "control-room/contracts/action-risk-registry.v1.json",
     "sha256": "28e31ff76d7bb3ed05bef44b3a47721e42d94abdf1c76c0cb323dd698dec9826"
   },
-  "server_context": {
-    "organization_tenant_id": "carr-internal",
-    "runtime_principal": "synthetic-router-v1",
-    "sponsoring_human_id": "synthetic-sponsor-001",
-    "capability_profile": "read_only"
-  },
-  "server_context_digest": "29a2c7decb1e1e353582a350b08e6be54f81ebf151a089e167d714fb80ca1ec0",
   "selected_tool_evidence": [
     {
       "tool_name": "find",
@@ -75,25 +68,6 @@
       }
     }
   ],
-  "response_envelope_evidence": {
-    "fixture": {
-      "path": "evals/ai/response-envelope.v1.json",
-      "sha256": "3dd3a9f98ab16ab49d8d598e57ddb8c918e4a82d9bd861cf454534154f727d98"
-    },
-    "validator": {
-      "path": "ops/ai_eval.py",
-      "sha256": "de003e25804807625885479e23c45d60c9feb3503322ba8aecdcf7cfc391af52"
-    },
-    "accepted_evidence": {
-      "state": "accepted",
-      "attempts": 1,
-      "violation_codes": [],
-      "case_id": "AI-GROUND-001",
-      "fixture_digest": "3dd3a9f98ab16ab49d8d598e57ddb8c918e4a82d9bd861cf454534154f727d98",
-      "validator_digest": "de003e25804807625885479e23c45d60c9feb3503322ba8aecdcf7cfc391af52"
-    },
-    "accepted_evidence_digest": "bb3a7e193ae2e528d008ba31b6b13faf6791bee5a98019a3ba185c098c096edc"
-  },
   "denied_targets": [
     {"tool_name": "add-loop", "write": true, "full_only": false},
     {"tool_name": "read-work-shape", "write": false, "full_only": true}

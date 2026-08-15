@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline selection of a typed, synthetic read-only route.
 
-This module verifies fixed file evidence and returns a descriptor only.  It has
-no transport, database, or tool invocation path.
+The router returns a descriptor only.  It has no transport, database, or
+tool-invocation path; its fixed policy and server attribution live in code.
 """
 
 from __future__ import annotations
@@ -12,29 +12,30 @@ import json
 import math
 from pathlib import Path
 import re
-from dataclasses import dataclass
 from typing import Any
 
+import ai_eval
 
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+POLICY_PATH = REPO_ROOT / "evals" / "ai" / "function-router.v1.json"
+BOUND_SUITE_PATH = REPO_ROOT / "evals" / "ai" / "model-boundary.v1.json"
+POLICY_SHA256 = "db71490ac40e606c6352481aa4b18cee25e957964f2551e2f17ec797b9a082bd"
+SERVER_CONTEXT = {
+    "organization_tenant_id": "carr-internal",
+    "runtime_principal": "synthetic-router-v1",
+    "sponsoring_human_id": "synthetic-sponsor-001",
+    "capability_profile": "read_only",
+}
 POLICY_FIELDS = {
     "schema_version", "artifact_type", "data_class", "execution", "calls_models",
     "writes_records", "allowed_actions", "tool_registry", "action_risk_registry",
-    "server_context", "server_context_digest", "selected_tool_evidence", "routes",
-    "response_envelope_evidence", "denied_targets",
+    "selected_tool_evidence", "routes", "denied_targets",
 }
 FILE_BINDING_FIELDS = {"path", "sha256"}
-SERVER_CONTEXT_FIELDS = {
-    "organization_tenant_id", "runtime_principal", "sponsoring_human_id", "capability_profile",
-}
 ROUTE_FIELDS = {"tool_name", "write", "full_only", "input_schema"}
 SELECTED_TOOL_EVIDENCE_FIELDS = ROUTE_FIELDS | {"input_schema_digest"}
 DENIED_TARGET_FIELDS = {"tool_name", "write", "full_only"}
-RESPONSE_ENVELOPE_EVIDENCE_FIELDS = {
-    "fixture", "validator", "accepted_evidence", "accepted_evidence_digest",
-}
-ACCEPTED_ENVELOPE_EVIDENCE_FIELDS = {
-    "state", "attempts", "violation_codes", "case_id", "fixture_digest", "validator_digest",
-}
 PROPOSAL_FIELDS = {"schema_version", "tool_name", "arguments"}
 FORBIDDEN_AUTHORITY_FIELDS = {
     "target", "organization_tenant_id", "tenant_id", "identity", "actor",
@@ -65,18 +66,7 @@ SUPPORTED_SCHEMA_TYPES = {"string", "integer", "number", "boolean", "object", "a
 
 
 class RouterError(ValueError):
-    """A policy or server-evidence artifact is invalid."""
-
-
-@dataclass(frozen=True)
-class RouterPolicy:
-    """A loaded policy paired with the digest that authenticates its in-memory shape."""
-
-    data: dict[str, Any]
-    trusted_digest: str
-
-    def __getitem__(self, key: str) -> Any:
-        return self.data[key]
+    """A fixed policy or bound evaluation artifact is invalid."""
 
 
 def _exact_object(value: Any, expected: set[str], label: str) -> dict[str, Any]:
@@ -99,12 +89,12 @@ def _canonical_digest(value: Any) -> str:
     ).hexdigest()
 
 
-def _validate_file_binding(value: Any, repo_root: Path, label: str) -> None:
+def _validate_file_binding(value: Any, label: str) -> None:
     binding = _exact_object(value, FILE_BINDING_FIELDS, label)
     relative_path = binding["path"]
     if not _nonempty_string(relative_path) or not SHA256_RE.fullmatch(binding["sha256"]):
         raise RouterError(f"{label} has an invalid file binding")
-    root = repo_root.resolve()
+    root = REPO_ROOT.resolve()
     target = (root / relative_path).resolve()
     if root not in target.parents or not target.is_file() or _sha256(target) != binding["sha256"]:
         raise RouterError(f"{label} does not bind the current file")
@@ -144,7 +134,7 @@ def _validate_schema(schema: Any) -> None:
         raise RouterError("route scalar schema has object or array fields")
 
 
-def _validate_policy(policy: Any, repo_root: Path) -> dict[str, Any]:
+def _validate_policy(policy: Any) -> dict[str, Any]:
     artifact = _exact_object(policy, POLICY_FIELDS, "router policy")
     if artifact["schema_version"] != 1 or artifact["artifact_type"] != "synthetic_read_only_router_policy":
         raise RouterError("router policy schema is unsupported")
@@ -154,16 +144,9 @@ def _validate_policy(policy: Any, repo_root: Path) -> dict[str, Any]:
         raise RouterError("router policy cannot call models or write records")
     if artifact["allowed_actions"] != []:
         raise RouterError("router policy cannot authorize actions")
-    _validate_file_binding(artifact["tool_registry"], repo_root, "tool registry")
-    _validate_file_binding(artifact["action_risk_registry"], repo_root, "action risk registry")
-    context = _exact_object(artifact["server_context"], SERVER_CONTEXT_FIELDS, "server context")
-    if not all(_nonempty_string(context[field]) for field in SERVER_CONTEXT_FIELDS):
-        raise RouterError("server context fields must be non-empty strings")
-    if context["organization_tenant_id"] != "carr-internal" or context["capability_profile"] != "read_only":
-        raise RouterError("server context cannot widen tenant or capability")
-    if artifact["server_context_digest"] != _canonical_digest(context):
-        raise RouterError("server context digest does not match its evidence")
-    risk_path = repo_root / artifact["action_risk_registry"]["path"]
+    _validate_file_binding(artifact["tool_registry"], "tool registry")
+    _validate_file_binding(artifact["action_risk_registry"], "action risk registry")
+    risk_path = REPO_ROOT / artifact["action_risk_registry"]["path"]
     try:
         risk_rows = json.loads(risk_path.read_text())["verbs"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -216,39 +199,44 @@ def _validate_policy(policy: Any, repo_root: Path) -> dict[str, Any]:
         denied_names.add(denied["tool_name"])
         if not isinstance(denied["write"], bool) or not isinstance(denied["full_only"], bool):
             raise RouterError("router denied target flags are invalid")
-    envelope = _exact_object(
-        artifact["response_envelope_evidence"], RESPONSE_ENVELOPE_EVIDENCE_FIELDS,
-        "response envelope evidence",
-    )
-    _validate_file_binding(envelope["fixture"], repo_root, "response envelope fixture")
-    _validate_file_binding(envelope["validator"], repo_root, "response envelope validator")
-    accepted = _exact_object(
-        envelope["accepted_evidence"], ACCEPTED_ENVELOPE_EVIDENCE_FIELDS,
-        "accepted response envelope evidence",
-    )
-    if (
-        accepted["state"] != "accepted"
-        or accepted["attempts"] != 1
-        or accepted["violation_codes"] != []
-        or not _nonempty_string(accepted["case_id"])
-        or accepted["fixture_digest"] != envelope["fixture"]["sha256"]
-        or accepted["validator_digest"] != envelope["validator"]["sha256"]
-    ):
-        raise RouterError("accepted response envelope evidence is invalid")
-    if envelope["accepted_evidence_digest"] != _canonical_digest(accepted):
-        raise RouterError("accepted response envelope evidence digest does not match")
     return artifact
 
 
-def load_router_policy(path: Path, repo_root: Path | None = None) -> RouterPolicy:
-    """Load and verify the fixed D1 read-route evidence artifact."""
-    root = repo_root or path.resolve().parents[2]
+def _load_fixed_policy() -> dict[str, Any]:
+    if _sha256(POLICY_PATH) != POLICY_SHA256:
+        raise RouterError("router policy file digest does not match the fixed binding")
     try:
-        policy = json.loads(path.read_text())
+        policy = json.loads(POLICY_PATH.read_text())
     except (OSError, ValueError) as exc:
         raise RouterError("router policy cannot be loaded") from exc
-    artifact = _validate_policy(policy, root)
-    return RouterPolicy(artifact, _canonical_digest(artifact))
+    return _validate_policy(policy)
+
+
+def _load_bound_suite() -> dict[str, Any]:
+    try:
+        return ai_eval.load_suite(BOUND_SUITE_PATH)
+    except (ai_eval.SuiteError, OSError, ValueError) as exc:
+        raise RouterError("bound response envelope suite cannot be loaded") from exc
+
+
+def _accepted_envelope_binding(response_envelope: Any) -> dict[str, str] | None:
+    try:
+        suite = _load_bound_suite()
+        validated = ai_eval.validate_response_envelope(suite, response_envelope)
+        evaluated = ai_eval.evaluate_response_envelope(suite, response_envelope)
+    except (ai_eval.SuiteError, RouterError, TypeError, ValueError):
+        return None
+    if (
+        validated.get("state") != "accepted"
+        or evaluated.get("state") != "accepted"
+        or evaluated.get("evaluation", {}).get("passed") is not True
+    ):
+        return None
+    return {
+        "suite_digest": suite["_digest"],
+        "case_id": validated["case_id"],
+        "envelope_digest": _canonical_digest(response_envelope),
+    }
 
 
 def _schema_matches(value: Any, schema: dict[str, Any]) -> bool:
@@ -281,23 +269,14 @@ def _refuse(code: str) -> dict[str, Any]:
     return {"state": "refused", "violation_codes": [code]}
 
 
-def route_read_only(
-    proposal: Any, envelope_evidence: Any, policy: Any, repo_root: Path
-) -> dict[str, Any]:
-    """Return a normalized descriptor only when the proposal is safely routable."""
-    if not isinstance(policy, RouterPolicy) or policy.trusted_digest != _canonical_digest(policy.data):
-        return _refuse("router_policy_invalid")
+def route_read_only(proposal: Any, response_envelope: Any) -> dict[str, Any]:
+    """Return a descriptor only for a typed read route with a passing bound envelope."""
     try:
-        artifact = _validate_policy(policy.data, repo_root)
+        artifact = _load_fixed_policy()
     except RouterError:
         return _refuse("router_policy_invalid")
-    envelope = artifact["response_envelope_evidence"]
-    if not isinstance(envelope_evidence, dict):
-        return _refuse("router_envelope_evidence_invalid")
-    if (
-        envelope_evidence != envelope["accepted_evidence"]
-        or _canonical_digest(envelope_evidence) != envelope["accepted_evidence_digest"]
-    ):
+    envelope_binding = _accepted_envelope_binding(response_envelope)
+    if envelope_binding is None:
         return _refuse("router_envelope_evidence_invalid")
     if not isinstance(proposal, dict):
         return _refuse("router_proposal_not_object")
@@ -335,7 +314,8 @@ def route_read_only(
     return {
         "state": "accepted",
         "route": {"tool_name": name, "arguments": arguments},
-        "attribution": artifact["server_context"],
+        "attribution": SERVER_CONTEXT,
+        "envelope_binding": envelope_binding,
         "calls_models": False,
         "writes_records": False,
         "allowed_actions": [],
