@@ -510,6 +510,32 @@ step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 # withholds resolved_at, so only a human declares an incident resolved (0117).
 step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/ops-record.py assess --environment production
 
+# THE OTHER HALF OF THAT SENTENCE. Every incident assess opens carries the line
+# "watch until 24h clear, then close with an outcome", and until 2026-08-14
+# nothing performed the close: assess only moves a recovered incident INTO
+# monitoring, and no job, agent or service entry called a close path, because
+# none existed. The windows expired and the pile stayed, reprinted in full every
+# night — a list that can only grow teaches people to stop reading it, the same
+# way a check that goes red on normal work does.
+#
+# WHAT THIS DOES NOT DO. It does not close on one green run, which is the thing
+# 0117's grant was written to prevent. It closes only what has nothing left to
+# decide: recovered against real evidence, window fully elapsed, and NO failure
+# recorded against that same service/environment/run_key for the whole window.
+# Anything still flapping, never recovered, or missing evidence stays open and
+# keeps its human outcome — that is what `ops-record.py resolve` is for.
+#
+# WHY BREAK-GLASS. carr_jobs cannot write resolved_at or root_cause at all
+# (0117's column-scoped grant), so this needs the owner credential, and db-tap
+# holds every write behind default_transaction_read_only unless break-glass is
+# set. The reason is stated here rather than typed fresh each night, and every
+# run appends to out/break-glass-receipts.log, so the escalation is auditable
+# instead of invisible.
+step "incident sweep (close windows that elapsed clean)" \
+  env CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py \
+    --reason "nightly incident sweep: close monitoring incidents whose 24h window elapsed with no repeat failure; anything still open needs a human outcome" \
+    run tools/ops-record.py sweep --environment production
+
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="
 else
