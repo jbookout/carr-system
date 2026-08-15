@@ -7,6 +7,9 @@ const score = value => Number.isInteger(value) && value >= 1 && value <= 5;
 const githubUrl = value => textPresent(value) && /^https:\/\/github\.com\/[^/]+\/[^/]+\/?(?:[?#].*)?$/i.test(value.trim());
 const words = value => textPresent(value) ? value.trim().split(/\s+/).length : 0;
 const repoRoot = value => typeof value === "string" ? value.trim().replace(/\/$/, "").toLowerCase() : "";
+const PREBUILD_STATES = new Set(["captured", "triaged", "ready"]);
+
+export const SHAPE_DISPOSITIONS = Object.freeze(["required", "not_required"]);
 
 function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -65,6 +68,44 @@ export function shapeDecisionError(value) {
   if (briefWords < 80 || briefWords > 160) invalid.push("builder_brief.text (80-160 words; target about 120)");
 
   return invalid.length ? { error: "work_shape_invalid", invalid } : null;
+}
+
+export function shapeDispositionError(value) {
+  const v = plainObject(value) ? value : {};
+  if (!SHAPE_DISPOSITIONS.includes(v.disposition))
+    return { error: "work_shape_disposition_invalid", allowed: SHAPE_DISPOSITIONS };
+  if (!textPresent(v.rationale))
+    return { error: "work_shape_disposition_invalid", invalid: ["rationale"] };
+  if (v.disposition === "required" && textPresent(v.fixed_surface_ref))
+    return { error: "work_shape_disposition_invalid", invalid: ["fixed_surface_ref (must be absent when analysis is required)"] };
+  if (v.disposition === "not_required" && !textPresent(v.fixed_surface_ref))
+    return { error: "work_shape_disposition_invalid", invalid: ["fixed_surface_ref"] };
+  return null;
+}
+
+export function implementationShapeError(work, currentShape) {
+  const dispositionError = shapeDispositionError({
+    disposition: work?.shape_disposition,
+    fixed_surface_ref: work?.shape_fixed_surface_ref,
+    rationale: work?.shape_rationale,
+  });
+  if (dispositionError) return {
+    error: "work_shape_disposition_required",
+    work_request: work?.ref,
+    work_request_version: Number(work?.version),
+    resolution: "set an explicit required or not_required shape disposition before implementation; not_required must cite the already-fixed surface",
+  };
+  if (work.shape_disposition === "not_required") return null;
+  const shapeWorkVersion = currentShape ? Number(currentShape.work_request_version) : null;
+  if (shapeWorkVersion !== Number(work.version)) return {
+    error: "work_shape_required",
+    reason: shapeWorkVersion === null ? "missing" : "stale_after_work_request_change",
+    work_request: work.ref,
+    work_request_version: Number(work.version),
+    shape_work_request_version: shapeWorkVersion,
+    resolution: "read the current Work Request and shape stream, then append a shape revision bound to the fresh Work Request version",
+  };
+  return null;
 }
 
 function shapeRow(row) {
@@ -142,16 +183,49 @@ export function workShapeTools({ withEnvelope, writeEvent, ToolError }) {
         properties: { work_request: { type: "string" }, include_history: { type: "boolean" } }, required: ["work_request"],
       },
       handler: async (c, _actor, args) => {
-        const work = (await c.query(`select id, ref, title, state, version, shape_required from ops.work_request where ref=$1 or id::text=$1 limit 1`, [args.work_request])).rows[0];
+        const work = (await c.query(`select id, ref, title, state, version, shape_disposition, shape_fixed_surface_ref, shape_rationale, shape_decided_by_actor_id, shape_decided_at from ops.work_request where ref=$1 or id::text=$1 limit 1`, [args.work_request])).rows[0];
         if (!work) throw new ToolError({ error: "work_request_not_found", work_request: args.work_request });
         const revisions = (await c.query(`select * from ops.work_shape_revision where work_request_id=$1 order by version desc`, [work.id])).rows;
         return {
           ok: true,
-          work_request: { id: work.id, ref: work.ref, title: work.title, state: work.state, version: Number(work.version), shape_required: Boolean(work.shape_required) },
+          work_request: { id: work.id, ref: work.ref, title: work.title, state: work.state, version: Number(work.version), shape_disposition: work.shape_disposition || null, shape_fixed_surface_ref: work.shape_fixed_surface_ref || null, shape_rationale: work.shape_rationale || null, shape_decided_by_actor_id: work.shape_decided_by_actor_id || null, shape_decided_at: work.shape_decided_at || null },
           current: shapeRow(revisions[0]), revision_count: revisions.length,
           history: args.include_history ? revisions.map(shapeRow) : undefined,
         };
       },
+    },
+    "set-work-shape-disposition": {
+      write: true,
+      description: "Explicitly decide whether a Work Request needs shape analysis before implementation. required means a current work-shape revision must exist at claim time. not_required is allowed only when the implementation surface is already fixed and names that surface. Any qualified seat may record this operational disposition; it grants no human-only authority.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" }, work_request: { type: "string" }, base_version: { type: "integer", minimum: 1 },
+          disposition: { type: "string", enum: SHAPE_DISPOSITIONS }, fixed_surface_ref: { type: "string" }, rationale: { type: "string" }, human_quote: { type: "string" },
+        },
+        required: ["idempotency_key", "work_request", "base_version", "disposition", "rationale"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "set-work-shape-disposition", args, async () => {
+        const validation = shapeDispositionError(args);
+        if (validation) throw new ToolError(validation);
+        const work = (await c.query(`select id, ref, title, state, version, shape_disposition, shape_fixed_surface_ref, shape_rationale from ops.work_request where ref=$1 or id::text=$1 limit 1 for update`, [args.work_request])).rows[0];
+        if (!work) throw new ToolError({ error: "work_request_not_found", work_request: args.work_request });
+        if (!PREBUILD_STATES.has(work.state))
+          throw new ToolError({ error: "work_shape_disposition_frozen", work_request: work.ref, state: work.state, allowed_states: [...PREBUILD_STATES] });
+        if (Number(args.base_version) !== Number(work.version))
+          throw new ToolError({ error: "version_conflict", current_version: Number(work.version), base_version: Number(args.base_version), resolution: "re-read the Work Request and reconsider its shape disposition; never overwrite blind" });
+        const updated = (await c.query(
+          `update ops.work_request set shape_disposition=$2, shape_fixed_surface_ref=$3, shape_rationale=$4, shape_decided_by_actor_id=$5, shape_decided_at=now(), updated_at=now(), version=version+1 where id=$1 returning *`,
+          [work.id, args.disposition, args.disposition === "not_required" ? args.fixed_surface_ref.trim() : null, args.rationale.trim(), actor.id],
+        )).rows[0];
+        await writeEvent(c, actor, "set-work-shape-disposition", "ops_work_request", work.id, {
+          field: "implementation_shape_disposition",
+          old: { disposition: work.shape_disposition || null, fixed_surface_ref: work.shape_fixed_surface_ref || null, rationale: work.shape_rationale || null },
+          new: { disposition: updated.shape_disposition, fixed_surface_ref: updated.shape_fixed_surface_ref, rationale: updated.shape_rationale },
+          human_quote: args.human_quote || null, idempotency_key: args.idempotency_key,
+        });
+        return { ok: true, work_request: { id: updated.id, ref: updated.ref, title: updated.title, state: updated.state, version: Number(updated.version), shape_disposition: updated.shape_disposition, shape_fixed_surface_ref: updated.shape_fixed_surface_ref, shape_rationale: updated.shape_rationale, shape_decided_by_actor_id: updated.shape_decided_by_actor_id, shape_decided_at: updated.shape_decided_at } };
+      }),
     },
     "write-work-shape": {
       write: true,
@@ -167,8 +241,12 @@ export function workShapeTools({ withEnvelope, writeEvent, ToolError }) {
       handler: async (c, actor, args) => withEnvelope(c, actor, "write-work-shape", args, async () => {
         const validation = shapeDecisionError(args);
         if (validation) throw new ToolError(validation);
-        const work = (await c.query(`select id, ref, title, state, version, shape_required from ops.work_request where ref=$1 or id::text=$1 limit 1 for update`, [args.work_request])).rows[0];
+        const work = (await c.query(`select id, ref, title, state, version, shape_disposition, shape_fixed_surface_ref, shape_rationale from ops.work_request where ref=$1 or id::text=$1 limit 1 for update`, [args.work_request])).rows[0];
         if (!work) throw new ToolError({ error: "work_request_not_found", work_request: args.work_request });
+        if (!PREBUILD_STATES.has(work.state))
+          throw new ToolError({ error: "work_shape_frozen", work_request: work.ref, state: work.state, allowed_states: [...PREBUILD_STATES] });
+        if (work.shape_disposition !== "required")
+          throw new ToolError({ error: "work_shape_not_required", work_request: work.ref, shape_disposition: work.shape_disposition || null, resolution: "set the Work Request shape disposition to required against a fresh base version before writing analysis" });
         if (Number(args.work_request_base_version) !== Number(work.version))
           throw new ToolError({ error: "work_request_version_conflict", current_version: Number(work.version), work_request_base_version: Number(args.work_request_base_version), resolution: "re-read the Work Request and reassess its implementation shape; never attach reasoning based on stale requirements" });
         const current = (await c.query(`select * from ops.work_shape_revision where work_request_id=$1 order by version desc limit 1`, [work.id])).rows[0];
@@ -188,7 +266,7 @@ export function workShapeTools({ withEnvelope, writeEvent, ToolError }) {
           new: { revision_id: inserted.id, version: next, chosen_key: inserted.chosen_key },
           human_quote: args.human_quote || null, idempotency_key: args.idempotency_key,
         });
-        return { ok: true, work_request: { id: work.id, ref: work.ref, title: work.title, state: work.state, version: Number(work.version), shape_required: Boolean(work.shape_required) }, shape: shapeRow(inserted) };
+        return { ok: true, work_request: { id: work.id, ref: work.ref, title: work.title, state: work.state, version: Number(work.version), shape_disposition: work.shape_disposition }, shape: shapeRow(inserted) };
       }),
     },
   };
