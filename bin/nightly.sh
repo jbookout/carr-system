@@ -248,6 +248,42 @@ step "vault drift watch (check, first)"              env CARR_DRIFT_INGEST=1 ./.
 # production, and CI cannot reach production by construction.
 step "schema snapshot drift (db/schema.sql vs production)" ./bin/schema-snapshot.sh --check
 
+# ── PROGRAM 1's GATE, ASKED NIGHTLY (2026-08-15) ─────────────────────────────
+# "Staging cannot access Production data or credentials" is G1's gate, and until
+# this line it was a sentence in a roadmap and an argument in wrangler.toml. The
+# isolation was built on 2026-08-13; nothing has ever asked whether it still
+# holds, and nothing would have noticed the day it stopped.
+#
+# WHAT PROVOKED IT is the same shape as the step above. On 2026-08-15 the
+# staging database was found FOUR migrations behind production, including the
+# one carrying P0-1's release object. It surfaced when a person went to run an
+# acceptance test there and got "relation ops.release does not exist" — six days
+# after the drift began. The gate's assertions 5 and 6 are that discovery turned
+# into a question the machine asks every night, in both directions.
+#
+# It runs HERE, not in CI, for the same reason: it needs the two REAL Neon
+# projects, and CI reaches neither by construction. It writes to neither, and
+# opens production read-only at the session level rather than merely intending
+# to. step() records the outcome to the operational ledger, so a night it fails
+# is a row rather than a line in a log nobody opens (rule 1f3a7372).
+step "environment isolation + currency (G1)" ./.venv/bin/python ops/p1-environment-gate.py
+
+# ── PROGRAM 1's REBUILD CLAUSE, PROVEN NIGHTLY (2026-08-15) ──────────────────
+# "A fresh non-production environment can be reconstructed from repository
+# declarations and approved secret references." Until this ran, reconstruction
+# had never been attempted once, and the only way to discover a missing piece
+# would have been to need it.
+#
+# It branches STAGING, never production — a Neon branch is a copy-on-write child
+# of its parent, so branching production would hand a throwaway database every
+# production row. Guard 0 refuses on the production project id before anything
+# is created, and the branch is destroyed on every exit path.
+#
+# The nightly cost is one Neon branch created and deleted. The thing it buys is
+# that the repository's sufficiency is a measured fact each morning rather than
+# an argument nobody has tested.
+step "environment rebuild proof (ephemeral branch)" ./.venv/bin/python ops/p1-rebuild-gate.py
+
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
 # credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first
