@@ -61,6 +61,7 @@
     "deal_guard": {"implementation": ["mcp-server/src/tools.js", "migrations/0079_deal_room_api.sql", "migrations/0091_deal_reconciliation_read.sql"], "test": ["mcp-server/test/dealroom.test.js"], "failure_mode": "transaction refusal"},
     "loop_guard": {"implementation": ["migrations/0081_loop_blocker.sql", "mcp-server/src/tools.js"], "test": ["external:migration probes"], "failure_mode": "transaction refusal"},
     "completion_evidence": {"implementation": ["hooks/completion-evidence-gate.py"], "test": ["ops/completion-evidence-gate-selftest.py"], "failure_mode": "Stop block"},
+    "loose_work": {"implementation": ["hooks/loose-work-gate.py"], "test": ["ops/loose-work-gate-selftest.py"], "failure_mode": "Stop block"},
     "session_boot": {"implementation": ["hooks/session-brief.py", "mcp-server/src/mcp.js"], "test": ["command:python3 hooks/gate-integrity.py --selftest"], "failure_mode": "session rail"},
     "ledger_capture": {"implementation": ["hooks/ledger-sweep.py"], "test": ["external:ledger scope regressions"], "failure_mode": "Stop reminder"},
     "context_rail": {"implementation": ["hooks/context-handoff-gate.py"], "test": ["ops/context-handoff-gate-selftest.py"], "failure_mode": "Stop block"}
@@ -222,7 +223,7 @@
     "4fae20f4": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Statistical-reasoning judgment (does the window contain an intervention or migration)."},
     "cff429f5": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "new-vendor/new-client verbs could refuse a blank company/category/market field without an attached research_attempted flag naming the sources checked."},
     "d7c69aa6": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Calendar-ingest pipeline could require, for any unmatched attendee email, an automatic mail-search + research pass before that run reports complete."},
-    "bc9188b4": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "run.sh health carries an 'uncommitted work' row naming every loose tracked path and its age; git-writer-gate.py bans -A/-a/. ONLY when the tree is detected shared, not unconditionally as this rule demands."},
+    "bc9188b4": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "session Stop", "control": "loose_work", "exceptions": "CARR_ALLOW_LOOSE_WORK=1 for a deliberate hand-off or mid-investigation park", "note": "Both halves now hold at Stop: loose-work-gate.py refuses a session that leaves its OWN edits uncommitted, and as of 2026-08-15 also one that committed and never pushed (reachability from any remote ref, so a push under a different branch name still counts as landed). The sweep half of this rule stays with git-writer-gate.py, which bans -A/-a/. when the tree is shared; that narrower scope is deliberate and argued in its own docstring."},
     "88e9b5eb": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Loop-filing check: when blocker=capability and text reads as a bare refusal, require it name the specific action refused and the decider, else refuse the row."},
     "c0b38d80": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "pre-commit hook: if the diff touches any hooks/*-gate.py file or ops/config/rule-enforcement-map.json, require ops/config/gate-baseline.json to be in the SAME diff, else refuse the commit."},
     "38b15dc6": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Message-shape lint: count imperative clauses in outgoing task text; below a numbered-list format with >1 clause, warn/refuse."},
@@ -278,7 +279,7 @@
   "category_overrides": {
     "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807", "236ca227", "f5d97b4a"],
     "transactional_schema": ["faf1b643", "54e2bcb9", "c53beeaa", "d7e6de46", "5409731b", "9f15f21a", "23ea0607", "b42e217e", "4039b9b5"],
-    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880"],
+    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4"],
     "session_task_rail": ["25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46", "d5dcfe26"]
   }
 }

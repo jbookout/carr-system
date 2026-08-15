@@ -196,8 +196,20 @@ def manifest_unit_cases():
          "supposed to be re-pointed" in (md_write_verdict(
              "Automation/radar/radar-digest-latest.md", today=CUTOFF,
              actor="joe") or "")),
-        ("unit · and it names health-check as the writer",
-         "health-check" in (md_write_verdict(
+        # THE ATTRIBUTION MUST BE A WRITE SITE, NOT A GREP HIT. The first version
+        # of this row named tools/health-check.py, because that file mentions the
+        # path — in its WATCH table, a staleness list of (name, output glob, max
+        # age, inputs, note). It only READS it. Naming the wrong job inside a
+        # message whose whole purpose is naming the right one would send its
+        # reader to a file that never touches the output. Both halves are pinned
+        # here so the mistake cannot come back: the real writer is named, and the
+        # watcher is asserted absent.
+        ("unit · the radar row names the Monday run, the job that WRITES it",
+         "Monday radar run" in (md_write_verdict(
+             "Automation/radar/radar-digest-latest.md", today=CUTOFF,
+             actor="joe") or "")),
+        ("unit · and it does NOT name health-check, which only watches the path",
+         "health-check" not in (md_write_verdict(
              "Automation/radar/radar-digest-latest.md", today=CUTOFF,
              actor="joe") or "")),
         # The rows that already existed gain the same naming, so the diagnosis
