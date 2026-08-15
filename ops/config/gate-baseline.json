@@ -9,7 +9,7 @@
     "context-handoff-gate.py": "b6dcf841ab4980bbc3ddd04067a636b2545562763cfb9aa29cfa87b6ccf3cae6",
     "corpus_renders.py": "a5e9766e9ad7cbc15412a09e24a67530b9cbee4c256f6ace80cf4a075006272f",
     "delegation-gate.py": "4601af3d3572036227c476e8f0f1a21cc4ec049a520bb6b8b10404408f2c8fc8",
-    "drift-claim-gate.py": "b9437a066f04d65385dfc044818f8879bd03a73127621ca1a40104a79b1bdfe8",
+    "drift-claim-gate.py": "01b99962f7aad21befc396849df63f84fecdee90ee533ea6fc290bf0bf40753c",
     "escalation-gate.py": "448981d723010a9f6d836c01c8c85412905790ef79d6eb638b8f477f06024651",
     "executor-tier-gate.py": "62c8e664c577def7e0bce250f48f379c5f0e910dab726ccbac7d68911f77ac9b",
     "gate-edit-gate.py": "12fe15ec94a494934fec2ba6c9bd610c69ec252600fcbc320c6a768147e7dae9",
