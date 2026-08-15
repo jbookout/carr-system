@@ -867,6 +867,12 @@ _LEASE = re.compile(r"--force-with-lease(?:=\S*)?\b", re.I)
 # spelling therefore needs an explicit "not followed by -with-lease".
 _BARE_FORCE = re.compile(r"--force(?!-with-lease)\b|\s-f\b|\s\+\S+:", re.I)
 _GIT_PUSH = re.compile(r"git\s+push\b", re.I)
+# Where one command ends. `&&`, `||`, `;` and a bare `|` end it; a REDIRECTION
+# ends its argument list too, and must be recognised separately because `2>&1`
+# carries an ampersand that is not a separator — the exact thing that defeated
+# the previous version of this parser.
+_SEPARATOR = re.compile(r"^(?:&&|\|\||[;|&])$")
+_REDIRECT = re.compile(r"^\d*(?:>>?|<)&?\d*$|^[<>]")
 
 
 def force_push_to_named_side_branch(cmd):
@@ -893,14 +899,26 @@ def force_push_to_named_side_branch(cmd):
     match = _GIT_PUSH.search(text)
     if not match:
         return False
-    # Stop at the first command separator so a trailing `&& echo done` cannot be
-    # mistaken for extra refspecs — and, more importantly, so nothing AFTER this
-    # command can dress up the target of this one.
-    after = re.split(r"[;|&]", text[match.end():])[0]
-    # Everything that is not a flag: the remote, then the refspec. A flag's own
-    # value (--repo=x, -o opt) never looks like a bare word here in practice, and
-    # anything unparseable falls through to False rather than to an allow.
-    words = [w for w in after.split() if not w.startswith("-")]
+    # READ TOKENS UNTIL THIS COMMAND ENDS, rather than cutting the string on raw
+    # separator CHARACTERS.
+    #
+    # The character cut was `re.split(r"[;|&]", …)`, and it broke on `2>&1` — the
+    # redirection every one of these commands carries in practice, whose ampersand
+    # is not a separator at all. It chopped mid-redirect, left a stray `2>` in the
+    # argument list, counted three words instead of two, and refused the push. The
+    # first two versions of this parser were each defeated by a piece of perfectly
+    # ordinary shell syntax the test cases had quietly excluded, so it now walks
+    # tokens and stops at a real boundary.
+    #
+    # Stopping at the boundary is what keeps this honest: only THIS command's
+    # arguments are read, so nothing chained after it can dress up its target.
+    words = []
+    for token in text[match.end():].split():
+        if _SEPARATOR.match(token) or _REDIRECT.match(token):
+            break             # this command's arguments end here
+        if token.startswith("-"):
+            continue          # a flag, not a destination
+        words.append(token)
     if len(words) != 2:
         return False          # no remote+ref pair means no visible destination
     ref = words[1].split(":")[-1]
