@@ -122,6 +122,8 @@ check("document-level row's gist comes from the preamble section's first line",
 section_level = [r for r in wr_rows if r[3] == 1]
 check("one row per active section (excluding the doc-level row)",
       len(section_level), 2)
+check("store section rows retain their stable doctrine section keys",
+      sorted(r[8] for r in section_level), ["no-em-dashes", "preamble"])
 titled = [r for r in section_level if r[4] == "No em-dashes"]
 check("a titled section keeps its title as the header",
       len(titled), 1)

@@ -12,6 +12,7 @@ import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 RUNNER = REPO / "ops" / "retrieval_eval.py"
+HYBRID_RUNNER = REPO / "ops" / "retrieval_hybrid_eval.py"
 GOLDEN = REPO / "evals" / "retrieval" / "golden-queries.v1.json"
 BASELINE = REPO / "evals" / "retrieval" / "baselines" / "lexical.v1.json"
 BASELINE_INDEX = REPO / "evals" / "retrieval" / "fixtures" / "section-index.baseline.v1.tsv"
@@ -145,5 +146,18 @@ with tempfile.TemporaryDirectory() as tmp:
           committed_payload["summary"]["passed_cases"] == 16
           and committed_payload["summary"]["failed_cases"] == 6
           and committed_payload["summary"]["unknown_cases"] == 0)
+
+    hybrid_report = pathlib.Path(tmp) / "hybrid-report.json"
+    hybrid = subprocess.run([
+        sys.executable, str(HYBRID_RUNNER), "--suite", str(GOLDEN),
+        "--section-index", str(BASELINE_INDEX), "--doctrine-results", str(DOCTRINE_BASELINE),
+        "--section-index-scope-proven", "--output", str(hybrid_report),
+    ], text=True, capture_output=True)
+    hybrid_payload = json.loads(hybrid_report.read_text(encoding="utf-8"))
+    check("the feature-gated hybrid keeps exact evidence for every golden case",
+          hybrid.returncode == 0
+          and hybrid_payload["summary"]["passed_cases"] == len(golden["cases"])
+          and hybrid_payload["summary"]["failed_cases"] == 0
+          and hybrid_payload["summary"]["unknown_cases"] == 0)
 
 print("PASS: retrieval evaluation self-test")

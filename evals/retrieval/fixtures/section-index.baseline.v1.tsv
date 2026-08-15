@@ -1,10 +1,10 @@
 # section-index baseline fixture — D2 metadata only; no source bodies or client records
-# path	start	end	level	header	parents	gist	source
-doctrine:runbook	1	1	1	Record layer outage diagnosis runbook	CARR Runbook	Current two-minute diagnosis checklist	store
-doctrine:playbook-review	1	1	1	Playbook self improvement review cycle	CARR Playbook	Current monthly reflect promote prune loop	store
-doctrine:document-factory-routing	1	1	1	Document factory	CARR Documents	Current document factory routing	store
-doctrine:npi-sweep-sop	1	1	1	Weekly new provider detection	CARR Prospecting	Current NPI sweep procedure	store
-doctrine:space-search-sop	1	1	1	Space search multi source	CARR Deals	Current space search procedure	store
-doctrine:alabama-lead-system	1	1	1	Lead system	CARR Leads	Current Alabama lead system	store
-doctrine:lead-system-handoff	1	1	1	Lead handoff	CARR Leads	Current lead handoff	store
-doctrine:2026-07-30-agent-systems-explainer-takeaways	1	1	1	Agent systems validation	CARR Software	Current agent systems evidence	store
+# path	start	end	level	header	parents	gist	source	section_key
+doctrine:runbook	1	1	1	Record layer outage diagnosis runbook	CARR Runbook	Current two-minute diagnosis checklist	store	diagnosis-checklist-in-order-2-minutes
+doctrine:playbook-review	1	1	1	Playbook self improvement review cycle	CARR Playbook	Current monthly reflect promote prune loop	store	preamble
+doctrine:document-factory-routing	1	1	1	Document factory	CARR Documents	Current document factory routing	store	preamble
+doctrine:npi-sweep-sop	1	1	1	Weekly new provider detection	CARR Prospecting	Current NPI sweep procedure	store	preamble
+doctrine:space-search-sop	1	1	1	Space search multi source	CARR Deals	Current space search procedure	store	preamble
+doctrine:alabama-lead-system	1	1	1	Lead system	CARR Leads	Current Alabama lead system	store	preamble
+doctrine:lead-system-handoff	1	1	1	Lead handoff	CARR Leads	Current lead handoff	store	preamble
+doctrine:2026-07-30-agent-systems-explainer-takeaways	1	1	1	Agent systems validation	CARR Software	Current agent systems evidence	store	preamble

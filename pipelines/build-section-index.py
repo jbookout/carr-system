@@ -4,7 +4,8 @@ build-section-index.py — derived section-level index of the CARR AI vault.
 
 Walks the vault's knowledge tier and emits one TSV row per markdown section:
 path, start line, end line, header level, header text, parent breadcrumb, a
-one-line gist (file-level rows only), and a source tag (file|store). This is
+one-line gist (file-level rows only), a source tag (file|store), and an
+optional doctrine section key. This is
 the machine layer retrieve.py scores against so a session can decide WHERE an
 answer lives without opening files (graph-engineering build, 2026-07-25;
 doctrine: the index is for the model, the graph view is for Joe).
@@ -55,7 +56,9 @@ retrieval should land on.
 Usage: python3 build-section-index.py [CARR_ROOT]
 Output: <CARR_ROOT>/Automation/section-index.tsv
 """
+import json
 import sys, os, re
+from datetime import datetime, timezone
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT  = os.path.join(ROOT, "Automation", "section-index.tsv")
@@ -116,7 +119,7 @@ def index_file(abspath, relpath, rows):
         return  # frozen backups never enter the retrieval layer
     # file-level row (level 0) so headerless files still score
     rows.append((relpath, 1, n, 0, os.path.splitext(os.path.basename(relpath))[0],
-                 "", gist_of(lines), "file"))
+                 "", gist_of(lines), "file", ""))
     heads, fence = [], False
     for i, ln in enumerate(lines, 1):
         if ln.lstrip().startswith("```"):
@@ -138,7 +141,7 @@ def index_file(abspath, relpath, rows):
                 crumbs.append(heads[k][2])
                 lvl = heads[k][1]
         rows.append((relpath, start, end, level, text,
-                     " > ".join(reversed(crumbs)), "", "file"))
+                     " > ".join(reversed(crumbs)), "", "file", ""))
 
 
 def store_rows(sections):
@@ -157,11 +160,11 @@ def store_rows(sections):
         path = f"doctrine:{slug}"
         preamble = next((s for s in secs if s["section_key"] == "preamble"), secs[0])
         gist = clean(preamble["plain_text"].splitlines()[0]) if preamble["plain_text"] else ""
-        rows.append((path, 0, 0, 0, clean(doc_title), "", gist[:200], "store"))
+        rows.append((path, 0, 0, 0, clean(doc_title), "", gist[:200], "store", ""))
         for s in secs:
             title = clean(s["title"] or s["section_key"].replace("-", " "))
             rows.append((path, s["ordinal"], s["ordinal"], 1, title,
-                         clean(doc_title), "", "store"))
+                         clean(doc_title), "", "store", s["section_key"]))
     return rows
 
 
@@ -206,7 +209,15 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
         f.write("# section-index.tsv — DERIVED, never hand-edit. Rebuild: ./run.sh section-index\n")
-        f.write("# path\tstart\tend\tlevel\theader\tparents\tgist\tsource\n")
+        contract = {
+            "schema_version": "carr-section-index-v2",
+            "scope_ref": "carr-internal",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "current_source_policy": "store-active-or-file-filtered-v1",
+            "store_status": "verified" if store_ok else "fallback_files",
+        }
+        f.write("# contract\t" + json.dumps(contract, sort_keys=True, separators=(",", ":")) + "\n")
+        f.write("# path\tstart\tend\tlevel\theader\tparents\tgist\tsource\tsection_key\n")
         for r in rows:
             f.write("\t".join(str(x) for x in r) + "\n")
     files = len({r[0] for r in rows if r[7] == "file"})
