@@ -520,6 +520,25 @@
       ]
     },
     {
+      "key": "content-fuel-harvest-weekly",
+      "name": "Weekly content-fuel harvest",
+      "purpose": "Sources cited market material across the four content lanes and banks it, so the Friday social batch has fuel to draw on.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "/Users/booko/.claude/scheduled-tasks/content-fuel-harvest-weekly/SKILL.md",
+      "runtime": "claude-code-scheduled-task",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "Claude Code scheduled task (native), cron 30 9 * * 1",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 172800,
+          "notes": "ENABLED AND UNREGISTERED until 2026-08-15, found by cross-checking list_scheduled_tasks against this file rather than by anything noticing on its own. The registry's own rule above is that only currently-enabled tasks are registered and disabled ones are deliberately left out, so this omission was a gap and not a choice: unregistered it had no cadence, nothing could call it stale, and ops/edge-liveness.py could not see it go quiet from off the Mac. Same 7-day cadence and 2-day grace as every other weekly task, for the reason local-briefs established — a weekly job can miss its one window if the Mac is asleep. Criticality is low because its output feeds the Friday batch rather than any client-facing or recovery path: a missed week costs that batch some fuel and nothing else."
+        }
+      ]
+    },
+    {
       "key": "logitech-keymap",
       "name": "Logitech modifier-key repair",
       "purpose": "Re-applies the hidutil modifier mapping, which dies on reboot and on receiver replug.",
