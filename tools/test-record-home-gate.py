@@ -155,6 +155,63 @@ def manifest_unit_cases():
         ("unit · closed-row message names the ruling, not just the cutoff",
          "eliminate the ability" in (md_write_verdict(
              "DNA/Network/briefs/x.md", today=CUTOFF, actor="joe") or "")),
+
+        # THE FIVE WRITERS THE EARLY CLOSURE MISSED. Joe's ruling keeps retired
+        # rows in the file instead of deleting them for one stated reason: "A
+        # deleted row falls through to the generic deny message, which tells a
+        # job's author only that markdown is closed. A retired row produces the
+        # SPECIFIC message — its writer was supposed to be re-pointed — which
+        # names what has to happen and to which job. The diagnosis is the point."
+        #
+        # These five never had rows at all, so they fell through to exactly the
+        # generic message the mechanism exists to avoid, and the jobs writing
+        # them kept running with no diagnosis attached. Found 2026-08-14 by the
+        # write-effect check, which reported them as changed files nothing may
+        # write.
+        ("unit · the weekday brief's output is a RETIRED row for a migrated "
+         "partner, not a generic deny",
+         "supposed to be re-pointed" in (md_write_verdict(
+             "00_Context/today.md", today=CUTOFF, actor="joe") or "")),
+        ("unit · and it names the job that has to change",
+         "local-briefs" in (md_write_verdict(
+             "00_Context/today.md", today=CUTOFF, actor="joe") or "")),
+        # NO NEW WRITE WINDOW. These three retire at CLOSED_EARLY for EVERYONE
+        # rather than at CUTOFF, because they never had an allowance to stagger:
+        # a CUTOFF row would GRANT an unmigrated partner a window that does not
+        # exist today. Improving a denial's wording must not widen what may be
+        # written, so the verdict is unchanged for both partners and only the
+        # message improves.
+        ("unit · the weekday brief is closed for an UNMIGRATED partner too — "
+         "the new row must not grant a window that did not exist",
+         md_write_verdict("00_Context/today.md", today=CUTOFF,
+                          actor="dell") is not None),
+        ("unit · and closed for an unmigrated partner even BEFORE the cutoff",
+         md_write_verdict("00_Context/today.md", today=CUTOFF - timedelta(days=5),
+                          actor="dell") is not None),
+        ("unit · the learning job outputs are retired rows for a migrated partner",
+         "supposed to be re-pointed" in (md_write_verdict(
+             "Automation/Learning/weekly-learning-latest.md", today=CUTOFF,
+             actor="joe") or "")),
+        ("unit · the radar digest is a retired row for a migrated partner",
+         "supposed to be re-pointed" in (md_write_verdict(
+             "Automation/radar/radar-digest-latest.md", today=CUTOFF,
+             actor="joe") or "")),
+        ("unit · and it names health-check as the writer",
+         "health-check" in (md_write_verdict(
+             "Automation/radar/radar-digest-latest.md", today=CUTOFF,
+             actor="joe") or "")),
+        # The rows that already existed gain the same naming, so the diagnosis
+        # is uniform rather than only on the paths added last.
+        ("unit · an EXISTING retired row now names its writer too",
+         "batch" in (md_write_verdict(
+             "Marketing/Social Media/x-batch-2026-08-24-week.md",
+             today=CUTOFF, actor="joe") or "").lower()),
+        # And a path nobody declared still gets the generic message — the change
+        # must not turn every unknown file into a false "your job needs
+        # re-pointing" claim.
+        ("unit · an UNDECLARED path keeps the generic closed message",
+         "supposed to be re-pointed" not in (md_write_verdict(
+             "DNA/Some/hand-authored-note.md", today=CUTOFF, actor="joe") or "")),
         ("unit · brief prefix DENIED after cutoff",
          md_write_verdict("DNA/Network/briefs/x.md",
                           today=CUTOFF + timedelta(days=1)) is not None),
