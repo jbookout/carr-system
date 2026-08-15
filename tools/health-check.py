@@ -1741,4 +1741,43 @@ except Exception as e:
     print(f"  ⚠︎ stranded PRs check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# --- the sign against origin (rule 173119a8) --------------------------------
+# The `uncommitted work` row above reads the WORKING TREE only. It cannot see a
+# commit that exists on this machine and nowhere else, and it cannot see work
+# another session already landed — which is the pair the rule is about. Its own
+# incident was a session naming a peer as the blocker off a HEAD-based diff:
+# accurate diff, backwards conclusion, because a HEAD that is BEHIND origin
+# makes somebody else's landed work look like your missing work.
+#
+# bin/whose-work.py is the ONE implementation of that measurement, so this row
+# and a session asking by hand cannot drift apart (rule a8c55a47).
+print("\nlanded against origin")
+try:
+    _ww = os.path.join(REPO_ROOT, "bin", "whose-work.py")
+    if not os.path.exists(_ww):
+        print("  -- landed              bin/whose-work.py not present; skipped")
+    else:
+        _wwp = subprocess.run([os.path.join(REPO_ROOT, ".venv/bin/python"), _ww,
+                               "--repo", REPO_ROOT, "--json"],
+                              cwd=REPO_ROOT, capture_output=True, text=True,
+                              timeout=240)
+        _w = json.loads(_wwp.stdout or "{}")
+        _ahead, _behind = _w.get("ahead"), _w.get("behind")
+        _unl = _w.get("unlanded_commits", 0)
+        if _ahead is None:
+            print(f"  -- landed              {_w.get('note', 'no upstream to measure against')}")
+        else:
+            print(f"  {'⚠︎' if _unl else 'OK'} landed              "
+                  f"ahead {_ahead}, behind {_behind}"
+                  + (f" · {_unl} commit(s) on no remote — push them"
+                     if _unl else " · nothing unlanded"))
+            if _unl:
+                rc = 1
+            if _behind and not _ahead:
+                print("     behind-only means another session landed work; pull it. "
+                      "Reading this as your own missing work is the mistake this row exists for.")
+except Exception as e:
+    print(f"  ⚠︎ landed check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)
