@@ -83,7 +83,12 @@
     "settings_change": {"implementation": ["hooks/settings-change-gate.py"], "test": ["ops/settings-change-gate-selftest.py"], "failure_mode": "Pre+PostToolUse deny"},
     "session_boot": {"implementation": ["hooks/session-brief.py", "mcp-server/src/mcp.js"], "test": ["command:python3 hooks/gate-integrity.py --selftest"], "failure_mode": "session rail"},
     "ledger_capture": {"implementation": ["hooks/ledger-sweep.py"], "test": ["external:ledger scope regressions"], "failure_mode": "Stop reminder"},
-    "context_rail": {"implementation": ["hooks/context-handoff-gate.py"], "test": ["ops/context-handoff-gate-selftest.py"], "failure_mode": "Stop block"}
+    "context_rail": {"implementation": ["hooks/context-handoff-gate.py"], "test": ["ops/context-handoff-gate-selftest.py"], "failure_mode": "Stop block"},
+    "map_architecture": {
+      "implementation": ["hooks/map-architecture-gate.py"],
+      "test": ["ops/map-architecture-gate-selftest.py", "mcp-server/test/map-architecture.test.mjs"],
+      "failure_mode": "Stop block until the current governed map task loads the validated live doctrine and machine contract"
+    }
   },
   "rule_controls": {
     "e313a3ca": {"category": "hard_pre_action", "enforcement_class": "deny_gate", "binding_moment": "before command handoff", "control": "conduct_stop", "exceptions": "human explicitly asks for a command"},
