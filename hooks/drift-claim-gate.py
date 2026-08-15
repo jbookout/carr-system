@@ -2,8 +2,20 @@
 """drift-claim-gate.py — before asserting something drifted, show the decision.
 
 THE FAILURE CLASS THIS TARGETS is the most common one this system has:
-"dated-artifact-read-as-present-state", 8 occurrences since 2026-08-04, 6 of
-them caught by a human rather than by the system. The shape is always the same.
+"dated-artifact-read-as-present-state", running since 2026-08-04, with the
+majority caught by a human rather than by the system. The shape is always the
+same.
+
+NO COUNT IS WRITTEN HERE, and that is a correction. This file carried "8
+occurrences" in its docstring and in the message it prints; by 2026-08-15 the
+ledger read twelve. A gate whose whole job is catching a stale figure quoted as
+present state cannot quote a stale figure as present state in the sentence meant
+to persuade — rule b01edd26 bans exactly that, and a session that spots the wrong
+number has been handed a reason to discount everything after it. A PreToolUse
+hook must stay fast and offline, so it cannot ask the record layer for the live
+value; `standing-context` returns it to any session that wants the integer.
+Fixed alongside hooks/drift-assertion-gate.py, which carried the identical
+defect — the Stop door and this write door are one mechanism and drift together.
 A session reads a CURRENT artifact that is perfectly accurate about the present
 (a status line, a file's contents, a script's output, a count) and concludes
 that something has drifted, regressed, or was never finished, without checking
@@ -251,8 +263,9 @@ def main():
                     "DRIFT CLAIM — THE DECISION LOG HAS SOMETHING ON THIS SUBJECT. Read it before "
                     "this write lands.\n\n"
                     "You are asserting that a present state is wrong rather than chosen. That is the "
-                    "most common way this system has been wrong: 8 times since 2026-08-04, 6 caught by "
-                    "a human. The pattern is always a CURRENT artifact read accurately and a DECISION "
+                    "most common way this system has been wrong, running since 2026-08-04, most of "
+                    "them caught by a human — `standing-context` returns the live count if you want "
+                    "it. The pattern is always a CURRENT artifact read accurately and a DECISION "
                     "behind it left unread. On 2026-08-13 a session read a status banner as evidence of "
                     "regression and asked Joe to redo something he had deliberately reversed three days "
                     "earlier.\n\nMatching rulings, newest first:\n\n" + body +

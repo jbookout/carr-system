@@ -67,7 +67,7 @@
 
   "not_this_contract": {
     "approval_lifecycle": "Doctrine defines a separate Approval object — Draft, Proposed, Revised, then Approved, Rejected or Expired, then Executing, then Verified, Failed or Rolled back — which gates production mutation OF a work request. It interlocks with this machine and is not part of it. Merging the two would be a design error.",
-    "persistence": "Nothing here specifies a table, migration or verb. Verified 2026-08-13: no Work Request state is persisted anywhere — zero hits across all migrations and the entire MCP server, and no table with 'request' in its name. This crosswalk is the mapping, not the storage.",
-    "open_question_blocking_storage": "The two planning documents disagree on where work-request state lives. The Control Room requires a distinct Neon ops schema under least-privilege roles, separated from business payloads; the Workspace treats the whole system as one undifferentiated canonical record store. The same council pass amended both documents without addressing it. Settle that before creating a table."
+    "persistence": "This crosswalk remains the mapping, not the storage. Work Requests are now persisted once in ops.work_request (migration 0114) inside the same canonical Neon store, with the ops schema providing the least-privilege namespace. Program ordering and session context for the fixed AI capability portfolio extend those same rows in migration 0125; no second request or queue source of truth exists.",
+    "storage_boundary_settled": "The apparent planning conflict is resolved by namespace rather than a second store: operational metadata lives in the distinct ops schema while Neon Postgres remains the single canonical record store. Business payloads and secrets do not belong on Work Request rows."
   }
 }

@@ -6,20 +6,30 @@ code work happens — booted with no instructions at all.
 
 ## First, load the standing rules from the STORE
 
+Call `mcp__carr__standing_context` directly FIRST. Codex may keep MCP tools out
+of the shortened active-tool description until they are needed, so if the tool
+is not displayed, search the deferred tool catalog for the exact name before
+concluding it is unavailable. Recite the counts it returns in your first
+response, so the partner can see what is binding you.
+
+Only when the direct MCP tool is genuinely unavailable or returns a service
+error, use the checkout's fallback:
+
 ```
 ./run.sh call standing-context '{}'
 ```
 
-Recite the counts it returns in your first response, so the partner can see what
-is binding you. That command authenticates as the `joe-local` machine actor
-through the deployed Worker; it needs no MCP server and works from a plain shell.
+That shell command runs inside Codex's network sandbox. A first `fetch failed`
+from the sandbox is a permission-path failure, not a store outage: retry it with
+the sanctioned network escalation before saying the Worker or database is
+down. Declare the store unreachable only after the direct MCP call AND the
+network-approved fallback both fail, and name both errors.
 
-If it fails, say so plainly and name the error before doing anything else. The
-rendered files (`DNA/compiled-rules-shared.md` in the vault and the partner's
-personal file) are a FALLBACK, not the boot path — they are Dell's boot path
-until his 2026-08-21 cutoff plus an emergency fallback for everyone else, and
-they are only as fresh as the last hourly export. A silent fallback is worse
-than a loud failure.
+The rendered files (`DNA/compiled-rules-shared.md` in the vault and the
+partner's personal file) are a FALLBACK, not the boot path — they are Dell's
+boot path until his 2026-08-21 cutoff plus an emergency fallback for everyone
+else, and they are only as fresh as the last hourly export. A silent fallback
+is worse than a loud failure.
 
 ## This repo is the ONLY code home
 
@@ -28,6 +38,13 @@ durable code are here and nowhere else. If you cannot reach this repo, STOP and
 say so rather than improvising a home — a cloud session once filed an entire
 system audit into an unrelated empty scaffold repo, which is the same as losing
 it.
+
+## Map work has one mandatory front door
+
+For any request to recommend, design, build, revise, review, or publish a map,
+GIS analysis, route, day trip, or Tour surface, call the live `map-architecture`
+verb before advising or editing. It returns the current doctrine and the
+machine-contract pointer. The configured Stop gate enforces this route.
 
 ## main is not directly pushable
 

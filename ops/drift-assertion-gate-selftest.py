@@ -3,11 +3,13 @@
 drift-assertion-gate-selftest.py — acceptance test for hooks/drift-assertion-gate.py,
 written before the gate (rule e65efc68).
 
-WHY IT EXISTS, and the number is the argument. "A current artifact read
-accurately, the decision behind it left unread" has now failed NINE times since
-2026-08-04, six of them caught by Joe rather than by a session. The record layer
-says so itself when a ninth is filed: "A repeat class is a design problem, not a
-lapse."
+WHY IT EXISTS, and the frequency is the argument. "A current artifact read
+accurately, the decision behind it left unread" is the most frequent failure
+class on record here, running since 2026-08-04, most caught by Joe rather than
+by a session. The record layer says so itself on every filing: "A repeat class
+is a design problem, not a lapse." The integer is deliberately absent — it was
+"NINE" here while the ledger read twelve, and a suite testing the gate against
+stale figures should not carry one. `standing-context` returns the live count.
 
 drift-claim-gate.py already guards this, and it works — it fired twice on
 2026-08-14 and both times the claim it flagged was wrong. But it sits on
