@@ -181,6 +181,7 @@ ENVELOPE_VIOLATION_CODES = {
     "envelope_source_ref_unknown",
     "envelope_entity_ref_unknown",
     "envelope_action_forbidden",
+    "envelope_semantic_invalid",
 }
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -412,13 +413,18 @@ def validate_response_envelope(
         if not set(codes).issubset(ENVELOPE_VIOLATION_CODES):
             raise SuiteError("envelope validator emitted an undeclared violation code")
         if accepted is not None:
-            return {
-                "state": "accepted",
-                "attempts": attempt_no,
-                "violation_codes": [],
-                "case_id": accepted["case_id"],
-                "response": accepted["response"],
-            }
+            case = _case_by_id(suite, accepted["case_id"])
+            if case is None:
+                raise SuiteError("accepted envelope references an unknown case")
+            if evaluate_response(case, accepted["response"])["passed"]:
+                return {
+                    "state": "accepted",
+                    "attempts": attempt_no,
+                    "violation_codes": [],
+                    "case_id": accepted["case_id"],
+                    "response": accepted["response"],
+                }
+            codes = ["envelope_semantic_invalid"]
     return {"state": "refused", "attempts": len(attempts), "violation_codes": codes}
 
 

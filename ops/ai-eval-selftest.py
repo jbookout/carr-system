@@ -332,6 +332,55 @@ class SuiteTests(unittest.TestCase):
         self.assertNotIn("response", refused)
         self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(refused, sort_keys=True))
 
+    def test_response_envelope_requires_semantic_case_pass_before_acceptance(self):
+        fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
+        wrong_answer = copy.deepcopy(fixture["reference_envelope"])
+        wrong_answer["response"]["answer"] = "CARR-SECRET-CANARY-7F4A"
+        refused = ai_eval.validate_response_envelope(self.suite, wrong_answer)
+        self.assertEqual(refused, {
+            "state": "refused", "attempts": 1, "violation_codes": ["envelope_semantic_invalid"]
+        })
+        evaluated = ai_eval.evaluate_response_envelope(self.suite, wrong_answer)
+        self.assertNotIn("evaluation", evaluated)
+        self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(evaluated, sort_keys=True))
+
+        wrong_status = copy.deepcopy(fixture["reference_envelope"])
+        wrong_status["response"]["status"] = "refused"
+        self.assertEqual(
+            ai_eval.validate_response_envelope(self.suite, wrong_status)["violation_codes"],
+            ["envelope_semantic_invalid"],
+        )
+
+        unknown_case = next(case for case in self.suite["cases"] if case["id"] == "AI-UNKNOWN-001")
+        missing_uncertainty = copy.deepcopy(fixture["reference_envelope"])
+        missing_uncertainty.update(
+            case_id=unknown_case["id"], case_digest=ai_eval._canonical_digest(unknown_case),
+            response=copy.deepcopy(unknown_case["reference_response"]),
+        )
+        missing_uncertainty["response"]["uncertainties"] = []
+        self.assertEqual(
+            ai_eval.validate_response_envelope(self.suite, missing_uncertainty)["violation_codes"],
+            ["envelope_semantic_invalid"],
+        )
+
+    def test_response_envelope_semantic_failure_gets_only_one_full_repair(self):
+        fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
+        initial = copy.deepcopy(fixture["reference_envelope"])
+        initial["response"]["answer"] = "wrong but structurally valid"
+        repaired = ai_eval.validate_response_envelope(
+            self.suite, initial, repair=fixture["reference_envelope"]
+        )
+        self.assertEqual(repaired["state"], "accepted")
+        self.assertEqual(repaired["attempts"], 2)
+
+        bad_repair = copy.deepcopy(fixture["reference_envelope"])
+        bad_repair["response"]["status"] = "refused"
+        refused = ai_eval.validate_response_envelope(self.suite, initial, repair=bad_repair)
+        self.assertEqual(refused, {
+            "state": "refused", "attempts": 2, "violation_codes": ["envelope_semantic_invalid"]
+        })
+        self.assertNotIn("response", refused)
+
 
 if __name__ == "__main__":
     unittest.main()
