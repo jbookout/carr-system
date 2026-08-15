@@ -6011,10 +6011,12 @@ export const TOOLS = {
   },
 };
 
-// These names describe server-owned authority, never data a tool caller may
-// claim. The scan is recursive because composite candidates can nest a payload;
-// allowing a nested claim through would make the direct and composite routes
-// disagree. No registered input schema currently owns any of these names.
+// These names describe server-owned authority, never data a tool invocation may
+// claim. This is deliberately TOP-LEVEL only: record findings, template maps,
+// metrics, and correction payloads legitimately carry free-form business keys
+// such as `action` or `profile`, and those nested keys cannot widen authority.
+// call-verb recursion and composite dispatch each hand their inner arguments
+// back to this boundary as a new top-level invocation.
 const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "tenant", "tenant_id", "organization_tenant_id", "sponsor", "sponsoring_human_id",
   "sponsoring_human_slug", "human_slug", "identity", "actor", "runtime_principal",
@@ -6023,19 +6025,9 @@ const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "write", "writes_records", "calls_models", "call_models",
 ]);
 
-function hasReservedAuthorityField(value, seen = new Set()) {
-  if (!value || typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  if (Array.isArray(value)) return value.some((item) => hasReservedAuthorityField(item, seen));
-  for (const [key, child] of Object.entries(value)) {
-    if (RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key) || hasReservedAuthorityField(child, seen)) return true;
-  }
-  return false;
-}
-
 export function assertNoCallerAuthorityFields(args) {
-  if (hasReservedAuthorityField(args))
+  if (args && typeof args === "object" && !Array.isArray(args) &&
+      Object.keys(args).some((key) => RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key)))
     throw new ToolError({ error: "caller_authority_field_forbidden" });
   return args;
 }

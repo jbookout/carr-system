@@ -39,10 +39,24 @@ class ActionRiskDispositionTests(unittest.TestCase):
     def test_baseline_is_exactly_covered_and_set_lead_is_the_only_selected_remediation(self):
         result = self.validate()
         self.assertEqual(result, {"status": "valid", "selected_slice": "set-lead", "rows": 13})
+        self.assertEqual(self.artifact["contract"], "carr-action-risk-dispositions")
+        self.assertEqual(self.artifact["version"], "1.0.0")
+        self.assertEqual(self.artifact["status"], "phase1_guardrails")
         rows = self.artifact["dispositions"]
         self.assertEqual({row["tool_name"] for row in rows}, action_risk_guardrails.BASELINE_NONE_ROWS)
         self.assertEqual([row["tool_name"] for row in rows if row["selected_slice"]], ["set-lead"])
         self.assertNotIn(CANARY, json.dumps(self.artifact, sort_keys=True))
+
+    def test_every_baseline_row_has_a_closed_owner_target_control_and_evidence_category(self):
+        for row in self.artifact["dispositions"]:
+            with self.subTest(tool_name=row["tool_name"]):
+                expected = action_risk_guardrails.EXPECTED_ROWS[row["tool_name"]]
+                self.assertEqual(
+                    (row["owner"], row["target_control"], row["evidence_category"],
+                     row["evidence"], row["priority"], row["selected_slice"]),
+                    expected,
+                )
+                self.assertNotEqual(row["evidence_category"], "pending_shape_analysis")
 
     def test_registry_digest_is_bound_and_stale_bytes_refuse(self):
         stale_binding = copy.deepcopy(self.artifact)
@@ -58,10 +72,10 @@ class ActionRiskDispositionTests(unittest.TestCase):
 
         unknown = copy.deepcopy(self.artifact)
         unknown["dispositions"][-1]["tool_name"] = "unknown-tool"
-        self.assert_invalid(unknown, "baseline coverage")
+        self.assert_invalid(unknown, "owner or control")
 
         duplicate = copy.deepcopy(self.artifact)
-        duplicate["dispositions"][-1]["tool_name"] = duplicate["dispositions"][0]["tool_name"]
+        duplicate["dispositions"][-1] = copy.deepcopy(duplicate["dispositions"][0])
         self.assert_invalid(duplicate, "duplicates")
 
         unowned = copy.deepcopy(self.artifact)
@@ -82,7 +96,11 @@ class ActionRiskDispositionTests(unittest.TestCase):
         bad_evidence = copy.deepcopy(self.artifact)
         selected = next(row for row in bad_evidence["dispositions"] if row["tool_name"] == "set-lead")
         selected["evidence"] = "unverified"
-        self.assert_invalid(bad_evidence, "selected evidence")
+        self.assert_invalid(bad_evidence, "owner or control")
+
+        wrong_owner = copy.deepcopy(self.artifact)
+        wrong_owner["dispositions"][0]["owner"] = "unowned"
+        self.assert_invalid(wrong_owner, "owner or control")
 
 
 if __name__ == "__main__":

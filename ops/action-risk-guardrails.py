@@ -26,20 +26,31 @@ BASELINE_NONE_ROWS = frozenset({
     "update-document-status",
 })
 ARTIFACT_FIELDS = {
-    "schema_version", "artifact_type", "data_class", "action_risk_registry",
+    "contract", "version", "status", "artifact_type", "data_class", "action_risk_registry",
     "selected_slice", "dispositions",
 }
 BINDING_FIELDS = {"path", "sha256"}
 ROW_FIELDS = {
-    "tool_name", "baseline_protection", "owner", "disposition", "evidence",
-    "priority", "selected_slice",
+    "tool_name", "baseline_protection", "owner", "target_control", "evidence_category",
+    "evidence", "priority", "selected_slice",
 }
-OWNERS = {"mcp-server-runtime"}
 PRIORITIES = {"P0", "P1", "P2"}
-PENDING_DISPOSITION = "pending_shape_analysis"
-SELECTED_DISPOSITION = "human_boundary_and_optimistic_concurrency"
 SELECTED_TOOL = "set-lead"
-SELECTED_EVIDENCE = "mcp-server/test/action-risk-guardrails.test.mjs"
+EXPECTED_ROWS = {
+    "complete-action": ("workflow-actions", "atomic_state_predicate", "verified_runtime_handler", "mcp-server/src/tools.js#complete-action", "P1", False),
+    "detach-decision": ("decision-governance", "native_optimistic_concurrency", "queued_native_guard", "mcp-server/src/tools.js#detach-decision", "P1", False),
+    "end-deal-review": ("deal-review", "atomic_state_predicate", "verified_runtime_handler", "mcp-server/src/tools.js#end-deal-review", "P1", False),
+    "link-parties": ("relationship-integrity", "native_optimistic_concurrency", "queued_native_guard", "mcp-server/src/tools.js#link-parties", "P1", False),
+    "measure-placement": ("marketing-measurement", "atomic_state_predicate", "verified_runtime_handler", "mcp-server/src/tools.js#measure-placement", "P1", False),
+    "register-template": ("document-governance", "native_optimistic_concurrency", "queued_native_guard", "mcp-server/src/tools.js#register-template", "P1", False),
+    "resolve-conflict": ("dealroom-concurrency", "transaction_row_lock", "verified_runtime_handler", "mcp-server/src/tools.js#resolve-conflict", "P1", False),
+    "set-lead": ("deal-ownership", "human_boundary_and_optimistic_concurrency", "verified_runtime_handler", "mcp-server/test/action-risk-guardrails.test.mjs", "P0", True),
+    "set-next-action": ("workflow-actions", "native_optimistic_concurrency", "queued_native_guard", "mcp-server/src/tools.js#set-next-action", "P1", False),
+    "set-next-step": ("dealroom-concurrency", "transaction_row_lock", "verified_runtime_handler", "mcp-server/src/tools.js#set-next-step", "P1", False),
+    "triage-item": ("inbox-triage", "atomic_state_predicate", "verified_runtime_handler", "mcp-server/src/tools.js#triage-item", "P1", False),
+    "update-decision": ("decision-governance", "native_optimistic_concurrency", "queued_native_guard", "mcp-server/src/tools.js#update-decision", "P1", False),
+    "update-document-status": ("document-governance", "native_optimistic_concurrency", "queued_native_guard", "mcp-server/src/tools.js#update-document-status", "P1", False),
+}
 
 
 class DispositionError(ValueError):
@@ -62,28 +73,28 @@ def _validate_row(row: Any) -> dict[str, Any]:
         raise DispositionError("disposition tool name is invalid")
     if item["baseline_protection"] != "NONE":
         raise DispositionError("baseline protection is invalid")
-    if item["owner"] not in OWNERS:
-        raise DispositionError("disposition owner is invalid")
     if item["priority"] not in PRIORITIES:
         raise DispositionError("disposition priority is invalid")
     if not isinstance(item["selected_slice"], bool):
         raise DispositionError("selected slice marker is invalid")
     if not isinstance(item["evidence"], str) or not item["evidence"]:
         raise DispositionError("disposition evidence is invalid")
-    if item["selected_slice"]:
-        if item["tool_name"] != SELECTED_TOOL or item["disposition"] != SELECTED_DISPOSITION:
-            raise DispositionError("selected disposition is invalid")
-        if item["evidence"] != SELECTED_EVIDENCE:
-            raise DispositionError("selected evidence is invalid")
-    elif item["disposition"] != PENDING_DISPOSITION or item["evidence"] != "pending_shape_analysis":
-        raise DispositionError("pending disposition is invalid")
+    expected = EXPECTED_ROWS.get(item["tool_name"])
+    actual = (
+        item["owner"], item["target_control"], item["evidence_category"],
+        item["evidence"], item["priority"], item["selected_slice"],
+    )
+    if expected is None or actual != expected:
+        raise DispositionError("disposition owner or control is invalid")
     return item
 
 
 def validate_dispositions(artifact: Any, registry: Any, registry_bytes: bytes) -> dict[str, Any]:
     """Validate exact baseline coverage against the current generated registry."""
     doc = _exact_object(artifact, ARTIFACT_FIELDS, "disposition artifact fields are invalid")
-    if doc["schema_version"] != 1 or doc["artifact_type"] != "carr_action_risk_dispositions":
+    if (doc["contract"] != "carr-action-risk-dispositions" or doc["version"] != "1.0.0"
+            or doc["status"] != "phase1_guardrails"
+            or doc["artifact_type"] != "carr_action_risk_dispositions"):
         raise DispositionError("disposition artifact version is invalid")
     if doc["data_class"] != "D2_internal_metadata_only":
         raise DispositionError("disposition artifact data class is invalid")
