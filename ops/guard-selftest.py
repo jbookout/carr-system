@@ -263,6 +263,62 @@ case("repartitioning a disk is refused", bash(f"diskutil partitionDisk {_DISK} 1
 case("a plus-refspec force push is refused", bash("git push origin +main:main"), DENY)
 case("an ordinary push is still allowed", bash("git push origin main"), ALLOW)
 
+# ── Rebasing your OWN branch in place, which the blanket block made impossible ──
+#
+# THE CORPSE FACTORY, measured 2026-08-15. main takes ~100 commits a day here, so
+# a branch going stale mid-review is the normal case, not the exception. The fix
+# for a stale branch is `git rebase origin/main` followed by a force-push to the
+# SAME branch — but the blanket "force push" rule refused that, so the only route
+# left was: abandon the branch, cut a new one, open a second pull request. Four
+# closed pull requests say so in their own closing notes, verbatim — "reopened on
+# a fresh branch because rewriting the pushed one needs a force-push, which the
+# unattended guard blocks" (#125, #131, #142, and #100 in the same words).
+#
+# Every one of those events leaves a PERMANENT orphan, because GitHub's
+# auto-delete fires on MERGE and never on close. 25 closed pull requests and 35
+# dead branches were swept by hand on 2026-08-15; the guard was manufacturing the
+# garbage it was never asked to make.
+#
+# WHAT STAYS BLOCKED, because this is a narrow widening and not an amnesty:
+# anything aimed at main, the bare --force spelling, the +refspec spelling, and a
+# force-push with NO named target (whose destination the guard cannot see).
+case("force-with-lease to a named feature branch is allowed",
+     bash("git push --force-with-lease origin HEAD:refs/heads/my-feature"), ALLOW)
+case("force-with-lease to a named branch, short form, is allowed",
+     bash("git push --force-with-lease origin my-feature"), ALLOW)
+case("force-with-lease at MAIN is still refused",
+     bash("git push --force-with-lease origin HEAD:refs/heads/main"), DENY)
+case("force-with-lease at main, short form, is still refused",
+     bash("git push --force-with-lease origin main"), DENY)
+case("force-with-lease at master is still refused",
+     bash("git push --force-with-lease origin master"), DENY)
+# Lease is the whole point: it refuses when the remote moved under you, which is
+# the only thing protecting a peer session's push on a shared branch. Bare
+# --force has no such check, so it stays blocked even on a feature branch.
+case("bare --force to a feature branch is still refused",
+     bash("git push --force origin my-feature"), DENY)
+case("-f to a feature branch is still refused",
+     bash("git push -f origin my-feature"), DENY)
+case("a plus-refspec to a feature branch is still refused",
+     bash("git push origin +my-feature:my-feature"), DENY)
+# No named target means the guard cannot see where this lands — it takes the
+# current branch, which may be main. Naming the branch is the same house rule as
+# committing by named paths, and it makes the guard's decision auditable.
+case("force-with-lease with NO named target is still refused",
+     bash("git push --force-with-lease"), DENY)
+case("force-with-lease to a bare remote with no ref is still refused",
+     bash("git push --force-with-lease origin"), DENY)
+# A branch whose NAME merely contains "main" is not main.
+case("a branch named main-thread is not main",
+     bash("git push --force-with-lease origin main-thread"), ALLOW)
+case("a branch named domain-fix is not main",
+     bash("git push --force-with-lease origin domain-fix"), ALLOW)
+# Prose describing the newly-allowed form must still not become a way to smuggle
+# a real one past the scanner.
+case("prose describing a force-with-lease is allowed",
+     bash('gh pr create --title "x" --body "rebase then git push --force-with-lease origin main"'),
+     ALLOW)
+
 case("find -delete is refused outside a scratch zone",
      bash("find /Users/booko/important -name '*.md' -delete"), DENY)
 case("find without -delete is still allowed",
