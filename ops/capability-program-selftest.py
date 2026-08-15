@@ -198,6 +198,47 @@ def tier2() -> None:
             cur.execute("select program_ordinal from ops.v_capability_program_next where program_key=%s",
                         ("carr-ai-engineering-suite-v1",))
             check("an independently verified close exposes exactly project 2", cur.fetchall() == [(2,)])
+            cur.execute("""
+                update ops.capability_agent_session
+                   set state='completed', completed_at=now(), version=version+1
+                 where id=%s
+            """, (session_id,))
+
+            def refused_after_savepoint(label: str, statement: str, params: tuple[object, ...]) -> None:
+                cur.execute("savepoint immutable_probe")
+                refused = False
+                try:
+                    cur.execute(statement, params)
+                except psycopg.Error:
+                    refused = True
+                cur.execute("rollback to savepoint immutable_probe")
+                check(label, refused)
+
+            refused_after_savepoint(
+                "closed completion evidence cannot be rewritten",
+                "update ops.work_request set completion_evidence='{}'::jsonb where id=%s",
+                (work_request_id,),
+            )
+            refused_after_savepoint(
+                "a closed capability project cannot be reopened",
+                "update ops.work_request set state='verification', closed_at=null where id=%s",
+                (work_request_id,),
+            )
+            refused_after_savepoint(
+                "verification attestations cannot be rewritten",
+                "update ops.capability_verification set note='forged' where id=%s",
+                (pass_id,),
+            )
+            refused_after_savepoint(
+                "a completed session candidate kind cannot be rewritten",
+                "update ops.capability_agent_session set candidate_kind='built' where id=%s",
+                (session_id,),
+            )
+            refused_after_savepoint(
+                "a completed capability session is fully immutable",
+                "update ops.capability_agent_session set completed_at=now() + interval '1 second' where id=%s",
+                (session_id,),
+            )
             cur.execute("rollback to savepoint queue_handoff")
             cur.execute("select program_ordinal from ops.v_capability_program_next where program_key=%s",
                         ("carr-ai-engineering-suite-v1",))

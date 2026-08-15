@@ -287,6 +287,9 @@ test("the scheduled builder definition cannot certify, merge, deploy, or communi
     "NEVER deploy",
     "NEVER communicate externally",
     "one current project",
+    "reminder_only_pending_runner_identity",
+    "must not edit\\s+files",
+    "must not[\\s\\S]*delegate implementation",
   ]) assert.match(prompt, new RegExp(boundary, "i"));
 });
 

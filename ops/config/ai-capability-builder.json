@@ -30,5 +30,6 @@
   },
   "prohibitions": ["merge", "deploy", "production_mutation", "external_communication", "spend", "self_completion", "cadence_self_modification"],
   "completion_authority": "A separate interactive owner decision plus independent verifier evidence; the recurring builder cannot call complete-capability-project.",
-  "current_activation_scope": "reminder_only_pending_runner_identity; autonomous build preparation is not enabled"
+  "current_activation_scope": "reminder_only_pending_runner_identity; autonomous build preparation is not enabled",
+  "database_authority_boundary": "The MCP application authenticates actor identity before SQL. The shared carr_writer database credential is privileged infrastructure, not an independent actor identity; database triggers enforce lifecycle consistency and immutability."
 }
