@@ -14,6 +14,7 @@ import json
 import math
 import re
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,7 @@ ATTRIBUTION_FIELDS = {
     "policy_digest",
     "observed_by",
 }
+SCORECARD_ATTRIBUTION_FIELDS = {"provider_id", "model_id", "route_id", "observed_by"}
 PROVIDER_OUTPUT_FIELDS = {
     "outcome",
     "content",
@@ -76,6 +78,37 @@ PROVIDER_OUTPUT_FIELDS = {
     "reported_usage",
 }
 METRICS_FIELDS = {"latency_ms", "cost_usd"}
+OBSERVED_SCORECARD_FIELDS = {
+    "schema_version",
+    "artifact_type",
+    "data_class",
+    "execution",
+    "calls_models",
+    "writes_records",
+    "allowed_actions",
+    "run_id",
+    "attribution",
+    "replay",
+    "summary",
+    "results",
+}
+BASELINE_HISTORY_FIELDS = {
+    "schema_version",
+    "artifact_type",
+    "data_class",
+    "execution",
+    "calls_models",
+    "writes_records",
+    "allowed_actions",
+    "history_id",
+    "baseline",
+    "entries",
+}
+BASELINE_FIELDS = {"attribution", "suite_digest", "policy_digest", "route_digest", "case_ids"}
+BASELINE_ENTRY_FIELDS = {"sequence", "observed_on", "run_id", "binding", "summary", "cases"}
+ENTRY_BINDING_FIELDS = {"attribution", "replay"}
+PROJECTED_CASE_FIELDS = {"case_id", "passed", "violation_codes"}
+SUMMARY_FIELDS = {"total", "passed", "failed"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -113,6 +146,53 @@ def _is_sha256(value: Any) -> bool:
 
 def _is_finite_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _validate_observed_on(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise SuiteError(f"{label} must be an ISO date")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise SuiteError(f"{label} must be an ISO date") from exc
+    return value
+
+
+def _validate_summary(value: Any, label: str) -> dict[str, int]:
+    summary = _expect_exact_keys(value, SUMMARY_FIELDS, label)
+    if any(not isinstance(summary[field], int) or isinstance(summary[field], bool) or summary[field] < 0
+           for field in SUMMARY_FIELDS):
+        raise SuiteError(f"{label} values must be non-negative integers")
+    if summary["passed"] + summary["failed"] != summary["total"]:
+        raise SuiteError(f"{label} totals do not reconcile")
+    return summary
+
+
+def _validate_attribution(value: Any, label: str) -> dict[str, Any]:
+    attribution = _expect_exact_keys(value, ATTRIBUTION_FIELDS, label)
+    for field in ("provider_id", "model_id", "route_id", "observed_by"):
+        if not _is_nonempty_string(attribution[field]):
+            raise SuiteError(f"{label} {field} must be a non-empty string")
+    for field in ("route_digest", "policy_digest"):
+        if not _is_sha256(attribution[field]):
+            raise SuiteError(f"{label} {field} must be a lowercase SHA-256 digest")
+    return attribution
+
+
+def _validate_scorecard_attribution(value: Any, label: str) -> dict[str, str]:
+    attribution = _expect_exact_keys(value, SCORECARD_ATTRIBUTION_FIELDS, label)
+    if any(not _is_nonempty_string(attribution[field]) for field in attribution):
+        raise SuiteError(f"{label} values must be non-empty strings")
+    return attribution
+
+
+def _validate_replay(value: Any, label: str) -> dict[str, str]:
+    replay = _expect_exact_keys(
+        value, {"suite_digest", "fixture_digest", "policy_digest", "route_digest", "run_digest"}, label
+    )
+    if any(not _is_sha256(replay[field]) for field in replay):
+        raise SuiteError(f"{label} must contain lowercase SHA-256 digests")
+    return replay
 
 
 def load_suite(path: Path) -> dict[str, Any]:
@@ -437,6 +517,7 @@ def evaluate_provider_run(suite: dict[str, Any], observed_run: dict[str, Any]) -
         "calls_models": False,
         "writes_records": False,
         "allowed_actions": [],
+        "run_id": observed_run["run_id"],
         "attribution": {
             "provider_id": attribution["provider_id"],
             "model_id": attribution["model_id"],
@@ -452,6 +533,188 @@ def evaluate_provider_run(suite: dict[str, Any], observed_run: dict[str, Any]) -
         },
         "summary": report["summary"],
         "results": report["results"],
+    }
+
+
+def _projected_cases_from_scorecard(scorecard: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(scorecard["results"], list) or not scorecard["results"]:
+        raise SuiteError("scorecard results must be a non-empty list")
+    projected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for result in scorecard["results"]:
+        if not isinstance(result, dict) or set(result) != {
+            "case_id", "evaluation_area", "passed", "violation_codes", "violations"
+        }:
+            raise SuiteError("scorecard result fields do not match the v1 contract")
+        case_id = result["case_id"]
+        if not _is_nonempty_string(case_id) or case_id in seen:
+            raise SuiteError("scorecard case IDs must be unique non-empty strings")
+        if not isinstance(result["passed"], bool) or not _string_list(result["violation_codes"]):
+            raise SuiteError("scorecard result status must be a boolean and redacted codes")
+        if result["passed"] == bool(result["violation_codes"]):
+            raise SuiteError("scorecard result pass state does not match violation codes")
+        seen.add(case_id)
+        projected.append(
+            {
+                "case_id": case_id,
+                "passed": result["passed"],
+                "violation_codes": result["violation_codes"],
+            }
+        )
+    return projected
+
+
+def _scorecard_projection(scorecard: Any) -> dict[str, Any]:
+    card = _expect_exact_keys(scorecard, OBSERVED_SCORECARD_FIELDS, "scorecard")
+    if card["schema_version"] != 1 or card["artifact_type"] != "observed_synthetic_scorecard":
+        raise SuiteError("unsupported observed scorecard contract")
+    if card["data_class"] != "synthetic_only" or card["execution"] != "offline_deterministic":
+        raise SuiteError("scorecard must be synthetic_only and offline_deterministic")
+    if card["calls_models"] is not False or card["writes_records"] is not False or card["allowed_actions"] != []:
+        raise SuiteError("scorecard cannot call models, write records, or authorize actions")
+    if not _is_nonempty_string(card["run_id"]):
+        raise SuiteError("scorecard run_id must be a non-empty string")
+    attribution = _validate_scorecard_attribution(card["attribution"], "scorecard attribution")
+    replay = _validate_replay(card["replay"], "scorecard replay")
+    summary = _validate_summary(card["summary"], "scorecard summary")
+    cases = _projected_cases_from_scorecard(card)
+    actual = {
+        "total": len(cases),
+        "passed": sum(1 for case in cases if case["passed"]),
+        "failed": sum(1 for case in cases if not case["passed"]),
+    }
+    if summary != actual:
+        raise SuiteError("scorecard summary does not match its case results")
+    return {"run_id": card["run_id"], "attribution": attribution, "replay": replay,
+            "summary": summary, "cases": cases}
+
+
+def project_scorecard_entry(scorecard: Any, observed_on: str, sequence: int) -> dict[str, Any]:
+    """Create the redacted, immutable projection a baseline history can retain."""
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+        raise SuiteError("history entry sequence must be a positive integer")
+    projected = _scorecard_projection(scorecard)
+    _validate_observed_on(observed_on, "history entry observed_on")
+    return {
+        "sequence": sequence,
+        "observed_on": observed_on,
+        "run_id": projected["run_id"],
+        "binding": {"attribution": projected["attribution"], "replay": projected["replay"]},
+        "summary": projected["summary"],
+        "cases": projected["cases"],
+    }
+
+
+def _validate_baseline_history(history: Any) -> dict[str, Any]:
+    artifact = _expect_exact_keys(history, BASELINE_HISTORY_FIELDS, "baseline history")
+    if artifact["schema_version"] != 1:
+        raise SuiteError("unsupported baseline history schema_version")
+    if artifact["artifact_type"] != "synthetic_observed_scorecard_history":
+        raise SuiteError("baseline history artifact_type is invalid")
+    if artifact["data_class"] != "synthetic_only" or artifact["execution"] != "offline_deterministic":
+        raise SuiteError("baseline history must be synthetic_only and offline_deterministic")
+    if artifact["calls_models"] is not False or artifact["writes_records"] is not False:
+        raise SuiteError("baseline history cannot call models or write records")
+    if artifact["allowed_actions"] != [] or not _is_nonempty_string(artifact["history_id"]):
+        raise SuiteError("baseline history cannot authorize actions and needs a history_id")
+    baseline = _expect_exact_keys(artifact["baseline"], BASELINE_FIELDS, "baseline")
+    attribution = _validate_scorecard_attribution(baseline["attribution"], "baseline attribution")
+    for field in ("suite_digest", "policy_digest", "route_digest"):
+        if not _is_sha256(baseline[field]):
+            raise SuiteError(f"baseline {field} must be a lowercase SHA-256 digest")
+    case_ids = baseline["case_ids"]
+    if not isinstance(case_ids, list) or not case_ids or not all(_is_nonempty_string(case_id) for case_id in case_ids):
+        raise SuiteError("baseline case_ids must be non-empty strings")
+    if len(case_ids) != len(set(case_ids)):
+        raise SuiteError("baseline case_ids must be unique")
+    if not isinstance(artifact["entries"], list) or not artifact["entries"]:
+        raise SuiteError("baseline history must contain entries")
+
+    run_ids: set[str] = set()
+    run_digests: set[str] = set()
+    fixture_digests: set[str] = set()
+    for expected_sequence, entry in enumerate(artifact["entries"], start=1):
+        row = _expect_exact_keys(entry, BASELINE_ENTRY_FIELDS, "baseline history entry")
+        if row["sequence"] != expected_sequence:
+            raise SuiteError("baseline history entries must have contiguous sequences")
+        _validate_observed_on(row["observed_on"], "baseline history entry observed_on")
+        if not _is_nonempty_string(row["run_id"]):
+            raise SuiteError("baseline history entry run_id must be a non-empty string")
+        if row["run_id"] in run_ids:
+            raise SuiteError("baseline history contains duplicate run_id")
+        run_ids.add(row["run_id"])
+        binding = _expect_exact_keys(row["binding"], ENTRY_BINDING_FIELDS, "baseline history entry binding")
+        entry_attribution = _validate_scorecard_attribution(
+            binding["attribution"], "baseline history entry attribution"
+        )
+        entry_replay = _validate_replay(binding["replay"], "baseline history entry replay")
+        if entry_attribution != attribution or any(
+            entry_replay[field] != baseline[field] for field in ("suite_digest", "policy_digest", "route_digest")
+        ):
+            raise SuiteError("baseline history entry drifts from the immutable baseline")
+        if entry_replay["run_digest"] in run_digests:
+            raise SuiteError("baseline history contains duplicate run_digest")
+        if entry_replay["fixture_digest"] in fixture_digests:
+            raise SuiteError("baseline history contains duplicate fixture_digest")
+        run_digests.add(entry_replay["run_digest"])
+        fixture_digests.add(entry_replay["fixture_digest"])
+        summary = _validate_summary(row["summary"], "baseline history entry summary")
+        if not isinstance(row["cases"], list) or len(row["cases"]) != len(case_ids):
+            raise SuiteError("baseline history entry cases do not match the baseline")
+        projected_cases: list[dict[str, Any]] = []
+        for case in row["cases"]:
+            projected = _expect_exact_keys(case, PROJECTED_CASE_FIELDS, "baseline history entry case")
+            if not isinstance(projected["passed"], bool) or not _string_list(projected["violation_codes"]):
+                raise SuiteError("baseline history entry case must contain status and redacted codes")
+            if projected["passed"] == bool(projected["violation_codes"]):
+                raise SuiteError("baseline history entry case pass state does not match violation codes")
+            projected_cases.append(projected)
+        if [case["case_id"] for case in projected_cases] != case_ids:
+            raise SuiteError("baseline history entry cases do not match the baseline")
+        actual = {
+            "total": len(projected_cases),
+            "passed": sum(1 for case in projected_cases if case["passed"]),
+            "failed": sum(1 for case in projected_cases if not case["passed"]),
+        }
+        if summary != actual:
+            raise SuiteError("baseline history entry summary does not match its cases")
+    return artifact
+
+
+def load_baseline_history(path: Path) -> dict[str, Any]:
+    """Load a D1 redacted scorecard history; it is evidence, never a decision gate."""
+    try:
+        history = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SuiteError(f"cannot load baseline history: {exc}") from exc
+    return _validate_baseline_history(history)
+
+
+def compare_scorecard_to_history(scorecard: Any, history: Any) -> dict[str, Any]:
+    """Return a redacted informational comparison against the most recent observed entry."""
+    artifact = _validate_baseline_history(history)
+    candidate = _scorecard_projection(scorecard)
+    baseline = artifact["baseline"]
+    if candidate["attribution"] != baseline["attribution"] or any(
+        candidate["replay"][field] != baseline[field]
+        for field in ("suite_digest", "policy_digest", "route_digest")
+    ):
+        raise SuiteError("scorecard drifts from history baseline")
+    latest = artifact["entries"][-1]
+    return {
+        "schema_version": 1,
+        "artifact_type": "informational_synthetic_history_comparison",
+        "data_class": "synthetic_only",
+        "execution": "offline_deterministic",
+        "history_id": artifact["history_id"],
+        "sample_count": len(artifact["entries"]),
+        "candidate": {"run_id": candidate["run_id"], "summary": candidate["summary"]},
+        "latest": {"run_id": latest["run_id"], "summary": latest["summary"]},
+        "summary_delta": {
+            "passed": candidate["summary"]["passed"] - latest["summary"]["passed"],
+            "failed": candidate["summary"]["failed"] - latest["summary"]["failed"],
+        },
+        "informational_only": True,
     }
 
 

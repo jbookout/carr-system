@@ -16,6 +16,7 @@ ROOT = Path(__file__).parents[1]
 MODULE_PATH = Path(__file__).with_name("ai_eval.py")
 SUITE_PATH = ROOT / "evals" / "ai" / "model-boundary.v1.json"
 OBSERVED_RUN_PATH = ROOT / "evals" / "ai" / "synthetic-observed-run.v1.json"
+BASELINE_HISTORY_PATH = ROOT / "evals" / "ai" / "synthetic-baseline-history.v1.json"
 ACCEPTANCE_PATH = ROOT / "workspace" / "contracts" / "phase0-acceptance.v1.json"
 
 SPEC = importlib.util.spec_from_file_location("ai_eval", MODULE_PATH)
@@ -201,6 +202,66 @@ class SuiteTests(unittest.TestCase):
         scorecard = ai_eval.evaluate_provider_run(self.suite, observed_run)
         self.assertEqual(scorecard["summary"]["failed"], 1)
         self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(scorecard, sort_keys=True))
+
+    def test_baseline_history_projects_one_observed_scorecard_without_raw_output(self):
+        history = ai_eval.load_baseline_history(BASELINE_HISTORY_PATH)
+        scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
+        entry = ai_eval.project_scorecard_entry(scorecard, observed_on="2026-08-15", sequence=1)
+        self.assertEqual(history["entries"], [entry])
+        comparison = ai_eval.compare_scorecard_to_history(scorecard, history)
+        self.assertEqual(comparison["sample_count"], 1)
+        self.assertEqual(comparison["summary_delta"], {"passed": 0, "failed": 0})
+        self.assertTrue(comparison["informational_only"])
+        rendered = json.dumps({"history": history, "comparison": comparison}, sort_keys=True)
+        self.assertNotIn("The synthetic suite is 4,200 square feet.", rendered)
+        self.assertNotIn("CARR-SECRET-CANARY-7F4A", rendered)
+        self.assertNotIn("provider_output", rendered)
+        self.assertNotIn("promotion", rendered.casefold())
+        self.assertNotIn("threshold", rendered.casefold())
+
+    def test_baseline_history_rejects_malformed_duplicate_and_drifted_entries(self):
+        raw = json.loads(BASELINE_HISTORY_PATH.read_text())
+        cases = [
+            (lambda h: h["entries"].extend([{**copy.deepcopy(h["entries"][0]), "sequence": 2}]), "duplicate run_id"),
+            (lambda h: h["entries"][0]["binding"]["attribution"].update(model_id="other-model"), "drifts"),
+            (lambda h: h["entries"][0]["binding"]["replay"].update(suite_digest="0" * 64), "drifts"),
+            (lambda h: h["entries"][0].update(answer="CARR-SECRET-CANARY-7F4A"), "entry fields"),
+        ]
+        for mutate, error in cases:
+            changed = copy.deepcopy(raw)
+            mutate(changed)
+            with self.subTest(error=error), tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+                json.dump(changed, handle)
+                handle.flush()
+                with self.assertRaisesRegex(ai_eval.SuiteError, error):
+                    ai_eval.load_baseline_history(Path(handle.name))
+
+        changed = copy.deepcopy(raw)
+        duplicate = copy.deepcopy(changed["entries"][0])
+        duplicate["sequence"] = 2
+        duplicate["run_id"] = "synthetic-observed-run-002"
+        duplicate["binding"]["replay"]["run_digest"] = "1" * 64
+        changed["entries"].append(duplicate)
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(changed, handle)
+            handle.flush()
+            with self.assertRaisesRegex(ai_eval.SuiteError, "duplicate fixture_digest"):
+                ai_eval.load_baseline_history(Path(handle.name))
+
+        changed = copy.deepcopy(raw)
+        changed["entries"][0]["summary"] = {"total": 10, "passed": 9, "failed": 1}
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(changed, handle)
+            handle.flush()
+            with self.assertRaisesRegex(ai_eval.SuiteError, "summary does not match"):
+                ai_eval.load_baseline_history(Path(handle.name))
+
+    def test_baseline_comparison_rejects_scorecard_binding_drift(self):
+        history = ai_eval.load_baseline_history(BASELINE_HISTORY_PATH)
+        scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
+        scorecard["replay"]["route_digest"] = "0" * 64
+        with self.assertRaisesRegex(ai_eval.SuiteError, "drifts from history baseline"):
+            ai_eval.compare_scorecard_to_history(scorecard, history)
 
 
 if __name__ == "__main__":
