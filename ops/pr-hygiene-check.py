@@ -62,7 +62,7 @@ import sys
 # Each is deliberately generous. See the module docstring on why a tight
 # threshold here would be worse than no check at all.
 RED_STALE_MINUTES = 180        # red checks, untouched for 3h
-NO_CHECKS_MINUTES = 90         # open 1.5h and CI never ran — usually a dead session
+NO_CHECKS_MINUTES = 90         # open 1.5h, head commit unchecked — usually a dead session
 CONFLICT_MINUTES = 180         # conflicted against main for 3h
 
 _FIELDS = ("number,title,headRefName,isDraft,createdAt,updatedAt,"
@@ -84,11 +84,17 @@ def _age_minutes(iso: str, now: _dt.datetime) -> float:
 
 
 def _rollup_state(row: dict) -> str | None:
-    """FAILURE / SUCCESS / IN_PROGRESS, or None when CI never ran at all.
+    """FAILURE / SUCCESS / IN_PROGRESS, or None when the HEAD COMMIT has no check.
 
     None and FAILURE are genuinely different findings and must never be
     reported as the same one (rule 88e9b5eb): a red pull request had a session
-    that got far enough to run CI; a check-less one usually did not.
+    that got far enough to run CI; a check-less head usually did not.
+
+    None means THIS COMMIT is unchecked, never that the branch was never built.
+    GitHub's rollup describes the head only, so a pull request whose earlier
+    commit passed and whose later push ran nothing reads None here — which is
+    exactly #179 on 2026-08-15, and exactly the overstatement that reached Joe
+    when this returned a sentence saying CI had never run.
     """
     roll = row.get("statusCheckRollup") or []
     if not roll:
@@ -128,8 +134,16 @@ def classify(rows: list[dict], now_iso: str | None = None) -> list[dict]:
             continue
 
         if state is None and idle >= NO_CHECKS_MINUTES:
+            # WORDING IS LOAD-BEARING HERE, corrected 2026-08-15. This said "CI
+            # has never run against it", and a session repeated that to Joe about
+            # #179 — where CI had in fact run and PASSED on an earlier commit,
+            # and a later push left the CURRENT HEAD unchecked. The rollup this
+            # reads describes the head commit only, so the classification was
+            # right and the sentence was not. An overstated finding is how a
+            # correct detector loses its reader.
             add("no-checks",
-                f"open {idle/60:.1f}h and CI has never run against it",
+                f"open {idle/60:.1f}h with no CI run against its CURRENT HEAD "
+                f"(an earlier commit may well have passed; this reads the head only)",
                 f"`python3 ops/pr_actor.py` to see the plan, `--execute` to act "
                 f"— it decides #{num} and clears it.")
         elif state == "FAILURE" and idle >= RED_STALE_MINUTES:

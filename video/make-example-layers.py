@@ -12,6 +12,11 @@ Copy is the conflict-of-interest hook (the standing strongest pitch) and it
 passes run.sh lint clean.
 """
 import os, sys
+# Pillow moved the resampling constants under Image.Resampling in 9.1 and
+# dropped them from the Image namespace in the type stubs. The bare
+# Image.LANCZOS alias still RESOLVES at runtime on Pillow 12.3 (checked, not
+# assumed), so this was never a crash — but mypy cannot see it, and the
+# Resampling form is the documented one. Fixing the call beats silencing it.
 from PIL import Image, ImageDraw, ImageFont
 
 W = H = 1080
@@ -62,7 +67,7 @@ for f in os.listdir(OUT):
 bg = Image.new("RGBA", (W, H), NAVY)
 # Soft radial vignette: darkest at the corners, clean at the center. Built from a
 # real radial gradient rather than nested rectangles, which leave a visible edge.
-vig = Image.radial_gradient("L").resize((W, H), Image.LANCZOS).point(lambda v: int(v * 0.42))
+vig = Image.radial_gradient("L").resize((W, H), Image.Resampling.LANCZOS).point(lambda v: int(v * 0.42))
 bg = Image.composite(Image.new("RGBA", (W, H), (0, 18, 44, 255)), bg, vig)
 bg.save(f"{OUT}/01_background_scale.png")
 
@@ -104,7 +109,7 @@ l.save(f"{OUT}/07_claim.png")
 # 08 — logo
 logo = Image.open(f"{BRAND}/Logos/CARR_White_Logo.png").convert("RGBA")
 scale = (W * 0.20) / logo.width
-logo = logo.resize((int(logo.width * scale), int(logo.height * scale)), Image.LANCZOS)
+logo = logo.resize((int(logo.width * scale), int(logo.height * scale)), Image.Resampling.LANCZOS)
 l = plate()
 l.paste(logo, (int((W - logo.width) / 2), 946), logo)
 l.save(f"{OUT}/08_logo_scale.png")
