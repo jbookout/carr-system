@@ -57,8 +57,21 @@ PUBKEY_FILE="$REPO/backups-public-key.txt"
 # human eye exactly like it should: this script calls the real `age-keygen`.
 AGE_KEYGEN="age-key""gen"
 
+# --backup ADDED 2026-08-14, folding bin/verify-key-custody.sh into this script
+# rather than keeping two that do one job. That file tested the paper key against
+# an OFF-MAC copy — a GitHub Actions artifact — while this one goes through
+# restore-rehearse, which reads backups/ and therefore tests the copy that dies
+# with this Mac. The off-mac dimension was the only thing it had that this did
+# not, so it is an option here and that file is gone.
+#
+# WHY IT MATTERS: "the backups restore" and "the backups that would SURVIVE
+# restore" are different claims, and only the second one is about recovery.
+DUMP_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --backup)  [ $# -ge 2 ] || { echo "FAIL: --backup needs a path" >&2; exit 2; }
+               [ -f "$2" ] || { echo "FAIL: no such backup: $2" >&2; exit 2; }
+               DUMP_ARGS=(--dump "$2"); shift 2 ;;
     -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "FAIL: unknown argument '$1'" >&2; exit 2 ;;
   esac
@@ -320,7 +333,7 @@ fi
 step "phase 2: the real proof — restore a backup using ONLY the typed identity"
 RESTORE_OUTPUT="$WORKDIR/restore-output.txt"
 set -o pipefail
-"$REPO/run.sh" restore-rehearse --identity "$IDENTITY_FILE" 2>&1 | tee "$RESTORE_OUTPUT"
+"$REPO/run.sh" restore-rehearse --identity "$IDENTITY_FILE" "${DUMP_ARGS[@]}" 2>&1 | tee "$RESTORE_OUTPUT"
 RESTORE_RC=${pipestatus[1]}
 set +o pipefail
 RESTORE_ATTEMPTED=1
