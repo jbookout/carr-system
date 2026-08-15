@@ -1714,4 +1714,31 @@ except Exception as e:
     print(f"  ⚠︎ worktrees check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# --- stranded pull requests (Joe's question, 2026-08-14) ---------------------
+# "if i don't have the emails and things sit until they are noticed how will the
+# system fix them consistently and timely". Until this row existed, GitHub's
+# failure emails to Joe personally were the ONLY thing watching the repo, and
+# they missed the case that mattered anyway: PR #79 sat 8.5h with no CI run
+# against it at all and a conflict against main, found only because a session
+# went looking by hand. The nightly chain runs this file, so a stranded pull
+# request now surfaces within a day with no inbox involved. Thresholds and the
+# reasoning behind their width live in ops/pr-hygiene-check.py.
+print("\nrepo hygiene")
+try:
+    _prh = os.path.join(REPO_ROOT, "ops", "pr-hygiene-check.py")
+    if not os.path.exists(_prh):
+        print("  -- stranded PRs        ops/pr-hygiene-check.py not present; skipped")
+    else:
+        _prp = subprocess.run([os.path.join(REPO_ROOT, ".venv/bin/python"), _prh,
+                               "--health-row"],
+                              cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+        print((_prp.stdout or "").rstrip() or
+              "  ⚠︎ stranded PRs        check produced no output · on breach: run "
+              "ops/pr-hygiene-check.py by hand")
+        if _prp.returncode != 0:
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ stranded PRs check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 sys.exit(rc)

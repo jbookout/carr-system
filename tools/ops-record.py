@@ -355,6 +355,61 @@ SEVERITY_BY_CRITICALITY = {
 MONITORING_HOURS = 24
 
 
+# THE CLOSE PATH, added 2026-08-14. Until this existed, nothing in the repo
+# could resolve an incident: collectors opened them, `assess` moved a recovered
+# one to monitoring and deliberately left resolved_at "for a human", and that
+# human had no tool to act with — no verb (all 106 checked), no subcommand, no
+# script. So the pile only ever grew, and the nightly assessment reprinted it
+# whole every night. One of the entries was a DELIBERATE acceptance probe that
+# could never clear on its own, because no green run for an induced failure is
+# ever coming.
+#
+# Kept PURE and separate from the write so the guards can be tested without a
+# database, the same reason mcp-server/src/trace.js exports its classifiers.
+# The guards are the substance: a close path that rubber-stamps anything is
+# worse than none, because then the pile LOOKS handled.
+def resolve_preconditions(incident, root_cause, evidence=None,
+                          allow_early=False, now=None):
+    """(ok, error, fields_to_write). Decides whether one incident may close.
+
+    `incident` is a mapping with ref/state/recovery_evidence_ref/monitoring_until.
+    """
+    now = now or datetime.now(timezone.utc)
+    state = (incident.get("state") or "").strip()
+    if state in ("resolved", "reviewed"):
+        return False, f"{incident.get('ref')} is already {state}", {}
+
+    if not (root_cause or "").strip():
+        return False, ("a root cause is required — 'close with an outcome' means the "
+                       "outcome is recorded, not that the row is cleared"), {}
+
+    # Evidence: prefer what assess already recorded off a real green run; fall
+    # back to what the caller supplies, which is the only option for an incident
+    # that never recovered because nothing was ever broken.
+    ref = incident.get("recovery_evidence_ref") or (evidence or "").strip() or None
+    if not ref:
+        return False, ("no recovery evidence on the incident and none supplied — pass "
+                       "--evidence naming what shows it is safe to close"), {}
+
+    until = incident.get("monitoring_until")
+    if until is not None and until > now and not allow_early:
+        return False, (f"still inside its monitoring window until {until:%Y-%m-%d %H:%M}Z — "
+                       f"a green run says the symptom stopped, not that the cause is "
+                       f"understood. Pass --allow-early with a reason if the window "
+                       f"cannot apply."), {}
+
+    # monitoring_until is NOT NULL under the resolved constraint. An incident
+    # closed early, or one that never had a window, still needs a value: stamp
+    # now, so the row says the watching ended here rather than implying a wait
+    # that never happened.
+    return True, None, {
+        "recovery_evidence_ref": ref,
+        "monitoring_until": until or now,
+        "resolved_at": now,
+        "root_cause": root_cause.strip(),
+    }
+
+
 def _next_incident_ref(cur) -> str:
     cur.execute(
         """select coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1
@@ -459,6 +514,72 @@ def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
         # system teaches people to stop reading its alarms.
 
     return opened
+
+
+def resolve_authority(env):
+    """(ok, error). Closing needs owner privileges, and says so before connecting.
+
+    THE DATABASE IS THE GATE, not this function. carr_jobs — the role every
+    scheduled job runs as — holds a COLUMN-SCOPED update on ops.incident
+    (state, next_action, monitoring_until, recovery_evidence_ref, observed_at,
+    expires_at) and no grant at all on resolved_at or root_cause. So a machine
+    can move an incident to monitoring and can never mark it closed, which is
+    "closing an incident is a human's call" enforced in grants rather than in
+    prose. Running this under the job role earns a bare `permission denied for
+    table incident` with nothing saying why or what to do instead.
+    """
+    if not env.get("DATABASE_URL"):
+        return False, (
+            "closing an incident needs owner privileges, which the job role does not "
+            "have: carr_jobs may write state and monitoring_until but has no grant on "
+            "resolved_at or root_cause. Run it through the receipted break-glass path, "
+            "which supplies the owner credential and logs why:\n\n"
+            "  CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py --reason \"why\" \\\n"
+            "    run tools/ops-record.py resolve --ref INC-... --root-cause \"...\"")
+    return True, None
+
+
+def cmd_resolve(args) -> int:
+    ok, err = resolve_authority(os.environ)
+    if not ok:
+        print(err, file=sys.stderr)
+        return 1
+    with connect("owner") as conn, conn.cursor() as cur:
+        cur.execute(
+            """select ref, state, recovery_evidence_ref, monitoring_until
+                 from ops.incident where ref = %s""", (args.ref,))
+        row = cur.fetchone()
+        if not row:
+            print(f"no incident {args.ref}", file=sys.stderr)
+            return 1
+        incident = dict(zip(("ref", "state", "recovery_evidence_ref", "monitoring_until"), row))
+
+        ok, err, fields = resolve_preconditions(
+            incident, root_cause=args.root_cause, evidence=args.evidence,
+            allow_early=bool(args.allow_early))
+        if not ok:
+            print(f"REFUSED — {err}", file=sys.stderr)
+            return 1
+
+        cur.execute(
+            """update ops.incident
+                  set state = 'resolved', resolved_at = %s, monitoring_until = %s,
+                      recovery_evidence_ref = %s, root_cause = %s,
+                      next_action = 'review and record a followup disposition'
+                where ref = %s""",
+            (fields["resolved_at"], fields["monitoring_until"],
+             fields["recovery_evidence_ref"], fields["root_cause"], args.ref))
+        # The reason an early close was allowed belongs ON the incident, not in
+        # a shell history nobody reads back.
+        if args.allow_early:
+            cur.execute(
+                """insert into ops.incident_fact (incident_id, text, source_ref)
+                   select id, %s, %s from ops.incident where ref = %s""",
+                (f"closed before its monitoring window elapsed: {args.allow_early}",
+                 "ops-record.py resolve --allow-early", args.ref))
+        conn.commit()
+    print(f"{args.ref} resolved — {fields['root_cause']}")
+    return 0
 
 
 def cmd_assess(args) -> int:
@@ -698,6 +819,18 @@ def main() -> int:
 
     sub.add_parser("health", help="derived health of every registered service")
 
+    rs = sub.add_parser("resolve", help="close one incident, with its outcome recorded")
+    rs.add_argument("--ref", required=True, help="e.g. INC-20260814-09")
+    rs.add_argument("--root-cause", required=True,
+                    help="what actually happened — recorded on the incident")
+    rs.add_argument("--evidence",
+                    help="what shows it is safe to close; required only when the "
+                         "incident carries no recovery evidence of its own")
+    rs.add_argument("--allow-early", metavar="REASON",
+                    help="close before the monitoring window elapses, stating why "
+                         "the window cannot apply (e.g. an induced failure that will "
+                         "never produce a green run). Recorded as an incident fact.")
+
     a = sub.add_parser("assess", help="turn the latest run of every job into incident state")
     a.add_argument("--environment",
                    choices=["local", "rehearsal", "staging", "production"])
@@ -712,6 +845,7 @@ def main() -> int:
         "trace": cmd_trace,
         "health": cmd_health,
         "assess": cmd_assess,
+        "resolve": cmd_resolve,
         "settings-change": cmd_settings_change,
     }[args.cmd](args)
 

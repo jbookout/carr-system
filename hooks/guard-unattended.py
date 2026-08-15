@@ -56,6 +56,21 @@ from urllib.parse import urlsplit
 # drift silently, because each copy still passes its own tests.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cmd_text import strip_inert_text  # noqa: E402
+# Shared with hooks/record-home-gate.py, which refuses the FILE-TOOL spelling of
+# the same write. One memory, so a record refused through either door is
+# recognised at the other (rule 76a53dfe).
+from refused_content import REFUSAL, remember_refusal, was_refused  # noqa: E402
+
+
+def heredoc_body(cmd):
+    """The text a heredoc feeds to a program — the payload of a shell write.
+
+    Only the body: the command around it is the delivery mechanism, and the
+    rule is about the RECORD being hidden, not about how it travelled.
+    """
+    match = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1\n(.*?)\n\s*\2\s*$",
+                      cmd or "", re.S | re.M)
+    return match.group(3) if match else ""
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(REPO, "out", "hook-guard.log")
@@ -970,6 +985,23 @@ def main():
             sys.exit(0)
 
         reason = check(cmd)
+
+        # THE SHELL HALF OF rule 76a53dfe. A record refused at the vault must not
+        # simply be written somewhere the gate does not look, and a heredoc into
+        # a scratchpad was exactly that path. One shared memory with
+        # record-home-gate.py, so a record refused through either door is
+        # recognised at the other (rule a8c55a47: two doors, one module).
+        session = payload.get("session_id") or payload.get("sessionId") or ""
+        body = heredoc_body(cmd)
+        if reason and "vault markdown" in reason:
+            remember_refusal(body or cmd, session)
+        elif not reason and body:
+            hidden, share = was_refused(body, session)
+            if hidden:
+                log(f"DENY re-routed refused content ({share:.2f})")
+                print(REFUSAL.format(pct=round(share * 100)), file=sys.stderr)
+                sys.exit(2)
+
         if not reason:
             # THE GATE DOOR (loop #231, 2026-08-10). Runs only when nothing above
             # denies, so a destructive shape (`rm -rf hooks/`) still DENIES on the
