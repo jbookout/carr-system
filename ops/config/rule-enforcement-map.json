@@ -57,6 +57,7 @@
     "commit_claims": {"implementation": ["ops/githooks/commit-claims-check.py", "ops/githooks/commit-msg"], "test": ["ops/commit-claims-selftest.py"], "failure_mode": "commit-msg refusal"},
     "staged_gate_bless": {"implementation": ["ops/githooks/staged-gate-bless-check.py", "ops/githooks/pre-commit"], "test": ["ops/gate-baseline-cochange-selftest.py"], "failure_mode": "pre-commit refusal"},
     "chat_lint": {"implementation": ["hooks/chat-lint-gate.py"], "test": ["ops/chat-lint-gate-selftest.py", "ops/unlinked-file-ask-selftest.py"], "failure_mode": "Stop block"},
+    "trigger_grant": {"implementation": ["ops/trigger-grant-check.py"], "test": ["ops/trigger-grant-selftest.py"], "failure_mode": "CI migration-class failure"},
     "costar_lane": {"implementation": ["hooks/costar-lane-gate.py"], "test": ["ops/costar-lane-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
     "record_home": {
       "implementation": ["hooks/record-home-gate.py", "hooks/install-record-home-gate.py", "hooks/bash-write-gate.py", "hooks/guard-unattended.py", "hooks/write-effect-check.py"],
@@ -109,7 +110,7 @@
     "54e2bcb9": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "contact fact promotion", "control": "versioned_record", "exceptions": "CARR placeholder values refused"},
     "c53beeaa": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "record mutation acknowledgement", "control": "versioned_record", "exceptions": "requires fresh read/version"},
     "d7e6de46": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "deal value write", "control": "deal_guard", "exceptions": "placeholder Salesforce fields remain labelled"},
-    "5409731b": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "new trigger/table write", "control": "versioned_record", "exceptions": "migration grant probes"},
+    "5409731b": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "a migration adding or modifying a trigger", "control": "trigger_grant", "exceptions": "SECURITY DEFINER functions, which run as owner; a column grant too narrow for the column read is a stated gap"},
     "9f15f21a": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "national-account deal assignment", "control": "deal_guard", "exceptions": "national/market separation"},
     "23ea0607": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "Salesforce reconciliation", "control": "deal_guard", "exceptions": "Deal Room close state wins"},
     "2271e684": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "terminal technical claim", "control": "completion_evidence", "exceptions": "explicit uncertainty"},

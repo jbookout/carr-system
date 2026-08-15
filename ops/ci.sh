@@ -467,7 +467,22 @@ check_migration() {
     # grep -c prints "0" AND exits nonzero on no match, so `|| echo 0` printed
     # a second zero. `|| :` keeps the count grep already printed.
     n="$(grep -c '^applying ' "$LOGDIR/migration.log" 2>/dev/null || :)"
-    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live"
+
+    # THE TRIGGER-READ CHECK (rule 5409731b). The canary above proves the
+    # declared grants attached; this asks the question that broke set-lead for
+    # five days in production: can the role that WRITES a table actually SELECT
+    # every table the trigger on it READS? An invoker-rights trigger runs as the
+    # caller, and grants never fire for the owner, so no rehearsal as owner can
+    # see it — which is why this lives here, against the built database, rather
+    # than in the gates class against a synthetic tree.
+    if ! CARR_CI_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-triggers.log" \
+         "$PY" ops/trigger-grant-check.py; then
+      tail -25 "$LOGDIR/migration-triggers.log" >&2
+      bad migration "a trigger reads a table its firing role cannot select"
+      return
+    fi
+
+    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted"
   else
     tail -15 "$LOGDIR/migration-grants.log" >&2
     bad migration "the app roles' grants did not survive into the built database"
