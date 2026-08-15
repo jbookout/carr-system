@@ -20,7 +20,7 @@ import ai_eval
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = REPO_ROOT / "evals" / "ai" / "function-router.v1.json"
 BOUND_SUITE_PATH = REPO_ROOT / "evals" / "ai" / "model-boundary.v1.json"
-POLICY_SHA256 = "db71490ac40e606c6352481aa4b18cee25e957964f2551e2f17ec797b9a082bd"
+POLICY_SHA256 = "7892d59607498925dc879048c64b99d98bd634fbb2bf5a95a431e719c1c3de14"
 SERVER_CONTEXT = {
     "organization_tenant_id": "carr-internal",
     "runtime_principal": "synthetic-router-v1",

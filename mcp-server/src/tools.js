@@ -503,8 +503,30 @@ export function coerceArgsToSchema(schema, args, path = "") {
         hint: `${where} is declared ${spec.type}; pass a number` });
     }
     if (spec.type === "object") { coerceArgsToSchema(spec, v, where); continue; }
-    if (spec.type === "array" && Array.isArray(v) && spec.items) {
-      v.forEach((item, i) => coerceArgsToSchema(spec.items, item, `${where}[${i}]`));
+    // A JSON-STRING ARRAY IS STILL AN ARRAY ARGUMENT, and until 2026-08-15 it fell
+    // straight through here uncoerced, because this branch required Array.isArray
+    // BEFORE it would look at anything. What that cost, live: doctrine-sections
+    // measured `.length` on an ~80-character string and answered
+    // "batch_too_large, max 50" for a batch of two, while a single id slipped
+    // under the limit and died casting a string to uuid[]. claim-doctrine-sections
+    // iterated the same string into characters, so no session could claim a
+    // doctrine section and the single-writer write path was down for hours.
+    //
+    // Parsed HERE rather than in the handlers, per the 2026-08-13 ruling that put
+    // coercion at the choke point instead of in seventeen of them. Every verb
+    // taking an array gets this, not only the three that happened to be caught.
+    let value = v;
+    if (spec.type === "array" && typeof value === "string") {
+      const text = value.trim();
+      if (text.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(text);
+          if (Array.isArray(parsed)) { args[key] = value = parsed; }
+        } catch { /* leave it; the handler's own validation refuses it by name */ }
+      }
+    }
+    if (spec.type === "array" && Array.isArray(value) && spec.items) {
+      value.forEach((item, i) => coerceArgsToSchema(spec.items, item, `${where}[${i}]`));
     }
   }
   return args;
