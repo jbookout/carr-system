@@ -33,7 +33,7 @@ read; the one that explained them was not.
 
 WHY A NAG WOULD NOT WORK. The failure classes are already surfaced at every
 session start, including this one, and the session still failed. "Remember to
-check" is the same prose that has failed seven times before. So this hook does
+check" is the same prose that has failed repeatedly before. So this hook does
 not remind anyone of anything: it RUNS THE SEARCH ITSELF and puts the matching
 decisions in front of the session at the moment it is about to make the claim.
 
