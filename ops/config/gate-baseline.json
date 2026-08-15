@@ -47,7 +47,7 @@
   "contracts": {
     "delegation-gate-hook.json": "e40833c685de0a915d4a15b96506ef2c4bff60cd70e70e240dbe274233b7dbd4",
     "codex-hooks.json": "90a60c2f81583865752fd445209c7e8186201c026d6e920a96cd84ae47c381a5",
-    "rule-enforcement-map.json": "6f4e84a8a189791389dd4e2ba52a8692c2b30411af3f2f1dcef6accb9cd0f03f",
+    "rule-enforcement-map.json": "befac63c8831c101bb9d9b66054cad0af886f4330c0650cc8728edf063a25bf5",
     "model-floors.json": "298d84503a8730197dcd51613e73bd18505f1ee448562803603308cd278ce062"
   }
 }
