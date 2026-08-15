@@ -519,6 +519,65 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       },
     },
 
+    "map-architecture": {
+      description: "Mandatory first read for any CARR map, GIS, route, day-trip, or Tour request. Returns the two current live doctrine sections that govern map construction plus the machine-contract identity and the non-bypass workflow. Call this before recommending a stack, researching layers, designing, editing, or publishing a map. Fails visibly if either source is missing or retired.",
+      inputSchema: { type: "object", properties: {} },
+      handler: async (c) => {
+        const required = [
+          ["maps-and-demographics", "ai-built-interactive-tour-maps-source-rendering-routing-and-promotion-gate"],
+          ["carr-workspace-bduf", "s13-ipad-application-and-tour-mode"],
+        ];
+        const rows = await c.query(
+          `select d.slug as document_slug, s.section_key, s.title,
+                  s.current_version as version, r.body
+             from doctrine_section s
+             join doctrine_document d on d.id = s.document_id
+             join doctrine_revision r on r.id = s.current_revision_id
+            where s.status = 'active'
+              and ((d.slug = $1 and s.section_key = $2)
+                or (d.slug = $3 and s.section_key = $4))`,
+          required.flat());
+        const byKey = new Map(rows.rows.map(row =>
+          [`${row.document_slug}/${row.section_key}`, row]));
+        const missing = required.map(([doc, section]) => `${doc}/${section}`)
+          .filter(key => !byKey.has(key));
+        if (missing.length)
+          throw new ToolError({ error: "map_architecture_unavailable", missing,
+            hint: "The governed map method is fail-closed. Restore or activate every required doctrine section before map work continues." });
+        const generation = (await c.query(
+          `select generation from doctrine_meta where id=1`)).rows[0];
+        return {
+          ok: true,
+          architecture: "carr-map-tour-v1",
+          doctrine_generation: Number(generation.generation),
+          contract: {
+            id: "carr-workspace-market-map-route-planning",
+            version: "1.1.0",
+            path: "workspace/contracts/market-map-route-planning.v1.json",
+            production_status: "approved_architecture_not_implemented_in_production",
+          },
+          required_workflow: [
+            "Build one canonical, reviewed stop dataset from CARR records; never let the map or model become source truth.",
+            "Keep reviewed GIS and OSINT enrichment separate, with source, as-of date, rights, confidence, and verification state.",
+            "Use deterministic geocoding and routing; preserve locked appointments, dwell time, buffers, start/end points, and visible exclusions.",
+            "Keep marker, list, route, and offline itinerary order identical; make optional context layers progressive rather than the default task view.",
+            "Hand exact approved coordinates to native Google Maps or Apple Maps navigation and return to the correct Tour stop.",
+            "Require the contract promotion receipt before client/public use; unresolved route-critical facts, unreviewed layers, or a stale route block promotion.",
+          ],
+          sources: required.map(([doc, section]) => {
+            const row = byKey.get(`${doc}/${section}`);
+            return {
+              document: doc,
+              section_key: section,
+              title: row.title,
+              version: Number(row.version),
+              body_text: row.body && row.body.text ? row.body.text : "",
+            };
+          }),
+        };
+      },
+    },
+
     "doctrine-sections": {
       description: "Batch-read up to 50 sections by id — current body, version, review state — in one round trip. The fleet read path; never loop read-doctrine per section.",
       inputSchema: { type: "object", properties: {

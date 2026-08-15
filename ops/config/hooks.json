@@ -185,6 +185,11 @@
       "hooks": [
         {
           "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/map-architecture-gate.py",
+          "timeout": 15
+        },
+        {
+          "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/conduct-stop-gate.py",
           "timeout": 15
         },

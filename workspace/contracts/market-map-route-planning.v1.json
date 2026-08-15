@@ -1,7 +1,7 @@
 {
   "contract": "carr-workspace-market-map-route-planning",
-  "version": "1.0.0",
-  "status": "phase0_candidate_not_implemented",
+  "version": "1.1.0",
+  "status": "approved_architecture_not_implemented_in_production",
   "source": {
     "human": "Joe Bookout",
     "date": "2026-08-12",
@@ -11,6 +11,65 @@
       "Help Joe and Dell combine site visits into efficient single-day trips.",
       "Treat high-quality visual data and interaction as core adoption requirements because both partners are strongly visual."
     ]
+  },
+  "ai_assisted_map_build_contract": {
+    "ai_role": "bounded research and authoring orchestrator over reviewed records, deterministic GIS tools, and reusable map components",
+    "forbidden_authority": [
+      "become the source of truth",
+      "act as the final geocoder",
+      "act as route authority",
+      "silently resolve an unknown or conflict",
+      "publish or promote a client or public map"
+    ],
+    "architecture_layers": [
+      {"id": "canonical_record", "role": "reviewed CARR stop, property, appointment, constraint, and source data"},
+      {"id": "reviewed_enrichment", "role": "separately versioned GIS and OSINT layers with source, as-of date, rights, confidence, and verification state"},
+      {"id": "deterministic_route", "role": "provider-backed geocoding and routing that preserves locked appointments, dwell time, buffers, and explicit exclusions"},
+      {"id": "interactive_presentation", "role": "numbered map, synchronized cards and list, progressive optional layers, and current/next stop state"},
+      {"id": "native_navigation", "role": "exact-coordinate handoff to Google Maps or Apple Maps plus return to the correct Tour stop"}
+    ],
+    "structured_brief": {
+      "required_fields": [
+        "audience_and_field_task",
+        "verified_stop_dataset",
+        "start_end_and_route_constraints",
+        "property_card_fields",
+        "default_basemap",
+        "optional_enrichment_layers",
+        "source_as_of_and_rights_requirements",
+        "phone_and_ipad_behavior",
+        "offline_fallback",
+        "native_navigation_handoff",
+        "sharing_and_redaction_scope",
+        "acceptance_test"
+      ],
+      "prototype_rule": "Generate multiple disposable interface treatments from real structured content; no one-shot prototype is production evidence."
+    },
+    "bounded_tool_rule": "Prefer registered, typed GIS operations and curated mapping components. Arbitrary generated code is limited to a trusted local analyst environment and never self-publishes.",
+    "confirmation_gates": [
+      "delete_or_replace_layer",
+      "overwrite_saved_map",
+      "start_expensive_geoprocessing",
+      "send_data_to_new_vendor",
+      "publish_client_or_public_map"
+    ],
+    "promotion_receipt": {
+      "required_checks": [
+        "canonical_address_and_coordinate_review",
+        "no_unresolved_route_critical_unknown_or_conflict",
+        "map_list_route_offline_order_parity",
+        "locked_appointments_dwell_and_buffers_preserved",
+        "claims_and_layers_have_source_as_of_rights_and_review_state",
+        "optional_context_layers_progressively_disclosed",
+        "phone_and_ipad_interaction_test",
+        "exact_native_navigation_handoff",
+        "ordered_offline_itinerary_verified",
+        "deterministic_rebuild_from_canonical_record",
+        "provider_terms_attribution_expiry_and_cost_gate_passed"
+      ],
+      "blocking_rule": "A client or public map cannot be promoted while any required check is false, Unknown, stale, or unsupported by evidence."
+    },
+    "emerging_dependency_rule": "Do not depend on private-preview, ambiguously named, or unverified agentic GIS products without an exact vendor, product URL, availability status, security model, terms, and export path."
   },
   "product_objective": "Give Joe and Dell a fast, spatial understanding of market activity and a safe way to assemble efficient site-visit day trips without opening Claude Code or Codex.",
   "authority_and_truth": {

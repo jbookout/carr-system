@@ -18,6 +18,13 @@ Drive gotcha: Google Drive File Stream serves online-only placeholders; a
 grep over the Drive mirror can miss content that exists. Materialize files
 offline before trusting a negative grep there.
 
+## Map work has one mandatory front door
+
+For any request to recommend, design, build, revise, review, or publish a map,
+GIS analysis, route, day trip, or Tour surface, call the live `map-architecture`
+verb first. It returns the current doctrine and machine-contract pointer; the
+configured Stop gate prevents a governed CARR session from finishing without it.
+
 ## Dell migration trigger
 
 In an interactive Claude Code session whose working directory is
