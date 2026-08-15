@@ -8,7 +8,7 @@
   "allowed_actions": [],
   "tool_registry": {
     "path": "mcp-server/src/tools.js",
-    "sha256": "3e6dee54100cb0daa051afcdf673a15716c82692b52e223f1295c1a4f4df5976"
+    "sha256": "02ed5e2658848a9677f91d504768bf53d1f768b89a5da003d4a5ef564c2cae62"
   },
   "action_risk_registry": {
     "path": "control-room/contracts/action-risk-registry.v1.json",
