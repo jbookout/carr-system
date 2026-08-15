@@ -268,6 +268,22 @@ step "schema snapshot drift (db/schema.sql vs production)" ./bin/schema-snapshot
 # is a row rather than a line in a log nobody opens (rule 1f3a7372).
 step "environment isolation + currency (G1)" ./.venv/bin/python ops/p1-environment-gate.py
 
+# ── PROGRAM 1's REBUILD CLAUSE, PROVEN NIGHTLY (2026-08-15) ──────────────────
+# "A fresh non-production environment can be reconstructed from repository
+# declarations and approved secret references." Until this ran, reconstruction
+# had never been attempted once, and the only way to discover a missing piece
+# would have been to need it.
+#
+# It branches STAGING, never production — a Neon branch is a copy-on-write child
+# of its parent, so branching production would hand a throwaway database every
+# production row. Guard 0 refuses on the production project id before anything
+# is created, and the branch is destroyed on every exit path.
+#
+# The nightly cost is one Neon branch created and deleted. The thing it buys is
+# that the repository's sufficiency is a measured fact each morning rather than
+# an argument nobody has tested.
+step "environment rebuild proof (ephemeral branch)" ./.venv/bin/python ops/p1-rebuild-gate.py
+
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
 # credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first
