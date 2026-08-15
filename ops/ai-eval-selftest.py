@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 MODULE_PATH = Path(__file__).with_name("ai_eval.py")
 SUITE_PATH = ROOT / "evals" / "ai" / "model-boundary.v1.json"
+OBSERVED_RUN_PATH = ROOT / "evals" / "ai" / "synthetic-observed-run.v1.json"
 ACCEPTANCE_PATH = ROOT / "workspace" / "contracts" / "phase0-acceptance.v1.json"
 
 SPEC = importlib.util.spec_from_file_location("ai_eval", MODULE_PATH)
@@ -126,6 +127,80 @@ class SuiteTests(unittest.TestCase):
                 handle.flush()
                 with self.assertRaises(ai_eval.SuiteError):
                     ai_eval.load_suite(Path(handle.name))
+
+    def test_synthetic_provider_run_normalizes_into_the_existing_envelope(self):
+        observed_run = ai_eval.load_provider_run(OBSERVED_RUN_PATH)
+        first = observed_run["outputs"][0]
+        response = ai_eval.normalize_provider_output(first["provider_output"], first["observed_metrics"])
+        self.assertEqual(response["status"], "accepted")
+        self.assertEqual(response["answer"], "The synthetic suite is 4,200 square feet.")
+        self.assertEqual(response["metrics"], {"latency_ms": 800, "cost_usd": 0.01})
+        self.assertNotEqual(response["metrics"]["latency_ms"], first["provider_output"]["reported_usage"]["latency_ms"])
+
+    def test_observed_scorecard_is_replayable_attributed_and_redacted(self):
+        observed_run = ai_eval.load_provider_run(OBSERVED_RUN_PATH)
+        scorecard = ai_eval.evaluate_provider_run(self.suite, observed_run)
+        self.assertEqual(scorecard["summary"], {"total": 10, "passed": 10, "failed": 0})
+        self.assertEqual(
+            scorecard["attribution"],
+            {
+                "provider_id": "synthetic-provider-v1",
+                "model_id": "synthetic-model-v1",
+                "route_id": "synthetic-route-v1",
+                "observed_by": "offline-fixture-observer-v1",
+            },
+        )
+        self.assertEqual(scorecard["replay"]["suite_digest"], self.suite["_digest"])
+        self.assertEqual(set(scorecard["replay"]), {
+            "suite_digest", "fixture_digest", "policy_digest", "route_digest", "run_digest"
+        })
+        self.assertTrue(all(len(value) == 64 for value in scorecard["replay"].values()))
+        rendered = json.dumps(scorecard, sort_keys=True)
+        self.assertNotIn("The synthetic suite is 4,200 square feet.", rendered)
+        self.assertNotIn("CARR-SECRET-CANARY-7F4A", rendered)
+        self.assertEqual(scorecard, ai_eval.evaluate_provider_run(self.suite, observed_run))
+
+    def test_provider_run_fails_closed_for_bad_binding_and_unknown_or_malformed_output(self):
+        raw = json.loads(OBSERVED_RUN_PATH.read_text())
+        changed = copy.deepcopy(raw)
+        changed["suite_digest"] = "0" * 64
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(changed, handle)
+            handle.flush()
+            with self.assertRaisesRegex(ai_eval.SuiteError, "suite digest"):
+                ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(Path(handle.name)))
+
+        changed = copy.deepcopy(raw)
+        changed["outputs"][0]["case_id"] = "AI-NOT-REAL"
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(changed, handle)
+            handle.flush()
+            with self.assertRaisesRegex(ai_eval.SuiteError, "unknown case IDs"):
+                ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(Path(handle.name)))
+
+        changed = copy.deepcopy(raw)
+        changed["outputs"][0]["provider_output"]["provider_id"] = "provider-override"
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(changed, handle)
+            handle.flush()
+            with self.assertRaisesRegex(ai_eval.SuiteError, "provider output fields"):
+                ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(Path(handle.name)))
+
+    def test_provider_run_rejects_nonfinite_metrics_and_redacts_failed_output(self):
+        raw = json.loads(OBSERVED_RUN_PATH.read_text())
+        changed = copy.deepcopy(raw)
+        changed["outputs"][0]["observed_metrics"]["cost_usd"] = float("nan")
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(changed, handle, allow_nan=True)
+            handle.flush()
+            with self.assertRaisesRegex(ai_eval.SuiteError, "observed metrics"):
+                ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(Path(handle.name)))
+
+        observed_run = ai_eval.load_provider_run(OBSERVED_RUN_PATH)
+        observed_run["outputs"][5]["provider_output"]["content"] = "CARR-SECRET-CANARY-7F4A"
+        scorecard = ai_eval.evaluate_provider_run(self.suite, observed_run)
+        self.assertEqual(scorecard["summary"]["failed"], 1)
+        self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(scorecard, sort_keys=True))
 
 
 if __name__ == "__main__":
