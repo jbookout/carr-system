@@ -1,15 +1,60 @@
 {
   "contract": "carr-workspace-market-map-route-planning",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "status": "approved_architecture_not_implemented_in_production",
   "source": {
     "human": "Joe Bookout",
     "date": "2026-08-12",
+    "amended_date": "2026-08-14",
     "requirements": [
       "Show the entire operating market as an interactive visual field.",
       "Include prospects, active clients, active projects, and projects in process.",
       "Help Joe and Dell combine site visits into efficient single-day trips.",
       "Treat high-quality visual data and interaction as core adoption requirements because both partners are strongly visual."
+    ],
+    "research_inputs": [
+      {
+        "id": "X-MAP-ONE-PROMPT",
+        "locator": "https://x.com/kyle_e_walker/status/1996966559584079980",
+        "evidence_class": "direct_source",
+        "retrieval_note": "Original post, complete author thread, attached prototype screenshots, quoted parking-reform post, and linked primary map were read. The author identifies PMTiles, DuckDB, GeoParquet, databases, deployment, security, performance, and customer problem framing as the work beyond one-shot map generation.",
+        "incorporated_methods": ["disposable_prototype_boundary", "portable_geospatial_interchange", "production_deployment_gate", "business_question_first"]
+      },
+      {
+        "id": "X-WELLS-AGENT-WORKFLOW",
+        "locator": "https://x.com/kyle_e_walker/status/2052483280029483150",
+        "evidence_class": "direct_source",
+        "retrieval_note": "Original post and silent 4:12 screen recording were read locally through interval-sampled frames. The demonstrated sequence is location question, typed radius and bbox queries, analytical follow-up over time series, paginated operator retrieval, then an exploratory MapLibre satellite map with legend and popups.",
+        "incorporated_methods": ["typed_domain_queries", "analysis_before_rendering", "identical_agent_interface", "pagination_and_rate_contract", "deterministic_component_registry"]
+      },
+      {
+        "id": "X-MAPGL-DETERMINISM",
+        "locator": "https://x.com/kyle_e_walker/status/2073796862667043312",
+        "evidence_class": "direct_source",
+        "retrieval_note": "Original post and author reply were read. The author states that packages encode tested standards and judgment; prompts remain nondeterministic while code is deterministic; typed functions can expose many arguments safely to an LLM.",
+        "incorporated_methods": ["deterministic_component_registry", "typed_map_functions", "no_one_shot_production_code"]
+      },
+      {
+        "id": "MAPGL-PRIMARY",
+        "locator": "https://walker-data.com/mapgl/",
+        "evidence_class": "linked_artifact",
+        "retrieval_note": "Primary documentation and repository were reviewed for tested Mapbox and MapLibre layers, controls, Shiny events, Turf operations, PMTiles, sliders, and story maps. The architecture adopts the patterns without requiring an R runtime.",
+        "incorporated_methods": ["search_and_tour_modes", "map_event_contract", "story_tour_controller", "spatial_analysis_boundary"]
+      },
+      {
+        "id": "CLEARFORK-PRIMARY",
+        "locator": "https://clearforkintelligence.com/api/wells/",
+        "evidence_class": "linked_artifact",
+        "retrieval_note": "Primary API, CLI, and MCP documentation was read for canonical IDs, lookup, bbox, radius, batch, time-series retrieval, authentication, pagination, page-size limits, rate limits, usage reporting, and estimate/allocation caveats.",
+        "incorporated_methods": ["typed_domain_queries", "canonical_ids", "serving_receipts", "human_and_agent_interface_parity"]
+      },
+      {
+        "id": "PARKING-REFORM-PRIMARY",
+        "locator": "https://abundanthousingillinois.org/resources/parking-reform-map/",
+        "evidence_class": "linked_artifact",
+        "retrieval_note": "The quoted public map and its source repository were reviewed for official policy inputs, projected buffers, union and difference carve-outs, layer controls, and explicit geometry and determination caveats.",
+        "incorporated_methods": ["overlay_provenance", "projection_sensitive_server_analysis", "geometry_caveats", "layer_controls"]
+      }
     ]
   },
   "ai_assisted_map_build_contract": {
@@ -45,6 +90,263 @@
       ],
       "prototype_rule": "Generate multiple disposable interface treatments from real structured content; no one-shot prototype is production evidence."
     },
+    "source_intake": {
+      "recursive_source_types": [
+        "post",
+        "quoted_post",
+        "thread",
+        "linked_article",
+        "linked_repository",
+        "linked_documentation",
+        "video_or_transcript",
+        "dataset_metadata"
+      ],
+      "evidence_classes": [
+        "direct_source",
+        "linked_artifact",
+        "public_mirror",
+        "inference"
+      ],
+      "required_fields": [
+        "source_id",
+        "parent_source_id",
+        "locator",
+        "source_type",
+        "evidence_class",
+        "retrieved_at",
+        "retrieval_status",
+        "content_hash",
+        "license_or_terms",
+        "claims_supported",
+        "review_state"
+      ],
+      "x_source_rule": "For X sources, use the governed Grok Build retrieval lane first, then read the actual post, author thread, quoted post, linked primary artifacts, and material video frames or transcript. Grok summaries are discovery evidence, never a substitute for the raw source.",
+      "inaccessible_content_rule": "Inaccessible or partially retrieved content is never marked read, quoted as direct evidence, or silently inferred. Record the missing branch and limit claims to evidence actually observed."
+    },
+    "spatial_authoring_workbench": {
+      "lifecycle": [
+        "source_graph_complete_or_gaps_declared",
+        "canonical_dataset_reviewed",
+        "typed_domain_queries_executed",
+        "analysis_and_caveats_recorded",
+        "disposable_prototypes_compared",
+        "tested_components_assembled",
+        "promotion_receipt_approved"
+      ],
+      "allowed_operations": [
+        "inspect",
+        "import",
+        "normalize",
+        "join",
+        "filter",
+        "style",
+        "compare",
+        "validate",
+        "export",
+        "prototype"
+      ],
+      "typed_input_formats": [
+        "canonical_record_json",
+        "GeoJSON",
+        "GeoPackage",
+        "GeoParquet",
+        "PMTiles",
+        "provider_response_with_receipt"
+      ],
+      "typed_output_formats": [
+        "GeoJSON",
+        "GeoPackage",
+        "GeoParquet",
+        "PMTiles",
+        "promotion_receipt"
+      ],
+      "draft_rule": "Every agent-authored layer, analysis, prototype, or route remains draft-only until the human promotion receipt passes.",
+      "execution_receipt_required": true,
+      "arbitrary_code_boundary": "Generated mapping code may run only in a trusted local analyst sandbox. Production maps use registered functions and components with versioned tests."
+    },
+    "canonical_stop_dataset": {
+      "required_fields": [
+        "property_id",
+        "canonical_address_version",
+        "approved_position",
+        "position_role",
+        "coordinate_source",
+        "coordinate_precision",
+        "coordinate_verified_by",
+        "coordinate_verified_at",
+        "route_eligible",
+        "review_state"
+      ],
+      "review_rule": "Only reviewed canonical records and explicitly reviewed enrichment enter a promoted map. Missing, conflicting, stale, or sold/off-market facts remain visible states rather than model-resolved facts."
+    },
+    "reviewed_enrichment_contract": {
+      "layer_classes": [
+        {"id": "competitor", "required_fields": ["organization_or_location_id", "source", "as_of", "rights", "precision", "confidence", "review_state"], "authority_rule": "A pin shows an observed competing location, not operational quality, capacity, service overlap, or market saturation."},
+        {"id": "parcel", "required_fields": ["parcel_source_id", "source", "as_of", "rights", "source_crs", "geometry_method", "known_limitations", "review_state"], "authority_rule": "Parcel context is analytical unless the authoritative jurisdiction and intended legal use establish otherwise."},
+        {"id": "zoning", "required_fields": ["source", "as_of", "rights", "source_crs", "classification", "determination_status", "review_state"]},
+        {"id": "demographic", "required_fields": ["source", "release", "geography", "estimate_or_margin", "as_of", "rights", "review_state"]},
+        {"id": "flood", "required_fields": ["source", "panel_or_layer", "effective_date", "geometry_precision", "determination_status", "review_state"]},
+        {"id": "imagery", "required_fields": ["provider", "capture_or_publication_date", "rights", "attribution", "review_state"]},
+        {"id": "policy", "required_fields": ["official_source", "effective_date", "source_crs", "buffer_method", "union_difference_rules", "known_limitations", "determination_status", "review_state"]},
+        {"id": "traffic", "required_fields": ["provider", "observed_at", "traffic_basis", "rights", "expiry", "review_state"]}
+      ],
+      "separation_rule": "An enrichment layer never silently edits property, organization, route, appointment, address, or coordinate truth. A reviewed proposal returns to the owning record workflow."
+    },
+    "entrance_verification": {
+      "position_roles": [
+        "primary_entrance",
+        "driveway_entry",
+        "parking_access",
+        "parcel_centroid",
+        "building_centroid"
+      ],
+      "route_rule": "Native navigation requires an entrance-level approved position. A parcel centroid, building centroid, geocoder candidate, or apparent parking-lot pin must visibly downgrade or exclude the stop until a human approves the entrance, driveway, or parking access point.",
+      "remediation_workflow": [
+        "resolve_authoritative_property_location",
+        "inspect_access_imagery_or_site_evidence",
+        "select_position_role",
+        "human_approve_coordinate",
+        "record_verification_evidence",
+        "rerun_route"
+      ],
+      "evidence_rule": "Store the coordinate source, precision, verifier, verification time, imagery or authoritative reference, and any access note with the approved position."
+    },
+    "route_stop_identity": {
+      "required_fields": [
+        "route_stop_id",
+        "property_id",
+        "route_sequence",
+        "route_label",
+        "locked_state",
+        "dwell_minutes",
+        "buffer_minutes"
+      ],
+      "identity_invariant": "route_sequence and route_label are mutable itinerary and presentation fields and never become property identity. Reordering A, B, C changes neither property_id nor the canonical option record.",
+      "parity_invariant": "Marker label, route list position, selected card, offline itinerary, and next-stop state derive from the same route_sequence version.",
+      "version_mapping_required_fields": [
+        "old_route_version",
+        "new_route_version",
+        "property_id",
+        "old_route_stop_id",
+        "new_route_stop_id",
+        "old_route_sequence",
+        "new_route_sequence",
+        "old_route_label",
+        "new_route_label",
+        "disposition"
+      ],
+      "version_mapping_rule": "Every reorder records an explicit old-to-new mapping, including removed, held, merged-navigation, and unchanged dispositions. The requested label changes never leave the fate of an old stop implicit."
+    },
+    "interchange_and_data_serving": {
+      "coordinate_reference_system": "EPSG:4326 at web, provider, and interchange boundaries; projection-sensitive analysis declares and preserves its working CRS.",
+      "formats": [
+        {"format": "GeoJSON", "role": "small authorized working sets, web interchange, and deterministic API responses"},
+        {"format": "GeoPackage", "role": "portable editable project bundle when desktop GIS review is required"},
+        {"format": "GeoParquet", "role": "columnar analytical preparation with DuckDB or server-side spatial engines"},
+        {"format": "PMTiles", "role": "large read-only vector or raster layers with bounded client delivery"}
+      ],
+      "domain_query_functions": [
+        "lookup",
+        "text_search",
+        "bbox_search",
+        "radius_search",
+        "drawn_polygon_search",
+        "batch_lookup",
+        "time_series"
+      ],
+      "serving_receipt_fields": [
+        "canonical_id",
+        "source_version",
+        "freshness",
+        "provenance",
+        "precision",
+        "estimate_or_allocation_status",
+        "page_size",
+        "pagination",
+        "rate_limit",
+        "observed_at"
+      ],
+      "round_trip_rule": "Stable IDs, field provenance, nulls, precision, review state, and source versions survive every export and re-import; silent column loss or inferred replacement values fail validation."
+    },
+    "product_modes": [
+      {
+        "id": "search",
+        "role": "Use typed text, bbox, radius, and drawn-polygon queries; feature selection opens the exact CARR record and preserves current map state."
+      },
+      {
+        "id": "tour",
+        "role": "Use deterministic story sections to synchronize camera, verified marker, stop card, optional trade-area or isochrone, route order, and native-navigation handoff."
+      }
+    ],
+    "map_event_contract": {
+      "typed_events": [
+        "feature_click",
+        "bounds_change",
+        "draw_result",
+        "filter_state",
+        "slider_state",
+        "selected_record",
+        "route_stop_change"
+      ],
+      "state_rule": "Filters, style changes, selected records, drawn geometry, and route progress update through typed events without remounting the map or discarding camera and selection state."
+    },
+    "spatial_analysis_boundary": {
+      "client_side": "Turf may filter or compare already-authorized loaded features for immediate interaction, including within, intersects, contains, disjoint, buffer previews, and draw-to-filter behavior.",
+      "server_side": "Legal or regulatory determinations, large datasets, canonical geometry changes, and projection-sensitive buffers, unions, intersections, or differences use authoritative server-side GIS with source CRS and method receipts.",
+      "disclaimer_rule": "A client-side overlay is analytical context, not an official parcel, zoning, parking, flood, demographic, or legal determination."
+    },
+    "component_contract": {
+      "registry": [
+        {"id": "MapShell", "role": "provider-isolated renderer and responsive frame"},
+        {"id": "MapListSync", "role": "bidirectional marker, list, filter, focus, and route parity"},
+        {"id": "StopCard", "role": "canonical property facts, verification state, and next action"},
+        {"id": "SourceBadge", "role": "source, as-of, rights, confidence, and caveat disclosure"},
+        {"id": "LayerControl", "role": "progressive optional overlays and visible layer state"},
+        {"id": "RouteSummary", "role": "ordered stops, assumptions, travel, dwell, buffers, and exclusions"},
+        {"id": "ExclusionPanel", "role": "unknown, stale, ineligible, duplicate-location, and conflict evidence"},
+        {"id": "NativeNavAction", "role": "approved-coordinate Google Maps or Apple Maps handoff"},
+        {"id": "OfflineItinerary", "role": "ordered network-independent route and property facts"},
+        {"id": "StoryTourController", "role": "deterministic camera, section, marker, card, and reverse-scroll state"}
+      ],
+      "package_rule": "Promoted maps are assembled from versioned, tested components and typed functions. One-shot HTML or model-invented JavaScript is disposable prototype evidence only.",
+      "default_renderer": "Use one MapLibre-based renderer by default. Add Mapbox, Google, satellite, 3D, or another paid provider only when its verified capability and terms justify it; do not maintain parallel renderers without measured need."
+    },
+    "provider_rights_receipt": {
+      "required_fields": [
+        "provider",
+        "sku",
+        "terms_url",
+        "reviewed_at",
+        "reviewer",
+        "storage_class",
+        "storable_fields",
+        "retention_limit",
+        "purge_rule",
+        "attribution",
+        "map_compatibility",
+        "export_exit_path",
+        "quota_cost_gate"
+      ],
+      "storage_rule": "A temporary provider result cannot enter the canonical database. Store only independently authoritative coordinates or provider results whose exact SKU and receipt permit permanent storage."
+    },
+    "native_navigation_link_contract": {
+      "required_fields": [
+        "platform",
+        "approved_latitude",
+        "approved_longitude",
+        "route_stop_id",
+        "route_version",
+        "travel_mode",
+        "return_uri",
+        "generated_at",
+        "expires_at",
+        "device_test_receipt"
+      ],
+      "privacy_rule": "Use the minimum destination data required by the navigation platform. Do not place client names, deal facts, internal record IDs, or access notes in third-party labels or public URLs.",
+      "fallback_rule": "Provide a platform-neutral web link or ordered offline address and approved-coordinate card when the preferred app is unavailable. Any CARR return token is scoped to the exact Tour, stop, route version, user, and expiry.",
+      "test_rule": "Open the final link on the target phone platform, confirm the approved access point and travel mode, then confirm return to the correct current stop."
+    },
+    "outage_rule": "If the live map-architecture method or either doctrine source is unavailable, block map delivery and client-ready claims. Engineering may repair and test the governed method in the code repository, but it may not substitute remembered advice or a local contract for the required live read.",
     "bounded_tool_rule": "Prefer registered, typed GIS operations and curated mapping components. Arbitrary generated code is limited to a trusted local analyst environment and never self-publishes.",
     "confirmation_gates": [
       "delete_or_replace_layer",
@@ -54,6 +356,20 @@
       "publish_client_or_public_map"
     ],
     "promotion_receipt": {
+      "required_fields": [
+        "reviewer_human_id",
+        "reviewed_at",
+        "decision",
+        "brief_version",
+        "canonical_dataset_version",
+        "selected_prototype_id",
+        "component_registry_version",
+        "route_version",
+        "provider_rights_receipt_ids",
+        "mobile_test_evidence",
+        "native_navigation_test_evidence",
+        "offline_test_evidence"
+      ],
       "required_checks": [
         "canonical_address_and_coordinate_review",
         "no_unresolved_route_critical_unknown_or_conflict",
@@ -195,6 +511,34 @@
   ],
   "phase0_fixture_claim": "The bounded Phase 0 synthetic fixture must prove the strict canonical nested shape, mixed freshness, multi-location records, explicit unlocated work, all four record classes including active_project, and transparent skipped-stop evidence. Provider-backed optimization, live traffic, production clustering, full pan/zoom, route alternatives, planning fingerprint enforcement, and observed human adoption remain future gates unless separately demonstrated.",
   "day_trip_planning_contract": {
+    "route_constraint_required_fields": [
+      "start_position",
+      "end_position",
+      "departure_time",
+      "traffic_policy",
+      "avoidances",
+      "locked_appointments",
+      "dwell_minutes",
+      "buffer_minutes",
+      "workday_and_daylight_bounds",
+      "manual_priorities"
+    ],
+    "route_response_required_fields": [
+      "provider",
+      "sku",
+      "request_fingerprint",
+      "observed_at",
+      "ordered_route_stop_ids",
+      "geometry",
+      "legs",
+      "duration_evidence",
+      "distance_evidence",
+      "traffic_evidence",
+      "excluded_stops",
+      "warnings",
+      "terms_receipt_id",
+      "cost_event_count"
+    ],
     "planning_inputs": [
       "candidate site-visit locations",
       "locked appointments",

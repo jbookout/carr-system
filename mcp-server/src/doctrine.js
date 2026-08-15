@@ -540,7 +540,10 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         const byKey = new Map(rows.rows.map(row =>
           [`${row.document_slug}/${row.section_key}`, row]));
         const missing = required.map(([doc, section]) => `${doc}/${section}`)
-          .filter(key => !byKey.has(key));
+          .filter(key => {
+            const row = byKey.get(key);
+            return !row || !row.body || typeof row.body.text !== "string" || !row.body.text.trim();
+          });
         if (missing.length)
           throw new ToolError({ error: "map_architecture_unavailable", missing,
             hint: "The governed map method is fail-closed. Restore or activate every required doctrine section before map work continues." });
@@ -552,17 +555,34 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           doctrine_generation: Number(generation.generation),
           contract: {
             id: "carr-workspace-market-map-route-planning",
-            version: "1.1.0",
+            version: "1.2.0",
             path: "workspace/contracts/market-map-route-planning.v1.json",
             production_status: "approved_architecture_not_implemented_in_production",
           },
+          method_ids: [
+            "recursive_source_intake",
+            "typed_domain_queries",
+            "spatial_authoring_workbench",
+            "deterministic_component_registry",
+            "portable_geospatial_interchange",
+            "entrance_level_coordinate_verification",
+            "route_label_identity_separation",
+            "search_and_tour_modes",
+            "map_event_contract",
+            "provider_rights_receipt",
+            "human_promotion_receipt",
+          ],
           required_workflow: [
-            "Build one canonical, reviewed stop dataset from CARR records; never let the map or model become source truth.",
-            "Keep reviewed GIS and OSINT enrichment separate, with source, as-of date, rights, confidence, and verification state.",
-            "Use deterministic geocoding and routing; preserve locked appointments, dwell time, buffers, start/end points, and visible exclusions.",
-            "Keep marker, list, route, and offline itinerary order identical; make optional context layers progressive rather than the default task view.",
-            "Hand exact approved coordinates to native Google Maps or Apple Maps navigation and return to the correct Tour stop.",
-            "Require the contract promotion receipt before client/public use; unresolved route-critical facts, unreviewed layers, or a stale route block promotion.",
+            "Start with the business question. Recursively read direct, quoted, threaded, linked, video, repository, documentation, and dataset sources; label direct evidence, linked artifacts, public mirrors, inference, and inaccessible branches.",
+            "Use typed domain queries for lookup, text, bbox, radius, polygon, batch, and time-series retrieval; perform analysis with explicit freshness, provenance, precision, estimate/allocation, pagination, and rate-limit caveats.",
+            "Build one canonical, reviewed dataset from CARR records and separately reviewed GIS or OSINT enrichment; never let the map, geocoder, route provider, or model become source truth.",
+            "Use the bounded spatial authoring workbench for draft import, normalize, join, filter, style, compare, validate, export, and disposable prototypes. Promote only deterministic map components and typed functions that are tested and versioned.",
+            "Use GeoJSON for small web working sets, GeoPackage for editable GIS bundles, GeoParquet plus DuckDB for analysis, and PMTiles for large read-only layers while preserving stable IDs and provenance.",
+            "Approve an entrance, driveway, or parking-access coordinate before navigation. Parcel centroids, building centroids, geocoder candidates, and apparent parking-lot pins visibly downgrade or exclude a stop.",
+            "Keep property identity separate from mutable route_sequence and route_label. Marker, list, route, story section, and offline itinerary derive from one route version.",
+            "Use Search Mode for typed spatial discovery and Tour Mode for deterministic camera, card, marker, route, and optional overlay choreography. Update state through typed events without remounting the map.",
+            "Use provider-backed geocoding and routing with a current rights receipt; preserve locked appointments, dwell, buffers, start/end points, and visible exclusions.",
+            "Hand exact approved coordinates to native Google Maps or Apple Maps navigation and require a human promotion receipt with mobile, native-navigation, offline, provider-rights, component-version, and route-version evidence before client/public use.",
           ],
           sources: required.map(([doc, section]) => {
             const row = byKey.get(`${doc}/${section}`);

@@ -33,8 +33,36 @@ def tool_result(value, tool_id="map-call", is_error=False):
     ]}}
 
 
-def success():
-    return tool_result(json.dumps({"ok": True, "architecture": "carr-map-tour-v1"}))
+METHOD_IDS = [
+    "recursive_source_intake", "typed_domain_queries", "spatial_authoring_workbench",
+    "deterministic_component_registry", "portable_geospatial_interchange",
+    "entrance_level_coordinate_verification", "route_label_identity_separation",
+    "search_and_tour_modes", "map_event_contract", "provider_rights_receipt",
+    "human_promotion_receipt",
+]
+
+
+def architecture_payload(**overrides):
+    value = {
+        "ok": True,
+        "architecture": "carr-map-tour-v1",
+        "contract": {
+            "id": "carr-workspace-market-map-route-planning",
+            "version": "1.2.0",
+            "path": "workspace/contracts/market-map-route-planning.v1.json",
+        },
+        "method_ids": METHOD_IDS,
+        "sources": [
+            {"document": "maps-and-demographics", "section_key": "ai-built-interactive-tour-maps-source-rendering-routing-and-promotion-gate", "version": 3, "body_text": "governed map method"},
+            {"document": "carr-workspace-bduf", "section_key": "s13-ipad-application-and-tour-mode", "version": 2, "body_text": "governed Tour method"},
+        ],
+    }
+    value.update(overrides)
+    return value
+
+
+def success(payload=None):
+    return tool_result(json.dumps(payload or architecture_payload()))
 
 
 def codex_user(value):
@@ -62,14 +90,26 @@ CASES = [
     ("Codex nested live verb after request satisfies gate",
      [codex_user("Build a MapLibre property map."),
       codex_call("await tools.mcp__carr__map_architecture({});"),
-      codex_output('{"ok":true,"architecture":"carr-map-tour-v1"}')], False),
+      codex_output(json.dumps(architecture_payload()))], False),
     ("local call-verb path after request satisfies gate",
      [user("Design an interactive market map."),
       assistant_tool("Bash", value={"command": "./run.sh call map-architecture '{}'"}),
-      tool_result('{"ok":true,"architecture":"carr-map-tour-v1"}')], False),
+      tool_result(json.dumps(architecture_payload()))], False),
     ("failed live verb does not satisfy gate",
      [user("Create a Google Maps tour."), assistant_tool("mcp__carr__map-architecture"),
       tool_result('{"error":"map_architecture_unavailable"}', is_error=True)], True),
+    ("minimal success-looking stub does not satisfy gate",
+     [user("Create a Google Maps tour."), assistant_tool("mcp__carr__map-architecture"),
+      success({"ok": True, "architecture": "carr-map-tour-v1"})], True),
+    ("stale contract version does not satisfy gate",
+     [user("Create a Google Maps tour."), assistant_tool("mcp__carr__map-architecture"),
+      success(architecture_payload(contract={"id": "carr-workspace-market-map-route-planning", "version": "1.1.0", "path": "workspace/contracts/market-map-route-planning.v1.json"}))], True),
+    ("blank doctrine body does not satisfy gate",
+     [user("Create a Google Maps tour."), assistant_tool("mcp__carr__map-architecture"),
+      success(architecture_payload(sources=[
+          {"document": "maps-and-demographics", "section_key": "ai-built-interactive-tour-maps-source-rendering-routing-and-promotion-gate", "version": 1, "body_text": ""},
+          {"document": "carr-workspace-bduf", "section_key": "s13-ipad-application-and-tour-mode", "version": 2, "body_text": "Tour"},
+      ]))], True),
     ("old architecture read does not satisfy a new task",
      [assistant_tool("mcp__carr__map-architecture"), success(),
       user("Create a MapLibre tour map.")], True),
@@ -136,7 +176,9 @@ def main():
     skill_path = os.path.join(REPO, "claude-tree", "skills", "build-interactive-map", "SKILL.md")
     skill = open(skill_path).read()
     skill_valid = ("TODO" not in skill and "map-architecture" in skill
-                   and "Google Maps" in skill and "map out the steps" in skill)
+                   and "Google Maps" in skill and "map out the steps" in skill
+                   and "PMTiles" in skill and "property identity" in skill
+                   and "entrance" in skill and "Grok Build" in skill)
     outcomes.append(skill_valid)
     print(f"{'PASS' if skill_valid else 'FAIL'}  map skill has trigger and mandatory live read")
 

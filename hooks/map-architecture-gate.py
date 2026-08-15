@@ -26,9 +26,26 @@ CALL_MARKER = re.compile(
     r"(?:mcp__(?:carr|carr_records)__(?:map[-_]architecture)|"
     r"run\.sh\s+call\s+map-architecture\b|"
     r"call[_-]verb[^\n]{0,240}map-architecture)", re.I)
-SUCCESS_OK = re.compile(r'''["']ok["']\s*:\s*true''', re.I)
-SUCCESS_METHOD = re.compile(
-    r'''["']architecture["']\s*:\s*["']carr-map-tour-v1["']''', re.I)
+CONTRACT_ID = "carr-workspace-market-map-route-planning"
+CONTRACT_VERSION = "1.2.0"
+CONTRACT_PATH = "workspace/contracts/market-map-route-planning.v1.json"
+REQUIRED_METHOD_IDS = {
+    "recursive_source_intake",
+    "typed_domain_queries",
+    "spatial_authoring_workbench",
+    "deterministic_component_registry",
+    "portable_geospatial_interchange",
+    "entrance_level_coordinate_verification",
+    "route_label_identity_separation",
+    "search_and_tour_modes",
+    "map_event_contract",
+    "provider_rights_receipt",
+    "human_promotion_receipt",
+}
+REQUIRED_SOURCES = {
+    ("maps-and-demographics", "ai-built-interactive-tour-maps-source-rendering-routing-and-promotion-gate"),
+    ("carr-workspace-bduf", "s13-ipad-application-and-tour-mode"),
+}
 
 
 def _content_text(content, kinds=("text", "input_text", "output_text")):
@@ -97,13 +114,106 @@ def latest_task(records):
     return -1, ""
 
 
+def _parse_json_value(value):
+    if isinstance(value, dict):
+        for key in ("structuredContent", "structured_content", "result"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                return _parse_json_value(nested)
+        content = value.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parsed = _parse_json_value(block["text"])
+                    if parsed is not None:
+                        return parsed
+        return value
+    if isinstance(value, list):
+        for item in value:
+            parsed = _parse_json_value(item)
+            if parsed is not None:
+                return parsed
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return _parse_json_value(parsed)
+
+
+def _tool_result(record, expected_tool_id=None):
+    payload = record.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "custom_tool_call_output":
+        return _parse_json_value(payload.get("output"))
+    message = record.get("message") if isinstance(record.get("message"), dict) else record
+    content = message.get("content")
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        if block.get("is_error"):
+            continue
+        if expected_tool_id and block.get("tool_use_id") != expected_tool_id:
+            continue
+        return _parse_json_value(block.get("content"))
+    return None
+
+
+def _map_call_id(record):
+    raw = serialized(record)
+    if not CALL_MARKER.search(raw):
+        return None
+    message = record.get("message") if isinstance(record.get("message"), dict) else record
+    content = message.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and CALL_MARKER.search(serialized(block)):
+                return block.get("id") or "__unidentified__"
+    payload = record.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "custom_tool_call":
+        return "__codex__"
+    return "__unidentified__"
+
+
+def _valid_architecture_payload(value):
+    if not isinstance(value, dict):
+        return False
+    if value.get("ok") is not True or value.get("architecture") != "carr-map-tour-v1":
+        return False
+    contract = value.get("contract")
+    if not isinstance(contract, dict) or contract.get("id") != CONTRACT_ID:
+        return False
+    if contract.get("version") != CONTRACT_VERSION or contract.get("path") != CONTRACT_PATH:
+        return False
+    methods = value.get("method_ids")
+    if not isinstance(methods, list) or not REQUIRED_METHOD_IDS.issubset(set(methods)):
+        return False
+    sources = value.get("sources")
+    if not isinstance(sources, list):
+        return False
+    seen = set()
+    for source in sources:
+        if not isinstance(source, dict) or not isinstance(source.get("body_text"), str):
+            return False
+        if not source["body_text"].strip() or not isinstance(source.get("version"), int):
+            return False
+        seen.add((source.get("document"), source.get("section_key")))
+    return REQUIRED_SOURCES.issubset(seen)
+
+
 def successful_architecture_read(records):
-    call_seen = False
+    call_id = None
     for record in records:
-        raw = serialized(record)
-        if CALL_MARKER.search(raw):
-            call_seen = True
-        if call_seen and SUCCESS_OK.search(raw) and SUCCESS_METHOD.search(raw):
+        found_call = _map_call_id(record)
+        if found_call:
+            call_id = found_call
+            continue
+        expected = None if call_id in {None, "__codex__", "__unidentified__"} else call_id
+        result = _tool_result(record, expected)
+        if call_id and _valid_architecture_payload(result):
             return True
     return False
 
@@ -137,6 +247,7 @@ def audit(row):
 
 
 def main():
+    payload = {}
     try:
         payload = json.load(sys.stdin)
         if payload.get("stop_hook_active") or not payload_is_carr(payload):
@@ -158,7 +269,14 @@ def main():
             "Read its two current doctrine sections and machine-contract pointer, then do the "
             "map work against carr-map-tour-v1. A prior task's read does not satisfy this one."}))
         return 0
-    except Exception:
+    except Exception as exc:
+        if payload_is_carr(payload):
+            audit({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   "hook": "map-architecture-gate",
+                   "session": payload.get("session_id") or payload.get("sessionId"),
+                   "reason": "gate internal failure", "error": type(exc).__name__})
+            print(json.dumps({"decision": "block", "reason":
+                "MAP ARCHITECTURE GATE FAILED CLOSED — the governed map-method check could not be verified. Repair the gate or transcript read before ending this CARR task."}))
         return 0
 
 
