@@ -516,6 +516,61 @@ def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
     return opened
 
 
+# THE ELAPSED-WINDOW SWEEP, added 2026-08-14. Every incident carried the line
+# "watch until 24h clear, then close with an outcome" and nothing ever performed
+# that close: assess only moves a recovered incident INTO monitoring (its update
+# targets detected/triaged/investigating/mitigating), so a row already there was
+# never touched again, and no job, agent or service entry called the close path.
+# The windows expired and the pile stayed, reprinted whole every night.
+#
+# ONLY THE CLOCK-WATCHING IS AUTOMATED — the judgment is not. This closes an
+# incident only when nothing is left to decide: it recovered against real
+# evidence, the window ran out, and nothing failed again for the whole window.
+# Everything else — never recovered, still flapping, no evidence — stays open
+# and keeps its human outcome, which is what the `resolve` subcommand is for.
+# A failure that recurs mid-window is the case this must never close, because
+# that is precisely the judgment the human close exists to make.
+def sweep_decision(incident, job_clean, now=None):
+    """(close, reason). Whether one monitoring incident may close on the clock.
+
+    `job_clean` answers the question every incident's own next_action asks —
+    "watch until 24h clear" — of the LAST 24 HOURS UP TO NOW: latest run for
+    that signature succeeded, and no failed or timed-out run in the window.
+
+    IT IS DELIBERATELY ANCHORED ON NOW, not on the recovery pointer. assess
+    writes recovery_evidence_ref when it moves an incident detected -> monitoring
+    and never updates it again, so a job that recovers, fails again and recovers
+    once more still points at the FIRST recovery. Anchoring there counts long-
+    healed failures forever and the incident never closes — which a read-only
+    proof against the live ledger showed for three of the eight open rows before
+    this shipped. Anchored on now, the test is self-correcting: whatever went
+    wrong, 24 clean hours is 24 clean hours.
+    """
+    now = now or datetime.now(timezone.utc)
+    if (incident.get("state") or "") != "monitoring":
+        return False, f"state is {incident.get('state')!r}, not monitoring"
+
+    if not incident.get("recovery_evidence_ref"):
+        return False, "no recovery evidence recorded, so there is nothing to stand on"
+
+    until = incident.get("monitoring_until")
+    if until is None:
+        # Never treat a missing window as an elapsed one — that would sweep
+        # every incident that has no window at all.
+        return False, "no monitoring window recorded"
+    if until > now:
+        return False, f"monitoring window still open until {until:%Y-%m-%d %H:%M}Z"
+
+    if not job_clean:
+        return False, (f"not yet {MONITORING_HOURS}h clear — a failure is still recorded "
+                       f"inside the window, or the latest run is not green")
+
+    return True, (f"its monitoring window ended {until:%Y-%m-%d %H:%M}Z and the job has run "
+                  f"clean for a full {MONITORING_HOURS}h since — no failure recorded, latest "
+                  f"run green. That is the watch every incident asks for. Closed by the "
+                  f"elapsed-window sweep.")
+
+
 def resolve_authority(env):
     """(ok, error). Closing needs owner privileges, and says so before connecting.
 
@@ -579,6 +634,79 @@ def cmd_resolve(args) -> int:
                  "ops-record.py resolve --allow-early", args.ref))
         conn.commit()
     print(f"{args.ref} resolved — {fields['root_cause']}")
+    return 0
+
+
+def cmd_sweep(args) -> int:
+    ok, err = resolve_authority(os.environ)
+    if not ok:
+        print(err, file=sys.stderr)
+        return 1
+    closed = skipped = 0
+    with connect("owner") as conn, conn.cursor() as cur:
+        cur.execute(
+            """select ref, state, recovery_evidence_ref, monitoring_until, title, signature
+                 from ops.incident
+                where state = 'monitoring'
+                  and (%s::text is null or environment = %s)
+             order by ref""",
+            (args.environment, args.environment))
+        cols = ("ref", "state", "recovery_evidence_ref", "monitoring_until", "title", "signature")
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+        for inc in rows:
+            # "Failed again during the window" is asked of the RUN LEDGER, not
+            # of the incident: the incident is not re-opened by a repeat
+            # failure under the same signature (0116's partial unique index
+            # collapses it), so the incident alone cannot answer this.
+            # "Watch until 24h clear", asked of the run ledger over the last 24
+            # hours UP TO NOW — not of the incident, which is not re-opened by a
+            # repeat failure under the same signature (0116's partial unique
+            # index collapses it), and not of recovery_evidence_ref, which assess
+            # never updates after the move into monitoring.
+            sig = (inc.get("signature") or "").split("|")
+            job_clean = False
+            if len(sig) >= 3:
+                cur.execute(
+                    """select (select r.state from ops.run r
+                                 join ops.service s on s.id = r.service_id
+                                where s.key=%s and r.environment=%s and r.run_key=%s
+                             order by r.observed_at desc limit 1) = 'succeeded'
+                          and not exists (
+                              select 1 from ops.run r
+                                join ops.service s on s.id = r.service_id
+                               where s.key=%s and r.environment=%s and r.run_key=%s
+                                 and r.state in ('failed','timed_out')
+                                 and r.observed_at > now() - make_interval(hours => %s))""",
+                    (sig[0], sig[1], sig[2], sig[0], sig[1], sig[2], MONITORING_HOURS))
+                job_clean = bool(cur.fetchone()[0])
+
+            close, reason = sweep_decision(inc, job_clean=job_clean)
+            if not close:
+                skipped += 1
+                if args.verbose:
+                    print(f"  keep  {inc['ref']}  {reason}")
+                continue
+
+            ok2, err2, fields = resolve_preconditions(
+                inc, root_cause=reason, evidence=inc["recovery_evidence_ref"])
+            if not ok2:
+                skipped += 1
+                print(f"  keep  {inc['ref']}  {err2}")
+                continue
+
+            cur.execute(
+                """update ops.incident
+                      set state = 'resolved', resolved_at = %s, monitoring_until = %s,
+                          recovery_evidence_ref = %s, root_cause = %s,
+                          next_action = 'review and record a followup disposition'
+                    where ref = %s and state = 'monitoring'""",
+                (fields["resolved_at"], fields["monitoring_until"],
+                 fields["recovery_evidence_ref"], fields["root_cause"], inc["ref"]))
+            closed += 1
+            print(f"  close {inc['ref']}  {inc['title']}")
+        conn.commit()
+    print(f"incident sweep: {closed} closed, {skipped} left open for a human")
     return 0
 
 
@@ -831,6 +959,12 @@ def main() -> int:
                          "the window cannot apply (e.g. an induced failure that will "
                          "never produce a green run). Recorded as an incident fact.")
 
+    sw = sub.add_parser("sweep", help="close monitoring incidents whose window elapsed clean")
+    sw.add_argument("--environment",
+                    choices=["local", "rehearsal", "staging", "production"])
+    sw.add_argument("--verbose", action="store_true",
+                    help="also print why each incident was left open")
+
     a = sub.add_parser("assess", help="turn the latest run of every job into incident state")
     a.add_argument("--environment",
                    choices=["local", "rehearsal", "staging", "production"])
@@ -846,6 +980,7 @@ def main() -> int:
         "health": cmd_health,
         "assess": cmd_assess,
         "resolve": cmd_resolve,
+        "sweep": cmd_sweep,
         "settings-change": cmd_settings_change,
     }[args.cmd](args)
 
