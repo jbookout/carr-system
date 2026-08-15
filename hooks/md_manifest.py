@@ -125,7 +125,59 @@ ALLOW_PREFIX = {
     # The GENERATED dossiers in this same directory stay denied via the render
     # set (exact paths win over prefix allowance — deny is checked first).
     "DNA/Clients/prospects/": CUTOFF,
+    # ── THE FIVE WRITERS THE EARLY CLOSURE MISSED, added 2026-08-14 ──────────
+    # Joe's ruling keeps retired rows instead of deleting them for one reason,
+    # in its own words: "A deleted row falls through to the generic deny
+    # message, which tells a job's author only that markdown is closed. A
+    # retired row produces the SPECIFIC message — its writer was supposed to be
+    # re-pointed — which names what has to happen and to which job. The
+    # diagnosis is the point."
+    #
+    # These paths never had rows AT ALL, so they fell through to exactly the
+    # generic message the mechanism exists to avoid, and the jobs writing them
+    # kept running with no diagnosis attached to the denial. Found by the
+    # write-effect check on the day it shipped: it reported them as files
+    # nothing may write, and none of them carried a writer's name.
+    #
+    # THEY RETIRE AT CLOSED_EARLY FOR EVERYONE, NOT AT CUTOFF, and that is a
+    # deliberate narrowing. The first cut of this change gave them CUTOFF like
+    # the rows above, which would have been faithful to the staggering rule but
+    # wrong here: these paths never had an allowance to stagger, so a CUTOFF row
+    # would GRANT Dell a write window that does not exist today. Improving a
+    # denial's wording must not quietly widen what may be written. All three are
+    # Joe-personal trees anyway (00_Context and Automation are outside the shared
+    # DNA tier), so there is no partner whose jobs the earlier date could break.
+    # Net effect of this row: the verdict is unchanged for both partners, and
+    # only the MESSAGE improves — from "markdown is closed" to the specific
+    # alarm naming the job.
+    "00_Context/today.md": CLOSED_EARLY,
+    "Automation/Learning/": CLOSED_EARLY,
+    "Automation/radar/": CLOSED_EARLY,
 }
+
+# WHICH JOB WRITES A RETIRED PATH, so the denial can name it. The retired
+# message said "its writer was supposed to be re-pointed" without ever saying
+# WHICH writer — half of the diagnosis the ruling asks for. Longest prefix wins,
+# so a specific file beats the directory it sits in.
+WRITER_BY_PREFIX = {
+    "00_Context/today.md": "bin/local-briefs.sh (launchd com.carr.local-briefs, 06:45 weekdays)",
+    "Automation/Learning/": "the weekly metrics jobs — ops/scheduled-tasks/social-metrics-pull-weekly "
+                            "and pipelines/pull_placement_metrics.py",
+    "Automation/radar/": "tools/health-check.py",
+    "DNA/Network/briefs/": "the weekly network brief run",
+    "DNA/Clients/prospects/": "client-intake's dossier narrative",
+    "Marketing/Social Media/": "the weekly social batch run",
+    "DNA/Marketing/Social Media/": "the weekly social batch run",
+}
+
+
+def writer_for(rel):
+    """The job that writes `rel`, or None. Longest declared prefix wins."""
+    best = None
+    for prefix, name in WRITER_BY_PREFIX.items():
+        if rel.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, name)
+    return best[1] if best else None
 
 # Job-output FILENAME patterns that live in folders shared with migrated
 # doctrine (a prefix row would un-block the migrated files too). The weekly
@@ -158,11 +210,14 @@ def md_write_verdict(rel, today=None, actor=None):
     for prefix in ALLOW_MACHINE_PREFIX:
         if rel.startswith(prefix):
             return None
+    writer = writer_for(rel)
+    who = f"THE JOB TO FIX IS {writer}. " if writer else ""
     retired_msg = (f"'{rel}' sat on a TEMPORARY manifest row, and that row is now "
                    f"CLOSED (Joe, 2026-08-14: \"we need to eliminate the ability to "
                    f"write markdown at all. me or dell\" — brought forward from the "
                    f"2026-08-21 cutoff). Its writer was supposed to be re-pointed at "
-                   f"the store, and this write is the alarm that it was not. Route the "
+                   f"the store, and this write is the alarm that it was not. "
+                   f"{who}Route the "
                    f"content through a verb and fix the job: the posts, findings, "
                    f"decisions and open items in a report each have one. A markdown "
                    f"file reaches nobody and no query finds it.")
