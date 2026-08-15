@@ -57,6 +57,53 @@ import sys
 from collections import Counter
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def install_repo(repo=None):
+    """The checkout the INSTALLED adapters point at — the main worktree.
+
+    WHY THIS IS NOT JUST REPO. Worktree-per-session is this repo's default
+    (rule 4a53ff82), so most sessions run from .claude/worktrees/<name>, where
+    REPO is that worktree. But there is only ever ONE installed wiring:
+    ~/.claude/settings.json and ~/.codex/hooks.json name absolute commands in
+    the canonical checkout. Rendering {{REPO}} as the worktree therefore made
+    every expected command mismatch the live one, and the wiring comparison
+    reported all 40 gates as "found 0" — a full GATE INTEGRITY FAILURE banner,
+    from a machine whose gates were 40/40 exact.
+
+    That is worse than a cosmetic bug. The banner tells the session to open its
+    next message to Joe by saying the gates are not in force, so the default
+    working tree produced a false alarm on the one check that guards every
+    other gate; and a session that learns to disregard it has been trained to
+    ignore exactly the signal that caught the 2026-08-08 outage. Recorded as
+    defect class worktree-run-of-gate-integrity-reports-false-total-failure.
+
+    Content checks are unaffected and stay tree-local on purpose: hashing the
+    hook files in the tree under test is what catches tampering, and that half
+    was always correct. Only the WIRING comparison moves to the install target.
+
+    In the canonical checkout this returns REPO unchanged, so nothing about the
+    normal path changes. Falls back to REPO whenever git cannot answer.
+    """
+    repo = repo or REPO
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return repo
+    common = out.stdout.strip()
+    if out.returncode != 0 or not common:
+        return repo
+    # --git-common-dir points at the MAIN worktree's .git directory whichever
+    # worktree asked, so its parent is the canonical checkout.
+    candidate = os.path.dirname(os.path.abspath(common))
+    return candidate if os.path.isdir(os.path.join(candidate, "hooks")) else repo
+
+
+INSTALL_REPO = install_repo()
 HOOKS = os.path.join(REPO, "hooks")
 BASELINE = os.path.join(REPO, "ops", "config", "gate-baseline.json")
 REPO_HOOKS_JSON = os.path.join(REPO, "ops", "config", "hooks.json")
@@ -311,7 +358,10 @@ def bless(only=None):
 def render_config(path):
     """Load one portable hooks config with this machine's concrete paths."""
     raw = open(path).read()
-    raw = raw.replace("{{REPO}}", REPO).replace("{{HOME}}", os.path.expanduser("~"))
+    # {{REPO}} renders the command the INSTALLED adapter must be invoking, which
+    # is always the main worktree — see install_repo(). Identical to REPO in the
+    # canonical checkout.
+    raw = raw.replace("{{REPO}}", INSTALL_REPO).replace("{{HOME}}", os.path.expanduser("~"))
     return json.loads(raw.replace("{{VAULT}}", os.path.expanduser("~/My Drive/CARR AI")))
 
 
@@ -435,7 +485,9 @@ def codex_wiring_matches_repo():
     """
     try:
         wanted = json.load(open(CODEX_HOOKS_REPO))
-        rendered = json.loads(json.dumps(wanted).replace("{{REPO}}", REPO))
+        # INSTALL_REPO, not REPO: same reason as render_config — ~/.codex/hooks.json
+        # names commands in the canonical checkout whichever worktree asks.
+        rendered = json.loads(json.dumps(wanted).replace("{{REPO}}", INSTALL_REPO))
         live = json.load(open(CODEX_HOOKS_LIVE))
     except Exception as exc:
         return False, f"Codex hooks unreadable: {exc}"

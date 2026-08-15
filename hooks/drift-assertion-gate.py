@@ -2,12 +2,23 @@
 """drift-assertion-gate.py — the drift check, moved to the door where the claim
 actually reaches a human.
 
-WHY THIS EXISTS, and the number is the whole argument. "A CURRENT artifact read
-accurately, the DECISION behind it left unread" has failed NINE times since
-2026-08-04, six of them caught by Joe rather than by a session. When the ninth
-was filed on 2026-08-14 the record layer answered with the point this file acts
-on: "A repeat class is a design problem, not a lapse: say so rather than filing
-the next one quietly."
+WHY THIS EXISTS, and the frequency is the whole argument. "A CURRENT artifact
+read accurately, the DECISION behind it left unread" is the most frequent
+failure class this system has recorded, running since 2026-08-04, with the
+majority caught by Joe rather than by a session. When one was filed on
+2026-08-14 the record layer answered with the point this file acts on: "A repeat
+class is a design problem, not a lapse: say so rather than filing the next one
+quietly."
+
+THE COUNT IS NOT WRITTEN HERE, deliberately, and that is a correction rather
+than an omission. This file carried "NINE times" in its docstring and again in
+the message it prints. By 2026-08-15 the ledger read eleven, so the gate whose
+entire job is catching a stale artifact quoted as present state was itself
+quoting a stale artifact as present state, in the sentence meant to persuade.
+Rule b01edd26 bans exactly this: no hardcoded count a later edit can falsify.
+A Stop hook cannot ask the record layer for the live figure — it must stay fast
+and work offline — so the honest move is to state the shape and point at the
+live source. `standing-context` returns the ledger with current counts.
 
 drift-claim-gate.py already guards this class and it WORKS — it fired twice on
 2026-08-14 and both flagged claims turned out to be wrong. Its limitation is
@@ -168,9 +179,11 @@ def main():
         print(
             "DRIFT ASSERTION — you are about to tell Joe that a present state is "
             "WRONG, and the decision log has something on this subject.\n\n"
-            "This class has failed NINE times since 2026-08-04, six of them caught "
-            "by him rather than by a session, and it always has the same shape: a "
-            "current artifact read accurately, the decision behind it left unread. "
+            "This is the most frequent failure class on record here, running since "
+            "2026-08-04, most of them caught by him rather than by a session, and it "
+            "always has the same shape: a current artifact read accurately, the "
+            "decision behind it left unread. `standing-context` returns the live "
+            "count if you want it. "
             "The write-door version of this check only fires when a record gets "
             "filed — by then the claim has usually already reached him in chat, "
             "which is what this door is for.\n\nMatching rulings, newest first:\n\n"
