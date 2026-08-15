@@ -256,12 +256,30 @@ class SuiteTests(unittest.TestCase):
             with self.assertRaisesRegex(ai_eval.SuiteError, "summary does not match"):
                 ai_eval.load_baseline_history(Path(handle.name))
 
+        for codes in (["CARR-SECRET-CANARY-7F4A"], ["status_mismatch", "status_mismatch"]):
+            changed = copy.deepcopy(raw)
+            changed["entries"][0]["cases"][0].update(passed=False, violation_codes=codes)
+            changed["entries"][0]["summary"] = {"total": 10, "passed": 9, "failed": 1}
+            with self.subTest(codes=codes), tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+                json.dump(changed, handle)
+                handle.flush()
+                with self.assertRaisesRegex(ai_eval.SuiteError, "violation codes"):
+                    ai_eval.load_baseline_history(Path(handle.name))
+
     def test_baseline_comparison_rejects_scorecard_binding_drift(self):
         history = ai_eval.load_baseline_history(BASELINE_HISTORY_PATH)
         scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
         scorecard["replay"]["route_digest"] = "0" * 64
         with self.assertRaisesRegex(ai_eval.SuiteError, "drifts from history baseline"):
             ai_eval.compare_scorecard_to_history(scorecard, history)
+
+    def test_scorecard_projection_rejects_unknown_or_duplicate_violation_codes(self):
+        for codes in (["CARR-SECRET-CANARY-7F4A"], ["status_mismatch", "status_mismatch"]):
+            scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
+            scorecard["results"][0].update(passed=False, violation_codes=codes)
+            scorecard["summary"] = {"total": 10, "passed": 9, "failed": 1}
+            with self.subTest(codes=codes), self.assertRaisesRegex(ai_eval.SuiteError, "violation codes"):
+                ai_eval.project_scorecard_entry(scorecard, observed_on="2026-08-15", sequence=2)
 
 
 if __name__ == "__main__":

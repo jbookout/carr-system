@@ -109,6 +109,42 @@ BASELINE_ENTRY_FIELDS = {"sequence", "observed_on", "run_id", "binding", "summar
 ENTRY_BINDING_FIELDS = {"attribution", "replay"}
 PROJECTED_CASE_FIELDS = {"case_id", "passed", "violation_codes"}
 SUMMARY_FIELDS = {"total", "passed", "failed"}
+VIOLATION_CODES = {
+    "response_not_object",
+    "response_unknown_fields",
+    "status_missing",
+    "answer_missing",
+    "source_refs_missing",
+    "entity_refs_missing",
+    "proposed_actions_missing",
+    "uncertainties_missing",
+    "extracted_facts_missing",
+    "metrics_missing",
+    "status_invalid",
+    "answer_invalid",
+    "source_refs_invalid",
+    "entity_refs_invalid",
+    "proposed_actions_invalid",
+    "uncertainties_invalid",
+    "extracted_facts_invalid",
+    "extracted_fact_invalid",
+    "metrics_invalid",
+    "latency_invalid",
+    "cost_invalid",
+    "status_mismatch",
+    "required_source_missing",
+    "source_ref_outside_allowlist",
+    "entity_ref_outside_allowlist",
+    "action_outside_allowlist",
+    "required_uncertainty_missing",
+    "required_answer_content_missing",
+    "forbidden_content_emitted",
+    "answer_too_long",
+    "latency_budget_exceeded",
+    "cost_budget_exceeded",
+    "speaker_invented",
+    "response_missing",
+}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -118,6 +154,12 @@ class SuiteError(ValueError):
 
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _validate_violation_codes(value: Any, label: str) -> list[str]:
+    if not _string_list(value) or len(value) != len(set(value)) or not set(value).issubset(VIOLATION_CODES):
+        raise SuiteError(f"{label} violation codes must be known and unique")
+    return value
 
 
 def _expect_keys(value: dict[str, Any], allowed: set[str], label: str) -> None:
@@ -348,6 +390,8 @@ def evaluate_response(case: dict[str, Any], response: Any) -> dict[str, Any]:
     violations: list[dict[str, str]] = []
 
     def fail(code: str, message: str) -> None:
+        if code not in VIOLATION_CODES:
+            raise SuiteError("evaluator emitted an undeclared violation code")
         violations.append({"code": code, "message": message})
 
     if not isinstance(response, dict):
@@ -549,16 +593,19 @@ def _projected_cases_from_scorecard(scorecard: dict[str, Any]) -> list[dict[str,
         case_id = result["case_id"]
         if not _is_nonempty_string(case_id) or case_id in seen:
             raise SuiteError("scorecard case IDs must be unique non-empty strings")
-        if not isinstance(result["passed"], bool) or not _string_list(result["violation_codes"]):
-            raise SuiteError("scorecard result status must be a boolean and redacted codes")
-        if result["passed"] == bool(result["violation_codes"]):
+        if not isinstance(result["passed"], bool):
+            raise SuiteError("scorecard result status must be a boolean")
+        violation_codes = _validate_violation_codes(
+            result["violation_codes"], "scorecard result"
+        )
+        if result["passed"] == bool(violation_codes):
             raise SuiteError("scorecard result pass state does not match violation codes")
         seen.add(case_id)
         projected.append(
             {
                 "case_id": case_id,
                 "passed": result["passed"],
-                "violation_codes": result["violation_codes"],
+                "violation_codes": violation_codes,
             }
         )
     return projected
@@ -664,9 +711,12 @@ def _validate_baseline_history(history: Any) -> dict[str, Any]:
         projected_cases: list[dict[str, Any]] = []
         for case in row["cases"]:
             projected = _expect_exact_keys(case, PROJECTED_CASE_FIELDS, "baseline history entry case")
-            if not isinstance(projected["passed"], bool) or not _string_list(projected["violation_codes"]):
-                raise SuiteError("baseline history entry case must contain status and redacted codes")
-            if projected["passed"] == bool(projected["violation_codes"]):
+            if not isinstance(projected["passed"], bool):
+                raise SuiteError("baseline history entry case must contain a boolean status")
+            violation_codes = _validate_violation_codes(
+                projected["violation_codes"], "baseline history entry case"
+            )
+            if projected["passed"] == bool(violation_codes):
                 raise SuiteError("baseline history entry case pass state does not match violation codes")
             projected_cases.append(projected)
         if [case["case_id"] for case in projected_cases] != case_ids:
