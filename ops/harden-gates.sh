@@ -86,6 +86,7 @@ FILES=(
   "$HOOKS/session-brief.py"
   "$HOOKS/delegation-gate.py"
   "$HOOKS/completion-evidence-gate.py"
+  "$HOOKS/map-architecture-gate.py"
   "$HOME_DIR/.claude/settings.json"
   "$HOME_DIR/My Drive/CARR AI/.claude/settings.json"
   "$HOME_DIR/My Drive/.claude/settings.json"

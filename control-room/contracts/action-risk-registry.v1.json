@@ -15,8 +15,8 @@
  "counts": {
   "human_boundary": 14,
   "append_only": 31,
-  "optimistic_concurrency": 13,
-  "read_only": 30,
+  "optimistic_concurrency": 14,
+  "read_only": 31,
   "NONE": 13,
   "upsert_last_writer_wins": 4
  },
@@ -591,6 +591,18 @@
     "upserts": 0
    },
    "does": "Read the standing paragraph that sits at the top of each loops section \u2014 the header prose of open-loops"
+  },
+  "map-architecture": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Mandatory first read for any CARR map, GIS, route, day-trip, or Tour request"
   },
   "measure-placement": {
    "protection": "NONE",
@@ -1239,6 +1251,18 @@
     "upserts": 0
    },
    "does": "Record what a HUMAN says happened to a prepared document \u2014 sets document status: draft -> handed_to_joe -> sent"
+  },
+  "update-lead": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "sql": {
+    "updates": 1,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, "
   },
   "update-loop": {
    "protection": "optimistic_concurrency",

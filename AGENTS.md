@@ -39,6 +39,13 @@ say so rather than improvising a home — a cloud session once filed an entire
 system audit into an unrelated empty scaffold repo, which is the same as losing
 it.
 
+## Map work has one mandatory front door
+
+For any request to recommend, design, build, revise, review, or publish a map,
+GIS analysis, route, day trip, or Tour surface, call the live `map-architecture`
+verb before advising or editing. It returns the current doctrine and the
+machine-contract pointer. The configured Stop gate enforces this route.
+
 ## main is not directly pushable
 
 Ruleset "main: CI must be green" requires the `ops/ci.sh --strict` status check,
