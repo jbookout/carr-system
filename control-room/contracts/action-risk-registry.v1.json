@@ -13,11 +13,11 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 14,
+  "human_boundary": 20,
   "append_only": 31,
-  "optimistic_concurrency": 14,
-  "read_only": 31,
-  "NONE": 13,
+  "optimistic_concurrency": 16,
+  "read_only": 33,
+  "NONE": 12,
   "upsert_last_writer_wins": 4
  },
  "the_gap": [
@@ -28,7 +28,6 @@
   "measure-placement",
   "register-template",
   "resolve-conflict",
-  "set-lead",
   "set-next-action",
   "set-next-step",
   "triage-item",
@@ -44,6 +43,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -56,6 +56,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -68,6 +69,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -80,6 +82,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -92,6 +95,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -104,6 +108,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -116,6 +121,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -128,6 +134,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -140,6 +147,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 2,
     "deletes": 0,
@@ -148,10 +156,37 @@
    },
    "does": "Bind published content to the campaign it belongs to \u2014 the link that makes 259 metrics answerable"
   },
+  "attest-capability-project": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Persist an independent pass or fail against the frozen current candidate"
+  },
+  "begin-capability-project": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Perform the separate claimed\u2192in_progress transition for the persisted current capability session"
+  },
   "call-verb": {
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -160,10 +195,24 @@
    },
    "does": "Invoke ANY live verb by name \u2014 the deploy-gap passthrough"
   },
+  "capability-program": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read the one fixed CARR AI Engineering Suite"
+  },
   "capture-queue": {
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -176,6 +225,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -188,6 +238,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -200,6 +251,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -212,6 +264,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -224,6 +277,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -236,6 +290,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 2,
     "deletes": 0,
@@ -244,10 +299,24 @@
    },
    "does": "Mark YOUR open ball on a subject DONE \u2014 the thing actually happened"
   },
+  "complete-capability-project": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Close only the current project from its frozen candidate plus a stored independent PASS attestation, then expose exactly the next ordered Work Request"
+  },
   "confirm-merge": {
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -260,6 +329,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -272,6 +342,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -284,6 +355,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -296,6 +368,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -308,6 +381,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -320,6 +394,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -332,6 +407,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -344,6 +420,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -356,6 +433,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -368,6 +446,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -380,6 +459,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -392,6 +472,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -404,6 +485,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -416,6 +498,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -428,6 +511,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -440,6 +524,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -452,6 +537,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -464,6 +550,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -476,6 +563,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -488,6 +576,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -500,6 +589,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -512,6 +602,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -524,6 +615,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -536,6 +628,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -548,6 +641,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -560,6 +654,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 3,
     "deletes": 0,
@@ -572,6 +667,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -584,6 +680,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -596,6 +693,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -608,6 +706,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -620,6 +719,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 6,
     "deletes": 0,
@@ -632,6 +732,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -644,6 +745,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -656,6 +758,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -668,6 +771,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -680,6 +784,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -692,6 +797,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -704,6 +810,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -716,6 +823,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -728,6 +836,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -740,6 +849,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -748,10 +858,24 @@
    },
    "does": "Patch one Deal Room cell using its last-seen event as the field base"
   },
+  "prepare-capability-project": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Freeze exactly one candidate for independent verification"
+  },
   "prepare-document": {
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -764,6 +888,7 @@
    "protection": "upsert_last_writer_wins",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -776,6 +901,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -788,6 +914,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -800,6 +927,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -812,6 +940,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -820,10 +949,24 @@
    },
    "does": "Read ONE loop and its current version"
   },
+  "read-work-shape": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read the current append-only implementation-shape decision for a canonical Work Request"
+  },
   "reassign-deal": {
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -836,6 +979,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -848,6 +992,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -860,6 +1005,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -872,6 +1018,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -884,6 +1031,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -896,6 +1044,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -908,6 +1057,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -920,6 +1070,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 2,
     "deletes": 0,
@@ -932,6 +1083,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -944,6 +1096,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -956,6 +1109,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 3,
     "deletes": 0,
@@ -968,6 +1122,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -980,6 +1135,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -992,6 +1148,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1004,6 +1161,7 @@
    "protection": "upsert_last_writer_wins",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1016,6 +1174,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1028,6 +1187,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1040,6 +1200,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1049,21 +1210,23 @@
    "does": "Replace a section's outbound links and typed edges in one atomic act"
   },
   "set-lead": {
-   "protection": "NONE",
+   "protection": "human_boundary",
    "write": true,
-   "binds_both_partners": false,
+   "binds_both_partners": true,
+   "base_version_required": true,
    "sql": {
     "updates": 2,
     "deletes": 0,
     "inserts": 1,
     "upserts": 0
    },
-   "does": "THE handoff: make joe or dell the current lead on a deal"
+   "does": "THE human ownership handoff: make joe or dell the current lead on a deal"
   },
   "set-market-agent": {
    "protection": "upsert_last_writer_wins",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1076,6 +1239,7 @@
    "protection": "upsert_last_writer_wins",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1088,6 +1252,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 2,
     "deletes": 0,
@@ -1100,6 +1265,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 2,
     "deletes": 0,
@@ -1108,10 +1274,24 @@
    },
    "does": "Append a new current next step"
   },
+  "set-work-shape-disposition": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Explicitly decide whether a Work Request needs shape analysis before implementation"
+  },
   "source-attribution": {
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1124,6 +1304,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1136,6 +1317,7 @@
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1148,6 +1330,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1156,10 +1339,24 @@
    },
    "does": "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store \u2014 the taught r"
   },
+  "start-capability-project": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Create the server-persisted build session for only the current ready project and perform the actual ready\u2192claimed transition"
+  },
   "start-deal-review": {
    "protection": "append_only",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1172,6 +1369,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1184,6 +1382,7 @@
    "protection": "human_boundary",
    "write": true,
    "binds_both_partners": true,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1196,6 +1395,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1208,6 +1408,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1220,6 +1421,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1232,6 +1434,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1244,6 +1447,7 @@
    "protection": "NONE",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1256,6 +1460,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1268,6 +1473,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1280,6 +1486,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1292,6 +1499,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 1,
     "deletes": 0,
@@ -1304,6 +1512,7 @@
    "protection": "read_only",
    "write": false,
    "binds_both_partners": false,
+   "base_version_required": false,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1316,6 +1525,7 @@
    "protection": "optimistic_concurrency",
    "write": true,
    "binds_both_partners": false,
+   "base_version_required": true,
    "sql": {
     "updates": 0,
     "deletes": 0,
@@ -1323,6 +1533,19 @@
     "upserts": 0
    },
    "does": "Write ONE section of a doctrine document \u2014 create it (base_version 0) or replace its body (base_version = current_version from a fresh read)"
+  },
+  "write-work-shape": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Append an evidence-backed implementation-shape decision to a canonical Work Request"
   }
  }
 }

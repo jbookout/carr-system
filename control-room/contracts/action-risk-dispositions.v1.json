@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "artifact_type": "carr_action_risk_dispositions",
+  "data_class": "D2_internal_metadata_only",
+  "action_risk_registry": {
+    "path": "control-room/contracts/action-risk-registry.v1.json",
+    "sha256": "b3b2e079db4c36b4ddb48d5adb3a33a372e1c459f8b878415ca7c6914ef9a8f8"
+  },
+  "selected_slice": "set-lead",
+  "dispositions": [
+    {"tool_name": "complete-action", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "detach-decision", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "end-deal-review", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "link-parties", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "measure-placement", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "register-template", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "resolve-conflict", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "set-lead", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "human_boundary_and_optimistic_concurrency", "evidence": "mcp-server/test/action-risk-guardrails.test.mjs", "priority": "P0", "selected_slice": true},
+    {"tool_name": "set-next-action", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "set-next-step", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "triage-item", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "update-decision", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false},
+    {"tool_name": "update-document-status", "baseline_protection": "NONE", "owner": "mcp-server-runtime", "disposition": "pending_shape_analysis", "evidence": "pending_shape_analysis", "priority": "P1", "selected_slice": false}
+  ]
+}
