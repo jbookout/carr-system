@@ -105,7 +105,8 @@ def main() -> int:
             continue
         differs = subprocess.run(
             ("git", "-C", str(REPO), "diff", "--quiet", sha, head_sha,
-             "--", "mcp-server", "dealroom"))
+             "--", "mcp-server", "dealroom",
+             ":(exclude)mcp-server/.last-deployed-verb-count"))
         if differs.returncode != 0:
             other = sha
             break
