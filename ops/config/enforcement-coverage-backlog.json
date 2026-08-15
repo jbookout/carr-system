@@ -1,28 +1,14 @@
 {
-  "_note": "Blessed gate files that no control in rule-enforcement-map.json names yet. Created 2026-08-15 when ops/enforcement-coverage-check.py first measured this: 21 of 40 blessed gates were invisible to the coverage map, which is why rule 4a53ff82 read 'unbuilt' while hooks/canonical-edit-gate.py was already enforcing it. A NEW orphan fails the check immediately; these are the recorded debt. The debt may only SHRINK — the check fails if an entry here has since been mapped, or names a gate that no longer exists.",
-  "_how_to_clear_one": "Add a control to control_catalog naming the file, then point every rule it actually enforces at that control and set their enforcement_class accordingly. Then delete the entry here. ops/rule-enforcement-map-check.py enforces that category and enforcement_class agree.",
-  "_shared_helpers": "Some entries are not gates at all: they are modules imported BY gates, blessed so tampering stays detectable, denying nothing on their own. They are listed rather than silently filtered, because a silent filter is how a real gate gets excluded by accident.",
+  "_note": "Blessed gate files that no control in rule-enforcement-map.json names. Created 2026-08-15 with twenty entries, when ops/enforcement-coverage-check.py first measured that 21 of 40 blessed gates were invisible to the coverage map — which is why rule 4a53ff82 read 'unbuilt' while hooks/canonical-edit-gate.py was already enforcing it. The fourteen real gates were mapped the same day; what remains are the six shared modules, which are not gates.",
+  "_how_to_clear_one": "Add a control to control_catalog naming the file, then point every rule it actually enforces at that control and set their category and enforcement_class to agree. Then delete the entry here. ops/rule-enforcement-map-check.py enforces that pairing.",
+  "_why_these_six_remain": "They are modules imported BY gates, blessed so tampering stays detectable, denying nothing on their own. A control naming one would claim enforcement that does not exist there. They are listed rather than silently filtered, because a silent filter is how a real gate gets excluded by accident — and this file exists because exactly that kind of blindness cost a day.",
   "unmapped_gates": [
-    "blocker-decider-gate.py",
     "cmd_text.py",
     "conduct_patterns.py",
     "corpus_renders.py",
-    "executor-tier-gate.py",
-    "gate-edit-gate.py",
-    "gate-integrity.py",
     "gate_paths.py",
-    "install-record-home-gate.py",
-    "ledger-boundary-sweep.py",
     "md_manifest.py",
-    "model-floor-gate.py",
-    "peer-broadcast-gate.py",
-    "refused_content.py",
-    "rule-shape-gate.py",
-    "scheduled-run-record.py",
-    "settings-change-gate.py",
-    "staging-attribution-gate.py",
-    "staging-observation-tracker.py",
-    "worktree-self-plumb.py"
+    "refused_content.py"
   ],
   "reasons": {
     "cmd_text.py": "shared helper — command-text extraction imported by the Bash-facing gates; denies nothing itself",
@@ -30,20 +16,6 @@
     "corpus_renders.py": "shared helper — render-path resolution imported by the corpus gates",
     "gate_paths.py": "shared helper — path resolution imported across gates",
     "md_manifest.py": "shared helper — manifest reading imported by record-home-gate.py",
-    "refused_content.py": "shared helper — refusal-text shaping imported by the write gates",
-    "blocker-decider-gate.py": "real gate, awaiting a control entry",
-    "executor-tier-gate.py": "real gate, awaiting a control entry",
-    "gate-edit-gate.py": "real gate, awaiting a control entry",
-    "gate-integrity.py": "real gate, awaiting a control entry",
-    "install-record-home-gate.py": "real gate, awaiting a control entry",
-    "ledger-boundary-sweep.py": "real gate, awaiting a control entry",
-    "model-floor-gate.py": "real gate, awaiting a control entry",
-    "peer-broadcast-gate.py": "real gate, awaiting a control entry",
-    "rule-shape-gate.py": "real gate, awaiting a control entry",
-    "scheduled-run-record.py": "real gate, awaiting a control entry",
-    "settings-change-gate.py": "real gate, awaiting a control entry",
-    "staging-attribution-gate.py": "real gate, awaiting a control entry",
-    "staging-observation-tracker.py": "real gate, awaiting a control entry",
-    "worktree-self-plumb.py": "real gate, awaiting a control entry"
+    "refused_content.py": "shared helper — refusal-text shaping imported by the write gates"
   }
 }
