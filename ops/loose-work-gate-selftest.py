@@ -222,6 +222,112 @@ with tempfile.TemporaryDirectory() as tmp:
     rc, out = run(repo, transcript(tmp, [outside]))
     check("a write outside the repo is ignored", rc == 0, f"rc={rc}: {out[:120]}")
 
+# ════════════════════════════════════════════════════════════════════════════
+# THE SECOND HALF: committed, but never pushed.
+#
+# Rule bc9188b4 says it in one line — "PUSH WHAT YOU COMMIT. Committed-but-
+# unpushed is the same drift as deployed-but-uncommitted." Until these cases
+# existed the gate stopped at uncommitted, and the ungated half cost real time
+# on 2026-08-14: a correct, verified fix for a red pull request sat committed on
+# a local branch for about an hour. The pull request stayed red and kept emailing
+# Joe, and his read was that a session had fixed it and the fix had not worked.
+#
+# Reachability matters more than any single upstream: the test is whether the
+# commit is reachable from ANY remote ref, so pushing under a different branch
+# name still counts as landed. That is how the same fix reached origin that day.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def committing_transcript(tmp, name="tc.jsonl"):
+    """A transcript in which this session ran `git commit` and wrote nothing."""
+    p = os.path.join(tmp, name)
+    with open(p, "w") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"content": "go"}}) + "\n")
+        fh.write(json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "git add ops/x.py && git commit -m 'fix'"}}]},
+        }) + "\n")
+    return p
+
+
+def add_remote(repo, tmp, name="origin"):
+    bare = os.path.join(tmp, f"{name}.git")
+    git(repo, "init", "--bare", "-q", "-b", "main", bare) if False else None
+    subprocess.run(["git", "init", "--bare", "-q", "-b", "main", bare],
+                   capture_output=True, check=True)
+    git(repo, "remote", "add", name, bare)
+    return bare
+
+
+# 8. THE CASE THIS EXISTS FOR: the session committed and never pushed.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    add_remote(repo, tmp)
+    git(repo, "push", "-q", "origin", "main")
+    with open(os.path.join(repo, "tracked.txt"), "w") as fh:
+        fh.write("a real fix\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-q", "-m", "the fix nobody could see")
+    rc, out = run(repo, committing_transcript(tmp))
+    check("a session that committed and never pushed is stopped", rc == 2,
+          f"rc={rc}: {out[:200]}")
+    check("...and the refusal says the commit exists on no other machine",
+          "unpushed" in out.lower() or "no other machine" in out.lower(), out[:200])
+
+# 9. Pushed under a DIFFERENT branch name still counts as landed.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    add_remote(repo, tmp)
+    git(repo, "push", "-q", "origin", "main")
+    with open(os.path.join(repo, "tracked.txt"), "w") as fh:
+        fh.write("a real fix\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-q", "-m", "the fix")
+    git(repo, "push", "-q", "origin", "HEAD:refs/heads/some-other-name")
+    rc, out = run(repo, committing_transcript(tmp))
+    check("a commit pushed under another branch name is NOT flagged", rc == 0,
+          f"rc={rc}: {out[:200]}")
+
+# 10. A session that committed NOTHING is not this half's business.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    add_remote(repo, tmp)
+    git(repo, "push", "-q", "origin", "main")
+    # Someone else's unpushed commit sits here; this session only read.
+    with open(os.path.join(repo, "other.txt"), "w") as fh:
+        fh.write("another session's commit\n")
+    git(repo, "add", "other.txt")
+    git(repo, "commit", "-q", "-m", "not mine")
+    rc, out = run(repo, transcript(tmp, []))
+    check("another session's unpushed commit is not flagged at my Stop", rc == 0,
+          f"rc={rc}: {out[:200]}")
+
+# 11. The parking escape hatch covers this half too.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    add_remote(repo, tmp)
+    git(repo, "push", "-q", "origin", "main")
+    with open(os.path.join(repo, "tracked.txt"), "w") as fh:
+        fh.write("wip\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-q", "-m", "wip")
+    rc, out = run(repo, committing_transcript(tmp),
+                  env={"CARR_ALLOW_LOOSE_WORK": "1"})
+    check("deliberate parking still suppresses it", rc == 0, f"rc={rc}: {out[:120]}")
+
+# 12. A repository with NO remote at all fails open rather than nagging.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = make_repo(tmp)
+    with open(os.path.join(repo, "tracked.txt"), "w") as fh:
+        fh.write("local only\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-q", "-m", "local")
+    rc, out = run(repo, committing_transcript(tmp))
+    check("a repository with no remote is never nagged about pushing", rc == 0,
+          f"rc={rc}: {out[:200]}")
+
 print()
 if failures:
     print(f"FAIL {len(failures)} check(s): {', '.join(failures)}")
