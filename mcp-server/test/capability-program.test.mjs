@@ -15,6 +15,7 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const MIGRATION = path.join(REPO, "migrations/0125_ai_capability_program.sql");
+const REPRIORITIZATION = path.join(REPO, "migrations/0129_reprioritize_rag_benchmark.sql");
 const PROGRAM = "carr-ai-engineering-suite-v1";
 const APPROVED_TITLES = [
   "LLM evaluation harness", "Structured-output parser", "Function-calling router",
@@ -68,6 +69,24 @@ test("the capability portfolio is seeded once in the approved usefulness order",
     assert.ok(row.context.scope.trim() && row.context.first_deliverable.trim() &&
       row.context.rollback_exit.trim() && row.context.completion_definition.trim(), `${row.ref}: no placeholder context`);
   }
+});
+
+test("Joe's retrieval decision moves RAG first without renaming or skipping another project", () => {
+  const sql = fs.readFileSync(REPRIORITIZATION, "utf8");
+  const expectedRefs = [
+    "WR-AI-006", ...Array.from({ length: 5 }, (_, i) => `WR-AI-${String(i + 1).padStart(3, "0")}`),
+    ...Array.from({ length: 45 }, (_, i) => `WR-AI-${String(i + 7).padStart(3, "0")}`),
+  ];
+  const proof = sql.match(/expected text\[\] := array\[([\s\S]*?)\];/);
+  assert.ok(proof, "migration must carry its exact effective-order proof");
+  assert.deepEqual([...proof[1].matchAll(/'(WR-AI-\d+)'/g)].map(match => match[1]), expectedRefs);
+  assert.match(sql, /non_ready <> 0 or sessions <> 0/,
+    "an in-flight or changed program must refuse reprioritization");
+  assert.match(sql, /lock table ops\.capability_agent_session in share row exclusive mode/,
+    "the zero-session proof must be atomic against a concurrent session insert");
+  assert.match(sql, /disable trigger capability_program_identity_guard_before_update/);
+  assert.match(sql, /enable trigger capability_program_identity_guard_before_update/);
+  assert.match(sql, /WR-AI-006[\s\S]*sole queue head/i);
 });
 
 test("completion evidence is conditional on what completion means", () => {
