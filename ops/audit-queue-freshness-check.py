@@ -18,9 +18,12 @@ this session turned out to guard doors that do not exist"). Prose does not bind.
 This does.
 
 It is also the top known failure class in this system by a wide margin:
-`dated-artifact-read-as-present-state`, 11 occurrences, 6 of them caught by a
-human rather than by any check. An audit table is exactly that shape — accurate
-the morning it was written, silently wrong afterwards.
+`dated-artifact-read-as-present-state`, with most caught by a human rather than
+by any check. An audit table is exactly that shape — accurate the morning it was
+written, silently wrong afterwards. No count is quoted here: this file carried
+"11 occurrences" and the ledger moved to twelve the same week, which would have
+made a file about stale figures carry one. `standing-context` returns the live
+ledger.
 
 THE PREDICATE, and why it is a predicate and not a judgment. Deciding whether a
 rule is "really" enforced is a judgment, and a gate that tried to make it would
