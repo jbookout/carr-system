@@ -41,6 +41,10 @@ EVERY ROW IT WRITES IS ROLLED BACK. Run it against staging as often as you like:
     .venv/bin/python tools/db-tap.py --project staging run ops/program3-incident-gate.py
 """
 
+# ci: db-gate — ops/ci.sh runs this against the throwaway Postgres in its
+# migration class. Remove the marker only with a reason; an unrun acceptance
+# gate is a document with assertions in it.
+
 import os
 import sys
 import uuid

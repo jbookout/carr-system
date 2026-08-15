@@ -77,6 +77,10 @@ you like without leaving residue. Nothing here is a fixture file that can drift
 from the schema; the seed IS the schema's contract, exercised.
 """
 
+# ci: db-gate — ops/ci.sh runs this against the throwaway Postgres in its
+# migration class. Remove the marker only with a reason; an unrun acceptance
+# gate is a document with assertions in it.
+
 import os
 import sys
 import uuid
@@ -270,11 +274,18 @@ def main() -> int:
             "5a. a production deployment of an UNAPPROVED release is refused",
         )
 
+        # AGE THE WHOLE APPROVAL, not just its expiry. The first version of this
+        # step moved approval_expires_at into the past and left approved_at at
+        # now, which the database refused on its FIRST EVER run in CI — the
+        # constraint that an approval expires after it is given caught its own
+        # acceptance test. The constraint is right and an approval that expired
+        # before it was granted is nonsense, so the test now produces a
+        # genuinely OLD approval the way time would.
         cur.execute(
             """update ops.release
-                  set approval_expires_at = %s
+                  set approved_at = %s, approval_expires_at = %s
                 where id = %s""",
-            (now - timedelta(minutes=1), release_id))
+            (now - timedelta(hours=2), now - timedelta(hours=1), release_id))
         refuses(
             cur,
             """insert into ops.deployment
@@ -285,9 +296,14 @@ def main() -> int:
             (service_id, SHA, release_id, now),
             "5b. a production deployment on an EXPIRED approval is refused",
         )
+        # Restore a live approval: approved_at moves back to now as well, so the
+        # row stays internally consistent rather than carrying a two-hour-old
+        # grant with a fresh expiry.
         cur.execute(
-            "update ops.release set approval_expires_at = %s where id = %s",
-            (now + timedelta(hours=24), release_id))
+            """update ops.release
+                  set approved_at = %s, approval_expires_at = %s
+                where id = %s""",
+            (now, now + timedelta(hours=24), release_id))
 
         # ── 4. material plan revision invalidates prior approval ─────────────
         cur.execute(

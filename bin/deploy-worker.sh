@@ -84,6 +84,10 @@ COUNT_FILE="$WORKER_DIR/.last-deployed-verb-count"
 # Set again after argument parsing when a non-production env is chosen, so a
 # staging deploy can never overwrite the baseline production is measured against.
 WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
+# Same resolution ops/ci.sh and bin/worktree.sh use: prefer the repo venv, fall
+# back to whatever python3 is on PATH. The release preflight below needs it.
+PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || true)"
 
 CHECK_ONLY=0
 ALLOW_SHRINK=0
@@ -233,6 +237,106 @@ else
   echo "  --  no previous count recorded; this run establishes the baseline"
 fi
 
+# record_deployment <state> <correlation> — attach what just shipped to the
+# release that authorised it.
+#
+# ONE FUNCTION, THREE CALL SITES, because the three outcomes of a deploy are
+# genuinely different facts and the ledger has to hold whichever one happened.
+# complete carries a read-back and means the suite proved the Worker answering;
+# verifying means the suite could not run, so nothing was proven; failed means
+# it ran and the Worker answered wrongly. Recording all three as one state, or
+# recording only the happy one, is how a deploy history starts reading greener
+# than the deploys were.
+#
+# IT NEVER FAILS THE DEPLOY. The code has already shipped by the time this runs
+# — refusing to exit zero because the LEDGER write failed would turn a recorded
+# problem into an unrecorded one. It prints, loudly, and returns.
+record_deployment() {
+  rd_state="$1"
+  rd_corr="${2:-}"
+  [ -x "$PY" ] || return 0
+  [ -f "$REPO/tools/ops-record.py" ] || return 0
+
+  set +e
+  # A read-back only exists when the golden suite actually ran and passed. The
+  # 0115 constraint refuses `complete` without one, which is the point.
+  if [ "$rd_state" = "complete" ]; then
+    rd_read_back="--read-back-at now"
+  else
+    rd_read_back=""
+  fi
+  # shellcheck disable=SC2086
+  "$PY" "$REPO/tools/ops-record.py" deployment \
+    --service carr-mcp --environment "$TARGET_ENV" --state "$rd_state" \
+    --git-sha "$HEAD_SHA" --verb-count "$SHIPPING" \
+    ${rd_corr:+--correlation "$rd_corr"} \
+    ${RELEASE_KEY:+--release-key "$RELEASE_KEY"} \
+    ${rd_state:+--source-kind wrapper} --source-ref bin/deploy-worker.sh \
+    $rd_read_back \
+    ${rd_corr:+--verification-evidence-ref "bin/smoke-and-record.sh#$rd_corr"} \
+    ${rd_state:+$( [ "$rd_state" = "failed" ] && echo "--failure-class golden_workflow_failed" )} \
+    >/dev/null 2>&1
+  rd_rc=$?
+  set -e
+  if [ "$rd_rc" -ne 0 ]; then
+    echo "  !! the deploy shipped but its ledger row did NOT record (exit $rd_rc)."
+    echo "     Record it by hand so the release keeps its deployment:"
+    echo "       .venv/bin/python tools/ops-record.py deployment --service carr-mcp \\"
+    echo "         --environment $TARGET_ENV --state $rd_state --git-sha $HEAD_SHA \\"
+    echo "         --release-key ${RELEASE_KEY:-<key>} --source-kind wrapper \\"
+    echo "         --source-ref bin/deploy-worker.sh"
+  else
+    echo "  recorded this deploy as $rd_state against release ${RELEASE_KEY:-<none>}"
+  fi
+}
+
+# ---------- preflight 4: release truth (P0-1) ----------
+# THE DEPLOY IS THE MOMENT THE MANIFEST HAS TO EXIST, not a step somebody
+# performs beside it. Every earlier preflight asks whether the ARTIFACT is
+# right; this one asks whether anyone APPROVED it, and it is the wrapper half
+# of P0-1. The database half (migration 0130) refuses a production deployment
+# naming an unapproved or expired release, so this check exists to fail EARLY
+# and legibly rather than half way through a wrangler run.
+#
+# It builds the manifest from the SHA about to ship — the same tools/
+# release-manifest.py any human or CI run would use, never a second copy of the
+# digest decision (rule a8c55a47) — and hands the plan hash to the require
+# check, so an approval given to a DIFFERENT plan is caught here by name.
+#
+# NOT ENFORCED IS SAID OUT LOUD. Where DATABASE_URL is absent, or 0130 has not
+# been applied, the require check prints exactly that and returns success. A
+# wrapper that refused on the database's behalf would be claiming a protection
+# the database is not providing, and any other deploy path would bypass it
+# anyway. Silence is the only outcome ruled out.
+RELEASE_KEY=""
+RELEASE_PLAN_HASH=""
+if [ -x "$PY" ] && [ -f "$REPO/tools/release-manifest.py" ]; then
+  echo ""
+  echo "== preflight: release truth =="
+  RELEASE_MANIFEST="$(mktemp -t carr-release-manifest)"
+  if "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
+       --environment "$TARGET_ENV" > "$RELEASE_MANIFEST" 2>/dev/null; then
+    RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
+                          --manifest "$RELEASE_MANIFEST" 2>/dev/null)"
+    echo "  manifest built for ${HEAD_SHA} — plan ${RELEASE_PLAN_HASH:-unknown}"
+  else
+    echo "  !! could not build the release manifest for $HEAD_SHA"
+  fi
+
+  set +e
+  RELEASE_KEY="$("$PY" "$REPO/tools/ops-record.py" release require \
+                   --sha "$HEAD_SHA" --environment "$TARGET_ENV" \
+                   --plan-hash "$RELEASE_PLAN_HASH")"
+  REQUIRE_RC=$?
+  set -e
+  if [ "$REQUIRE_RC" -eq 3 ]; then
+    fail "no live approval for $HEAD_SHA in $TARGET_ENV. The reason and the exact
+commands are printed above. This is P0-1: a production deploy names an approved
+release or it does not happen."
+  fi
+  [ -n "$RELEASE_KEY" ] && echo "  approved release: $RELEASE_KEY"
+fi
+
 if [ "$CHECK_ONLY" = "1" ]; then
   echo ""
   echo "check only — nothing deployed."
@@ -327,12 +431,17 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
   echo "  correlation $CARR_CORRELATION_ID"
   if "$REPO/bin/smoke-and-record.sh"; then
     echo "  golden workflow suite PASSED against the deploy you just shipped."
+    record_deployment complete "$CARR_CORRELATION_ID"
   else
     smoke_rc=$?
     if [ "$smoke_rc" -eq 78 ]; then
       echo "  golden workflow suite SKIPPED — no probe token configured on this machine."
       echo "  This deploy is UNVERIFIED by the suite. See the provisioning runbook in"
       echo "  mcp-server/smoke-reads.sh. Not treated as a deploy failure."
+      # VERIFYING, NOT COMPLETE. The completion bar in 0115 is a read-back, and a
+      # skipped suite produced none. Recording this as complete would be the
+      # single most expensive lie this script could tell.
+      record_deployment verifying "$CARR_CORRELATION_ID"
     else
       echo ""
       echo "  ***  GOLDEN WORKFLOW SUITE FAILED (exit $smoke_rc) AFTER THIS DEPLOY.  ***"
@@ -341,6 +450,7 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
       echo "  this deploy as ONE journey rather than two unrelated facts:"
       echo "      .venv/bin/python tools/ops-record.py trace $CARR_CORRELATION_ID"
       echo "  Rolling back is bin/deploy-worker.sh --pinned-release <sha>."
+      record_deployment failed "$CARR_CORRELATION_ID"
       exit 1
     fi
   fi
