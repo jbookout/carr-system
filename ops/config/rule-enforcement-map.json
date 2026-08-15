@@ -35,7 +35,7 @@
     }
   },
   "control_catalog": {
-    "conduct_stop": {"implementation": ["hooks/conduct-stop-gate.py"], "test": ["ops/conduct-gate-selftest.py"], "failure_mode": "Stop block"},
+    "conduct_stop": {"implementation": ["hooks/conduct-stop-gate.py"], "test": ["ops/conduct-gate-selftest.py", "ops/delta-resend-selftest.py"], "failure_mode": "Stop block"},
     "delegation_tripwire": {"implementation": ["hooks/delegation-gate.py"], "test": ["ops/delegation-gate-selftest.py"], "failure_mode": "PreToolUse block"},
     "artifact_read": {
       "implementation": ["hooks/unread-artifact-gate.py"],
@@ -54,6 +54,9 @@
     },
     "writing_lint": {"implementation": ["tools/writing-lint.py", "hooks/lint-gate.py", "hooks/chat-lint-gate.py"], "test": ["ops/chat-lint-gate-selftest.py", "baselines/writing-lint.txt"], "failure_mode": "advisory surfacing at write time \u2014 HARD findings are reported, not refused"},
     "weekend_quiet": {"implementation": ["hooks/weekend-quiet-gate.py"], "test": ["ops/weekend-quiet-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
+    "commit_claims": {"implementation": ["ops/githooks/commit-claims-check.py", "ops/githooks/commit-msg"], "test": ["ops/commit-claims-selftest.py"], "failure_mode": "commit-msg refusal"},
+    "staged_gate_bless": {"implementation": ["ops/githooks/staged-gate-bless-check.py", "ops/githooks/pre-commit"], "test": ["ops/gate-baseline-cochange-selftest.py"], "failure_mode": "pre-commit refusal"},
+    "chat_lint": {"implementation": ["hooks/chat-lint-gate.py"], "test": ["ops/chat-lint-gate-selftest.py"], "failure_mode": "Stop block"},
     "costar_lane": {"implementation": ["hooks/costar-lane-gate.py"], "test": ["ops/costar-lane-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
     "record_home": {
       "implementation": ["hooks/record-home-gate.py", "hooks/install-record-home-gate.py", "hooks/bash-write-gate.py", "hooks/guard-unattended.py", "hooks/write-effect-check.py"],
@@ -187,7 +190,7 @@
     "f92dfab2": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Packet-render check: refuse to render properties.json into a client packet if the findings/confirmations blocks are empty."},
     "e7a620cc": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Persona/tone judgment across every interaction; largely unenforceable in prose."},
     "ede4c735": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "at each write, when the surface is classified", "control": "writing_lint", "exceptions": "paths on the INTERNAL BY CONSTRUCTION list are out of scope by design"},
-    "412d37d3": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Add a one-line HARD regex to tools/writing-lint.py's vocab table matching 'HIPPA' (case-insensitive)."},
+        "412d37d3": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "writing HIPAA in any surface", "control": "writing_lint", "exceptions": "none — HARD findings are reported at write time, not refused"},
     "51d9f05f": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Tone judgment."},
     "725dff46": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "at each prospect-visible write", "control": "writing_lint", "exceptions": "internal surfaces, where the attribution rule does not bind"},
     "ce12c11e": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Messaging/positioning judgment."},
@@ -233,26 +236,26 @@
     "740bb505": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Estimation-methodology judgment specific to each job's supervisor/retry design."},
     "9530fb1c": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging proportionality (is X actually worth building right now); the 'said X, did nothing' middle case could be partially text-scanned but with low precision."},
     "347a9ca6": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Reasoning-hygiene judgment (don't infer safety/risk from a session's title)."},
-    "3a9dbafd": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "PostToolUse/pre-send lint on partner-facing text: regex-flag a bare 8-hex rule id / loop #### / migration #### not immediately followed by a plain-language gloss; refuse send."},
+        "3a9dbafd": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "a reply to a partner carrying a bare id", "control": "chat_lint", "exceptions": "code fences, where an id is the literal thing being run"},
     "e4d965d9": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires creative problem-solving to find a third option preserving the constraint."},
-    "e065aa82": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Extend escalation-gate.py's internal/external classifier to also fire on add-loop calls carrying marker='decision', denying ones that fail the external-audience test."},
+        "e065aa82": {"category": "hard_pre_action", "enforcement_class": "deny_gate", "binding_moment": "an add-loop carrying marker='decision'", "control": "escalation", "exceptions": "client-facing, public, money and irreversible calls, which are Joe’s"},
     "4fae20f4": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Statistical-reasoning judgment (does the window contain an intervention or migration)."},
     "cff429f5": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "new-vendor/new-client verbs could refuse a blank company/category/market field without an attached research_attempted flag naming the sources checked."},
     "d7c69aa6": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Calendar-ingest pipeline could require, for any unmatched attendee email, an automatic mail-search + research pass before that run reports complete."},
     "bc9188b4": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "session Stop", "control": "loose_work", "exceptions": "CARR_ALLOW_LOOSE_WORK=1 for a deliberate hand-off or mid-investigation park", "note": "Both halves now hold at Stop: loose-work-gate.py refuses a session that leaves its OWN edits uncommitted, and as of 2026-08-15 also one that committed and never pushed (reachability from any remote ref, so a push under a different branch name still counts as landed). The sweep half of this rule stays with git-writer-gate.py, which bans -A/-a/. when the tree is shared; that narrower scope is deliberate and argued in its own docstring."},
     "88e9b5eb": {"category": "hard_pre_action", "enforcement_class": "deny_gate", "binding_moment": "before filing a capability blocker", "control": "blocker_decider", "exceptions": "a blocker that names a decider passes; the gate refuses only an unattributed one", "planned_control": "Loop-filing check: when blocker=capability and text reads as a bare refusal, require it name the specific action refused and the decider, else refuse the row."},
-    "c0b38d80": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "pre-commit hook: if the diff touches any hooks/*-gate.py file or ops/config/rule-enforcement-map.json, require ops/config/gate-baseline.json to be in the SAME diff, else refuse the commit."},
+        "c0b38d80": {"category": "hard_pre_action", "enforcement_class": "deny_gate", "binding_moment": "committing a change to a gate", "control": "staged_gate_bless", "exceptions": "CARR_ALLOW_GATE_BLESS_SKIP, same idiom as its neighbours"},
     "38b15dc6": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Message-shape lint: count imperative clauses in outgoing task text; below a numbered-list format with >1 clause, warn/refuse."},
     "5e89c211": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Broad architecture-design judgment; the rule's OWN text says it is 'activated as prose guidance... to be re-admitted through the Phase 1 rule-admission contract with executable fixtures' -- i.e. self-declared as pending, not yet enforceable at this scope."},
     "4402973a": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Modify the existing vault-drift-watch healing script to diff-and-quarantine (write the diff + queue intake) before any regenerate/overwrite call."},
-    "24e10ee8": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "pre-commit hook: for known claim-verbs in the message ('re-blessed the baseline', 'fixed X'), require the specific named artifact appear in git show --stat for this commit; refuse mismatch."},
+        "24e10ee8": {"category": "hard_pre_action", "enforcement_class": "deny_gate", "binding_moment": "a commit message naming an act", "control": "commit_claims", "exceptions": "CARR_ALLOW_CLAIM_MISMATCH for a partial amend that legitimately describes files outside the delta"},
     "cd84d22a": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "A human decision inside a product UI dialog; no CARR-side tool call to gate. (A Claude Code settings.json opt-out, if one exists, was not checked this session and could close this fully -- worth a follow-up.)"},
     "614c1209": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Inference-quality judgment (did mail/calendar evidence actually establish contact)."},
     "58b44ccb": {"category": "hard_pre_action", "enforcement_class": "deny_gate", "binding_moment": "creating a code file outside the repo", "control": "one_repo", "exceptions": "editing a file that already exists; non-code extensions; anything outside a git working tree"},
     "152ceb65": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Communication-style judgment (does this content have a shape worth rendering)."},
     "e65efc68": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Development-discipline norm; nothing currently blocks a session from writing implementation before its test."},
     "1c21263c": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Self-monitoring judgment; no counter exists that tracks 'same shape of fix, Nth time' across a session."},
-    "1d50a3bb": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Extend conduct-stop-gate.py: when it blocks a turn and the session re-sends, diff the new reply against the blocked one and require the resend contain only the delta plus a short pointer."},
+        "1d50a3bb": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "a Stop-blocked turn being re-sent", "control": "conduct_stop", "exceptions": "the resend carries only the delta plus a pointer"},
     "67580c28": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Design-taste judgment; a lint could flag banned light-grey/bare-white CSS tokens but 'calm' vs 'bland' is not mechanical."},
     "a8f159ad": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Design-completeness judgment (does this content have a shape, was a real diagram built vs a decorated table)."},
     "9293d609": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Design-taste judgment on ambition/richness of motion."},
@@ -294,9 +297,9 @@
     ]
   },
   "category_overrides": {
-    "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807", "236ca227", "4a53ff82", "88e9b5eb", "ab814a26", "f5d97b4a"],
+    "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807", "236ca227", "4a53ff82", "88e9b5eb", "ab814a26", "f5d97b4a", "24e10ee8", "c0b38d80", "e065aa82"],
     "transactional_schema": ["faf1b643", "54e2bcb9", "c53beeaa", "d7e6de46", "5409731b", "9f15f21a", "23ea0607", "b42e217e", "4039b9b5"],
-    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4"],
-    "session_task_rail": ["25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46", "d5dcfe26"]
+    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4", "1d50a3bb", "3a9dbafd"],
+    "session_task_rail": ["25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46", "d5dcfe26", "412d37d3"]
   }
 }
