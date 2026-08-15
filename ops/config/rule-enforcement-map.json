@@ -37,6 +37,11 @@
   "control_catalog": {
     "conduct_stop": {"implementation": ["hooks/conduct-stop-gate.py"], "test": ["ops/conduct-gate-selftest.py"], "failure_mode": "Stop block"},
     "delegation_tripwire": {"implementation": ["hooks/delegation-gate.py"], "test": ["ops/delegation-gate-selftest.py"], "failure_mode": "PreToolUse block"},
+    "drift_claim": {
+      "implementation": ["hooks/drift-claim-gate.py", "hooks/drift-assertion-gate.py"],
+      "test": ["ops/drift-assertion-gate-selftest.py"],
+      "failure_mode": "surfaces the governing ruling; Stop door reopens the turn once"
+    },
     "one_repo": {
       "implementation": ["hooks/one-repo-gate.py", "hooks/bash-write-gate.py"],
       "test": ["ops/one-repo-gate-selftest.py", "ops/bash-write-gate-selftest.py"],
@@ -147,7 +152,7 @@
     "2ca2add2": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Data-capture completeness judgment (what counts as 'useful')."},
     "5d44d3f3": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "A verified_at/verified_source column plus a view (like v_expired_verification) flags unstamped records; could refuse using an unstamped record in a decision."},
     "d26d63b0": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Research-completeness judgment (what counts as exhausted)."},
-    "d5dcfe26": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judgment about which later ruling supersedes an earlier memo."},
+    "d5dcfe26": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "asserting a present state is wrong", "control": "drift_claim", "exceptions": "a drift claim with no matching ruling is usually a real finding, and passes"},
     "2b889e80": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires knowing which collections exist for a given claim and checking all."},
     "81709f57": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Panel-composition and seat-diversity judgment."},
     "c20dc3d5": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging materiality (would acting on this write/spend/send/change a decision)."},
@@ -272,6 +277,6 @@
     "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807"],
     "transactional_schema": ["faf1b643", "54e2bcb9", "c53beeaa", "d7e6de46", "5409731b", "9f15f21a", "23ea0607", "b42e217e", "4039b9b5"],
     "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880"],
-    "session_task_rail": ["236ca227", "25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46"]
+    "session_task_rail": ["236ca227", "25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46", "d5dcfe26"]
   }
 }
