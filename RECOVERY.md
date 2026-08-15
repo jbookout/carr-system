@@ -111,7 +111,14 @@ system's code being intact. Given the file and the key, Postgres alone is enough
   paper, derives the public key it produces, and compares that against the
   repo-tracked `backups-public-key.txt`. A mismatch is decisive and needs no
   decryption at all. It then hands the typed identity to the rehearsal for the
-  full end-to-end proof.
+  full end-to-end proof. You never create a key file and never have to remember
+  to delete one — it is read silently and shredded on every exit path.
+
+  Add `--backup <path>` to run the drill against an **off-Mac copy** — an R2
+  object or a GitHub artifact you have downloaded — instead of the local
+  `backups/` folder. That distinction is the whole point on the day it matters:
+  "the backups restore" and "the backups that would SURVIVE restore" are
+  different claims, and only the second one is about recovery.
 - **Last passed**: 2026-08-14. The paper copy opened a GitHub-artifact backup —
   43,605,559 bytes, plaintext validated as a real dump.
 
