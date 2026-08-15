@@ -86,6 +86,11 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/write-effect-check.py",
           "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/draft-export-gate.py",
+          "timeout": 10
         }
       ]
     },
@@ -227,6 +232,11 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/chat-lint-gate.py",
           "timeout": 15
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/stale-claim-gate.py",
+          "timeout": 20
         },
         {
           "type": "command",

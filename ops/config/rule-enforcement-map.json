@@ -47,6 +47,16 @@
       "test": ["ops/drift-assertion-gate-selftest.py"],
       "failure_mode": "surfaces the governing ruling; Stop door reopens the turn once"
     },
+    "stale_claim": {
+      "implementation": ["hooks/stale-claim-gate.py"],
+      "test": ["ops/stale-claim-gate-selftest.py"],
+      "failure_mode": "Stop block; names the recent commit that already fixed what the reply calls broken"
+    },
+    "draft_export_read": {
+      "implementation": ["hooks/draft-export-gate.py"],
+      "test": ["ops/draft-export-gate-selftest.py"],
+      "failure_mode": "surfaces the draft's age beside the live render; allows the read, never denies"
+    },
     "one_repo": {
       "implementation": ["hooks/one-repo-gate.py", "hooks/bash-write-gate.py"],
       "test": ["ops/one-repo-gate-selftest.py", "ops/bash-write-gate-selftest.py"],
@@ -118,7 +128,7 @@
     "9f15f21a": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "national-account deal assignment", "control": "deal_guard", "exceptions": "national/market separation"},
     "23ea0607": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "Salesforce reconciliation", "control": "deal_guard", "exceptions": "Deal Room close state wins"},
     "2271e684": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "terminal technical claim", "control": "completion_evidence", "exceptions": "explicit uncertainty"},
-    "fa217e48": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "completion after changed work, and any claim about what a file does", "control": "completion_evidence", "second_control": "artifact_read", "exceptions": "simple one-file edit; naming a path without describing its behaviour"},
+    "fa217e48": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "completion after changed work, and any claim about what a file does", "control": "completion_evidence", "second_control": "artifact_read", "third_control": "draft_export_read", "exceptions": "simple one-file edit; naming a path without describing its behaviour"},
     "767f9b41": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "confirmation response", "control": "completion_evidence", "exceptions": "no mutation in task"},
     "97326357": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "surface capability claim", "control": "completion_evidence", "exceptions": "claim includes failed/unverified state"},
     "6a4e6283": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "shipping claim", "control": "completion_evidence", "exceptions": "no deploy/build occurred"},
@@ -185,7 +195,7 @@
     "2ca2add2": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Data-capture completeness judgment (what counts as 'useful')."},
     "5d44d3f3": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "A verified_at/verified_source column plus a view (like v_expired_verification) flags unstamped records; could refuse using an unstamped record in a decision."},
     "d26d63b0": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Research-completeness judgment (what counts as exhausted)."},
-    "d5dcfe26": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "asserting a present state is wrong", "control": "drift_claim", "exceptions": "a drift claim with no matching ruling is usually a real finding, and passes"},
+    "d5dcfe26": {"category": "session_task_rail", "enforcement_class": "surfacing", "binding_moment": "asserting a present state is wrong", "control": "drift_claim", "second_control": "stale_claim", "exceptions": "a drift claim with no matching ruling is usually a real finding, and passes"},
     "2b889e80": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires knowing which collections exist for a given claim and checking all."},
     "81709f57": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Panel-composition and seat-diversity judgment."},
     "c20dc3d5": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging materiality (would acting on this write/spend/send/change a decision)."},
