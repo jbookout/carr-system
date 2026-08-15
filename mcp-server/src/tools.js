@@ -6301,7 +6301,7 @@ Object.assign(TOOLS, {
       const client = await c.query(
         `insert into client (roster_ref,party_id,client_type,vertical,status,
                              acquisition_source,owner_id,owner_label,created_by,updated_by)
-         values ($1,$2,'national_account',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+         values ($1,$2,'national_account',$3,'engaged','national_account',$4,$5,$4,$4) returning id`,
         [ref, org.rows[0].id, args.vertical || null, actor.id, actor.display]);
       const owner = (await c.query("select id from actor where slug=$1", [args.owner])).rows[0];
       await c.query(
@@ -6348,7 +6348,7 @@ Object.assign(TOOLS, {
         const made = await c.query(
           `insert into client (roster_ref,party_id,client_type,vertical,status,
                                acquisition_source,owner_id,owner_label,created_by,updated_by)
-           values ($1,$2,'franchise',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+           values ($1,$2,'franchise',$3,'active_deal','national_account',$4,$5,$4,$4) returning id`,
           [ref, person.rows[0].id, args.segment || null, actor.id, actor.display]);
         sub = { id: made.rows[0].id, roster_ref: ref };
       }
