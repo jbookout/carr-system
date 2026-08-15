@@ -46,13 +46,21 @@ def check(label: str, cond: bool, detail: str = "") -> None:
         FAILED.append(label)
 
 
-def scan(text: str, name: str = "open-loops.md"):
+def scan(text: str, name: str = "open-loops.md", assume: str = "lead"):
+    """Run the check over one throwaway surface.
+
+    `assume` stands in for the record lookup so the MATCHER is tested without a
+    round trip per candidate: "lead" means the ref resolves to a lead-only party,
+    "carveout" means it also holds a client record or live deal, "unknown" means
+    the record layer could not be reached.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         f = os.path.join(tmp, name)
         with open(f, "w") as fh:
             fh.write(text + "\n")
         p = subprocess.run([sys.executable, CHECK, "--path", f],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "CARR_GLANCEABLE_ASSUME": assume})
         return p.returncode, p.stdout + p.stderr
 
 
@@ -104,14 +112,47 @@ for label, line, fname in [
     rc, out = scan(line, fname)
     check(f"silent on: {label}", rc == 0, out[:260])
 
-# ── the known baseline holds the one live finding, and only that one ────────
-rc, out = scan("| 338 | joe | Send Dr. Randy Ramsey (L-221) the buyer advisory.")
-check("the one KNOWN finding is held rather than failing the check", rc == 0, out[:260])
-check("...and the pass says out loud that it is holding one",
-      "known finding" in out.lower(), out[:260])
-rc, out = scan("| 339 | joe | Send Dr. Someone Else (L-903) the same advisory.")
-check("a NEW lead-outreach row still fails, which is what the baseline is for",
-      rc != 0, out[:260])
+# ── THE CARVE-OUT, and the false positive that produced it ─────────────────
+# On 2026-08-15 this check flagged loop 338 — "Send Dr. Randy Ramsey (L-221) the
+# buyer advisory" — and a session baselined it as a known violation. The RECORD
+# said Ramsey holds a client row (C-199) and a live deal, The Enclave Investment
+# Purchase. That makes the row a dated follow-up on a real deal, which rule
+# 17ffd587 writes into itself as permitted. The render said lead; the record said
+# client with a deal; only one of those is the answer.
+LIVE_ROW = ("| 338 | joe | 2026-08-13 Send Dr. Randy Ramsey (L-221, Jackson MS "
+            "surgeon) the buyer advisory on The Enclave.")
+
+rc, out = scan(LIVE_ROW, assume="carveout")
+check("a lead who ALSO holds a client record or live deal is the carve-out",
+      rc == 0, out[:300])
+check("...and the pass names it as a carve-out rather than staying silent",
+      "carve-out" in out.lower(), out[:300])
+
+rc, out = scan(LIVE_ROW, assume="lead")
+check("the same row IS a finding when the person is lead-only", rc != 0, out[:300])
+
+rc, out = scan(LIVE_ROW, assume="unknown")
+check("an unreachable record is UNVERIFIED, never counted as a violation",
+      rc == 0, out[:300])
+check("...and says so out loud rather than reporting clean",
+      "unverified" in out.lower(), out[:300])
+
+# The lookup asks by NAME because `find` returns nothing for a bare ref. Asking
+# it for "L-221" got an empty answer, and reading that emptiness as "no client
+# link" is how the false positive survived.
+sys.path.insert(0, os.path.join(REPO, "ops"))
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("glanceable_lead_check", CHECK)
+assert _spec is not None and _spec.loader is not None
+_mod = _ilu.module_from_spec(_spec)
+sys.modules["glanceable_lead_check"] = _mod
+_spec.loader.exec_module(_mod)
+check("the person's name is extracted from the row, since a bare ref finds nothing",
+      _mod.person_for(LIVE_ROW) == "Dr. Randy Ramsey",
+      repr(_mod.person_for(LIVE_ROW)))
+check("...and the outreach verb is not mistaken for part of the name",
+      "Send" not in (_mod.person_for(LIVE_ROW) or ""),
+      repr(_mod.person_for(LIVE_ROW)))
 
 # ── the finding has to be usable ────────────────────────────────────────────
 rc, out = scan("| 12 | joe | Call L-98 about the Milton startup this week.")
@@ -127,7 +168,7 @@ p = subprocess.run([sys.executable, CHECK], capture_output=True, text=True,
 # whole file a report nobody reads. The live surfaces are clean apart from the
 # one row held in KNOWN, so demanding zero costs nothing today and fails CI the
 # moment a new lead-outreach reminder renders onto Joe's daily view.
-check("NO NEW LEAD-OUTREACH REMINDER ON A LIVE SURFACE — a new one fails CI here",
+check("NO LEAD-ONLY OUTREACH REMINDER ON A LIVE SURFACE — a new one fails here",
       p.returncode == 0, (p.stdout + p.stderr)[:500])
 check("...and names which surfaces it read, so an empty pass is not a silent one",
       "surface" in (p.stdout + p.stderr).lower(), (p.stdout + p.stderr)[:400])
