@@ -881,11 +881,26 @@ def force_push_to_named_side_branch(cmd):
         return False          # two pushes in one line: cannot reason, so refuse
     if not _LEASE.search(text) or _BARE_FORCE.search(text):
         return False
-    after = text.split("push", 1)[1]
+    # ANCHOR ON THE REAL `git push`, NOT ON THE SUBSTRING "push".
+    #
+    # This read `text.split("push", 1)[1]` when the carve-out first shipped, and
+    # it was wrong in the shape every session actually sends. The guard receives
+    # the WHOLE command line, and a session working in a worktree always writes
+    # `cd <path> && git push …`. Any earlier "push" — in the directory, in the
+    # branch name — consumed the split, so the refspec parsed as nonsense and the
+    # push was refused. It failed on the very first real use: the branch was
+    # `force-push-narrow`, so its own worktree path contained "push".
+    match = _GIT_PUSH.search(text)
+    if not match:
+        return False
+    # Stop at the first command separator so a trailing `&& echo done` cannot be
+    # mistaken for extra refspecs — and, more importantly, so nothing AFTER this
+    # command can dress up the target of this one.
+    after = re.split(r"[;|&]", text[match.end():])[0]
     # Everything that is not a flag: the remote, then the refspec. A flag's own
     # value (--repo=x, -o opt) never looks like a bare word here in practice, and
     # anything unparseable falls through to False rather than to an allow.
-    words = [w for w in re.split(r"[\s;|&]+", after.strip()) if w and not w.startswith("-")]
+    words = [w for w in after.split() if not w.startswith("-")]
     if len(words) != 2:
         return False          # no remote+ref pair means no visible destination
     ref = words[1].split(":")[-1]

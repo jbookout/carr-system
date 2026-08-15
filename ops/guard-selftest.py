@@ -319,6 +319,37 @@ case("prose describing a force-with-lease is allowed",
      bash('gh pr create --title "x" --body "rebase then git push --force-with-lease origin main"'),
      ALLOW)
 
+# THE SHAPE EVERY SESSION ACTUALLY SENDS, and the one the first version of this
+# carve-out got wrong. The guard is handed the WHOLE command line, and a session
+# working in a worktree always prefixes `cd <path> && `. The original parser found
+# the refspec by splitting on the bare substring "push", so any earlier "push" —
+# in the directory, in the branch name — consumed the split and the ref parsed as
+# nonsense, refusing a push the rule was written to allow.
+#
+# It was invisible to every case above, because all of them are bare commands with
+# no prefix. It surfaced on the first REAL push after the change shipped: the
+# branch was called `force-push-narrow`, the worktree path therefore contained
+# "push", and the live guard refused it. A unit case cannot catch a defect whose
+# whole nature is the shape of the surrounding command, which is why the artifact
+# is the thing that has to be exercised (rules a9ecd5b4, fa217e48).
+case("cd-prefixed force-with-lease to a feature branch is allowed",
+     bash("cd /Users/booko/carr-system && git push --force-with-lease origin my-feature"), ALLOW)
+case("a path containing 'push' does not eat the refspec",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/force-push-narrow && "
+          "git push --force-with-lease origin force-push-narrow"), ALLOW)
+case("a BRANCH named with 'push' is still parsed correctly",
+     bash("git push --force-with-lease origin push-parse-fix"), ALLOW)
+case("cd-prefixed force-with-lease at MAIN is still refused",
+     bash("cd /Users/booko/carr-system && git push --force-with-lease origin main"), DENY)
+case("a path containing 'push' does not let a push at main through",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/force-push-narrow && "
+          "git push --force-with-lease origin main"), DENY)
+# A trailing command must not become a way to hide the real target either.
+case("force-with-lease to a feature branch with a trailing command is allowed",
+     bash("git push --force-with-lease origin my-feature && echo done"), ALLOW)
+case("force-with-lease at main with a trailing command is still refused",
+     bash("git push --force-with-lease origin main && echo done"), DENY)
+
 case("find -delete is refused outside a scratch zone",
      bash("find /Users/booko/important -name '*.md' -delete"), DENY)
 case("find without -delete is still allowed",
