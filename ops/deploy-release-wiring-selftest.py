@@ -4,7 +4,7 @@ deploy-release-wiring-selftest.py — the deploy path names an approved release,
 or it does not ship.
 
 WHAT THIS GUARDS. P0-1 put the release object in the database and gave migration
-0130 the teeth to refuse a production deployment that names no approved release.
+0131 the teeth to refuse a production deployment that names no approved release.
 None of that reaches a real deploy unless bin/deploy-worker.sh actually asks. So
 this proves the wrapper asks, that a refusal happens BEFORE wrangler is invoked,
 and that all three outcomes of a deploy reach the ledger.

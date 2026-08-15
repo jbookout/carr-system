@@ -3,7 +3,7 @@
 release-manifest.py — build and verify the P0-1 release manifest.
 
 THE ACCEPTANCE CLAUSE THIS FILE OWNS: "identical artifact rebuild from recorded
-SHA". The other two clauses live in the database (migration 0130) and in
+SHA". The other two clauses live in the database (migration 0131) and in
 ops/ci.sh; this is the half that answers "is what shipped what we think
 shipped", months later, from nothing but the recorded SHA.
 
@@ -62,7 +62,7 @@ CONFIG_PATHS = ("mcp-server/wrangler.toml",)
 CONFIG_GLOBS = ("ops/config/*.json",)
 
 # The fields an approver reads. Changing any of them is a material plan
-# revision, and migration 0130's trigger destroys the approval when the hash
+# revision, and migration 0131's trigger destroys the approval when the hash
 # moves. Deploy-time facts (read-backs, verification) are NOT here: they happen
 # after the approval and cannot retroactively invalidate it.
 PLAN_FIELDS = (

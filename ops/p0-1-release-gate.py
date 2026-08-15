@@ -12,7 +12,7 @@ P0-1's acceptance, verbatim from the Phase 0 action register:
 
 Three clauses. None of them is directly executable, so this file is the
 executable form, and it is deliberately the FIRST artifact of P0-1. Everything
-migration 0130 builds exists to make these assertions pass. If a later change
+migration 0131 builds exists to make these assertions pass. If a later change
 makes one pass for the wrong reason, the assertion is wrong and gets fixed
 here — never loosened to match the code.
 
@@ -175,7 +175,7 @@ def main() -> int:
                returning id""",
             (corr, f"gate-{corr}", service_id, env,
              SHA, "sha256:" + "c" * 64, "sha256:" + "d" * 64, "sbom/gate.json",
-             "0130", ["0130"],
+             "0131", ["0131"],
              "cfg:" + "e" * 16, "staging uses the staging Neon branch",
              '{"deal-room": "2026-08-15T00:00:00Z"}',
              "claude", "ops/ci.sh#run-1",

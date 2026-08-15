@@ -814,7 +814,7 @@ def cmd_release(args) -> int:
 
     THE APPROVAL IS NOT HERE BY ACCIDENT. `approve` takes the plan hash the
     approver actually read and refuses if the manifest has moved since — the
-    database would void it anyway (migration 0130's trigger), and catching it
+    database would void it anyway (migration 0131's trigger), and catching it
     here means the human is told which field changed rather than watching an
     approval silently evaporate.
     """
@@ -873,18 +873,18 @@ def cmd_release(args) -> int:
             if args.action == "require":
                 # THE QUESTION A DEPLOY ASKS, one query: may this SHA ship?
                 #
-                # WHY THIS RETURNS 0 WHEN THE TABLE IS ABSENT. Migration 0130
+                # WHY THIS RETURNS 0 WHEN THE TABLE IS ABSENT. Migration 0131
                 # carries the enforcement — the trigger that refuses a
                 # production deployment naming an unapproved release. Where the
                 # table does not exist, that control is not installed, and a
                 # wrapper refusing on its behalf would be theatre: it would
                 # claim a protection the database is not providing and could be
                 # bypassed by any other deploy path. So it says so, loudly, on
-                # every run, and the enforcement begins the moment 0130 applies.
+                # every run, and the enforcement begins the moment 0131 applies.
                 cur.execute("select to_regclass('ops.release')")
                 if cur.fetchone()[0] is None:
                     print("RELEASE TRUTH IS NOT ENFORCED ON THIS DATABASE.\n"
-                          "  ops.release does not exist, so migration 0130 has not "
+                          "  ops.release does not exist, so migration 0131 has not "
                           "been applied here.\n"
                           "  This deploy will ship WITHOUT a release record, and "
                           "nothing will refuse it.\n"
@@ -1111,7 +1111,7 @@ def main() -> int:
                             "deploying", "verifying", "complete", "failed", "aborted",
                             "rolled_back", "superseded"])
     d.add_argument("--git-sha")
-    d.add_argument("--release-ref", help="SUPERSEDED by --release-key (0130); kept "
+    d.add_argument("--release-ref", help="SUPERSEDED by --release-key (0131); kept "
                                          "so nothing that wrote it breaks")
     d.add_argument("--release-key", help="the release this deploy is shipping, by key. "
                                          "Resolved to ops.release.id, which is the "
