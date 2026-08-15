@@ -347,6 +347,35 @@ case("a path containing 'push' does not let a push at main through",
 # A trailing command must not become a way to hide the real target either.
 case("force-with-lease to a feature branch with a trailing command is allowed",
      bash("git push --force-with-lease origin my-feature && echo done"), ALLOW)
+
+# REDIRECTIONS, which is how these commands are ACTUALLY typed and the third
+# thing this carve-out got wrong in a row. `2>&1` contains an ampersand, so
+# cutting the argument list at the first `[;|&]` chopped mid-redirect and left a
+# stray `2>` token, making the argument list three words instead of two — and the
+# push was refused again. Every earlier case was a clean command with no
+# redirection, so none of them saw it.
+#
+# The pattern across all three misses is the same and worth naming: each one was
+# a piece of ordinary shell syntax that the test cases had quietly excluded. The
+# cases below are deliberately written the way a session really types them —
+# prefix, redirect, pipe, tail — rather than the way a rule reads best.
+case("the everyday form with 2>&1 and a pipe is allowed",
+     bash("git push --force-with-lease origin my-feature 2>&1 | tail -3"), ALLOW)
+case("the full real-world shape: cd prefix, push-bearing path, redirect and pipe",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/pushparse && "
+          "git push --force-with-lease origin pushparse 2>&1 | tail -3"), ALLOW)
+case("a redirect to a file does not break the parse",
+     bash("git push --force-with-lease origin my-feature > out.log"), ALLOW)
+case("stderr-only redirect does not break the parse",
+     bash("git push --force-with-lease origin my-feature 2> err.log"), ALLOW)
+# The same shapes must not become a way to smuggle main past the check.
+case("2>&1 and a pipe do NOT let a push at main through",
+     bash("git push --force-with-lease origin main 2>&1 | tail -3"), DENY)
+case("cd prefix with redirect does NOT let a push at main through",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/pushparse && "
+          "git push --force-with-lease origin main 2>&1 | tail -3"), DENY)
+case("a file redirect does NOT let a push at main through",
+     bash("git push --force-with-lease origin main > out.log"), DENY)
 case("force-with-lease at main with a trailing command is still refused",
      bash("git push --force-with-lease origin main && echo done"), DENY)
 
