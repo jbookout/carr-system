@@ -9,7 +9,7 @@ id	plain_name	bucket	enforcement_or_sketch	evidence
 9730f565	Check the clock from real timestamps, not mood	P	session_boot rail only.	rule_controls: session_task_rail/session_boot.
 9d80fd2d	Doctor cadence is the message; frequency = content	J	Tone/cadence judgment about a specific outreach.	Not in map.
 c1db316c	Complete solutions, not incremental patches	J	Quality judgment on solution scope.	Not in map.
-e6dec821	Unbiased, direct, truthful; no sycophancy	J	Requires judging whether praise/agreement is warranted.	Not in map.
+e6dec821	Unbiased, direct, truthful; no sycophancy	RETIRED	Requires judging whether praise/agreement is warranted.	RULE RETIRED FROM THE STORE 2026-08-15, found by the session-start gate when the map's inventory no longer matched the render (169 -> 168 shared). No row for this id survives in v_compiled_rules, and no surviving rule carries its wording — a content search for unbiased / truthful / flattery returns nothing. Its substance still appears in the project CLAUDE.md as "No sycophancy. Joe values accuracy over being told what he wants to hear." Removed from the enforcement map to restore parity; NOT re-taught, because re-adding a rule a human retired is the human's call.
 f5beac20	Expansion posture: capture useful-but-not-today knowledge	J	Judgment on what is worth capturing and where.	Not in map.
 fa217e48	Verify the artifact, not the summary	P	completion-evidence-gate.py Stop hook.	rule_controls: post_action_verification/completion_evidence.
 6901cc3b	Doc must be perfect; never propose a workaround over the real fix	J	Aspirational quality bar; 'would a busy partner resent this gap' is a judgment test.	Not in map.
