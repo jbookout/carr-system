@@ -110,6 +110,16 @@
       ]
     },
     {
+      "matcher": "mcp__claude-in-chrome__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/costar-lane-gate.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
       "matcher": "mcp__.*__(record-defect|add-loop)",
       "hooks": [
         {
