@@ -34,6 +34,37 @@ export function generatedRuleCount(rendered) {
 //   * search is the FTS floor (websearch_to_tsquery over current revisions).
 //     Ranking polish and telemetry are P3 acceptance items.
 
+
+// AN ARRAY ARGUMENT CAN ARRIVE AS A JSON STRING, and when it does the failure is
+// silent and wrong rather than loud. Found live on 2026-08-15: doctrine-sections
+// answered "batch_too_large, max 50" for a batch of TWO, because the guard was
+// measuring `.length` on an ~80-character JSON string rather than on a
+// 2-element array. A single id is ~38 characters, under the limit, so it slipped
+// past the guard and died casting a string to uuid[] — surfacing as a bare
+// "internal error". One bug, two faces, and it took the doctrine WRITE path down
+// with it: claim-doctrine-sections takes the same shape, so no session could
+// claim a section, and doctrine is single-writer by ORDER 38.
+//
+// The verbs had worked hours earlier with the identical call, so the change was
+// in how arguments reached us rather than in this file. Accepting both shapes is
+// the fix that does not depend on which client is calling.
+function idList(value, ToolError, field) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) return parsed;
+      } catch { /* fall through to the refusal below */ }
+    }
+    // A bare single id is a legitimate convenience, and unambiguous.
+    if (text && !text.includes(",") && !text.startsWith("[")) return [text];
+  }
+  throw new ToolError({ error: "invalid_argument", field,
+    hint: `${field} must be an array of section ids (a JSON array is accepted too)` });
+}
+
 export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
 
   // ---------------------------------------------------------------- helpers
@@ -605,8 +636,9 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         required: ["section_ids"] },
       handler: async (c, actor, args) => {
         await actorId(c, actor);
-        if ((args.section_ids || []).length > 50)
-          throw new ToolError({ error: "batch_too_large", max: 50 });
+        const sectionIds = idList(args.section_ids, ToolError, "section_ids");
+        if (sectionIds.length > 50)
+          throw new ToolError({ error: "batch_too_large", max: 50, got: sectionIds.length });
         const r = await c.query(
           `select s.id, s.section_key, s.title, s.ordinal, s.status, s.current_version,
                   s.review_after, d.slug as doc_slug, d.content_class, d.visibility,
@@ -614,12 +646,12 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
              from doctrine_section s
              join doctrine_document d on d.id = s.document_id
              left join doctrine_revision rev on rev.id = s.current_revision_id
-            where s.id = any($1::uuid[])`, [args.section_ids]);
+            where s.id = any($1::uuid[])`, [sectionIds]);
         const visible = r.rows.filter(x =>
           x.visibility !== "personal" || x.owner_actor_id === actor.id);
         const found = new Set(visible.map(x => x.id));
         return { ok: true, sections: visible.map(({ owner_actor_id, ...x }) => x),
-                 missing: args.section_ids.filter(id => !found.has(id)) };
+                 missing: sectionIds.filter(id => !found.has(id)) };
       },
     },
 
@@ -682,8 +714,9 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         required: ["idempotency_key", "section_ids", "purpose"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "claim-doctrine-sections", args, async () => {
         const ttl = Math.min(Math.max(args.ttl_seconds || 300, 30), 1800);
+        const claimIds = idList(args.section_ids, ToolError, "section_ids");
         const claims = [], denied = [];
-        for (const id of args.section_ids) {
+        for (const id of claimIds) {
           const cur = await c.query(
             `select holder_actor_id, holder_session_key, expires_at from doctrine_claim
               where section_id=$1 and expires_at > now()`, [id]);
@@ -714,10 +747,11 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       handler: async (c, actor, args) => withEnvelope(c, actor, "release-doctrine-claims", args, async () => {
         const r = await c.query(
           `delete from doctrine_claim where section_id = any($1::uuid[]) and holder_actor_id = $2
-           returning section_id`, [args.section_ids, actor.id]);
+           returning section_id`, [idList(args.section_ids, ToolError, "section_ids"), actor.id]);
         const released = r.rows.map(x => x.section_id);
         return { ok: true, released,
-                 not_held: args.section_ids.filter(id => !released.includes(id)) };
+                 not_held: idList(args.section_ids, ToolError, "section_ids")
+                             .filter(id => !released.includes(id)) };
       }),
     },
 
