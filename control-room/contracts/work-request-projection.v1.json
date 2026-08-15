@@ -1,6 +1,6 @@
 {
   "contract": "carr-work-request-projection",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "status": "phase1_draft",
   "purpose": "The crosswalk from the canonical Work Request lifecycle to the Workspace's user-facing projection. Doctrine names writing this as a Phase 1 Foundation deliverable and neither planning document contains it.",
   "authority": {

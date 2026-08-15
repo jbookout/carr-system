@@ -12,10 +12,30 @@ import os
 import pathlib
 import re
 import sys
+import json
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 MIGRATION = REPO / "migrations" / "0125_ai_capability_program.sql"
 FAILED: list[str] = []
+APPROVED_TITLES = [
+    "LLM evaluation harness", "Structured-output parser", "Function-calling router",
+    "Guardrails system", "AI gateway", "RAG pipeline", "Agent loop / ReAct",
+    "Data-curation and deduplication pipeline", "Synthetic-data generator",
+    "Knowledge-graph builder", "Semantic router", "Prompt caching",
+    "Code-interpreter sandbox", "Text-to-SQL", "Graph RAG", "Vector database / HNSW",
+    "Embedding model", "Adversarial-attack generator", "Whisper-style ASR",
+    "Text-to-speech pipeline", "Small language model", "Inference server",
+    "Quantization library", "Feature store", "Recommendation system", "Vector database driver",
+    "Reasoner / Chain-of-Thought implementation", "Interpretability / SAE tooling",
+    "LoRA trainer", "PEFT library", "Model-distillation pipeline", "DPO loss",
+    "RLHF / PPO pipeline", "Model merger", "KV-cache paging", "Speculative decoding",
+    "Tokenizer", "Transformer", "Vision Transformer", "Multimodal projector / CLIP",
+    "Diffusion model", "Audio Spectrogram Transformer", "Logit processor",
+    "State Space Model / Mamba", "Mixture-of-Experts routing layer",
+    "Distributed training / FSDP / tensor parallelism", "Autograd engine",
+    "Matrix multiplication kernel", "Softmax optimization", "FlashAttention CUDA kernel",
+    "Neural Architecture Search",
+]
 
 
 def check(label: str, condition: bool, detail: str = "") -> None:
@@ -30,12 +50,14 @@ def tier1() -> None:
     print("TIER 1 — static program and authority contract")
     sql = MIGRATION.read_text(encoding="utf-8")
     rows = re.findall(
-        r"\(\s*(\d+)\s*,\s*'carr-ai-engineering-suite-v1'\s*,\s*'(WR-AI-\d+)'\s*,\s*'([^']+)'\s*,\s*'(build|extend|adopt|decline)'\s*,",
+        r"\(\s*(\d+)\s*,\s*'carr-ai-engineering-suite-v1'\s*,\s*'(WR-AI-\d+)'\s*,\s*'([^']+)'\s*,\s*'(build|extend|adopt|decline)'\s*,[\s\S]*?'(\{[^']+\})'::jsonb,\s*'joe',\s*'joe'\)",
         sql,
     )
     check("exactly 51 canonical Work Requests are seeded", len(rows) == 51, str(len(rows)))
     check("ordinals are contiguous 1..51", [int(r[0]) for r in rows] == list(range(1, 52)))
     check("refs are contiguous and stable", [r[1] for r in rows] == [f"WR-AI-{n:03d}" for n in range(1, 52)])
+    check("all 51 approved titles retain their exact usefulness order",
+          [r[2] for r in rows] == APPROVED_TITLES)
     check("the current projection cannot skip an unfinished predecessor",
           "p.program_ordinal < w.program_ordinal" in sql and "p.state <> 'confirmed_closed'" in sql)
     check("scheduled jobs receive read but not mutation grants",
@@ -43,9 +65,23 @@ def tier1() -> None:
           and "grant update" not in sql.lower().split("carr_jobs")[-1])
     required_context = ["scope", "non_goals", "prerequisites", "first_deliverable",
                         "rollback_exit", "data_risk", "effort", "completion_definition"]
-    check("every row includes a session-complete context shape",
-          all(sql.count(f'"{key}"') >= 51 for key in required_context),
-          ", ".join(f'{k}={sql.count(chr(34) + k + chr(34))}' for k in required_context))
+    parsed_contexts = []
+    for sequence, ref, _title, _disposition, context in rows:
+        try:
+            parsed_contexts.append((sequence, ref, json.loads(context)))
+        except json.JSONDecodeError as exc:
+            check(f"{ref} has valid project context JSON", False, str(exc))
+    expected_keys = set(required_context + ["evidence"])
+    for sequence, ref, context in parsed_contexts:
+        check(f"{ref} has the exact session context shape", set(context) == expected_keys,
+              f"keys={sorted(context)}")
+        check(f"{ref} has non-placeholder build context",
+              all(isinstance(context.get(key), str) and context[key].strip()
+                  for key in ["scope", "first_deliverable", "rollback_exit", "data_risk", "effort", "completion_definition"]),
+              str(context))
+        check(f"{ref} has list-shaped constraints and evidence",
+              all(isinstance(context.get(key), list) for key in ["non_goals", "prerequisites", "evidence"]),
+              str(context))
 
 
 def tier2() -> None:
@@ -84,20 +120,84 @@ def tier2() -> None:
             assert incomplete is not None
             check("all stored project contexts are build-complete", incomplete[0] == 0)
 
-            # Prove the derived handoff with a rolled-back close. The server verb
-            # adds stronger transition/evidence checks; this proves the database
-            # view itself advances exactly one position and nothing persists.
+            # Prove both halves of the database boundary with rolled-back
+            # evidence: an arbitrary direct close is refused, while a frozen
+            # candidate plus an independent stored pass exposes exactly one
+            # successor. Nothing from this proof persists.
             cur.execute("savepoint queue_handoff")
+            cur.execute("savepoint arbitrary_close")
+            arbitrary_close_refused = False
+            try:
+                cur.execute("""
+                    update ops.work_request
+                       set state='confirmed_closed', completion_kind='extended',
+                           completion_evidence='{"selftest":true}'::jsonb,
+                           verification_evidence_ref='selftest:verifier', closed_at=now()
+                     where program_key=%s and program_ordinal=1
+                """, ("carr-ai-engineering-suite-v1",))
+            except psycopg.Error:
+                arbitrary_close_refused = True
+                cur.execute("rollback to savepoint arbitrary_close")
+            if not arbitrary_close_refused:
+                cur.execute("rollback to savepoint arbitrary_close")
+            check("direct SQL cannot close the queue with invented evidence", arbitrary_close_refused)
+
+            cur.execute("""
+                select w.id,
+                       (select id from actor where slug='system' and active),
+                       (select id from actor where slug='joe' and active)
+                  from ops.work_request w
+                 where w.program_key=%s and w.program_ordinal=1
+            """, ("carr-ai-engineering-suite-v1",))
+            identities = cur.fetchone()
+            assert identities is not None
+            work_request_id, executor_id, verifier_id = identities
+            check("staging has distinct active actors for the evidence proof",
+                  bool(executor_id and verifier_id and executor_id != verifier_id))
+
+            cur.execute("""
+                insert into ops.capability_agent_session
+                  (work_request_id, executor_actor_id, created_by_actor_id,
+                   source_commit_sha, worktree_ref)
+                values (%s,%s,%s,%s,%s)
+                returning id
+            """, (work_request_id, executor_id, verifier_id, "a" * 40, "selftest-worktree"))
+            session_row = cur.fetchone()
+            assert session_row is not None
+            session_id = session_row[0]
+            cur.execute("update ops.capability_agent_session set state='in_progress', started_at=now(), version=version+1 where id=%s", (session_id,))
+            candidate = {"artifact_ref": "selftest:artifact", "candidate_commit_sha": "b" * 40,
+                         "acceptance_test_refs": ["selftest:acceptance"]}
+            cur.execute("""
+                update ops.capability_agent_session
+                   set state='verification', candidate_kind='extended',
+                       candidate_evidence=%s::jsonb, prepared_at=now(), version=version+1
+                 where id=%s returning candidate_fingerprint
+            """, (json.dumps(candidate), session_id))
+            fingerprint_row = cur.fetchone()
+            assert fingerprint_row is not None
+            fingerprint = fingerprint_row[0]
+            cur.execute("update ops.work_request set state='verification' where id=%s", (work_request_id,))
+            cur.execute("""
+                insert into ops.capability_verification
+                  (build_session_id, work_request_id, verifier_actor_id, outcome,
+                   verification_evidence_ref, source_ref, candidate_fingerprint)
+                values (%s,%s,%s,'pass','selftest:acceptance','selftest:staging',%s)
+                returning id
+            """, (session_id, work_request_id, verifier_id, fingerprint))
+            pass_row = cur.fetchone()
+            assert pass_row is not None
+            pass_id = pass_row[0]
             cur.execute("""
                 update ops.work_request
                    set state='confirmed_closed', verification_accepted_at=now(),
-                       verification_evidence_ref='selftest:verifier', closed_at=now(),
-                       completion_kind='extended', completion_evidence='{"selftest":true}'::jsonb
-                 where program_key=%s and program_ordinal=1
-            """, ("carr-ai-engineering-suite-v1",))
+                       verification_evidence_ref=%s, closed_at=now(), completion_kind='extended',
+                       completion_evidence=jsonb_build_object('candidate', %s::jsonb)
+                 where id=%s
+            """, (str(pass_id), json.dumps(candidate), work_request_id))
             cur.execute("select program_ordinal from ops.v_capability_program_next where program_key=%s",
                         ("carr-ai-engineering-suite-v1",))
-            check("a verified close exposes exactly project 2", cur.fetchall() == [(2,)])
+            check("an independently verified close exposes exactly project 2", cur.fetchall() == [(2,)])
             cur.execute("rollback to savepoint queue_handoff")
             cur.execute("select program_ordinal from ops.v_capability_program_next where program_key=%s",
                         ("carr-ai-engineering-suite-v1",))
