@@ -283,7 +283,7 @@
     "11b2b73b": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Judgment on what applies and how it adapts to CARR's own tokens."},
     "5cd8d0f6": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging whether a blocker is self-servable at all, which depends on the specific refusal and what the session already holds. A predicate could not tell a missing credential apart from a gate that names its own escape hatch. Activated after the 2026-08-14 audit, so it carries no audit row."},
     "1c42d80c": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging whether a given move fixes the cause or routes around it, which no predicate can decide: reshaping a command to get through a false refusal and writing a different correct command are the same keystrokes. The rule works by being recited at the moment friction appears, and its own text names the tell — the system still does the wrong thing and only this session knows the trick."},
-    "6172e7d5": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "pending classification — see rule-enforceability audit 2026-08-14"}
+    "6172e7d5": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires judging that a source is media beyond this session's own reach and that the Grok seat should be delegated instead. No script can tell a video a session legitimately cannot pull from one it simply did not try, and the rule's own remedy is a delegation choice rather than a refusable action."}
   },
   "active_rule_ids": {
     "shared": [
