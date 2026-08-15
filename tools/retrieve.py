@@ -18,25 +18,9 @@ If the index is missing or stale, rebuild with: ./run.sh section-index
 (health-check watches staleness). No hits is a real answer: fall back to the
 INDEX.md router — never guess paths.
 """
-import sys, os, re, csv
+import sys, os
 
-STOP = {"the","a","an","and","or","of","to","in","on","for","with","is","are","was","be",
-        "do","does","how","what","which","who","when","where","why","we","our","my","your",
-        "i","you","it","this","that","these","those","about","from","at","by","as","into",
-        "can","should","would","could","did","have","has","had","will","there","any","all",
-        "me","us","they","them","their","his","her","its","if","then","than","so","not","no",
-        "get","got","need","want","find","show","tell","give","look","up","out","new","use"}
-KEEP_SHORT = {"al","fl","x","ai","cre","npi","dso","sos","loi","na","t1","t2","t3","cpa"}
-
-def toks(text):
-    out = []
-    for t in re.split(r"[^a-z0-9]+", text.lower()):
-        if not t or t in STOP:
-            continue
-        if len(t) < 3 and t not in KEEP_SHORT:
-            continue
-        out.append(t[:-1] if len(t) > 4 and t.endswith("s") else t)
-    return out
+from retrieval_lexical import rank_index, toks
 
 def main():
     args = sys.argv[1:]
@@ -113,32 +97,7 @@ def main():
     # `doctrine:<slug>`, never a real file, so it prints as a read-doctrine
     # pointer below instead of a file-open. Rows with only 7 columns (a stale
     # TSV from before this build) default to 'file' — same behaviour as ever.
-    scored = []
-    with open(index, encoding="utf-8") as f:
-        rdr = csv.reader((ln for ln in f if not ln.startswith("#")), delimiter="\t")
-        for row in rdr:
-            if len(row) < 7:
-                continue
-            path, start, end, level, header, parents, gist = row[:7]
-            source = row[7] if len(row) > 7 else "file"
-            fname = os.path.splitext(os.path.basename(path))[0]
-            dirs  = os.path.dirname(path)
-            score = 0.0
-            score += 3.0 * len(q & set(toks(header)))
-            score += 3.0 * len(q & set(toks(fname)))
-            score += 2.0 * len(q & set(toks(parents)))
-            score += 2.0 * len(q & set(toks(gist)))
-            score += 1.0 * len(q & set(toks(dirs)))
-            if len(query) > 6 and (query in header.lower() or query in gist.lower()):
-                score += 4.0
-            if score > 0:
-                # migrated files: build-section-index.py no longer even walks
-                # these, so this only fires against a stale TSV — kept as a
-                # defensive net rather than trusted as the primary gate now.
-                if source == "file" and path in migrated_rel:
-                    continue
-                scored.append((score, path, int(start), int(end), int(level),
-                               header, parents, source))
+    ranked_all = rank_index(index, query, top=None, migrated_paths=migrated_rel)
 
     if store_hits:
         print(f"retrieve: STORE hits (read via verbs, these are the live copies):")
@@ -147,25 +106,18 @@ def main():
             print(f"  [store]  {label}")
             print(f"           read-doctrine {{\"document\":\"{slug}\"}} · {snippet}")
 
-    if not scored and not store_hits:
+    if not ranked_all and not store_hits:
         print("retrieve: no keyword hits — fall back to the INDEX.md router (do not guess paths)")
         sys.exit(0)
-    if not scored:
+    if not ranked_all:
         sys.exit(0)
+    ranked = ranked_all[:top]
 
-    # prefer the sharpest section per file/document; file-level (or store
-    # document-level) rows only win when no section scored higher (keeps
-    # reads narrow, per the one-section rule) — path is the dedup key for
-    # both a file (its own path) and a store document (`doctrine:<slug>`).
-    best = {}
-    for s in sorted(scored, key=lambda r: (-r[0], r[4] == 0, r[3] - r[2])):
-        prior = best.get(s[1])
-        if prior is None or s[0] > prior[0] + 0.01 or (abs(s[0] - prior[0]) <= 0.01 and s[4] > prior[4]):
-            best[s[1]] = s
-    ranked = sorted(best.values(), key=lambda r: -r[0])[:top]
-
-    print(f"retrieve: top {len(ranked)} of {len(best)} matching files for: {' '.join(sorted(q))}")
-    for score, path, start, end, level, header, parents, source in ranked:
+    print(f"retrieve: top {len(ranked)} of {len(ranked_all)} matching files for: {' '.join(sorted(q))}")
+    for item in ranked:
+        score = item.score
+        path, start, end, level = item.row.path, item.row.start, item.row.end, item.row.level
+        header, parents, source = item.row.header, item.row.parents, item.row.source
         crumb = f"{parents} > {header}" if parents else header
         if source == "store":
             slug = path.split("doctrine:", 1)[1]

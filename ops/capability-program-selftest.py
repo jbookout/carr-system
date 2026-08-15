@@ -16,6 +16,7 @@ import json
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 MIGRATION = REPO / "migrations" / "0125_ai_capability_program.sql"
+REPRIORITIZATION = REPO / "migrations" / "0129_reprioritize_rag_benchmark.sql"
 FAILED: list[str] = []
 APPROVED_TITLES = [
     "LLM evaluation harness", "Structured-output parser", "Function-calling router",
@@ -83,6 +84,20 @@ def tier1() -> None:
               all(isinstance(context.get(key), list) for key in ["non_goals", "prerequisites", "evidence"]),
               str(context))
 
+    reorder_sql = REPRIORITIZATION.read_text(encoding="utf-8")
+    expected_refs = ["WR-AI-006"] + [f"WR-AI-{n:03d}" for n in range(1, 6)] + [f"WR-AI-{n:03d}" for n in range(7, 52)]
+    proof_match = re.search(r"expected text\[\] := array\[([\s\S]*?)\];", reorder_sql)
+    effective_refs = re.findall(r"'(WR-AI-\d+)'", proof_match.group(1)) if proof_match else []
+    check("RAG is reprioritized first without losing or renaming another project", effective_refs == expected_refs,
+          str(effective_refs))
+    check("reprioritization refuses any in-flight program",
+          "non_ready <> 0 or sessions <> 0" in reorder_sql
+          and "lock table ops.capability_agent_session in share row exclusive mode" in reorder_sql)
+    check("ordinal guard is restored inside the same transaction",
+          "disable trigger capability_program_identity_guard_before_update" in reorder_sql
+          and "enable trigger capability_program_identity_guard_before_update" in reorder_sql
+          and reorder_sql.rstrip().endswith("commit;"))
+
 
 def tier2() -> None:
     url = os.environ.get("DATABASE_URL")
@@ -107,7 +122,7 @@ def tier2() -> None:
 
             cur.execute("select program_ordinal, ref from ops.v_capability_program_next where program_key=%s",
                         ("carr-ai-engineering-suite-v1",))
-            check("project 1 is the sole initial head", cur.fetchall() == [(1, "WR-AI-001")])
+            check("the RAG benchmark is the sole initial head", cur.fetchall() == [(1, "WR-AI-006")])
 
             cur.execute("select has_table_privilege('carr_jobs','ops.v_capability_program_next','SELECT'), has_table_privilege('carr_jobs','ops.work_request','UPDATE')")
             privileges = cur.fetchone()

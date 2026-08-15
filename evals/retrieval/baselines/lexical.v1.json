@@ -1,0 +1,52 @@
+{
+  "schema_version": "carr-retrieval-baseline-v1",
+  "suite_id": "carr-retrieval-golden-v1",
+  "suite_digest": "3e1858ac5adfa74c34d84cbc959cb90869bff96d11269fba77298828ca20a820",
+  "observed_at": "2026-08-15T00:00:00-05:00",
+  "scope_ref": "carr-internal",
+  "source_artifacts": {
+    "section_index": "CARR AI/Automation/section-index.tsv",
+    "doctrine_fts": "evals/retrieval/baselines/doctrine-fts.2026-08-15.v1.json",
+    "doctrine_generation": 423
+  },
+  "summary": {
+    "passed": 16,
+    "failed": 6,
+    "unknown": 0,
+    "total_engine_cases": 22,
+    "mean_reciprocal_rank": 0.621212
+  },
+  "engine_summary": {
+    "doctrine_postgres_fts": {
+      "passed": 9,
+      "failed": 2,
+      "unknown": 0,
+      "mean_reciprocal_rank": 0.6515151515151515,
+      "case_status": {
+        "RET-001": "pass", "RET-002": "fail", "RET-003": "fail", "RET-004": "pass",
+        "RET-005": "pass", "RET-006": "pass", "RET-007": "pass", "RET-008": "pass",
+        "RET-009": "pass", "RET-010": "pass", "RET-ARCH-001": "pass"
+      }
+    },
+    "section_index_lexical": {
+      "passed": 7,
+      "failed": 4,
+      "unknown": 0,
+      "mean_reciprocal_rank": 0.5909090909090909,
+      "case_status": {
+        "RET-001": "fail", "RET-002": "pass", "RET-003": "pass", "RET-004": "pass",
+        "RET-005": "pass", "RET-006": "fail", "RET-007": "pass", "RET-008": "pass",
+        "RET-009": "fail", "RET-010": "fail", "RET-ARCH-001": "pass"
+      }
+    }
+  },
+  "measured_misses": [
+    {"engine": "doctrine_postgres_fts", "case_id": "RET-002"},
+    {"engine": "doctrine_postgres_fts", "case_id": "RET-003"},
+    {"engine": "section_index_lexical", "case_id": "RET-001"},
+    {"engine": "section_index_lexical", "case_id": "RET-006"},
+    {"engine": "section_index_lexical", "case_id": "RET-009"},
+    {"engine": "section_index_lexical", "case_id": "RET-010"}
+  ],
+  "interpretation": "This is the measured floor, not a claim of full retrieval quality. Candidate retrieval changes must preserve provenance and scope, introduce no unknowns, and meet or exceed both engine floors."
+}
