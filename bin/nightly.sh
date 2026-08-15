@@ -393,6 +393,18 @@ step "graph (derived from the exported files)"       ./run.sh graph
 step "section index (retrieval-as-code layer)"       ./run.sh section-index
 step "system graph (Graph-System/, derived)"         ./run.sh graph-system
 
+# Added 2026-08-15 (rule faf1b643). Joe defined the vendor relationship levels by
+# COUNTABLE EVENTS so they stop being impressions — "you can email fifty people
+# and have fifty relationships that do not exist" — and the rule names its own
+# mechanism, v_vendor_level_suggestion. That view has existed since migration
+# 0052 and NOTHING has ever read it: a finding that only lives in a record has
+# not reached the partner (rule d8c9b1f0). This step reads it and prints the
+# disagreements. It changes no level: the level stays a human judgment, stored
+# and not computed, because a relationship can matter for reasons no event count
+# can see. Exits 0 whether or not it finds drift, and 78 = SKIP with no
+# credential, same contract as the other steps.
+step "vendor level drift (reports, never changes a level)" ./.venv/bin/python ops/vendor-level-drift-check.py
+
 step "encrypted backup -> R2"                        ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
