@@ -81,6 +81,7 @@
     "rule_shape": {"implementation": ["hooks/rule-shape-gate.py"], "test": ["ops/rule-shape-gate-selftest.py"], "failure_mode": "PreToolUse deny"},
     "scheduled_run_record": {"implementation": ["hooks/scheduled-run-record.py"], "test": ["ops/scheduled-run-record-selftest.py"], "failure_mode": "Stop block"},
     "settings_change": {"implementation": ["hooks/settings-change-gate.py"], "test": ["ops/settings-change-gate-selftest.py"], "failure_mode": "Pre+PostToolUse deny"},
+    "stale_count": {"implementation": ["ops/stale-count-check.py"], "test": ["ops/stale-count-selftest.py"], "failure_mode": "CI class failure"},
     "session_boot": {"implementation": ["hooks/session-brief.py", "mcp-server/src/mcp.js"], "test": ["command:python3 hooks/gate-integrity.py --selftest"], "failure_mode": "session rail"},
     "ledger_capture": {"implementation": ["hooks/ledger-sweep.py"], "test": ["external:ledger scope regressions"], "failure_mode": "Stop reminder"},
     "context_rail": {"implementation": ["hooks/context-handoff-gate.py"], "test": ["ops/context-handoff-gate-selftest.py"], "failure_mode": "Stop block"},
@@ -212,7 +213,7 @@
     "1fddcffb": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Judgment on what counts as 'needed regardless of task'."},
     "99e951b9": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "pre-commit check: if a commit adds a file under a multi-folder category, the same commit's diff must also touch that folder's INDEX.md."},
     "a3f6c7f9": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires evaluating whether a cited task was genuinely slow."},
-    "b01edd26": {"category": "judgment_advisory", "enforcement_class": "unbuilt", "planned_control": "Regex lint on write: flag literal number+noun phrases like 'the four files' in generated docs."},
+    "b01edd26": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "CI, on any committed source or doc", "control": "stale_count", "exceptions": "a count over a CLOSED window stays true and is not flagged; quoted history documenting its own correction is exempt", "note": "Built 2026-08-15 after this rule was violated four times inside the enforcement layer itself in two days, each needing its own pull request, with three hand passes still missing a fifth site. The check targets an OPEN-ENDED count (still accumulating) rather than any number: a first attempt flagged 173 lines of ordinary prose, which would have been muted on day one.", "planned_control": "Regex lint on write: flag literal number+noun phrases like 'the four files' in generated docs."},
     "fb2b263d": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Requires knowing what other files reference the changed content."},
     "fc4d7753": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Structural-design judgment."},
     "b42f11a0": {"category": "judgment_advisory", "enforcement_class": "judgment_ambient", "why_unenforceable": "Sizing/scope judgment against a stated future load."},
@@ -304,7 +305,7 @@
   "category_overrides": {
     "hard_pre_action": ["e313a3ca", "1e62c007", "fb110a39", "14181e60", "9ff56260", "76a53dfe", "308ef1de", "647f843d", "aa411351", "eaa31ac5", "faae6748", "9b081605", "58b44ccb", "ca841807", "236ca227", "4a53ff82", "88e9b5eb", "ab814a26", "f5d97b4a", "24e10ee8", "c0b38d80", "e065aa82"],
     "transactional_schema": ["faf1b643", "54e2bcb9", "c53beeaa", "d7e6de46", "5409731b", "9f15f21a", "23ea0607", "b42e217e", "4039b9b5"],
-    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4", "1d50a3bb", "3a9dbafd", "8c1e6057"],
+    "post_action_verification": ["2271e684", "fa217e48", "767f9b41", "97326357", "6a4e6283", "708c2150", "f04a05aa", "590b11e1", "f47a8fe9", "73381d78", "a9ecd5b4", "43e2ef76", "a6e6ab4e", "1f3a7372", "847f9995", "e8868cbe", "4e104d4c", "dcf98880", "bc9188b4", "1d50a3bb", "3a9dbafd", "b01edd26", "8c1e6057"],
     "session_task_rail": ["25fcddee", "2b66211d", "3fa17fa0", "72e06bdf", "9730f565", "14e0408b", "c6f69dee", "75c2e4c9", "4f7c348f", "4a9188f3", "581cb3fe", "015183f5", "2dbb0ad8", "185013c6", "df55c398", "fc21a431", "dff58fef", "d9874334", "634a2d94", "c864b8cb", "113b3833", "30a189fb", "57d13061", "bbffc139", "c66dc739", "0156e9fa", "49533583", "557838a5", "ede4c735", "725dff46", "d5dcfe26", "412d37d3"]
   }
 }
