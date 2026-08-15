@@ -10,7 +10,7 @@ import { implementationShapeError, shapeDecisionError, shapeDispositionError, wo
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
-const MIGRATION = path.join(REPO, "migrations/0130_work_shape_revision.sql");
+const MIGRATION = path.join(REPO, "migrations/0132_work_shape_revision.sql");
 
 class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }

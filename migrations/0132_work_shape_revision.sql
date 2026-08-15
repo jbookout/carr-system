@@ -1,4 +1,4 @@
--- 0130_work_shape_revision.sql
+-- 0132_work_shape_revision.sql
 -- Requirements say what work must do; they do not determine whether it should
 -- be a verb, UI, scheduled lane, CLI, stored table, or derived view. Every Work
 -- Request must now make that question explicit before implementation starts.
