@@ -37,6 +37,11 @@
   "control_catalog": {
     "conduct_stop": {"implementation": ["hooks/conduct-stop-gate.py"], "test": ["ops/conduct-gate-selftest.py"], "failure_mode": "Stop block"},
     "delegation_tripwire": {"implementation": ["hooks/delegation-gate.py"], "test": ["ops/delegation-gate-selftest.py"], "failure_mode": "PreToolUse block"},
+    "artifact_read": {
+      "implementation": ["hooks/unread-artifact-gate.py"],
+      "test": ["ops/unread-artifact-gate-selftest.py"],
+      "failure_mode": "Stop block, once per claim, when a behavioural claim names a file the session never opened"
+    },
     "drift_claim": {
       "implementation": ["hooks/drift-claim-gate.py", "hooks/drift-assertion-gate.py"],
       "test": ["ops/drift-assertion-gate-selftest.py"],
@@ -87,7 +92,7 @@
     "9f15f21a": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "national-account deal assignment", "control": "deal_guard", "exceptions": "national/market separation"},
     "23ea0607": {"category": "transactional_schema", "enforcement_class": "schema", "binding_moment": "Salesforce reconciliation", "control": "deal_guard", "exceptions": "Deal Room close state wins"},
     "2271e684": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "terminal technical claim", "control": "completion_evidence", "exceptions": "explicit uncertainty"},
-    "fa217e48": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "completion after changed work", "control": "completion_evidence", "exceptions": "simple one-file edit"},
+    "fa217e48": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "completion after changed work, and any claim about what a file does", "control": "completion_evidence", "second_control": "artifact_read", "exceptions": "simple one-file edit; naming a path without describing its behaviour"},
     "767f9b41": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "confirmation response", "control": "completion_evidence", "exceptions": "no mutation in task"},
     "97326357": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "surface capability claim", "control": "completion_evidence", "exceptions": "claim includes failed/unverified state"},
     "6a4e6283": {"category": "post_action_verification", "enforcement_class": "stop_gate", "binding_moment": "shipping claim", "control": "completion_evidence", "exceptions": "no deploy/build occurred"},
