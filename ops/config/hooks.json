@@ -86,6 +86,11 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/write-effect-check.py",
           "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/draft-export-gate.py",
+          "timeout": 10
         }
       ]
     },
