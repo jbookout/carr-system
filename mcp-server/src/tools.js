@@ -2424,6 +2424,38 @@ export const TOOLS = {
           note: { type: "string" } }, required: ["from_ref","to_ref","kind"] } },
     }, required: ["idempotency_key","ref","kind","summary"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "log-activity", args, async () => {
+      // A TOUCH CANNOT HAVE HAPPENED TOMORROW. Found 2026-08-15: of 59 vendors
+      // carrying a last-touch date, four were dated after today — the nearest
+      // three days out, which reads exactly like a booked meeting logged as
+      // though it had already happened.
+      //
+      // This is not tidiness. last_touch is what staleness is measured FROM, so
+      // a vendor whose last touch is in the future can never read as stale no
+      // matter how long it has actually been. The row goes quiet and no surface
+      // can tell.
+      //
+      // The field already meant this: occurred_at is documented above as "when
+      // it happened", and the activity table draws the same boundary from the
+      // other side — migration 0017 stopped a `note` moving last_touch because a
+      // note is annotation rather than contact. The future has its own verbs.
+      //
+      // The window is for CLOCK SKEW between a caller and the server, not for
+      // scheduling: minutes, deliberately not hours.
+      const SKEW_MS = 5 * 60 * 1000;
+      if (args.occurred_at) {
+        const when = Date.parse(args.occurred_at);
+        // An unparseable date is a different problem; this guard judges future
+        // ones and does not invent a verdict on malformed input.
+        if (!Number.isNaN(when) && when > Date.now() + SKEW_MS)
+          throw new ToolError({ error: "occurred_at_in_future",
+            occurred_at: args.occurred_at,
+            why: "occurred_at records when a touch HAPPENED. A future date makes the subject " +
+                 "permanently un-stale — every staleness measure counts from last_touch, so a " +
+                 "row dated ahead of today can never surface as gone quiet.",
+            hint: "If this already happened, use its real date. If it is SCHEDULED, it is not a " +
+                  "touch yet: set-next-action carries the ball you owe, and add-critical-date " +
+                  "carries a dated obligation on a deal." });
+      }
       const s = await resolveSubject(c, args.ref);
       const r = await c.query(
         `insert into activity (occurred_at, actor_id, kind, summary, detail, owed, ${FK[s.type]}, source)
