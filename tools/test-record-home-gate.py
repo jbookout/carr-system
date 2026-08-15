@@ -192,6 +192,14 @@ def manifest_unit_cases():
          "supposed to be re-pointed" in (md_write_verdict(
              "Automation/Learning/weekly-learning-latest.md", today=CUTOFF,
              actor="joe") or "")),
+        # NAMED BY WRITE SITE, not by the task that invokes them. The first cut
+        # named the orchestrating task prompt and missed learning_jobs.py, which
+        # writes two of the three outputs. A job author sent to a task prompt
+        # finds a runbook, not the code that emits the file.
+        ("unit · the learning row names the PIPELINE that writes the file",
+         "learning_jobs.py" in (md_write_verdict(
+             "Automation/Learning/weekly-learning-latest.md", today=CUTOFF,
+             actor="joe") or "")),
         ("unit · the radar digest is a retired row for a migrated partner",
          "supposed to be re-pointed" in (md_write_verdict(
              "Automation/radar/radar-digest-latest.md", today=CUTOFF,
