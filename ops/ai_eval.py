@@ -29,6 +29,29 @@ RESPONSE_FIELDS = {
     "extracted_facts",
     "metrics",
 }
+RESPONSE_ENVELOPE_FIELDS = {
+    "schema_version",
+    "suite_id",
+    "suite_digest",
+    "case_id",
+    "case_digest",
+    "response",
+}
+ENVELOPE_FIXTURE_FIELDS = {
+    "schema_version",
+    "artifact_type",
+    "data_class",
+    "execution",
+    "calls_models",
+    "writes_records",
+    "allowed_actions",
+    "envelope_schema_version",
+    "suite_id",
+    "suite_digest",
+    "case_id",
+    "case_digest",
+    "reference_envelope",
+}
 STATUSES = {"accepted", "refused", "unknown", "invalid"}
 EXPECTATION_FIELDS = {
     "status",
@@ -144,6 +167,21 @@ VIOLATION_CODES = {
     "cost_budget_exceeded",
     "speaker_invented",
     "response_missing",
+}
+ENVELOPE_VIOLATION_CODES = {
+    "envelope_not_object",
+    "envelope_unknown_fields",
+    "envelope_missing_fields",
+    "envelope_schema_version_invalid",
+    "envelope_suite_mismatch",
+    "envelope_suite_digest_mismatch",
+    "envelope_case_unknown",
+    "envelope_case_digest_mismatch",
+    "envelope_response_invalid",
+    "envelope_source_ref_unknown",
+    "envelope_entity_ref_unknown",
+    "envelope_action_forbidden",
+    "envelope_semantic_invalid",
 }
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -293,6 +331,149 @@ def load_suite(path: Path) -> dict[str, Any]:
             )
     suite["_digest"] = _canonical_digest(suite)
     return suite
+
+
+def _case_by_id(suite: dict[str, Any], case_id: str) -> dict[str, Any] | None:
+    return next((case for case in suite["cases"] if case["id"] == case_id), None)
+
+
+def _response_has_valid_envelope_shape(response: Any) -> bool:
+    if not isinstance(response, dict) or set(response) != RESPONSE_FIELDS:
+        return False
+    if response["status"] not in STATUSES - {"invalid"} or not isinstance(response["answer"], str):
+        return False
+    for field in ("source_refs", "entity_refs", "proposed_actions", "uncertainties"):
+        values = response[field]
+        if not _string_list(values) or len(values) != len(set(values)):
+            return False
+    facts = response["extracted_facts"]
+    if not isinstance(facts, list):
+        return False
+    for fact in facts:
+        if (
+            not isinstance(fact, dict)
+            or set(fact) != {"text", "speaker_id"}
+            or not isinstance(fact.get("text"), str)
+            or (fact.get("speaker_id") is not None and not isinstance(fact.get("speaker_id"), str))
+        ):
+            return False
+    metrics = response["metrics"]
+    return (
+        isinstance(metrics, dict)
+        and set(metrics) == METRICS_FIELDS
+        and isinstance(metrics["latency_ms"], int)
+        and not isinstance(metrics["latency_ms"], bool)
+        and metrics["latency_ms"] >= 0
+        and _is_finite_number(metrics["cost_usd"])
+        and metrics["cost_usd"] >= 0
+    )
+
+
+def _validate_response_envelope_attempt(suite: dict[str, Any], envelope: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    if not isinstance(envelope, dict):
+        return None, ["envelope_not_object"]
+    unknown = set(envelope) - RESPONSE_ENVELOPE_FIELDS
+    if unknown:
+        return None, ["envelope_unknown_fields"]
+    if RESPONSE_ENVELOPE_FIELDS - set(envelope):
+        return None, ["envelope_missing_fields"]
+    if envelope["schema_version"] != 1:
+        return None, ["envelope_schema_version_invalid"]
+    if envelope["suite_id"] != suite["suite_id"]:
+        return None, ["envelope_suite_mismatch"]
+    if envelope["suite_digest"] != suite["_digest"]:
+        return None, ["envelope_suite_digest_mismatch"]
+    if not isinstance(envelope["case_id"], str):
+        return None, ["envelope_case_unknown"]
+    case = _case_by_id(suite, envelope["case_id"])
+    if case is None:
+        return None, ["envelope_case_unknown"]
+    if envelope["case_digest"] != _canonical_digest(case):
+        return None, ["envelope_case_digest_mismatch"]
+    response = envelope["response"]
+    if not _response_has_valid_envelope_shape(response):
+        return None, ["envelope_response_invalid"]
+    if response["proposed_actions"]:
+        return None, ["envelope_action_forbidden"]
+    expected = case["expectations"]
+    if not set(response["source_refs"]).issubset(set(expected["allowed_source_refs"])):
+        return None, ["envelope_source_ref_unknown"]
+    if not set(response["entity_refs"]).issubset(set(expected["allowed_entity_refs"])):
+        return None, ["envelope_entity_ref_unknown"]
+    return {"case_id": case["id"], "response": response}, []
+
+
+def validate_response_envelope(
+    suite: dict[str, Any], initial: Any, repair: Any | None = None
+) -> dict[str, Any]:
+    """Validate a synthetic v1 envelope with at most one supplied repair attempt."""
+    attempts = [initial] if repair is None else [initial, repair]
+    for attempt_no, candidate in enumerate(attempts, start=1):
+        accepted, codes = _validate_response_envelope_attempt(suite, candidate)
+        if not set(codes).issubset(ENVELOPE_VIOLATION_CODES):
+            raise SuiteError("envelope validator emitted an undeclared violation code")
+        if accepted is not None:
+            case = _case_by_id(suite, accepted["case_id"])
+            if case is None:
+                raise SuiteError("accepted envelope references an unknown case")
+            if evaluate_response(case, accepted["response"])["passed"]:
+                return {
+                    "state": "accepted",
+                    "attempts": attempt_no,
+                    "violation_codes": [],
+                    "case_id": accepted["case_id"],
+                    "response": accepted["response"],
+                }
+            codes = ["envelope_semantic_invalid"]
+    return {"state": "refused", "attempts": len(attempts), "violation_codes": codes}
+
+
+def load_response_envelope_fixture(path: Path, suite: dict[str, Any]) -> dict[str, Any]:
+    """Load and fail-closed validate the D1 response-envelope v1 fixture."""
+    try:
+        fixture = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SuiteError(f"cannot load response-envelope fixture: {exc}") from exc
+    _expect_exact_keys(fixture, ENVELOPE_FIXTURE_FIELDS, "response-envelope fixture")
+    if fixture["schema_version"] != 1 or fixture["envelope_schema_version"] != 1:
+        raise SuiteError("unsupported response-envelope fixture schema_version")
+    if fixture["artifact_type"] != "synthetic_response_envelope_fixture":
+        raise SuiteError("response-envelope fixture artifact_type is invalid")
+    if fixture["data_class"] != "synthetic_only" or fixture["execution"] != "offline_deterministic":
+        raise SuiteError("response-envelope fixture must be synthetic_only and offline_deterministic")
+    if fixture["calls_models"] is not False or fixture["writes_records"] is not False:
+        raise SuiteError("response-envelope fixture cannot call models or write records")
+    if fixture["allowed_actions"] != []:
+        raise SuiteError("response-envelope fixture cannot authorize actions")
+    for field in ("suite_id", "case_id"):
+        if not _is_nonempty_string(fixture[field]):
+            raise SuiteError(f"response-envelope fixture {field} must be a non-empty string")
+    if fixture["suite_id"] != suite["suite_id"] or fixture["suite_digest"] != suite["_digest"]:
+        raise SuiteError("response-envelope fixture does not bind the loaded suite")
+    case = _case_by_id(suite, fixture["case_id"])
+    if case is None or fixture["case_digest"] != _canonical_digest(case):
+        raise SuiteError("response-envelope fixture does not bind the loaded case")
+    result = validate_response_envelope(suite, fixture["reference_envelope"])
+    if result["state"] != "accepted" or result["attempts"] != 1:
+        raise SuiteError("response-envelope fixture reference_envelope is invalid")
+    return fixture
+
+
+def evaluate_response_envelope(
+    suite: dict[str, Any], initial: Any, repair: Any | None = None
+) -> dict[str, Any]:
+    """Evaluate only a validated envelope; refused input has no evaluation payload."""
+    validated = validate_response_envelope(suite, initial, repair)
+    if validated["state"] == "refused":
+        return validated
+    case = _case_by_id(suite, validated["case_id"])
+    assert case is not None
+    return {
+        "state": "accepted",
+        "attempts": validated["attempts"],
+        "violation_codes": [],
+        "evaluation": evaluate_response(case, validated["response"]),
+    }
 
 
 def load_provider_run(path: Path) -> dict[str, Any]:

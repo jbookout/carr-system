@@ -17,6 +17,7 @@ MODULE_PATH = Path(__file__).with_name("ai_eval.py")
 SUITE_PATH = ROOT / "evals" / "ai" / "model-boundary.v1.json"
 OBSERVED_RUN_PATH = ROOT / "evals" / "ai" / "synthetic-observed-run.v1.json"
 BASELINE_HISTORY_PATH = ROOT / "evals" / "ai" / "synthetic-baseline-history.v1.json"
+ENVELOPE_FIXTURE_PATH = ROOT / "evals" / "ai" / "response-envelope.v1.json"
 ACCEPTANCE_PATH = ROOT / "workspace" / "contracts" / "phase0-acceptance.v1.json"
 
 SPEC = importlib.util.spec_from_file_location("ai_eval", MODULE_PATH)
@@ -280,6 +281,105 @@ class SuiteTests(unittest.TestCase):
             scorecard["summary"] = {"total": 10, "passed": 9, "failed": 1}
             with self.subTest(codes=codes), self.assertRaisesRegex(ai_eval.SuiteError, "violation codes"):
                 ai_eval.project_scorecard_entry(scorecard, observed_on="2026-08-15", sequence=2)
+
+    def test_response_envelope_v1_binds_the_loaded_suite_case_and_known_references(self):
+        fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
+        result = ai_eval.validate_response_envelope(self.suite, fixture["reference_envelope"])
+        self.assertEqual(result["state"], "accepted")
+        self.assertEqual(result["attempts"], 1)
+        self.assertEqual(result["violation_codes"], [])
+        self.assertEqual(result["response"], fixture["reference_envelope"]["response"])
+        evaluated = ai_eval.evaluate_response_envelope(self.suite, fixture["reference_envelope"])
+        self.assertTrue(evaluated["evaluation"]["passed"])
+
+    def test_response_envelope_refuses_stale_extra_unknown_reference_and_action_fields(self):
+        fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
+        mutations = {
+            "extra": lambda e: e.update(model_selected_route="other-route"),
+            "stale": lambda e: e.update(case_digest="0" * 64),
+            "source": lambda e: e["response"].update(source_refs=["src:not-known"]),
+            "entity": lambda e: e["response"].update(entity_refs=["client:not-known"]),
+            "action": lambda e: e["response"].update(proposed_actions=["send"]),
+        }
+        for label, mutate in mutations.items():
+            envelope = copy.deepcopy(fixture["reference_envelope"])
+            mutate(envelope)
+            with self.subTest(label=label):
+                result = ai_eval.validate_response_envelope(self.suite, envelope)
+                self.assertEqual(result["state"], "refused")
+                self.assertEqual(result["attempts"], 1)
+                self.assertTrue(result["violation_codes"])
+                self.assertNotIn("response", result)
+                evaluated = ai_eval.evaluate_response_envelope(self.suite, envelope)
+                self.assertNotIn("evaluation", evaluated)
+
+    def test_response_envelope_uses_one_repair_then_refuses_without_raw_payload(self):
+        fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
+        invalid = copy.deepcopy(fixture["reference_envelope"])
+        del invalid["response"]["metrics"]
+        repaired = ai_eval.validate_response_envelope(
+            self.suite, invalid, repair=fixture["reference_envelope"]
+        )
+        self.assertEqual(repaired["state"], "accepted")
+        self.assertEqual(repaired["attempts"], 2)
+
+        bad_repair = copy.deepcopy(invalid)
+        bad_repair["response"]["answer"] = "CARR-SECRET-CANARY-7F4A"
+        refused = ai_eval.validate_response_envelope(self.suite, invalid, repair=bad_repair)
+        self.assertEqual(refused["state"], "refused")
+        self.assertEqual(refused["attempts"], 2)
+        self.assertTrue(refused["violation_codes"])
+        self.assertNotIn("response", refused)
+        self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(refused, sort_keys=True))
+
+    def test_response_envelope_requires_semantic_case_pass_before_acceptance(self):
+        fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
+        wrong_answer = copy.deepcopy(fixture["reference_envelope"])
+        wrong_answer["response"]["answer"] = "CARR-SECRET-CANARY-7F4A"
+        refused = ai_eval.validate_response_envelope(self.suite, wrong_answer)
+        self.assertEqual(refused, {
+            "state": "refused", "attempts": 1, "violation_codes": ["envelope_semantic_invalid"]
+        })
+        evaluated = ai_eval.evaluate_response_envelope(self.suite, wrong_answer)
+        self.assertNotIn("evaluation", evaluated)
+        self.assertNotIn("CARR-SECRET-CANARY-7F4A", json.dumps(evaluated, sort_keys=True))
+
+        wrong_status = copy.deepcopy(fixture["reference_envelope"])
+        wrong_status["response"]["status"] = "refused"
+        self.assertEqual(
+            ai_eval.validate_response_envelope(self.suite, wrong_status)["violation_codes"],
+            ["envelope_semantic_invalid"],
+        )
+
+        unknown_case = next(case for case in self.suite["cases"] if case["id"] == "AI-UNKNOWN-001")
+        missing_uncertainty = copy.deepcopy(fixture["reference_envelope"])
+        missing_uncertainty.update(
+            case_id=unknown_case["id"], case_digest=ai_eval._canonical_digest(unknown_case),
+            response=copy.deepcopy(unknown_case["reference_response"]),
+        )
+        missing_uncertainty["response"]["uncertainties"] = []
+        self.assertEqual(
+            ai_eval.validate_response_envelope(self.suite, missing_uncertainty)["violation_codes"],
+            ["envelope_semantic_invalid"],
+        )
+
+    def test_response_envelope_semantic_failure_gets_only_one_full_repair(self):
+        fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
+        initial = copy.deepcopy(fixture["reference_envelope"])
+        initial["response"]["answer"] = "wrong but structurally valid"
+        repaired = ai_eval.validate_response_envelope(
+            self.suite, initial, repair=fixture["reference_envelope"]
+        )
+        self.assertEqual(repaired["state"], "accepted")
+        self.assertEqual(repaired["attempts"], 2)
+
+        bad_repair = copy.deepcopy(fixture["reference_envelope"])
+        bad_repair["response"]["status"] = "refused"
+        refused = ai_eval.validate_response_envelope(self.suite, initial, repair=bad_repair)
+        self.assertEqual(refused, {
+            "state": "refused", "attempts": 2, "violation_codes": ["envelope_semantic_invalid"]
+        })
+        self.assertNotIn("response", refused)
 
 
 if __name__ == "__main__":
