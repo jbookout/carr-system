@@ -34,6 +34,7 @@ than the thing it checks for.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -99,6 +100,53 @@ def loose_tracked(repo):
     return paths
 
 
+def session_committed(transcript_path, read_tail):
+    """True when THIS session ran `git commit` at least once.
+
+    Scoped the same way session_writes() is, and for the same reason: several
+    sessions share one working tree, and another session's unpushed commit is
+    not this session's business to answer for at its own Stop.
+    """
+    for rec in read_tail(transcript_path, limit=4000):
+        msg = rec.get("message") or {}
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            cmd = (block.get("input") or {}).get("command")
+            if isinstance(cmd, str) and re.search(r"\bgit\b[^\n]*\bcommit\b", cmd):
+                return True
+    return False
+
+
+def unpushed_count(repo):
+    """Commits reachable from HEAD and from NO remote ref at all.
+
+    REACHABILITY, not upstream tracking, is the right test. On 2026-08-14 the
+    fix that mattered reached origin under a different branch name than the one
+    it was committed on (`git push origin HEAD:other-name`), which leaves the
+    local branch with no upstream and zero commits actually missing. Asking
+    `--not --remotes` gets that right; asking about @{upstream} would have
+    nagged about work that had already landed.
+
+    Returns None when the question does not apply — no remotes configured at
+    all, or git refuses to answer. A local-only repository is not drift.
+    """
+    r = subprocess.run(["git", "remote"], cwd=repo, capture_output=True, text=True)
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    p = subprocess.run(["git", "rev-list", "--count", "HEAD", "--not", "--remotes"],
+                       cwd=repo, capture_output=True, text=True)
+    if p.returncode != 0:
+        return None
+    try:
+        return int((p.stdout or "0").strip())
+    except ValueError:
+        return None
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -124,14 +172,39 @@ def main():
     try:
         written_path, read_tail = _helpers()
         mine = session_writes(transcript, written_path, read_tail)
-        if not mine:
-            return 0
-        loose = loose_tracked(repo)
-        if loose is None:            # not a git repo, or git refused to answer
-            return 0
-        left = [p for p in mine if p in set(loose)]
+        loose = loose_tracked(repo) if mine else None
+        left = [p for p in mine if p in set(loose)] if loose is not None else []
+
+        # THE SECOND HALF, checked independently of writes: a session can commit
+        # work it edited in an earlier turn, or in a worktree, and leave the
+        # commit on this machine only. Rule bc9188b4 — "committed-but-unpushed is
+        # the same drift as deployed-but-uncommitted". Uncommitted wins the
+        # report when both are true, because committing is the first step out.
+        ahead = 0
+        if not left and session_committed(transcript, read_tail):
+            ahead = unpushed_count(repo) or 0
     except Exception:
         return 0                     # fail open on anything unexpected
+
+    if not left and ahead:
+        print(
+            f"LOOSE WORK GATE — this session committed {ahead} change(s) and never "
+            f"pushed them.\n\n"
+            "  They exist on no other machine. The repository looks finished from\n"
+            "  inside this checkout and unchanged from everywhere else, which is\n"
+            "  the most expensive shape this failure takes: on 2026-08-14 a correct,\n"
+            "  verified fix for a red pull request sat exactly like this for an hour\n"
+            "  while the pull request kept failing and kept emailing Joe, and his\n"
+            "  read was that a session had fixed it and the fix had not worked.\n\n"
+            "  PUSH THEM — main only moves through a pull request, so:\n\n"
+            "      git push origin HEAD:refs/heads/<name>\n"
+            "      gh pr create --base main --head <name> --title \"...\" --body \"...\"\n\n"
+            "  ALREADY LANDED ANOTHER WAY? Then nothing here is missing from origin\n"
+            "  and this gate would not have fired; re-read the count above.\n\n"
+            "  GENUINELY PARKING THEM:  CARR_ALLOW_LOOSE_WORK=1\n\n"
+            "  Say which it is. Do not simply stop again.",
+            file=sys.stderr)
+        return 2
 
     if not left:
         return 0                     # the quiet, common case: say nothing
