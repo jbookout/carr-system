@@ -3789,6 +3789,8 @@ export const TOOLS = {
       human_quote: { type: "string", description: "the partner's own words, when he said it" },
       working_attachment: { type: "string" }, pdf_attachment: { type: "string" },
       lint_passed: { type: "boolean" }, leak_check_passed: { type: "boolean" },
+      format_exception: { type: "string", description:
+        "Required ONLY to record a send that goes against Joe's format split — an LOI or letter leaving as PDF, or a spreadsheet leaving as a live file. State why (the listing agent's system blocks .docx, the client asked for the live sheet). Joe's rule ends with 'unless the partner says otherwise'; this is where the partner says otherwise." },
       note: { type: "string" } },
       required: ["idempotency_key","document_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-document-status", args, async () => {
@@ -3799,6 +3801,61 @@ export const TOOLS = {
       if (args.status === "sent" && actor.kind !== "human")
         throw new ToolError({ error: "human_only",
           hint: "'sent' records that a partner sent it; only a human can state that" });
+
+      // JOE'S SPLIT ON OUTBOUND FORMAT, in his words: "the LOI is sent over to the
+      // listing agent in word format so they can easily edit or revise. i know i
+      // said everything goes out pdf but thats really just spreadsheets that go
+      // out pdf so noone can see the formulas"
+      //
+      // TWO RULES, and the correction is the important half. An LOI or letter
+      // goes out in WORD, because the listing agent editing it IS the
+      // negotiation; a PDF makes them retype it. A SPREADSHEET goes out as PDF so
+      // nobody reads our formulas. The older blanket "everything goes out PDF" is
+      // superseded and would break the negotiation it exists to start.
+      //
+      // THIS IS NOT ABOUT WHETHER THE FILE WAS MADE. output_kinds {working,pdf}
+      // names ROLES, not formats, and both files exist by now. The question here
+      // is which one we handed over — and this verb is the only place a human
+      // states that a document went out at all.
+      if (args.status === "sent") {
+        const tk = await c.query(
+          `/* outbound_template_kind */
+           select coalesce(t.field_map->>'template_kind',
+                           lower(regexp_replace(t.source_path, '^.*\\.', ''))) as template_kind
+             from document d join doc_template t on t.id = d.template_id
+            where d.id = $1`, [args.document_id]);
+        const kind = (tk.rows[0]?.template_kind || "").toLowerCase();
+        // Attachments and the status change often land in one call, so the gate
+        // reads the MERGED state rather than the stored row alone.
+        const working = args.working_attachment ?? cur.working_attachment;
+        const pdf = args.pdf_attachment ?? cur.pdf_attachment;
+        // A throwaway word is not a decision. Length rather than a banned-word
+        // list, for the same reason as confirm-merge's basis: any such list is one
+        // synonym from useless.
+        const excused = String(args.format_exception ?? "").trim().length >= 20;
+
+        const wordKinds = ["docx", "doc", "dotx", "rtf"];
+        const sheetKinds = ["xlsx", "xls", "xlsm", "csv"];
+        if (!excused) {
+          if (wordKinds.includes(kind) && !working)
+            throw new ToolError({ error: "outbound_format", template_kind: kind,
+              ruling: "Joe: \"the LOI is sent over to the listing agent in word format so they can " +
+                      "easily edit or revise.\"",
+              why: "An LOI or letter goes out in WORD. The listing agent being able to edit or revise " +
+                   "it IS the negotiation workflow; a PDF makes them retype it. No working file is " +
+                   "recorded on this document, so what is on file to have been sent is the PDF.",
+              hint: "Record the Word file as working_attachment. If the send genuinely went out as PDF " +
+                    "— their system blocks .docx, say — pass format_exception with the reason." });
+          if (sheetKinds.includes(kind) && !pdf)
+            throw new ToolError({ error: "outbound_format", template_kind: kind,
+              ruling: "Joe: \"thats really just spreadsheets that go out pdf so noone can see the formulas\"",
+              why: "A spreadsheet goes out as PDF. A live workbook carries our formulas, and the " +
+                   "recipient can read every one of them.",
+              hint: "Record the PDF as pdf_attachment. If the client genuinely needed the live sheet, " +
+                    "pass format_exception with the reason." });
+        }
+      }
+
       const sets = [], vals = [];
       const put = (col, v) => { if (v !== undefined && v !== null) { vals.push(v); sets.push(`${col}=$${vals.length}`); } };
       put("sent_status", args.status);
@@ -3812,7 +3869,10 @@ export const TOOLS = {
       await c.query(`update document set ${sets.join(", ")} where id=$${vals.length}`, vals);
       await writeEvent(c, actor, "update-document-status", "deal", cur.deal_id,
         { field: "document.sent_status", old: { sent_status: cur.sent_status },
-          new: { document_id: args.document_id, sent_status: args.status || cur.sent_status },
+          new: { document_id: args.document_id, sent_status: args.status || cur.sent_status,
+                 // An exception nobody can find later is indistinguishable from an
+                 // inconsistency, so it rides the event.
+                 ...(args.format_exception ? { format_exception: args.format_exception } : {}) },
           human_quote: args.human_quote || null, idempotency_key: args.idempotency_key });
       return { ok: true, document_id: args.document_id, sent_status: args.status || cur.sent_status };
     }),
