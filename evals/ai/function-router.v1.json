@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "artifact_type": "synthetic_read_only_router_policy",
+  "data_class": "synthetic_only",
+  "execution": "offline_deterministic",
+  "calls_models": false,
+  "writes_records": false,
+  "allowed_actions": [],
+  "tool_registry": {
+    "path": "mcp-server/src/tools.js",
+    "sha256": "af13e39bd6ca2378622364978b99fb271e0cb9d4ddd99a230329aa521e41ddc5"
+  },
+  "action_risk_registry": {
+    "path": "control-room/contracts/action-risk-registry.v1.json",
+    "sha256": "28e31ff76d7bb3ed05bef44b3a47721e42d94abdf1c76c0cb323dd698dec9826"
+  },
+  "selected_tool_evidence": [
+    {
+      "tool_name": "find",
+      "write": false,
+      "full_only": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"]
+      },
+      "input_schema_digest": "1dc63095e8672403bbe40fa26719d175e695c0167f6daad6b9655f6506491f01"
+    },
+    {
+      "tool_name": "who-do-we-know",
+      "write": false,
+      "full_only": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {"type": "string", "description": "who you want to reach — C-155, V-CPA-006, L-208, or a full name"},
+          "max_depth": {"type": "integer", "description": "hops to walk, 1-3 (default 3)"},
+          "limit": {"type": "integer", "description": "paths returned, capped at 25"}
+        },
+        "required": ["target"]
+      },
+      "input_schema_digest": "614cca3beb29149d0f16e016e155183a79dee3a4c46cc93a82421a99169241b9"
+    }
+  ],
+  "routes": [
+    {
+      "tool_name": "find",
+      "write": false,
+      "full_only": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"]
+      }
+    },
+    {
+      "tool_name": "who-do-we-know",
+      "write": false,
+      "full_only": false,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {"type": "string", "description": "who you want to reach — C-155, V-CPA-006, L-208, or a full name"},
+          "max_depth": {"type": "integer", "description": "hops to walk, 1-3 (default 3)"},
+          "limit": {"type": "integer", "description": "paths returned, capped at 25"}
+        },
+        "required": ["target"]
+      }
+    }
+  ],
+  "denied_targets": [
+    {"tool_name": "add-loop", "write": true, "full_only": false},
+    {"tool_name": "read-work-shape", "write": false, "full_only": true}
+  ]
+}

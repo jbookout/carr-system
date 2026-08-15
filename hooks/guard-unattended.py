@@ -824,6 +824,108 @@ def in_safe_zone(cmd):
     return any(z in cmd for z in SAFE_ZONES)
 
 
+# ── Rebasing your own branch in place ────────────────────────────────────────
+#
+# WHY THIS CARVE-OUT EXISTS (measured 2026-08-15). The "force push" rule above is
+# blanket: it cannot see WHERE the push lands, so it refused a force-push at a
+# session's own feature branch exactly as hard as one aimed at main. main takes
+# roughly a hundred commits a day here, so a branch going stale mid-review is the
+# normal case — and the standard repair, `git rebase origin/main` then force-push
+# the SAME branch, was unavailable. The only route left was to abandon the branch,
+# cut a new one and open a second pull request.
+#
+# That is a corpse factory, and it is not a theory: four closed pull requests say
+# it in their own closing notes, in the same words — "reopened on a fresh branch
+# because rewriting the pushed one needs a force-push, which the unattended guard
+# blocks" (#125, #131, #142, #100). GitHub's auto-delete fires on MERGE and never
+# on close, so every one of those left a permanent orphan. 25 closed pull requests
+# and 35 dead branches were swept by hand on 2026-08-15. The guard was
+# manufacturing the mess, and no amount of sweeping addresses that.
+#
+# WHAT IS DELIBERATELY *NOT* WIDENED, because the point is to remove a
+# manufacturing defect rather than to hand back the whole capability:
+#
+#   main and master           — still refused. The server ruleset also forbids it,
+#                               and belt-and-braces is right for the one ref whose
+#                               history everything else is measured against.
+#   bare --force / -f         — still refused even at a feature branch. Lease is
+#                               the whole safety story: it aborts when the remote
+#                               moved under you, which is the only thing standing
+#                               between a rebase and a peer session's pushed work.
+#                               Bare force has no such check and many sessions
+#                               share this machine.
+#   +refspec                  — still refused; same overwrite, no lease.
+#   no named target           — still refused. Without an explicit ref the push
+#                               takes the current branch, which the guard cannot
+#                               see and which may be main. Naming it is the same
+#                               house rule as committing by named paths, and it
+#                               makes this decision auditable after the fact.
+PROTECTED_REFS = frozenset({"main", "master", "HEAD"})
+_LEASE = re.compile(r"--force-with-lease(?:=\S*)?\b", re.I)
+# `--force\b` also matches the "--force" inside "--force-with-lease", which is
+# what makes the blanket rule catch the lease form at all. Detecting the BARE
+# spelling therefore needs an explicit "not followed by -with-lease".
+_BARE_FORCE = re.compile(r"--force(?!-with-lease)\b|\s-f\b|\s\+\S+:", re.I)
+_GIT_PUSH = re.compile(r"git\s+push\b", re.I)
+# Where one command ends. `&&`, `||`, `;` and a bare `|` end it; a REDIRECTION
+# ends its argument list too, and must be recognised separately because `2>&1`
+# carries an ampersand that is not a separator — the exact thing that defeated
+# the previous version of this parser.
+_SEPARATOR = re.compile(r"^(?:&&|\|\||[;|&])$")
+_REDIRECT = re.compile(r"^\d*(?:>>?|<)&?\d*$|^[<>]")
+
+
+def force_push_to_named_side_branch(cmd):
+    """True only for the one safe shape: --force-with-lease at a named non-main ref.
+
+    Reads the EXECUTABLE remainder, not the raw command, so a feature-branch
+    example quoted in a pull-request body cannot vouch for a real force-push at
+    main sitting beside it in the same line.
+    """
+    text = strip_inert_text(cmd)
+    if len(_GIT_PUSH.findall(text)) != 1:
+        return False          # two pushes in one line: cannot reason, so refuse
+    if not _LEASE.search(text) or _BARE_FORCE.search(text):
+        return False
+    # ANCHOR ON THE REAL `git push`, NOT ON THE SUBSTRING "push".
+    #
+    # This read `text.split("push", 1)[1]` when the carve-out first shipped, and
+    # it was wrong in the shape every session actually sends. The guard receives
+    # the WHOLE command line, and a session working in a worktree always writes
+    # `cd <path> && git push …`. Any earlier "push" — in the directory, in the
+    # branch name — consumed the split, so the refspec parsed as nonsense and the
+    # push was refused. It failed on the very first real use: the branch was
+    # `force-push-narrow`, so its own worktree path contained "push".
+    match = _GIT_PUSH.search(text)
+    if not match:
+        return False
+    # READ TOKENS UNTIL THIS COMMAND ENDS, rather than cutting the string on raw
+    # separator CHARACTERS.
+    #
+    # The character cut was `re.split(r"[;|&]", …)`, and it broke on `2>&1` — the
+    # redirection every one of these commands carries in practice, whose ampersand
+    # is not a separator at all. It chopped mid-redirect, left a stray `2>` in the
+    # argument list, counted three words instead of two, and refused the push. The
+    # first two versions of this parser were each defeated by a piece of perfectly
+    # ordinary shell syntax the test cases had quietly excluded, so it now walks
+    # tokens and stops at a real boundary.
+    #
+    # Stopping at the boundary is what keeps this honest: only THIS command's
+    # arguments are read, so nothing chained after it can dress up its target.
+    words = []
+    for token in text[match.end():].split():
+        if _SEPARATOR.match(token) or _REDIRECT.match(token):
+            break             # this command's arguments end here
+        if token.startswith("-"):
+            continue          # a flag, not a destination
+        words.append(token)
+    if len(words) != 2:
+        return False          # no remote+ref pair means no visible destination
+    ref = words[1].split(":")[-1]
+    ref = re.sub(r"^refs/heads/", "", ref)
+    return bool(ref) and ref not in PROTECTED_REFS
+
+
 def raw_targets_carr(cmd):
     """Recognize CARR path spellings without evaluating shell variables."""
     if not isinstance(cmd, str):
@@ -869,6 +971,11 @@ def check(cmd):
         if pat.search(cmd):
             # Destructive-fs rules are waived inside the sanctioned scratch zones.
             if label in ("recursive/forced delete", "secure delete") and in_safe_zone(cmd):
+                continue
+            # Rebasing your OWN branch in place is repair, not history loss —
+            # and refusing it is what produced 35 orphan branches. Narrow by
+            # design: lease spelling, named ref, never main. See the function.
+            if label == "force push" and force_push_to_named_side_branch(cmd):
                 continue
             # A SQL keyword sitting in PROSE is not a database operation (loop #240).
             # The patterns stay exactly as strict; they are simply consulted only when

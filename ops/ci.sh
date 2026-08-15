@@ -467,7 +467,64 @@ check_migration() {
     # grep -c prints "0" AND exits nonzero on no match, so `|| echo 0` printed
     # a second zero. `|| :` keeps the count grep already printed.
     n="$(grep -c '^applying ' "$LOGDIR/migration.log" 2>/dev/null || :)"
-    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live"
+
+    # THE TRIGGER-READ CHECK (rule 5409731b). The canary above proves the
+    # declared grants attached; this asks the question that broke set-lead for
+    # five days in production: can the role that WRITES a table actually SELECT
+    # every table the trigger on it READS? An invoker-rights trigger runs as the
+    # caller, and grants never fire for the owner, so no rehearsal as owner can
+    # see it — which is why this lives here, against the built database, rather
+    # than in the gates class against a synthetic tree.
+    if ! CARR_CI_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-triggers.log" \
+         "$PY" ops/trigger-grant-check.py; then
+      tail -25 "$LOGDIR/migration-triggers.log" >&2
+      bad migration "a trigger reads a table its firing role cannot select"
+      return
+    fi
+
+    # ── THE DATABASE ACCEPTANCE GATES ────────────────────────────────────────
+    # Three of these existed before this loop did and NOTHING RAN ANY OF THEM.
+    # ops/program3-trace-gate.py opens by calling itself "the acceptance test
+    # for Program 3", written before the thing it tests — and its only stated
+    # runner was a db-tap command a human types. A gate nobody runs is a
+    # document with assertions in it (rule ab814a26: a rule ships with its
+    # enforcement, and recitation is not enforcement).
+    #
+    # This class already stands up the one thing they need: a throwaway
+    # database with the committed schema loaded and every pending migration
+    # applied. So they run here, on every proposed change, against real
+    # Postgres. Each gate rolls back everything it writes, which is why running
+    # them repeatedly costs nothing.
+    #
+    # SELF-REGISTERING, by the marker `# ci: db-gate` in the file itself. A new
+    # gate is wired by writing it, not by remembering to edit this list. Any
+    # ops/*-gate.py that reads DATABASE_URL and carries no marker is NAMED in
+    # the output rather than quietly skipped — an unrun gate that nobody can
+    # see is how this situation arose in the first place.
+    local db_gate_failures="" db_gate_count=0 db_gate_unmarked=""
+    for g in ops/*-gate.py; do
+      [ -f "$g" ] || continue
+      if grep -q '^# ci: db-gate' "$g"; then
+        db_gate_count=$((db_gate_count+1))
+        if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/db-gate-$(basename "$g").log" \
+             "$PY" "$g"; then
+          db_gate_failures="$db_gate_failures $(basename "$g")"
+          tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
+        fi
+      elif grep -q 'DATABASE_URL' "$g"; then
+        db_gate_unmarked="$db_gate_unmarked $(basename "$g")"
+      fi
+    done
+    if [ -n "$db_gate_unmarked" ]; then
+      printf '        \033[33mnot run\033[0m  db-gates without the `# ci: db-gate` marker:%s\n' \
+        "$db_gate_unmarked" >&2
+    fi
+    if [ -n "$db_gate_failures" ]; then
+      bad migration "database acceptance gate(s) failed:$db_gate_failures"
+      return
+    fi
+
+    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate(s) pass"
   else
     tail -15 "$LOGDIR/migration-grants.log" >&2
     bad migration "the app roles' grants did not survive into the built database"

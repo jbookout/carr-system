@@ -2,6 +2,8 @@
 // lifecycle. Project definitions and mutable state live in Postgres. This module
 // owns the server-enforced transition and independent-verification boundary.
 
+import { implementationShapeError } from "./work-shape.js";
+
 export const COMPLETION_KINDS = Object.freeze(["built", "extended", "adopted", "declined"]);
 export const DEFAULT_PROGRAM = "carr-ai-engineering-suite-v1";
 
@@ -78,6 +80,9 @@ function programRow(row) {
     context: row.project_context || {}, executor_actor: row.executor_actor || null,
     blocker_code: row.blocker_code || null, blocker_detail: row.blocker_detail || null,
     completion_kind: row.completion_kind || null, completion_evidence: row.completion_evidence || null,
+    shape_disposition: row.shape_disposition || null,
+    shape_fixed_surface_ref: row.shape_fixed_surface_ref || null,
+    shape_rationale: row.shape_rationale || null,
   };
 }
 
@@ -96,6 +101,11 @@ function sessionBrief(row) {
     `Data/risk: ${c.data_risk || "Unknown — stop before using sensitive data."}; effort: ${c.effort || "unknown"}.`,
     `Existing evidence: ${(c.evidence || []).join("; ") || "none recorded"}.`,
     `Completion meaning: ${c.completion_definition || "accepted evidence and independent verification"}.`,
+    p.shape_disposition === "required"
+      ? `Implementation shape: required; read the current decision with read-work-shape ${p.ref}.`
+      : p.shape_disposition === "not_required"
+        ? `Implementation shape: fixed at ${p.shape_fixed_surface_ref}; rationale: ${p.shape_rationale}`
+        : "Implementation shape: UNDECIDED. This request cannot be claimed until a qualified seat records required or not_required with set-work-shape-disposition.",
     "Work in an isolated worktree. Write acceptance tests first. Use the cheapest qualified executor. Never merge, deploy, mutate Production, communicate externally, spend, or mark this project complete from the build session. Return a candidate for an independent actor to attest; only a separate human-governed completion can slide the queue.",
   ].join("\n");
 }
@@ -178,6 +188,11 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         requireFixedProgram(args, ToolError);
         const row = await requireCurrent(c, ToolError, args.sequence, args.base_version);
         if (row.state !== "ready") throw new ToolError({ error: "invalid_state_transition", from: row.state, to: "claimed", required_from: "ready" });
+        const shape = row.shape_disposition === "required"
+          ? (await c.query(`select work_request_version from ops.work_shape_revision where work_request_id=$1 order by version desc limit 1`, [row.id])).rows[0]
+          : null;
+        const shapeError = implementationShapeError(row, shape);
+        if (shapeError) throw new ToolError(shapeError);
         if (!fullSha(args.source_commit_sha) || !textPresent(args.worktree_ref)) throw new ToolError({ error: "capability_agent_session_identity_invalid", required: ["source_commit_sha (40 lowercase hex)","worktree_ref"] });
         const executor = (await c.query(`select id, slug from actor where slug=$1 and active=true`, [args.executor_actor])).rows[0];
         if (!executor) throw new ToolError({ error: "capability_executor_not_active", executor_actor: args.executor_actor });

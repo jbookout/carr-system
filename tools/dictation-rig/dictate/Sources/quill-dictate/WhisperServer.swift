@@ -139,7 +139,18 @@ final class WhisperServer {
         WhisperServer.killStaleListener(binaryName: "whisper-server", port: port)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: WhisperServer.binaryPath)
-        p.arguments = ["-m", modelPath, "--host", "127.0.0.1", "--port", String(port)]
+        // -nt = no timestamps. WITHOUT IT THE TRANSCRIPT ARRIVES IN SEGMENTS AND
+        // THE SEGMENT BREAKS LAND INSIDE WORDS: dictating "Pensacola" came back
+        // as "Pensac\nola" (found 2026-08-09, open item T66). The server emits
+        // timestamped segments by default and Quill pastes what it is given, so
+        // the newline goes straight into whatever Joe is typing into.
+        //
+        // The fix was written the same day on dictation-phase-b-loop-243 and
+        // never merged — the branch also carried a whisper-server-sharing change
+        // that does not apply to doc-convo as it stands on main, and the whole
+        // branch stalled rather than being split. This is the half that stands
+        // alone: one flag, on a file main already has.
+        p.arguments = ["-m", modelPath, "--host", "127.0.0.1", "--port", String(port), "-nt"]
         // These are long-lived, chatty servers. An unread Pipe is NOT a sink:
         // macOS fills its 16 KiB buffer, then blocks the child on its next
         // write while the listener misleadingly stays alive. That exact

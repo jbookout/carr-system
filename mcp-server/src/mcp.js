@@ -217,6 +217,7 @@ function profileFor(request) {
 
 function allowedIn(profile, name, tool) {
   if (profile === "full") return true;
+  if (tool.fullOnly) return false;            // sensitive operational reads stay off probe/reviewer/read
   if (!tool.write) return true;              // reads are allowed in every profile
   return PROFILES[profile].has(name);
 }

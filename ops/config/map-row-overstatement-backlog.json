@@ -11,11 +11,6 @@
       "reason": "No existing check confirmed this session."
     },
     {
-      "rule": "5409731b",
-      "rule_name": "New trigger -> grant-check every table it reads, as the firing role",
-      "reason": "rule_controls cites 'migration grant probes' as a test but this is a described intent, not verified to exist as a running CI check this session."
-    },
-    {
       "rule": "581cb3fe",
       "rule_name": "CEO seat operating contract: every finding gets DONE/FILED/DECIDED/DECLINED",
       "reason": "rule_controls lists session_task_rail/conduct_stop (state supply only); a hard disposition check does not yet exist despite being clearly specifiable."

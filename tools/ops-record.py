@@ -23,6 +23,12 @@ WHAT IT DOES
   deployment      Append one deployment marker. /release answers what is serving
                   now; this answers what was serving then.
 
+  release         Record a release candidate from a manifest, approve one, or
+                  read one back. The release is the P0-1 object that JOINS code,
+                  schema, config, tests, approval, deploy and verification;
+                  before it existed, ops.deployment.release_ref pointed at
+                  nothing and a deploy could name its SHA and nothing else.
+
   trace           Read one correlation id back as a chain. This is the terminal
                   form of the Program 3 gate view, and it is the honest interim
                   answer to "without terminal archaeology": one query against the
@@ -119,6 +125,12 @@ def connect(kind: str):
 def parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
+    # `now` is accepted because the callers are SHELL scripts, and portable
+    # ISO-8601 out of `date` differs between BSD and GNU. Making every wrapper
+    # get that right is how a read-back timestamp ends up missing on the one
+    # machine whose date(1) took the other flag.
+    if value == "now":
+        return datetime.now(timezone.utc)
     try:
         # Accept the ISO-8601 the shell produces, Z suffix included.
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -741,22 +753,42 @@ def cmd_deployment(args) -> int:
               file=sys.stderr)
         return 2
     corr = correlation_of(args.correlation)
+    # A TERMINAL DEPLOYMENT HAS ENDED — 0115 refuses one that has not, and the
+    # wrapper calling this knows the answer is "just now". Defaulting it here
+    # keeps every caller from having to produce a portable timestamp, and the
+    # explicit --ended-at still wins when a caller has a truer one.
+    ended_at = args.ended_at
+    if not ended_at and args.state in ("complete", "failed", "aborted",
+                                       "rolled_back", "superseded"):
+        ended_at = "now"
     try:
         with connect("write") as conn, conn.cursor() as cur:
             sid = service_id(cur, args.service)
+            release_id = None
+            if getattr(args, "release_key", None):
+                cur.execute("select to_regclass('ops.release')")
+                if cur.fetchone()[0] is not None:
+                    cur.execute("select id from ops.release where release_key = %s",
+                                (args.release_key,))
+                    row = cur.fetchone()
+                    if not row:
+                        print(f"ops-record: no release {args.release_key!r} — recording "
+                              f"the deployment without it", file=sys.stderr)
+                    else:
+                        release_id = row[0]
             cur.execute(
                 """insert into ops.deployment
                        (correlation_id, service_id, environment, state, git_sha,
-                        release_ref, deployed_by_actor, verb_count,
+                        release_ref, release_id, deployed_by_actor, verb_count,
                         schema_highest_migration, doctrine_generation,
                         started_at, ended_at, read_back_at, verification_evidence_ref,
                         failure_class, source_kind, source_ref, observed_at, detail)
-                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), %s)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), %s)
                    returning id""",
                 (corr, sid, args.environment, args.state, args.git_sha,
-                 args.release_ref, args.actor, args.verb_count,
+                 args.release_ref, release_id, args.actor, args.verb_count,
                  args.schema_migration, args.doctrine_generation,
-                 parse_ts(args.started_at), parse_ts(args.ended_at),
+                 parse_ts(args.started_at), parse_ts(ended_at),
                  parse_ts(args.read_back_at), args.verification_evidence_ref,
                  args.failure_class, args.source_kind, args.source_ref,
                  (args.detail or None)))
@@ -769,6 +801,171 @@ def cmd_deployment(args) -> int:
         return 1
     print(f"{corr} {dep_id}")
     return 0
+
+
+# ── release ──────────────────────────────────────────────────────────────────
+def cmd_release(args) -> int:
+    """Record one release candidate from a manifest built by
+    tools/release-manifest.py, or approve / read one back.
+
+    ONE WRITER, still (rule a8c55a47). The manifest tool computes evidence and
+    this puts it in the record; neither does the other's job, and there is no
+    second path that writes ops.release.
+
+    THE APPROVAL IS NOT HERE BY ACCIDENT. `approve` takes the plan hash the
+    approver actually read and refuses if the manifest has moved since — the
+    database would void it anyway (migration 0131's trigger), and catching it
+    here means the human is told which field changed rather than watching an
+    approval silently evaporate.
+    """
+    if args.action == "require":
+        if not args.sha:
+            print("ops-record: release require needs --sha", file=sys.stderr)
+            return 2
+    elif not args.key:
+        print(f"ops-record: release {args.action} needs --key", file=sys.stderr)
+        return 2
+
+    manifest = {}
+    if getattr(args, "manifest", None):
+        try:
+            manifest = json.loads(Path(args.manifest).read_text())
+        except Exception as e:                                   # noqa: BLE001
+            print(f"ops-record: could not read the manifest: {e}", file=sys.stderr)
+            return 2
+
+    try:
+        with connect("write") as conn, conn.cursor() as cur:
+            if args.action == "candidate":
+                sid = service_id(cur, args.service)
+                corr = correlation_of(getattr(args, "correlation", None))
+                cur.execute(
+                    """insert into ops.release
+                           (correlation_id, release_key, service_id, environment,
+                            state, git_sha, artifact_digest, dependency_lock_digest,
+                            sbom_ref, migration_set, schema_highest_migration,
+                            config_fingerprint, declared_env_differences,
+                            asset_versions, maker_actor, maker_verification_ref,
+                            test_evidence_ref, security_evidence_ref,
+                            rollback_ready, rollback_plan_ref, work_request_ref,
+                            plan_hash, source_kind, source_ref, expires_at)
+                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                               %s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
+                               'tools/release-manifest.py', %s)
+                       returning id, release_key""",
+                    (corr, args.key, sid, args.environment,
+                     manifest.get("git_sha"), manifest.get("artifact_digest"),
+                     manifest.get("dependency_lock_digest"), manifest.get("sbom_ref"),
+                     manifest.get("migration_set"),
+                     manifest.get("schema_highest_migration"),
+                     manifest.get("config_fingerprint"),
+                     manifest.get("declared_env_differences"),
+                     json.dumps(manifest.get("asset_versions")) if manifest.get("asset_versions") else None,
+                     args.maker, args.maker_verification,
+                     args.test_evidence, args.security_evidence,
+                     args.rollback_ready, args.rollback_plan,
+                     args.work_request, manifest.get("plan_hash"),
+                     parse_ts(args.expires_at) if args.expires_at else None))
+                row = cur.fetchone()
+                print(f"{row[0]} {row[1]}")
+                return 0
+
+            if args.action == "require":
+                # THE QUESTION A DEPLOY ASKS, one query: may this SHA ship?
+                #
+                # WHY THIS RETURNS 0 WHEN THE TABLE IS ABSENT. Migration 0131
+                # carries the enforcement — the trigger that refuses a
+                # production deployment naming an unapproved release. Where the
+                # table does not exist, that control is not installed, and a
+                # wrapper refusing on its behalf would be theatre: it would
+                # claim a protection the database is not providing and could be
+                # bypassed by any other deploy path. So it says so, loudly, on
+                # every run, and the enforcement begins the moment 0131 applies.
+                cur.execute("select to_regclass('ops.release')")
+                if cur.fetchone()[0] is None:
+                    print("RELEASE TRUTH IS NOT ENFORCED ON THIS DATABASE.\n"
+                          "  ops.release does not exist, so migration 0131 has not "
+                          "been applied here.\n"
+                          "  This deploy will ship WITHOUT a release record, and "
+                          "nothing will refuse it.\n"
+                          "  Close it with: bin/migrate-prod.sh",
+                          file=sys.stderr)
+                    return 0
+
+                cur.execute(
+                    """select release_key, state, approval_expires_at, plan_hash
+                         from ops.release
+                        where git_sha = %s and environment = %s
+                          and state in ('approved','deploying','verifying')
+                          and approval_expires_at > now()
+                        order by approved_at desc
+                        limit 1""",
+                    (args.sha, args.environment))
+                row = cur.fetchone()
+                if not row:
+                    print(f"NO LIVE APPROVAL for {args.sha[:12]} in {args.environment}.\n"
+                          f"  Build the manifest, record the candidate, and have Joe "
+                          f"approve the plan hash it prints:\n"
+                          f"    tools/release-manifest.py build --sha {args.sha} "
+                          f"> out/release.json\n"
+                          f"    tools/ops-record.py release candidate --key <key> "
+                          f"--manifest out/release.json\n"
+                          f"    tools/ops-record.py release approve --key <key> "
+                          f"--plan-hash <hash> --actor joe",
+                          file=sys.stderr)
+                    return 3
+                key, state, expires, stored_plan = row
+                if args.plan_hash and args.plan_hash != stored_plan:
+                    print(f"THE PLAN MOVED SINCE APPROVAL. Release {key} was approved "
+                          f"against {stored_plan}; this tree builds {args.plan_hash}. "
+                          f"Re-approve before shipping.", file=sys.stderr)
+                    return 3
+                print(key)
+                return 0
+
+            if args.action == "approve":
+                cur.execute(
+                    "select plan_hash, state from ops.release where release_key = %s",
+                    (args.key,))
+                row = cur.fetchone()
+                if not row:
+                    print(f"ops-record: no release {args.key!r}", file=sys.stderr)
+                    return 2
+                stored_hash, state = row
+                if args.plan_hash != stored_hash:
+                    print(f"ops-record: the plan moved. You are approving "
+                          f"{args.plan_hash}, the release carries {stored_hash}. "
+                          f"Rebuild the manifest and re-read it before approving.",
+                          file=sys.stderr)
+                    return 2
+                cur.execute(
+                    """update ops.release
+                          set state = 'approved', approved_by_actor = %s,
+                              approved_at = now(),
+                              approval_expires_at = now() + make_interval(hours => %s)
+                        where release_key = %s
+                    returning approval_expires_at""",
+                    (args.actor, args.expires_hours, args.key))
+                print(f"approved until {cur.fetchone()[0].isoformat()}")
+                return 0
+
+            # read one back — the manifest, in one query, as the gate asserts
+            cur.execute(
+                "select * from ops.v_release_manifest where release_key = %s",
+                (args.key,))
+            row = cur.fetchone()
+            if not row:
+                print(f"ops-record: no release {args.key!r}", file=sys.stderr)
+                return 2
+            cols = [d.name for d in cur.description]
+            print(json.dumps(dict(zip(cols, row)), indent=2, default=str))
+            return 0
+    except SystemExit:
+        raise
+    except Exception as e:                                       # noqa: BLE001
+        print(f"ops-record: could not record the release: "
+              f"{str(e).splitlines()[0][:300]}", file=sys.stderr)
+        return 1
 
 
 # ── settings-change ──────────────────────────────────────────────────────────
@@ -914,7 +1111,12 @@ def main() -> int:
                             "deploying", "verifying", "complete", "failed", "aborted",
                             "rolled_back", "superseded"])
     d.add_argument("--git-sha")
-    d.add_argument("--release-ref")
+    d.add_argument("--release-ref", help="SUPERSEDED by --release-key (0131); kept "
+                                         "so nothing that wrote it breaks")
+    d.add_argument("--release-key", help="the release this deploy is shipping, by key. "
+                                         "Resolved to ops.release.id, which is the "
+                                         "edge that makes a deploy traceable to an "
+                                         "approved plan.")
     d.add_argument("--actor")
     d.add_argument("--verb-count", type=int)
     d.add_argument("--schema-migration")
@@ -941,6 +1143,33 @@ def main() -> int:
     sc.add_argument("--environment",
                     choices=["local", "rehearsal", "staging", "production"],
                     default="production")
+
+    rel = sub.add_parser("release", help="record, approve or read one release (P0-1)")
+    rel.add_argument("action", choices=["candidate", "approve", "require", "show"])
+    rel.add_argument("--sha", help="require only: the SHA about to ship")
+    rel.add_argument("--key", help="the release key, e.g. r-2026-08-15-01. Required "
+                                   "for every action except `require`, which asks "
+                                   "about a SHA rather than a named release.")
+    rel.add_argument("--manifest", help="JSON from tools/release-manifest.py build")
+    rel.add_argument("--service", default="carr-mcp")
+    rel.add_argument("--environment",
+                     choices=["local", "rehearsal", "staging", "production"],
+                     default="production")
+    rel.add_argument("--correlation")
+    rel.add_argument("--maker", default=os.environ.get("CARR_ACTOR", "claude"))
+    rel.add_argument("--maker-verification", help="ref to the maker's own evidence")
+    rel.add_argument("--test-evidence", help="ref to the test run, e.g. ops/ci.sh#<run>")
+    rel.add_argument("--security-evidence", help="ref to the security/scan run")
+    rel.add_argument("--rollback-ready", action="store_true")
+    rel.add_argument("--rollback-plan", help="ref to the rollback runbook")
+    rel.add_argument("--work-request", help="the Work Request this release delivers")
+    rel.add_argument("--expires-at", help="when this candidate's evidence goes stale")
+    rel.add_argument("--plan-hash", help="approve only: the hash the approver read")
+    rel.add_argument("--actor", help="approve only: who is approving")
+    rel.add_argument("--expires-hours", type=int, default=24,
+                     help="approve only: how long the approval stays live. An "
+                          "approval that never expires is how a plan-hash check "
+                          "gets bypassed by time.")
 
     t = sub.add_parser("trace", help="read one correlation id back as a chain")
     t.add_argument("correlation")
@@ -976,6 +1205,7 @@ def main() -> int:
         "sync-registry": cmd_sync_registry,
         "run": cmd_run,
         "deployment": cmd_deployment,
+        "release": cmd_release,
         "trace": cmd_trace,
         "health": cmd_health,
         "assess": cmd_assess,

@@ -9,6 +9,7 @@
 import { doctrineTools } from "./doctrine.js";
 import { investigationTools } from "./investigation.js";
 import { capabilityProgramTools } from "./capability-program.js";
+import { workShapeTools } from "./work-shape.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -97,6 +98,13 @@ async function withEnvelope(client, actor, verb, args, fn) {
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
     hint: "generate a UUID per intended action; retries reuse the SAME key" });
   const hash = await requestHash({ ...args, idempotency_key: undefined });
+  // Shape writes need same-key serialization before their replay read:
+  // otherwise two first calls can both see no tool_call row, and the loser
+  // reports a version conflict instead of the promised replay.
+  // Keep this scoped until the shared envelope's existing fake-client suites
+  // are migrated to model the extra query for every historical write verb.
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition")
+    await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
     if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
@@ -3781,6 +3789,8 @@ export const TOOLS = {
       human_quote: { type: "string", description: "the partner's own words, when he said it" },
       working_attachment: { type: "string" }, pdf_attachment: { type: "string" },
       lint_passed: { type: "boolean" }, leak_check_passed: { type: "boolean" },
+      format_exception: { type: "string", description:
+        "Required ONLY to record a send that goes against Joe's format split — an LOI or letter leaving as PDF, or a spreadsheet leaving as a live file. State why (the listing agent's system blocks .docx, the client asked for the live sheet). Joe's rule ends with 'unless the partner says otherwise'; this is where the partner says otherwise." },
       note: { type: "string" } },
       required: ["idempotency_key","document_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-document-status", args, async () => {
@@ -3791,6 +3801,61 @@ export const TOOLS = {
       if (args.status === "sent" && actor.kind !== "human")
         throw new ToolError({ error: "human_only",
           hint: "'sent' records that a partner sent it; only a human can state that" });
+
+      // JOE'S SPLIT ON OUTBOUND FORMAT, in his words: "the LOI is sent over to the
+      // listing agent in word format so they can easily edit or revise. i know i
+      // said everything goes out pdf but thats really just spreadsheets that go
+      // out pdf so noone can see the formulas"
+      //
+      // TWO RULES, and the correction is the important half. An LOI or letter
+      // goes out in WORD, because the listing agent editing it IS the
+      // negotiation; a PDF makes them retype it. A SPREADSHEET goes out as PDF so
+      // nobody reads our formulas. The older blanket "everything goes out PDF" is
+      // superseded and would break the negotiation it exists to start.
+      //
+      // THIS IS NOT ABOUT WHETHER THE FILE WAS MADE. output_kinds {working,pdf}
+      // names ROLES, not formats, and both files exist by now. The question here
+      // is which one we handed over — and this verb is the only place a human
+      // states that a document went out at all.
+      if (args.status === "sent") {
+        const tk = await c.query(
+          `/* outbound_template_kind */
+           select coalesce(t.field_map->>'template_kind',
+                           lower(regexp_replace(t.source_path, '^.*\\.', ''))) as template_kind
+             from document d join doc_template t on t.id = d.template_id
+            where d.id = $1`, [args.document_id]);
+        const kind = (tk.rows[0]?.template_kind || "").toLowerCase();
+        // Attachments and the status change often land in one call, so the gate
+        // reads the MERGED state rather than the stored row alone.
+        const working = args.working_attachment ?? cur.working_attachment;
+        const pdf = args.pdf_attachment ?? cur.pdf_attachment;
+        // A throwaway word is not a decision. Length rather than a banned-word
+        // list, for the same reason as confirm-merge's basis: any such list is one
+        // synonym from useless.
+        const excused = String(args.format_exception ?? "").trim().length >= 20;
+
+        const wordKinds = ["docx", "doc", "dotx", "rtf"];
+        const sheetKinds = ["xlsx", "xls", "xlsm", "csv"];
+        if (!excused) {
+          if (wordKinds.includes(kind) && !working)
+            throw new ToolError({ error: "outbound_format", template_kind: kind,
+              ruling: "Joe: \"the LOI is sent over to the listing agent in word format so they can " +
+                      "easily edit or revise.\"",
+              why: "An LOI or letter goes out in WORD. The listing agent being able to edit or revise " +
+                   "it IS the negotiation workflow; a PDF makes them retype it. No working file is " +
+                   "recorded on this document, so what is on file to have been sent is the PDF.",
+              hint: "Record the Word file as working_attachment. If the send genuinely went out as PDF " +
+                    "— their system blocks .docx, say — pass format_exception with the reason." });
+          if (sheetKinds.includes(kind) && !pdf)
+            throw new ToolError({ error: "outbound_format", template_kind: kind,
+              ruling: "Joe: \"thats really just spreadsheets that go out pdf so noone can see the formulas\"",
+              why: "A spreadsheet goes out as PDF. A live workbook carries our formulas, and the " +
+                   "recipient can read every one of them.",
+              hint: "Record the PDF as pdf_attachment. If the client genuinely needed the live sheet, " +
+                    "pass format_exception with the reason." });
+        }
+      }
+
       const sets = [], vals = [];
       const put = (col, v) => { if (v !== undefined && v !== null) { vals.push(v); sets.push(`${col}=$${vals.length}`); } };
       put("sent_status", args.status);
@@ -3804,7 +3869,10 @@ export const TOOLS = {
       await c.query(`update document set ${sets.join(", ")} where id=$${vals.length}`, vals);
       await writeEvent(c, actor, "update-document-status", "deal", cur.deal_id,
         { field: "document.sent_status", old: { sent_status: cur.sent_status },
-          new: { document_id: args.document_id, sent_status: args.status || cur.sent_status },
+          new: { document_id: args.document_id, sent_status: args.status || cur.sent_status,
+                 // An exception nobody can find later is indistinguishable from an
+                 // inconsistency, so it rides the event.
+                 ...(args.format_exception ? { format_exception: args.format_exception } : {}) },
           human_quote: args.human_quote || null, idempotency_key: args.idempotency_key });
       return { ok: true, document_id: args.document_id, sent_status: args.status || cur.sent_status };
     }),
@@ -3930,7 +3998,9 @@ export const TOOLS = {
     write: true, humanOnly: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
-      idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" } },
+      idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
+      same_person_because: { type: "string", description:
+        "Required ONLY when one side holds just a lead row and the other just a client row. Joe's ruling: everyone starts as a lead, so an L- and a C- ref for one person is the system working, not a duplicate. State what makes these TWO party rows for ONE human — matching NPI, address, the intake record — not that the names match." } },
       required: ["idempotency_key","survivor_party","merged_party"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-merge", args, async () => {
       // [0069] Inputs used to be assumed party uuids; a V- ref passed here died in
@@ -3960,6 +4030,52 @@ export const TOOLS = {
       }
       args = { ...args, survivor_party: surv.partyId, merged_party: merg.partyId };
 
+      // JOE'S RULING, in his words: "Tyrer is a client now duh. everyone starts
+      // as a lead." A lead record and a client record for the same person are
+      // NOT a duplicate — every party enters as a lead and converts, and both
+      // refs coexist by design.
+      //
+      // WHY THIS REFUSES RATHER THAN WARNS. Merging is destructive in a way that
+      // does not undo: it retires the loser's ref permanently, and a lost ref is
+      // never reissued, so every piece of doctrine quoting it goes dead and has
+      // to be repointed by hand.
+      //
+      // WHY IT IS NOT A FLAT NO. The opposite case is real and this verb's own
+      // history records it: Petersen was two party rows for one human, one
+      // carrying the lead and one the client, and merging them was correct. So
+      // the gate refuses the merge whose only basis is that the names match, and
+      // takes `same_person_because` as the evidence that it is that shape.
+      const roleKinds = async (partyId) => {
+        const r = await c.query(
+          `/* role_kinds_for_party */
+           select 'lead' as kind from lead where party_id=$1
+           union all select 'client' from client where party_id=$1 and merged_into is null
+           union all select 'vendor' from vendor where party_id=$1`, [partyId]);
+        return new Set(r.rows.map(x => x.kind));
+      };
+      const [survRoles, mergRoles] = [await roleKinds(surv.partyId), await roleKinds(merg.partyId)];
+      const only = (set, kind) => set.size === 1 && set.has(kind);
+      // Symmetric on purpose: swapping the arguments must not slip past it.
+      const isLeadClientPair =
+        (only(survRoles, "client") && only(mergRoles, "lead")) ||
+        (only(survRoles, "lead") && only(mergRoles, "client"));
+      if (isLeadClientPair) {
+        // A throwaway word is not a basis. The bar is length rather than a
+        // vocabulary list because the failure being prevented is a session
+        // typing "yes" to clear a gate, and any list of banned words is one
+        // synonym from useless.
+        const stated = String(args.same_person_because ?? "").trim();
+        if (stated.length < 20)
+          throw new ToolError({ error: "lead_client_pair",
+            ruling: "Joe, on the Tyrer record: \"Tyrer is a client now duh. everyone starts as a lead.\"",
+            why: "A lead record and a client record for the same person are not a duplicate. Every party " +
+                 "enters as a lead and converts to a client; both refs coexist by design. Merging them " +
+                 "retires one ref permanently, and a lost ref is never reissued.",
+            hint: "If these really are TWO party rows for ONE human — the Petersen shape — pass " +
+                  "same_person_because with what establishes it (matching NPI, address, the intake " +
+                  "record). Not that the names match." });
+      }
+
       // THE ROLE ROWS MOVE WITH THE PERSON. Until 2026-08-02 this verb set merged_into and
       // nothing else, so the loser's lead/client/vendor rows were left pointing at a party
       // that no longer resolves — they vanished from every party-based view while still
@@ -3986,8 +4102,12 @@ export const TOOLS = {
          union all select 'vendor', count(*) from vendor where party_id=$1 having count(*)>1`,
         [args.survivor_party]);
 
+      // The stated basis rides the event: a merge is permanent, so the reason it
+      // was allowed has to outlive the session that gave it.
       await writeEvent(c, actor, "confirm-merge", "party", args.merged_party,
-        { new: { merged_into: args.survivor_party, roles_moved: moved }, idempotency_key: args.idempotency_key });
+        { new: { merged_into: args.survivor_party, roles_moved: moved,
+                 ...(args.same_person_because ? { same_person_because: args.same_person_because } : {}) },
+          idempotency_key: args.idempotency_key });
       return { ok: true, roles_moved: moved,
                duplicate_roles_on_survivor: dup.rows.length ? dup.rows : undefined };
     }),
@@ -6301,7 +6421,7 @@ Object.assign(TOOLS, {
       const client = await c.query(
         `insert into client (roster_ref,party_id,client_type,vertical,status,
                              acquisition_source,owner_id,owner_label,created_by,updated_by)
-         values ($1,$2,'national_account',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+         values ($1,$2,'national_account',$3,'engaged','national_account',$4,$5,$4,$4) returning id`,
         [ref, org.rows[0].id, args.vertical || null, actor.id, actor.display]);
       const owner = (await c.query("select id from actor where slug=$1", [args.owner])).rows[0];
       await c.query(
@@ -6348,7 +6468,7 @@ Object.assign(TOOLS, {
         const made = await c.query(
           `insert into client (roster_ref,party_id,client_type,vertical,status,
                                acquisition_source,owner_id,owner_label,created_by,updated_by)
-           values ($1,$2,'franchise',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+           values ($1,$2,'franchise',$3,'active_deal','national_account',$4,$5,$4,$4) returning id`,
           [ref, person.rows[0].id, args.segment || null, actor.id, actor.display]);
         sub = { id: made.rows[0].id, roster_ref: ref };
       }
@@ -6779,3 +6899,6 @@ Object.assign(TOOLS, investigationTools({ withEnvelope, writeEvent, ToolError })
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
 Object.assign(TOOLS, capabilityProgramTools({ withEnvelope, writeEvent, ToolError }));
+
+// Evidence-backed implementation form, linked to canonical Work Requests.
+Object.assign(TOOLS, workShapeTools({ withEnvelope, writeEvent, ToolError }));
