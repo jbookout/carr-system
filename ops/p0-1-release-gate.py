@@ -77,6 +77,10 @@ you like without leaving residue. Nothing here is a fixture file that can drift
 from the schema; the seed IS the schema's contract, exercised.
 """
 
+# ci: db-gate — ops/ci.sh runs this against the throwaway Postgres in its
+# migration class. Remove the marker only with a reason; an unrun acceptance
+# gate is a document with assertions in it.
+
 import os
 import sys
 import uuid
