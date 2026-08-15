@@ -65,6 +65,12 @@ OUT = REPO / "out"
 
 UNAVAILABLE = "UNAVAILABLE"
 
+# How many candidate pairs the conflict report prints, highest vocabulary overlap
+# first. The pair count grows with the square of the active-rule count, so an
+# uncapped list stopped being readable somewhere under 220 rules; the remainder is
+# always counted in the report rather than dropped in silence.
+CANDIDATE_PAIR_CAP = 40
+
 # Directive polarity markers used only to nominate CANDIDATE pairs for a human
 # read. They never decide that two rules conflict.
 NEGATIVE = re.compile(r"\b(never|not|no|don'?t|do not|avoid|refuse|stop)\b", re.I)
@@ -391,17 +397,22 @@ def job_promotion(src):
     n = len(rules)
     violations = None
     per_rule = {}
-    if full is not None:
-        # A violation is a post-activation human correction naming the rule.
-        v = src.rows("""
-            select e.subject_id, count(*) as n
-            from event e
-            where e.subject_type = 'rule' and e.cause = 'human_correction'
-            group by e.subject_id
-        """)
-        if v is not None:
-            violations = sum(x["n"] for x in v)
-            per_rule = {x["subject_id"]: x["n"] for x in v}
+    # A violation is a post-activation human correction naming the rule. This runs on
+    # BOTH read paths, not just the owner tier: migration 0067 appended `r.id` to
+    # v_compiled_rules, and `event` is one of the five relations the jobs role reads,
+    # so the join has everything it needs from the views-only credential. It was gated
+    # on `full is not None` from before 0067 landed, which made every jobs-tier run
+    # print "could not be counted under this credential" — a non-answer standing in for
+    # a measurable 0, on the one report this review reads first.
+    v = src.rows("""
+        select e.subject_id, count(*) as n
+        from event e
+        where e.subject_type = 'rule' and e.cause = 'human_correction'
+        group by e.subject_id
+    """)
+    if v is not None:
+        violations = sum(x["n"] for x in v)
+        per_rule = {x["subject_id"]: x["n"] for x in v}
 
     promotable = [rid for rid, c in per_rule.items()
                   if threshold is not None and c >= int(threshold)]
@@ -444,11 +455,11 @@ def job_promotion(src):
                "`rule.enforcement`.")
         for rid in promotable:
             r.line(f"- rule `{rid}` — {per_rule[rid]} corrections since activation")
-    if violations is None and full is None:
+    if violations is None:
         r.line("")
-        r.line(f"Violation counts are {UNAVAILABLE}: `v_compiled_rules` exposes active "
-               "rules but not their ids, so post-activation corrections cannot be "
-               "joined to them from the views-only tier. Rerun with `DATABASE_URL`.")
+        r.line(f"Violation counts are {UNAVAILABLE}: the `event` relation could not be "
+               "read under this credential, so post-activation corrections cannot be "
+               "joined to the active rules. Rerun with `DATABASE_URL`.")
     r.verdict = "ok"
     return r
 
@@ -545,10 +556,27 @@ def job_conflicts(src):
         r.line("**None.** No two active rules in the same scope share enough subject "
                "vocabulary while pointing opposite ways to be worth a human's minute.")
     else:
-        for a, b, ov in cands:
+        # Ranked and capped, and the cap is stated. The pair count is quadratic in the
+        # rule count, so at 220 active rules this printed 5,885 pairs into a 1.9 MB file
+        # on 2026-08-15 — a report whose own doctrine says noise on a queue is
+        # indistinguishable from no queue. Ranking by overlap size puts the pairs most
+        # likely to be a real contradiction first; the tail is counted, never silently
+        # dropped, so a reader can see exactly what was withheld and ask for more.
+        ranked = sorted(cands, key=lambda t: (-len(t[2]), (t[0].get("statement") or "")))
+        shown = ranked[:CANDIDATE_PAIR_CAP]
+        for a, b, ov in shown:
             r.line(f"- shared terms {ov}")
             r.line(f"  - {(a.get('statement') or '')[:120]}")
             r.line(f"  - {(b.get('statement') or '')[:120]}")
+        if len(ranked) > len(shown):
+            r.line("")
+            r.line(f"**{len(ranked) - len(shown)} further candidate pair(s) not printed** "
+                   f"— this report shows the {CANDIDATE_PAIR_CAP} with the most shared "
+                   "vocabulary, which is where a real contradiction is most likely to "
+                   "sit. Nothing was discarded: raise `CANDIDATE_PAIR_CAP` to see the "
+                   "rest. A count this large is itself the finding — a keyword-overlap "
+                   "heuristic does not scale past a few hundred rules and needs a "
+                   "tighter test, not a longer list.")
     r.verdict = "ok"
     return r
 

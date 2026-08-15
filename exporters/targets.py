@@ -536,12 +536,12 @@ def _rule_section(row):
 def _rule_ident(row):
     """The rule's id, rendered as a trailing tag, or '' when it is not published.
 
-    v_compiled_rules does NOT expose `rule.id` today (0015, widened by 0029 to add
-    `scope`), and the exporter credential is denied the `rule` table on purpose —
-    0029's own note explains why the view, not a wider grant, is the way to publish
-    a column. So this returns nothing right now and no fake identifier is invented.
-    The moment a migration appends `r.id` to the view, ids start printing here and
-    in the CLAUDE.md gist index with no further code change.
+    v_compiled_rules DOES expose `rule.id` — migration 0067 appended it in 2026-08,
+    so ids print here and in the CLAUDE.md gist index. The exporter credential is
+    still denied the `rule` table on purpose; 0029's note explains why the view, not
+    a wider grant, is how a column gets published. The fallback below is kept because
+    it costs nothing and keeps this function honest against a database that has not
+    taken 0067 yet, such as a restore rehearsal replaying an older snapshot.
     """
     rid = row.get("id")
     return f"  `#{str(rid)[:8]}`" if rid else ""
