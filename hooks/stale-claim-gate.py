@@ -354,11 +354,13 @@ def main():
             f"{STALE_WINDOW_DAYS} DAYS. Check it before this reaches Joe.",
             "",
             "You are telling him something is broken, unfinished, or needs "
-            "building. That is the most common way this system has been wrong: "
-            "10 times since 2026-08-04, 6 caught by Joe rather than by the "
-            "system, and four of those were work that had already shipped. On "
-            "2026-08-14 a session read a failing log from that morning, missed "
-            "the fix merged three hours later, and offered to go rebuild it.",
+            "building. That is the most frequent failure class on record here, "
+            "running since 2026-08-04, most of them caught by Joe rather than "
+            "by a session, and a large share were work that had already "
+            "shipped. `standing-context` returns the live ledger with current "
+            "counts. On 2026-08-14 a session read a failing log from that "
+            "morning, missed the fix merged three hours later, and offered to "
+            "go rebuild it.",
             "",
             "Recent commits about this subject:",
             "",
