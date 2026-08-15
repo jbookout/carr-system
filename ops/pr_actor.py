@@ -172,9 +172,23 @@ def decide(pr: PrShape, policy: dict) -> Decision:
 
 
 # ── git mechanics ───────────────────────────────────────────────────────────
-def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
+# WHY PUSH GETS ITS OWN TIMEOUT. Every git call here used a flat 180s, which is
+# generous for a rebase and impossible for a push: ops/githooks/pre-push runs
+# ops/ci.sh against the whole repo before a single byte leaves the machine, and
+# that takes minutes by design (the reason is in that hook's own header — this
+# repo is private on a free plan, so a red GitHub run cannot block a merge and
+# the local hook is the only thing that can). On 2026-08-15 the actor rebased
+# #191 and #179 correctly and then died on the push with TimeoutExpired,
+# leaving both branches exactly as it found them and the traceback as the only
+# report. A tool that cannot finish its own last step is worse than one that
+# refuses: it burns the work and says nothing a reader can act on.
+PUSH_TIMEOUT = 900
+
+
+def _git(repo: str, *args: str,
+         timeout: int = 180) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True,
-                          text=True, timeout=180)
+                          text=True, timeout=timeout)
 
 
 def _conflicting_paths(repo: str) -> list[str]:
@@ -416,12 +430,30 @@ def _execute_one(repo: str, plan: dict, base: str, policy: dict) -> str:
         add = _git(repo, "worktree", "add", "--detach", wt, f"origin/{branch}")
         if add.returncode != 0:
             return f"could not stage a worktree: {add.stderr.strip()[:160]}"
+        # PLUMB IT, or the push cannot survive its own pre-push hook. That hook
+        # runs ops/ci.sh, which needs .venv, out/ and mcp-server/node_modules —
+        # all gitignored, so a bare `git worktree add` has none of them and CI
+        # dies on a missing module rather than on anything about this branch.
+        # bin/worktree.sh --plumb is the same code path a hand-made worktree
+        # takes (rule a8c55a47: one job, one implementation), so the actor's
+        # trees and a person's trees cannot drift apart.
+        subprocess.run([os.path.join(repo, "bin", "worktree.sh"),
+                        "--plumb", wt],
+                       capture_output=True, text=True, timeout=120)
         _git(wt, "checkout", "-B", branch)
         res = rebase_branch(wt, branch, f"origin/{base}", policy)
         if not res.ok:
             return f"rebase refused, nothing pushed: {res.detail}"
-        push = _git(wt, "push", "--force-with-lease", "origin",
-                    f"{branch}:{branch}")
+        try:
+            push = _git(wt, "push", "--force-with-lease", "origin",
+                        f"{branch}:{branch}", timeout=PUSH_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Say which half succeeded. A bare traceback here reads as "the
+            # actor is broken" when the rebase was fine and only the pre-push
+            # CI ran long.
+            return (f"rebased cleanly, but the push exceeded {PUSH_TIMEOUT}s "
+                    f"(ops/githooks/pre-push runs ops/ci.sh first) — nothing "
+                    f"was pushed, the branch is unchanged")
         if push.returncode != 0:
             return f"rebased but push failed: {(push.stderr or '').strip()[:160]}"
         return f"rebased onto {base} and pushed; CI re-runs against current main"
