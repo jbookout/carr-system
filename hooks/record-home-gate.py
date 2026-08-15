@@ -276,6 +276,10 @@ GENERATED_FALLBACK = {
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from md_manifest import md_write_verdict  # noqa: E402
 from corpus_renders import verdict as corpus_verdict  # noqa: E402
+# Shared with hooks/guard-unattended.py, which refuses the SHELL spelling of
+# the same write. One memory, so a record refused through either door is
+# recognised at the other (rule 76a53dfe).
+from refused_content import REFUSAL, remember_refusal, was_refused  # noqa: E402
 
 # --- D. the one content check ------------------------------------------------
 RULE_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
@@ -460,9 +464,27 @@ def main():
             reason = check(tool, ti)
         else:
             sys.exit(0)
+
+        session = payload.get("session_id") or payload.get("sessionId") or ""
+        body = ti.get("content") or ti.get("new_string") or "" if isinstance(ti, dict) else ""
+
         if reason:
+            # A refusal is only half the rule. Remember WHAT was refused, so the
+            # same record cannot simply be written somewhere this gate does not
+            # look (rule 76a53dfe, whose own text records that happening).
+            remember_refusal(body, session)
             log(f"DENY {tool} :: {reason[:220]}")
             print(f"BLOCKED by the CARR record-home gate: {reason}", file=sys.stderr)
+            sys.exit(2)
+
+        # The path is allowed — but if this is the content a gate just refused,
+        # allowing it here is the hole rather than the exception. Scratch writes
+        # unrelated to any refusal never reach this branch, which is nearly all
+        # of them.
+        hidden, share = was_refused(body, session)
+        if hidden:
+            log(f"DENY {tool} :: re-routed refused content ({share:.2f})")
+            print(REFUSAL.format(pct=round(share * 100)), file=sys.stderr)
             sys.exit(2)
         sys.exit(0)
     except Exception as exc:
