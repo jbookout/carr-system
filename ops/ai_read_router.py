@@ -12,20 +12,29 @@ import json
 import math
 from pathlib import Path
 import re
+from dataclasses import dataclass
 from typing import Any
 
 
 POLICY_FIELDS = {
     "schema_version", "artifact_type", "data_class", "execution", "calls_models",
     "writes_records", "allowed_actions", "tool_registry", "action_risk_registry",
-    "server_context", "routes", "denied_targets",
+    "server_context", "server_context_digest", "selected_tool_evidence", "routes",
+    "response_envelope_evidence", "denied_targets",
 }
 FILE_BINDING_FIELDS = {"path", "sha256"}
 SERVER_CONTEXT_FIELDS = {
     "organization_tenant_id", "runtime_principal", "sponsoring_human_id", "capability_profile",
 }
 ROUTE_FIELDS = {"tool_name", "write", "full_only", "input_schema"}
+SELECTED_TOOL_EVIDENCE_FIELDS = ROUTE_FIELDS | {"input_schema_digest"}
 DENIED_TARGET_FIELDS = {"tool_name", "write", "full_only"}
+RESPONSE_ENVELOPE_EVIDENCE_FIELDS = {
+    "fixture", "validator", "accepted_evidence", "accepted_evidence_digest",
+}
+ACCEPTED_ENVELOPE_EVIDENCE_FIELDS = {
+    "state", "attempts", "violation_codes", "case_id", "fixture_digest", "validator_digest",
+}
 PROPOSAL_FIELDS = {"schema_version", "tool_name", "arguments"}
 FORBIDDEN_AUTHORITY_FIELDS = {
     "target", "organization_tenant_id", "tenant_id", "identity", "actor",
@@ -42,6 +51,7 @@ ROUTER_VIOLATION_CODES = {
     "router_unknown_tool",
     "router_write_target_forbidden",
     "router_sensitive_target_forbidden",
+    "router_envelope_evidence_invalid",
     "router_arguments_missing",
     "router_arguments_unknown",
     "router_arguments_type_invalid",
@@ -58,6 +68,17 @@ class RouterError(ValueError):
     """A policy or server-evidence artifact is invalid."""
 
 
+@dataclass(frozen=True)
+class RouterPolicy:
+    """A loaded policy paired with the digest that authenticates its in-memory shape."""
+
+    data: dict[str, Any]
+    trusted_digest: str
+
+    def __getitem__(self, key: str) -> Any:
+        return self.data[key]
+
+
 def _exact_object(value: Any, expected: set[str], label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != expected:
         raise RouterError(f"{label} must contain its exact v1 fields")
@@ -70,6 +91,12 @@ def _nonempty_string(value: Any) -> bool:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _canonical_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
 
 
 def _validate_file_binding(value: Any, repo_root: Path, label: str) -> None:
@@ -134,6 +161,8 @@ def _validate_policy(policy: Any, repo_root: Path) -> dict[str, Any]:
         raise RouterError("server context fields must be non-empty strings")
     if context["organization_tenant_id"] != "carr-internal" or context["capability_profile"] != "read_only":
         raise RouterError("server context cannot widen tenant or capability")
+    if artifact["server_context_digest"] != _canonical_digest(context):
+        raise RouterError("server context digest does not match its evidence")
     risk_path = repo_root / artifact["action_risk_registry"]["path"]
     try:
         risk_rows = json.loads(risk_path.read_text())["verbs"]
@@ -141,6 +170,22 @@ def _validate_policy(policy: Any, repo_root: Path) -> dict[str, Any]:
         raise RouterError("action risk registry cannot be read") from exc
     if not isinstance(artifact["routes"], list) or len(artifact["routes"]) < 2:
         raise RouterError("router policy needs two safe routes")
+    if not isinstance(artifact["selected_tool_evidence"], list):
+        raise RouterError("selected tool evidence is invalid")
+    evidence_by_name: dict[str, dict[str, Any]] = {}
+    for row in artifact["selected_tool_evidence"]:
+        evidence = _exact_object(row, SELECTED_TOOL_EVIDENCE_FIELDS, "selected tool evidence")
+        name = evidence["tool_name"]
+        if not _nonempty_string(name) or name in evidence_by_name:
+            raise RouterError("selected tool evidence must have unique names")
+        if evidence["write"] is not False or evidence["full_only"] is not False:
+            raise RouterError("selected tool evidence is not read-only")
+        _validate_schema(evidence["input_schema"])
+        if evidence["input_schema_digest"] != _canonical_digest(evidence["input_schema"]):
+            raise RouterError("selected tool schema digest does not match")
+        evidence_by_name[name] = evidence
+    if len(evidence_by_name) != len(artifact["routes"]):
+        raise RouterError("selected tool evidence does not match routes")
     names: set[str] = set()
     for row in artifact["routes"]:
         route = _exact_object(row, ROUTE_FIELDS, "router route")
@@ -151,6 +196,9 @@ def _validate_policy(policy: Any, repo_root: Path) -> dict[str, Any]:
         if route["write"] is not False or route["full_only"] is not False:
             raise RouterError("router route is not safe for read-only selection")
         _validate_schema(route["input_schema"])
+        expected = evidence_by_name.get(name)
+        if expected is None or route != {key: expected[key] for key in ROUTE_FIELDS}:
+            raise RouterError("router route drifts from selected tool evidence")
         risk = risk_rows.get(name)
         if not isinstance(risk, dict) or risk.get("write") is not False or risk.get("protection") != "read_only":
             raise RouterError("router route does not match action risk evidence")
@@ -168,17 +216,39 @@ def _validate_policy(policy: Any, repo_root: Path) -> dict[str, Any]:
         denied_names.add(denied["tool_name"])
         if not isinstance(denied["write"], bool) or not isinstance(denied["full_only"], bool):
             raise RouterError("router denied target flags are invalid")
+    envelope = _exact_object(
+        artifact["response_envelope_evidence"], RESPONSE_ENVELOPE_EVIDENCE_FIELDS,
+        "response envelope evidence",
+    )
+    _validate_file_binding(envelope["fixture"], repo_root, "response envelope fixture")
+    _validate_file_binding(envelope["validator"], repo_root, "response envelope validator")
+    accepted = _exact_object(
+        envelope["accepted_evidence"], ACCEPTED_ENVELOPE_EVIDENCE_FIELDS,
+        "accepted response envelope evidence",
+    )
+    if (
+        accepted["state"] != "accepted"
+        or accepted["attempts"] != 1
+        or accepted["violation_codes"] != []
+        or not _nonempty_string(accepted["case_id"])
+        or accepted["fixture_digest"] != envelope["fixture"]["sha256"]
+        or accepted["validator_digest"] != envelope["validator"]["sha256"]
+    ):
+        raise RouterError("accepted response envelope evidence is invalid")
+    if envelope["accepted_evidence_digest"] != _canonical_digest(accepted):
+        raise RouterError("accepted response envelope evidence digest does not match")
     return artifact
 
 
-def load_router_policy(path: Path, repo_root: Path | None = None) -> dict[str, Any]:
+def load_router_policy(path: Path, repo_root: Path | None = None) -> RouterPolicy:
     """Load and verify the fixed D1 read-route evidence artifact."""
     root = repo_root or path.resolve().parents[2]
     try:
         policy = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         raise RouterError("router policy cannot be loaded") from exc
-    return _validate_policy(policy, root)
+    artifact = _validate_policy(policy, root)
+    return RouterPolicy(artifact, _canonical_digest(artifact))
 
 
 def _schema_matches(value: Any, schema: dict[str, Any]) -> bool:
@@ -211,12 +281,24 @@ def _refuse(code: str) -> dict[str, Any]:
     return {"state": "refused", "violation_codes": [code]}
 
 
-def route_read_only(proposal: Any, policy: Any, repo_root: Path) -> dict[str, Any]:
+def route_read_only(
+    proposal: Any, envelope_evidence: Any, policy: Any, repo_root: Path
+) -> dict[str, Any]:
     """Return a normalized descriptor only when the proposal is safely routable."""
+    if not isinstance(policy, RouterPolicy) or policy.trusted_digest != _canonical_digest(policy.data):
+        return _refuse("router_policy_invalid")
     try:
-        artifact = _validate_policy(policy, repo_root)
+        artifact = _validate_policy(policy.data, repo_root)
     except RouterError:
         return _refuse("router_policy_invalid")
+    envelope = artifact["response_envelope_evidence"]
+    if not isinstance(envelope_evidence, dict):
+        return _refuse("router_envelope_evidence_invalid")
+    if (
+        envelope_evidence != envelope["accepted_evidence"]
+        or _canonical_digest(envelope_evidence) != envelope["accepted_evidence_digest"]
+    ):
+        return _refuse("router_envelope_evidence_invalid")
     if not isinstance(proposal, dict):
         return _refuse("router_proposal_not_object")
     if set(proposal) & FORBIDDEN_AUTHORITY_FIELDS:
