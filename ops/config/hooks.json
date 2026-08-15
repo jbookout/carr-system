@@ -135,6 +135,16 @@
       ]
     },
     {
+      "matcher": "PushNotification|mcp__.*__(send_message|create_draft|update_draft)",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/weekend-quiet-gate.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
       "matcher": "SendMessage",
       "hooks": [
         {
