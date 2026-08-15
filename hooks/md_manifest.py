@@ -163,7 +163,15 @@ WRITER_BY_PREFIX = {
     "00_Context/today.md": "bin/local-briefs.sh (launchd com.carr.local-briefs, 06:45 weekdays)",
     "Automation/Learning/": "the weekly metrics jobs — ops/scheduled-tasks/social-metrics-pull-weekly "
                             "and pipelines/pull_placement_metrics.py",
-    "Automation/radar/": "tools/health-check.py",
+    # NOT health-check.py, and the correction is worth the line. The first
+    # version of this map named it, on the strength of a grep hit — but
+    # health-check only WATCHES this path: it appears in that file's WATCH
+    # table, a staleness list of (name, output glob, max age, inputs, note).
+    # A grep match is not a write site, and naming the wrong job in a message
+    # whose entire purpose is naming the right one would have sent its reader to
+    # a file that never touches it. The writer is named in health-check's own
+    # note field for that row, which is where this value comes from.
+    "Automation/radar/": "the Monday radar run (radar-digest-sop.md)",
     "DNA/Network/briefs/": "the weekly network brief run",
     "DNA/Clients/prospects/": "client-intake's dossier narrative",
     "Marketing/Social Media/": "the weekly social batch run",
