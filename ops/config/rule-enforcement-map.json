@@ -125,6 +125,15 @@
       ],
       "failure_mode": "PreToolUse deny"
     },
+    "costar_lane": {
+      "implementation": [
+        "hooks/costar-lane-gate.py"
+      ],
+      "test": [
+        "ops/costar-lane-gate-selftest.py"
+      ],
+      "failure_mode": "PreToolUse deny"
+    },
     "record_home": {
       "implementation": [
         "hooks/record-home-gate.py",
@@ -1127,9 +1136,11 @@
       "why_unenforceable": "Sizing/scope judgment against a stated future load."
     },
     "f5d97b4a": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "PreToolUse deny on claude-in-chrome navigate/computer tools when target URL host matches costar.com."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "a Chrome-extension tool call whose target host is costar.com",
+      "control": "costar_lane",
+      "exceptions": "none \u2014 the sanctioned Browser-pane lane is always open on the same URL, so a refusal never blocks the work"
     },
     "8aefcdce": {
       "category": "judgment_advisory",
@@ -1717,7 +1728,8 @@
       "236ca227",
       "4a53ff82",
       "88e9b5eb",
-      "ab814a26"
+      "ab814a26",
+      "f5d97b4a"
     ],
     "transactional_schema": [
       "faf1b643",
