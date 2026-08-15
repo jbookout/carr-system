@@ -8,6 +8,7 @@
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
 import { investigationTools } from "./investigation.js";
+import { capabilityProgramTools } from "./capability-program.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -6775,3 +6776,6 @@ Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
 // Bounded investigation control plane (0098): deterministic signals, one
 // reasoning owner, evidence-only worker packets, explicit branch termination.
 Object.assign(TOOLS, investigationTools({ withEnvelope, writeEvent, ToolError }));
+
+// One fixed ordered AI-capability portfolio over canonical Work Requests.
+Object.assign(TOOLS, capabilityProgramTools({ withEnvelope, writeEvent, ToolError }));

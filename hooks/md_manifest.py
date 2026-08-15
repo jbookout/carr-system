@@ -161,9 +161,24 @@ ALLOW_PREFIX = {
 # so a specific file beats the directory it sits in.
 WRITER_BY_PREFIX = {
     "00_Context/today.md": "bin/local-briefs.sh (launchd com.carr.local-briefs, 06:45 weekdays)",
-    "Automation/Learning/": "the weekly metrics jobs — ops/scheduled-tasks/social-metrics-pull-weekly "
-                            "and pipelines/pull_placement_metrics.py",
-    "Automation/radar/": "tools/health-check.py",
+    # NAMED BY WRITE SITE, not by the task that invokes them. The first version
+    # said "the weekly metrics jobs — social-metrics-pull-weekly and
+    # pull_placement_metrics.py", which names the ORCHESTRATING task prompt and
+    # misses pipelines/learning_jobs.py entirely — the file that writes TWO of
+    # the three outputs here, at its write() method. A job author sent to the
+    # task prompt would find a runbook, not the code that emits the file.
+    "Automation/Learning/": "pipelines/learning_jobs.py (weekly-learning, correction-miner) "
+                            "and pipelines/pull_placement_metrics.py (placement-pull) — "
+                            "both invoked by ops/scheduled-tasks/social-metrics-pull-weekly",
+    # NOT health-check.py, and the correction is worth the line. The first
+    # version of this map named it, on the strength of a grep hit — but
+    # health-check only WATCHES this path: it appears in that file's WATCH
+    # table, a staleness list of (name, output glob, max age, inputs, note).
+    # A grep match is not a write site, and naming the wrong job in a message
+    # whose entire purpose is naming the right one would have sent its reader to
+    # a file that never touches it. The writer is named in health-check's own
+    # note field for that row, which is where this value comes from.
+    "Automation/radar/": "the Monday radar run (radar-digest-sop.md)",
     "DNA/Network/briefs/": "the weekly network brief run",
     "DNA/Clients/prospects/": "client-intake's dossier narrative",
     "Marketing/Social Media/": "the weekly social batch run",

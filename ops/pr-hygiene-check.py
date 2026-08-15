@@ -20,6 +20,20 @@ bound action per finding (rule 590b11e1), on the surface Joe already reads:
 `run.sh health`. The nightly chain runs that, so a stranded pull request surfaces
 within a day without any inbox involved.
 
+WHO CLEARS WHAT THIS NOTICES: ops/pr_actor.py, and the bound action on every
+finding here names it. This half NOTICES, that half CLEARS, split on purpose so
+only one of them can write. Keep the two in step — this file shipped 44 minutes
+BEFORE the actor did, on 2026-08-14, and its remedy text went on telling readers
+to hand-rebase for a day after code took the job over. A nightly run on
+2026-08-15 followed that stale text and proposed exactly the manual path Joe had
+already ruled out twice (rule 5e89c211: never spend a model on a decision already
+expressible as tested code). A bound action that names the wrong actor is worse
+than none, because it reads as current.
+
+THE ONE FINDING THAT STAYS HUMAN is stale-red. The actor refuses to touch a red
+check by design — rebasing one buries a possibly-real failure under a fresh run —
+so that action still points at a person, and that is not drift.
+
 WHY THE THRESHOLDS ARE WIDE. A red pull request minutes old is a session
 mid-iteration, and CI failing IS the feedback loop working — on 2026-08-14 the
 repo took 397 runs with 21 failures spread across 12 branches, nearly all of them
@@ -116,20 +130,20 @@ def classify(rows: list[dict], now_iso: str | None = None) -> list[dict]:
         if state is None and idle >= NO_CHECKS_MINUTES:
             add("no-checks",
                 f"open {idle/60:.1f}h and CI has never run against it",
-                f"check whether the session that opened it is gone: "
-                f"`gh pr view {num}`. If it is, rebase onto current main and push, "
-                f"or close it with a reason.")
+                f"`python3 ops/pr_actor.py` to see the plan, `--execute` to act "
+                f"— it decides #{num} and clears it.")
         elif state == "FAILURE" and idle >= RED_STALE_MINUTES:
             add("stale-red",
                 f"CI red and nothing pushed for {idle/60:.1f}h",
                 f"`gh run view --log-failed` on its latest run, fix or close: "
-                f"`gh pr view {num}`.")
+                f"`gh pr view {num}`. The actor refuses a red check on purpose, "
+                f"so this one is genuinely yours.")
 
         if merge == "DIRTY" and idle >= CONFLICT_MINUTES:
             add("conflicted",
                 f"conflicted against main for {idle/60:.1f}h",
-                f"rebase it in a worktree (`run.sh worktree <name> --from origin/main`) "
-                f"and push, or close it as superseded: `gh pr view {num}`.")
+                f"`python3 ops/pr_actor.py` to see the plan, `--execute` to act "
+                f"— it decides #{num} and clears it.")
 
     findings.sort(key=lambda f: -f["idle_minutes"])
     return findings
@@ -180,8 +194,15 @@ def main() -> int:
                   f"({RED_STALE_MINUTES//60}h red / {NO_CHECKS_MINUTES//60}h no-CI / "
                   f"{CONFLICT_MINUTES//60}h conflicted)")
             return 0
+        # Count PRs, not findings. One pull request can raise two (no-checks AND
+        # conflicted), so `len(findings)` printed against `len(rows)` produced
+        # "5 of 3 open" on 2026-08-15 — a count that cannot be true, which cost a
+        # nightly run a paragraph arguing the arithmetic was broken. It was not;
+        # the label was.
+        stranded = len({f["number"] for f in findings})
         worst = findings[0]
-        print(f"  ⚠︎ stranded PRs        {len(findings)} of {len(rows)} open, oldest "
+        print(f"  ⚠︎ stranded PRs        {stranded} of {len(rows)} open "
+              f"({len(findings)} finding(s)), oldest "
               f"#{worst['number']} {worst['why']} · on breach: {worst['action']}")
         return 1
 

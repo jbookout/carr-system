@@ -329,6 +329,24 @@ PYEOF
   # local hook runs.
   run_quiet "$LOGDIR/gate-integrity.log" "$PY" hooks/gate-integrity.py --strict \
     || { failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
+
+  # THE THREE INVENTORY CHECKS, run against THIS REPO rather than a synthetic
+  # tree. The selftest loop above runs their *-selftest.py, and every one of
+  # those builds its own fixture tree on purpose — that measures the CHECK and
+  # says nothing whatever about the actual inventory. So all three could pass
+  # their suites while the real files contradicted each other, and that is not
+  # hypothetical: on 2026-08-15 ops/audit-queue-freshness-check.py FAILED on
+  # main's own tree while CI reported green, because nothing here ever ran it.
+  #
+  # Same shape as gate-integrity --strict directly above: repository content
+  # only, no machine state, no network, no database. Each carries its own
+  # escape hatch for a genuinely mid-flight tree and names its own remedy in
+  # its own output, so none is repeated here.
+  for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check; do
+    [ -f "ops/$inv.py" ] || continue
+    run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
+      || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
+  done
   if [ -n "$failures" ]; then
     bad gates "failed:$failures"
   elif [ -n "$skiplist" ]; then
@@ -462,6 +480,8 @@ check_migration() {
 # no live settings file, so that half skips and the wrangler half still runs.
 check_binding() {
   local problems=""
+  run_quiet "$LOGDIR/binding-agent-boot.log" "$PY" ops/agent-boot-contract.py \
+    || { problems="$problems agent-boot"; cat "$LOGDIR/binding-agent-boot.log" >&2; }
   if [ -f mcp-server/wrangler.toml ]; then
     run_quiet "$LOGDIR/binding-wrangler.log" node -e '
       const fs=require("fs"), t=fs.readFileSync("mcp-server/wrangler.toml","utf8");

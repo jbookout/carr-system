@@ -8,10 +8,16 @@
     }
   },
   "theme": "dark",
+  "workflowSizeGuideline": "medium",
+  "env": {
+    "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION": "60",
+    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "10",
+    "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION": "60"
+  },
   "inputNeededNotifEnabled": true,
   "agentPushNotifEnabled": true,
   "enabledPlugins": {
-    "runpod@runpod": true
+    "runpod@runpod": false
   },
   "permissions": {
     "defaultMode": "auto",
@@ -111,7 +117,7 @@
         ]
       },
       {
-        "matcher": "mcp__.*__teach",
+        "matcher": "mcp__.*__(teach|activate-rule)",
         "hooks": [
           {
             "type": "command",
@@ -131,6 +137,16 @@
           {
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/gate-edit-gate.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/canonical-edit-gate.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/one-repo-gate.py",
             "timeout": 10
           }
         ]
@@ -162,6 +178,20 @@
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/staging-observation-tracker.py",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/settings-change-gate.py"
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/bash-write-gate.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/write-effect-check.py",
+            "timeout": 10
           }
         ]
       },
@@ -186,12 +216,51 @@
         ]
       },
       {
+        "matcher": "mcp__claude-in-chrome__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/costar-lane-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "mcp__.*__(record-defect|add-loop)",
         "hooks": [
           {
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/drift-claim-gate.py",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/escalation-gate.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/blocker-decider-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "PushNotification|mcp__.*__(send_message|create_draft|update_draft)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/weekend-quiet-gate.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/peer-broadcast-gate.py"
           }
         ]
       }
@@ -214,6 +283,15 @@
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/staging-observation-tracker.py",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/settings-change-gate.py"
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/write-effect-check.py",
+            "timeout": 15
           }
         ]
       }
@@ -221,6 +299,11 @@
     "Stop": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/map-architecture-gate.py",
+            "timeout": 15
+          },
           {
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/conduct-stop-gate.py",
@@ -239,6 +322,30 @@
           {
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/context-handoff-gate.py",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/scheduled-run-record.py",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/chat-lint-gate.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/loose-work-gate.py"
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/drift-assertion-gate.py",
+            "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/unread-artifact-gate.py",
             "timeout": 20
           }
         ]

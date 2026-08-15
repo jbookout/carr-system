@@ -115,6 +115,16 @@
       ]
     },
     {
+      "matcher": "mcp__claude-in-chrome__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/costar-lane-gate.py",
+          "timeout": 10
+        }
+      ]
+    },
+    {
       "matcher": "mcp__.*__(record-defect|add-loop)",
       "hooks": [
         {
@@ -190,6 +200,11 @@
       "hooks": [
         {
           "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/map-architecture-gate.py",
+          "timeout": 15
+        },
+        {
+          "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/conduct-stop-gate.py",
           "timeout": 15
         },
@@ -230,6 +245,11 @@
         {
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/drift-assertion-gate.py",
+          "timeout": 20
+        },
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/unread-artifact-gate.py",
           "timeout": 20
         }
       ]
