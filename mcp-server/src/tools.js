@@ -3938,7 +3938,9 @@ export const TOOLS = {
     write: true, humanOnly: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
-      idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" } },
+      idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
+      same_person_because: { type: "string", description:
+        "Required ONLY when one side holds just a lead row and the other just a client row. Joe's ruling: everyone starts as a lead, so an L- and a C- ref for one person is the system working, not a duplicate. State what makes these TWO party rows for ONE human — matching NPI, address, the intake record — not that the names match." } },
       required: ["idempotency_key","survivor_party","merged_party"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-merge", args, async () => {
       // [0069] Inputs used to be assumed party uuids; a V- ref passed here died in
@@ -3968,6 +3970,52 @@ export const TOOLS = {
       }
       args = { ...args, survivor_party: surv.partyId, merged_party: merg.partyId };
 
+      // JOE'S RULING, in his words: "Tyrer is a client now duh. everyone starts
+      // as a lead." A lead record and a client record for the same person are
+      // NOT a duplicate — every party enters as a lead and converts, and both
+      // refs coexist by design.
+      //
+      // WHY THIS REFUSES RATHER THAN WARNS. Merging is destructive in a way that
+      // does not undo: it retires the loser's ref permanently, and a lost ref is
+      // never reissued, so every piece of doctrine quoting it goes dead and has
+      // to be repointed by hand.
+      //
+      // WHY IT IS NOT A FLAT NO. The opposite case is real and this verb's own
+      // history records it: Petersen was two party rows for one human, one
+      // carrying the lead and one the client, and merging them was correct. So
+      // the gate refuses the merge whose only basis is that the names match, and
+      // takes `same_person_because` as the evidence that it is that shape.
+      const roleKinds = async (partyId) => {
+        const r = await c.query(
+          `/* role_kinds_for_party */
+           select 'lead' as kind from lead where party_id=$1
+           union all select 'client' from client where party_id=$1 and merged_into is null
+           union all select 'vendor' from vendor where party_id=$1`, [partyId]);
+        return new Set(r.rows.map(x => x.kind));
+      };
+      const [survRoles, mergRoles] = [await roleKinds(surv.partyId), await roleKinds(merg.partyId)];
+      const only = (set, kind) => set.size === 1 && set.has(kind);
+      // Symmetric on purpose: swapping the arguments must not slip past it.
+      const isLeadClientPair =
+        (only(survRoles, "client") && only(mergRoles, "lead")) ||
+        (only(survRoles, "lead") && only(mergRoles, "client"));
+      if (isLeadClientPair) {
+        // A throwaway word is not a basis. The bar is length rather than a
+        // vocabulary list because the failure being prevented is a session
+        // typing "yes" to clear a gate, and any list of banned words is one
+        // synonym from useless.
+        const stated = String(args.same_person_because ?? "").trim();
+        if (stated.length < 20)
+          throw new ToolError({ error: "lead_client_pair",
+            ruling: "Joe, on the Tyrer record: \"Tyrer is a client now duh. everyone starts as a lead.\"",
+            why: "A lead record and a client record for the same person are not a duplicate. Every party " +
+                 "enters as a lead and converts to a client; both refs coexist by design. Merging them " +
+                 "retires one ref permanently, and a lost ref is never reissued.",
+            hint: "If these really are TWO party rows for ONE human — the Petersen shape — pass " +
+                  "same_person_because with what establishes it (matching NPI, address, the intake " +
+                  "record). Not that the names match." });
+      }
+
       // THE ROLE ROWS MOVE WITH THE PERSON. Until 2026-08-02 this verb set merged_into and
       // nothing else, so the loser's lead/client/vendor rows were left pointing at a party
       // that no longer resolves — they vanished from every party-based view while still
@@ -3994,8 +4042,12 @@ export const TOOLS = {
          union all select 'vendor', count(*) from vendor where party_id=$1 having count(*)>1`,
         [args.survivor_party]);
 
+      // The stated basis rides the event: a merge is permanent, so the reason it
+      // was allowed has to outlive the session that gave it.
       await writeEvent(c, actor, "confirm-merge", "party", args.merged_party,
-        { new: { merged_into: args.survivor_party, roles_moved: moved }, idempotency_key: args.idempotency_key });
+        { new: { merged_into: args.survivor_party, roles_moved: moved,
+                 ...(args.same_person_because ? { same_person_because: args.same_person_because } : {}) },
+          idempotency_key: args.idempotency_key });
       return { ok: true, roles_moved: moved,
                duplicate_roles_on_survivor: dup.rows.length ? dup.rows : undefined };
     }),
