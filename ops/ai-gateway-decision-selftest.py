@@ -79,7 +79,10 @@ class GatewayDecisionTests(unittest.TestCase):
         artifact = ai_gateway_decision.load_gateway_decision()
         self.assertEqual(
             [row["path"] for row in artifact["evidence_bindings"]],
-            list(ai_gateway_decision.REQUIRED_BINDING_PATHS),
+            [
+                "evals/ai/synthetic-observed-run.v1.json",
+                "evals/ai/model-boundary.v1.json",
+            ],
         )
         for binding in artifact["evidence_bindings"]:
             self.assertEqual(
@@ -87,6 +90,17 @@ class GatewayDecisionTests(unittest.TestCase):
                 hashlib.sha256((ROOT / binding["path"]).read_bytes()).hexdigest(),
             )
         self.assertEqual(len(artifact["provider_evidence"]), 1)
+
+    def test_gateway_decision_does_not_transitively_pin_router_or_evaluator_modules(self):
+        artifact = ai_gateway_decision.load_gateway_decision()
+        bound_paths = {row["path"] for row in artifact["evidence_bindings"]}
+        self.assertTrue(bound_paths.issubset({
+            "evals/ai/synthetic-observed-run.v1.json",
+            "evals/ai/model-boundary.v1.json",
+        }))
+        self.assertNotIn("evals/ai/function-router.v1.json", bound_paths)
+        self.assertNotIn("ops/ai_read_router.py", bound_paths)
+        self.assertNotIn("ops/ai_eval.py", bound_paths)
 
     def test_refuses_unknown_missing_duplicate_and_fake_multi_provider_evidence(self):
         unknown = self.valid()

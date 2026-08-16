@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused, offline tests for the synthetic read-only function router."""
 
+import copy
 import hashlib
 import inspect
 import json
@@ -37,33 +38,86 @@ class ReadRouterTests(unittest.TestCase):
         self.assertEqual(result, {"state": "refused", "violation_codes": [code]})
         self.assertNotIn(CANARY, json.dumps(result, sort_keys=True))
 
-    def test_policy_is_fixed_and_binds_two_safe_server_derived_read_routes(self):
+    def test_policy_is_fixed_and_contains_one_selected_route_row_per_tool(self):
         self.assertEqual(hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest(), ai_read_router.POLICY_SHA256)
         self.assertEqual([row["tool_name"] for row in self.policy["routes"]], ["find", "who-do-we-know"])
-        self.assertEqual(self.policy["tool_registry"]["path"], "mcp-server/src/tools.js")
-        self.assertEqual(
-            self.policy["action_risk_registry"]["path"],
-            "control-room/contracts/action-risk-registry.v1.json",
-        )
+        self.assertTrue(all(set(row) == ai_read_router.ROUTE_FIELDS for row in self.policy["routes"]))
+        self.assertTrue(all(row["protection"] == "read_only" for row in self.policy["routes"]))
+        self.assertNotIn("selected_tool_evidence", self.policy)
+        self.assertNotIn("tool_registry", self.policy)
+        self.assertNotIn("action_risk_registry", self.policy)
         self.assertNotIn("server_context", self.policy)
 
-    def test_selected_tool_evidence_exactly_matches_current_registry_in_test_only_node_check(self):
+    def test_runtime_does_not_pin_or_repin_the_whole_tools_registry(self):
+        source = (ROOT / "ops" / "ai_read_router.py").read_text()
+        self.assertNotIn("mcp-server/src/tools.js", source)
+        self.assertFalse((ROOT / "ops" / "ai-read-router-repin.py").exists())
+
+    def _live_tool_projection(self, selected_names, include_unrelated=False):
         probe = (
             "import { TOOLS } from './mcp-server/src/tools.js';"
-            "const names = ['find', 'who-do-we-know'];"
-            "process.stdout.write(JSON.stringify(names.map((tool_name) => ({"
-            "tool_name,write:Boolean(TOOLS[tool_name].write),"
-            "full_only:Boolean(TOOLS[tool_name].fullOnly),input_schema:TOOLS[tool_name].inputSchema}))));"
+            f"const names = {json.dumps(selected_names)};"
+            "const registry = {...TOOLS};"
+            + ("registry.__unrelated_projection_probe__ = {write:true,fullOnly:true,inputSchema:{type:'object'}};"
+               if include_unrelated else "")
+            + "process.stdout.write(JSON.stringify(names.map((tool_name) => {"
+            "const tool = registry[tool_name];"
+            "return tool ? {tool_name,write:Boolean(tool.write),full_only:Boolean(tool.fullOnly),"
+            "input_schema:tool.inputSchema} : null;})));"
         )
         run = subprocess.run(
             ["node", "--input-type=module", "-e", probe], cwd=ROOT,
             check=True, capture_output=True, text=True,
         )
-        current = json.loads(run.stdout)
-        embedded = [{
-            key: row[key] for key in ("tool_name", "write", "full_only", "input_schema")
-        } for row in self.policy["selected_tool_evidence"]]
-        self.assertEqual(embedded, current)
+        return json.loads(run.stdout)
+
+    def _live_risk_projection(self, selected_names):
+        generated = subprocess.run(
+            ["python3", "ops/action-risk-registry.py"], cwd=ROOT,
+            check=True, capture_output=True, text=True,
+        )
+        live_risks = json.loads(generated.stdout)["verbs"]
+        return [
+            ({"tool_name": name, "write": live_risks[name]["write"],
+              "protection": live_risks[name]["protection"]} if name in live_risks else None)
+            for name in selected_names
+        ]
+
+    def _assert_selected_semantics_match(self, policy):
+        selected_names = [row["tool_name"] for row in policy["routes"]]
+        embedded = [{key: row[key] for key in ai_read_router.TOOL_SEMANTIC_FIELDS}
+                    for row in policy["routes"]]
+        self.assertEqual(embedded, self._live_tool_projection(selected_names))
+        self.assertEqual(
+            [{"tool_name": row["tool_name"], "write": row["write"], "protection": row["protection"]}
+             for row in policy["routes"]],
+            self._live_risk_projection(selected_names),
+        )
+
+    def test_selected_route_and_risk_projections_match_current_live_outputs(self):
+        self._assert_selected_semantics_match(self.policy)
+
+    def test_unrelated_tools_are_outside_the_selected_semantic_projection(self):
+        selected_names = [row["tool_name"] for row in self.policy["routes"]]
+        self.assertEqual(
+            self._live_tool_projection(selected_names),
+            self._live_tool_projection(selected_names, include_unrelated=True),
+        )
+
+    def test_selected_name_write_full_only_schema_and_risk_drift_fail_parity(self):
+        mutations = (
+            ("tool_name", lambda row: row.update(tool_name="not-a-live-selected-tool")),
+            ("write", lambda row: row.update(write=True)),
+            ("full_only", lambda row: row.update(full_only=True)),
+            ("input_schema", lambda row: row["input_schema"].update(required=[])),
+            ("protection", lambda row: row.update(protection="NONE")),
+        )
+        for field, mutate in mutations:
+            with self.subTest(field=field):
+                drifted = copy.deepcopy(self.policy)
+                mutate(drifted["routes"][0])
+                with self.assertRaises(AssertionError):
+                    self._assert_selected_semantics_match(drifted)
 
     def test_accepts_normalized_find_with_code_owned_attribution_and_envelope_binding(self):
         proposal = {
@@ -152,10 +206,6 @@ class ReadRouterTests(unittest.TestCase):
         self.assertEqual(list(signature.parameters), ["proposal", "response_envelope"])
         forged = json.loads(FIXTURE_PATH.read_text())
         forged["routes"][0]["input_schema"]["required"] = []
-        forged["selected_tool_evidence"][0]["input_schema"]["required"] = []
-        forged["selected_tool_evidence"][0]["input_schema_digest"] = ai_read_router._canonical_digest(
-            forged["selected_tool_evidence"][0]["input_schema"]
-        )
         with self.assertRaises(TypeError):
             ai_read_router.route_read_only(
                 {"schema_version": 1, "tool_name": "find", "arguments": {}}, self.valid_envelope,
