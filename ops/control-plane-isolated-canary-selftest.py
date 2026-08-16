@@ -31,6 +31,12 @@ def main() -> int:
     notes_source = NOTES.read_text(encoding="utf-8")
     check("Notes canary permission probe is portable, not BSD-stat-specific",
           "stat.S_IMODE" in notes_source and "/usr/bin/stat -f" not in notes_source)
+    check("Notes full canary path uses portable mktemp templates",
+          all(template in notes_source for template in (
+              "carr-notes-sweep.XXXXXX",
+              "carr-notes-sweep-err.XXXXXX",
+              "carr-notes-sweep-body.XXXXXX",
+          )))
 
     with tempfile.TemporaryDirectory(prefix="carr-canary-") as raw:
         tmp = Path(raw)

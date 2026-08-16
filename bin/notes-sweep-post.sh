@@ -162,9 +162,12 @@ if [ "${1:-}" = "--status" ]; then
   exit 0
 fi
 
-RUNTMP="$(mktemp -d -t carr-notes-sweep)"
-ERRFILE="$(mktemp -t carr-notes-sweep-err)"
-BODYFILE="$(mktemp -t carr-notes-sweep-body)"
+# BSD mktemp accepts a bare -t prefix; GNU mktemp requires an XXXXXX
+# template.  The explicit templates preserve both behaviours for canaries
+# and the production Notes path.
+RUNTMP="$(mktemp -d -t carr-notes-sweep.XXXXXX)"
+ERRFILE="$(mktemp -t carr-notes-sweep-err.XXXXXX)"
+BODYFILE="$(mktemp -t carr-notes-sweep-body.XXXXXX)"
 trap 'rm -rf "$RUNTMP" "$ERRFILE" "$BODYFILE"' EXIT
 
 # ---------------------------------------------------------------- 1. scan Notes
