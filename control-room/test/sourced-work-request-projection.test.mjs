@@ -14,9 +14,9 @@ test("sourced captured-request projection is a closed, versioned read contract",
   assert.equal(contract.version, "1.0.0");
   assert.match(contract.status, /^phase1_/);
   assert.equal(contract.transport, "authenticated MCP-backed read, not implemented by this static prototype");
-  assert.deepEqual(contract.lifecycle, {canonical_from: ["captured", "triaged"], projection_state: "queued"});
+  assert.deepEqual(contract.lifecycle, {canonical_from: ["captured", "triaged", "ready"], projection_state: "queued"});
   assert.deepEqual(contract.output.required_fields, [
-    "human_ref", "title", "desired_outcome", "acceptance_criteria", "source", "triage", "state", "next_human_action", "actions"
+    "human_ref", "title", "desired_outcome", "acceptance_criteria", "source", "triage", "plan", "shape", "state", "next_human_action", "actions"
   ]);
   assert.deepEqual(contract.output.actions, []);
   assert.deepEqual(contract.output.next_human_action.captured, {label: "Review and triage", effect: "none"});
@@ -29,7 +29,8 @@ test("triaged projection supplies only durable triage readback and another inert
   assert.match(contract.output.triage.rule, /never an action authority/i);
   assert.deepEqual(contract.output.next_human_action, {
     captured: {label: "Review and triage", effect: "none"},
-    triaged: {label: "Prepare scope and acceptance", effect: "none"}
+    triaged: {label: "Prepare scope and acceptance", effect: "none"},
+    ready: {label: "Plan accepted", effect: "none"}
   });
 });
 

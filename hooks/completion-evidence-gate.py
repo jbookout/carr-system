@@ -65,6 +65,8 @@ WRITE_ACTION_EXACT = {
                               # is not generalized because report-style reads exist
     "review-and-triage",    # Program 6 human state transition; exact because
                               # other review-* actions include non-mutating reads
+    "propose-ready-plan",   # Program 6 immutable plan proposal; explicit evidence coverage
+    "accept-ready-plan",    # Program 6 human readiness transition; never execution
     "review-deal",
 }
 NESTED_CARR_CALL = re.compile(r"(?:tools\.)?(mcp__carr(?:_records)?__([A-Za-z0-9_]+))")

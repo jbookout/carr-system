@@ -134,6 +134,16 @@ CASES = [
         codex_tool("exec", "await tools.mcp__carr__review_and_triage({ human_ref: 'WR-000001' });"),
         codex_assistant("Completed."),
     ], True),
+    ("Codex sourced ready-plan proposal requires evidence", [
+        codex_user("prepare the bounded plan"),
+        codex_tool("exec", "await tools.mcp__carr__propose_ready_plan({ human_ref: 'WR-000001' });"),
+        codex_assistant("Completed."),
+    ], True),
+    ("Codex sourced ready-plan acceptance requires evidence", [
+        codex_user("accept the exact plan"),
+        codex_tool("exec", "await tools.mcp__carr__accept_ready_plan({ human_ref: 'WR-000001' });"),
+        codex_assistant("Completed."),
+    ], True),
     ("CARR read action permits completion", [
         codex_user("reconcile Musicologie"),
         codex_tool("exec", "await tools.mcp__carr__patch_deal_field({ id: 'd1' });"),

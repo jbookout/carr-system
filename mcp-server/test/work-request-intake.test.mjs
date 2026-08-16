@@ -207,3 +207,18 @@ test("work-request-card keeps a triaged request queued and returns only durable 
   assert.deepEqual(result.next_human_action, { label: "Prepare scope and acceptance", effect: "none" });
   assert.deepEqual(result.actions, []);
 });
+
+test("work-request-card retains triage readback when a ready request remains queued", async () => {
+  const db = new IntakeFake(); const original = db.query.bind(db);
+  db.query = async (sql, params) => { const result = await original(sql, params); if (String(sql).includes("work_request_card")) Object.assign(result.rows[0], {
+    state: "ready", triage_classification: "operational", triaged_by_actor_slug: "joe", triaged_at: "2026-08-16T00:00:00Z",
+    plan_ref: "PLAN-000001", plan_hash: "sha256:" + "a".repeat(64),
+    scope_summary: "Inspect evidence and record a bounded result",
+    runbook_ref: "doctrine:runbook#safe-plan"
+  }); return result; };
+  const card = await executeRegisteredTool(db, { ...ACTOR }, "work-request-card", { work_request: "WR-0001" });
+  assert.equal(card.projection_state, "queued"); assert.equal(card.triage.classification, "operational");
+  assert.equal(card.plan.plan_ref, "PLAN-000001");
+  assert.equal(card.plan.scope_summary, "Inspect evidence and record a bounded result");
+  assert.deepEqual(card.next_human_action, { label: "Plan accepted", effect: "none" }); assert.deepEqual(card.actions, []);
+});
