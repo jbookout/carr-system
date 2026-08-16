@@ -8,6 +8,8 @@
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
 import { investigationTools } from "./investigation.js";
+import { capabilityProgramTools } from "./capability-program.js";
+import { workShapeTools } from "./work-shape.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -96,6 +98,13 @@ async function withEnvelope(client, actor, verb, args, fn) {
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
     hint: "generate a UUID per intended action; retries reuse the SAME key" });
   const hash = await requestHash({ ...args, idempotency_key: undefined });
+  // Shape writes need same-key serialization before their replay read:
+  // otherwise two first calls can both see no tool_call row, and the loser
+  // reports a version conflict instead of the promised replay.
+  // Keep this scoped until the shared envelope's existing fake-client suites
+  // are migrated to model the extra query for every historical write verb.
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition")
+    await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
     if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
@@ -494,8 +503,30 @@ export function coerceArgsToSchema(schema, args, path = "") {
         hint: `${where} is declared ${spec.type}; pass a number` });
     }
     if (spec.type === "object") { coerceArgsToSchema(spec, v, where); continue; }
-    if (spec.type === "array" && Array.isArray(v) && spec.items) {
-      v.forEach((item, i) => coerceArgsToSchema(spec.items, item, `${where}[${i}]`));
+    // A JSON-STRING ARRAY IS STILL AN ARRAY ARGUMENT, and until 2026-08-15 it fell
+    // straight through here uncoerced, because this branch required Array.isArray
+    // BEFORE it would look at anything. What that cost, live: doctrine-sections
+    // measured `.length` on an ~80-character string and answered
+    // "batch_too_large, max 50" for a batch of two, while a single id slipped
+    // under the limit and died casting a string to uuid[]. claim-doctrine-sections
+    // iterated the same string into characters, so no session could claim a
+    // doctrine section and the single-writer write path was down for hours.
+    //
+    // Parsed HERE rather than in the handlers, per the 2026-08-13 ruling that put
+    // coercion at the choke point instead of in seventeen of them. Every verb
+    // taking an array gets this, not only the three that happened to be caught.
+    let value = v;
+    if (spec.type === "array" && typeof value === "string") {
+      const text = value.trim();
+      if (text.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(text);
+          if (Array.isArray(parsed)) { args[key] = value = parsed; }
+        } catch { /* leave it; the handler's own validation refuses it by name */ }
+      }
+    }
+    if (spec.type === "array" && Array.isArray(value) && spec.items) {
+      value.forEach((item, i) => coerceArgsToSchema(spec.items, item, `${where}[${i}]`));
     }
   }
   return args;
@@ -1628,6 +1659,61 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
   return { old_value: oldRow.rows[0].value, new_value: value };
 }
 
+const FIND_CATCH_UP_QUERY_MAX = 200;
+const FIND_CATCH_UP_LIMIT_MAX = 50;
+const FIND_CATCH_UP_CANDIDATE_CAP = 25;
+const CONVERSATION_TIMELINE_MAX = 20;
+const CONVERSATION_PATH_MAX = 10;
+
+function kindFromRef(ref) {
+  if (/^L-/i.test(ref)) return "lead";
+  if (/^C-/i.test(ref)) return "client";
+  if (/^[VT]-/i.test(ref)) return "vendor";
+  if (/^P-/i.test(ref)) return "party";
+  return "record";
+}
+
+// Turn find's deliberately rich result into the one thing a composition may
+// act on: an explicit LIVE target. Related lead/client links and deals_via_link
+// are context, not matches, so they never enter this list. Ref-bearing rows are
+// deduplicated because find can surface the same survivor in both parties and
+// organizations; deal-name rows are not deduplicated because two deals with one
+// name are still two records and therefore must stop for disambiguation.
+function findCatchUpCandidates(found) {
+  if (!found || typeof found !== "object" || Array.isArray(found) ||
+      !Array.isArray(found.parties) || !Array.isArray(found.organizations) ||
+      !Array.isArray(found.deals))
+    throw new ToolError({ error: "find_result_invalid" });
+
+  const refs = new Map();
+  const addRef = (target, name, kind) => {
+    if (typeof target !== "string" || !target.trim()) return;
+    const clean = target.trim();
+    if (!refs.has(clean)) refs.set(clean, {
+      kind: typeof kind === "string" && kind ? kind : kindFromRef(clean),
+      name: typeof name === "string" && name ? name : clean,
+      target: clean,
+    });
+  };
+
+  for (const row of found.parties) {
+    if (row && row.merged === false) addRef(row.ref, row.name, row.kind);
+  }
+  for (const row of found.organizations) {
+    if (!row || typeof row !== "object") continue;
+    for (const ref of [...(Array.isArray(row.refs) ? row.refs : []),
+                       ...(Array.isArray(row.role_refs) ? row.role_refs : [])])
+      addRef(ref, row.name, kindFromRef(ref));
+  }
+
+  const deals = found.deals.flatMap((row) =>
+    row && typeof row.name === "string" && row.name.trim()
+      ? [{ kind: "deal", name: row.name.trim(), target: row.name.trim() }]
+      : []);
+  return [...refs.values(), ...deals].sort((a, b) =>
+    a.target.localeCompare(b.target) || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
+}
+
 // ---------- the registry ----------
 // Each: { description, inputSchema, write: bool, humanOnly?: bool, handler(client, actor, args) }
 
@@ -2172,6 +2258,120 @@ export const TOOLS = {
     },
   },
 
+  "find-and-catch-up": {
+    write: false,
+    description: "Find one live person, practice, vendor, or deal by name and immediately return that record's catch-me-up timeline. This is the bounded read-only composition of find then catch-me-up: exactly one live match proceeds; zero returns not_found; multiple matches return needs_disambiguation and no timeline. Retired aliases, linked neighbours, and related deals are never selected as the target. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      query: { type: "string", description: `name to find, at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
+      limit: { type: "integer", minimum: 1, maximum: FIND_CATCH_UP_LIMIT_MAX, default: 20,
+        description: `timeline rows returned, 1-${FIND_CATCH_UP_LIMIT_MAX}` },
+    }, required: ["query"] },
+    handler: async (c, actor, args) => {
+      const allowed = new Set(["query", "limit"]);
+      if (!args || typeof args !== "object" || Array.isArray(args) ||
+          Object.keys(args).some((key) => !allowed.has(key)))
+        throw new ToolError({ error: "unexpected_arguments" });
+
+      if (typeof args.query !== "string" || !args.query.trim() ||
+          args.query.trim().length > FIND_CATCH_UP_QUERY_MAX)
+        throw new ToolError({ error: "invalid_query",
+          hint: `query must be a nonempty string of at most ${FIND_CATCH_UP_QUERY_MAX} characters` });
+      const query = args.query.trim();
+      const limit = args.limit === undefined ? 20 : args.limit;
+      if (!Number.isInteger(limit) || limit < 1 || limit > FIND_CATCH_UP_LIMIT_MAX)
+        throw new ToolError({ error: "invalid_limit",
+          hint: `limit must be an integer from 1 to ${FIND_CATCH_UP_LIMIT_MAX}` });
+
+      // Reuse the registered read handlers directly on the same reader client.
+      // This is not a generic composite dispatcher: the two names are fixed in
+      // code, no callback/tool name/provider is accepted, and the second handler
+      // is unreachable until the first yields exactly one live target.
+      const found = await TOOLS["find"].handler(c, actor, { query });
+      const candidates = findCatchUpCandidates(found);
+      if (candidates.length === 0) {
+        const retiredMatches = found.parties.filter((row) => row?.merged === true).length +
+          found.organizations.reduce((total, row) => total +
+            (Number.isInteger(row?.retired_aliases) ? row.retired_aliases : 0), 0);
+        return { state: "not_found", query, candidates: [], retired_matches: retiredMatches,
+          hint: retiredMatches
+            ? "Only retired aliases matched; search the survivor name or call catch-me-up with a known retired ref."
+            : "No live record matched this name." };
+      }
+      if (candidates.length !== 1) {
+        return { state: "needs_disambiguation", query,
+          candidate_count: candidates.length,
+          candidates: candidates.slice(0, FIND_CATCH_UP_CANDIDATE_CAP),
+          candidates_truncated: candidates.length > FIND_CATCH_UP_CANDIDATE_CAP,
+          hint: "Choose one exact target and call catch-me-up; this verb never guesses." };
+      }
+
+      const match = candidates[0];
+      const catchUp = await TOOLS["catch-me-up"].handler(c, actor, { ref: match.target, limit });
+      return { state: "completed", query, match: { ...match }, catch_up: catchUp };
+    },
+  },
+
+  "prepare-conversation": {
+    write: false,
+    description: "Prepare for one conversation by resolving a name to exactly one live record, returning its recent catch-up timeline, and—when the target is a person or organization—showing the existing introduction paths to that exact ref. This is a fixed bounded read composition: ambiguous or missing identity stops before timeline/graph reads; deals receive timeline context but are never pretended to be intro-graph people. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      query: { type: "string", description: `person, organization, vendor, or deal name; at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
+      timeline_limit: { type: "integer", minimum: 1, maximum: CONVERSATION_TIMELINE_MAX, default: 10,
+        description: `recent timeline rows, 1-${CONVERSATION_TIMELINE_MAX}` },
+      path_limit: { type: "integer", minimum: 1, maximum: CONVERSATION_PATH_MAX, default: 10,
+        description: `introduction paths, 1-${CONVERSATION_PATH_MAX}` },
+      max_depth: { type: "integer", minimum: 1, maximum: WHO_MAX_DEPTH, default: WHO_MAX_DEPTH,
+        description: `introduction hops, 1-${WHO_MAX_DEPTH}` },
+    }, required: ["query"] },
+    handler: async (c, actor, args) => {
+      const allowed = new Set(["query", "timeline_limit", "path_limit", "max_depth"]);
+      if (!args || typeof args !== "object" || Array.isArray(args) ||
+          Object.keys(args).some((key) => !allowed.has(key)))
+        throw new ToolError({ error: "unexpected_arguments" });
+      if (typeof args.query !== "string" || !args.query.trim() ||
+          args.query.trim().length > FIND_CATCH_UP_QUERY_MAX)
+        throw new ToolError({ error: "invalid_query",
+          hint: `query must be a nonempty string of at most ${FIND_CATCH_UP_QUERY_MAX} characters` });
+
+      const timelineLimit = args.timeline_limit === undefined ? 10 : args.timeline_limit;
+      const pathLimit = args.path_limit === undefined ? 10 : args.path_limit;
+      const maxDepth = args.max_depth === undefined ? WHO_MAX_DEPTH : args.max_depth;
+      if (!Number.isInteger(timelineLimit) || timelineLimit < 1 ||
+          timelineLimit > CONVERSATION_TIMELINE_MAX)
+        throw new ToolError({ error: "invalid_timeline_limit" });
+      if (!Number.isInteger(pathLimit) || pathLimit < 1 || pathLimit > CONVERSATION_PATH_MAX)
+        throw new ToolError({ error: "invalid_path_limit" });
+      if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > WHO_MAX_DEPTH)
+        throw new ToolError({ error: "invalid_max_depth" });
+
+      // Three fixed read stages, no caller-selected route: find, catch-up, then
+      // (only for a live non-deal target) the introduction graph. The first two
+      // already live behind find-and-catch-up's exact one-candidate gate.
+      const located = await TOOLS["find-and-catch-up"].handler(c, actor, {
+        query: args.query.trim(),
+        limit: timelineLimit,
+      });
+      if (located.state !== "completed")
+        return { workflow: "prepare-conversation", ...located };
+
+      if (located.match.kind === "deal") {
+        return { workflow: "prepare-conversation", ...located,
+          introduction: {
+            status: "not_applicable",
+            reason: "Deals do not represent people or organizations in the introduction graph.",
+          } };
+      }
+
+      const graph = await TOOLS["who-do-we-know"].handler(c, actor, {
+        target: located.match.target,
+        max_depth: maxDepth,
+        limit: pathLimit,
+      });
+      return { workflow: "prepare-conversation", ...located,
+        introduction: { status: "evaluated", ...graph } };
+    },
+  },
+
   "today-triage": {
     write: false,
     description: "What needs attention now: due next-actions (next_action.due_on, suppressed by hold_until), critical_date rows inside 14 days, untriaged ingest items. The morning-brief substrate.",
@@ -2415,6 +2615,38 @@ export const TOOLS = {
           note: { type: "string" } }, required: ["from_ref","to_ref","kind"] } },
     }, required: ["idempotency_key","ref","kind","summary"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "log-activity", args, async () => {
+      // A TOUCH CANNOT HAVE HAPPENED TOMORROW. Found 2026-08-15: of 59 vendors
+      // carrying a last-touch date, four were dated after today — the nearest
+      // three days out, which reads exactly like a booked meeting logged as
+      // though it had already happened.
+      //
+      // This is not tidiness. last_touch is what staleness is measured FROM, so
+      // a vendor whose last touch is in the future can never read as stale no
+      // matter how long it has actually been. The row goes quiet and no surface
+      // can tell.
+      //
+      // The field already meant this: occurred_at is documented above as "when
+      // it happened", and the activity table draws the same boundary from the
+      // other side — migration 0017 stopped a `note` moving last_touch because a
+      // note is annotation rather than contact. The future has its own verbs.
+      //
+      // The window is for CLOCK SKEW between a caller and the server, not for
+      // scheduling: minutes, deliberately not hours.
+      const SKEW_MS = 5 * 60 * 1000;
+      if (args.occurred_at) {
+        const when = Date.parse(args.occurred_at);
+        // An unparseable date is a different problem; this guard judges future
+        // ones and does not invent a verdict on malformed input.
+        if (!Number.isNaN(when) && when > Date.now() + SKEW_MS)
+          throw new ToolError({ error: "occurred_at_in_future",
+            occurred_at: args.occurred_at,
+            why: "occurred_at records when a touch HAPPENED. A future date makes the subject " +
+                 "permanently un-stale — every staleness measure counts from last_touch, so a " +
+                 "row dated ahead of today can never surface as gone quiet.",
+            hint: "If this already happened, use its real date. If it is SCHEDULED, it is not a " +
+                  "touch yet: set-next-action carries the ball you owe, and add-critical-date " +
+                  "carries a dated obligation on a deal." });
+      }
       const s = await resolveSubject(c, args.ref);
       const r = await c.query(
         `insert into activity (occurred_at, actor_id, kind, summary, detail, owed, ${FK[s.type]}, source)
@@ -2759,15 +2991,17 @@ export const TOOLS = {
   },
 
   "set-lead": {
-    write: true,
-    description: "THE handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
+    write: true, humanOnly: true,
+    description: "THE human ownership handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Ownership is a matter between the two humans, never a machine's call. Requires base_version from a fresh read; the locked deal version makes simultaneous handoffs conflict instead of silently replacing one another. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
-      new_lead: { type: "string", enum: ["joe","dell"] } },
-      required: ["idempotency_key","deal","new_lead"] },
+      new_lead: { type: "string", enum: ["joe","dell"] },
+      base_version: { type: "integer" } },
+      required: ["idempotency_key","deal","new_lead","base_version"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-lead", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      await versionGuard(c, "deal", s.id, args.base_version);
       const na = await c.query("select id from actor where slug=$1", [args.new_lead]);
       const prev = await c.query(
         `update deal_participant set to_at=now() where deal_id=$1 and role='lead' and to_at is null
@@ -3780,6 +4014,8 @@ export const TOOLS = {
       human_quote: { type: "string", description: "the partner's own words, when he said it" },
       working_attachment: { type: "string" }, pdf_attachment: { type: "string" },
       lint_passed: { type: "boolean" }, leak_check_passed: { type: "boolean" },
+      format_exception: { type: "string", description:
+        "Required ONLY to record a send that goes against Joe's format split — an LOI or letter leaving as PDF, or a spreadsheet leaving as a live file. State why (the listing agent's system blocks .docx, the client asked for the live sheet). Joe's rule ends with 'unless the partner says otherwise'; this is where the partner says otherwise." },
       note: { type: "string" } },
       required: ["idempotency_key","document_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-document-status", args, async () => {
@@ -3790,6 +4026,61 @@ export const TOOLS = {
       if (args.status === "sent" && actor.kind !== "human")
         throw new ToolError({ error: "human_only",
           hint: "'sent' records that a partner sent it; only a human can state that" });
+
+      // JOE'S SPLIT ON OUTBOUND FORMAT, in his words: "the LOI is sent over to the
+      // listing agent in word format so they can easily edit or revise. i know i
+      // said everything goes out pdf but thats really just spreadsheets that go
+      // out pdf so noone can see the formulas"
+      //
+      // TWO RULES, and the correction is the important half. An LOI or letter
+      // goes out in WORD, because the listing agent editing it IS the
+      // negotiation; a PDF makes them retype it. A SPREADSHEET goes out as PDF so
+      // nobody reads our formulas. The older blanket "everything goes out PDF" is
+      // superseded and would break the negotiation it exists to start.
+      //
+      // THIS IS NOT ABOUT WHETHER THE FILE WAS MADE. output_kinds {working,pdf}
+      // names ROLES, not formats, and both files exist by now. The question here
+      // is which one we handed over — and this verb is the only place a human
+      // states that a document went out at all.
+      if (args.status === "sent") {
+        const tk = await c.query(
+          `/* outbound_template_kind */
+           select coalesce(t.field_map->>'template_kind',
+                           lower(regexp_replace(t.source_path, '^.*\\.', ''))) as template_kind
+             from document d join doc_template t on t.id = d.template_id
+            where d.id = $1`, [args.document_id]);
+        const kind = (tk.rows[0]?.template_kind || "").toLowerCase();
+        // Attachments and the status change often land in one call, so the gate
+        // reads the MERGED state rather than the stored row alone.
+        const working = args.working_attachment ?? cur.working_attachment;
+        const pdf = args.pdf_attachment ?? cur.pdf_attachment;
+        // A throwaway word is not a decision. Length rather than a banned-word
+        // list, for the same reason as confirm-merge's basis: any such list is one
+        // synonym from useless.
+        const excused = String(args.format_exception ?? "").trim().length >= 20;
+
+        const wordKinds = ["docx", "doc", "dotx", "rtf"];
+        const sheetKinds = ["xlsx", "xls", "xlsm", "csv"];
+        if (!excused) {
+          if (wordKinds.includes(kind) && !working)
+            throw new ToolError({ error: "outbound_format", template_kind: kind,
+              ruling: "Joe: \"the LOI is sent over to the listing agent in word format so they can " +
+                      "easily edit or revise.\"",
+              why: "An LOI or letter goes out in WORD. The listing agent being able to edit or revise " +
+                   "it IS the negotiation workflow; a PDF makes them retype it. No working file is " +
+                   "recorded on this document, so what is on file to have been sent is the PDF.",
+              hint: "Record the Word file as working_attachment. If the send genuinely went out as PDF " +
+                    "— their system blocks .docx, say — pass format_exception with the reason." });
+          if (sheetKinds.includes(kind) && !pdf)
+            throw new ToolError({ error: "outbound_format", template_kind: kind,
+              ruling: "Joe: \"thats really just spreadsheets that go out pdf so noone can see the formulas\"",
+              why: "A spreadsheet goes out as PDF. A live workbook carries our formulas, and the " +
+                   "recipient can read every one of them.",
+              hint: "Record the PDF as pdf_attachment. If the client genuinely needed the live sheet, " +
+                    "pass format_exception with the reason." });
+        }
+      }
+
       const sets = [], vals = [];
       const put = (col, v) => { if (v !== undefined && v !== null) { vals.push(v); sets.push(`${col}=$${vals.length}`); } };
       put("sent_status", args.status);
@@ -3803,7 +4094,10 @@ export const TOOLS = {
       await c.query(`update document set ${sets.join(", ")} where id=$${vals.length}`, vals);
       await writeEvent(c, actor, "update-document-status", "deal", cur.deal_id,
         { field: "document.sent_status", old: { sent_status: cur.sent_status },
-          new: { document_id: args.document_id, sent_status: args.status || cur.sent_status },
+          new: { document_id: args.document_id, sent_status: args.status || cur.sent_status,
+                 // An exception nobody can find later is indistinguishable from an
+                 // inconsistency, so it rides the event.
+                 ...(args.format_exception ? { format_exception: args.format_exception } : {}) },
           human_quote: args.human_quote || null, idempotency_key: args.idempotency_key });
       return { ok: true, document_id: args.document_id, sent_status: args.status || cur.sent_status };
     }),
@@ -3929,7 +4223,9 @@ export const TOOLS = {
     write: true, humanOnly: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
-      idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" } },
+      idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
+      same_person_because: { type: "string", description:
+        "Required ONLY when one side holds just a lead row and the other just a client row. Joe's ruling: everyone starts as a lead, so an L- and a C- ref for one person is the system working, not a duplicate. State what makes these TWO party rows for ONE human — matching NPI, address, the intake record — not that the names match." } },
       required: ["idempotency_key","survivor_party","merged_party"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-merge", args, async () => {
       // [0069] Inputs used to be assumed party uuids; a V- ref passed here died in
@@ -3959,6 +4255,52 @@ export const TOOLS = {
       }
       args = { ...args, survivor_party: surv.partyId, merged_party: merg.partyId };
 
+      // JOE'S RULING, in his words: "Tyrer is a client now duh. everyone starts
+      // as a lead." A lead record and a client record for the same person are
+      // NOT a duplicate — every party enters as a lead and converts, and both
+      // refs coexist by design.
+      //
+      // WHY THIS REFUSES RATHER THAN WARNS. Merging is destructive in a way that
+      // does not undo: it retires the loser's ref permanently, and a lost ref is
+      // never reissued, so every piece of doctrine quoting it goes dead and has
+      // to be repointed by hand.
+      //
+      // WHY IT IS NOT A FLAT NO. The opposite case is real and this verb's own
+      // history records it: Petersen was two party rows for one human, one
+      // carrying the lead and one the client, and merging them was correct. So
+      // the gate refuses the merge whose only basis is that the names match, and
+      // takes `same_person_because` as the evidence that it is that shape.
+      const roleKinds = async (partyId) => {
+        const r = await c.query(
+          `/* role_kinds_for_party */
+           select 'lead' as kind from lead where party_id=$1
+           union all select 'client' from client where party_id=$1 and merged_into is null
+           union all select 'vendor' from vendor where party_id=$1`, [partyId]);
+        return new Set(r.rows.map(x => x.kind));
+      };
+      const [survRoles, mergRoles] = [await roleKinds(surv.partyId), await roleKinds(merg.partyId)];
+      const only = (set, kind) => set.size === 1 && set.has(kind);
+      // Symmetric on purpose: swapping the arguments must not slip past it.
+      const isLeadClientPair =
+        (only(survRoles, "client") && only(mergRoles, "lead")) ||
+        (only(survRoles, "lead") && only(mergRoles, "client"));
+      if (isLeadClientPair) {
+        // A throwaway word is not a basis. The bar is length rather than a
+        // vocabulary list because the failure being prevented is a session
+        // typing "yes" to clear a gate, and any list of banned words is one
+        // synonym from useless.
+        const stated = String(args.same_person_because ?? "").trim();
+        if (stated.length < 20)
+          throw new ToolError({ error: "lead_client_pair",
+            ruling: "Joe, on the Tyrer record: \"Tyrer is a client now duh. everyone starts as a lead.\"",
+            why: "A lead record and a client record for the same person are not a duplicate. Every party " +
+                 "enters as a lead and converts to a client; both refs coexist by design. Merging them " +
+                 "retires one ref permanently, and a lost ref is never reissued.",
+            hint: "If these really are TWO party rows for ONE human — the Petersen shape — pass " +
+                  "same_person_because with what establishes it (matching NPI, address, the intake " +
+                  "record). Not that the names match." });
+      }
+
       // THE ROLE ROWS MOVE WITH THE PERSON. Until 2026-08-02 this verb set merged_into and
       // nothing else, so the loser's lead/client/vendor rows were left pointing at a party
       // that no longer resolves — they vanished from every party-based view while still
@@ -3985,8 +4327,12 @@ export const TOOLS = {
          union all select 'vendor', count(*) from vendor where party_id=$1 having count(*)>1`,
         [args.survivor_party]);
 
+      // The stated basis rides the event: a merge is permanent, so the reason it
+      // was allowed has to outlive the session that gave it.
       await writeEvent(c, actor, "confirm-merge", "party", args.merged_party,
-        { new: { merged_into: args.survivor_party, roles_moved: moved }, idempotency_key: args.idempotency_key });
+        { new: { merged_into: args.survivor_party, roles_moved: moved,
+                 ...(args.same_person_because ? { same_person_because: args.same_person_because } : {}) },
+          idempotency_key: args.idempotency_key });
       return { ok: true, roles_moved: moved,
                duplicate_roles_on_survivor: dup.rows.length ? dup.rows : undefined };
     }),
@@ -5866,12 +6212,36 @@ export const TOOLS = {
   },
 };
 
+// These names describe server-owned authority, never data a tool invocation may
+// claim. This is deliberately TOP-LEVEL only: record findings, template maps,
+// metrics, and correction payloads legitimately carry free-form business keys
+// such as `action` or `profile`, and those nested keys cannot widen authority.
+// call-verb recursion and composite dispatch each hand their inner arguments
+// back to this boundary as a new top-level invocation.
+const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
+  "tenant", "tenant_id", "organization_tenant_id", "sponsor", "sponsoring_human_id",
+  "sponsoring_human_slug", "human_slug", "identity", "actor", "runtime_principal",
+  "authorization", "authorization_class", "profile", "capability", "capabilities",
+  "action", "actions", "action_authority", "action_authorities", "allowed_actions",
+  "write", "writes_records", "calls_models", "call_models",
+]);
+
+export function assertNoCallerAuthorityFields(args) {
+  if (args && typeof args === "object" && !Array.isArray(args) &&
+      Object.keys(args).some((key) => RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key)))
+    throw new ToolError({ error: "caller_authority_field_forbidden" });
+  return args;
+}
+
 // One registered-handler path for direct MCP calls and composite verbs. The
-// MCP layer applies its profile gate first; this helper owns registry lookup,
-// the human-only gate, and the handler/envelope invocation itself.
+// MCP layer applies its profile gate first; this helper owns caller-authority,
+// registry lookup, human-only, coercion, and handler/envelope gates. Keeping
+// the first gate here makes direct MCP, call-verb recursion, and composites
+// fail closed before a handler or database client can be used.
 export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  assertNoCallerAuthorityFields(args);
   // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
   // not just the refusal. Every non-human door (probe/reviewer/agent-token,
   // and — since this same day — the LOCAL_TOKENS machine door local-verb.mjs
@@ -6300,7 +6670,7 @@ Object.assign(TOOLS, {
       const client = await c.query(
         `insert into client (roster_ref,party_id,client_type,vertical,status,
                              acquisition_source,owner_id,owner_label,created_by,updated_by)
-         values ($1,$2,'national_account',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+         values ($1,$2,'national_account',$3,'engaged','national_account',$4,$5,$4,$4) returning id`,
         [ref, org.rows[0].id, args.vertical || null, actor.id, actor.display]);
       const owner = (await c.query("select id from actor where slug=$1", [args.owner])).rows[0];
       await c.query(
@@ -6347,7 +6717,7 @@ Object.assign(TOOLS, {
         const made = await c.query(
           `insert into client (roster_ref,party_id,client_type,vertical,status,
                                acquisition_source,owner_id,owner_label,created_by,updated_by)
-           values ($1,$2,'franchise',$3,'active','national_account',$4,$5,$4,$4) returning id`,
+           values ($1,$2,'franchise',$3,'active_deal','national_account',$4,$5,$4,$4) returning id`,
           [ref, person.rows[0].id, args.segment || null, actor.id, actor.display]);
         sub = { id: made.rows[0].id, roster_ref: ref };
       }
@@ -6775,3 +7145,9 @@ Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
 // Bounded investigation control plane (0098): deterministic signals, one
 // reasoning owner, evidence-only worker packets, explicit branch termination.
 Object.assign(TOOLS, investigationTools({ withEnvelope, writeEvent, ToolError }));
+
+// One fixed ordered AI-capability portfolio over canonical Work Requests.
+Object.assign(TOOLS, capabilityProgramTools({ withEnvelope, writeEvent, ToolError }));
+
+// Evidence-backed implementation form, linked to canonical Work Requests.
+Object.assign(TOOLS, workShapeTools({ withEnvelope, writeEvent, ToolError }));

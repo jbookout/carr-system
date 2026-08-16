@@ -13,12 +13,15 @@
 // LIKE correlation.js, THE CLASSIFIER HALF OF THIS FILE IS DB-FREE AND PURE —
 // httpFailureClass, rpcInternalErrorFailureClass, and incidentSignature take
 // no client, no env, no cloudflare: import, so node --test exercises them
-// directly. Only recordWorkerFailure touches a database, and it does so
-// through an injected `query` function (text, params) => Promise<{rows}>>,
-// the exact convention mcp.js's readCallInsertSQL/recordReadCall already use —
-// so ITS logic is also unit-testable with a fake, and only the thin
-// production wiring (neon(env.DATABASE_URL_WRITER)) goes untested here, same
-// division tool-read-call.test.mjs already draws.
+// directly. recordWorkerFailure touches a database only through an injected
+// `query` function (text, params) => Promise<{rows}>, the exact convention
+// mcp.js's readCallInsertSQL/recordReadCall already use — so ITS logic is also
+// unit-testable with a fake. THE ONE REMAINING SEAM, wrapNeonRows, is the
+// adapter between that internal {rows} contract and what neon(dsn).query()
+// ACTUALLY returns (a bare array — see its own comment for the production
+// incident this caused), and it is exported and unit-tested on its own for
+// exactly that reason: it is the one place a correct-looking internal contract
+// met a real driver and disagreed, silently, in production.
 //
 // ── THE INCLUSION RULE, STATED ONCE, DEFENDED HERE ─────────────────────────
 // Record exactly two things a failed request can be. Never a row per request —
@@ -73,6 +76,7 @@
 // an unhandled anything).
 
 import { neon } from "@neondatabase/serverless";
+import { logLine } from "./correlation.js";
 
 const SERVICE_KEY = "carr-mcp";
 const DEFAULT_SEVERITY = "SEV-3"; // contained: one request failed, not the whole service —
@@ -169,10 +173,25 @@ export async function recordWorkerFailure(query, {
     if (!incidentId) return; // opening lost a race and the re-check (inside openIncident) still found nothing
 
     await appendFactIfNew(query, incidentId, factSourceRef, factText);
-  } catch {
-    // swallow — see file header: a recording failure must never surface as a
-    // request failure, and by the time this runs (ctx.waitUntil) the response
-    // is already on the wire.
+  } catch (e) {
+    // SWALLOWED, NEVER SILENT (2026-08-14, defect cae5be2e, second finding).
+    // The first build of this file swallowed with NO log line at all, and that
+    // is exactly what let a real bug (see wrapNeonRows below) run in production
+    // for hours with zero trace anywhere: every single call reached this catch,
+    // and nothing said so. A recording failure must never change the response
+    // the caller is waiting on — that discipline stays — but "never surfaces to
+    // the caller" is not the same promise as "never observable at all". One
+    // structured line, correlation id + error name/message only — no query
+    // text, no params, no client content — so the NEXT failure is diagnosable
+    // from `wrangler tail` instead of requiring a live probe plus a database
+    // archaeology pass to find, the way this one did.
+    logLine("error", "worker_failure_record_error", {
+      correlation_id: correlationId || null,
+      route_key: routeKey || null,
+      failure_class: failureClass || null,
+      error_name: (e && e.name) || typeof e,
+      error_message: String((e && e.message) || e).slice(0, 300),
+    });
   }
 }
 
@@ -241,14 +260,93 @@ async function appendFactIfNew(query, incidentId, sourceRef, text) {
     [incidentId]);
 }
 
+// ── THE ROOT CAUSE OF THE FIRST DEPLOY (2026-08-14, defect cae5be2e, live
+// diagnosis) ─────────────────────────────────────────────────────────────
+// PR #148 shipped, migration 0122 applied clean, grants were correct
+// (carr_writer already held select/insert/update on ops.incident/
+// ops.incident_fact and select on ops.service — verified again below), and
+// the recorder STILL never wrote a row. Root-caused live against production,
+// not hypothesised:
+//
+//   1. Induced a real failure through the deployed Worker (probe token,
+//      read-loop with a malformed uuid) — got back the exact -32603 envelope
+//      this file's classifier targets, with a real x-correlation-id.
+//   2. `tools/ops-record.py trace <that id>` answered "no trace". Direct read
+//      of ops.incident on production: no new row at all, not even a failed
+//      attempt visible anywhere — because nothing WAS visible anywhere; see
+//      finding 2 below.
+//   3. THE DECISIVE CHECK: tool_read_call — mcp.js's recordReadCall, a
+//      DIFFERENT function, scheduled through the IDENTICAL ctx.waitUntil,
+//      against the IDENTICAL env.DATABASE_URL_WRITER, via the IDENTICAL
+//      neon() driver — recorded that EXACT probe request
+//      (verb=read-loop, actor_slug=smoke-probe, ok=false,
+//      error_kind=internal_error, at the same timestamp). That proves
+//      ctx.waitUntil fires, DATABASE_URL_WRITER authenticates, and INSERT
+//      succeeds through this exact pipeline — ruling out a missing grant
+//      (candidate a) and an unreached waitUntil (candidate c) at once.
+//   4. So the difference had to be THIS file's own code, not the wiring
+//      around it. recordReadCall never reads anything off its insert's
+//      result; every function in THIS file does (`svc.rows.length`,
+//      `r.rows[0]?.id`, ...). @neondatabase/serverless's own documented
+//      contract for `neon(dsn).query(text, params)`: "the query function
+//      returns database rows directly" — e.g.
+//      `await sql.query("SELECT ...", [...])  // -> [ { greeting: "..." } ]`,
+//      a BARE ARRAY, never `{rows: [...]}` unless `fullResults: true` is
+//      passed (it is not, here). scheduleFailureRecord's old `query` was
+//      `(text, params) => neon(env.DATABASE_URL_WRITER).query(text, params)`
+//      — the bare array, unwrapped. recordWorkerFailure's very FIRST query
+//      (`select id from ops.service...`) returned that bare array, `svc.rows`
+//      read `undefined`, `.length` threw a TypeError, and recordWorkerFailure's
+//      own outer catch swallowed it — on every single call, with (before this
+//      fix) no log line to say so either. THE SAME MISTAKE THIS FILE'S OWN
+//      DESIGN NOTE WARNED ABOUT AVOIDING FOR TOOL_READ_CALL never touched this
+//      new code, because it was never written through the one place that
+//      already got the shape right: mcp.js's own read-branch client object,
+//      `{ query: async (text, params) => ({ rows: await sql.query(text, params) }) }`.
+//
+// wrapNeonRows below is that same adapter, extracted and named so it is
+// independently unit-testable — the unit test that WOULD have caught this
+// (trace.test.mjs) mocked `query` returning `{rows:[...]}` directly, which
+// is the shape THIS file's internals correctly expect, but is NOT the shape
+// the real driver returns. The mock was internally consistent and wrong
+// about the one boundary that mattered.
+export function wrapNeonRows(sqlLike) {
+  return async (text, params) => ({ rows: await sqlLike.query(text, params) });
+}
+
 /** Production wiring: builds the injected `query` from env.DATABASE_URL_WRITER
  * and schedules recordWorkerFailure via ctx.waitUntil so it never adds latency
  * to the response the caller is waiting on — the exact pattern mcp.js's
  * recordReadCall wiring already uses for tool_read_call. A no-op, not a throw,
- * when the writer credential is absent (mirrors that same precedent). */
+ * when the writer credential is absent (mirrors that same precedent).
+ *
+ * neon(dsn) IS CALLED HERE, SYNCHRONOUSLY, AND MUST BE GUARDED SEPARATELY FROM
+ * recordWorkerFailure's OWN try/catch — a bug this exact fix introduced and
+ * its own tests caught before it shipped. neon() throws synchronously on a
+ * malformed connection string (proven in this file's history: the -32603 test
+ * below relies on the identical behavior for a DIFFERENT reason). Before this
+ * guard, `wrapNeonRows(neon(env.DATABASE_URL_WRITER))` ran eagerly in THIS
+ * function's own body — outside recordWorkerFailure's try/catch, since that
+ * only wraps code that runs AFTER being handed to ctx.waitUntil — so a
+ * malformed DATABASE_URL_WRITER would throw straight out of
+ * scheduleFailureRecord and INTO withFailureRecording / dispatch() /
+ * mcpApiHandler, exactly the "a recorder must never change a response"
+ * failure this whole file exists to prevent. */
 export function scheduleFailureRecord(env, ctx, { routeKey, failureClass, detail }) {
   if (!env || !env.DATABASE_URL_WRITER || !ctx || typeof ctx.waitUntil !== "function") return;
-  const query = (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params);
+  let query;
+  try {
+    query = wrapNeonRows(neon(env.DATABASE_URL_WRITER));
+  } catch (e) {
+    logLine("error", "worker_failure_record_error", {
+      correlation_id: env.CORRELATION_ID || null,
+      route_key: routeKey || null,
+      failure_class: failureClass || null,
+      error_name: (e && e.name) || typeof e,
+      error_message: String((e && e.message) || e).slice(0, 300),
+    });
+    return;
+  }
   ctx.waitUntil(recordWorkerFailure(query, {
     environment: env.CARR_ENV || null,
     routeKey,

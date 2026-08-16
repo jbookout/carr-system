@@ -74,6 +74,19 @@ for h in ("https://npiregistry.cms.hhs.gov/api/?version=2.1",
           "https://raw.githubusercontent.com/a/b"):
     case(f"known host {h[:48]}", fetch(h), ALLOW)
 
+# claude.com, added 2026-08-14. anthropic.com was already here; claude.com was
+# not, and the standard Claude Code attribution line links to it. So EVERY `gh
+# pr create` carrying the documented attribution was refused as "network send to
+# an unrecognised host", three times in one session, each one a real PR being
+# opened by a session doing exactly what the repo asks of it. The workaround is
+# to strip the link, which quietly costs the attribution the line exists for.
+# Same owner and same read-only class as anthropic.com; the guard's own refusal
+# text says to list a legitimate host here.
+case("gh pr create carrying the Claude Code attribution link",
+     bash('gh pr create --title t --body "fix\n\n'
+          'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
+case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
+
 # ── 2. DERIVED list (the B half): client practice sites, from the record ──────
 # THESE CARRY A LONG QUERY ON PURPOSE. A derived host gets the UNCONDITIONAL
 # pass, so it must be allowed even with a query the open-read class would refuse.
@@ -249,6 +262,122 @@ case("repartitioning a disk is refused", bash(f"diskutil partitionDisk {_DISK} 1
 
 case("a plus-refspec force push is refused", bash("git push origin +main:main"), DENY)
 case("an ordinary push is still allowed", bash("git push origin main"), ALLOW)
+
+# ── Rebasing your OWN branch in place, which the blanket block made impossible ──
+#
+# THE CORPSE FACTORY, measured 2026-08-15. main takes ~100 commits a day here, so
+# a branch going stale mid-review is the normal case, not the exception. The fix
+# for a stale branch is `git rebase origin/main` followed by a force-push to the
+# SAME branch — but the blanket "force push" rule refused that, so the only route
+# left was: abandon the branch, cut a new one, open a second pull request. Four
+# closed pull requests say so in their own closing notes, verbatim — "reopened on
+# a fresh branch because rewriting the pushed one needs a force-push, which the
+# unattended guard blocks" (#125, #131, #142, and #100 in the same words).
+#
+# Every one of those events leaves a PERMANENT orphan, because GitHub's
+# auto-delete fires on MERGE and never on close. 25 closed pull requests and 35
+# dead branches were swept by hand on 2026-08-15; the guard was manufacturing the
+# garbage it was never asked to make.
+#
+# WHAT STAYS BLOCKED, because this is a narrow widening and not an amnesty:
+# anything aimed at main, the bare --force spelling, the +refspec spelling, and a
+# force-push with NO named target (whose destination the guard cannot see).
+case("force-with-lease to a named feature branch is allowed",
+     bash("git push --force-with-lease origin HEAD:refs/heads/my-feature"), ALLOW)
+case("force-with-lease to a named branch, short form, is allowed",
+     bash("git push --force-with-lease origin my-feature"), ALLOW)
+case("force-with-lease at MAIN is still refused",
+     bash("git push --force-with-lease origin HEAD:refs/heads/main"), DENY)
+case("force-with-lease at main, short form, is still refused",
+     bash("git push --force-with-lease origin main"), DENY)
+case("force-with-lease at master is still refused",
+     bash("git push --force-with-lease origin master"), DENY)
+# Lease is the whole point: it refuses when the remote moved under you, which is
+# the only thing protecting a peer session's push on a shared branch. Bare
+# --force has no such check, so it stays blocked even on a feature branch.
+case("bare --force to a feature branch is still refused",
+     bash("git push --force origin my-feature"), DENY)
+case("-f to a feature branch is still refused",
+     bash("git push -f origin my-feature"), DENY)
+case("a plus-refspec to a feature branch is still refused",
+     bash("git push origin +my-feature:my-feature"), DENY)
+# No named target means the guard cannot see where this lands — it takes the
+# current branch, which may be main. Naming the branch is the same house rule as
+# committing by named paths, and it makes the guard's decision auditable.
+case("force-with-lease with NO named target is still refused",
+     bash("git push --force-with-lease"), DENY)
+case("force-with-lease to a bare remote with no ref is still refused",
+     bash("git push --force-with-lease origin"), DENY)
+# A branch whose NAME merely contains "main" is not main.
+case("a branch named main-thread is not main",
+     bash("git push --force-with-lease origin main-thread"), ALLOW)
+case("a branch named domain-fix is not main",
+     bash("git push --force-with-lease origin domain-fix"), ALLOW)
+# Prose describing the newly-allowed form must still not become a way to smuggle
+# a real one past the scanner.
+case("prose describing a force-with-lease is allowed",
+     bash('gh pr create --title "x" --body "rebase then git push --force-with-lease origin main"'),
+     ALLOW)
+
+# THE SHAPE EVERY SESSION ACTUALLY SENDS, and the one the first version of this
+# carve-out got wrong. The guard is handed the WHOLE command line, and a session
+# working in a worktree always prefixes `cd <path> && `. The original parser found
+# the refspec by splitting on the bare substring "push", so any earlier "push" —
+# in the directory, in the branch name — consumed the split and the ref parsed as
+# nonsense, refusing a push the rule was written to allow.
+#
+# It was invisible to every case above, because all of them are bare commands with
+# no prefix. It surfaced on the first REAL push after the change shipped: the
+# branch was called `force-push-narrow`, the worktree path therefore contained
+# "push", and the live guard refused it. A unit case cannot catch a defect whose
+# whole nature is the shape of the surrounding command, which is why the artifact
+# is the thing that has to be exercised (rules a9ecd5b4, fa217e48).
+case("cd-prefixed force-with-lease to a feature branch is allowed",
+     bash("cd /Users/booko/carr-system && git push --force-with-lease origin my-feature"), ALLOW)
+case("a path containing 'push' does not eat the refspec",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/force-push-narrow && "
+          "git push --force-with-lease origin force-push-narrow"), ALLOW)
+case("a BRANCH named with 'push' is still parsed correctly",
+     bash("git push --force-with-lease origin push-parse-fix"), ALLOW)
+case("cd-prefixed force-with-lease at MAIN is still refused",
+     bash("cd /Users/booko/carr-system && git push --force-with-lease origin main"), DENY)
+case("a path containing 'push' does not let a push at main through",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/force-push-narrow && "
+          "git push --force-with-lease origin main"), DENY)
+# A trailing command must not become a way to hide the real target either.
+case("force-with-lease to a feature branch with a trailing command is allowed",
+     bash("git push --force-with-lease origin my-feature && echo done"), ALLOW)
+
+# REDIRECTIONS, which is how these commands are ACTUALLY typed and the third
+# thing this carve-out got wrong in a row. `2>&1` contains an ampersand, so
+# cutting the argument list at the first `[;|&]` chopped mid-redirect and left a
+# stray `2>` token, making the argument list three words instead of two — and the
+# push was refused again. Every earlier case was a clean command with no
+# redirection, so none of them saw it.
+#
+# The pattern across all three misses is the same and worth naming: each one was
+# a piece of ordinary shell syntax that the test cases had quietly excluded. The
+# cases below are deliberately written the way a session really types them —
+# prefix, redirect, pipe, tail — rather than the way a rule reads best.
+case("the everyday form with 2>&1 and a pipe is allowed",
+     bash("git push --force-with-lease origin my-feature 2>&1 | tail -3"), ALLOW)
+case("the full real-world shape: cd prefix, push-bearing path, redirect and pipe",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/pushparse && "
+          "git push --force-with-lease origin pushparse 2>&1 | tail -3"), ALLOW)
+case("a redirect to a file does not break the parse",
+     bash("git push --force-with-lease origin my-feature > out.log"), ALLOW)
+case("stderr-only redirect does not break the parse",
+     bash("git push --force-with-lease origin my-feature 2> err.log"), ALLOW)
+# The same shapes must not become a way to smuggle main past the check.
+case("2>&1 and a pipe do NOT let a push at main through",
+     bash("git push --force-with-lease origin main 2>&1 | tail -3"), DENY)
+case("cd prefix with redirect does NOT let a push at main through",
+     bash("cd /Users/booko/carr-system/.claude/worktrees/pushparse && "
+          "git push --force-with-lease origin main 2>&1 | tail -3"), DENY)
+case("a file redirect does NOT let a push at main through",
+     bash("git push --force-with-lease origin main > out.log"), DENY)
+case("force-with-lease at main with a trailing command is still refused",
+     bash("git push --force-with-lease origin main && echo done"), DENY)
 
 case("find -delete is refused outside a scratch zone",
      bash("find /Users/booko/important -name '*.md' -delete"), DENY)

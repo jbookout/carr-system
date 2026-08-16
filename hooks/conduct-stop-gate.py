@@ -468,9 +468,13 @@ def main():
         body = REASON_HEAD + "\n\n".join(REMEDY[c] for c in classes if c in REMEDY)
         body += (
             "\n\nDO THIS NOW, in this same turn: carry out the work you were about "
-            "to hand over, then restate your closing message with the offload "
-            "removed. Do not re-explain this gate to Joe and do not apologise — "
-            "just deliver the finished result.\n\n"
+            "to hand over, then send ONLY THE DELTA — the result of that work, plus "
+            "at most a one-line pointer to what you already said. Rule 1d50a3bb "
+            "binds here: Joe has ALREADY READ the blocked message, so restating it "
+            "with the fix folded in charges him twice for the same text, which is "
+            "the exact thing he taught against on 2026-08-13. Do not re-explain "
+            "this gate to Joe and do not apologise — just deliver the finished "
+            "result.\n\n"
             "This gate exists because rules 14e0408b, e313a3ca and 179be4b8 were "
             "all ACTIVE and all recited at the start of this session, and were "
             "violated anyway. Prose does not bind; this does."

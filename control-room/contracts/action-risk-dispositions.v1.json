@@ -1,0 +1,27 @@
+{
+  "contract": "carr-action-risk-dispositions",
+  "version": "1.0.0",
+  "status": "phase1_guardrails",
+  "artifact_type": "carr_action_risk_dispositions",
+  "data_class": "D2_internal_metadata_only",
+  "action_risk_registry": {
+    "path": "control-room/contracts/action-risk-registry.v1.json",
+    "sha256": "86961d7455ab0c4508a1e7df3f89c984300e98dac9fe4433f131e00894889d29"
+  },
+  "selected_slice": "set-lead",
+  "dispositions": [
+    {"tool_name": "complete-action", "baseline_protection": "NONE", "owner": "workflow-actions", "target_control": "atomic_state_predicate", "evidence_category": "verified_runtime_handler", "evidence": "mcp-server/src/tools.js#complete-action", "priority": "P1", "selected_slice": false},
+    {"tool_name": "detach-decision", "baseline_protection": "NONE", "owner": "decision-governance", "target_control": "native_optimistic_concurrency", "evidence_category": "queued_native_guard", "evidence": "mcp-server/src/tools.js#detach-decision", "priority": "P1", "selected_slice": false},
+    {"tool_name": "end-deal-review", "baseline_protection": "NONE", "owner": "deal-review", "target_control": "atomic_state_predicate", "evidence_category": "verified_runtime_handler", "evidence": "mcp-server/src/tools.js#end-deal-review", "priority": "P1", "selected_slice": false},
+    {"tool_name": "link-parties", "baseline_protection": "NONE", "owner": "relationship-integrity", "target_control": "native_optimistic_concurrency", "evidence_category": "queued_native_guard", "evidence": "mcp-server/src/tools.js#link-parties", "priority": "P1", "selected_slice": false},
+    {"tool_name": "measure-placement", "baseline_protection": "NONE", "owner": "marketing-measurement", "target_control": "atomic_state_predicate", "evidence_category": "verified_runtime_handler", "evidence": "mcp-server/src/tools.js#measure-placement", "priority": "P1", "selected_slice": false},
+    {"tool_name": "register-template", "baseline_protection": "NONE", "owner": "document-governance", "target_control": "native_optimistic_concurrency", "evidence_category": "queued_native_guard", "evidence": "mcp-server/src/tools.js#register-template", "priority": "P1", "selected_slice": false},
+    {"tool_name": "resolve-conflict", "baseline_protection": "NONE", "owner": "dealroom-concurrency", "target_control": "transaction_row_lock", "evidence_category": "verified_runtime_handler", "evidence": "mcp-server/src/tools.js#resolve-conflict", "priority": "P1", "selected_slice": false},
+    {"tool_name": "set-lead", "baseline_protection": "NONE", "owner": "deal-ownership", "target_control": "human_boundary_and_optimistic_concurrency", "evidence_category": "verified_runtime_handler", "evidence": "mcp-server/test/action-risk-guardrails.test.mjs", "priority": "P0", "selected_slice": true},
+    {"tool_name": "set-next-action", "baseline_protection": "NONE", "owner": "workflow-actions", "target_control": "native_optimistic_concurrency", "evidence_category": "queued_native_guard", "evidence": "mcp-server/src/tools.js#set-next-action", "priority": "P1", "selected_slice": false},
+    {"tool_name": "set-next-step", "baseline_protection": "NONE", "owner": "dealroom-concurrency", "target_control": "transaction_row_lock", "evidence_category": "verified_runtime_handler", "evidence": "mcp-server/src/tools.js#set-next-step", "priority": "P1", "selected_slice": false},
+    {"tool_name": "triage-item", "baseline_protection": "NONE", "owner": "inbox-triage", "target_control": "atomic_state_predicate", "evidence_category": "verified_runtime_handler", "evidence": "mcp-server/src/tools.js#triage-item", "priority": "P1", "selected_slice": false},
+    {"tool_name": "update-decision", "baseline_protection": "NONE", "owner": "decision-governance", "target_control": "native_optimistic_concurrency", "evidence_category": "queued_native_guard", "evidence": "mcp-server/src/tools.js#update-decision", "priority": "P1", "selected_slice": false},
+    {"tool_name": "update-document-status", "baseline_protection": "NONE", "owner": "document-governance", "target_control": "native_optimistic_concurrency", "evidence_category": "queued_native_guard", "evidence": "mcp-server/src/tools.js#update-document-status", "priority": "P1", "selected_slice": false}
+  ]
+}

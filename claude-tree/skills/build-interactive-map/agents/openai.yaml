@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Interactive Map"
+  short_description: "Build governed CARR maps and property tours"
+  default_prompt: "Use $build-interactive-map to build a governed interactive CARR map or property tour."

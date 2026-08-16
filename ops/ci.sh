@@ -289,6 +289,28 @@ PYEOF
     run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t" \
       || { failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2; }
   done
+
+  # SHELL TESTS, run under their own shebang rather than "$PY". The loop above
+  # globs only *.py and hands every match to the Python interpreter, so a shell
+  # test dropped into tools/ was collected by nobody and executed by nothing —
+  # it would sit in the tree looking like coverage while never running once.
+  # Some things under test here ARE shell (mcp-server/smoke-reads.sh), and a
+  # Python wrapper around them would only shell out to the same script.
+  # Everything else is identical to the loop above: same exclusion scope, same
+  # counting, same captured log and same 12-line tail on failure.
+  for t in tools/test-*.sh; do
+    [ -f "$t" ] || continue
+    local sbase; sbase="$(basename "$t")"
+    local swhy; swhy="$(excluded_reason "$sbase")"
+    if [ -n "$swhy" ]; then
+      skiplist="$skiplist $sbase"
+      printf '        \033[33mnot run\033[0m  %s — %s\n' "$sbase" "$swhy" >&2
+      continue
+    fi
+    count=$((count+1))
+    run_quiet "$LOGDIR/gate-$sbase.log" "$t" \
+      || { failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2; }
+  done
   # gate-integrity is the baseline check itself: a gate edited without a
   # re-bless in the same commit (rule c0b38d80) fails here.
   #
@@ -307,6 +329,24 @@ PYEOF
   # local hook runs.
   run_quiet "$LOGDIR/gate-integrity.log" "$PY" hooks/gate-integrity.py --strict \
     || { failures="$failures gate-integrity"; tail -12 "$LOGDIR/gate-integrity.log" >&2; }
+
+  # THE THREE INVENTORY CHECKS, run against THIS REPO rather than a synthetic
+  # tree. The selftest loop above runs their *-selftest.py, and every one of
+  # those builds its own fixture tree on purpose — that measures the CHECK and
+  # says nothing whatever about the actual inventory. So all three could pass
+  # their suites while the real files contradicted each other, and that is not
+  # hypothetical: on 2026-08-15 ops/audit-queue-freshness-check.py FAILED on
+  # main's own tree while CI reported green, because nothing here ever ran it.
+  #
+  # Same shape as gate-integrity --strict directly above: repository content
+  # only, no machine state, no network, no database. Each carries its own
+  # escape hatch for a genuinely mid-flight tree and names its own remedy in
+  # its own output, so none is repeated here.
+  for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check; do
+    [ -f "ops/$inv.py" ] || continue
+    run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
+      || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
+  done
   if [ -n "$failures" ]; then
     bad gates "failed:$failures"
   elif [ -n "$skiplist" ]; then
@@ -427,7 +467,64 @@ check_migration() {
     # grep -c prints "0" AND exits nonzero on no match, so `|| echo 0` printed
     # a second zero. `|| :` keeps the count grep already printed.
     n="$(grep -c '^applying ' "$LOGDIR/migration.log" 2>/dev/null || :)"
-    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live"
+
+    # THE TRIGGER-READ CHECK (rule 5409731b). The canary above proves the
+    # declared grants attached; this asks the question that broke set-lead for
+    # five days in production: can the role that WRITES a table actually SELECT
+    # every table the trigger on it READS? An invoker-rights trigger runs as the
+    # caller, and grants never fire for the owner, so no rehearsal as owner can
+    # see it — which is why this lives here, against the built database, rather
+    # than in the gates class against a synthetic tree.
+    if ! CARR_CI_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-triggers.log" \
+         "$PY" ops/trigger-grant-check.py; then
+      tail -25 "$LOGDIR/migration-triggers.log" >&2
+      bad migration "a trigger reads a table its firing role cannot select"
+      return
+    fi
+
+    # ── THE DATABASE ACCEPTANCE GATES ────────────────────────────────────────
+    # Three of these existed before this loop did and NOTHING RAN ANY OF THEM.
+    # ops/program3-trace-gate.py opens by calling itself "the acceptance test
+    # for Program 3", written before the thing it tests — and its only stated
+    # runner was a db-tap command a human types. A gate nobody runs is a
+    # document with assertions in it (rule ab814a26: a rule ships with its
+    # enforcement, and recitation is not enforcement).
+    #
+    # This class already stands up the one thing they need: a throwaway
+    # database with the committed schema loaded and every pending migration
+    # applied. So they run here, on every proposed change, against real
+    # Postgres. Each gate rolls back everything it writes, which is why running
+    # them repeatedly costs nothing.
+    #
+    # SELF-REGISTERING, by the marker `# ci: db-gate` in the file itself. A new
+    # gate is wired by writing it, not by remembering to edit this list. Any
+    # ops/*-gate.py that reads DATABASE_URL and carries no marker is NAMED in
+    # the output rather than quietly skipped — an unrun gate that nobody can
+    # see is how this situation arose in the first place.
+    local db_gate_failures="" db_gate_count=0 db_gate_unmarked=""
+    for g in ops/*-gate.py; do
+      [ -f "$g" ] || continue
+      if grep -q '^# ci: db-gate' "$g"; then
+        db_gate_count=$((db_gate_count+1))
+        if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/db-gate-$(basename "$g").log" \
+             "$PY" "$g"; then
+          db_gate_failures="$db_gate_failures $(basename "$g")"
+          tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
+        fi
+      elif grep -q 'DATABASE_URL' "$g"; then
+        db_gate_unmarked="$db_gate_unmarked $(basename "$g")"
+      fi
+    done
+    if [ -n "$db_gate_unmarked" ]; then
+      printf '        \033[33mnot run\033[0m  db-gates without the `# ci: db-gate` marker:%s\n' \
+        "$db_gate_unmarked" >&2
+    fi
+    if [ -n "$db_gate_failures" ]; then
+      bad migration "database acceptance gate(s) failed:$db_gate_failures"
+      return
+    fi
+
+    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate(s) pass"
   else
     tail -15 "$LOGDIR/migration-grants.log" >&2
     bad migration "the app roles' grants did not survive into the built database"
@@ -440,6 +537,8 @@ check_migration() {
 # no live settings file, so that half skips and the wrangler half still runs.
 check_binding() {
   local problems=""
+  run_quiet "$LOGDIR/binding-agent-boot.log" "$PY" ops/agent-boot-contract.py \
+    || { problems="$problems agent-boot"; cat "$LOGDIR/binding-agent-boot.log" >&2; }
   if [ -f mcp-server/wrangler.toml ]; then
     run_quiet "$LOGDIR/binding-wrangler.log" node -e '
       const fs=require("fs"), t=fs.readFileSync("mcp-server/wrangler.toml","utf8");

@@ -80,10 +80,13 @@ set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORKER_DIR="$REPO/mcp-server"
-COUNT_FILE="$WORKER_DIR/.last-deployed-verb-count"
 # Set again after argument parsing when a non-production env is chosen, so a
 # staging deploy can never overwrite the baseline production is measured against.
 WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
+# Same resolution ops/ci.sh and bin/worktree.sh use: prefer the repo venv, fall
+# back to whatever python3 is on PATH. The release preflight below needs it.
+PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || true)"
 
 CHECK_ONLY=0
 ALLOW_SHRINK=0
@@ -107,10 +110,6 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-
-if [ "$TARGET_ENV" != "production" ]; then
-  COUNT_FILE="$WORKER_DIR/.last-deployed-verb-count.$TARGET_ENV"
-fi
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
@@ -213,24 +212,175 @@ case "$SHIPPING" in
 esac
 echo "  OK  registry imports cleanly: $SHIPPING verbs about to ship"
 
-if [ -f "$COUNT_FILE" ]; then
-  PREVIOUS="$(tr -dc '0-9' < "$COUNT_FILE")"
-  if [ -n "$PREVIOUS" ] && [ "$SHIPPING" -lt "$PREVIOUS" ]; then
-    LOST=$((PREVIOUS - SHIPPING))
-    if [ "$ALLOW_SHRINK" = "0" ]; then
-      fail "this deploy would REMOVE $LOST verb(s) from production.
+# THE BASELINE COMES FROM THE LEDGER, NOT A FILE (defect d737c09c, 2026-08-16).
+# It used to live in mcp-server/.last-deployed-verb-count.<env>, which the
+# postflight told you to commit — and committing it fails
+# ops/release-manifest-selftest.py, because manifest artifact_paths are
+# ['mcp-server','dealroom'] so the file sits inside the digested artifact while
+# the digest skips dotfiles. It moved the deployed TREE without moving its
+# DIGEST, the exact condition that test guards. Two halves of one control giving
+# opposite instructions.
+#
+# The file was always a DUPLICATE: every deploy already records --verb-count
+# into ops.deployment, and since the ledger fix earlier today it does so for
+# staging too. Write law 14181e60 settles which copy survives.
+PREVIOUS=""
+LEDGER_RC=0
+PREVIOUS="$("$PY" "$REPO/ops/last-deployed-verb-count.py" carr-mcp "$TARGET_ENV" 2>/dev/null)" \
+  || LEDGER_RC=$?
+case "$LEDGER_RC" in
+  0)
+    if [ -n "$PREVIOUS" ] && [ "$SHIPPING" -lt "$PREVIOUS" ]; then
+      LOST=$((PREVIOUS - SHIPPING))
+      if [ "$ALLOW_SHRINK" = "0" ]; then
+        fail "this deploy would REMOVE $LOST verb(s) from $TARGET_ENV.
   last deployed: $PREVIOUS
   about to ship: $SHIPPING
 
   If verbs were deliberately retired, say so: re-run with --allow-shrink.
   If not, you are about to reproduce loop #276."
+      fi
+      echo "  !!  shrinking by $LOST verb(s), allowed explicitly via --allow-shrink"
+    else
+      echo "  OK  no verb loss (last deployed to $TARGET_ENV: $PREVIOUS)"
     fi
-    echo "  !!  shrinking by $LOST verb(s), allowed explicitly via --allow-shrink"
+    ;;
+  3)
+    echo "  --  no previous deployment recorded for $TARGET_ENV; this run establishes the baseline"
+    ;;
+  *)
+    # FAIL CLOSED, and no escape flag. Not caution: the Worker being deployed
+    # needs Postgres for every verb it serves, so a deploy attempted while the
+    # ledger is unreachable ships something that cannot work anyway. Refusing
+    # costs nothing real, and a loss guard that cannot check must never wave a
+    # deploy through — that is exactly how loop #276 happened.
+    fail "could not read the previous verb count from the ledger (exit $LEDGER_RC).
+  The verb-loss guard cannot run, so this deploy is refused rather than shipped blind.
+  Diagnose with: .venv/bin/python ops/last-deployed-verb-count.py carr-mcp $TARGET_ENV
+  If Postgres is down, the Worker you are about to ship cannot serve a verb anyway."
+    ;;
+esac
+
+# record_deployment <state> <correlation> — attach what just shipped to the
+# release that authorised it.
+#
+# ONE FUNCTION, THREE CALL SITES, because the three outcomes of a deploy are
+# genuinely different facts and the ledger has to hold whichever one happened.
+# complete carries a read-back and means the suite proved the Worker answering;
+# verifying means the suite could not run, so nothing was proven; failed means
+# it ran and the Worker answered wrongly. Recording all three as one state, or
+# recording only the happy one, is how a deploy history starts reading greener
+# than the deploys were.
+#
+# IT NEVER FAILS THE DEPLOY. The code has already shipped by the time this runs
+# — refusing to exit zero because the LEDGER write failed would turn a recorded
+# problem into an unrecorded one. It prints, loudly, and returns.
+record_deployment() {
+  rd_state="$1"
+  rd_corr="${2:-}"
+  [ -x "$PY" ] || return 0
+  [ -f "$REPO/tools/ops-record.py" ] || return 0
+
+  set +e
+  # A read-back only exists when the golden suite actually ran and passed. The
+  # 0115 constraint refuses `complete` without one, which is the point.
+  if [ "$rd_state" = "complete" ]; then
+    rd_read_back="--read-back-at now"
   else
-    echo "  OK  no verb loss (last deployed: $PREVIOUS)"
+    rd_read_back=""
   fi
-else
-  echo "  --  no previous count recorded; this run establishes the baseline"
+  # shellcheck disable=SC2086
+  "$PY" "$REPO/tools/ops-record.py" deployment \
+    --service carr-mcp --environment "$TARGET_ENV" --state "$rd_state" \
+    --git-sha "$HEAD_SHA" --verb-count "$SHIPPING" \
+    ${rd_corr:+--correlation "$rd_corr"} \
+    ${RELEASE_KEY:+--release-key "$RELEASE_KEY"} \
+    ${rd_state:+--source-kind wrapper} --source-ref bin/deploy-worker.sh \
+    $rd_read_back \
+    ${rd_corr:+--verification-evidence-ref "bin/smoke-and-record.sh#$rd_corr"} \
+    ${rd_state:+$( [ "$rd_state" = "failed" ] && echo "--failure-class golden_workflow_failed" )} \
+    >/dev/null 2>&1
+  rd_rc=$?
+  set -e
+  if [ "$rd_rc" -ne 0 ]; then
+    echo "  !! the deploy shipped but its ledger row did NOT record (exit $rd_rc)."
+    echo "     Record it by hand so the release keeps its deployment:"
+    echo "       .venv/bin/python tools/ops-record.py deployment --service carr-mcp \\"
+    echo "         --environment $TARGET_ENV --state $rd_state --git-sha $HEAD_SHA \\"
+    echo "         --release-key ${RELEASE_KEY:-<key>} --source-kind wrapper \\"
+    echo "         --source-ref bin/deploy-worker.sh"
+  else
+    echo "  recorded this deploy as $rd_state against release ${RELEASE_KEY:-<none>}"
+  fi
+
+  # AND CLOSE THE RELEASE, when the deploy actually landed and was verified.
+  # Without this the release sits at `approved` while its own deployment reads
+  # `complete` — observed on the first real release, 2026-08-16, where the
+  # manifest view showed a landed deploy against a release still waiting to
+  # ship. Only the complete path closes it: `verifying` means nothing was
+  # proven and `failed` means the opposite, and neither is a finished release.
+  if [ "$rd_state" = "complete" ] && [ -n "$RELEASE_KEY" ]; then
+    set +e
+    "$PY" "$REPO/tools/ops-record.py" release complete --key "$RELEASE_KEY" \
+      --verifier "golden-workflow-suite" \
+      --verifier-evidence "bin/smoke-and-record.sh#${rd_corr:-unknown}" >/dev/null 2>&1
+    rc_rel=$?
+    set -e
+    if [ "$rc_rel" -eq 0 ]; then
+      echo "  release $RELEASE_KEY is complete"
+    else
+      echo "  !! the deploy landed but release $RELEASE_KEY did not close (exit $rc_rel)."
+      echo "     Close it by hand so the release and its deployment stop disagreeing:"
+      echo "       .venv/bin/python tools/ops-record.py release complete --key $RELEASE_KEY"
+    fi
+  fi
+}
+
+# ---------- preflight 4: release truth (P0-1) ----------
+# THE DEPLOY IS THE MOMENT THE MANIFEST HAS TO EXIST, not a step somebody
+# performs beside it. Every earlier preflight asks whether the ARTIFACT is
+# right; this one asks whether anyone APPROVED it, and it is the wrapper half
+# of P0-1. The database half (migration 0130) refuses a production deployment
+# naming an unapproved or expired release, so this check exists to fail EARLY
+# and legibly rather than half way through a wrangler run.
+#
+# It builds the manifest from the SHA about to ship — the same tools/
+# release-manifest.py any human or CI run would use, never a second copy of the
+# digest decision (rule a8c55a47) — and hands the plan hash to the require
+# check, so an approval given to a DIFFERENT plan is caught here by name.
+#
+# NOT ENFORCED IS SAID OUT LOUD. Where DATABASE_URL is absent, or 0130 has not
+# been applied, the require check prints exactly that and returns success. A
+# wrapper that refused on the database's behalf would be claiming a protection
+# the database is not providing, and any other deploy path would bypass it
+# anyway. Silence is the only outcome ruled out.
+RELEASE_KEY=""
+RELEASE_PLAN_HASH=""
+if [ -x "$PY" ] && [ -f "$REPO/tools/release-manifest.py" ]; then
+  echo ""
+  echo "== preflight: release truth =="
+  RELEASE_MANIFEST="$(mktemp -t carr-release-manifest)"
+  if "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
+       --environment "$TARGET_ENV" > "$RELEASE_MANIFEST" 2>/dev/null; then
+    RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
+                          --manifest "$RELEASE_MANIFEST" 2>/dev/null)"
+    echo "  manifest built for ${HEAD_SHA} — plan ${RELEASE_PLAN_HASH:-unknown}"
+  else
+    echo "  !! could not build the release manifest for $HEAD_SHA"
+  fi
+
+  set +e
+  RELEASE_KEY="$("$PY" "$REPO/tools/ops-record.py" release require \
+                   --sha "$HEAD_SHA" --environment "$TARGET_ENV" \
+                   --plan-hash "$RELEASE_PLAN_HASH")"
+  REQUIRE_RC=$?
+  set -e
+  if [ "$REQUIRE_RC" -eq 3 ]; then
+    fail "no live approval for $HEAD_SHA in $TARGET_ENV. The reason and the exact
+commands are printed above. This is P0-1: a production deploy names an approved
+release or it does not happen."
+  fi
+  [ -n "$RELEASE_KEY" ] && echo "  approved release: $RELEASE_KEY"
 fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
@@ -261,10 +411,15 @@ fi
 # should trust.
 echo ""
 echo "== postflight =="
-printf '%s\n' "$SHIPPING" > "$COUNT_FILE"
-echo "  recorded $SHIPPING verbs in $(basename "$COUNT_FILE")"
+# NO BASELINE FILE IS WRITTEN, and nothing is left for a human to commit. The
+# baseline is the --verb-count this run records into ops.deployment below, which
+# the next deploy reads back through ops/last-deployed-verb-count.py. The file
+# this used to write could not be committed at all: it sits inside the digested
+# artifact while the digest skips dotfiles, so committing it failed
+# ops/release-manifest-selftest.py (defect d737c09c).
+echo "  shipping $SHIPPING verbs — the baseline for the next deploy is the"
+echo "  ledger row recorded below, not a file"
 echo "  stamped GIT_SHA=$HEAD_SHA into this deploy (see /release)"
-echo "  COMMIT THAT FILE — it is the baseline the next deploy is measured against."
 echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
 echo "  confirm it reports $SHIPPING. A deploy that returns success and a"
@@ -327,12 +482,17 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
   echo "  correlation $CARR_CORRELATION_ID"
   if "$REPO/bin/smoke-and-record.sh"; then
     echo "  golden workflow suite PASSED against the deploy you just shipped."
+    record_deployment complete "$CARR_CORRELATION_ID"
   else
     smoke_rc=$?
     if [ "$smoke_rc" -eq 78 ]; then
       echo "  golden workflow suite SKIPPED — no probe token configured on this machine."
       echo "  This deploy is UNVERIFIED by the suite. See the provisioning runbook in"
       echo "  mcp-server/smoke-reads.sh. Not treated as a deploy failure."
+      # VERIFYING, NOT COMPLETE. The completion bar in 0115 is a read-back, and a
+      # skipped suite produced none. Recording this as complete would be the
+      # single most expensive lie this script could tell.
+      record_deployment verifying "$CARR_CORRELATION_ID"
     else
       echo ""
       echo "  ***  GOLDEN WORKFLOW SUITE FAILED (exit $smoke_rc) AFTER THIS DEPLOY.  ***"
@@ -341,7 +501,41 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
       echo "  this deploy as ONE journey rather than two unrelated facts:"
       echo "      .venv/bin/python tools/ops-record.py trace $CARR_CORRELATION_ID"
       echo "  Rolling back is bin/deploy-worker.sh --pinned-release <sha>."
+      record_deployment failed "$CARR_CORRELATION_ID"
       exit 1
     fi
   fi
+fi
+
+# ── THE LEDGER IS NOT THE SMOKE SUITE ────────────────────────────────────────
+# Defect cb65fc17, 2026-08-16: the first approved release in this system's
+# history shipped to staging, read back clean by hand, and wrote NO row to
+# ops.deployment. All three record_deployment call sites sit inside the block
+# above, so a staging deploy reached none of them.
+#
+# THE PRODUCTION-ONLY GUARD ABOVE IS CORRECT AND STAYS. smoke-reads.sh defaults
+# to the production API, and aiming post-deploy verification at a reconstructed
+# staging hostname is what the 2026-08-13 routes incident was made of.
+#
+# WHAT WAS WRONG IS THE NESTING. Running the golden suite and recording THAT A
+# DEPLOY HAPPENED are different facts. The second is the Program 3 job ledger,
+# which Program 5's promotion path reads, and a staging deploy leaving no row is
+# indistinguishable from a staging deploy that never ran — which is exactly how
+# this went unnoticed until someone went looking for something else.
+#
+# `verifying`, NEVER `complete`, and the word is already defined above for this
+# case: the suite could not run, so nothing was proven. Migration 0115 refuses
+# `complete` without a read-back and would reject the lie anyway. Automating the
+# staging read-back so this could honestly say `complete` is Program 5 work
+# (production read-back is one of its bullets) and is deliberately not smuggled
+# in here.
+if [ "$TARGET_ENV" != "production" ]; then
+  echo ""
+  echo "== postflight: deployment ledger =="
+  CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+  export CARR_CORRELATION_ID
+  echo "  correlation $CARR_CORRELATION_ID"
+  echo "  the golden suite does not run against $TARGET_ENV, so this deploy is"
+  echo "  recorded as VERIFYING — shipped, not yet proven by a suite."
+  record_deployment verifying "$CARR_CORRELATION_ID"
 fi

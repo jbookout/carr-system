@@ -145,11 +145,47 @@ pass=0; fail=0
 _id=0
 
 # call <verb> <json-args> -> prints the result text, sets RESULT
+#
+# RETRIES A SILENT TRANSPORT FAILURE, AND NAMES IT WHEN IT SURVIVES THE RETRIES.
+# A curl that times out or has its connection dropped sets RESULT to the EMPTY
+# STRING, and an empty string matches neither '"error"' nor '"isError":true' —
+# the two branches every caller below tests first. So it fell through to the
+# content greps and printed as "expected /<pattern>/ in the result", i.e. the
+# suite blamed ANSWER CORRECTNESS for a network blip, with a blank detail line
+# (the `head -c 220` of nothing) as the only tell.
+#
+# THE COST, measured: the 2026-08-14 nightly chain reported FAIL on the golden
+# workflow suite (out/nightly.log, run 13:03-13:08) for two checks —
+# retired_aliases-reads-0 at rep 3 of 3 and Musicologie-role_refs at rep 1 of 3.
+# Both detail lines were empty. The same suite passed 33/33 twice in the two
+# chain runs that followed, 13 and 35 minutes later. Nothing was wrong with the
+# answers; two HTTP calls came back with no body, and the chain went red under a
+# heading that says "answer correctness".
+#
+# WHY THE SYNTHETIC ENVELOPE. When the retries are exhausted RESULT is set to a
+# well-formed JSON-RPC error rather than left empty. Every call site already
+# greps '"error"' before anything else, so all of them — check(), and each
+# hand-rolled rep loop further down — report this as a transport failure with no
+# edit of their own. Leaving RESULT empty is what made the blank line possible.
+#
+# NOT --retry: curl only treats a subset of failures as retryable without
+# --retry-all-errors, and a 200 carrying an empty body is not one of them. The
+# emptiness of the body is the signal here, so the retry is tested on the body.
+CALL_ATTEMPTS="${SMOKE_CALL_ATTEMPTS:-3}"
+CALL_RETRY_SLEEP="${SMOKE_CALL_RETRY_SLEEP:-2}"
+
 call() {
   _id=$((_id+1))
-  RESULT=$(curl -s --max-time 30 -X POST "$API" \
-    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":$_id,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}")
+  local _attempt _curl_exit
+  for _attempt in $(seq 1 "$CALL_ATTEMPTS"); do
+    RESULT=$(curl -s --max-time 30 -X POST "$API" \
+      -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":$_id,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}")
+    _curl_exit=$?
+    [ "$_curl_exit" -eq 0 ] && [ -n "$RESULT" ] && return
+    [ "$_attempt" -lt "$CALL_ATTEMPTS" ] && sleep "$CALL_RETRY_SLEEP"
+  done
+  RESULT="{\"error\":{\"code\":-32000,\"message\":\"transport: no response body from $API after $CALL_ATTEMPTS attempt(s) (last curl exit $_curl_exit) calling $1 — this is the network, not the answer\"}}"
 }
 
 # Each check runs REPS times and every rep must pass.

@@ -1,0 +1,89 @@
+{
+  "_note": "The environment matrix P0-2 asks for: Local, Rehearsal, Staging and Production, with their identities, database, bindings, domains, secrets, telemetry and data class. This file is the DECLARATION; ops/environment-matrix-selftest.py compares it against what the repository actually declares and fails on any difference that is not named below. The Program 0 inventory of 2026-08-13 found that 'Local is implicit and defined nowhere' and 'Development does not exist' — this is that gap closed by writing the matrix down where a check can read it.",
+  "_rule": "Every difference between two environments is either INTENTIONAL and listed in intentional_differences, or it is drift. There is no third category, and the check treats an unlisted difference as a failure rather than a curiosity.",
+  "version": 1,
+  "environments": [
+    {
+      "name": "local",
+      "purpose": "contract, fixture and prototype development on a partner's own Mac",
+      "data_class": "synthetic only",
+      "database": {
+        "kind": "none",
+        "note": "There is no local Postgres. A session that needs a database uses an ephemeral Neon branch of STAGING, never a local copy of production — a local copy is a production extract on a laptop with no audit and no expiry."
+      },
+      "worker": {"deployed": false},
+      "domains": [],
+      "secrets": {"source": "~/.config/carr/db.env (chmod 600, gitignored)"},
+      "telemetry": {"destination": "out/ logs on that Mac only"},
+      "who_may_write": "the partner at the keyboard"
+    },
+    {
+      "name": "rehearsal",
+      "purpose": "migration, restore and reconstruction tests that must not touch a standing environment",
+      "data_class": "ephemeral; either synthetic or a short-lived restore of an encrypted backup",
+      "database": {
+        "kind": "neon-branch",
+        "parent_project": "carr-staging",
+        "lifetime": "created per run, deleted in the same run's teardown",
+        "note": "Branches of STAGING for reconstruction (ops/p1-rebuild-gate.py). bin/restore-rehearse.sh branches PRODUCTION deliberately and by a different route, because proving a backup restores requires production's own data; that script carries its own guards and deletes its branch."
+      },
+      "worker": {"deployed": false},
+      "domains": [],
+      "secrets": {"source": "derived per run from the Neon API key; never stored"},
+      "telemetry": {"destination": "the run's own output and the ops ledger"},
+      "who_may_write": "the script that created the branch, for the life of the branch"
+    },
+    {
+      "name": "staging",
+      "purpose": "integrated rehearsal, migration and release-candidate verification",
+      "data_class": "sanitized invented fixtures (tools/staging-fixtures.py); never production rows",
+      "database": {
+        "kind": "neon-project",
+        "project": "carr-staging",
+        "resolution": "by name, so a deleted and recreated project is picked up rather than silently missed"
+      },
+      "worker": {"deployed": true, "name": "carr-mcp-staging", "config": "mcp-server/wrangler.toml [env.staging]"},
+      "domains": [],
+      "secrets": {"source": "bin/staging-secrets.sh, generated fresh; no production secret is ever copied"},
+      "telemetry": {"destination": "Cloudflare observability on the staging Worker"},
+      "who_may_write": "any session, without break-glass"
+    },
+    {
+      "name": "production",
+      "purpose": "the system Joe and Dell actually operate on",
+      "data_class": "canonical client records",
+      "database": {
+        "kind": "neon-project",
+        "project": "production",
+        "resolution": "PINNED BY ID, never by name — resolving production by a name somebody could recreate elsewhere is the worst failure this map could have"
+      },
+      "worker": {"deployed": true, "name": "carr-mcp", "config": "mcp-server/wrangler.toml [top level]"},
+      "domains": ["api.practicecre.com", "api.doctorcre.com", "dealroom.doctorcre.com"],
+      "secrets": {"source": "wrangler secrets and ~/.config/carr/db.env; never in the repository"},
+      "telemetry": {"destination": "Cloudflare observability, healthchecks.io dead-man switch, the ops ledger"},
+      "who_may_write": "human-gated paths only; tools/db-tap.py is read-only here without break-glass"
+    }
+  ],
+  "intentional_differences": [
+    {
+      "difference": "staging has no custom domain while production has three",
+      "why": "A staging hostname on the same zone is one typo and one certificate away from production. workers.dev costs nothing, needs no DNS, and is unmistakably not production at a glance."
+    },
+    {
+      "difference": "staging has no R2 bucket while production declares carr_documents",
+      "why": "The production binding is declared but referenced nowhere in src/. Staging gets one when the code uses it; an unused binding is a surface to isolate for no benefit."
+    },
+    {
+      "difference": "staging and production hold different KV namespace ids",
+      "why": "This is the isolation, not a gap. A shared namespace would mean shared OAuth grants."
+    },
+    {
+      "difference": "local and rehearsal deploy no Worker at all",
+      "why": "Neither is a serving environment. Local is a workstation; rehearsal is a database branch with a lifetime measured in minutes."
+    },
+    {
+      "difference": "production is resolved by pinned id while staging is resolved by name",
+      "why": "Stated in tools/db-tap.py and deliberate: staging is disposable and gets recreated, so a pinned id would go stale; production must never be reachable by a name another project could take."
+    }
+  ]
+}

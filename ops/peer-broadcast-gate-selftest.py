@@ -26,13 +26,33 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
-def run(to, state_dir, tool="SendMessage"):
+def run(to, state_dir, tool="SendMessage", transcript=None, transcript_key="transcript_path"):
     """Invoke the gate with an isolated HOME so the real state file is untouched."""
     env = {**os.environ, "HOME": state_dir}
-    payload = json.dumps({"tool_name": tool, "tool_input": {"to": to}})
-    p = subprocess.run([sys.executable, GATE], input=payload,
+    body = {"tool_name": tool, "tool_input": {"to": to}}
+    if transcript is not None:
+        body[transcript_key] = transcript
+    p = subprocess.run([sys.executable, GATE], input=json.dumps(body),
                        capture_output=True, text=True, env=env, timeout=60)
     return p.returncode, (p.stdout + p.stderr)
+
+
+def spawn_record(agent_id):
+    """One transcript line as the harness actually writes it when the Agent tool
+    launches a subagent — verified against a real session transcript
+    (db8cb4af, 2026-08-14): the spawn is a toolUseResult carrying agentId."""
+    return json.dumps({
+        "type": "user",
+        "toolUseResult": {"isAsync": True, "status": "async_launched",
+                          "agentId": agent_id, "description": "worker"},
+    })
+
+
+def write_transcript(d, lines):
+    path = os.path.join(d, "transcript.jsonl")
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return path
 
 
 print("peer-broadcast-gate")
@@ -124,6 +144,104 @@ with tempfile.TemporaryDirectory() as d:
     check("the refusal lists peers by name, without the ref noise",
           rc == 2 and "carr-ai-01" in out and "[aaa]" not in out,
           f"rc={rc}: {out[:200]}")
+
+# 4c. A SESSION'S OWN SUBAGENTS ARE ORCHESTRATION, NOT BROADCAST.
+#
+# The false positive, hit 2026-08-14 (session db8cb4af): an orchestrating
+# session spawned workers via the Agent tool and messaged them by agentId. The
+# gate counted those workers as "sessions", filled the budget with them, and
+# then refused the session's OWN next worker — listing one of its own subagents
+# as an already-messaged peer in the refusal.
+#
+# The gate's rationale does not apply here. Its whole justification is the
+# EXTERNALISED cost — the asker pays one message, every other session on the
+# machine pays for reading and answering. A subagent's reply lands in the
+# asker's own context; the asker pays the full cost itself. There is nobody to
+# protect.
+#
+# Identity must be PROVEN, not pattern-matched: a recipient is exempt only when
+# THIS session's transcript records spawning that agentId. A recipient merely
+# SHAPED like an agentId is still a peer — otherwise naming a session
+# 'a0123456789abcdef' would spend an unlimited budget.
+
+# Own subagent, budget already full — the incident, replayed. With spare budget
+# this passes against the unfixed gate, so it is asserted at the point the old
+# gate refused.
+with tempfile.TemporaryDirectory() as d:
+    t = write_transcript(d, [spawn_record("a4da4a7e30149a307"),
+                             spawn_record("aabf255ee92301b74")])
+    run("carr-ai-01 [aaa]", d, transcript=t)
+    run("carr-ai-02 [bbb]", d, transcript=t)   # budget now full
+    rc, out = run("aabf255ee92301b74", d, transcript=t)
+    check("an own subagent is allowed even with the peer budget full",
+          rc == 0, f"rc={rc}: {out[:200]}")
+
+# Own subagents must not consume the budget either — the other direction of the
+# same incident: two worker messages first, then two genuine peers.
+with tempfile.TemporaryDirectory() as d:
+    t = write_transcript(d, [spawn_record("a4da4a7e30149a307"),
+                             spawn_record("aabf255ee92301b74")])
+    run("a4da4a7e30149a307", d, transcript=t)
+    run("aabf255ee92301b74", d, transcript=t)
+    rc1, out1 = run("carr-ai-01 [aaa]", d, transcript=t)
+    rc2, out2 = run("carr-ai-02 [bbb]", d, transcript=t)
+    rc3, _ = run("carr-ai-03 [ccc]", d, transcript=t)
+    check("own subagents do not consume the named-peer allowance",
+          rc1 == 0 and rc2 == 0, f"rc1={rc1} rc2={rc2}: {(out1 + out2)[:160]}")
+    check("and a genuinely third PEER is still refused alongside subagent traffic",
+          rc3 == 2, f"rc={rc3}")
+
+# The exemption is earned by the transcript, not by the shape of the name. A
+# recipient that merely looks like an agentId but was never spawned by this
+# session is a peer and spends the budget like one.
+with tempfile.TemporaryDirectory() as d:
+    t = write_transcript(d, [spawn_record("a4da4a7e30149a307")])
+    run("carr-ai-01 [aaa]", d, transcript=t)
+    run("carr-ai-02 [bbb]", d, transcript=t)
+    rc, _ = run("a0123456789abcdef", d, transcript=t)
+    check("an agentId-shaped recipient NOT spawned by this session is still refused",
+          rc == 2, f"rc={rc}")
+
+# An agentId that appears in the transcript only as TEXT — quoted in a message,
+# pasted in a tool result — is not a spawn record. Only a structural
+# toolUseResult.agentId proves ownership; anything less is spoofable by content.
+with tempfile.TemporaryDirectory() as d:
+    mention = json.dumps({"type": "assistant", "message": {
+        "content": 'peer said its id is "agentId": "adecoy0123456789a"'}})
+    t = write_transcript(d, [spawn_record("a4da4a7e30149a307"), mention])
+    run("carr-ai-01 [aaa]", d, transcript=t)
+    run("carr-ai-02 [bbb]", d, transcript=t)
+    rc, _ = run("adecoy0123456789a", d, transcript=t)
+    check("an agentId mentioned only in message text earns no exemption",
+          rc == 2, f"rc={rc}")
+
+# No transcript in the payload, or a transcript that cannot be read, means no
+# exemption can be proven — the recipient counts as a peer, the gate keeps
+# working, and nothing crashes.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01 [aaa]", d)
+    run("carr-ai-02 [bbb]", d)
+    rc, _ = run("aabf255ee92301b74", d)
+    check("without a transcript_path the recipient counts as a peer",
+          rc == 2, f"rc={rc}")
+
+with tempfile.TemporaryDirectory() as d:
+    gone = os.path.join(d, "no-such-transcript.jsonl")
+    run("carr-ai-01 [aaa]", d, transcript=gone)
+    run("carr-ai-02 [bbb]", d, transcript=gone)
+    rc, _ = run("aabf255ee92301b74", d, transcript=gone)
+    check("an unreadable transcript denies the exemption without crashing",
+          rc == 2, f"rc={rc}")
+
+# The camelCase payload spelling some hook events use must work too.
+with tempfile.TemporaryDirectory() as d:
+    t = write_transcript(d, [spawn_record("aabf255ee92301b74")])
+    run("carr-ai-01 [aaa]", d, transcript=t, transcript_key="transcriptPath")
+    run("carr-ai-02 [bbb]", d, transcript=t, transcript_key="transcriptPath")
+    rc, out = run("aabf255ee92301b74", d, transcript=t,
+                  transcript_key="transcriptPath")
+    check("the camelCase transcriptPath key is honoured as well",
+          rc == 0, f"rc={rc}: {out[:160]}")
 
 # 5. It must not touch any other tool.
 with tempfile.TemporaryDirectory() as d:

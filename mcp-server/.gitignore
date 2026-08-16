@@ -5,3 +5,4 @@ node_modules
 .wrangler/
 .dev.vars
 .dev.vars.*
+.last-deployed-verb-count*

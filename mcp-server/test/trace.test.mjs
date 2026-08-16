@@ -34,6 +34,7 @@ import {
   recordWorkerFailure,
   scheduleFailureRecord,
   withFailureRecording,
+  wrapNeonRows,
 } from "../src/trace.js";
 import { dispatch } from "../src/mcp.js";
 import { auditIdentity } from "../src/tools.js";
@@ -184,6 +185,38 @@ test("recordWorkerFailure: a brand-new signature opens an incident and attaches 
   assert.ok(bump, "must bump freshness after attaching a fact");
 });
 
+// THIS TEST GUARDS A CROSS-LANGUAGE CONTRACT, which is why it exists separately
+// from the assertion two tests up that already checks the same string. A
+// RECURRING failure's correlation id is stored NOWHERE but in this source_ref
+// (the incident row's own correlation_id belongs to the FIRST failure of the
+// signature), and migrations/0123_trace_incident_recurrence.sql's ops.v_trace
+// arm is what reads it back — by parsing this exact prefix with this exact
+// regex. Renaming the prefix here would not fail a single JS test that
+// hardcodes both sides; it would silently stop every recurrence from tracing,
+// which is the defect 0123 closed. So the regex the SQL uses is asserted here,
+// against the JS that has to keep feeding it.
+test("recordWorkerFailure: a fact's source_ref matches the regex migration 0123's ops.v_trace arm parses", async () => {
+  // Character-for-character the pattern in 0123's substring(... from ...) call.
+  const V_TRACE_ARM_PATTERN =
+    /^correlation:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+  const { query, calls } = fakeQuery([
+    { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
+    { match: /select id from ops\.incident where signature/, rows: [{ id: "inc-open" }] }, // a RECURRENCE
+    { match: /select 1 from ops\.incident_fact/, rows: [] },
+  ]);
+  await recordWorkerFailure(query, {
+    environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
+  });
+
+  const fact = calls.find((c) => /insert into ops\.incident_fact/.test(c.text));
+  assert.ok(fact, "a recurrence must still attach a fact — it is the only record of its correlation id");
+  const sourceRef = fact.params[2];
+  const parsed = V_TRACE_ARM_PATTERN.exec(sourceRef);
+  assert.ok(parsed, `0123's v_trace arm cannot parse ${sourceRef} — recurrences would stop tracing`);
+  assert.equal(parsed[1], A_CORR, "the arm must recover the recurrence's own correlation id, unchanged");
+});
+
 test("recordWorkerFailure: NEVER writes state, resolved_at, recovery_evidence_ref or monitoring_until — closing an incident is a human's call", async () => {
   const svcId = "svc-1", incId = "inc-open";
   const { query, calls } = fakeQuery([
@@ -263,10 +296,211 @@ test("recordWorkerFailure: a concurrent writer winning the open-incident race (2
 });
 
 test("recordWorkerFailure: NEVER throws, even when the query function itself throws unexpectedly — a recording failure must not become a request failure", async () => {
-  const angryQuery = async () => { throw new Error("network blip"); };
-  await assert.doesNotReject(recordWorkerFailure(angryQuery, {
-    environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
-  }));
+  const originalError = console.error;
+  console.error = () => {}; // this call is ALSO expected to log now — silenced here, asserted below
+  try {
+    const angryQuery = async () => { throw new Error("network blip"); };
+    await assert.doesNotReject(recordWorkerFailure(angryQuery, {
+      environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
+    }));
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("recordWorkerFailure: a swallowed error is LOGGED via one structured console.error line — never silent (defect cae5be2e, second finding: the FIRST build swallowed with no log line at all, which is exactly what let the wrapNeonRows bug below run in production for hours with zero trace anywhere)", async () => {
+  const originalError = console.error;
+  const lines = [];
+  console.error = (line) => lines.push(line);
+  try {
+    const angryQuery = async () => { throw new TypeError("Cannot read properties of undefined (reading 'length')"); };
+    await recordWorkerFailure(angryQuery, {
+      environment: "production", routeKey: "mcp:tools/call:read-loop",
+      failureClass: "verb_internal_error", correlationId: A_CORR,
+    });
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]);
+  assert.equal(parsed.level, "error");
+  assert.equal(parsed.event, "worker_failure_record_error");
+  assert.equal(parsed.correlation_id, A_CORR);
+  assert.equal(parsed.route_key, "mcp:tools/call:read-loop");
+  assert.equal(parsed.failure_class, "verb_internal_error");
+  assert.equal(parsed.error_name, "TypeError");
+  assert.match(parsed.error_message, /Cannot read properties of undefined/);
+  // NEVER the query text, params, or client content — only what the error
+  // object itself carries (name + message), matching correlation.js's own
+  // logLine discipline for the uncaught-throw case.
+  assert.doesNotMatch(lines[0], /select |insert into|ops\.service/i);
+});
+
+test("recordWorkerFailure: a successful call logs NOTHING — the log line is for failure only, never routine operation", async () => {
+  const originalError = console.error;
+  const lines = [];
+  console.error = (line) => lines.push(line);
+  try {
+    const { query } = fakeQuery([
+      { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
+      { match: /select id from ops\.incident where signature/, rows: [] },
+      { match: /select coalesce\(max/, rows: [{ n: 1 }] },
+      { match: /insert into ops\.incident\b/, rows: [{ id: "inc-1" }] },
+      { match: /select 1 from ops\.incident_fact/, rows: [] },
+    ]);
+    await recordWorkerFailure(query, {
+      environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
+    });
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(lines.length, 0);
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// wrapNeonRows — THE ROOT CAUSE FIX (defect cae5be2e, second finding,
+// diagnosed live against production 2026-08-14). PR #148 shipped, migration
+// 0122 applied clean, every grant was correct, and the recorder STILL never
+// wrote a row — because scheduleFailureRecord's OLD query function was
+// `(text, params) => neon(env.DATABASE_URL_WRITER).query(text, params)`,
+// returning whatever neon(dsn).query() actually returns. Per
+// @neondatabase/serverless's own documented contract, that is a BARE ARRAY OF
+// ROWS by default — e.g. `await sql.query("SELECT ...", [...])
+// // -> [ { greeting: "hello world" } ]` — never `{rows: [...]}` unless
+// `fullResults: true` is passed. recordWorkerFailure's first query
+// (`select id from ops.service...`) returned that bare array, `svc.rows` read
+// `undefined`, `.length` threw a TypeError, and the outer catch swallowed it —
+// on every single call. Proof this is real, not a guess: tool_read_call's
+// recordReadCall (mcp.js) — the SAME ctx.waitUntil, the SAME
+// DATABASE_URL_WRITER, the SAME neon() driver — recorded the exact probe
+// request that triggered this bug, because recordReadCall never reads `.rows`
+// off its own insert's result. These tests prove the adapter now closes that
+// exact gap, using a stub shaped like the REAL documented driver contract —
+// not the `{rows:[...]}` shape the original (wrong) test mock used, which is
+// precisely how the original suite passed 31/31 while this bug shipped.
+// ────────────────────────────────────────────────────────────────────────
+
+test("wrapNeonRows: adapts a bare array (neon()'s REAL documented return shape) into {rows:[...]}", async () => {
+  const bareArrayDriver = { query: async () => [{ id: "svc-1" }] };
+  const query = wrapNeonRows(bareArrayDriver);
+  const result = await query("select id from ops.service where key=$1", ["carr-mcp"]);
+  assert.deepEqual(result, { rows: [{ id: "svc-1" }] });
+});
+
+test("wrapNeonRows: an empty result set is {rows: []}, never {rows: undefined} — the exact shape recordWorkerFailure's `.rows.length` checks depend on", async () => {
+  const bareArrayDriver = { query: async () => [] };
+  const query = wrapNeonRows(bareArrayDriver);
+  const result = await query("select 1", []);
+  assert.deepEqual(result, { rows: [] });
+});
+
+test("wrapNeonRows: passes text and params through to the underlying driver unchanged", async () => {
+  const seen = [];
+  const driver = { query: async (text, params) => { seen.push({ text, params }); return []; } };
+  const query = wrapNeonRows(driver);
+  await query("select 1 where x=$1", ["y"]);
+  assert.deepEqual(seen, [{ text: "select 1 where x=$1", params: ["y"] }]);
+});
+
+test("REGRESSION (defect cae5be2e, second finding): recordWorkerFailure through wrapNeonRows against a driver shaped EXACTLY like the real neon() contract actually opens an incident and attaches a fact — this is the test that would have caught the production bug", async () => {
+  const calls = [];
+  const bareArrayDriver = {
+    query: async (text, params) => {
+      calls.push({ text, params });
+      if (/select id from ops\.service/.test(text)) return [{ id: "svc-1" }];
+      if (/select id from ops\.incident where signature/.test(text)) return [];
+      if (/select coalesce\(max/.test(text)) return [{ n: 1 }];
+      if (/^\s*insert into ops\.incident\b/.test(text)) return [{ id: "inc-1" }];
+      if (/select 1 from ops\.incident_fact/.test(text)) return [];
+      return [];
+    },
+  };
+  const query = wrapNeonRows(bareArrayDriver);
+  await recordWorkerFailure(query, {
+    environment: "production", routeKey: "mcp:tools/call:read-loop",
+    failureClass: "verb_internal_error", correlationId: A_CORR,
+  });
+  assert.ok(calls.some((c) => /^\s*insert into ops\.incident\b/.test(c.text)),
+    "the incident insert must actually have been attempted — a naive {rows}-shaped mock would pass this test even with the old bug, which is exactly why THIS test drives a bare-array driver instead");
+  assert.ok(calls.some((c) => /insert into ops\.incident_fact/.test(c.text)),
+    "the fact insert must also have been attempted — proves the recorder read the incident id back correctly, not just that the first query survived");
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// scheduleFailureRecord composes wrapNeonRows — source assertion, since the
+// live wiring needs a real (or network-reachable-shaped) DSN to exercise
+// behaviorally, matching the convention correlation.test.mjs/tool-read-call.
+// test.mjs already use for Worker-only composition points.
+// ────────────────────────────────────────────────────────────────────────
+
+test("trace.js: scheduleFailureRecord builds its query through wrapNeonRows, not a raw neon(...).query() passthrough", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../src/trace.js", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("export function scheduleFailureRecord"));
+  assert.match(fn, /wrapNeonRows\(neon\(env\.DATABASE_URL_WRITER\)\)/,
+    "scheduleFailureRecord must adapt neon()'s bare-array return through wrapNeonRows before recordWorkerFailure ever sees it");
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// THE REAL INSERT SHAPE — every NOT NULL / CHECK-constrained column
+// migrations 0115/0116 require on ops.incident, asserted against the ACTUAL
+// SQL text the recorder sends, not just "was insert called". A test that only
+// checks the recorder ran (as every test above the wrapNeonRows section did,
+// pre-fix) proves nothing about whether the statement itself is well-formed —
+// this is the coverage that was missing alongside the shape bug.
+// ────────────────────────────────────────────────────────────────────────
+
+test("openIncident's INSERT supplies every column ops.incident's constraints actually require (0115 NOT NULL + CHECK, 0116 signature)", async () => {
+  let insertText = null;
+  const { query } = fakeQuery([
+    { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
+    { match: /select id from ops\.incident where signature/, rows: [] },
+    { match: /select coalesce\(max/, rows: [{ n: 1 }] },
+  ]);
+  const capturingQuery = async (text, params) => {
+    if (/^\s*insert into ops\.incident\b/.test(text)) {
+      insertText = text;
+      return { rows: [{ id: "inc-1" }] };
+    }
+    if (/select 1 from ops\.incident_fact/.test(text)) return { rows: [] };
+    return query(text, params);
+  };
+  await recordWorkerFailure(capturingQuery, {
+    environment: "production", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
+  });
+  assert.ok(insertText, "the insert must actually have run");
+  const columnList = insertText.slice(insertText.indexOf("("), insertText.indexOf(")") + 1);
+  // NOT NULL, no default: ref, title, environment, detected_source, source_kind,
+  // source_ref. NOT NULL WITH a default this insert deliberately supplies
+  // explicitly anyway (correlation_id, state, detected_at, observed_at).
+  // severity is NOT NULL AND check-constrained (SEV-0..4 — see the DEFAULT_
+  // SEVERITY test below). signature is nullable but is what makes 0116's whole
+  // dedup mechanism work — its absence would silently defeat the point of using
+  // ops.incident over a new ledger row at all.
+  for (const col of ["ref", "correlation_id", "title", "severity", "state",
+                      "environment", "detected_source", "detected_at",
+                      "source_kind", "source_ref", "signature", "observed_at",
+                      "expires_at"]) {
+    assert.match(columnList, new RegExp(`\\b${col}\\b`), `insert must supply ${col}`);
+  }
+});
+
+test("the default severity satisfies ops.incident's CHECK constraint (severity ~ '^SEV-[0-4]$', migration 0115)", async () => {
+  let severityParam = null;
+  const { query } = fakeQuery([
+    { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
+    { match: /select id from ops\.incident where signature/, rows: [] },
+    { match: /select coalesce\(max/, rows: [{ n: 1 }] },
+    { match: /select 1 from ops\.incident_fact/, rows: [] },
+  ]);
+  const capturingQuery = async (text, params) => {
+    if (/^\s*insert into ops\.incident\b/.test(text)) { severityParam = params[3]; return { rows: [{ id: "inc-1" }] }; }
+    return query(text, params);
+  };
+  await recordWorkerFailure(capturingQuery, {
+    environment: "production", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
+  });
+  assert.match(severityParam, /^SEV-[0-4]$/);
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -290,15 +524,39 @@ test("scheduleFailureRecord: never throws when ctx or ctx.waitUntil is missing",
 
 test("scheduleFailureRecord: schedules exactly one promise via ctx.waitUntil when a writer credential is present, and never rejects", async () => {
   const waited = [];
-  // Deliberately not a real database: neon() throws SYNCHRONOUSLY on a
-  // malformed connection string (proven live — see dispatch()'s own internal-
-  // error test below for the same technique), which recordWorkerFailure's
-  // outer try/catch swallows before any network call is ever attempted. This
-  // proves the wiring without dialing out.
-  scheduleFailureRecord({ DATABASE_URL_WRITER: "not-a-real-connection-string", CARR_ENV: "staging", CORRELATION_ID: A_CORR },
+  // Syntactically VALID but network-unreachable: neon() does not throw at
+  // construction on this shape (proven live — tool-read-call.test.mjs's own
+  // fakeReaderClientEnv uses the identical DSN for the identical reason), so
+  // this exercises the real path through wrapNeonRows and into
+  // recordWorkerFailure's own try/catch, which swallows the eventual network
+  // failure. Deliberately NOT "not-a-real-connection-string" here — that string
+  // makes neon() throw SYNCHRONOUSLY at construction, which is a DIFFERENT
+  // code path (scheduleFailureRecord's own try/catch, tested below) that never
+  // reaches ctx.waitUntil at all.
+  scheduleFailureRecord({ DATABASE_URL_WRITER: "postgres://fake:fake@localhost.invalid/fake", CARR_ENV: "staging", CORRELATION_ID: A_CORR },
     { waitUntil: (p) => waited.push(p) }, { routeKey: "/mcp", failureClass: "http_5xx", detail: null });
   assert.equal(waited.length, 1);
   await assert.doesNotReject(waited[0]);
+});
+
+test("scheduleFailureRecord: a connection string neon() rejects OUTRIGHT (synchronously, at construction) is caught and logged — never thrown, even though the throw happens in THIS function's own body, before ctx.waitUntil is ever reached (the exact regression this fix's own test suite caught before shipping)", async () => {
+  const originalError = console.error;
+  const lines = [];
+  console.error = (line) => lines.push(line);
+  const waited = [];
+  try {
+    assert.doesNotThrow(() => scheduleFailureRecord(
+      { DATABASE_URL_WRITER: "not-a-real-connection-string", CARR_ENV: "staging", CORRELATION_ID: A_CORR },
+      { waitUntil: (p) => waited.push(p) }, { routeKey: "/mcp", failureClass: "http_5xx", detail: null }));
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(waited.length, 0, "a synchronous neon() failure must never reach ctx.waitUntil");
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]);
+  assert.equal(parsed.event, "worker_failure_record_error");
+  assert.equal(parsed.correlation_id, A_CORR);
+  assert.match(parsed.error_message, /not a valid URL/);
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -308,7 +566,7 @@ test("scheduleFailureRecord: schedules exactly one promise via ctx.waitUntil whe
 
 function fakeEnvCtx() {
   const waited = [];
-  return { env: { DATABASE_URL_WRITER: "not-a-real-connection-string", CARR_ENV: "staging", CORRELATION_ID: A_CORR },
+  return { env: { DATABASE_URL_WRITER: "postgres://fake:fake@localhost.invalid/fake", CARR_ENV: "staging", CORRELATION_ID: A_CORR },
     ctx: { waitUntil: (p) => waited.push(p) }, waited };
 }
 
@@ -362,9 +620,11 @@ test("dispatch(): a genuine uncaught exception in a tool call schedules a failur
   // env.DATABASE_URL_READER is absent: list-verbs is a read verb, so callTool's
   // read branch calls neon(undefined) BEFORE its own try/catch — a real,
   // reproducible uncaught exception, not a contrived one (see this file's
-  // header). DATABASE_URL_WRITER carries the same non-dialing malformed string
-  // scheduleFailureRecord's own tests use.
-  const env = { DATABASE_URL_WRITER: "not-a-real-connection-string" };
+  // header). DATABASE_URL_WRITER is syntactically valid but network-
+  // unreachable (NOT "not-a-real-connection-string" — that shape makes
+  // neon() throw synchronously at construction inside scheduleFailureRecord's
+  // own guard, tested separately, and never reaches ctx.waitUntil at all).
+  const env = { DATABASE_URL_WRITER: "postgres://fake:fake@localhost.invalid/fake" };
   const ctx = { waitUntil: (p) => waited.push(p) };
   const actor = { slug: "joe", display: "Joe", human: true, via: "oauth-google", client_id: "claude" };
   const req = new Request("https://api.doctorcre.com/mcp", {
