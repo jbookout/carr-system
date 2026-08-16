@@ -477,3 +477,36 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
     fi
   fi
 fi
+
+# ── THE LEDGER IS NOT THE SMOKE SUITE ────────────────────────────────────────
+# Defect cb65fc17, 2026-08-16: the first approved release in this system's
+# history shipped to staging, read back clean by hand, and wrote NO row to
+# ops.deployment. All three record_deployment call sites sit inside the block
+# above, so a staging deploy reached none of them.
+#
+# THE PRODUCTION-ONLY GUARD ABOVE IS CORRECT AND STAYS. smoke-reads.sh defaults
+# to the production API, and aiming post-deploy verification at a reconstructed
+# staging hostname is what the 2026-08-13 routes incident was made of.
+#
+# WHAT WAS WRONG IS THE NESTING. Running the golden suite and recording THAT A
+# DEPLOY HAPPENED are different facts. The second is the Program 3 job ledger,
+# which Program 5's promotion path reads, and a staging deploy leaving no row is
+# indistinguishable from a staging deploy that never ran — which is exactly how
+# this went unnoticed until someone went looking for something else.
+#
+# `verifying`, NEVER `complete`, and the word is already defined above for this
+# case: the suite could not run, so nothing was proven. Migration 0115 refuses
+# `complete` without a read-back and would reject the lie anyway. Automating the
+# staging read-back so this could honestly say `complete` is Program 5 work
+# (production read-back is one of its bullets) and is deliberately not smuggled
+# in here.
+if [ "$TARGET_ENV" != "production" ]; then
+  echo ""
+  echo "== postflight: deployment ledger =="
+  CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+  export CARR_CORRELATION_ID
+  echo "  correlation $CARR_CORRELATION_ID"
+  echo "  the golden suite does not run against $TARGET_ENV, so this deploy is"
+  echo "  recorded as VERIFYING — shipped, not yet proven by a suite."
+  record_deployment verifying "$CARR_CORRELATION_ID"
+fi
