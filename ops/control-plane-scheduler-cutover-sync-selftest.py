@@ -20,6 +20,7 @@ REGISTRY = json.loads((REPO / "ops" / "config" / "control-plane-scheduler-cutove
 MIGRATION = (REPO / "migrations" / "0176_legacy_schedule_disable_receipt.sql").read_text(encoding="utf-8").lower()
 REBUILD_GATE = (REPO / "ops" / "p1-rebuild-gate.py").read_text(encoding="utf-8").lower()
 DB_GATE = (REPO / "ops" / "control-plane-db-gate.py").read_text(encoding="utf-8").lower()
+CI = (REPO / "ops" / "ci.sh").read_text(encoding="utf-8").lower()
 FAILED: list[str] = []
 
 
@@ -81,6 +82,16 @@ def main() -> int:
           "scheduler surface registry is empty, stale" in DB_GATE
           and "from ops.legacy_schedule_surface_registry" in DB_GATE
           and "actual_surfaces != expected_surfaces" in DB_GATE)
+    migration_apply = 'tools/migrate.py --apply --yes'
+    authority_sync = '"$py" tools/control-plane.py sync'
+    db_gate_loop = 'for g in ops/*-gate.py; do'
+    check("CI orders throwaway migration, real authority sync, then DB acceptance gates",
+          migration_apply in CI and authority_sync in CI and db_gate_loop in CI
+          and CI.find(migration_apply) < CI.find(authority_sync) < CI.find(db_gate_loop))
+    check("CI fails the migration class when the real authority sync fails",
+          'migration-control-plane-sync.log' in CI
+          and 'bad migration "control-plane registry sync failed after migrations"' in CI
+          and 'database_url="$dsn" run_quiet "$logdir/migration-control-plane-sync.log"' in CI)
     print(f"control-plane scheduler cutover sync selftest — {len(FAILED)} failure(s)")
     return 1 if FAILED else 0
 

@@ -482,6 +482,18 @@ check_migration() {
       return
     fi
 
+    # Migration 0176 deliberately creates its FK-bound scheduler surface
+    # registry empty.  The real authority sync validates the complete
+    # checked-in inventory and writes it only after job definitions exist.
+    # Do that real sync on this disposable database before acceptance gates;
+    # copied seed SQL would bypass exactly the ordering this class must prove.
+    if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-control-plane-sync.log" \
+         "$PY" tools/control-plane.py sync; then
+      tail -30 "$LOGDIR/migration-control-plane-sync.log" >&2
+      bad migration "control-plane registry sync failed after migrations"
+      return
+    fi
+
     # ── THE DATABASE ACCEPTANCE GATES ────────────────────────────────────────
     # Three of these existed before this loop did and NOTHING RAN ANY OF THEM.
     # ops/program3-trace-gate.py opens by calling itself "the acceptance test
