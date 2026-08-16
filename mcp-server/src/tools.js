@@ -11,6 +11,7 @@ import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
+import { workRequestIntakeTools } from "./work-request-intake.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
@@ -105,7 +106,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition")
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem")
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -7593,6 +7594,9 @@ Object.assign(TOOLS, capabilityProgramTools({ withEnvelope, writeEvent, ToolErro
 
 // Evidence-backed implementation form, linked to canonical Work Requests.
 Object.assign(TOOLS, workShapeTools({ withEnvelope, writeEvent, ToolError }));
+
+// Program 6: sourced additive capture and a safe card only. No lifecycle verbs.
+Object.assign(TOOLS, workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }));
 
 // Pure workbook-derived lease economics. No database, model, or write path.
 Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));

@@ -61,6 +61,8 @@ WRITE_ACTION_EXACT = {
                                   # same exact-entry treatment
     "open-investigation-branch",  # sibling of open-investigation, same reasoning
     "presence-lease",
+    "report-problem",       # Program 6 additive Work Request capture; "report"
+                              # is not generalized because report-style reads exist
     "review-deal",
 }
 NESTED_CARR_CALL = re.compile(r"(?:tools\.)?(mcp__carr(?:_records)?__([A-Za-z0-9_]+))")

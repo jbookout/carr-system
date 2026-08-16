@@ -124,6 +124,11 @@ CASES = [
         codex_tool("exec", "await tools.mcp__carr__disable_legacy_schedule({ workflow_key: 'fixture' });"),
         codex_assistant("Completed."),
     ], True),
+    ("Codex sourced problem capture requires evidence", [
+        codex_user("capture this operating problem"),
+        codex_tool("exec", "await tools.mcp__carr__report_problem({ idempotency_key: 'fixture' });"),
+        codex_assistant("Completed."),
+    ], True),
     ("CARR read action permits completion", [
         codex_user("reconcile Musicologie"),
         codex_tool("exec", "await tools.mcp__carr__patch_deal_field({ id: 'd1' });"),

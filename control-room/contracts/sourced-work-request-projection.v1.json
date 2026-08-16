@@ -1,0 +1,49 @@
+{
+  "contract": "carr-sourced-work-request-projection",
+  "version": "1.0.0",
+  "status": "phase1_draft",
+  "purpose": "A closed read projection for a Work Request captured from a current sourced routine answer. It specifies what an authenticated server-side reader may return; it does not add capture, triage, claim, approval, dispatch, or execution transport to the static Control Room prototype.",
+  "authority": {
+    "canonical_work_request": "ops.work_request",
+    "canonical_lifecycle": "control-room/contracts/state-machines.v1.json#machines.work_request",
+    "workspace_projection": "control-room/contracts/work-request-projection.v1.json",
+    "source_reader": "mcp-server search-doctrine response with current source and reconstructible provenance"
+  },
+  "transport": "authenticated MCP-backed read, not implemented by this static prototype",
+  "lifecycle": {
+    "canonical_from": "captured",
+    "projection_state": "queued"
+  },
+  "output": {
+    "required_fields": [
+      "human_ref",
+      "title",
+      "desired_outcome",
+      "acceptance_criteria",
+      "source",
+      "state",
+      "next_human_action",
+      "actions"
+    ],
+    "human_ref": "durable human-readable Work Request reference; never a database UUID",
+    "source": {
+      "required_fields": ["label", "freshness", "provenance"],
+      "label_rule": "exact source label from the current retrieved result; never a generated summary"
+    },
+    "next_human_action": {
+      "label": "Review and triage",
+      "effect": "none"
+    },
+    "actions": []
+  },
+  "prohibitions": [
+    "derive canonical state from a UI label",
+    "claim completion before confirmed_closed",
+    "invent action controls",
+    "accept a client-supplied tenant, actor, or source reference",
+    "expose a raw database UUID as the human label",
+    "copy business payload or raw question text into the projection",
+    "add POST, dispatch, claim, approve, or execute routes"
+  ],
+  "integration_boundary": "An authenticated server-side reader must validate tenant and actor scope, current source freshness, and provenance before returning this projection. Capture and transition ownership remain in the MCP/record-layer implementation."
+}
