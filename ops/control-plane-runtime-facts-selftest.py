@@ -174,17 +174,20 @@ for key,evidence in command_fixtures.items():
     altered={**evidence,'stdout_tail':str(evidence['stdout_tail'])+' altered'}
     check(f'{key} nonidentical receipt evidence refuses',not evaluate_stage(workflow,'completion',cp._workflow_fact_collector(workflow,weekday_payload,execution=evidence,receipt_ref='job:fixture:attempt:1',receipt_evidence=altered,mode='shadow')))
 
-# Nightly's actual completion result now goes to stdout, allowing the canary
-# and live command receipt to prove the run outcome without treating a stale
-# log line as current-run evidence.
+# Nightly's actual completion result goes to stdout for the live receipt.  The
+# old canary used the same command and destination as live, so it is now
+# deliberately unregistered and must fail closed even when handed a valid live
+# marker.
 nightly=by['nightly-record-layer']
-for mode in ('canary','live'):
-    evidence={'entrypoint':'bin/nightly.sh','mode':mode,'args':[],'exit_code':0,
-              'stdout_tail':'nightly result: chain_ok'}
-    collector=cp._workflow_fact_collector(nightly,weekday_payload,execution=evidence,mode=mode)
-    check(f'nightly {mode} stdout completion marker validates',evaluate_stage(nightly,'validation',collector))
-    false_marker={**evidence,'stdout_tail':'nightly result: chain_failed'}
-    check(f'nightly {mode} failed marker refuses',not evaluate_stage(nightly,'validation',cp._workflow_fact_collector(nightly,weekday_payload,execution=false_marker,mode=mode)))
+live_evidence={'entrypoint':'bin/nightly.sh','mode':'live','args':[],'exit_code':0,
+               'stdout_tail':'nightly result: chain_ok'}
+live_collector=cp._workflow_fact_collector(nightly,weekday_payload,execution=live_evidence,mode='live')
+check('nightly live stdout completion marker validates',evaluate_stage(nightly,'validation',live_collector))
+false_marker={**live_evidence,'stdout_tail':'nightly result: chain_failed'}
+check('nightly live failed marker refuses',not evaluate_stage(nightly,'validation',cp._workflow_fact_collector(nightly,weekday_payload,execution=false_marker,mode='live')))
+old_canary={**live_evidence,'mode':'canary'}
+check('nightly live-equivalent canary cannot satisfy command validation',
+      not evaluate_stage(nightly,'validation',cp._workflow_fact_collector(nightly,weekday_payload,execution=old_canary,mode='canary')))
 
 # Every cognition predicate is fail-closed when its exact canonical input,
 # typed proposal field, or immutable receipt evidence is removed.  This table

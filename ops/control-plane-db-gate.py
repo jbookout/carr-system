@@ -344,6 +344,47 @@ def main() -> int:
             if fetchone_required(cur.fetchone(), "activated fixture rule")[0] != "active":
                 fail("admitted rule did not activate")
 
+            # Disabling a definition is a database-level dispatch fence.  It
+            # cancels queued/retry work with immutable evidence, and both claim
+            # functions must ignore the old version even when called by an old
+            # worker checkout.
+            fenced_definition = f"db-gate-fenced-{uuid.uuid4()}"
+            cur.execute("""
+                insert into ops.job_definition
+                  (key,version,enabled,risk,execution_kind,execution_contract,
+                   recurrence,retry_policy,deduplication,completion_contract,
+                   legacy_schedule)
+                values (%s,1,true,'green','deterministic','{"entrypoint":"fixture"}',
+                        '{"cron":"* * * * *","timezone":"UTC"}',
+                        '{"max_attempts":2,"base_seconds":1,"cap_seconds":2,"timeout_seconds":30,"backoff":"exponential"}',
+                        '{"key_template":"fixture-fenced"}',
+                        '{"predicate":"fixture","receipt_kind":"fixture"}',
+                        '{"status":"enabled"}')
+            """, (fenced_definition,))
+            cur.execute("set local role carr_jobs")
+            cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'canary')).id",
+                        (fenced_definition, "2026-08-15T11:59:00Z",
+                         '{"fixture":"must-not-run"}', f"fixture-fenced-{uuid.uuid4()}"))
+            fenced_job = fetchone_required(cur.fetchone(), "fenced fixture enqueue")[0]
+            cur.execute("reset role")
+            cur.execute("update ops.job_definition set enabled=false where key=%s and version=1",
+                        (fenced_definition,))
+            cur.execute("select state,attempt,last_failure_class from ops.job where id=%s",
+                        (fenced_job,))
+            if fetchone_required(cur.fetchone(), "disabled definition job state") != (
+                    "cancelled", 0, "definition_disabled"):
+                fail("definition disable did not cancel queued canary work before dispatch")
+            cur.execute("select count(*) from ops.job_receipt where job_id=%s and attempt=0 "
+                        "and kind='override' and evidence->>'failure_class'='definition_disabled'",
+                        (fenced_job,))
+            if fetchone_required(cur.fetchone(), "definition fence receipt")[0] != 1:
+                fail("definition disable did not persist one immutable fencing receipt")
+            cur.execute("set local role carr_jobs")
+            cur.execute("select * from ops.claim_job_mode('db-gate-old-worker','canary',1,30)")
+            if cur.fetchone() is not None:
+                fail("old worker claimed a job for a disabled definition")
+            cur.execute("reset role")
+
             # One enqueue identity, one row, even when two schedulers fire it.
             definition = f"db-gate-{uuid.uuid4()}"
             cur.execute("""

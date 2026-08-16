@@ -21,6 +21,11 @@ WORKFLOW_KEYS = {
 EXECUTION_KINDS = {"deterministic", "cognition"}
 RISKS = {"green", "yellow", "red"}
 BACKOFFS = {"constant", "linear", "exponential"}
+# An enabled deterministic canary must name a code-registered isolation guard.
+# The registry is deliberately empty until an entrypoint has a real, tested
+# destination boundary.  A manifest edit alone can never turn a live command
+# into a canary.
+CANARY_ISOLATION_GUARDS: frozenset[str] = frozenset()
 DECISION_FIELDS = ("routing", "filtering", "validation", "completion")
 INVENTORY_FIELDS = {
     "trigger", "owner", "inputs", "canonical_reads", "canonical_writes",
@@ -35,6 +40,36 @@ def _all_true(spec: dict[str, Any], context: dict[str, Any]) -> bool:
 
 PREDICATES = {"facts.all_true": _all_true}
 PROPOSAL_GUARDS = {"weekly_social_no_quote_tweets"}
+
+
+def deterministic_args(execution: dict[str, Any], mode: str) -> list[str]:
+    """Return the registered command arguments for one deterministic mode.
+
+    Canary is a separate authority boundary, not an alias for live arguments.
+    It stays unavailable until both the manifest and code name a tested
+    isolation guard.  This function is used before enqueue and immediately
+    before execution so neither a new schedule nor an old queued job can bypass
+    the boundary.
+    """
+    if mode == "shadow":
+        selected = execution.get("shadow_args")
+    elif mode == "canary":
+        canary = execution.get("canary")
+        if not isinstance(canary, dict) or canary.get("enabled") is not True:
+            reason = canary.get("reason") if isinstance(canary, dict) else None
+            suffix = f": {reason}" if isinstance(reason, str) and reason else ""
+            raise RuntimeError(f"deterministic canary isolation is disabled{suffix}")
+        guard = canary.get("isolation_guard")
+        if guard not in CANARY_ISOLATION_GUARDS:
+            raise RuntimeError(f"deterministic canary isolation guard is not registered: {guard}")
+        selected = canary.get("args")
+    elif mode == "replay":
+        raise RuntimeError("deterministic replay execution is disabled; use a versioned shadow or isolated canary contract")
+    else:
+        selected = execution.get("args")
+    if not isinstance(selected, list) or not all(isinstance(x, str) for x in selected):
+        raise RuntimeError(f"deterministic {mode} execution is not explicitly registered")
+    return list(selected)
 
 
 def evaluate_predicate(decision: dict[str, Any], context: dict[str, Any]) -> bool:
@@ -157,10 +192,23 @@ def validate_manifest(manifest: dict[str, Any], *, repo: Path | None = None) -> 
                 errors.append(f"{prefix}.execution.entrypoint is required")
             elif repo is not None and not (repo / path).exists():
                 errors.append(f"{prefix}.execution.entrypoint does not exist: {path}")
-            for mode_field in ("shadow_args", "canary_args"):
+            for mode_field in ("args", "shadow_args"):
                 mode_args = execution.get(mode_field)
                 if not isinstance(mode_args, list) or not all(isinstance(x, str) for x in mode_args):
                     errors.append(f"{prefix}.execution.{mode_field} must be an explicit string array")
+            canary = execution.get("canary")
+            if not isinstance(canary, dict) or not isinstance(canary.get("enabled"), bool):
+                errors.append(f"{prefix}.execution.canary requires an explicit enabled boolean")
+            elif canary["enabled"]:
+                guard = canary.get("isolation_guard")
+                if guard not in CANARY_ISOLATION_GUARDS:
+                    errors.append(
+                        f"{prefix}.execution.canary isolation guard is not registered: {guard}")
+                canary_args = canary.get("args")
+                if not isinstance(canary_args, list) or not all(isinstance(x, str) for x in canary_args):
+                    errors.append(f"{prefix}.execution.canary.args must be an explicit string array")
+            elif not isinstance(canary.get("reason"), str) or not canary["reason"].strip():
+                errors.append(f"{prefix}.execution.canary disabled state requires a reason")
         elif kind == "cognition":
             job_key = execution.get("cognition_job")
             if job_key not in cognition:
