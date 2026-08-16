@@ -46,13 +46,23 @@ const FULL_ONLY = { write: false, fullOnly: true };
 
 // ---------- the door itself ----------
 
-test("a matching HERMES_TOKENS bearer resolves to a locked, unsponsored actor", () => {
+test("a matching HERMES_TOKENS bearer resolves to a locked actor sponsored by Joe", () => {
   const a = actor();
   assert.equal(a.slug, "hermes-pilot");
   assert.equal(a.hermes, true);
   assert.equal(a.human, false, "never a human seat: humanOnly verbs refuse on this");
-  assert.equal(a.sponsoring_human_slug, null, "R0 carries no sponsor, so no personal brain");
+  assert.equal(a.sponsoring_human_slug, "joe",
+    "Joe sponsored the pilot 2026-08-16 so it can carry his personal work");
   assert.equal(a.via, "hermes-token", "the door is legible in tool_call rows");
+});
+
+test("an unlisted Hermes slug stays shared-only", () => {
+  // Sponsorship is a named entry, never a property of holding a Hermes token.
+  const other = hermesActorForToken("Bearer other-secret",
+    JSON.stringify({ "hermes-scratch": "other-secret" }));
+  assert.equal(other.hermes, true);
+  assert.equal(other.sponsoring_human_slug, null,
+    "a slug absent from HERMES_SPONSOR gets no personal brain");
 });
 
 test("the door fails closed on every malformed input", () => {
@@ -106,15 +116,27 @@ test("HERMES-CASE-001 — reads are allowed", () => {
 // that the derived identity is unsponsored and shared-only, so there is no
 // personal brain for a client hint to point at.
 
-test("HERMES-CASE-002/003/004 — the derived class is unsponsored, never a partner", () => {
-  assert.equal(authorizationClassForActor(actor()), "unsponsored_agent",
-    "a Hermes token must never resolve to verified_partner or sponsored_agent");
+test("HERMES-CASE-002/003/004 — the derived class is never a verified partner", () => {
+  assert.notEqual(authorizationClassForActor(actor()), "verified_partner",
+    "a Hermes token must never resolve to a partner seat, sponsored or not");
 });
 
-test("HERMES-CASE-005/010 — no personal brain scope, so cross-brain reads have no target", () => {
+test("HERMES-CASE-005 — the brain is Joe's and only Joe's", () => {
+  // Joe sponsored the pilot on 2026-08-16 so it can carry his personal work.
+  // The scope is derived from HERMES_SPONSOR server-side; no argument, model
+  // name, or client hint selects it, and Dell's brain is not reachable from
+  // this actor by any path.
   const scope = personalScopeForActor(actor());
-  assert.equal(scope.status, "none", "R0 is shared-only");
-  assert.equal(scope.sponsor, null);
+  assert.equal(scope.status, "personal");
+  assert.equal(scope.sponsor, "joe");
+  assert.notEqual(scope.sponsor, "dell", "cross-brain reads have no target here");
+});
+
+test("HERMES-CASE-010 — an unsponsored Hermes runtime still resolves, shared-only", () => {
+  const other = hermesActorForToken("Bearer other-secret",
+    JSON.stringify({ "hermes-pilot": "other-secret" }));
+  const scope = personalScopeForActor({ ...other, sponsoring_human_slug: null, human_slug: null });
+  assert.equal(scope.status, "none", "no sponsor means shared metadata only, never an error");
 });
 
 // ---------- HERMES-CASE-006: mutations refuse ----------
