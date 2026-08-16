@@ -114,6 +114,7 @@ echo "calendar-capture: read OK — ${SCANNED:-?} events scanned"
 # thrown away, which is the same shape as answering emptily instead of refusing.
 MATCH_JSON="$REPO/out/calendar-touch-proposals.json"
 MATCH_ERR="$REPO/out/calendar-matcher.err"
+INTAKE_EVIDENCE="$REPO/out/calendar-intake-evidence.json"
 # --from-dump, and this is the whole reason the job works unattended. The
 # matcher's default path opens the local Calendar DATABASE, which needs FULL DISK
 # ACCESS granted to the responsible process — held by a terminal, NOT by a launchd
@@ -143,6 +144,20 @@ if ! "$PY" "$REPO/tools/calendar-touch-matcher.py" "$DAYS" --json --from-dump "$
     exit 4
   fi
   exit 1
+fi
+
+# An address that does not resolve in the record is not a successful capture.
+# It starts a deterministic intake: local-mail search, research, then an
+# evidence-backed record result.  Until the intake worker supplies all three
+# receipts, this run refuses completion instead of silently treating an unknown
+# attendee as a harmless calendar row.  --dry-run remains read-only and prints
+# candidates without requiring (or creating) evidence.
+if [ "$DRY" -ne 1 ]; then
+  if ! "$PY" "$REPO/tools/calendar-intake-gate.py" \
+          --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE"; then
+    echo "calendar-capture: REFUSE unmatched attendee intake is incomplete; no successful completion receipt" >&2
+    exit 78
+  fi
 fi
 
 "$PY" - "$MATCH_JSON" "$DRY" "$DAYS" <<'PYEOF'

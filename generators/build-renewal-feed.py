@@ -272,5 +272,5 @@ def main():
               f".venv/bin/python -m pipelines.map_radar_lanes --lane renewal-radar",
               file=sys.stderr)
     else:
-        run_lane("renewal-radar")
+        run_lane("renewal-radar", rows=out)
 if __name__=="__main__": main()

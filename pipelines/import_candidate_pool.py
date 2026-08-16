@@ -234,14 +234,23 @@ def match_known(name, org, email, known, by_email, strict=False):
                   f"(shared: {', '.join(sorted(shared)) or 'equal token sets'})")
         nbasis = f"contact-name match to {g['type']} {g['ref']} ({g['first']} {g['last']})"
         if strict:
-            # The source's own order, kept exactly: `if pmatch or nmatch: return g`.
+            # Strict mode preserves the source's practice-token suppression
+            # semantics, but it cannot waive the system-wide name-only ban.
             if pmatch:
                 return g, pbasis, "suppressed"
             if nmatch:
-                return g, nbasis, "suppressed"
+                if weak is None:
+                    weak = (g, "REVIEW, not suppressed — " + nbasis, "review")
             continue
         if nmatch:
-            return g, nbasis, "suppressed"
+            # A name is one identifying field, even when it has both a first
+            # and a last token.  Suppressing on it silently turns a plausible
+            # duplicate into an invisible merge decision, which is precisely
+            # what the candidate pool is forbidden to do. Exact email remains
+            # a stable identity key; a name-only hit stays visible for
+            # confirmation.
+            if weak is None:
+                weak = (g, "REVIEW, not suppressed — " + nbasis, "review")
         if pmatch and weak is None:
             weak = (g, "REVIEW, not suppressed — " + pbasis, "review")
     return weak if weak else (None, None, None)

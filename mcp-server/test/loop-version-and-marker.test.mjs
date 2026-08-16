@@ -77,6 +77,7 @@ test("compareVersion: a non-numeric base_version is refused by name, not treated
 const ids = {
   joe: "10000000-0000-0000-0000-000000000002",
   loop: "20000000-0000-0000-0000-000000000350",
+  successor: "20000000-0000-0000-0000-000000000351",
 };
 const joe = { id: ids.joe, slug: "joe", display: "Joe", human: true,
   via: "mcp", client_id: "claude" };
@@ -88,6 +89,9 @@ class CloseLoopFake {
     this.loop = { id: ids.loop, kind: "open_loop", number: "350", status: "open",
       marker: "bell", due_on: null, close_outcome: null, section: "hot",
       version, created_at: "2026-08-13T16:09:51.846158+00:00" };
+    this.successor = { id: ids.successor, kind: "open_loop", number: "351", status: "open",
+      marker: "none", due_on: null, close_outcome: null, section: "backlog",
+      version: 1, created_at: "2026-08-13T16:10:00.000000+00:00" };
     this.events = [
       // The loop's own creation event — recorded_at equal to created_at,
       // exactly as the same transaction guarantees in production.
@@ -105,7 +109,8 @@ class CloseLoopFake {
       return { rows: prior ? [prior] : [] };
     }
     if (sql.includes("from loop_item li join loop_block lb") && sql.includes("where li.id = $1"))
-      return { rows: params[0] === this.loop.id ? [{ ...this.loop }] : [] };
+      return { rows: params[0] === this.loop.id ? [{ ...this.loop }]
+        : params[0] === this.successor.id ? [{ ...this.successor }] : [] };
     if (sql.startsWith("select version from loop_item where id=$1 for update"))
       return { rows: params[0] === this.loop.id ? [{ version: this.loop.version }] : [] };
     if (sql.startsWith("select created_at from loop_item where id=$1"))
@@ -202,6 +207,20 @@ test("close-loop: a REAL version conflict still refuses, and never blames the lo
         "a genuine subsequent edit must still be reported");
       return true;
     });
+});
+
+test("close-loop: a bookkeeping close must name an open successor and say so first", async () => {
+  const db = new CloseLoopFake({ version: 1 });
+  await assert.rejects(() => TOOLS["close-loop"].handler(db, joe, {
+    idempotency_key: "close-bookkeeping-missing", loop_id: ids.loop, base_version: 1,
+    resolution: "dropped", outcome: "Superseded by the replacement loop.",
+  }), e => e instanceof ToolError && e.payload.error === "successor_loop_required");
+  const result = await TOOLS["close-loop"].handler(db, joe, {
+    idempotency_key: "close-bookkeeping-valid", loop_id: ids.loop, base_version: 1,
+    resolution: "dropped", outcome: "Superseded, not abandoned: #351 carries the work forward.", successor_loop: ids.successor,
+  });
+  assert.deepEqual(result.successor_loop, { id: ids.successor, number: "351" });
+  assert.match(JSON.stringify(db.events.at(-1).new_value), /successor_loop/);
 });
 
 // ────────────────────────────────────────────────────────────────────────

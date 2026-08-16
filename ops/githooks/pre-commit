@@ -55,6 +55,17 @@ if [ "$CARR_ALLOW_UNBLESSED_GATE" != "1" ] \
   python3 "$hookdir/staged-gate-bless-check.py" || exit 1
 fi
 
+# Rule 0e22e34a: the new path is the only moment depth and draft/final naming
+# can be refused without a cleanup commit.  Rule 99e951b9: a category that has
+# an INDEX.md keeps it current when a new file lands beneath it.  Both helpers
+# inspect the staged index, so partially staged files cannot evade the check.
+if command -v python3 >/dev/null 2>&1 \
+    && [ -f "$hookdir/path-hygiene-check.py" ] \
+    && [ -f "$hookdir/index-upkeep-check.py" ]; then
+  python3 "$hookdir/path-hygiene-check.py" || exit 1
+  python3 "$hookdir/index-upkeep-check.py" || exit 1
+fi
+
 # Deliberate escape hatch, same shape and spelling as pre-push's
 # CARR_ALLOW_MAIN_PUSH. Set it for ONE command, never export it in a profile:
 #   CARR_ALLOW_MAIN_COMMIT=1 git commit -m "..."

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """chat-lint-gate.py — the writing rules reach the surface they were taught
-about (rules 5be2f462 + 3a9dbafd), at the only moment that surface exists.
+about (rules 5be2f462, 3a9dbafd, c315befa, 38b15dc6, and d7f74c93), at the only moment
+that surface exists.
 
 THE GAP THIS CLOSES. tools/writing-lint.py has banned the contrast-reframe
 shapes and the LLM-tell vocabulary for months, and lint-gate.py enforces that
@@ -25,6 +26,21 @@ TWO CHECKS, both on the turn's final assistant message:
      Guards, each from a real false-positive shape: fenced code is exempt
      (git output is hex), all-digit tokens are exempt (20260814 is a date),
      and the gloss test is per-sentence so a glossed id passes untouched.
+
+  3. NAMED DEAL QUESTIONS (c315befa): a partner-facing question cannot ask
+     about "the draft lease", "the LOI", or another bare deal noun without a
+     proper-name-like deal identifier in that same question. This is deliberately
+     limited to the explicit bare-reference forms; it does not pretend to infer
+     whether arbitrary prose is about a deal.
+
+  4. MULTI-CLAUSE TASKS (38b15dc6): a partner-directed instruction containing
+     two task verbs must be a numbered list and say "all required". First-person
+     progress reports and descriptions of what a script does are excluded.
+
+  5. ACCESS BOUNDARY RATIONALES (d7f74c93): a model/provider/agent cannot be
+     denied CARR material *because it is confidential, private, or sensitive*.
+     The actual boundary is held credentials and autonomous execution. Explicit
+     corrections of that framing and quoted/historical rule text are exempt.
 
 NEVER LOOPS: stop_hook_active short-circuits, same as every Stop gate here.
 FAILS OPEN on any internal error, and if writing-lint cannot be imported the
@@ -112,6 +128,48 @@ FILE_PATH = re.compile(
 
 # Already clickable: the path sits inside a markdown link target.
 MD_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+
+# ── specific-deal questions (rule c315befa) ─────────────────────────────────
+BARE_DEAL = re.compile(
+    r"\bthe\s+(?:draft\s+)?(?:lease|loi|landlord|tenant|property|deal)\b",
+    re.I,
+)
+# This intentionally recognises only a useful *shape* of name: a title-cased
+# word after the opening question word, a title-cased two-word name, or a street
+# number. It is an evidence signal, not a claim that every capitalised word is a
+# deal. The check is therefore scoped to BARE_DEAL rather than every question.
+PROPER_NAME = re.compile(r"\b(?:[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?|\d{2,5}\s+[A-Z][A-Za-z]+)\b")
+QUESTION_OPENERS = {"can", "could", "would", "should", "do", "does", "did",
+                    "is", "are", "will", "please", "what", "when", "where",
+                    "why", "how", "i", "we", "you", "the", "a", "an"}
+
+# ── multi-clause partner tasks (rule 38b15dc6) ──────────────────────────────
+TASK_VERB = re.compile(
+    r"\b(?:open|edit|review|add|update|run|check|approve|send|call|create|"
+    r"read|verify|sign|confirm|use|make|upload|download|fill)\b", re.I)
+NUMBERED_ITEM = re.compile(r"(?m)^\s*(?:\d+[.)]|[-*])\s+")
+ALL_REQUIRED = re.compile(r"\ball\s+required\b", re.I)
+
+# ── agent-access boundaries (rule d7f74c93) ─────────────────────────────────
+# This is deliberately a small causal predicate, not a general privacy lint.
+# It catches only an access/share prohibition directed at an agent-like actor,
+# concerning CARR material, where confidentiality vocabulary supplies the
+# rationale.  Privacy obligations in any other context remain outside scope.
+CONFIDENTIALITY_WORD = re.compile(r"\b(?:confidential|private|sensitive)\b", re.I)
+AGENT_ACTOR = re.compile(
+    r"\b(?:agent|model|provider|claude|codex|grok|hermes|copilot)\b", re.I)
+ACCESS_ACTION = re.compile(r"\b(?:read|see|view|access|receive|share)\b", re.I)
+CARR_MATERIAL = re.compile(
+    r"\b(?:carr|records?|doctrine|roadmaps?|material|data|text)\b", re.I)
+ACCESS_DENIAL = re.compile(
+    r"\b(?:cannot|can't|may\s+not|must\s+not|should\s+not|do\s+not|don't|"
+    r"withhold|forbid|deny|keep|not\s+allow)\b", re.I)
+CONFIDENTIALITY_CORRECTION = re.compile(
+    r"\b(?:confidentiality|privacy|sensitivity)\s+(?:is\s+)?(?:not|isn't|is\s+never)\s+"
+    r"(?:the\s+)?(?:boundary|reason)\b|\bnot\s+because\b.*\b(?:confidential|private|sensitive)\b",
+    re.I)
+HISTORICAL_QUOTE = re.compile(
+    r"\b(?:historical|old|previous|quoted)\b[^\n]*[\"“]", re.I)
 
 
 def now():
@@ -268,6 +326,80 @@ def unlinked_file_ask_findings(prose):
     return found
 
 
+def _has_deal_name(question):
+    """Whether the question carries a deal identifier, not merely an opener."""
+    for match in PROPER_NAME.finditer(question):
+        if match.group(0).lower() not in QUESTION_OPENERS:
+            return True
+    return False
+
+
+def unnamed_deal_question_findings(prose):
+    found = []
+    for sentence in sentences(prose):
+        if "?" not in sentence or not BARE_DEAL.search(sentence):
+            continue
+        if not _has_deal_name(sentence):
+            found.append(("unnamed-deal-question", sentence[:90],
+                          "name the specific deal in this question (for example, "
+                          "the Riverwalk LOI), rather than asking about a bare "
+                          "lease, LOI, landlord, tenant, property, or deal"))
+    return found
+
+
+def multi_clause_task_findings(prose):
+    """Find partner-directed, two-or-more-task instructions lacking the shape.
+
+    A task verb alone is not enough: "the script checks and writes" is a report,
+    not an instruction.  A sentence has to be an imperative or address the
+    partner, and first-person narration wins over either signal.
+    """
+    found = []
+    for block in re.split(r"\n\s*\n", prose):
+        if not block.strip() or SELF_NARRATION.search(block):
+            continue
+        verb_count = len(TASK_VERB.findall(block))
+        directed = (IMPERATIVE_ASK.search(block.strip()) or ADDRESSED.search(block))
+        if not directed or verb_count < 2:
+            continue
+        numbered = bool(NUMBERED_ITEM.search(block))
+        marked = bool(ALL_REQUIRED.search(block))
+        if numbered and marked:
+            continue
+        if numbered:
+            fix = "say 'all required' with this numbered multi-step instruction"
+        else:
+            fix = "make this a numbered list and say 'all required' — it gives " \
+                  "the partner more than one task"
+        found.append(("multi-clause-task", " ".join(block.split())[:90], fix))
+    return found
+
+
+def confidentiality_access_boundary_findings(prose):
+    """Refuse confidentiality used as the reason to deny agent access.
+
+    A correction (including the rule's own "confidentiality is not the
+    boundary" wording) must always pass. Markdown blockquotes and explicitly
+    historical/quoted prose also pass, so the hook does not prevent explaining
+    the retired rationale while reporting or teaching the rule.
+    """
+    found = []
+    for sentence in sentences(prose):
+        if sentence.lstrip().startswith(">"):
+            continue
+        if CONFIDENTIALITY_CORRECTION.search(sentence) or HISTORICAL_QUOTE.search(sentence):
+            continue
+        if not (CONFIDENTIALITY_WORD.search(sentence) and AGENT_ACTOR.search(sentence)
+                and ACCESS_ACTION.search(sentence) and CARR_MATERIAL.search(sentence)
+                and ACCESS_DENIAL.search(sentence)):
+            continue
+        found.append(("confidentiality-access-boundary", sentence[:90],
+                      "state the real boundary instead: held credentials, "
+                      "autonomous execution, stored state, isolation, recovery, "
+                      "export, availability, or cost"))
+    return found
+
+
 def scan(assistant):
     prose = strip_fences(assistant)
     rules, mask = writing_rules()
@@ -286,6 +418,12 @@ def scan(assistant):
         findings.append((rid, quote,
                          f"make {paths} a clickable markdown link — he is being "
                          "asked to open it, and a path in prose is not clickable"))
+    for rid, quote, fix in unnamed_deal_question_findings(prose):
+        findings.append((rid, quote, fix))
+    for rid, quote, fix in multi_clause_task_findings(prose):
+        findings.append((rid, quote, fix))
+    for rid, quote, fix in confidentiality_access_boundary_findings(prose):
+        findings.append((rid, quote, fix))
     return findings
 
 
@@ -322,9 +460,10 @@ def main():
                "excerpt": findings[0][1][:200]})
         lines = [
             "CHAT LINT — your PREVIOUS reply broke writing rules that bind chat "
-            "(5be2f462 banned constructions / 3a9dbafd bare ids). It has already "
-            "reached Joe and cannot be unsent, so do NOT reissue it. Simply avoid "
-            "these from here on:",
+            "(5be2f462 banned constructions / 3a9dbafd bare ids / named deal "
+            "questions / multi-clause task shape / agent-access rationale). It has "
+            "already reached Joe and cannot be unsent, so do NOT reissue it. Simply "
+            "avoid these from here on:",
             ""]
         for rid, quote, fix in findings[:6]:
             lines.append(f"  [{rid}] …{quote}…")
@@ -333,7 +472,10 @@ def main():
         lines.append("Vocab and contrast-reframe bans are the same ones every "
                      "client surface already enforces; a bare 8-hex id or "
                      "'loop #N' needs its plain-language gloss in the same "
-                     "sentence. Code fences are exempt.")
+                     "sentence. Deal questions name their deal; multi-step asks "
+                     "are numbered and marked 'all required'. Agent access is "
+                     "bounded by credentials and autonomous execution, not data "
+                     "confidentiality. Code fences are exempt.")
         carry("\n".join(lines), payload.get("session_id"))
         sys.exit(0)
 

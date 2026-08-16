@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The CARR job ledger owns cadence, idempotency, leases and completion.  This
+    uninstalled LaunchAgent merely gives the local device a once-per-minute
+    opportunity to run bin/control-plane-tick.sh, which submits due jobs behind
+    the jobs-only credential.  Do not load, unload, bootstrap, or otherwise
+    alter existing schedules from this definition; legacy schedules remain in
+    place until their independent acceptance evidence and approval exist.
+  -->
+  <key>Label</key><string>com.carr.control-plane-tick</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/control-plane-tick.sh</string>
+  </array>
+
+  <key>StartInterval</key><integer>60</integer>
+  <key>ThrottleInterval</key><integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key><string>{{REPO}}/out/control-plane-tick-launchd.log</string>
+  <key>StandardErrorPath</key><string>{{REPO}}/out/control-plane-tick-launchd.log</string>
+</dict>
+</plist>

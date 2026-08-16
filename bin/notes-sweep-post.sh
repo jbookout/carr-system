@@ -15,6 +15,7 @@
 # scheduled session's entire job is: run this, read the summary line.
 #
 #   ./bin/notes-sweep-post.sh --status     what has been swept, what is queued
+#   ./bin/notes-sweep-post.sh --dry-run    scan/count unposted notes, write/post nothing
 #   ./bin/notes-sweep-post.sh --scheduled  launchd entry point: weekdays,
 #                                           8am–6pm local only
 #   ./bin/notes-sweep-post.sh              scan Notes, queue new, POST, report
@@ -51,6 +52,32 @@ ASCRIPT="$REPO/bin/notes-sweep.applescript"
 SOURCE_LABEL="notes_sweep"
 FOLDER_NAME="Call Recordings"
 MAX_TEXT_BYTES=900000                       # socket ceiling is 1 MiB; leave headroom
+
+# Control-plane shadow path. It exercises the real Apple Notes collector and
+# the real local dedup predicate, but creates no directories, queue entries,
+# ledger rows, logs, or network requests.
+if [ "${1:-}" = "--dry-run" ]; then
+  errfile="$(mktemp -t carr-notes-sweep-shadow-err)"
+  trap 'rm -f "$errfile"' EXIT
+  ids_out="$(/usr/bin/osascript "$ASCRIPT" ids "$FOLDER_NAME" 2>"$errfile")"
+  scan_rc=$?
+  if [ "$scan_rc" -ne 0 ]; then
+    print -ru2 -- "notes-sweep shadow scan failed: $(head -c 400 "$errfile")"
+    exit "$scan_rc"
+  fi
+  scanned=0; unposted=0
+  if [ "${ids_out%%$'\n'*}" != "NOFOLDER" ]; then
+    while IFS= read -r note_id; do
+      [ -z "$note_id" ] && continue
+      scanned=$((scanned+1))
+      if [ ! -f "$LEDGER" ] || ! grep -Fqx -- "$note_id" "$LEDGER"; then
+        unposted=$((unposted+1))
+      fi
+    done <<< "$ids_out"
+  fi
+  print -r -- "notes-sweep shadow: scanned=$scanned unposted=$unposted writes=0 posts=0"
+  exit 0
+fi
 
 mkdir -p "$PENDING" "$SENT" "$FAILED" "$REPO/out"
 [ -f "$LEDGER" ] || : > "$LEDGER"

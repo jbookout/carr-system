@@ -240,6 +240,72 @@ async function insertOrgPartyGuarded(c, savepoint, insertSql, insertParams, name
   }
 }
 
+// Research is evidence, not a checkbox supplied after the write.  These
+// validators run before every intake write that turns a contact into a client
+// or vendor (and before a directly-created contact party).  The resulting
+// evidence is then persisted as a `verified` finding in the same envelope.
+function researchEvidence(raw, requiredFields, gate) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    throw new ToolError({ error: "research_evidence_required", gate,
+      hint: "research before creating this contact; pass typed HTTPS sources, per-field source indexes, and discrepancies[] (empty when none)" });
+  const sources = Array.isArray(raw.sources) ? raw.sources.map((source, index) => {
+    if (!source || typeof source !== "object" || Array.isArray(source))
+      throw new ToolError({ error: "research_source_invalid", gate, source_index: index });
+    let url;
+    try { url = new URL(String(source.url || "")); }
+    catch { throw new ToolError({ error: "research_source_invalid", gate, source_index: index }); }
+    const observed = new Date(String(source.observed_at || ""));
+    if (url.protocol !== "https:" || Number.isNaN(observed.getTime()) || observed.getTime() > Date.now() + 300000)
+      throw new ToolError({ error: "research_source_invalid", gate, source_index: index,
+        hint: "each source needs an HTTPS URL and a non-future observed_at timestamp" });
+    return { url: url.toString(), observed_at: observed.toISOString() };
+  }) : [];
+  const links = raw.field_evidence;
+  const linked = links && typeof links === "object" && !Array.isArray(links) ? links : {};
+  const validLinks = field => Array.isArray(linked[field]) && linked[field].length > 0 &&
+    linked[field].every(i => Number.isInteger(i) && i >= 0 && i < sources.length);
+  const missing = requiredFields.filter(field => !validLinks(field));
+  if (!sources.length || missing.length || !Array.isArray(raw.discrepancies))
+    throw new ToolError({ error: "research_evidence_incomplete", gate,
+      missing_fields: missing, has_sources: sources.length > 0,
+      hint: "link every required field to one or more typed source indexes and pass discrepancies[] even when it is empty" });
+  return { sources, checked_fields: requiredFields, field_evidence: linked,
+    discrepancies: raw.discrepancies };
+}
+
+const RESEARCH_EVIDENCE_SCHEMA = {
+  type: "object",
+  required: ["sources", "field_evidence", "discrepancies"],
+  properties: {
+    sources: { type: "array", items: { type: "object", required: ["url", "observed_at"],
+      properties: { url: { type: "string" }, observed_at: { type: "string" } } } },
+    field_evidence: { type: "object" },
+    discrepancies: { type: "array" },
+  },
+};
+
+async function stampResearch(c, actor, partyId, evidence) {
+  await c.query(
+    `insert into record_flag (subject_type,subject_id,kind,value,source,created_by)
+     values ('party',$1,'verified',$2,$3,$4)`,
+    [partyId, JSON.stringify({ found: true, checked_fields: evidence.checked_fields,
+      field_evidence: evidence.field_evidence, sources: evidence.sources,
+      discrepancies: evidence.discrepancies, epistemic_status: "source_backed" }),
+     evidence.sources.map(source => `${source.url} observed ${source.observed_at}`).join(" | "), actor.id]);
+}
+
+function preferredMergeSurvivor(rows) {
+  if (!Array.isArray(rows) || rows.length !== 2) return null;
+  const score = row => [row.has_business_ref ? 1 : 0,
+    Number(row.verified_identity_fields || 0), Number(row.linked_records || 0)];
+  const [a, b] = rows;
+  const as = score(a), bs = score(b);
+  for (let i = 0; i < as.length; i += 1) {
+    if (as[i] !== bs[i]) return as[i] > bs[i] ? a : b;
+  }
+  return new Date(a.created_at).getTime() <= new Date(b.created_at).getTime() ? a : b;
+}
+
 // [loop #278] The ONE place a decision gets mirrored onto the record it governs.
 // log-decision calls it at creation and update-decision calls it after the fact, so
 // attaching late and attaching at the time produce byte-identical rows — a manual path
@@ -3026,7 +3092,8 @@ export const TOOLS = {
       kind: { type: "string", enum: ["person","org"], default: "person" },
       org_name: { type: "string" }, phone: { type: "string" }, email: { type: "string" },
       city: { type: "string" }, state: { type: "string" }, county: { type: "string" },
-      specialty: { type: "string" }, force_new: { type: "boolean" } },
+      specialty: { type: "string" }, force_new: { type: "boolean" },
+      research_evidence: RESEARCH_EVIDENCE_SCHEMA },
       required: ["idempotency_key","name"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "add-party", args, async () => {
       if (args.phone && args.phone.replace(/\D/g, "").endsWith("2056436555"))
@@ -3054,6 +3121,10 @@ export const TOOLS = {
       // separately: collapsing those would assert six unrelated people share an
       // employer, which is a fabricated fact, not a merge.
       const kind = args.kind || "person";
+      const evidence = kind === "person"
+        ? researchEvidence(args.research_evidence,
+          ["name", "company", "phone", "specialty", "market"], "add-party")
+        : null;
       const emp = await employerOrgId(c, actor.id, kind, args.name, args.org_name);
       const insertSql =
         `insert into party (kind,name,org_id,phone,email,city,state,county,specialty,created_by,updated_by)
@@ -3073,6 +3144,7 @@ export const TOOLS = {
       } else {
         row = (await c.query(insertSql, insertParams)).rows[0];
       }
+      if (evidence) await stampResearch(c, actor, row.id, evidence);
       await writeEvent(c, actor, "add-party", "party", row.id,
         { new: { name: args.name }, idempotency_key: args.idempotency_key });
       return { ok: true, party_id: row.id,
@@ -3105,7 +3177,8 @@ export const TOOLS = {
         party_ref: { type: "string", description: "ref of an EXISTING party (V-/C-/L-/T-)" },
         new_party: { type: "object", properties: {
           name: { type: "string" }, kind: { type: "string", enum: ["person","org"] },
-          org_name: { type: "string" }, force_new: { type: "boolean" } }, required: ["name"] },
+          org_name: { type: "string" }, force_new: { type: "boolean" },
+          research_evidence: RESEARCH_EVIDENCE_SCHEMA }, required: ["name"] },
         kind: { type: "string", enum: ["owner","landlord_rep","property_manager","listing_agent"] },
         also_listing_side: { type: "boolean", description: "also record this party as the deal's listing_side participant" },
         source: { type: "string" } }, required: ["kind"] } },
@@ -3193,6 +3266,11 @@ export const TOOLS = {
           // add-party; the conflict surfaces as a THROW here, per this site's
           // deliberate divergence noted above.
           const npKind = o.new_party.kind || "person";
+          // A counterparty created while capturing premises is still a new
+          // contact record.  Do not let the convenience path bypass the same
+          // sourced-research gate as add-party.
+          const npEvidence = researchEvidence(o.new_party.research_evidence,
+            ["name", "company", "phone", "specialty", "market"], "add-premises.new_party");
           const npEmp = await employerOrgId(c, actor.id, npKind, o.new_party.name, o.new_party.org_name);
           const npSql = `insert into party (kind, name, org_id, created_by, updated_by)
              values ($1,$2,$3,$4,$4) returning id`;
@@ -3209,6 +3287,7 @@ export const TOOLS = {
           } else {
             partyId = (await c.query(npSql, npParams)).rows[0].id;
           }
+          await stampResearch(c, actor, partyId, npEvidence);
         } else throw new ToolError({ error: "ownership_needs_party",
           hint: "each ownership row carries party_ref or new_party" });
         await c.query(
@@ -3291,8 +3370,9 @@ export const TOOLS = {
       base_version: { type: "integer", description: "the pool row's version, from a fresh read" },
       stage: { type: "string", description: "lead_stage slug — a promoted lead is one Joe is working, so it needs a real stage" },
       lane: { type: "string", description: "lead_lane slug (optional)" },
-      source_detail: { type: "string", description: "why this one, now — free text provenance" } },
-      required: ["idempotency_key","pool_id","base_version","stage"] },
+      source_detail: { type: "string", description: "why this one, now — free text provenance" },
+      research_evidence: RESEARCH_EVIDENCE_SCHEMA },
+      required: ["idempotency_key","pool_id","base_version","stage","research_evidence"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "promote-pool", args, async () => {
       await versionGuard(c, "candidate_pool", args.pool_id, args.base_version);
       const p = (await c.query(
@@ -3304,6 +3384,8 @@ export const TOOLS = {
           hint: p.status === "promoted"
             ? "this row already became a lead; read v_pool for its promoted_ref"
             : "this row is marked as a duplicate of an existing record — work that record instead" });
+      const evidence = researchEvidence(args.research_evidence,
+        ["name", "company", "phone", "specialty", "market"], "promote-pool");
 
       // The org, when the source named one, becomes its own party so the lead
       // hangs off a person who belongs to a practice — the shape add-party and
@@ -3313,6 +3395,7 @@ export const TOOLS = {
         orgId = (await c.query(
           "insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id",
           [p.org_name, actor.id])).rows[0].id;
+        await stampResearch(c, actor, orgId, evidence);
       }
       const partyId = (await c.query(
         `insert into party (kind,name,org_id,phone,email,city,state,county,specialty,
@@ -3320,6 +3403,7 @@ export const TOOLS = {
          values ('person',$1,$2,$3,$4,$5,$6,$7,$8,$9,$9) returning id`,
         [p.name, orgId, p.phone || null, p.email || null, p.city || null,
          p.state || null, p.county || null, p.vertical || null, actor.id])).rows[0].id;
+      await stampResearch(c, actor, partyId, evidence);
 
       const ref = (await c.query(
         "select 'L-' || lpad(nextval('ref_lead_seq')::text, 3, '0') as r")).rows[0].r;
@@ -3537,9 +3621,13 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, party_id: { type: "string" },
       status: { type: "string" }, vertical: { type: "string" }, subtype: { type: "string" },
-      acquisition_source: { type: "string" }, acquisition_detail: { type: "string" } },
-      required: ["idempotency_key","party_id","status","acquisition_source"] },
+      acquisition_source: { type: "string" }, acquisition_detail: { type: "string" },
+      research_evidence: RESEARCH_EVIDENCE_SCHEMA },
+      required: ["idempotency_key","party_id","status","acquisition_source","research_evidence"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "new-client", args, async () => {
+      const evidence = researchEvidence(args.research_evidence,
+        ["practice_name", "address", "phone", "specialty", "practitioners", "hours"], "new-client");
+      await stampResearch(c, actor, args.party_id, evidence);
       const ref = (await c.query("select 'C-' || lpad(nextval('ref_client_seq')::text, 3, '0') as r")).rows[0].r;
       const r = await c.query(
         `insert into client (roster_ref, party_id, status, vertical, subtype, acquisition_source,
@@ -3559,11 +3647,15 @@ export const TOOLS = {
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, party_id: { type: "string" },
       category: { type: "string" }, ref_code: { type: "string", description: "CPA / LEN / GC / ..." },
-      stage: { type: "string", description: "a vendor_stage SLUG, not the label — e.g. prospect_uncontacted, building_working_on_it. A wrong value comes back with the full valid list." } },
-      required: ["idempotency_key","party_id","category","ref_code","stage"] },
+      stage: { type: "string", description: "a vendor_stage SLUG, not the label — e.g. prospect_uncontacted, building_working_on_it. A wrong value comes back with the full valid list." },
+      research_evidence: RESEARCH_EVIDENCE_SCHEMA },
+      required: ["idempotency_key","party_id","category","ref_code","stage","research_evidence"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "new-vendor", args, async () => {
+      const evidence = researchEvidence(args.research_evidence,
+        ["company", "title", "category", "market", "phone", "website", "deal_side"], "new-vendor");
       // Before the ref is minted: a rejected call must not burn a V-### number.
       await validateVendorStage(c, args.stage);
+      await stampResearch(c, actor, args.party_id, evidence);
       const ref = (await c.query(
         "select 'V-' || $1 || '-' || lpad(nextval('ref_vendor_seq')::text, 3, '0') as r",
         [args.ref_code.toUpperCase()])).rows[0].r;
@@ -4226,9 +4318,10 @@ export const TOOLS = {
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
+      match_basis: { type: "string", description: "The corroborating signal: exact domain, normalized org name, phone, address, or corroborated name plus city. Recorded permanently with the merge." },
       same_person_because: { type: "string", description:
         "Required ONLY when one side holds just a lead row and the other just a client row. Joe's ruling: everyone starts as a lead, so an L- and a C- ref for one person is the system working, not a duplicate. State what makes these TWO party rows for ONE human — matching NPI, address, the intake record — not that the names match." } },
-      required: ["idempotency_key","survivor_party","merged_party"] },
+      required: ["idempotency_key","survivor_party","merged_party","match_basis"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-merge", args, async () => {
       // [0069] Inputs used to be assumed party uuids; a V- ref passed here died in
       // the update below as "invalid input syntax for type uuid" — an internal
@@ -4256,6 +4349,40 @@ export const TOOLS = {
         throw new ToolError({ error: "same_party", hint: "a party cannot be merged into itself" });
       }
       args = { ...args, survivor_party: surv.partyId, merged_party: merg.partyId };
+      const basis = String(args.match_basis || "").trim();
+      if (basis.length < 8)
+        throw new ToolError({ error: "match_basis_required",
+          hint: "state the corroborating signal that established this duplicate; a name alone is never a merge basis" });
+
+      // The human confirms THAT this pair is a duplicate. Code decides WHICH
+      // row survives, with the rule's exact precedence, so a human cannot
+      // accidentally retire the more-cited or better-evidenced record.
+      const metrics = await c.query(
+        `/* merge_survivorship */
+         select p.id,p.created_at,
+           exists(select 1 from lead l where l.party_id=p.id and l.registry_ref is not null)
+            or exists(select 1 from client cl where cl.party_id=p.id and cl.roster_ref is not null and cl.merged_into is null)
+            or exists(select 1 from vendor v where v.party_id=p.id and v.vendor_ref is not null) as has_business_ref,
+           (select count(distinct rf.kind) from record_flag rf where rf.subject_type='party' and rf.subject_id=p.id
+             and rf.kind in ('verified','address','phone','email','npi','specialty') and coalesce(rf.value->>'found','true') <> 'false') as verified_identity_fields,
+           ((select count(*) from activity a where a.subject_type='party' and a.subject_id=p.id)
+             + (select count(*) from deal_participant dp where dp.party_id=p.id)
+             + (select count(*) from party_link pl where pl.from_party=p.id or pl.to_party=p.id or pl.via_party=p.id)) as linked_records
+          from party p where p.id = any($1::uuid[])`, [[surv.partyId, merg.partyId]]);
+      const preferred = preferredMergeSurvivor(metrics.rows);
+      if (!preferred)
+        throw new ToolError({ error: "merge_survivorship_unavailable", hint: "both party rows must be readable before a merge can run" });
+      if (preferred.id !== surv.partyId)
+        throw new ToolError({ error: "wrong_merge_survivor", required_survivor: preferred.id,
+          selected_survivor: surv.partyId, precedence: "business ref, verified identity, linked records, oldest",
+          hint: "the human gate confirmed the pair; use the deterministic survivor chosen from the record" });
+      const sweep = await c.query(
+        `/* merge_orphan_sweep */
+         select 'party_link' as attachment, count(*)::int as count from party_link where from_party=$1 or to_party=$1 or via_party=$1
+         union all select 'activity', count(*)::int from activity where subject_type='party' and subject_id=$1
+         union all select 'deal_participant', count(*)::int from deal_participant where party_id=$1
+         union all select 'record_flag', count(*)::int from record_flag where subject_type='party' and subject_id=$1
+         union all select 'child_party', count(*)::int from party where org_id=$1`, [merg.partyId]);
 
       // JOE'S RULING, in his words: "Tyrer is a client now duh. everyone starts
       // as a lead." A lead record and a client record for the same person are
@@ -4332,10 +4459,14 @@ export const TOOLS = {
       // The stated basis rides the event: a merge is permanent, so the reason it
       // was allowed has to outlive the session that gave it.
       await writeEvent(c, actor, "confirm-merge", "party", args.merged_party,
-        { new: { merged_into: args.survivor_party, roles_moved: moved,
+        { new: { merged_into: args.survivor_party, roles_moved: moved, match_basis: basis,
+                 survivorship: { business_ref: !!preferred.has_business_ref,
+                   verified_identity_fields: Number(preferred.verified_identity_fields || 0),
+                   linked_records: Number(preferred.linked_records || 0), created_at: preferred.created_at },
+                 orphan_sweep: sweep.rows,
                  ...(args.same_person_because ? { same_person_because: args.same_person_because } : {}) },
           idempotency_key: args.idempotency_key });
-      return { ok: true, roles_moved: moved,
+      return { ok: true, roles_moved: moved, match_basis: basis, orphan_sweep: sweep.rows,
                duplicate_roles_on_survivor: dup.rows.length ? dup.rows : undefined };
     }),
   },
@@ -4617,6 +4748,14 @@ export const TOOLS = {
          // structurally incapable of disagreeing, which is the disagreement that
          // stored a shared rule as personal while reporting otherwise.
          args.personal === true ? actor.id : null, args.supersedes || null]);
+      // Capture precedes authority. Every proposed rule enters the same intake
+      // state machine immediately, but this row is deliberately only CAPTURED:
+      // neither a model nor the transcription verb can make it binding.
+      await c.query(
+        `insert into ops.guidance_intake
+           (lane,source_kind,source_ref,statement,state,captured_by)
+         values ('rule','human',$1,$2,'captured',$3)`,
+        [`rule:${r.rows[0].id}`, args.statement, actor.id]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
         { new: { statement: args.statement, supersedes: args.supersedes || null },
           human_quote: args.human_quote, idempotency_key: args.idempotency_key });
@@ -4643,6 +4782,119 @@ export const TOOLS = {
     }),
   },
 
+  "admit-rule": {
+    write: true, humanOnly: true,
+    description: "Normalize and admit one PROPOSED rule into executable authority. Capture remains free; this is the separate human gate. Applicability, projection, reachability, input contract, binding moment, fixtures, and enforcement points are all explicit. A machine-enforceable rule is refused unless at least one installed enforcement point and fixture are named. Admission writes an immutable authority receipt but does not activate the rule; activate-rule remains a second explicit human act.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      rule_id: { type: "string" },
+      enforcement_class: { type: "string", enum: ["machine_enforceable","judgment_advisory","human_only"] },
+      binding_moment: { type: "string" },
+      applicability: { type: "object" },
+      projection: { type: "object" },
+      reachability: { type: "object" },
+      input_contract: { type: "object" },
+      fixture_refs: { type: "array", items: { type: "string" } },
+      enforcement_points: { type: "array", items: { type: "object", properties: {
+        control_key: { type: "string" }, implementation_ref: { type: "string" },
+        test_ref: { type: "string" },
+        enforcement_class: { type: "string", enum: ["deny_gate","stop_gate","schema","surfacing","transactional_schema","judgment_ambient"] },
+        installed: { type: "boolean" },
+      }, required: ["control_key","implementation_ref","test_ref","enforcement_class","installed"] } },
+      reason: { type: "string" },
+    }, required: ["idempotency_key","rule_id","enforcement_class","binding_moment",
+                  "applicability","projection","reachability","input_contract",
+                  "fixture_refs","enforcement_points","reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "admit-rule", args, async () => {
+      args.rule_id = await resolveRuleId(c, args.rule_id);
+      const rule = await c.query("select status,statement from rule where id=$1", [args.rule_id]);
+      if (!rule.rows.length) throw new ToolError({ error: "rule_not_found", rule_id: args.rule_id });
+      if (rule.rows[0].status !== "proposed") throw new ToolError({
+        error: "rule_not_proposed", rule_id: args.rule_id,
+        current_status: rule.rows[0].status,
+        hint: "admission is a pre-activation contract; active or retired history is not rewritten",
+      });
+      const reason = String(args.reason || "").trim();
+      const binding = String(args.binding_moment || "").trim();
+      if (!reason || !binding) throw new ToolError({ error: "admission_explanation_required" });
+      if (args.enforcement_class === "machine_enforceable") {
+        if (!args.fixture_refs.length) throw new ToolError({ error: "fixture_required" });
+        if (!args.enforcement_points.some(p => p.installed === true))
+          throw new ToolError({ error: "installed_enforcement_point_required" });
+      }
+
+      let intake = await c.query(
+        "select id from ops.guidance_intake where lane='rule' and source_ref=$1 order by captured_at limit 1",
+        [`rule:${args.rule_id}`]);
+      if (!intake.rows.length) intake = await c.query(
+        `insert into ops.guidance_intake
+           (lane,source_kind,source_ref,statement,state,captured_by)
+         values ('rule','system',$1,$2,'captured',$3) returning id`,
+        [`rule:${args.rule_id}`, rule.rows[0].statement, actor.id]);
+
+      const normalized = {
+        enforcement_class: args.enforcement_class, binding_moment: binding,
+        applicability: args.applicability, projection: args.projection,
+        reachability: args.reachability, input_contract: args.input_contract,
+        fixture_refs: args.fixture_refs, enforcement_points: args.enforcement_points,
+      };
+      await c.query(
+        `update ops.guidance_intake
+            set state='admitted',normalized_contract=$1,updated_at=now(),version=version+1
+          where id=$2`, [JSON.stringify(normalized), intake.rows[0].id]);
+      await c.query(
+        `insert into ops.rule_admission
+           (rule_id,guidance_intake_id,enforcement_class,binding_moment,applicability,
+            projection,reachability,input_contract,fixture_refs,state,admitted_by,
+            admitted_at,reason)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'admitted',$10,now(),$11)
+         on conflict (rule_id) do update set
+           guidance_intake_id=excluded.guidance_intake_id,
+           enforcement_class=excluded.enforcement_class,binding_moment=excluded.binding_moment,
+           applicability=excluded.applicability,projection=excluded.projection,
+           reachability=excluded.reachability,input_contract=excluded.input_contract,
+           fixture_refs=excluded.fixture_refs,state='admitted',admitted_by=excluded.admitted_by,
+           admitted_at=excluded.admitted_at,reason=excluded.reason,
+           version=ops.rule_admission.version+1,updated_at=now()`,
+        [args.rule_id,intake.rows[0].id,args.enforcement_class,binding,
+         JSON.stringify(args.applicability),JSON.stringify(args.projection),
+         JSON.stringify(args.reachability),JSON.stringify(args.input_contract),
+         args.fixture_refs,actor.id,reason]);
+      // A revision is the complete current contract. Controls omitted from the
+      // new contract must stop counting as installed evidence; retaining their
+      // rows preserves audit history without silently retaining authority.
+      await c.query(
+        `update ops.rule_enforcement_point
+            set installed=false,verified_at=null
+          where rule_id=$1 and not (control_key = any($2::text[]))`,
+        [args.rule_id,args.enforcement_points.map(point => point.control_key)]);
+      for (const point of args.enforcement_points) await c.query(
+        `insert into ops.rule_enforcement_point
+           (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+         values ($1,$2,$3,$4,$5,$6,case when $6 then now() else null end)
+         on conflict (rule_id,control_key) do update set
+           implementation_ref=excluded.implementation_ref,test_ref=excluded.test_ref,
+           enforcement_class=excluded.enforcement_class,installed=excluded.installed,
+           verified_at=excluded.verified_at`,
+        [args.rule_id,point.control_key,point.implementation_ref,point.test_ref,
+         point.enforcement_class,point.installed]);
+      await c.query(
+        `insert into ops.authority_receipt
+           (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
+         values ($1,'admission','rule',$2,$3,$4,
+                 encode(digest($5::text,'sha256'),'hex'),$6)`,
+        [`admission:${args.idempotency_key}`,args.rule_id,actor.id,reason,
+         JSON.stringify(normalized),args.fixture_refs]);
+      await writeEvent(c, actor, "admit-rule", "rule", args.rule_id, {
+        new: { admission_state: "admitted", enforcement_class: args.enforcement_class },
+        agent_rationale: reason, idempotency_key: args.idempotency_key,
+      });
+      return { ok: true, rule_id: args.rule_id, admission_state: "admitted",
+               enforcement_class: args.enforcement_class,
+               installed_controls: args.enforcement_points.filter(p => p.installed).length };
+    }),
+  },
+
   "activate-rule": {
     write: true, humanOnly: true,
     description: "Set a rule's status proposed -> active. The context compiler (compiled-rules exports) reads ACTIVE rules only; activation is a human decision by design.",
@@ -4652,6 +4904,28 @@ export const TOOLS = {
       required: ["idempotency_key","rule_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "activate-rule", args, async () => {
       args.rule_id = await resolveRuleId(c, args.rule_id);          // loop #261
+      // The database trigger is the non-bypassable backstop. This explicit
+      // read is the server-side authority gate: it provides a typed refusal and
+      // makes the admission evidence part of this same transaction.
+      const admission = await c.query(
+        `select a.state,a.enforcement_class,
+                count(ep.id) filter (where ep.installed) as installed_controls,
+                encode(digest(jsonb_build_object(
+                  'enforcement_class',a.enforcement_class,'binding_moment',a.binding_moment,
+                  'applicability',a.applicability,'projection',a.projection,
+                  'reachability',a.reachability,'input_contract',a.input_contract,
+                  'fixture_refs',a.fixture_refs)::text,'sha256'),'hex') as contract_hash
+           from ops.rule_admission a
+           left join ops.rule_enforcement_point ep on ep.rule_id=a.rule_id
+          where a.rule_id=$1
+          group by a.rule_id,a.state,a.enforcement_class,a.binding_moment,a.applicability,
+                   a.projection,a.reachability,a.input_contract,a.fixture_refs`, [args.rule_id]);
+      if (!admission.rows.length || admission.rows[0].state !== "admitted")
+        throw new ToolError({ error: "admission_required", rule_id: args.rule_id,
+          hint: "call admit-rule with applicability, projection, reachability, fixtures and enforcement evidence first" });
+      if (admission.rows[0].enforcement_class === "machine_enforceable"
+          && Number(admission.rows[0].installed_controls) < 1)
+        throw new ToolError({ error: "installed_enforcement_point_required", rule_id: args.rule_id });
       const r = await c.query(
         `update rule set status='active', activated_by=$1, activated_at=now()
          where id=$2 and status='proposed' returning id`, [actor.id, args.rule_id]);
@@ -4666,9 +4940,64 @@ export const TOOLS = {
             ? "only a PROPOSED rule can be activated; this one is already past that point"
             : "no rule carries that id" });
       }
+      await c.query(
+        `insert into ops.authority_receipt
+           (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
+         values ($1,'activation','rule',$2,$3,'activated admitted rule',$4,$5)`,
+        [`activation:${args.idempotency_key}`,args.rule_id,actor.id,
+         admission.rows[0].contract_hash,[]]);
       await writeEvent(c, actor, "activate-rule", "rule", args.rule_id,
         { new: { status: "active" }, idempotency_key: args.idempotency_key });
       return { ok: true };
+    }),
+  },
+
+  "applicable-rules": {
+    write: false,
+    description: "Compile the active admitted rule set for a finite workflow, surface and tier. This is deterministic applicability selection from stored tags; no model performs routing or decides which authority applies.",
+    inputSchema: { type: "object", properties: {
+      workflow: { type: "string" }, surface: { type: "string" }, tier: { type: "string" },
+    } },
+    handler: async (c, _actor, args) => {
+      const r = await c.query(
+        "select * from ops.applicable_rules($1,$2,$3)",
+        [args.workflow || null,args.surface || null,args.tier || null]);
+      return { ok: true, count: r.rows.length, rules: r.rows };
+    },
+  },
+
+  "accept-workflow": {
+    write: true, humanOnly: true, authorityOnly: true,
+    description: "Human acceptance of a completed shadow or canary workflow run. Uses the authority database connection, derives the partner from that connection's authenticated session, and refuses an arbitrary receipt reference.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, workflow_key: { type: "string" },
+      mode: { type: "string", enum: ["shadow", "canary"] }, receipt_ref: { type: "string" },
+    }, required: ["idempotency_key", "workflow_key", "mode", "receipt_ref"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "accept-workflow", args, async () => {
+      const accepted = await c.query(
+        "select ops.record_workflow_acceptance($1,$2,'accepted',$3) as id",
+        [args.workflow_key, args.mode, args.receipt_ref]);
+      await writeEvent(c, actor, "accept-workflow", "system", accepted.rows[0].id,
+        { new: { workflow_key: args.workflow_key, mode: args.mode, receipt_ref: args.receipt_ref },
+          idempotency_key: args.idempotency_key });
+      return { ok: true, acceptance_id: accepted.rows[0].id };
+    }),
+  },
+
+  "disable-legacy-schedule": {
+    write: true, humanOnly: true, authorityOnly: true,
+    description: "Joe-only authority operation to retire one legacy schedule after accepted shadow and canary completion receipts exist. Uses the authority connection; a routine writer credential cannot invoke it.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, workflow_key: { type: "string" }, reason: { type: "string" },
+    }, required: ["idempotency_key", "workflow_key", "reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "disable-legacy-schedule", args, async () => {
+      const retired = await c.query("select ops.disable_legacy_schedule($1,$2) as disabled",
+        [args.workflow_key, args.reason]);
+      if (!retired.rows[0].disabled)
+        throw new ToolError({ error: "legacy_schedule_not_disabled", workflow_key: args.workflow_key });
+      await writeEvent(c, actor, "disable-legacy-schedule", "system", args.workflow_key,
+        { new: { workflow_key: args.workflow_key, reason: args.reason }, idempotency_key: args.idempotency_key });
+      return { ok: true, workflow_key: args.workflow_key, disabled: true };
     }),
   },
 
@@ -5548,7 +5877,8 @@ export const TOOLS = {
       kind: { type: "string", enum: LOOP_KINDS },
       base_version: { type: "integer" },
       outcome: { type: "string", description: "REQUIRED: what came of it, in your words" },
-      resolution: { type: "string", enum: ["done", "dropped"] } },
+      resolution: { type: "string", enum: ["done", "dropped"] },
+      successor_loop: { type: "string", description: "Required when the row is renumbered, superseded, merged, or split: the open row that carries the work forward." } },
       required: ["idempotency_key", "outcome"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "close-loop", args, async () => {
       // The refusal is first and unconditional. A whitespace-only outcome is no
@@ -5568,6 +5898,20 @@ export const TOOLS = {
           hint: "already closed — this is what came of it" });
 
       const resolution = args.resolution || "done";
+      const bookkeeping = /\b(renumbered|superseded|merged|split)\b/i.test(outcome);
+      let successor = null;
+      if (bookkeeping) {
+        if (resolution !== "dropped")
+          throw new ToolError({ error: "bookkeeping_close_is_dropped", hint: "continuing work is not done; close it as dropped with the successor named" });
+        if (!/^(renumbered|superseded)/i.test(outcome))
+          throw new ToolError({ error: "bookkeeping_outcome_prefix", hint: "open a bookkeeping close with RENNUMBERED or SUPERSEDED, not an abandonment claim" });
+        if (!args.successor_loop)
+          throw new ToolError({ error: "successor_loop_required", hint: "name the open loop that now carries this work; a bookkeeping close cannot read as abandonment" });
+        successor = await resolveLoop(c, { loop_id: args.successor_loop });
+        if (successor.id === cur.id || successor.status !== "open")
+          throw new ToolError({ error: "successor_loop_not_open", successor_loop: args.successor_loop,
+            hint: "the successor must be a different open loop" });
+      }
 
       // A file with a Done table keeps its closed rows visible in the render; that
       // is the file's own convention, not a new one. open_loop has no Done table
@@ -5609,13 +5953,15 @@ export const TOOLS = {
 
       await writeEvent(c, actor, "close-loop", "loop", cur.id,
         { field: "status", old: { status: "open" },
-          new: { status: resolution, outcome }, human_quote: outcome,
+          new: { status: resolution, outcome,
+                 ...(successor ? { successor_loop: { id: successor.id, number: successor.number } } : {}) }, human_quote: outcome,
           idempotency_key: args.idempotency_key });
       // Name the destination BLOCK, not just the file. `ok:true` proves the call
       // parsed, never that the row landed where a reader will find it (rule
       // c53beeaa) — and a null here is now the caller's signal that this kind
       // keeps no closed table, rather than something having gone wrong.
       return { ok: true, loop_id: cur.id, number: cur.number, status: resolution,
+               ...(successor ? { successor_loop: { id: successor.id, number: successor.number } } : {}),
                moved_to_done_table_in: movedTo, closed_rows_render_in: movedToBlock };
     }),
   },
@@ -6658,16 +7004,20 @@ Object.assign(TOOLS, {
       idempotency_key: { type: "string" }, name: { type: "string" },
       owner: { type: "string", enum: ["joe","dell"] }, vertical: { type: "string" },
       force_new: { type: "boolean" },
-    }, required: ["idempotency_key","name","owner"] },
+      research_evidence: RESEARCH_EVIDENCE_SCHEMA,
+    }, required: ["idempotency_key","name","owner","research_evidence"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "create-national-account", args, async () => {
       const matches = await c.query(
         "select id,name from party where kind='org' and merged_into is null and lower(name)=lower($1)", [args.name.trim()]);
       if (matches.rows.length && !args.force_new)
         return { needs_confirm: true, candidates: matches.rows,
           hint: "An org with this exact name exists. Use its client or explicitly confirm a genuinely separate brand." };
+      const evidence = researchEvidence(args.research_evidence,
+        ["name", "company", "phone", "specialty", "market"], "create-national-account");
       const org = await c.query(
         `insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id`,
         [args.name.trim(), actor.id]);
+      await stampResearch(c, actor, org.rows[0].id, evidence);
       const ref = (await c.query("select 'C-' || lpad(nextval('ref_client_seq')::text,3,'0') as ref")).rows[0].ref;
       const client = await c.query(
         `insert into client (roster_ref,party_id,client_type,vertical,status,
@@ -6696,6 +7046,7 @@ Object.assign(TOOLS, {
       state: { type: "string" }, segment: { type: "string" }, agent_name: { type: "string" },
       deal_type: { type: "string", default: "startup" },
       phase: { type: "string", default: "pending" },
+      research_evidence: RESEARCH_EVIDENCE_SCHEMA,
     }, required: ["idempotency_key","account_client_id","client_name","deal_name","market"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "create-national-market-deal", args, async () => {
       const account = (await c.query(
@@ -6711,10 +7062,13 @@ Object.assign(TOOLS, {
           where p.org_id=$1 and p.merged_into is null and c.merged_into is null
             and lower(p.name)=lower($2) limit 1`, [account.party_id, args.client_name.trim()])).rows[0];
       if (!sub) {
+        const evidence = researchEvidence(args.research_evidence,
+          ["name", "company", "phone", "specialty", "market"], "create-national-market-deal");
         const person = await c.query(
           `insert into party (kind,name,org_id,city,state,created_by,updated_by)
            values ('person',$1,$2,$3,$4,$5,$5) returning id`,
           [args.client_name.trim(), account.party_id, args.market.trim(), args.state || null, actor.id]);
+        await stampResearch(c, actor, person.rows[0].id, evidence);
         const ref = (await c.query("select 'C-' || lpad(nextval('ref_client_seq')::text,3,'0') as ref")).rows[0].ref;
         const made = await c.query(
           `insert into client (roster_ref,party_id,client_type,vertical,status,

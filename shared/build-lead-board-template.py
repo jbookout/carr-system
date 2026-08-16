@@ -218,15 +218,19 @@ LANE_FILES = {
     "national-accounts": os.path.join(ROOT, "DNA", "Team", "national-accounts.json"),
 }
 
-router_path = latest_router()      # read in both modes: the FILENAME carries the
-                                   # router's own date, which is what the header's
-                                   # freshness grade is about. Records mode reads
-                                   # the name, never the contents.
 if MODE == MODE_RECORDS:
     POOL = load_pool((ROUTER_SOURCE,) + LANE_SOURCES)
     router_raw = POOL[ROUTER_SOURCE]
+    # The pool is the canonical source.  Do not require an exported router merely
+    # to recover the source filename: a missing recovery artifact must not turn a
+    # live record-layer build into a file-mode build.
+    router_path = None
+    router_label = "candidate_pool (source='lead-router')"
 else:
     POOL = None
+    # Explicit recovery path for machines without a record-layer read grant.
+    router_path = latest_router()
+    router_label = os.path.basename(router_path)
     router_raw = router_rows_from_file(router_path)
 
 
@@ -423,8 +427,10 @@ html = html.replace("__QUEUE__", str(queue_n)).replace("__DEC__", str(len(DECISI
 # board rebuilt today off a 15-day-old router read as current. Rule 28 says an
 # automation is verified by output freshness; this puts that check on the surface the
 # human actually reads, instead of leaving the source date alone in the footer.
-m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(router_path))
-if m:
+m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(router_path)) if router_path else None
+if MODE == MODE_RECORDS:
+    src_txt, src_state, src_note = "live", "fresh", "read from canonical candidate_pool"
+elif m:
     src_d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
     src_age = (date.today() - src_d).days
     src_txt = src_d.strftime("%B %-d")
@@ -463,7 +469,7 @@ except Exception as e:
     print(f"WARNING: shared-tier publish failed ({e}) — cloud fallback will go stale; fix before session end.")
 _src = ("records (candidate_pool + v_export_leads)" if MODE == MODE_RECORDS
         else "generated files")
-print(f"Router: {os.path.basename(router_path)} | {len(L):,} leads | queue {queue_n} | "
+print(f"Router: {router_label} | {len(L):,} leads | queue {queue_n} | "
       f"decisions {len(DECISIONS)} | source: {_src}")
 if publish_failed:
     # Corrective #2 (2026-07-25): a failed shared publish must FAIL the run, not

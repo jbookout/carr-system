@@ -227,6 +227,20 @@ def main() -> int:
               "pending: 0" in verify.stdout,
               verify.stdout.strip().splitlines()[-1][:160] if verify.stdout.strip() else "")
 
+        # The migration chain existing is not enough: exercise the job ledger,
+        # authority boundaries, retries, leases, receipts, cache, provider
+        # health, and cost admission on the same disposable Neon database.
+        control_plane = subprocess.run(
+            [sys.executable, str(REPO / "ops" / "control-plane-db-gate.py")],
+            capture_output=True, text=True, timeout=900,
+            env={**os.environ, "DATABASE_URL": rebuilt_dsn})
+        check("2c. control-plane ledger and authority integration gate passes",
+              control_plane.returncode == 0,
+              control_plane.stderr.strip().splitlines()[-1][:200]
+              if control_plane.stderr.strip() else
+              control_plane.stdout.strip().splitlines()[-1][:200]
+              if control_plane.stdout.strip() else "")
+
         # ── 3. the rebuilt database carries the tables the system needs ──────
         missing = []
         for table in REQUIRED_TABLES:

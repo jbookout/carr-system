@@ -358,7 +358,13 @@ def load_ref_index(mode):
 
 def _elevated_url():
     """A DSN that can read candidate_pool itself. `tools/db-tap.py run` sets DATABASE_URL."""
-    return os.environ.get("CARR_DB_POOL_URL") or os.environ.get("DATABASE_URL")
+    # The scheduled-jobs role already has the narrow pool grant needed to map
+    # lane output.  Let that same non-owner role read the canonical rows during
+    # the run, instead of making an unattended routine fall back to Drive simply
+    # because it does not carry an exporter credential.
+    return (os.environ.get("CARR_DB_POOL_URL")
+            or os.environ.get("CARR_DB_JOBS_URL")
+            or os.environ.get("DATABASE_URL"))
 
 
 # Which relation a reachable pool read comes from. Returned by pool_reach as its
