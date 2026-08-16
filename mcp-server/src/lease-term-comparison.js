@@ -100,11 +100,11 @@ function validate(args, ErrorType) {
 }
 
 function money(value) {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+  return Math.sign(value) * Math.round((Math.abs(value) + Number.EPSILON) * 100) / 100;
 }
 
 function ratio(value) {
-  return Math.round((value + Number.EPSILON) * 10000) / 10000;
+  return Math.sign(value) * Math.round((Math.abs(value) + Number.EPSILON) * 10000) / 10000;
 }
 
 function totalFinancingInterest(principal, annualRate, years) {

@@ -102,6 +102,25 @@ test("reports a signed result when the shorter option costs less", () => {
   assert.equal(out.comparison.direction, "shorter_costs_less");
 });
 
+test("rounds negative half-cents away from zero like the workbook", () => {
+  const input = sample();
+  input.square_feet = 1;
+  input.long_term.base_rent_per_sf = [1, 1, 1, 1, 1];
+  input.short_term.base_rent_per_sf = [0.999, 0.999, 0.999, 0.999, 0.999];
+  for (const option of [input.long_term, input.short_term]) {
+    option.operating_expenses_per_sf = 0;
+    option.free_rent_months = 0;
+    option.free_opex_months = 0;
+    option.buildout_cost_per_sf = 0;
+    option.landlord_ti_per_sf = 0;
+  }
+  input.financing.annual_interest_rate = 0;
+
+  const out = compareLeaseTerms(input);
+  assert.equal(out.comparison.additional_cost_of_shorter_term, -0.01);
+  assert.equal(out.comparison.direction, "shorter_costs_less");
+});
+
 test("rejects malformed, nonfinite, bounded, and authority-bearing inputs without echo", () => {
   const attacks = [
     (x) => { x.canary = "CARR-SECRET-CANARY-7F4A"; },
