@@ -105,11 +105,34 @@ def _cases(dsn: str) -> None:
     mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-manifest.json"
     mpath.write_text(json.dumps(manifest))
 
-    for k in ("rel-abandon-a", "rel-abandon-b", "rel-shipped"):
+    for k in ("rel-abandon-a", "rel-abandon-b"):
         record(dsn, "release", "candidate", "--key", k, "--manifest", str(mpath),
                "--service", "carr-mcp", "--environment", "staging",
                "--maker", "selftest", "--maker-verification", "ref",
                "--test-evidence", "ref", "--security-evidence", "ref")
+    production_manifest = {**manifest, "environment": "production"}
+    production_mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-production-manifest.json"
+    production_mpath.write_text(json.dumps(production_manifest))
+    record(dsn, "release", "candidate", "--key", "rel-shipped",
+           "--manifest", str(production_mpath), "--service", "carr-mcp",
+           "--environment", "production", "--maker", "selftest",
+           "--maker-verification", "ref", "--test-evidence", "ref",
+           "--security-evidence", "ref")
+
+    # Program 5 makes independent verification and rollback readiness
+    # prerequisites for approval, rather than evidence added after deployment.
+    # Only the two fixtures that will enter a promoted state need them; the
+    # abandoned candidate remains a deliberately ordinary candidate.
+    ready = psql(
+        dsn, "-c",
+        "update ops.release "
+        "set verifier_actor='independent-selftest', "
+        "    verifier_evidence_ref='ops/release-abandon-selftest.py#verification', "
+        "    rollback_ready=true, "
+        "    rollback_plan_ref='ops/release-abandon-selftest.py#rollback' "
+        "where release_key in ('rel-abandon-b','rel-shipped')")
+    check("0b. promoted fixtures carry verifier and rollback evidence",
+          ready.returncode == 0, (ready.stderr or ready.stdout).strip()[:160])
 
     # ── 1. a candidate can be abandoned, with a reason ──────────────────
     r = record(dsn, "release", "abandon", "--key", "rel-abandon-a",
@@ -146,7 +169,7 @@ def _cases(dsn: str) -> None:
     # and case 4 then proved nothing on a row still sitting at `candidate`.
     record(dsn, "release", "approve", "--key", "rel-shipped",
            "--plan-hash", "plan:selftest", "--actor", "selftest")
-    record(dsn, "deployment", "--service", "carr-mcp", "--environment", "staging",
+    record(dsn, "deployment", "--service", "carr-mcp", "--environment", "production",
            "--state", "complete", "--git-sha", "a" * 40, "--verb-count", "1",
            "--release-key", "rel-shipped", "--source-kind", "wrapper",
            "--source-ref", "ops/release-abandon-selftest.py",

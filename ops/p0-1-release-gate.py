@@ -130,7 +130,10 @@ def main() -> int:
         sys.exit("p0-1-release-gate: DATABASE_URL is not set")
 
     now = datetime.now(timezone.utc)
-    env = "staging"
+    # The database is still CI's isolated throwaway instance; the synthetic row
+    # itself targets Production because Program 5 binds a completed deployment
+    # to the release's exact environment.
+    env = "production"
     corr = uuid.uuid4()
 
     print(f"p0-1-release-gate: correlation {corr}")
@@ -159,6 +162,7 @@ def main() -> int:
                     asset_versions,
                     maker_actor, maker_verification_ref,
                     test_evidence_ref, security_evidence_ref,
+                    verifier_actor, verifier_evidence_ref,
                     rollback_ready, rollback_plan_ref,
                     work_request_ref,
                     source_kind, source_ref, observed_at, expires_at)
@@ -169,6 +173,7 @@ def main() -> int:
                        %s,
                        %s, %s,
                        %s, %s,
+                       %s, %s,
                        true, %s,
                        %s,
                        'wrapper', 'tools/release-manifest.py', %s, %s)
@@ -176,10 +181,11 @@ def main() -> int:
             (corr, f"gate-{corr}", service_id, env,
              SHA, "sha256:" + "c" * 64, "sha256:" + "d" * 64, "sbom/gate.json",
              "0131", ["0131"],
-             "cfg:" + "e" * 16, "staging uses the staging Neon branch",
+             "cfg:" + "e" * 16, "synthetic Production fixture in isolated CI",
              '{"deal-room": "2026-08-15T00:00:00Z"}',
              "claude", "ops/ci.sh#run-1",
              "ops/ci.sh#run-1", "ops/ci-secret-scan.py#run-1",
+             "codex", "ops/ci.sh#run-2",
              "runbooks/rollback-worker.md",
              "WR-P0-1",
              now, now + timedelta(days=30)))
