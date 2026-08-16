@@ -37,7 +37,14 @@ test("buildRelease: full shape when everything is reachable and stamped", async 
     ["doctrine_meta", [{ generation: 42 }]],
   ]);
   const out = await buildRelease({
-    env: { GIT_SHA: "a".repeat(40) },
+    env: {
+      GIT_SHA: "a".repeat(40),
+      CF_VERSION_METADATA: {
+        id: "cf-version-123",
+        tag: "release-a",
+        timestamp: "2026-08-16T18:00:00.000Z",
+      },
+    },
     sql,
     verbCount: 103,
     now: FIXED_NOW,
@@ -46,6 +53,13 @@ test("buildRelease: full shape when everything is reachable and stamped", async 
   assert.equal(out.ok, true);
   assert.equal(out.ts, "2026-08-13T21:00:00.000Z");
   assert.equal(out.verb_count, 103);
+  assert.equal(out.provider, "cloudflare-workers");
+  assert.deepEqual(out.worker_version, {
+    id: "cf-version-123",
+    tag: "release-a",
+    timestamp: "2026-08-16T18:00:00.000Z",
+    reason: null,
+  });
   assert.deepEqual(out.git_sha, { value: "a".repeat(40), reason: null });
   assert.equal(out.schema.highest_applied_migration, "0099_thing.sql");
   assert.equal(out.schema.applied_count, 101);
@@ -54,6 +68,42 @@ test("buildRelease: full shape when everything is reachable and stamped", async 
   // is "what the tracking table claims" even when the table is reachable.
   assert.match(out.schema.note, /not ground truth/);
   assert.deepEqual(out.doctrine_generation, { value: 42, reason: null });
+});
+
+test("buildRelease: missing Cloudflare version metadata is explicit and never falls back to git SHA", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
+    ["doctrine_meta", [{ generation: 1 }]],
+  ]);
+  const sha = "f".repeat(40);
+  const out = await buildRelease({ env: { GIT_SHA: sha }, sql, verbCount: 1, now: FIXED_NOW });
+
+  assert.equal(out.provider, "cloudflare-workers");
+  assert.deepEqual(out.worker_version, {
+    id: null,
+    tag: null,
+    timestamp: null,
+    reason: "CF_VERSION_METADATA binding is unavailable; no Cloudflare Worker version identity was observed",
+  });
+  assert.notEqual(out.worker_version.id, sha);
+});
+
+test("buildRelease: malformed Cloudflare version metadata never yields a partial identity", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", [{ applied_count: 1, highest_applied_migration: "0001_x.sql" }]],
+    ["doctrine_meta", [{ generation: 1 }]],
+  ]);
+  const out = await buildRelease({
+    env: { CF_VERSION_METADATA: { tag: "candidate-without-id", timestamp: "2026-08-16T18:00:00.000Z" } },
+    sql, verbCount: 1, now: FIXED_NOW,
+  });
+
+  assert.deepEqual(out.worker_version, {
+    id: null,
+    tag: null,
+    timestamp: null,
+    reason: "CF_VERSION_METADATA has no version id; no Cloudflare Worker version identity was observed",
+  });
 });
 
 test("buildRelease: git_sha reports null + a specific reason when GIT_SHA was never stamped", async () => {

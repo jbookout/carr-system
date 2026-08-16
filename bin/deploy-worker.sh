@@ -38,6 +38,10 @@
 #   bin/deploy-worker.sh --allow-shrink   # deliberate verb retirement
 #   bin/deploy-worker.sh --release-sha <full-40-char-sha>
 #       # an approved immutable release when main moves after approval
+#   bin/deploy-worker.sh --upload-version
+#       # upload a Production candidate without changing traffic
+#   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
+#       # promote that exact approved version to 100% of Production traffic
 #
 # Per rule a8c55a47, this is the same code the manual path and any automated
 # path both run. There is no second way to deploy.
@@ -92,6 +96,9 @@ CHECK_ONLY=0
 ALLOW_SHRINK=0
 TARGET_ENV="production"
 PINNED_RELEASE=""
+VERSION_MODE="ordinary"
+PROVIDER="cloudflare-workers"
+PROVIDER_VERSION_ID=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check)         CHECK_ONLY=1 ;;
@@ -106,6 +113,19 @@ while [ "$#" -gt 0 ]; do
       PINNED_RELEASE="$2"
       shift
       ;;
+    --upload-version)
+      [ "$VERSION_MODE" = "ordinary" ] \
+        || { echo "deploy-worker: --upload-version and --promote-version are mutually exclusive" >&2; exit 64; }
+      VERSION_MODE="upload"
+      ;;
+    --promote-version)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --promote-version needs an immutable provider version id" >&2; exit 64; }
+      [ "$VERSION_MODE" = "ordinary" ] \
+        || { echo "deploy-worker: --upload-version and --promote-version are mutually exclusive" >&2; exit 64; }
+      VERSION_MODE="promote"
+      PROVIDER_VERSION_ID="$2"
+      shift
+      ;;
     *) echo "deploy-worker: unknown argument '$1'" >&2; exit 64 ;;
   esac
   shift
@@ -113,10 +133,34 @@ done
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
+if [ "$VERSION_MODE" != "ordinary" ] && [ "$TARGET_ENV" != "production" ]; then
+  fail "provider-version operations are Production-only; staging is a source rehearsal and receives its own build."
+fi
+if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "production" ]; then
+  fail "Production source deploy is disabled. Upload an immutable candidate with
+  --upload-version, bind that provider version to an approved release, then use
+  --promote-version <id>."
+fi
+if [ "$VERSION_MODE" = "promote" ]; then
+  printf '%s\n' "$PROVIDER_VERSION_ID" | grep -Eq \
+    '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' \
+    || fail "--promote-version must be the exact immutable Cloudflare UUID."
+  PROVIDER_VERSION_ID="$(printf '%s' "$PROVIDER_VERSION_ID" | tr 'A-F' 'a-f')"
+fi
+
 cd "$REPO"
+[ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
+[ -x "$PY" ] || fail "python not found; release truth cannot be checked."
+
+HEAD_SHA=""
+SHIPPING=""
 
 # ---------- preflight 1: exactly origin/main ----------
 echo "== preflight =="
+if [ "$VERSION_MODE" = "promote" ]; then
+  echo "  OK  immutable provider promotion — source checkout and build preflights are skipped"
+  echo "      release truth below supplies the SHA bound to $PROVIDER_VERSION_ID"
+else
 git fetch origin main --quiet 2>/dev/null || fail "could not reach origin to verify main."
 
 HEAD_SHA="$(git rev-parse HEAD)"
@@ -199,7 +243,6 @@ if [ "$TARGET_ENV" != "production" ]; then
 fi
 
 # ---------- preflight 3: verb count did not shrink ----------
-[ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 
 # The count moved to ops/verb-count.sh on 2026-08-13 so that CI can run this same
 # guard at MERGE time, not only here at DEPLOY time. Same code, two callers
@@ -260,6 +303,7 @@ case "$LEDGER_RC" in
   If Postgres is down, the Worker you are about to ship cannot serve a verb anyway."
     ;;
 esac
+fi
 
 # record_deployment <state> <correlation> — attach what just shipped to the
 # release that authorised it.
@@ -289,16 +333,27 @@ record_deployment() {
   else
     rd_read_back=""
   fi
+  rd_provider_args=""
+  if [ "$TARGET_ENV" = "production" ]; then
+    rd_provider_args="--provider $PROVIDER --provider-version-id $PROVIDER_VERSION_ID"
+  fi
+  rd_verb_args=""
+  [ -n "$SHIPPING" ] && rd_verb_args="--verb-count $SHIPPING"
+  rd_evidence_ref="${DEPLOYMENT_EVIDENCE_REF:-bin/smoke-and-record.sh#${rd_corr:-unknown}}"
+  rd_failure_args=""
+  if [ "$rd_state" = "failed" ]; then
+    rd_failure_args="--failure-class ${DEPLOYMENT_FAILURE_CLASS:-golden_workflow_failed}"
+  fi
   # shellcheck disable=SC2086
   "$PY" "$REPO/tools/ops-record.py" deployment \
     --service carr-mcp --environment "$TARGET_ENV" --state "$rd_state" \
-    --git-sha "$HEAD_SHA" --verb-count "$SHIPPING" \
+    --git-sha "$HEAD_SHA" $rd_provider_args $rd_verb_args \
     ${rd_corr:+--correlation "$rd_corr"} \
     ${RELEASE_KEY:+--release-key "$RELEASE_KEY"} \
     ${rd_state:+--source-kind wrapper} --source-ref bin/deploy-worker.sh \
     $rd_read_back \
-    ${rd_corr:+--verification-evidence-ref "bin/smoke-and-record.sh#$rd_corr"} \
-    ${rd_state:+$( [ "$rd_state" = "failed" ] && echo "--failure-class golden_workflow_failed" )} \
+    --verification-evidence-ref "$rd_evidence_ref" \
+    $rd_failure_args \
     >/dev/null 2>&1
   rd_rc=$?
   set -e
@@ -307,6 +362,8 @@ record_deployment() {
     echo "     Record it by hand so the release keeps its deployment:"
     echo "       .venv/bin/python tools/ops-record.py deployment --service carr-mcp \\"
     echo "         --environment $TARGET_ENV --state $rd_state --git-sha $HEAD_SHA \\"
+    [ "$TARGET_ENV" != "production" ] || \
+      echo "         --provider $PROVIDER --provider-version-id $PROVIDER_VERSION_ID \\"
     echo "         --release-key ${RELEASE_KEY:-<key>} --source-kind wrapper \\"
     echo "         --source-ref bin/deploy-worker.sh"
   else
@@ -356,7 +413,64 @@ record_deployment() {
 # anyway. Silence is the only outcome ruled out.
 RELEASE_KEY=""
 RELEASE_PLAN_HASH=""
-if [ -x "$PY" ] && [ -f "$REPO/tools/release-manifest.py" ]; then
+RELEASE_MANIFEST=""
+if [ "$VERSION_MODE" = "promote" ]; then
+  echo ""
+  echo "== preflight: immutable release truth =="
+  set +e
+  RELEASE_BINDING="$("$PY" "$REPO/tools/ops-record.py" release require \
+    --environment production --provider "$PROVIDER" \
+    --provider-version-id "$PROVIDER_VERSION_ID")"
+  REQUIRE_RC=$?
+  set -e
+  [ "$REQUIRE_RC" -eq 0 ] \
+    || fail "no live approval binds Production to $PROVIDER:$PROVIDER_VERSION_ID."
+  # Production provider lookup returns exactly `<release-key> <git-sha>` so
+  # promotion provenance comes from the approved immutable object, not HEAD.
+  set -- $RELEASE_BINDING
+  [ "$#" -eq 2 ] \
+    || fail "release truth returned no exact release/SHA binding for $PROVIDER_VERSION_ID."
+  RELEASE_KEY="$1"
+  HEAD_SHA="$2"
+  printf '%s\n' "$HEAD_SHA" | grep -Eq '^[0-9A-Fa-f]{40}$' \
+    || fail "approved release $RELEASE_KEY has no canonical git SHA."
+  echo "  approved release: $RELEASE_KEY"
+  echo "  provider version: $PROVIDER_VERSION_ID"
+  echo "  recorded git SHA: $HEAD_SHA"
+
+  # The first exact UUID lookup reveals the SHA the approver signed. Recompute
+  # the evidence from that git object without uploading or building a Worker,
+  # bind the same canonical provider UUID, then ask release truth a second time
+  # with every immutable dimension and the freshly computed plan hash.
+  PROMOTION_SOURCE_MANIFEST="$(mktemp -t carr-promotion-source-manifest)"
+  PROMOTION_BOUND_MANIFEST="$(mktemp -t carr-promotion-bound-manifest)"
+  if ! "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
+      --environment production > "$PROMOTION_SOURCE_MANIFEST"; then
+    fail "approved release evidence cannot be rebuilt from git SHA $HEAD_SHA."
+  fi
+  if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
+      --manifest "$PROMOTION_SOURCE_MANIFEST" --provider "$PROVIDER" \
+      --provider-version-id "$PROVIDER_VERSION_ID" > "$PROMOTION_BOUND_MANIFEST"; then
+    fail "approved provider identity cannot be rebound to recomputed evidence."
+  fi
+  RELEASE_MANIFEST="$PROMOTION_BOUND_MANIFEST"
+  RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
+    --manifest "$RELEASE_MANIFEST")"
+  [ -n "$RELEASE_PLAN_HASH" ] \
+    || fail "recomputed provider-bound evidence produced no plan hash."
+  set +e
+  RECONFIRMED_BINDING="$("$PY" "$REPO/tools/ops-record.py" release require \
+    --sha "$HEAD_SHA" --environment production --provider "$PROVIDER" \
+    --provider-version-id "$PROVIDER_VERSION_ID" \
+    --plan-hash "$RELEASE_PLAN_HASH")"
+  REQUIRE_RC=$?
+  set -e
+  [ "$REQUIRE_RC" -eq 0 ] \
+    || fail "approval no longer matches the recomputed SHA/provider/version plan."
+  [ "$RECONFIRMED_BINDING" = "$RELEASE_BINDING" ] \
+    || fail "release binding changed between UUID resolution and final approval check."
+  echo "  recomputed plan: $RELEASE_PLAN_HASH"
+elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
   RELEASE_MANIFEST="$(mktemp -t carr-release-manifest)"
@@ -369,18 +483,24 @@ if [ -x "$PY" ] && [ -f "$REPO/tools/release-manifest.py" ]; then
     echo "  !! could not build the release manifest for $HEAD_SHA"
   fi
 
-  set +e
-  RELEASE_KEY="$("$PY" "$REPO/tools/ops-record.py" release require \
-                   --sha "$HEAD_SHA" --environment "$TARGET_ENV" \
-                   --plan-hash "$RELEASE_PLAN_HASH")"
-  REQUIRE_RC=$?
-  set -e
-  if [ "$REQUIRE_RC" -eq 3 ]; then
-    fail "no live approval for $HEAD_SHA in $TARGET_ENV. The reason and the exact
+  if [ "$VERSION_MODE" = "upload" ]; then
+    [ -n "$RELEASE_PLAN_HASH" ] \
+      || fail "the release manifest did not produce a plan hash; version upload refused."
+    echo "  upload may proceed; approval happens only after Cloudflare returns the immutable version id"
+  else
+    set +e
+    RELEASE_KEY="$("$PY" "$REPO/tools/ops-record.py" release require \
+                     --sha "$HEAD_SHA" --environment "$TARGET_ENV" \
+                     --plan-hash "$RELEASE_PLAN_HASH")"
+    REQUIRE_RC=$?
+    set -e
+    if [ "$REQUIRE_RC" -eq 3 ]; then
+      fail "no live approval for $HEAD_SHA in $TARGET_ENV. The reason and the exact
 commands are printed above. This is P0-1: a production deploy names an approved
 release or it does not happen."
+    fi
+    [ -n "$RELEASE_KEY" ] && echo "  approved release: $RELEASE_KEY"
   fi
-  [ -n "$RELEASE_KEY" ] && echo "  approved release: $RELEASE_KEY"
 fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
@@ -393,13 +513,89 @@ fi
 echo ""
 echo "== deploy =="
 cd "$WORKER_DIR"
-# RELEASE_SHA: whichever of the two preflight branches ran above, HEAD_SHA is
-# already proven equal to it (the pinned branch fails otherwise), so it is
-# always the right value to stamp — no separate variable to keep in sync.
-if [ "$TARGET_ENV" = "production" ]; then
-  "$WRANGLER" deploy --var "GIT_SHA:$HEAD_SHA"
+# -- provider-version upload --
+if [ "$VERSION_MODE" = "upload" ]; then
+  set +e
+  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" 2>&1)"
+  VERSION_UPLOAD_RC=$?
+  set -e
+  printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
+  [ "$VERSION_UPLOAD_RC" -eq 0 ] || fail "Cloudflare version upload failed."
+  PROVIDER_VERSION_ID="$(printf '%s\n' "$VERSION_UPLOAD_OUTPUT" \
+    | sed -nE 's/^.*Worker Version ID:[[:space:]]*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}).*$/\1/p' \
+    | tail -n 1 | tr 'A-F' 'a-f')"
+  [ -n "$PROVIDER_VERSION_ID" ] \
+    || fail "Cloudflare uploaded a version but returned no parseable immutable version id; traffic was not changed."
+  BOUND_RELEASE_MANIFEST="$(mktemp -t carr-bound-release-manifest)"
+  if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
+      --manifest "$RELEASE_MANIFEST" --provider "$PROVIDER" \
+      --provider-version-id "$PROVIDER_VERSION_ID" > "$BOUND_RELEASE_MANIFEST"; then
+    fail "the uploaded version could not be bound into its release manifest; traffic was not changed."
+  fi
+  RELEASE_MANIFEST="$BOUND_RELEASE_MANIFEST"
+  RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
+    --manifest "$RELEASE_MANIFEST")"
+  [ -n "$RELEASE_PLAN_HASH" ] \
+    || fail "the provider-bound release manifest has no approval plan hash; traffic was not changed."
+  echo ""
+  echo "uploaded only — Production traffic was not changed"
+  echo "  provider: $PROVIDER"
+  echo "  provider version: $PROVIDER_VERSION_ID"
+  echo "  git SHA: $HEAD_SHA"
+  echo "  plan hash: $RELEASE_PLAN_HASH"
+  echo ""
+  echo "Record this exact candidate before Joe approves its plan hash:"
+  echo "  .venv/bin/python tools/ops-record.py release candidate --key <key> \\"
+  echo "    --environment production --provider $PROVIDER \\"
+  echo "    --provider-version-id $PROVIDER_VERSION_ID --manifest $RELEASE_MANIFEST ..."
+  exit 0
+fi
+
+# -- provider-version promotion --
+if [ "$VERSION_MODE" = "promote" ]; then
+  "$WRANGLER" versions deploy "${PROVIDER_VERSION_ID}@100" --yes
 else
+# -- ordinary source deploy --
+  # Ordinary source deployment is staging/rehearsal only. Production reaches
+  # this file solely through upload followed by exact immutable promotion.
+  [ "$TARGET_ENV" != "production" ] \
+    || fail "Production cannot rebuild source during promotion."
   "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"
+fi
+
+# Production promotion is not verified by Wrangler accepting the command. Read
+# the serving Worker identity back from its fixed Production endpoint and refuse
+# to call any later golden success Complete unless every immutable field agrees.
+if [ "$TARGET_ENV" = "production" ]; then
+  CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+  export CARR_CORRELATION_ID
+  LIVE_RELEASE_URL="https://api.doctorcre.com/release"
+  echo ""
+  echo "== postflight: Production release identity =="
+  set +e
+  LIVE_RELEASE_JSON="$(curl --fail --silent --show-error --max-time 30 \
+    "$LIVE_RELEASE_URL" 2>&1)"
+  LIVE_RELEASE_RC=$?
+  set -e
+  if [ "$LIVE_RELEASE_RC" -ne 0 ]; then
+    echo "  Production /release could not be read (curl exit $LIVE_RELEASE_RC)." >&2
+    DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#unavailable"
+    DEPLOYMENT_FAILURE_CLASS="production_readback_unavailable"
+    record_deployment verifying "$CARR_CORRELATION_ID"
+    exit 1
+  fi
+  if ! printf '%s' "$LIVE_RELEASE_JSON" | \
+      "$PY" "$REPO/ops/verify-worker-release.py" \
+        --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
+        --provider-version-id "$PROVIDER_VERSION_ID"; then
+    echo "  Production /release is malformed or does not match the approved identity." >&2
+    DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#identity-mismatch"
+    DEPLOYMENT_FAILURE_CLASS="production_readback_mismatch"
+    record_deployment failed "$CARR_CORRELATION_ID"
+    exit 1
+  fi
+  LIVE_RELEASE_VERIFIED=1
+  echo "  OK  serving Production identity matches $HEAD_SHA / $PROVIDER_VERSION_ID"
 fi
 
 # ---------- postflight ----------
@@ -417,8 +613,12 @@ echo "== postflight =="
 # this used to write could not be committed at all: it sits inside the digested
 # artifact while the digest skips dotfiles, so committing it failed
 # ops/release-manifest-selftest.py (defect d737c09c).
-echo "  shipping $SHIPPING verbs — the baseline for the next deploy is the"
-echo "  ledger row recorded below, not a file"
+if [ -n "$SHIPPING" ]; then
+  echo "  shipping $SHIPPING verbs — the baseline for the next deploy is the"
+  echo "  ledger row recorded below, not a file"
+else
+  echo "  promoted immutable $PROVIDER version $PROVIDER_VERSION_ID"
+fi
 echo "  stamped GIT_SHA=$HEAD_SHA into this deploy (see /release)"
 echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
@@ -448,6 +648,9 @@ fi
 echo "  Then curl $VERIFY_URL and confirm BOTH:"
 echo "    git_sha.value is $HEAD_SHA   (which build answered)"
 echo "    env.value is \"$TARGET_ENV\"                        (which deployment answered)"
+if [ "$TARGET_ENV" = "production" ]; then
+  echo "    worker_version.id is $PROVIDER_VERSION_ID  (which immutable provider version answered)"
+fi
 echo "  That pair is the authoritative provenance check, not this file. env matters"
 echo "  because git_sha and schema are IDENTICAL across environments by design."
 
@@ -472,7 +675,26 @@ echo "  because git_sha and schema are IDENTICAL across environments by design."
 # The deploy and the check share ONE correlation id, which is the entire point:
 # a deploy that breaks a read verb now leaves a deployment and a failed check
 # under one id instead of two unrelated facts in two places.
+if [ "$TARGET_ENV" = "production" ] && [ ! -x "$REPO/bin/smoke-and-record.sh" ]; then
+  [ "${LIVE_RELEASE_VERIFIED:-0}" = "1" ] || {
+    DEPLOYMENT_EVIDENCE_REF="https://api.doctorcre.com/release#not-verified"
+    DEPLOYMENT_FAILURE_CLASS="production_readback_unavailable"
+    record_deployment verifying "$CARR_CORRELATION_ID"
+    exit 1
+  }
+  echo "  golden workflow suite is unavailable after a verified identity read-back." >&2
+  DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#identity-ok;golden-workflow-unavailable"
+  record_deployment verifying "$CARR_CORRELATION_ID"
+  exit 1
+fi
+
 if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; then
+  [ "${LIVE_RELEASE_VERIFIED:-0}" = "1" ] || {
+    DEPLOYMENT_EVIDENCE_REF="https://api.doctorcre.com/release#not-verified"
+    DEPLOYMENT_FAILURE_CLASS="production_readback_unavailable"
+    record_deployment verifying "$CARR_CORRELATION_ID"
+    exit 1
+  }
   echo ""
   echo "== postflight: golden workflow suite =="
   CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
@@ -480,6 +702,8 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
   CARR_ENV="$TARGET_ENV"
   export CARR_ENV
   echo "  correlation $CARR_CORRELATION_ID"
+  DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#identity-ok;bin/smoke-and-record.sh#$CARR_CORRELATION_ID"
+  DEPLOYMENT_FAILURE_CLASS="golden_workflow_failed"
   if "$REPO/bin/smoke-and-record.sh"; then
     echo "  golden workflow suite PASSED against the deploy you just shipped."
     record_deployment complete "$CARR_CORRELATION_ID"
@@ -493,6 +717,7 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
       # skipped suite produced none. Recording this as complete would be the
       # single most expensive lie this script could tell.
       record_deployment verifying "$CARR_CORRELATION_ID"
+      exit 1
     else
       echo ""
       echo "  ***  GOLDEN WORKFLOW SUITE FAILED (exit $smoke_rc) AFTER THIS DEPLOY.  ***"
@@ -500,7 +725,8 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
       echo "  refused. Read the output above, and read the failed check together with"
       echo "  this deploy as ONE journey rather than two unrelated facts:"
       echo "      .venv/bin/python tools/ops-record.py trace $CARR_CORRELATION_ID"
-      echo "  Rolling back is bin/deploy-worker.sh --release-sha <sha>."
+      echo "  Roll back by approving the prior immutable version, then running"
+      echo "  bin/deploy-worker.sh --promote-version <approved-prior-version-id>."
       record_deployment failed "$CARR_CORRELATION_ID"
       exit 1
     fi

@@ -20,8 +20,8 @@ tools/ops-record.py with no database at all.
   1. THE REFUSAL PRECEDES THE DEPLOY. The require check appears before the
      wrangler invocation. A gate that runs after the ship is a report.
 
-  2. THE REFUSAL IS A REFUSAL. Exit code 3 from the require check reaches
-     `fail`, which exits non-zero.
+  2. THE REFUSAL IS A REFUSAL. Any non-zero result from the require check
+     reaches `fail`; a ledger outage cannot become permission to ship.
 
   3. ALL THREE OUTCOMES REACH THE LEDGER. complete, verifying and failed each
      have a record_deployment call, and `complete` is the only one that claims a
@@ -34,12 +34,13 @@ tools/ops-record.py with no database at all.
      tools/release-manifest.py rather than carrying a second copy of the digest
      decision (rule a8c55a47).
 
-  6. `release require` DEMANDS ITS SHA and refuses without one, so a wrapper
-     that loses the variable gets an error rather than a pass.
+  6. A source rehearsal's `release require` DEMANDS ITS SHA and refuses without
+     one, so a staging wrapper that loses the variable gets an error rather
+     than a pass. Production instead requires provider + immutable version.
 
-  7. THE PRINTED ROLLBACK COMMAND USES THE REAL FLAG. A failure message is an
-     operational instruction; it must name `--release-sha`, not a stale flag
-     that the deploy wrapper refuses.
+  7. THE PRINTED ROLLBACK COMMAND USES THE PRODUCTION PROMOTION FLAG. Production
+     no longer rebuilds a SHA; rollback approves and promotes a known immutable
+     provider version through `--promote-version`.
 """
 
 import re
@@ -73,11 +74,16 @@ def main() -> int:
           require_at != -1 and deploy_at != -1 and require_at < deploy_at,
           f"require at {require_at}, wrangler at {deploy_at}")
 
-    # 2. exit code 3 is treated as a refusal
-    check("2. exit 3 from the require check reaches fail()",
+    # 2. Provider promotion is strict, while routine source rehearsal preserves
+    # main's credential boundary: only the explicit not-approved result blocks.
+    check("2. provider promotion refuses every non-zero approval result",
+          re.search(r'\[ "\$REQUIRE_RC" -eq 0 \]\s*\\\s*\n\s*\|\| fail '
+                    r'"no live approval binds Production', source) is not None,
+          "provider-version promotion can proceed without exact release truth")
+    check("2b. source rehearsal treats exit 3 as the approval refusal",
           re.search(r'REQUIRE_RC["}]*\s*-eq\s*3', source) is not None
           and re.search(r'-eq 3 \]; then\s*\n\s*fail ', source) is not None,
-          "no `fail` on the not-approved exit code")
+          "routine staging/rehearsal lost main's scoped credential boundary")
 
     # 3. all three outcomes are recorded
     for state in ("complete", "verifying", "failed"):
@@ -107,18 +113,21 @@ def main() -> int:
           and "sha256" not in source,
           "the wrapper appears to compute a digest of its own")
 
-    # 6. require refuses without a SHA, with no database in sight
+    # 6. a source rehearsal still refuses without a SHA, with no DB in sight
     out = subprocess.run(
-        [sys.executable, str(RECORD), "release", "require"],
+        [sys.executable, str(RECORD), "release", "require",
+         "--environment", "staging"],
         capture_output=True, text=True, cwd=REPO)
-    check("6. `release require` refuses with no --sha",
+    check("6. staging `release require` refuses with no --sha",
           out.returncode == 2 and "needs --sha" in (out.stderr + out.stdout),
           f"rc={out.returncode} err={out.stderr.strip()[:120]}")
 
-    check("7. rollback instruction uses the accepted release flag",
-          "Rolling back is bin/deploy-worker.sh --release-sha <sha>." in source
-          and "--pinned-release" not in source,
-          "failure output names a flag the wrapper does not accept")
+    check("7. rollback instruction uses immutable provider promotion",
+          "bin/deploy-worker.sh --promote-version "
+          "<approved-prior-version-id>." in source
+          and "Rolling back is bin/deploy-worker.sh --release-sha <sha>." not in source,
+          "failure output tells Production to rebuild a SHA instead of promoting "
+          "an approved provider version")
 
     print()
     if FAILURES:

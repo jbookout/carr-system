@@ -90,6 +90,13 @@ routes = [
 [vars]
 CARR_ENV = "production"
 
+# Cloudflare supplies the immutable version ID, optional tag, and creation
+# timestamp at runtime. /release reads this binding as provider identity; it is
+# deliberately separate from GIT_SHA, which is source provenance stamped by the
+# deploy wrapper.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 # One Worker + one asset binding is the smallest deployable structure. The
 # parallel Deal Room lane writes its no-build bundle directly under dealroom/;
 # src/dealroom-web.js also checks dist/ and falls back to public-shell/index.html.
@@ -165,6 +172,11 @@ routes = []
 # so a var added there must be repeated here.
 [env.staging.vars]
 CARR_ENV = "staging"
+
+# Environment configuration is explicit: staging's separate Worker needs the
+# same runtime version-identity binding and must not depend on inheritance.
+[env.staging.version_metadata]
+binding = "CF_VERSION_METADATA"
 
 [env.staging.assets]
 directory = "../dealroom"

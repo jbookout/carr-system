@@ -281,7 +281,8 @@ begin
                     'because a deploy nobody can trace to an approved plan is the '
                     'exact gap P0-1 closes';
   end if;
-  select state, approval_expires_at, release_key, git_sha, environment into r
+  select state, approval_expires_at, release_key, git_sha, environment,
+         provider, provider_version_id into r
     from ops.release where id = new.release_id;
   if r.state not in ('approved','deploying','verifying','complete') then
     raise exception 'release % is %, not approved — promotion refused',
@@ -298,6 +299,14 @@ begin
   if r.git_sha is distinct from new.git_sha then
     raise exception 'release % binds git SHA %, not deployment SHA % — promotion refused',
                     r.release_key, r.git_sha, new.git_sha;
+  end if;
+  if r.provider is distinct from new.provider then
+    raise exception 'release % binds provider %, not deployment provider % — promotion refused',
+                    r.release_key, r.provider, new.provider;
+  end if;
+  if r.provider_version_id is distinct from new.provider_version_id then
+    raise exception 'release % binds provider version %, not deployment provider version % — promotion refused',
+                    r.release_key, r.provider_version_id, new.provider_version_id;
   end if;
   return new;
 end $$;
@@ -342,14 +351,60 @@ begin
          and d.state = 'complete'
          and d.read_back_at is not null
          and d.git_sha = new.git_sha
+         and d.provider = new.provider
+         and d.provider_version_id = new.provider_version_id
     ) then
       raise exception 'release % cannot be complete: no attached Production deployment '
-                      'completed a read-back for its recorded git SHA. Shipped is not '
+                      'completed a read-back for its recorded provider version and git SHA. '
+                      'Shipped is not '
                       'the same as serving.', new.release_key;
     end if;
   end if;
   return new;
 end $$;
+
+
+--
+-- Name: deployment_provider_identity_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.deployment_provider_identity_is_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if old.environment = 'production'
+     and old.state in ('deploying', 'verifying', 'complete')
+     and (new.provider is distinct from old.provider
+          or new.provider_version_id is distinct from old.provider_version_id) then
+    raise exception 'Production deployment provider identity is immutable after promotion begins';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: release_provider_identity_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.release_provider_identity_is_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if old.environment = 'production'
+     and old.state in ('approved', 'deploying', 'verifying', 'complete')
+     and (new.provider is distinct from old.provider
+          or new.provider_version_id is distinct from old.provider_version_id) then
+    raise exception 'Production release provider identity is immutable after approval';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION release_completion_requires_a_read_back(); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.release_completion_requires_a_read_back() IS 'Program 5: complete requires an attached Production deployment in complete state, with read-back and the release provider, provider version, and git SHA.';
 
 
 --
@@ -1050,6 +1105,8 @@ CREATE TABLE ops.deployment (
     environment text NOT NULL,
     state text NOT NULL,
     git_sha text,
+    provider text,
+    provider_version_id text,
     release_ref text,
     deployed_by_actor text,
     verb_count integer,
@@ -1081,6 +1138,28 @@ CREATE TABLE ops.deployment (
 --
 
 COMMENT ON TABLE ops.deployment IS 'One attempt to place a release into one environment, RECORDED when it happens. /release answers what is serving now; this answers what was serving then, which is the question a failure investigation asks.';
+
+
+--
+-- Name: deployment production_deployment_requires_provider_version; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.deployment
+    ADD CONSTRAINT production_deployment_requires_provider_version CHECK (((environment <> 'production'::text) OR ((provider = 'cloudflare-workers'::text) AND (provider_version_id IS NOT NULL) AND (provider_version_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)))) NOT VALID;
+
+
+--
+-- Name: COLUMN deployment.provider; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.deployment.provider IS 'Program 5 provider identity observed for this deployment receipt.';
+
+
+--
+-- Name: COLUMN deployment.provider_version_id; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.deployment.provider_version_id IS 'Program 5 immutable provider version identifier observed for this deployment receipt.';
 
 
 --
@@ -1213,6 +1292,8 @@ CREATE TABLE ops.release (
     environment text NOT NULL,
     state text DEFAULT 'draft'::text NOT NULL,
     git_sha text NOT NULL,
+    provider text,
+    provider_version_id text,
     artifact_digest text,
     dependency_lock_digest text,
     sbom_ref text,
@@ -1278,6 +1359,14 @@ ALTER TABLE ONLY ops.release
 
 
 --
+-- Name: release production_promotion_requires_provider_version; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT production_promotion_requires_provider_version CHECK (((environment <> 'production'::text) OR (state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR ((provider = 'cloudflare-workers'::text) AND (provider_version_id IS NOT NULL) AND (provider_version_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)))) NOT VALID;
+
+
+--
 -- Name: TABLE release; Type: COMMENT; Schema: ops; Owner: -
 --
 
@@ -1299,10 +1388,31 @@ COMMENT ON CONSTRAINT promotion_release_requires_rollback_readiness ON ops.relea
 
 
 --
+-- Name: CONSTRAINT production_promotion_requires_provider_version on release; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON CONSTRAINT production_promotion_requires_provider_version ON ops.release IS 'Program 5: a promoted Production release records the Cloudflare Workers provider and immutable provider version; drafts/candidates and history may still collect it.';
+
+
+--
 -- Name: COLUMN release.artifact_digest; Type: COMMENT; Schema: ops; Owner: -
 --
 
 COMMENT ON COLUMN ops.release.artifact_digest IS 'Digest of the built artifact, produced by tools/release-manifest.py from the recorded SHA. Recomputing it from that SHA and getting this value back IS the "identical artifact rebuild" half of P0-1 acceptance.';
+
+
+--
+-- Name: COLUMN release.provider; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.release.provider IS 'Program 5 provider identity. Production promoted states are Cloudflare Workers and are frozen with provider_version_id.';
+
+
+--
+-- Name: COLUMN release.provider_version_id; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.release.provider_version_id IS 'Program 5 immutable Cloudflare Workers version identifier approved for a Production release.';
 
 
 --
@@ -11194,10 +11304,24 @@ CREATE TRIGGER deployment_requires_a_live_approval BEFORE INSERT OR UPDATE ON op
 
 
 --
+-- Name: deployment deployment_provider_identity_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER deployment_provider_identity_immutable BEFORE UPDATE OF provider, provider_version_id ON ops.deployment FOR EACH ROW EXECUTE FUNCTION ops.deployment_provider_identity_is_immutable();
+
+
+--
 -- Name: release release_completion_requires_a_read_back; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER release_completion_requires_a_read_back BEFORE UPDATE ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_completion_requires_a_read_back();
+
+
+--
+-- Name: release release_provider_identity_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER release_provider_identity_immutable BEFORE UPDATE OF provider, provider_version_id ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_provider_identity_is_immutable();
 
 
 --

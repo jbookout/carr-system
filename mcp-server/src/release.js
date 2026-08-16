@@ -11,7 +11,7 @@
 // node --test can exercise the actual payload-building logic with a fake
 // env and a fake `sql` tag function — no live database, no deploy required.
 //
-// FOUR FIELDS, EACH HONEST ON ITS OWN:
+// FIVE FIELDS, EACH HONEST ON ITS OWN:
 //   verb_count          — Object.keys(TOOLS).length, computed from the code
 //                          bundled INTO THIS DEPLOY. Never a written marker
 //                          (mcp-server/.last-deployed-verb-count is exactly
@@ -25,6 +25,13 @@
 //                          means a deploy happened OUTSIDE that script —
 //                          reported as null + a reason, never guessed or
 //                          left silently absent.
+//   provider / worker_version — Cloudflare's runtime version-metadata binding,
+//                          not a source digest or a value supplied by the
+//                          deploy wrapper. `id` is the immutable Worker version
+//                          identity that Cloudflare is actually serving; `tag`
+//                          and `timestamp` are provider metadata. Local dev or
+//                          an older deployment can lack the binding, in which
+//                          case the entire identity is visibly unknown.
 //   schema                — schema_migrations is tools/migrate.py's ledger
 //                          of applied migrations. Read through v_schema_ledger
 //                          (0113), a two-column view over schema_migrations,
@@ -54,6 +61,25 @@
 
 export async function buildRelease({ env, sql, verbCount, now = () => new Date() }) {
   const sha = (env && env.GIT_SHA) || null;
+  const versionMetadata = env && env.CF_VERSION_METADATA;
+  const versionId = versionMetadata && typeof versionMetadata.id === "string"
+    ? versionMetadata.id.trim()
+    : "";
+  const workerVersion = versionId
+    ? {
+      id: versionId,
+      tag: typeof versionMetadata.tag === "string" ? versionMetadata.tag : null,
+      timestamp: typeof versionMetadata.timestamp === "string" ? versionMetadata.timestamp : null,
+      reason: null,
+    }
+    : {
+      id: null,
+      tag: null,
+      timestamp: null,
+      reason: versionMetadata
+        ? "CF_VERSION_METADATA has no version id; no Cloudflare Worker version identity was observed"
+        : "CF_VERSION_METADATA binding is unavailable; no Cloudflare Worker version identity was observed",
+    };
 
   let schema;
   try {
@@ -117,6 +143,8 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
       ? { value: environment, reason: null }
       : { value: "unknown", reason: "CARR_ENV not set on this Worker — an unlabelled deployment is never assumed to be production" },
     verb_count: verbCount,
+    provider: "cloudflare-workers",
+    worker_version: workerVersion,
     git_sha: sha
       ? { value: sha, reason: null }
       : { value: null, reason: "not stamped: deployed outside bin/deploy-worker.sh" },

@@ -34,6 +34,9 @@ PASSES: list[str] = []
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
+PROVIDER = "cloudflare-workers"
+PROVIDER_VERSION = "11111111-2222-4333-8444-555555555555"
+OTHER_PROVIDER_VERSION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -59,20 +62,21 @@ def refuses(cur, sql: str, params: tuple, name: str) -> None:
 
 
 def seed_release(cur, service_id, now: datetime, *, environment: str = "production",
-                 git_sha: str = SHA):
+                 git_sha: str = SHA, provider: str | None = PROVIDER,
+                 provider_version_id: str | None = PROVIDER_VERSION):
     """Return an otherwise promotion-ready candidate release."""
     correlation = uuid.uuid4()
     cur.execute(
         """insert into ops.release
                (correlation_id, release_key, service_id, environment, state,
-                git_sha, artifact_digest, dependency_lock_digest,
+                git_sha, provider, provider_version_id, artifact_digest, dependency_lock_digest,
                 maker_actor, maker_verification_ref, test_evidence_ref,
                 security_evidence_ref, verifier_actor, verifier_evidence_ref,
                 rollback_ready, rollback_plan_ref, plan_hash, approved_by_actor,
                 approved_at, approval_expires_at, source_kind, source_ref,
                 observed_at, expires_at)
            values (%s, %s, %s, %s, 'candidate',
-                   %s, %s, %s,
+                   %s, %s, %s, %s, %s,
                    'claude', 'ops/ci.sh#maker', 'ops/ci.sh#tests',
                    'ops/ci.sh#security', 'codex', 'ops/ci.sh#independent',
                    true, 'runbooks/rollback-worker.md', %s, 'joe',
@@ -80,7 +84,7 @@ def seed_release(cur, service_id, now: datetime, *, environment: str = "producti
                    %s, %s)
            returning id, correlation_id""",
         (correlation, f"program5-{correlation}", service_id, environment,
-         git_sha, "sha256:" + "c" * 64, "sha256:" + "d" * 64,
+         git_sha, provider, provider_version_id, "sha256:" + "c" * 64, "sha256:" + "d" * 64,
          "plan:" + "e" * 16, now, now + timedelta(hours=24),
          now, now + timedelta(days=1)),
     )
@@ -89,18 +93,21 @@ def seed_release(cur, service_id, now: datetime, *, environment: str = "producti
 
 def insert_deployment(cur, service_id, release_id, correlation_id, now: datetime, *,
                       environment: str, git_sha: str, state: str,
-                      read_back: bool = False):
+                      read_back: bool = False, provider: str | None = PROVIDER,
+                      provider_version_id: str | None = PROVIDER_VERSION):
     """Insert a deployment receipt with only redacted pointer evidence."""
     ended = now if state in {"complete", "failed", "aborted", "rolled_back", "superseded"} else None
     cur.execute(
         """insert into ops.deployment
-               (correlation_id, service_id, environment, state, git_sha, release_id,
+               (correlation_id, service_id, environment, state, git_sha, provider,
+                provider_version_id, release_id,
                 started_at, ended_at, read_back_at, verification_evidence_ref,
                 source_kind, source_ref)
-           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+           values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                    'wrapper', 'ops/program5-promotion-gate.py')
            returning id""",
-        (correlation_id, service_id, environment, state, git_sha, release_id,
+        (correlation_id, service_id, environment, state, git_sha, provider,
+         provider_version_id, release_id,
          now, ended, now if read_back else None,
          "probe:/release" if read_back else None))
     return fetch_one(cur)[0]
@@ -119,6 +126,36 @@ def main() -> int:
                returning id""",
             (f"program5-promotion-{uuid.uuid4()}",))
         service_id = fetch_one(cur)[0]
+
+        # Candidates remain a planning surface.  Provider identity is required
+        # only when a Production release is promoted, so a legacy-compatible
+        # candidate may still be assembled before its provider receipt exists.
+        candidate_id, _ = seed_release(
+            cur, service_id, now, provider=None, provider_version_id=None)
+        cur.execute("select state, provider, provider_version_id from ops.release where id = %s",
+                    (candidate_id,))
+        candidate_state, candidate_provider, candidate_version = fetch_one(cur)
+        check(
+            "candidate release may omit provider identity while evidence is assembled",
+            candidate_state == "candidate" and candidate_provider is None
+            and candidate_version is None,
+        )
+        empty_version_id, _ = seed_release(
+            cur, service_id, now, provider_version_id="")
+        refuses(
+            cur,
+            "update ops.release set state = 'approved' where id = %s",
+            (empty_version_id,),
+            "Production approval with an empty provider version is refused",
+        )
+        mutable_alias_id, _ = seed_release(
+            cur, service_id, now, provider_version_id="latest")
+        refuses(
+            cur,
+            "update ops.release set state = 'approved' where id = %s",
+            (mutable_alias_id,),
+            "Production approval with a mutable provider alias is refused",
+        )
 
         # Every promoted state needs both independent verification and a usable
         # rollback plan.  Candidate is intentionally excluded: it is where that
@@ -149,6 +186,15 @@ def main() -> int:
                 (state, state, now, release_id),
                 f"{state} release without a rollback plan is refused",
             )
+            refuses(
+                cur,
+                """update ops.release
+                      set state = %s, provider = null, provider_version_id = null,
+                          ended_at = case when %s = 'complete' then %s else null end
+                    where id = %s""",
+                (state, state, now, release_id),
+                f"Production {state} release without provider identity is refused",
+            )
 
         # A Production deployment must be exactly the release that was approved,
         # not merely an approved release in the same service family.
@@ -156,13 +202,40 @@ def main() -> int:
         cur.execute("update ops.release set state = 'approved' where id = %s", (release_id,))
         refuses(
             cur,
+            "update ops.release set provider_version_id = %s where id = %s",
+            (OTHER_PROVIDER_VERSION, release_id),
+            "approved Production release provider version is immutable",
+        )
+        refuses(
+            cur,
             """insert into ops.deployment
-                   (correlation_id, service_id, environment, state, git_sha, release_id,
-                    started_at, source_kind, source_ref)
-               values (%s, %s, 'production', 'deploying', %s, %s, %s,
+                   (correlation_id, service_id, environment, state, git_sha, provider,
+                    provider_version_id, release_id, started_at, source_kind, source_ref)
+               values (%s, %s, 'production', 'deploying', %s, %s, %s, %s, %s,
                        'wrapper', 'ops/program5-promotion-gate.py')""",
-            (correlation, service_id, OTHER_SHA, release_id, now),
+            (correlation, service_id, OTHER_SHA, PROVIDER, PROVIDER_VERSION,
+             release_id, now),
             "Production deployment with a different SHA is refused",
+        )
+        refuses(
+            cur,
+            """insert into ops.deployment
+                   (correlation_id, service_id, environment, state, git_sha, provider,
+                    provider_version_id, release_id, started_at, source_kind, source_ref)
+               values (%s, %s, 'production', 'deploying', %s, %s, %s, %s, %s,
+                       'wrapper', 'ops/program5-promotion-gate.py')""",
+            (correlation, service_id, SHA, PROVIDER, OTHER_PROVIDER_VERSION,
+             release_id, now),
+            "Production deployment with a different provider version is refused",
+        )
+        deployment_id = insert_deployment(
+            cur, service_id, release_id, correlation, now,
+            environment="production", git_sha=SHA, state="deploying")
+        refuses(
+            cur,
+            "update ops.deployment set provider_version_id = %s where id = %s",
+            (OTHER_PROVIDER_VERSION, deployment_id),
+            "promoted Production deployment provider version is immutable",
         )
         release_id, correlation = seed_release(
             cur, service_id, now, environment="staging")
@@ -170,11 +243,12 @@ def main() -> int:
         refuses(
             cur,
             """insert into ops.deployment
-                   (correlation_id, service_id, environment, state, git_sha, release_id,
-                    started_at, source_kind, source_ref)
-               values (%s, %s, 'production', 'deploying', %s, %s, %s,
+                   (correlation_id, service_id, environment, state, git_sha, provider,
+                    provider_version_id, release_id, started_at, source_kind, source_ref)
+               values (%s, %s, 'production', 'deploying', %s, %s, %s, %s, %s,
                        'wrapper', 'ops/program5-promotion-gate.py')""",
-            (correlation, service_id, SHA, release_id, now),
+            (correlation, service_id, SHA, PROVIDER, PROVIDER_VERSION,
+             release_id, now),
             "deployment to a target other than the release environment is refused",
         )
 
@@ -209,17 +283,24 @@ def main() -> int:
             "update ops.release set state = 'complete', ended_at = %s where id = %s",
             (now, release_id))
         cur.execute(
-            """select r.state, d.environment, d.state, d.git_sha, d.read_back_at
+            """select r.state, r.provider, r.provider_version_id, d.environment,
+                      d.state, d.git_sha, d.provider, d.provider_version_id, d.read_back_at
                  from ops.release r
                  join ops.deployment d on d.release_id = r.id
                 where r.id = %s""",
             (release_id,))
-        state, environment, deploy_state, deploy_sha, read_back_at = fetch_one(cur)
+        (state, release_provider, release_version, environment, deploy_state,
+         deploy_sha, deployment_provider, deployment_version, read_back_at) = fetch_one(cur)
         check(
             "matching Production deployment with read-back completes the release",
             state == "complete" and environment == "production"
-            and deploy_state == "complete" and deploy_sha == SHA and read_back_at is not None,
-            f"release={state} deployment={environment}/{deploy_state}/{deploy_sha}/{read_back_at}",
+            and deploy_state == "complete" and deploy_sha == SHA
+            and release_provider == deployment_provider == PROVIDER
+            and release_version == deployment_version == PROVIDER_VERSION
+            and read_back_at is not None,
+            f"release={state}/{release_provider}/{release_version} "
+            f"deployment={environment}/{deploy_state}/{deploy_sha}/"
+            f"{deployment_provider}/{deployment_version}/{read_back_at}",
         )
 
         conn.rollback()

@@ -48,6 +48,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ABANDON_DB = "abandon_check"
+PROVIDER = "cloudflare-workers"
+PROVIDER_VERSION = "11111111-2222-4333-8444-555555555555"
 
 _spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
 if _spec is None or _spec.loader is None:
@@ -110,14 +112,45 @@ def _cases(dsn: str) -> None:
                "--service", "carr-mcp", "--environment", "staging",
                "--maker", "selftest", "--maker-verification", "ref",
                "--test-evidence", "ref", "--security-evidence", "ref")
-    production_manifest = {**manifest, "environment": "production"}
+    # Production candidate intake now rebuilds the manifest before it opens a
+    # DB connection. Build and bind the fixture through the canonical tool so
+    # this test carries real source evidence instead of a synthetic digest that
+    # the real intake path must correctly refuse.
+    built = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+         "build", "--sha", "HEAD", "--environment", "production"],
+        cwd=REPO, capture_output=True, text=True, timeout=300)
+    check("0a. canonical Production source manifest builds",
+          built.returncode == 0, (built.stderr or built.stdout).strip()[:160])
+    if built.returncode != 0:
+        return
     production_mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-production-manifest.json"
-    production_mpath.write_text(json.dumps(production_manifest))
-    record(dsn, "release", "candidate", "--key", "rel-shipped",
-           "--manifest", str(production_mpath), "--service", "carr-mcp",
-           "--environment", "production", "--maker", "selftest",
-           "--maker-verification", "ref", "--test-evidence", "ref",
-           "--security-evidence", "ref")
+    source_mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-production-source.json"
+    source_mpath.write_text(built.stdout)
+    bound = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+         "bind-provider", "--manifest", str(source_mpath),
+         "--provider", PROVIDER, "--provider-version-id", PROVIDER_VERSION],
+        cwd=REPO, capture_output=True, text=True, timeout=300)
+    check("0aa. canonical Production manifest binds the provider version",
+          bound.returncode == 0, (bound.stderr or bound.stdout).strip()[:160])
+    if bound.returncode != 0:
+        return
+    production_mpath.write_text(bound.stdout)
+    production_manifest = json.loads(bound.stdout)
+    production_sha = production_manifest["git_sha"]
+    production_plan = production_manifest["plan_hash"]
+    candidate = record(dsn, "release", "candidate", "--key", "rel-shipped",
+                       "--manifest", str(production_mpath), "--service", "carr-mcp",
+                       "--environment", "production", "--maker", "selftest",
+                       "--provider", PROVIDER, "--provider-version-id", PROVIDER_VERSION,
+                       "--maker-verification", "ref", "--test-evidence", "ref",
+                       "--security-evidence", "ref")
+    check("0ab. verified Production candidate reaches the ledger",
+          candidate.returncode == 0,
+          (candidate.stderr or candidate.stdout).strip()[:160])
+    if candidate.returncode != 0:
+        return
 
     # Program 5 makes independent verification and rollback readiness
     # prerequisites for approval, rather than evidence added after deployment.
@@ -168,9 +201,10 @@ def _cases(dsn: str) -> None:
     # earlier version set state directly, the constraint refused it silently,
     # and case 4 then proved nothing on a row still sitting at `candidate`.
     record(dsn, "release", "approve", "--key", "rel-shipped",
-           "--plan-hash", "plan:selftest", "--actor", "selftest")
+           "--plan-hash", production_plan, "--actor", "selftest")
     record(dsn, "deployment", "--service", "carr-mcp", "--environment", "production",
-           "--state", "complete", "--git-sha", "a" * 40, "--verb-count", "1",
+           "--state", "complete", "--git-sha", production_sha, "--verb-count", "1",
+           "--provider", PROVIDER, "--provider-version-id", PROVIDER_VERSION,
            "--release-key", "rel-shipped", "--source-kind", "wrapper",
            "--source-ref", "ops/release-abandon-selftest.py",
            "--read-back-at", "now", "--verification-evidence-ref", "selftest read-back")

@@ -34,10 +34,16 @@ WHAT IT PROVES
      material field moves it; changing a deploy-time observation does not. The
      database trigger that voids stale approvals is only as good as this hash.
 
-  7. THE MANIFEST CARRIES ALL SEVEN CLASSES the acceptance names.
+  7. PROVIDER VERSION BINDING IS POST-UPLOAD, IMMUTABLE, AND APPROVAL-BOUND.
+     It changes the plan hash without changing source evidence, and a bound
+     manifest still verifies its source digests.
+
+  8. THE MANIFEST CARRIES ALL SEVEN CLASSES the acceptance names.
 """
 
+import atexit
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -150,7 +156,55 @@ def main() -> int:
     check("6b. a non-material field does NOT move the plan hash",
           out.stdout.strip() == first["plan_hash"])
 
-    # 7. all seven acceptance classes present
+    # 7. Provider versions do not exist until Cloudflare has uploaded the
+    # source. Binding that returned identity must preserve source evidence and
+    # produce the exact plan hash an approver sees.
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "source.json"
+        source.write_text(json.dumps(first))
+        out = run("bind-provider", "--manifest", str(source),
+                  "--provider", "cloudflare-workers",
+                  "--provider-version-id", "cf-version-test-001")
+        check("7a. a post-upload provider version binds successfully",
+              out.returncode == 0, out.stderr.strip())
+        bound = json.loads(out.stdout) if out.returncode == 0 else {}
+        source_fields = ("git_sha", "artifact_digest", "dependency_lock_digest",
+                         "config_fingerprint", "migration_set",
+                         "schema_highest_migration")
+        check("7b. binding preserves the SHA and every source digest",
+              all(bound.get(k) == first.get(k) for k in source_fields))
+        check("7c. provider/version binding changes the approval plan hash",
+              bool(bound.get("plan_hash")
+                   and bound.get("plan_hash") != first["plan_hash"]))
+
+        bound_path = Path(tmp) / "bound.json"
+        bound_path.write_text(json.dumps(bound))
+        out = run("verify", "--manifest", str(bound_path))
+        check("7d. a bound manifest verifies its recorded source evidence",
+              out.returncode == 0, out.stdout.strip()[-300:])
+
+        out = run("bind-provider", "--manifest", str(source),
+                  "--provider", "cloudflare-workers", "--provider-version-id", "")
+        check("7e. an empty provider version ID is refused", out.returncode != 0)
+
+        out = run("bind-provider", "--manifest", str(bound_path),
+                  "--provider", "cloudflare-workers",
+                  "--provider-version-id", "cf-version-test-002")
+        check("7f. a changed provider version is refused", out.returncode != 0)
+
+        out = run("bind-provider", "--manifest", str(bound_path),
+                  "--provider", "different-provider",
+                  "--provider-version-id", "cf-version-test-001")
+        check("7g. a changed provider is refused", out.returncode != 0)
+
+        hash_tampered = dict(bound)
+        hash_tampered["plan_hash"] = "plan:" + "0" * 32
+        tampered_path = Path(tmp) / "plan-hash-tampered.json"
+        tampered_path.write_text(json.dumps(hash_tampered))
+        out = run("verify", "--manifest", str(tampered_path))
+        check("7h. a tampered bound plan hash FAILS verify", out.returncode != 0)
+
+    # 8. all seven acceptance classes present
     classes = {
         "code": ("git_sha", "artifact_digest", "dependency_lock_digest"),
         "schema": ("schema_highest_migration", "migration_set"),
@@ -161,7 +215,7 @@ def main() -> int:
                for name, fields in classes.items()
                for field in fields
                if first.get(field) in (None, "", [])]
-    check("7. the manifest carries code, schema, config and plan",
+    check("8. the manifest carries code, schema, config and plan",
           not missing, "missing: " + ", ".join(missing) if missing else "")
 
     print()
@@ -175,6 +229,7 @@ def main() -> int:
 
 
 _TMPDIR = tempfile.mkdtemp(prefix="release-manifest-selftest-")
+atexit.register(shutil.rmtree, _TMPDIR, ignore_errors=True)
 
 
 def _tmp_json(obj: dict) -> str:
