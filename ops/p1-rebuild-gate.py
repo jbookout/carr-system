@@ -63,10 +63,13 @@ It writes to NOTHING that already existed. Everything it creates it destroys.
 import argparse
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import quote, urlsplit, urlunsplit
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -122,7 +125,56 @@ def neon(env: dict, *args: str) -> subprocess.CompletedProcess:
 def psql(conn_string: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run([db_tap.psql_bin(), "-v", "ON_ERROR_STOP=1", "-q",
                            "-d", conn_string, *args],
-                          capture_output=True, text=True, timeout=900)
+                           capture_output=True, text=True, timeout=900)
+
+
+def _jobs_login_dsn(owner_dsn: str, password: str) -> str:
+    """Make a carr_jobs URL for the same disposable database without logging it."""
+    parsed = urlsplit(owner_dsn)
+    host = parsed.hostname
+    if parsed.scheme not in {"postgres", "postgresql"} or not host:
+        raise ValueError("rebuilt database URL has no PostgreSQL host")
+    rendered_host = f"[{host}]" if ":" in host else host
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("rebuilt database URL has an invalid port") from exc
+    if port is not None:
+        rendered_host = f"{rendered_host}:{port}"
+    return urlunsplit((parsed.scheme,
+                       f"carr_jobs:{quote(password, safe='')}@{rendered_host}",
+                       parsed.path, parsed.query, ""))
+
+
+def verify_rebuilt_jobs_login(
+    owner_dsn: str,
+    *,
+    connect: Callable[[str], Any] | None = None,
+    password_factory: Callable[[int], str] = secrets.token_urlsafe,
+    sql_module: Any | None = None,
+) -> bool:
+    """Prove the rebuilt runtime role can authenticate as itself.
+
+    Password is set only on the disposable rebuilt database, never printed, and
+    deliberately does *not* add LOGIN. A NOLOGIN snapshot therefore fails this
+    probe rather than being repaired by the test itself.
+    """
+    if connect is None or sql_module is None:
+        import psycopg
+        if connect is None:
+            connect = psycopg.connect
+        if sql_module is None:
+            from psycopg import sql as sql_module
+    assert connect is not None
+    assert sql_module is not None
+    password = password_factory(32)
+    with connect(owner_dsn) as owner:
+        owner.execute(sql_module.SQL("alter role {} password {}").format(
+            sql_module.Identifier("carr_jobs"), sql_module.Literal(password)))
+        owner.commit()
+    with connect(_jobs_login_dsn(owner_dsn, password)) as jobs:
+        row = jobs.execute("select session_user, current_user").fetchone()
+    return isinstance(row, tuple) and row == ("carr_jobs", "carr_jobs")
 
 
 def main() -> int:
@@ -227,6 +279,18 @@ def main() -> int:
               "pending: 0" in verify.stdout,
               verify.stdout.strip().splitlines()[-1][:160] if verify.stdout.strip() else "")
 
+        # A role can exist and receive every grant while still being NOLOGIN.
+        # Use an in-process password only on this disposable database and prove
+        # the actual authenticated session; never repair LOGIN in this probe.
+        try:
+            jobs_login_ok = verify_rebuilt_jobs_login(rebuilt_dsn)
+            jobs_login_detail = ""
+        except Exception as exc:
+            jobs_login_ok = False
+            jobs_login_detail = f"{type(exc).__name__}: {str(exc)[:160]}"
+        check("2c. rebuilt carr_jobs authenticates as session_user/current_user carr_jobs",
+              jobs_login_ok, jobs_login_detail)
+
         # The migration chain existing is not enough: exercise the job ledger,
         # authority boundaries, retries, leases, receipts, cache, provider
         # health, and cost admission on the same disposable Neon database.
@@ -234,7 +298,7 @@ def main() -> int:
             [sys.executable, str(REPO / "ops" / "control-plane-db-gate.py")],
             capture_output=True, text=True, timeout=900,
             env={**os.environ, "DATABASE_URL": rebuilt_dsn})
-        check("2c. control-plane ledger and authority integration gate passes",
+        check("2d. control-plane ledger and authority integration gate passes",
               control_plane.returncode == 0,
               control_plane.stderr.strip().splitlines()[-1][:200]
               if control_plane.stderr.strip() else

@@ -7,17 +7,32 @@
 -- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
 -- carr_exporter aged into the same trap by way of 0006 and joined the list on
 -- 2026-08-14, when the grants section below started carrying its privileges.
--- An existing role is left exactly as it is; a missing one is created NOLOGIN
--- purely so privileges have somewhere to attach in a rebuilt environment.
+-- carr_reader, carr_writer and carr_exporter are privilege bundles, so they
+-- stay NOLOGIN. carr_jobs is the narrow unattended runtime identity: a fresh
+-- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
+-- it with a fresh random placeholder password; an already-login role is left
+-- completely unchanged. The placeholder is generated in-process and never
+-- selected, logged, or written into this dump.
 --
 do $$
-declare r text;
+declare
+  r text;
+  jobs_can_login boolean;
+  jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_jobs','carr_exporter'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
   end loop;
+  select rolcanlogin into jobs_can_login from pg_roles where rolname='carr_jobs';
+  if not found then
+    jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('create role %I login password %L', 'carr_jobs', jobs_placeholder);
+  elsif not jobs_can_login then
+    jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
+  end if;
 end $$;
 
 --
@@ -14371,5 +14386,4 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
-
 
