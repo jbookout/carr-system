@@ -501,8 +501,9 @@ language plpgsql security invoker as $$
 declare c record; targets text[]; selected_policy text; required_ok boolean;
         forbidden_ok boolean; empty_ok boolean;
 begin
-  select policy_id into selected_policy from retrieval_ranking_policy
-   where is_default and status='active' and golden_suite_digest=p_suite_digest;
+  select rp.policy_id into selected_policy from retrieval_ranking_policy rp
+   where rp.is_default and rp.status='active'
+     and rp.golden_suite_digest=p_suite_digest;
   if selected_policy is null then
     raise exception 'golden suite digest mismatch';
   end if;
