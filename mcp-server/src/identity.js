@@ -294,12 +294,14 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
  * DELIBERATELY NOT A CALL INTO agentActorForToken. That function's contract is
  * an outside-model CLI: it sets agent:true, honours LOCAL_SPONSOR, and its
  * actors take profileFor(request) in dispatch, so they can pass ?profile= and
- * write. Every one of those is wrong here. This actor sets hermes:true (which
- * dispatch turns into the locked, write-empty `hermes` profile), never consults
- * LOCAL_SPONSOR, and carries no sponsor at all — so authorizationClassForActor
- * resolves it to `unsponsored_agent` and personalScopeForActor returns
- * shared-only. The R0 fixture's cross-brain-scope and unsponsored-metadata
- * cases are satisfied by those existing rules rather than by anything new.
+ * write. Every one of those is wrong here. This actor sets hermes:true, which
+ * dispatch turns into the locked, write-empty `hermes` profile.
+ *
+ * Its personal brain comes from HERMES_SPONSOR below, its own named map rather
+ * than LOCAL_SPONSOR, so sponsoring the Hermes pilot never silently sponsors a
+ * CLI seat and the reverse holds too. A slug absent from that map stays
+ * shared-only. Cross-brain reads refuse regardless of sponsorship, which the R0
+ * suite asserts directly rather than inheriting.
  *
  * The slug is not checked against DISPLAY here, and it does not need to be:
  * personalScopeForActor refuses any slug that is neither a DISPLAY actor nor a
@@ -312,6 +314,35 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
  * Fails closed on every path: no header, unparseable JSON, a non-object map, an
  * empty map, or a token matching nothing.
  */
+/**
+ * HERMES_SPONSOR — which human's personal brain a Hermes runtime reads.
+ *
+ * Joe's ruling, 2026-08-16: "i actaully want it to know my personal rules. that
+ * way it can take on tasks for me personally." The R0 evaluation shipped hours
+ * earlier as shared-only, and a runtime that cannot see how he wants work done
+ * is a runtime that cannot do his work — it would re-derive his preferences from
+ * nothing on every task, which is the failure the taught-rule store exists to
+ * end.
+ *
+ * WHAT THIS GRANTS, precisely: reads scoped to joe-personal. His 33 personal
+ * rules, and his side of any read verb that splits by brain. It grants no write
+ * (the hermes profile's write set stays empty), no humanOnly verb (human:false
+ * is unchanged), and no access to Dell's brain — cross-brain refusal is enforced
+ * by the same rule that refuses it for every other actor, and the R0 test suite
+ * asserts it explicitly.
+ *
+ * WHY THIS IS SAFE UNDER THE BOUNDARY THAT ACTUALLY BINDS. Rule d7f74c93: the
+ * question is never who may READ, it is who HOLDS A CREDENTIAL and who may ACT
+ * unsupervised. Personal rules are instructions about how to work with Joe. A
+ * runtime reading them gains judgment, never authority.
+ *
+ * A NAMED ENTRY, never a wildcard, for the reason LOCAL_SPONSOR states above: a
+ * credential in a 600 file gaining a personal brain is a design decision. Dell's
+ * side would be a separate, deliberate entry made by Dell's own ruling, and
+ * nothing here reaches it.
+ */
+const HERMES_SPONSOR = Object.freeze({ "hermes-pilot": "joe" });
+
 export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
   const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
@@ -324,7 +355,8 @@ export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
   if (!tokens || typeof tokens !== "object") return null;
   const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
   if (!slug) return null;
+  const sponsoring_human_slug = HERMES_SPONSOR[slug] || null;
   return { slug, display: `Hermes (${slug})`, human: false, hermes: true,
            via: "hermes-token", client_id: null,
-           sponsoring_human_slug: null, human_slug: null, sponsor_required: false };
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
 }
