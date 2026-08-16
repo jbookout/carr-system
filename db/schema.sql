@@ -74,6 +74,213 @@ COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching
 
 
 --
+-- Name: capability_agent_session_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.capability_agent_session_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if tg_op = 'INSERT' then
+    if new.state <> 'claimed' or new.candidate_evidence is not null
+       or new.candidate_kind is not null or new.candidate_fingerprint is not null then
+      raise exception 'capability session must be created claimed with no candidate';
+    end if;
+  else
+    if old.state in ('completed','cancelled') then
+      if new is distinct from old then
+        raise exception 'terminal capability session is immutable';
+      end if;
+      return old;
+    end if;
+    if new.work_request_id is distinct from old.work_request_id
+       or new.executor_actor_id is distinct from old.executor_actor_id
+       or new.created_by_actor_id is distinct from old.created_by_actor_id
+       or new.source_commit_sha is distinct from old.source_commit_sha
+       or new.worktree_ref is distinct from old.worktree_ref
+       or new.scope_ref is distinct from old.scope_ref then
+      raise exception 'capability session identity is immutable';
+    end if;
+    if old.candidate_kind is not null
+       and new.candidate_kind is distinct from old.candidate_kind then
+      raise exception 'prepared capability candidate kind is immutable';
+    end if;
+    if old.candidate_evidence is not null
+       and new.candidate_evidence is distinct from old.candidate_evidence then
+      raise exception 'prepared capability candidate is immutable';
+    end if;
+    if old.candidate_fingerprint is not null
+       and new.candidate_fingerprint is distinct from old.candidate_fingerprint then
+      raise exception 'prepared capability fingerprint is immutable';
+    end if;
+    if old.state = 'claimed' and new.state not in ('in_progress','cancelled') then
+      raise exception 'capability session claimed may only move to in_progress or cancelled';
+    elsif old.state = 'in_progress' and new.state not in ('verification','cancelled') then
+      raise exception 'capability session in_progress may only move to verification or cancelled';
+    elsif old.state = 'verification' and new.state not in ('completed','cancelled') then
+      raise exception 'capability session verification may only move to completed or cancelled';
+    end if;
+  end if;
+
+  if new.candidate_evidence is not null then
+    new.candidate_fingerprint := md5(new.candidate_evidence::text);
+  elsif new.candidate_fingerprint is not null then
+    raise exception 'candidate fingerprint requires candidate evidence';
+  end if;
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+
+--
+-- Name: capability_attestation_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.capability_attestation_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare s ops.capability_agent_session%rowtype;
+begin
+  select * into s from ops.capability_agent_session where id = new.build_session_id for key share;
+  if not found then raise exception 'capability build session does not exist'; end if;
+  if s.work_request_id <> new.work_request_id then
+    raise exception 'attestation work request does not match build session';
+  end if;
+  if s.state <> 'verification' then
+    raise exception 'attestation requires a session in verification';
+  end if;
+  if new.verifier_actor_id = s.executor_actor_id then
+    raise exception 'capability executor may not attest its own candidate';
+  end if;
+  if new.candidate_fingerprint <> s.candidate_fingerprint then
+    raise exception 'attestation candidate does not match the prepared candidate';
+  end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: capability_program_close_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.capability_program_close_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare s ops.capability_agent_session%rowtype; pass_id uuid;
+begin
+  if new.program_key is distinct from 'carr-ai-engineering-suite-v1'
+     or new.state <> 'confirmed_closed' or old.state = 'confirmed_closed' then
+    return new;
+  end if;
+  select * into s from ops.capability_agent_session
+   where work_request_id=new.id and state='verification'
+   order by prepared_at desc limit 1 for key share;
+  if not found or s.candidate_kind <> new.completion_kind
+     or (new.completion_evidence -> 'candidate') is distinct from s.candidate_evidence then
+    raise exception 'capability programme close requires its frozen prepared candidate';
+  end if;
+  begin
+    pass_id := new.verification_evidence_ref::uuid;
+  exception when invalid_text_representation then
+    raise exception 'capability programme close requires a stored pass attestation id';
+  end;
+  if not exists (
+    select 1 from ops.capability_verification a
+     where a.id=pass_id and a.build_session_id=s.id and a.work_request_id=new.id
+       and a.outcome='pass' and a.candidate_fingerprint=s.candidate_fingerprint
+       and a.verifier_actor_id <> s.executor_actor_id
+  ) then
+    raise exception 'capability programme close requires an independent stored pass';
+  end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: capability_program_closed_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.capability_program_closed_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if old.program_key = 'carr-ai-engineering-suite-v1'
+     and old.state = 'confirmed_closed'
+     and new is distinct from old then
+    raise exception 'closed capability programme evidence is immutable';
+  end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: capability_program_identity_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.capability_program_identity_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if old.program_key = 'carr-ai-engineering-suite-v1'
+     and (new.program_key is distinct from old.program_key
+          or new.program_ordinal is distinct from old.program_ordinal) then
+    raise exception 'capability programme identity is immutable';
+  end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: capability_verification_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.capability_verification_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'capability verification records are immutable';
+end;
+$$;
+
+
+--
+-- Name: deployment_requires_a_live_approval(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.deployment_requires_a_live_approval() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  r record;
+begin
+  if new.environment <> 'production' then
+    return new;
+  end if;
+  if new.release_id is null then
+    raise exception 'a production deployment must name its release (ops.release), '
+                    'because a deploy nobody can trace to an approved plan is the '
+                    'exact gap P0-1 closes';
+  end if;
+  select state, approval_expires_at, release_key into r
+    from ops.release where id = new.release_id;
+  if r.state not in ('approved','deploying','verifying','complete') then
+    raise exception 'release % is %, not approved — promotion refused',
+                    r.release_key, r.state;
+  end if;
+  if r.approval_expires_at is null or r.approval_expires_at <= now() then
+    raise exception 'release % has an expired approval (%) — re-approve before '
+                    'promoting', r.release_key, r.approval_expires_at;
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: freshness(timestamp with time zone, timestamp with time zone); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -94,6 +301,158 @@ $$;
 --
 
 COMMENT ON FUNCTION ops.freshness(observed_at timestamp with time zone, expires_at timestamp with time zone) IS 'The four freshness states from control-room/contracts/entity-schemas.v1.json. unknown is NOT stale: it means the observation carried no expiry, so nobody can say. Never collapse the two.';
+
+
+--
+-- Name: release_completion_requires_a_read_back(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.release_completion_requires_a_read_back() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if new.state = 'complete' and old.state is distinct from 'complete' then
+    if not exists (
+      select 1 from ops.deployment d
+       where d.release_id = new.id and d.read_back_at is not null
+    ) then
+      raise exception 'release % cannot be complete: no deployment attached to it '
+                      'recorded a read-back. Shipped is not the same as serving.',
+                      new.release_key;
+    end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: release_plan_revision_invalidates_approval(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.release_plan_revision_invalidates_approval() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if new.plan_hash is distinct from old.plan_hash
+     and old.state in ('approved','deploying','verifying') then
+    new.state               := 'candidate';
+    new.approved_by_actor   := null;
+    new.approved_at         := null;
+    new.approval_expires_at := null;
+    raise notice 'release %: the plan changed, so the approval is gone. Re-approve '
+                 'against the new plan hash.', old.release_key;
+  end if;
+  new.updated_at := now();
+  return new;
+end $$;
+
+
+--
+-- Name: work_request_shape_gate(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.work_request_shape_gate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  shape_work_request_version integer;
+begin
+  if tg_op = 'INSERT' then
+    if new.state in ('claimed','in_progress','verification','awaiting_release','released','confirmed_closed') then
+      raise exception 'new Work Request cannot enter implementation directly';
+    end if;
+    if new.state = 'ready' then
+      if new.shape_disposition is null then
+        raise exception 'ready Work Request requires an explicit shape disposition';
+      elsif new.shape_disposition = 'required' then
+        raise exception 'required shape analysis needs a captured or triaged Work Request before ready';
+      end if;
+    end if;
+    return new;
+  end if;
+
+  if old.state not in ('captured','triaged','ready')
+     and (new.shape_disposition,
+          new.shape_fixed_surface_ref,
+          new.shape_rationale,
+          new.shape_decided_by_actor_id,
+          new.shape_decided_at)
+         is distinct from
+         (old.shape_disposition,
+          old.shape_fixed_surface_ref,
+          old.shape_rationale,
+          old.shape_decided_by_actor_id,
+          old.shape_decided_at) then
+    raise exception 'implementation shape disposition is frozen after claim';
+  end if;
+
+  if new.state = 'ready' and old.state is distinct from 'ready' then
+    if new.shape_disposition is null then
+      raise exception 'ready Work Request requires an explicit shape disposition';
+    end if;
+    if new.shape_disposition = 'required' then
+      select r.work_request_version into shape_work_request_version
+        from ops.work_shape_revision r
+       where r.work_request_id = old.id
+       order by r.version desc
+       limit 1;
+      if shape_work_request_version is null
+         or shape_work_request_version <> old.version then
+        raise exception 'required work shape is missing or stale for Work Request version %', old.version;
+      end if;
+    end if;
+  end if;
+
+  -- This is the actual implementation-entry gate. It catches application code,
+  -- future verbs, and direct carr_writer SQL equally. Later transitions inside
+  -- the implementation-state set use the disposition frozen at first entry.
+  if new.state in ('claimed','in_progress','verification','awaiting_release','released','confirmed_closed')
+     and old.state not in ('claimed','in_progress','verification','awaiting_release','released','confirmed_closed') then
+    if (new.shape_disposition,
+        new.shape_fixed_surface_ref,
+        new.shape_rationale,
+        new.shape_decided_by_actor_id,
+        new.shape_decided_at)
+       is distinct from
+       (old.shape_disposition,
+        old.shape_fixed_surface_ref,
+        old.shape_rationale,
+        old.shape_decided_by_actor_id,
+        old.shape_decided_at) then
+      raise exception 'shape disposition must be recorded before the implementation transition';
+    end if;
+    if new.shape_disposition is null then
+      raise exception 'Work Request requires an explicit shape disposition before implementation';
+    end if;
+    if new.shape_disposition = 'required' then
+      select r.work_request_version into shape_work_request_version
+        from ops.work_shape_revision r
+       where r.work_request_id = old.id
+       order by r.version desc
+       limit 1;
+      if shape_work_request_version is null
+         or shape_work_request_version <> old.version then
+        raise exception 'required work shape is missing or stale for Work Request version %', old.version;
+      end if;
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+
+--
+-- Name: work_shape_revision_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.work_shape_revision_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'ops.work_shape_revision is append-only';
+end;
+$$;
 
 
 --
@@ -583,6 +942,77 @@ CREATE TABLE neon_auth.verification (
 
 
 --
+-- Name: capability_agent_session; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.capability_agent_session (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    executor_actor_id uuid NOT NULL,
+    created_by_actor_id uuid NOT NULL,
+    state text DEFAULT 'claimed'::text NOT NULL,
+    source_commit_sha text NOT NULL,
+    worktree_ref text NOT NULL,
+    scope_ref text,
+    candidate_kind text,
+    candidate_evidence jsonb,
+    candidate_fingerprint text,
+    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone,
+    prepared_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    cancelled_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    CONSTRAINT capability_agent_session_candidate_kind_check CHECK ((candidate_kind = ANY (ARRAY['built'::text, 'extended'::text, 'adopted'::text, 'declined'::text]))),
+    CONSTRAINT capability_agent_session_candidate_travels_together CHECK ((((candidate_kind IS NULL) = (candidate_evidence IS NULL)) AND ((candidate_kind IS NULL) = (candidate_fingerprint IS NULL)))),
+    CONSTRAINT capability_agent_session_source_commit_sha_check CHECK ((source_commit_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT capability_agent_session_state_check CHECK ((state = ANY (ARRAY['claimed'::text, 'in_progress'::text, 'verification'::text, 'completed'::text, 'cancelled'::text]))),
+    CONSTRAINT capability_agent_session_verification_has_candidate CHECK (((state <> ALL (ARRAY['verification'::text, 'completed'::text])) OR (candidate_evidence IS NOT NULL))),
+    CONSTRAINT capability_agent_session_version_check CHECK ((version > 0)),
+    CONSTRAINT capability_agent_session_worktree_ref_check CHECK ((btrim(worktree_ref) <> ''::text))
+);
+
+
+--
+-- Name: TABLE capability_agent_session; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.capability_agent_session IS 'Server-created, actor-bound build-session evidence for the fixed capability programme. A session starts claimed, is separately started, then freezes one candidate for independent verification. It never stores code or secrets: only worktree, commit and evidence references.';
+
+
+--
+-- Name: capability_verification; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.capability_verification (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    build_session_id uuid NOT NULL,
+    work_request_id uuid NOT NULL,
+    verifier_actor_id uuid NOT NULL,
+    outcome text NOT NULL,
+    verification_evidence_ref text NOT NULL,
+    source_ref text NOT NULL,
+    candidate_fingerprint text NOT NULL,
+    note text,
+    attested_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT capability_attestation_note_present CHECK (((note IS NULL) OR (btrim(note) <> ''::text))),
+    CONSTRAINT capability_verification_candidate_fingerprint_check CHECK ((candidate_fingerprint ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT capability_verification_outcome_check CHECK ((outcome = ANY (ARRAY['pass'::text, 'fail'::text]))),
+    CONSTRAINT capability_verification_source_ref_check CHECK ((btrim(source_ref) <> ''::text)),
+    CONSTRAINT capability_verification_verification_evidence_ref_check CHECK ((btrim(verification_evidence_ref) <> ''::text))
+);
+
+
+--
+-- Name: TABLE capability_verification; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.capability_verification IS 'Independent pass/fail attestation bound to one immutable capability-session candidate. The insert trigger rejects self-review or a stale candidate. Evidence and source references are persisted with the attestation rather than supplied later during completion.';
+
+
+--
 -- Name: deployment; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -609,6 +1039,7 @@ CREATE TABLE ops.deployment (
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone,
     detail text,
+    release_id uuid,
     CONSTRAINT a_failed_deployment_names_its_class CHECK (((state <> 'failed'::text) OR (failure_class IS NOT NULL))),
     CONSTRAINT a_terminal_deployment_has_ended CHECK (((state <> ALL (ARRAY['complete'::text, 'failed'::text, 'aborted'::text, 'rolled_back'::text, 'superseded'::text])) OR (ended_at IS NOT NULL))),
     CONSTRAINT complete_requires_a_production_read_back CHECK (((state <> 'complete'::text) OR (read_back_at IS NOT NULL))),
@@ -623,6 +1054,13 @@ CREATE TABLE ops.deployment (
 --
 
 COMMENT ON TABLE ops.deployment IS 'One attempt to place a release into one environment, RECORDED when it happens. /release answers what is serving now; this answers what was serving then, which is the question a failure investigation asks.';
+
+
+--
+-- Name: COLUMN deployment.release_ref; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.deployment.release_ref IS 'SUPERSEDED by release_id (0130). Kept because nothing silently rots (rule def3e84e); no new writer should set it.';
 
 
 --
@@ -734,6 +1172,94 @@ CREATE TABLE ops.incident_service (
     incident_id uuid NOT NULL,
     service_id uuid NOT NULL
 );
+
+
+--
+-- Name: release; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.release (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    release_key text NOT NULL,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    state text DEFAULT 'draft'::text NOT NULL,
+    git_sha text NOT NULL,
+    artifact_digest text,
+    dependency_lock_digest text,
+    sbom_ref text,
+    migration_set text[],
+    schema_highest_migration text,
+    config_fingerprint text,
+    declared_env_differences text,
+    asset_versions jsonb,
+    maker_actor text NOT NULL,
+    maker_verification_ref text,
+    test_evidence_ref text,
+    security_evidence_ref text,
+    verifier_actor text,
+    verifier_evidence_ref text,
+    rollback_ready boolean DEFAULT false NOT NULL,
+    rollback_plan_ref text,
+    plan_hash text,
+    approved_by_actor text,
+    approved_at timestamp with time zone,
+    approval_expires_at timestamp with time zone,
+    work_request_ref text,
+    failure_class text,
+    superseded_by uuid,
+    source_kind text NOT NULL,
+    source_ref text NOT NULL,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    ended_at timestamp with time zone,
+    abandoned_reason text,
+    CONSTRAINT a_failed_release_names_its_class CHECK (((state <> 'failed'::text) OR (failure_class IS NOT NULL))),
+    CONSTRAINT a_superseded_release_names_its_successor CHECK (((state <> 'superseded'::text) OR (superseded_by IS NOT NULL))),
+    CONSTRAINT a_terminal_release_has_ended CHECK (((state <> ALL (ARRAY['complete'::text, 'failed'::text, 'abandoned'::text, 'superseded'::text])) OR (ended_at IS NOT NULL))),
+    CONSTRAINT an_abandoned_release_says_why CHECK (((state <> 'abandoned'::text) OR ((abandoned_reason IS NOT NULL) AND (length(btrim(abandoned_reason)) >= 12)))),
+    CONSTRAINT an_approval_expires_after_it_is_given CHECK (((approval_expires_at IS NULL) OR (approved_at IS NULL) OR (approval_expires_at > approved_at))),
+    CONSTRAINT an_approved_release_can_be_rebuilt CHECK (((state = ANY (ARRAY['draft'::text, 'candidate'::text, 'abandoned'::text])) OR ((artifact_digest IS NOT NULL) AND (dependency_lock_digest IS NOT NULL)))),
+    CONSTRAINT an_approved_release_carries_its_evidence CHECK (((state = ANY (ARRAY['draft'::text, 'candidate'::text, 'abandoned'::text])) OR ((test_evidence_ref IS NOT NULL) AND (security_evidence_ref IS NOT NULL) AND (maker_verification_ref IS NOT NULL)))),
+    CONSTRAINT an_approved_release_names_its_approval CHECK (((state = ANY (ARRAY['draft'::text, 'candidate'::text, 'abandoned'::text])) OR ((plan_hash IS NOT NULL) AND (approved_by_actor IS NOT NULL) AND (approved_at IS NOT NULL) AND (approval_expires_at IS NOT NULL)))),
+    CONSTRAINT independent_verification_is_not_the_maker CHECK (((verifier_actor IS NULL) OR (verifier_actor <> maker_actor))),
+    CONSTRAINT release_environment_check CHECK ((environment = ANY (ARRAY['local'::text, 'rehearsal'::text, 'staging'::text, 'production'::text]))),
+    CONSTRAINT release_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT release_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
+    CONSTRAINT release_state_check CHECK ((state = ANY (ARRAY['draft'::text, 'candidate'::text, 'approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text, 'failed'::text, 'superseded'::text, 'abandoned'::text]))),
+    CONSTRAINT verification_evidence_names_its_verifier CHECK (((verifier_actor IS NULL) = (verifier_evidence_ref IS NULL)))
+);
+
+
+--
+-- Name: TABLE release; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.release IS 'P0-1 canonical release truth: the ONE object joining code, schema, config, generated assets, tests, security, approval, deployment and verification. ops.deployment.release_id points here; before 0130 it pointed at nothing.';
+
+
+--
+-- Name: COLUMN release.artifact_digest; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.release.artifact_digest IS 'Digest of the built artifact, produced by tools/release-manifest.py from the recorded SHA. Recomputing it from that SHA and getting this value back IS the "identical artifact rebuild" half of P0-1 acceptance.';
+
+
+--
+-- Name: COLUMN release.plan_hash; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.release.plan_hash IS 'The hash of the plan the approver actually read. Changing it DESTROYS the approval (trigger release_plan_revision_invalidates_approval), because the promotion rule is "material plan revision invalidates prior approval" and a flag that survives the plan it approved is the failure, not the control.';
+
+
+--
+-- Name: COLUMN release.abandoned_reason; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.release.abandoned_reason IS 'Why a release ended without ever shipping. Required when state = abandoned; a superseded release names its successor in superseded_by instead, so this stays null there. Never reuse failure_class for this: that describes a release that RAN and went wrong, and an abandoned one never ran.';
 
 
 --
@@ -893,6 +1419,138 @@ COMMENT ON COLUMN ops.settings_change.reason IS 'Why the change was made, in the
 
 
 --
+-- Name: work_request; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.work_request (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ref text NOT NULL,
+    state text DEFAULT 'captured'::text NOT NULL,
+    title text NOT NULL,
+    desired_outcome text,
+    acceptance_criteria jsonb DEFAULT '[]'::jsonb NOT NULL,
+    origin_ref text,
+    requester_actor text NOT NULL,
+    owner_actor text,
+    executor_actor text,
+    blocker_code text,
+    blocker_detail text,
+    verification_accepted_at timestamp with time zone,
+    verification_evidence_ref text,
+    exit_reason text,
+    superseded_by uuid,
+    captured_at timestamp with time zone DEFAULT now() NOT NULL,
+    claimed_at timestamp with time zone,
+    started_at timestamp with time zone,
+    closed_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    correlation_id uuid,
+    program_key text,
+    program_ordinal smallint,
+    disposition text,
+    existing_status text,
+    project_context jsonb DEFAULT '{}'::jsonb NOT NULL,
+    completion_kind text,
+    completion_evidence jsonb,
+    version integer DEFAULT 1 NOT NULL,
+    shape_disposition text,
+    shape_fixed_surface_ref text,
+    shape_rationale text,
+    shape_decided_by_actor_id uuid,
+    shape_decided_at timestamp with time zone,
+    CONSTRAINT blocked_needs_a_named_blocker CHECK (((state <> 'blocked'::text) OR ((blocker_code IS NOT NULL) AND (blocker_detail IS NOT NULL)))),
+    CONSTRAINT confirmed_close_needs_accepted_verification CHECK (((state <> 'confirmed_closed'::text) OR (verification_accepted_at IS NOT NULL))),
+    CONSTRAINT side_exits_record_a_reason CHECK (((state <> ALL (ARRAY['declined'::text, 'superseded'::text, 'failed'::text])) OR (exit_reason IS NOT NULL))),
+    CONSTRAINT superseded_names_its_successor CHECK (((state <> 'superseded'::text) OR (superseded_by IS NOT NULL))),
+    CONSTRAINT terminal_rows_are_closed CHECK (((state = ANY (ARRAY['confirmed_closed'::text, 'declined'::text, 'superseded'::text])) = (closed_at IS NOT NULL))),
+    CONSTRAINT work_request_program_close_has_bundle CHECK (((program_key IS NULL) OR (state <> 'confirmed_closed'::text) OR ((completion_kind IS NOT NULL) AND (completion_evidence IS NOT NULL)))),
+    CONSTRAINT work_request_program_completion_kind CHECK (((completion_kind IS NULL) OR (completion_kind = ANY (ARRAY['built'::text, 'extended'::text, 'adopted'::text, 'declined'::text])))),
+    CONSTRAINT work_request_program_disposition CHECK (((disposition IS NULL) OR (disposition = ANY (ARRAY['build'::text, 'extend'::text, 'adopt'::text, 'decline'::text])))),
+    CONSTRAINT work_request_program_fields_travel_together CHECK (((program_key IS NULL) = (program_ordinal IS NULL))),
+    CONSTRAINT work_request_program_ordinal_positive CHECK (((program_ordinal IS NULL) OR (program_ordinal > 0))),
+    CONSTRAINT work_request_shape_disposition_complete CHECK ((((shape_disposition IS NULL) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NULL) AND (shape_decided_by_actor_id IS NULL) AND (shape_decided_at IS NULL)) OR ((shape_disposition = 'required'::text) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)) OR ((shape_disposition = 'not_required'::text) AND (shape_fixed_surface_ref IS NOT NULL) AND (btrim(shape_fixed_surface_ref) <> ''::text) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)))),
+    CONSTRAINT work_request_shape_disposition_valid CHECK (((shape_disposition IS NULL) OR (shape_disposition = ANY (ARRAY['required'::text, 'not_required'::text])))),
+    CONSTRAINT work_request_state_check CHECK ((state = ANY (ARRAY['captured'::text, 'triaged'::text, 'ready'::text, 'claimed'::text, 'in_progress'::text, 'verification'::text, 'awaiting_release'::text, 'released'::text, 'confirmed_closed'::text, 'needs_joe'::text, 'blocked'::text, 'declined'::text, 'superseded'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: TABLE work_request; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.work_request IS 'The canonical Work Request. States come from control-room/contracts/state-machines.v1.json; the Workspace projection is defined by control-room/contracts/work-request-projection.v1.json and is derived, never stored. TRANSITIONS ARE SERVER-ENFORCED, not enforced here: doctrine requires it and the guards need evidence a CHECK cannot see. This table guarantees only that a row is never in an undefined state and never violates an invariant the machine declares about states.';
+
+
+--
+-- Name: COLUMN work_request.correlation_id; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.work_request.correlation_id IS 'Nullable on purpose: rows predate correlation, and a work request captured by hand has no journey behind it. Present when the request came out of a traced failure.';
+
+
+--
+-- Name: COLUMN work_request.project_context; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.work_request.project_context IS 'Session-complete context for one governed portfolio item: scope, non-goals, prerequisites, first deliverable, acceptance, rollback, data risk, effort, evidence and completion meaning. Operational metadata only; never client payload or secrets.';
+
+
+--
+-- Name: COLUMN work_request.shape_disposition; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.work_request.shape_disposition IS 'Mandatory before a request enters implementation: required runs the evidence-backed shape method; not_required cites the already-fixed implementation surface. Null is permitted while work is captured or triaged and on pre-0130 ready rows, which the implementation-entry gate still refuses until classified.';
+
+
+--
+-- Name: v_capability_program_next; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_capability_program_next AS
+ SELECT id,
+    ref,
+    state,
+    title,
+    desired_outcome,
+    acceptance_criteria,
+    origin_ref,
+    requester_actor,
+    owner_actor,
+    executor_actor,
+    blocker_code,
+    blocker_detail,
+    verification_accepted_at,
+    verification_evidence_ref,
+    exit_reason,
+    superseded_by,
+    captured_at,
+    claimed_at,
+    started_at,
+    closed_at,
+    updated_at,
+    correlation_id,
+    program_key,
+    program_ordinal,
+    disposition,
+    existing_status,
+    project_context,
+    completion_kind,
+    completion_evidence,
+    version
+   FROM ops.work_request w
+  WHERE ((program_key IS NOT NULL) AND (state <> 'confirmed_closed'::text) AND (NOT (EXISTS ( SELECT 1
+           FROM ops.work_request p
+          WHERE ((p.program_key = w.program_key) AND (p.program_ordinal < w.program_ordinal) AND (p.state <> 'confirmed_closed'::text))))));
+
+
+--
+-- Name: VIEW v_capability_program_next; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON VIEW ops.v_capability_program_next IS 'Exactly the first not-yet-verified Work Request in each ordered capability program. Blocked, failed, needs-Joe and verification rows remain current; later rows never skip them.';
+
+
+--
 -- Name: v_check_run; Type: VIEW; Schema: ops; Owner: -
 --
 
@@ -949,6 +1607,91 @@ CREATE VIEW ops.v_job_run AS
 
 
 --
+-- Name: v_release_manifest; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_release_manifest AS
+ SELECT r.id AS release_id,
+    r.release_key,
+    r.correlation_id,
+    s.key AS service_key,
+    r.environment,
+    r.state,
+    r.git_sha AS code_git_sha,
+    r.artifact_digest AS code_artifact_digest,
+    r.dependency_lock_digest AS code_dependency_lock_digest,
+    r.sbom_ref AS code_sbom_ref,
+    r.schema_highest_migration,
+    r.migration_set,
+    r.config_fingerprint,
+    r.declared_env_differences,
+    r.asset_versions,
+    r.test_evidence_ref,
+    r.security_evidence_ref,
+    r.maker_actor,
+    r.maker_verification_ref,
+    r.plan_hash AS approval_plan_hash,
+    r.approved_by_actor,
+    r.approved_at,
+    r.approval_expires_at,
+        CASE
+            WHEN (r.approved_at IS NULL) THEN 'unapproved'::text
+            WHEN (r.approval_expires_at <= now()) THEN 'expired'::text
+            ELSE 'live'::text
+        END AS approval_status,
+    d.id AS deployment_id,
+    d.state AS deploy_state,
+    d.read_back_at AS deploy_read_back_at,
+    d.verification_evidence_ref AS deploy_verification_evidence_ref,
+    r.verifier_actor,
+    r.verifier_evidence_ref,
+    r.rollback_ready,
+    r.rollback_plan_ref,
+    r.work_request_ref,
+    r.source_kind,
+    r.source_ref,
+    r.observed_at,
+    r.expires_at,
+    ops.freshness(r.observed_at, r.expires_at) AS freshness
+   FROM ((ops.release r
+     JOIN ops.service s ON ((s.id = r.service_id)))
+     LEFT JOIN LATERAL ( SELECT d2.id,
+            d2.correlation_id,
+            d2.service_id,
+            d2.environment,
+            d2.state,
+            d2.git_sha,
+            d2.release_ref,
+            d2.deployed_by_actor,
+            d2.verb_count,
+            d2.schema_highest_migration,
+            d2.doctrine_generation,
+            d2.started_at,
+            d2.ended_at,
+            d2.read_back_at,
+            d2.verification_evidence_ref,
+            d2.failure_class,
+            d2.rollback_of,
+            d2.source_kind,
+            d2.source_ref,
+            d2.observed_at,
+            d2.expires_at,
+            d2.detail,
+            d2.release_id
+           FROM ops.deployment d2
+          WHERE (d2.release_id = r.id)
+          ORDER BY d2.observed_at DESC
+         LIMIT 1) d ON (true));
+
+
+--
+-- Name: VIEW v_release_manifest; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON VIEW ops.v_release_manifest IS 'P0-1 assertion 1: ONE query returns code, schema, config, tests, approval, deploy and verification for one release. Seven lookups was the fragmentation this replaces.';
+
+
+--
 -- Name: v_service_environment_health; Type: VIEW; Schema: ops; Owner: -
 --
 
@@ -1001,56 +1744,6 @@ CREATE VIEW ops.v_service_environment_health AS
 --
 
 COMMENT ON VIEW ops.v_service_environment_health IS 'THE ONLY PLACE HEALTH IS EXPRESSED, and it is derived. The premortem names false health from stale collectors as the second most likely catastrophe; a stored health column is that failure mechanism. A silent collector reads unknown here because no green was ever written down.';
-
-
---
--- Name: work_request; Type: TABLE; Schema: ops; Owner: -
---
-
-CREATE TABLE ops.work_request (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    ref text NOT NULL,
-    state text DEFAULT 'captured'::text NOT NULL,
-    title text NOT NULL,
-    desired_outcome text,
-    acceptance_criteria jsonb DEFAULT '[]'::jsonb NOT NULL,
-    origin_ref text,
-    requester_actor text NOT NULL,
-    owner_actor text,
-    executor_actor text,
-    blocker_code text,
-    blocker_detail text,
-    verification_accepted_at timestamp with time zone,
-    verification_evidence_ref text,
-    exit_reason text,
-    superseded_by uuid,
-    captured_at timestamp with time zone DEFAULT now() NOT NULL,
-    claimed_at timestamp with time zone,
-    started_at timestamp with time zone,
-    closed_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    correlation_id uuid,
-    CONSTRAINT blocked_needs_a_named_blocker CHECK (((state <> 'blocked'::text) OR ((blocker_code IS NOT NULL) AND (blocker_detail IS NOT NULL)))),
-    CONSTRAINT confirmed_close_needs_accepted_verification CHECK (((state <> 'confirmed_closed'::text) OR (verification_accepted_at IS NOT NULL))),
-    CONSTRAINT side_exits_record_a_reason CHECK (((state <> ALL (ARRAY['declined'::text, 'superseded'::text, 'failed'::text])) OR (exit_reason IS NOT NULL))),
-    CONSTRAINT superseded_names_its_successor CHECK (((state <> 'superseded'::text) OR (superseded_by IS NOT NULL))),
-    CONSTRAINT terminal_rows_are_closed CHECK (((state = ANY (ARRAY['confirmed_closed'::text, 'declined'::text, 'superseded'::text])) = (closed_at IS NOT NULL))),
-    CONSTRAINT work_request_state_check CHECK ((state = ANY (ARRAY['captured'::text, 'triaged'::text, 'ready'::text, 'claimed'::text, 'in_progress'::text, 'verification'::text, 'awaiting_release'::text, 'released'::text, 'confirmed_closed'::text, 'needs_joe'::text, 'blocked'::text, 'declined'::text, 'superseded'::text, 'failed'::text])))
-);
-
-
---
--- Name: TABLE work_request; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON TABLE ops.work_request IS 'The canonical Work Request. States come from control-room/contracts/state-machines.v1.json; the Workspace projection is defined by control-room/contracts/work-request-projection.v1.json and is derived, never stored. TRANSITIONS ARE SERVER-ENFORCED, not enforced here: doctrine requires it and the guards need evidence a CHECK cannot see. This table guarantees only that a row is never in an undefined state and never violates an invariant the machine declares about states.';
-
-
---
--- Name: COLUMN work_request.correlation_id; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON COLUMN ops.work_request.correlation_id IS 'Nullable on purpose: rows predate correlation, and a work request captured by hand has no journey behind it. Present when the request came out of a traced failure.';
 
 
 --
@@ -1111,6 +1804,30 @@ UNION ALL
     i.id AS row_id
    FROM ops.incident i
 UNION ALL
+ SELECT f.correlation_id,
+    'incident_fact'::text AS kind,
+    i.ref,
+    i.state,
+    f.recorded_at AS occurred_at,
+    i.environment,
+    NULL::text AS service_key,
+    NULL::text AS failure_class,
+    f.text AS detail,
+    i.source_kind,
+    i.source_ref,
+    f.recorded_at AS observed_at,
+    i.expires_at,
+    ops.freshness(f.recorded_at, i.expires_at) AS freshness_state,
+    f.id AS row_id
+   FROM (( SELECT incident_fact.id,
+            incident_fact.incident_id,
+            incident_fact.text,
+            incident_fact.recorded_at,
+            ("substring"(incident_fact.source_ref, '^correlation:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'::text))::uuid AS correlation_id
+           FROM ops.incident_fact) f
+     JOIN ops.incident i ON ((i.id = f.incident_id)))
+  WHERE ((f.correlation_id IS NOT NULL) AND (f.correlation_id IS DISTINCT FROM i.correlation_id))
+UNION ALL
  SELECT w.correlation_id,
     'work_request'::text AS kind,
     w.ref,
@@ -1134,7 +1851,71 @@ UNION ALL
 -- Name: VIEW v_trace; Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON VIEW ops.v_trace IS 'THE PROGRAM 3 GATE. One correlation id returns the whole journey — deploy, golden-workflow check, job run, incident, work request — in time order, every link carrying its own source and freshness. Read-only by construction: a view over four tables with no insert rule.';
+COMMENT ON VIEW ops.v_trace IS 'THE PROGRAM 3 GATE. One correlation id returns the whole journey — deploy, golden-workflow check, job run, incident, RECURRENCE of an already-open incident, work request — in time order, every link carrying its own source and freshness. Read-only by construction: a view over the ops tables with no insert rule. The recurrence arm (0123) reads ops.incident_fact.source_ref, where mcp-server/src/trace.js stores the correlation id of every failure after the first one that opened the incident.';
+
+
+--
+-- Name: work_shape_revision; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.work_shape_revision (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    work_request_version integer NOT NULL,
+    version integer NOT NULL,
+    trinity jsonb NOT NULL,
+    hidden_assumption text NOT NULL,
+    repo_searches jsonb NOT NULL,
+    maintained_repos jsonb NOT NULL,
+    archetypes jsonb NOT NULL,
+    chosen_key text NOT NULL,
+    mind_changing_fact text NOT NULL,
+    builder_brief jsonb NOT NULL,
+    source_url text,
+    created_by_actor_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT work_shape_revision_archetypes_check CHECK ((jsonb_typeof(archetypes) = 'array'::text)),
+    CONSTRAINT work_shape_revision_builder_brief_check CHECK ((jsonb_typeof(builder_brief) = 'object'::text)),
+    CONSTRAINT work_shape_revision_chosen_key_check CHECK ((btrim(chosen_key) <> ''::text)),
+    CONSTRAINT work_shape_revision_hidden_assumption_check CHECK ((btrim(hidden_assumption) <> ''::text)),
+    CONSTRAINT work_shape_revision_maintained_repos_check CHECK ((jsonb_typeof(maintained_repos) = 'array'::text)),
+    CONSTRAINT work_shape_revision_mind_changing_fact_check CHECK ((btrim(mind_changing_fact) <> ''::text)),
+    CONSTRAINT work_shape_revision_repo_searches_check CHECK ((jsonb_typeof(repo_searches) = 'array'::text)),
+    CONSTRAINT work_shape_revision_trinity_check CHECK ((jsonb_typeof(trinity) = 'object'::text)),
+    CONSTRAINT work_shape_revision_version_check CHECK ((version > 0)),
+    CONSTRAINT work_shape_revision_work_request_version_check CHECK ((work_request_version > 0))
+);
+
+
+--
+-- Name: TABLE work_shape_revision; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.work_shape_revision IS 'Append-only implementation-shape reasoning for one canonical Work Request. The Worker enforces the trinity, recon, three archetypes, scores, falsifier and builder-brief contract; the database preserves every accepted revision.';
+
+
+--
+-- Name: v_work_shape_current; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_work_shape_current WITH (security_invoker='true') AS
+ SELECT DISTINCT ON (work_request_id) id,
+    work_request_id,
+    work_request_version,
+    version,
+    trinity,
+    hidden_assumption,
+    repo_searches,
+    maintained_repos,
+    archetypes,
+    chosen_key,
+    mind_changing_fact,
+    builder_brief,
+    source_url,
+    created_by_actor_id,
+    created_at
+   FROM ops.work_shape_revision
+  ORDER BY work_request_id, version DESC;
 
 
 --
@@ -4590,7 +5371,8 @@ CREATE VIEW public.v_compiled_rules AS
     r.enforcement,
     r.activated_at,
     r.scope,
-    r.id
+    r.id,
+    r.supersedes
    FROM ((public.rule r
      JOIN public.actor teacher ON ((teacher.id = r.taught_by)))
      LEFT JOIN public.actor owner ON ((owner.id = r.personal_to)))
@@ -8081,6 +8863,22 @@ ALTER TABLE ONLY neon_auth.verification
 
 
 --
+-- Name: capability_agent_session capability_agent_session_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_agent_session
+    ADD CONSTRAINT capability_agent_session_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: capability_verification capability_verification_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_verification
+    ADD CONSTRAINT capability_verification_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: deployment deployment_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -8134,6 +8932,22 @@ ALTER TABLE ONLY ops.incident
 
 ALTER TABLE ONLY ops.incident_service
     ADD CONSTRAINT incident_service_pkey PRIMARY KEY (incident_id, service_id);
+
+
+--
+-- Name: release release_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT release_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: release release_release_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT release_release_key_key UNIQUE (release_key);
 
 
 --
@@ -8198,6 +9012,22 @@ ALTER TABLE ONLY ops.work_request
 
 ALTER TABLE ONLY ops.work_request
     ADD CONSTRAINT work_request_ref_key UNIQUE (ref);
+
+
+--
+-- Name: work_shape_revision work_shape_revision_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_shape_revision
+    ADD CONSTRAINT work_shape_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: work_shape_revision work_shape_revision_work_request_id_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_shape_revision
+    ADD CONSTRAINT work_shape_revision_work_request_id_version_key UNIQUE (work_request_id, version);
 
 
 --
@@ -9465,6 +10295,27 @@ CREATE INDEX verification_identifier_idx ON neon_auth.verification USING btree (
 
 
 --
+-- Name: capability_agent_session_request_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX capability_agent_session_request_idx ON ops.capability_agent_session USING btree (work_request_id, state, created_at DESC);
+
+
+--
+-- Name: capability_one_attestation_per_reviewer_candidate; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX capability_one_attestation_per_reviewer_candidate ON ops.capability_verification USING btree (build_session_id, verifier_actor_id, candidate_fingerprint);
+
+
+--
+-- Name: capability_one_open_session_per_request; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX capability_one_open_session_per_request ON ops.capability_agent_session USING btree (work_request_id) WHERE (state <> ALL (ARRAY['completed'::text, 'cancelled'::text]));
+
+
+--
 -- Name: deployment_correlation_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -9476,6 +10327,13 @@ CREATE INDEX deployment_correlation_idx ON ops.deployment USING btree (correlati
 --
 
 CREATE INDEX deployment_env_observed_idx ON ops.deployment USING btree (environment, observed_at DESC);
+
+
+--
+-- Name: deployment_release_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX deployment_release_idx ON ops.deployment USING btree (release_id);
 
 
 --
@@ -9504,6 +10362,27 @@ COMMENT ON INDEX ops.incident_one_open_per_signature IS 'The deduplication rule 
 --
 
 CREATE INDEX incident_open_idx ON ops.incident USING btree (state, detected_at DESC) WHERE (state <> 'reviewed'::text);
+
+
+--
+-- Name: release_correlation_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX release_correlation_idx ON ops.release USING btree (correlation_id);
+
+
+--
+-- Name: release_service_state_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX release_service_state_idx ON ops.release USING btree (service_id, state);
+
+
+--
+-- Name: release_sha_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX release_sha_idx ON ops.release USING btree (git_sha);
 
 
 --
@@ -9549,6 +10428,13 @@ CREATE INDEX settings_change_recorded_idx ON ops.settings_change USING btree (re
 
 
 --
+-- Name: work_request_program_ordinal_uniq; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX work_request_program_ordinal_uniq ON ops.work_request USING btree (program_key, program_ordinal) WHERE (program_key IS NOT NULL);
+
+
+--
 -- Name: work_request_state_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -9560,6 +10446,13 @@ CREATE INDEX work_request_state_idx ON ops.work_request USING btree (state) WHER
 --
 
 COMMENT ON INDEX ops.work_request_state_idx IS 'Partial on purpose: the common query is open work, and terminal rows accumulate forever. Indexing only live rows keeps it small as history grows.';
+
+
+--
+-- Name: work_shape_revision_current_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX work_shape_revision_current_idx ON ops.work_shape_revision USING btree (work_request_id, version DESC);
 
 
 --
@@ -10195,6 +11088,83 @@ CREATE OR REPLACE VIEW public.v_investigation AS
 
 
 --
+-- Name: capability_agent_session capability_agent_session_guard_before_write; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER capability_agent_session_guard_before_write BEFORE INSERT OR UPDATE ON ops.capability_agent_session FOR EACH ROW EXECUTE FUNCTION ops.capability_agent_session_guard();
+
+
+--
+-- Name: capability_verification capability_attestation_guard_before_insert; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER capability_attestation_guard_before_insert BEFORE INSERT ON ops.capability_verification FOR EACH ROW EXECUTE FUNCTION ops.capability_attestation_guard();
+
+
+--
+-- Name: work_request capability_program_close_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER capability_program_close_guard_before_update BEFORE UPDATE OF state ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.capability_program_close_guard();
+
+
+--
+-- Name: work_request capability_program_closed_immutable_before_update; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER capability_program_closed_immutable_before_update BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.capability_program_closed_immutable();
+
+
+--
+-- Name: work_request capability_program_identity_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER capability_program_identity_guard_before_update BEFORE UPDATE OF program_key, program_ordinal ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.capability_program_identity_guard();
+
+
+--
+-- Name: capability_verification capability_verification_immutable_before_change; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER capability_verification_immutable_before_change BEFORE DELETE OR UPDATE ON ops.capability_verification FOR EACH ROW EXECUTE FUNCTION ops.capability_verification_immutable();
+
+
+--
+-- Name: deployment deployment_requires_a_live_approval; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER deployment_requires_a_live_approval BEFORE INSERT OR UPDATE ON ops.deployment FOR EACH ROW EXECUTE FUNCTION ops.deployment_requires_a_live_approval();
+
+
+--
+-- Name: release release_completion_requires_a_read_back; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER release_completion_requires_a_read_back BEFORE UPDATE ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_completion_requires_a_read_back();
+
+
+--
+-- Name: release release_plan_revision_invalidates_approval; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER release_plan_revision_invalidates_approval BEFORE UPDATE ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_plan_revision_invalidates_approval();
+
+
+--
+-- Name: work_request work_request_shape_gate; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_request_shape_gate BEFORE INSERT OR UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.work_request_shape_gate();
+
+
+--
+-- Name: work_shape_revision work_shape_revision_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_shape_revision_immutable BEFORE DELETE OR UPDATE ON ops.work_shape_revision FOR EACH ROW EXECUTE FUNCTION ops.work_shape_revision_immutable();
+
+
+--
 -- Name: activity activity_touch; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10411,6 +11381,62 @@ ALTER TABLE ONLY neon_auth.session
 
 
 --
+-- Name: capability_agent_session capability_agent_session_created_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_agent_session
+    ADD CONSTRAINT capability_agent_session_created_by_actor_id_fkey FOREIGN KEY (created_by_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: capability_agent_session capability_agent_session_executor_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_agent_session
+    ADD CONSTRAINT capability_agent_session_executor_actor_id_fkey FOREIGN KEY (executor_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: capability_agent_session capability_agent_session_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_agent_session
+    ADD CONSTRAINT capability_agent_session_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: capability_verification capability_verification_build_session_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_verification
+    ADD CONSTRAINT capability_verification_build_session_id_fkey FOREIGN KEY (build_session_id) REFERENCES ops.capability_agent_session(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: capability_verification capability_verification_verifier_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_verification
+    ADD CONSTRAINT capability_verification_verifier_actor_id_fkey FOREIGN KEY (verifier_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: capability_verification capability_verification_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.capability_verification
+    ADD CONSTRAINT capability_verification_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: deployment deployment_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.deployment
+    ADD CONSTRAINT deployment_release_id_fkey FOREIGN KEY (release_id) REFERENCES ops.release(id);
+
+
+--
 -- Name: deployment deployment_rollback_of_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -10467,6 +11493,22 @@ ALTER TABLE ONLY ops.incident_service
 
 
 --
+-- Name: release release_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT release_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id);
+
+
+--
+-- Name: release release_superseded_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT release_superseded_by_fkey FOREIGN KEY (superseded_by) REFERENCES ops.release(id);
+
+
+--
 -- Name: run run_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -10499,11 +11541,35 @@ ALTER TABLE ONLY ops.service_environment
 
 
 --
+-- Name: work_request work_request_shape_decided_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request
+    ADD CONSTRAINT work_request_shape_decided_by_actor_id_fkey FOREIGN KEY (shape_decided_by_actor_id) REFERENCES public.actor(id);
+
+
+--
 -- Name: work_request work_request_superseded_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
 ALTER TABLE ONLY ops.work_request
     ADD CONSTRAINT work_request_superseded_by_fkey FOREIGN KEY (superseded_by) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: work_shape_revision work_shape_revision_created_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_shape_revision
+    ADD CONSTRAINT work_shape_revision_created_by_actor_id_fkey FOREIGN KEY (created_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: work_shape_revision work_shape_revision_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_shape_revision
+    ADD CONSTRAINT work_shape_revision_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
 
 
 --
@@ -12401,7 +13467,11 @@ grant usage on schema public to carr_exporter;
 grant usage on schema public to carr_jobs;
 grant usage on schema public to carr_reader;
 grant usage on schema public to carr_writer;
-grant insert on table ops.deployment to carr_jobs;
+grant select on table ops.capability_agent_session to carr_reader;
+grant insert, select, update on table ops.capability_agent_session to carr_writer;
+grant select on table ops.capability_verification to carr_reader;
+grant insert, select on table ops.capability_verification to carr_writer;
+grant insert, select on table ops.deployment to carr_jobs;
 grant select on table ops.deployment to carr_reader;
 grant insert, select, update on table ops.deployment to carr_writer;
 grant insert, select on table ops.incident to carr_jobs;
@@ -12419,6 +13489,9 @@ grant insert, select, update on table ops.incident_link to carr_writer;
 grant select on table ops.incident_service to carr_jobs;
 grant select on table ops.incident_service to carr_reader;
 grant insert, select, update on table ops.incident_service to carr_writer;
+grant insert, select, update on table ops.release to carr_jobs;
+grant select on table ops.release to carr_reader;
+grant insert, select, update on table ops.release to carr_writer;
 grant insert, select on table ops.run to carr_jobs;
 grant select on table ops.run to carr_reader;
 grant insert, select on table ops.run to carr_writer;
@@ -12436,16 +13509,25 @@ grant insert, select, update on table ops.service_environment to carr_writer;
 grant insert, select on table ops.settings_change to carr_jobs;
 grant select on table ops.settings_change to carr_reader;
 grant insert, select on table ops.settings_change to carr_writer;
+grant select on table ops.v_capability_program_next to carr_jobs;
+grant select on table ops.v_capability_program_next to carr_reader;
+grant select on table ops.v_capability_program_next to carr_writer;
 grant select on table ops.v_check_run to carr_reader;
 grant select on table ops.v_check_run to carr_writer;
 grant select on table ops.v_job_run to carr_reader;
 grant select on table ops.v_job_run to carr_writer;
+grant select on table ops.v_release_manifest to carr_reader;
+grant select on table ops.v_release_manifest to carr_writer;
 grant select on table ops.v_service_environment_health to carr_reader;
 grant select on table ops.v_service_environment_health to carr_writer;
 grant select on table ops.v_trace to carr_reader;
 grant select on table ops.v_trace to carr_writer;
+grant select on table ops.v_work_shape_current to carr_reader;
+grant select on table ops.v_work_shape_current to carr_writer;
 grant select on table ops.work_request to carr_reader;
 grant insert, select, update on table ops.work_request to carr_writer;
+grant select on table ops.work_shape_revision to carr_reader;
+grant insert, select on table ops.work_shape_revision to carr_writer;
 grant insert, select, update on table public.activity to carr_writer;
 grant insert, select, update on table public.actor to carr_writer;
 grant insert, select, update on table public.actor_profile to carr_writer;
@@ -12459,6 +13541,7 @@ grant insert, select, update on table public.building_ownership to carr_writer;
 grant select on table public.cadence_rule to carr_jobs;
 grant insert, select, update on table public.cadence_rule to carr_writer;
 grant insert, select, update on table public.campaign to carr_writer;
+grant insert, select, update on table public.candidate_pool to carr_jobs;
 grant insert, select, update on table public.candidate_pool to carr_writer;
 grant insert, select, update on table public.capture_candidate to carr_writer;
 grant insert, select, update on table public.capture_post_call_action to carr_writer;
@@ -12542,7 +13625,7 @@ grant insert, select on table public.export_run to carr_exporter;
 grant insert, select, update on table public.export_run to carr_writer;
 grant insert, select on table public.growth_snapshot to carr_jobs;
 grant select on table public.growth_snapshot to carr_reader;
-grant select on table public.ingest_inbox to carr_jobs;
+grant insert, select, update on table public.ingest_inbox to carr_jobs;
 grant insert, select, update on table public.ingest_inbox to carr_writer;
 grant insert, select, update on table public.investigation_branch to carr_writer;
 grant insert, select, update on table public.investigation_evidence to carr_writer;
@@ -12669,11 +13752,13 @@ grant select on table public.v_defect_class to carr_writer;
 grant select on table public.v_expired_verification to carr_jobs;
 grant select on table public.v_expired_verification to carr_reader;
 grant select on table public.v_expired_verification to carr_writer;
+grant select on table public.v_export_clients to carr_jobs;
 grant select on table public.v_export_clients to carr_reader;
 grant select on table public.v_export_clients_active to carr_reader;
 grant select on table public.v_export_deals to carr_reader;
 grant select on table public.v_export_dossier_analysis to carr_exporter;
 grant select on table public.v_export_dossier_subject to carr_exporter;
+grant select on table public.v_export_leads to carr_jobs;
 grant select on table public.v_export_leads to carr_reader;
 grant select on table public.v_export_loops to carr_exporter;
 grant select on table public.v_export_loops_closed to carr_exporter;
@@ -12934,6 +14019,18 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0120_backup_role_sequences.sql	a8b20e5a2a8602394ded89852e976df3e8a644bedb8dcfe6c04001cd31ec3254	2026-08-14 16:14:27.222819+00
 0121_registry_writer_grants.sql	29940125bc7e286eb5bddef93edc4de5ec25205ae747891f9210f3b67b00f2c6	2026-08-14 19:50:27.228399+00
 0122_worker_trace.sql	e8f18df1ce59c92efb8433f8c6935b5592705aa1a2ff048411143642e2a6b7ce	2026-08-14 21:21:12.203596+00
+0123_trace_incident_recurrence.sql	e28e05fe17fa5e0524a5307b58d58520bcde7b57789e8930d18c9d95a585a1df	2026-08-14 21:48:49.951818+00
+0124_radar_lane_jobs_grants.sql	587e9c078e4066ca417383faaa19467984c3e2388325724667418d3c4cd0dd54	2026-08-14 21:52:41.207778+00
+0125_ai_capability_program.sql	74ede159e61be66d1bacd0af7608f364668c6b457260dcdf47da13a49214071e	2026-08-15 11:40:17.207121+00
+0126_capability_program_evidence.sql	33aa873ca8cfab56db5f9275a437da8f8df08ed4a12429f27a314fad8022b89c	2026-08-15 11:40:17.464538+00
+0127_capability_program_immutability.sql	d76aa548c88dd974fc29ac014c405c13c21ce23af4d7a1f0f7138963fd172a1a	2026-08-15 11:40:17.753994+00
+0128_capability_session_terminal_immutability.sql	0a74d4147ff296e32363c092cd284da3b952a884416a244eec2780e37d2b99b3	2026-08-15 11:40:17.95791+00
+0129_reprioritize_rag_benchmark.sql	91fc733a449db2c56acd7eb194058117b28f80cb5c669ff9a54a00bbabb3b155	2026-08-15 13:35:21.292805+00
+0130_compiled_rules_supersedes.sql	0e87df623ca11c39b9705b76d889266aac20cf35de4a508ce48179a36b0bbc73	2026-08-15 18:19:27.876698+00
+0131_ops_release.sql	3480ea037ee025ad3ffa5e86263ac95723bce2c3ab287a7c591df355edff31d5	2026-08-15 18:19:28.333313+00
+0132_work_shape_revision.sql	c08f63f665a84e31fde1317c79d5ce3addf36d30609abba39c040943f5b735c2	2026-08-15 18:19:28.649741+00
+0133_release_writer_grants.sql	85fce1968fa3598694113bd52c6729a98c7dfd3826f53daab072b541b2c6ef64	2026-08-16 00:33:51.969943+00
+0134_release_abandon_reason.sql	61c10b1eae104deb6a6f6719027946cf1fea82d6da9216c13d1c0e8895ea6289	2026-08-16 12:24:10.6226+00
 \.
 
 
