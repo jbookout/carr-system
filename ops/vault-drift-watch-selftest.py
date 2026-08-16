@@ -914,6 +914,63 @@ def _(assert_):
                 f"an undated path must stay UNEXPECTED: {lines}")
 
 
+# ── RETIRED-INTO-_to_delete, added 2026-08-16 ────────────────────────────────
+# THE FALSE POSITIVE THIS CLOSES. The 2026-08-16 nightly reported three DELETED
+# files as UNEXPECTED: 00_Context/sweep-sop.md, Automation/local-tasks/
+# review-task.md and DNA/Network/briefs/2026-07-04-network-brief.md. None had
+# been deleted. All three had been MOVED to _to_delete/ by the monthly sweep,
+# each into a dated folder naming its reason, exactly as Joe's never-delete
+# rule requires (faae6748: never delete, always stage into _to_delete).
+#
+# The cost was not the alarm, it was the reading: the session on duty took the
+# report at face value and told Joe his monthly sweep procedure might have been
+# deleted by something unknown. Filed as a defect against the class that has
+# now failed 17 times. A checker that cries wolf every time the sweep does its
+# job correctly trains its reader to be wrong.
+#
+# The rule: a vault .md that left its home and now exists under _to_delete/ was
+# RETIRED by a sanctioned process. Deliberately narrow — it applies to DELETED
+# paths only. An ADDED or MODIFIED file is untouched by this, and a file that
+# simply vanished with no copy in _to_delete is still UNEXPECTED, because that
+# is the real signal the alarm exists for.
+
+@case("DELETED but staged in _to_delete is RETIRED, not UNEXPECTED, exit 0")
+def _(assert_):
+    d = fresh_dirs("retired-staged")
+    write(d["root"], "00_Context/sweep-sop.md", "# sweep sop\n")
+    rc1, _, _ = run(d)
+    assert_(rc1 == 0, "seed run should exit 0")
+    os.remove(os.path.join(d["root"], "00_Context/sweep-sop.md"))
+    write(d["root"], "_to_delete/store-duplicates-2026-08-15/sweep-sop.md", "# sweep sop\n")
+    rc2, out2, err2 = run(d)
+    assert_("RETIRED" in out2, f"a file staged in _to_delete should read RETIRED\n{out2}")
+    assert_(rc2 == 0, f"a sanctioned retirement must not fail the chain, got {rc2}\nstderr={err2}")
+
+
+@case("DELETED with NO copy in _to_delete is still UNEXPECTED, exit 2")
+def _(assert_):
+    d = fresh_dirs("retired-absent")
+    write(d["root"], "00_Context/vanished.md", "# gone\n")
+    rc1, _, _ = run(d)
+    assert_(rc1 == 0, "seed run should exit 0")
+    os.remove(os.path.join(d["root"], "00_Context/vanished.md"))
+    rc2, out2, _ = run(d)
+    assert_("UNEXPECTED" in out2, "a file that vanished with no staged copy is the real alarm")
+    assert_(rc2 == 2, f"an unstaged deletion must still fail the chain, got {rc2}")
+
+
+@case("a DIFFERENT filename in _to_delete does not excuse a deletion")
+def _(assert_):
+    d = fresh_dirs("retired-mismatch")
+    write(d["root"], "00_Context/vanished.md", "# gone\n")
+    write(d["root"], "_to_delete/older-batch/unrelated.md", "# unrelated\n")
+    rc1, _, _ = run(d)
+    assert_(rc1 == 0, "seed run should exit 0")
+    os.remove(os.path.join(d["root"], "00_Context/vanished.md"))
+    rc2, out2, _ = run(d)
+    assert_(rc2 == 2, f"an unrelated staged file must not excuse this deletion, got {rc2}")
+
+
 def main():
     failures = []
     for name, fn in CASES:
