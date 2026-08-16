@@ -216,12 +216,19 @@ begin
   raise exception '% is append-only', tg_table_name;
 end $$;
 
+-- These controls may already exist from the pre-renumber control-plane
+-- sequence.  Drop only the named equivalent trigger before recreating it;
+-- table rows and immutable evidence remain untouched.
+drop trigger if exists job_attempt_append_only on ops.job_attempt;
 create trigger job_attempt_append_only
   before delete on ops.job_attempt for each row execute function ops.refuse_job_evidence_rewrite();
+drop trigger if exists job_receipt_append_only on ops.job_receipt;
 create trigger job_receipt_append_only
   before update or delete on ops.job_receipt for each row execute function ops.refuse_job_evidence_rewrite();
+drop trigger if exists provider_observation_append_only on ops.provider_observation;
 create trigger provider_observation_append_only
   before update or delete on ops.provider_observation for each row execute function ops.refuse_job_evidence_rewrite();
+drop trigger if exists workflow_acceptance_append_only on ops.workflow_acceptance;
 create trigger workflow_acceptance_append_only
   before update or delete on ops.workflow_acceptance for each row execute function ops.refuse_job_evidence_rewrite();
 
@@ -446,6 +453,7 @@ begin
   return new;
 end $$;
 
+drop trigger if exists job_definition_cutover_requires_evidence on ops.job_definition;
 create trigger job_definition_cutover_requires_evidence
   before update of legacy_disabled_at on ops.job_definition
   for each row execute function ops.require_cutover_evidence();
