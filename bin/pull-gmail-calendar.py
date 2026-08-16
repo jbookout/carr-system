@@ -32,7 +32,7 @@ re-land; the socket updates nothing on conflict. That is a known, accepted edge
 already carries the meeting).
 
   ./bin/pull-gmail-calendar.py                  calendar half, live POST
-  ./bin/pull-gmail-calendar.py --dry-run        print what would be posted
+  ./bin/pull-gmail-calendar.py --dry-run        parse/count only; POST and event output suppressed
   ./bin/pull-gmail-calendar.py --days-back 3 --days-ahead 21
   ./bin/pull-gmail-calendar.py --gmail          prints the auth decision, exits 78
 
@@ -318,7 +318,10 @@ def run_calendar(args):
             seen.add(item["external_id"])
             in_window += 1
             if args.dry_run:
-                print(json.dumps(item, indent=2)[:1200])
+                # Shadow evidence is aggregate-only. Calendar payloads can
+                # contain descriptions, meeting links/passcodes, attendee data
+                # and provider identifiers; printing them turns a no-write
+                # validation run into a local disclosure surface.
                 continue
             code, resp, was_dup = post(url, token, item)
             if code and 200 <= code < 300:
@@ -377,7 +380,8 @@ Nothing was attempted, nothing was stored, no connection was made.
 def main():
     ap = argparse.ArgumentParser(description="ORDER 12 lane (c): calendar + Gmail capture")
     ap.add_argument("--gmail", action="store_true", help="print the auth decision and stop")
-    ap.add_argument("--dry-run", action="store_true", help="print payloads, POST nothing")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="parse/count only; POST and event payload output are suppressed")
     ap.add_argument("--days-back", type=int, default=1)
     ap.add_argument("--days-ahead", type=int, default=14)
     args = ap.parse_args()
