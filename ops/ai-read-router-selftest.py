@@ -19,6 +19,17 @@ FIXTURE_PATH = ROOT / "evals" / "ai" / "function-router.v1.json"
 ENVELOPE_FIXTURE_PATH = ROOT / "evals" / "ai" / "response-envelope.v1.json"
 CANARY = "CARR-SECRET-CANARY-7F4A"
 DEFAULT_ENVELOPE = object()
+EXPECTED_READ_ROUTES = [
+    "find",
+    "catch-me-up",
+    "who-do-we-know",
+    "doctrine-index",
+    "search-doctrine",
+    "read-doctrine",
+    "find-precedent",
+    "stale-records",
+    "today-triage",
+]
 
 
 class ReadRouterTests(unittest.TestCase):
@@ -40,7 +51,7 @@ class ReadRouterTests(unittest.TestCase):
 
     def test_policy_is_fixed_and_contains_one_selected_route_row_per_tool(self):
         self.assertEqual(hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest(), ai_read_router.POLICY_SHA256)
-        self.assertEqual([row["tool_name"] for row in self.policy["routes"]], ["find", "who-do-we-know"])
+        self.assertEqual([row["tool_name"] for row in self.policy["routes"]], EXPECTED_READ_ROUTES)
         self.assertTrue(all(set(row) == ai_read_router.ROUTE_FIELDS for row in self.policy["routes"]))
         self.assertTrue(all(row["protection"] == "read_only" for row in self.policy["routes"]))
         self.assertNotIn("selected_tool_evidence", self.policy)
@@ -140,17 +151,28 @@ class ReadRouterTests(unittest.TestCase):
             "allowed_actions": [],
         })
 
-    def test_accepts_second_safe_read_route_with_typed_optional_arguments(self):
-        result = self.route({
-            "schema_version": 1,
-            "tool_name": "who-do-we-know",
-            "arguments": {"target": "C-001", "max_depth": 2, "limit": 3},
-        })
-        self.assertEqual(result["state"], "accepted")
-        self.assertEqual(result["route"]["tool_name"], "who-do-we-know")
-        self.assertEqual(result["route"]["arguments"], {
-            "target": "C-001", "max_depth": 2, "limit": 3,
-        })
+    def test_accepts_each_safe_read_route_with_exact_typed_arguments(self):
+        proposals = {
+            "find": {"query": "synthetic practice"},
+            "catch-me-up": {"ref": "C-001", "limit": 10},
+            "who-do-we-know": {"target": "C-001", "max_depth": 2, "limit": 3},
+            "doctrine-index": {"content_classes": ["policy", "playbook"]},
+            "search-doctrine": {"q": "synthetic doctrine", "content_classes": ["policy"], "limit": 5},
+            "read-doctrine": {"document": "synthetic-doctrine", "if_generation_match": 1},
+            "find-precedent": {"query": "synthetic ruling", "limit": 4, "since": "2026-01-01"},
+            "stale-records": {},
+            "today-triage": {},
+        }
+        self.assertEqual(list(proposals), EXPECTED_READ_ROUTES)
+        for tool_name, arguments in proposals.items():
+            with self.subTest(tool_name=tool_name):
+                result = self.route({
+                    "schema_version": 1,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                })
+                self.assertEqual(result["state"], "accepted")
+                self.assertEqual(result["route"], {"tool_name": tool_name, "arguments": arguments})
 
     def test_accepted_descriptor_is_detached_from_proposal_and_server_values(self):
         proposal = {
@@ -181,6 +203,16 @@ class ReadRouterTests(unittest.TestCase):
         self.assert_refused({
             "schema_version": 1, "tool_name": "who-do-we-know", "arguments": {"target": "C-001", "max_depth": "2"},
         }, "router_arguments_type_invalid")
+        self.assert_refused({
+            "schema_version": 1, "tool_name": "search-doctrine",
+            "arguments": {"q": "synthetic", "content_classes": ["policy", 7]},
+        }, "router_arguments_type_invalid")
+        self.assert_refused({
+            "schema_version": 1, "tool_name": "read-doctrine", "arguments": {},
+        }, "router_arguments_missing")
+        self.assert_refused({
+            "schema_version": 1, "tool_name": "today-triage", "arguments": {"tenant": CANARY},
+        }, "router_arguments_unknown")
 
     def test_refuses_direct_target_and_authority_widening_fields_without_leaking_input(self):
         forbidden = [
