@@ -98,6 +98,10 @@ begin
   raise exception 'authority receipts are append-only';
 end $$;
 
+-- The same control first ran under the pre-renumber migration sequence.
+-- A staging database may therefore already have this equivalent trigger even
+-- though 0148 is new to its schema ledger.  Replace it deliberately.
+drop trigger if exists authority_receipt_append_only on ops.authority_receipt;
 create trigger authority_receipt_append_only
   before update or delete on ops.authority_receipt
   for each row execute function ops.refuse_authority_receipt_rewrite();
@@ -177,6 +181,7 @@ begin
   return new;
 end $$;
 
+drop trigger if exists rule_activation_requires_admission on rule;
 create trigger rule_activation_requires_admission
   before update of status on rule
   for each row execute function ops.require_rule_admission();

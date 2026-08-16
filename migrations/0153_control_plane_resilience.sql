@@ -29,6 +29,7 @@ create table if not exists ops.cost_reservation (
   )
 );
 
+drop trigger if exists cost_reservation_no_delete on ops.cost_reservation;
 create trigger cost_reservation_no_delete
   before delete on ops.cost_reservation for each row
   execute function ops.refuse_job_evidence_rewrite();
