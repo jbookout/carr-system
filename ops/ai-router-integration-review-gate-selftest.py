@@ -116,10 +116,11 @@ class IntegrationReviewGateTests(unittest.TestCase):
         self.assertIn(gate.REVIEW_ARTIFACT_REL, result.stderr)
         self.assertNotIn(CANARY, result.stdout + result.stderr)
 
-    def test_real_tree_is_eval_only_and_passes_without_a_review_artifact(self):
+    def test_real_tree_first_descriptor_consumer_is_reviewed_and_passes(self):
         result = subprocess.run([sys.executable, str(GATE), "--repo", str(ROOT)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no production consumer", result.stdout)
+        self.assertIn("1 reviewed consumer", result.stdout)
+        self.assertTrue((ROOT / gate.REVIEW_ARTIFACT_REL).is_file())
 
     def test_orphan_review_artifact_is_refused_when_no_production_consumer_exists(self):
         self.write_artifact({})
