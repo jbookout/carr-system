@@ -42,7 +42,7 @@ const PROTOCOL = "2025-06-18";
 // descriptions, never fewer capabilities.
 //
 // Selected per-request: POST /mcp?profile=capture
-const PROFILES = {
+export const PROFILES = {
   // Everything. The default, and what both partners' interactive sessions use.
   full: null,
 
@@ -165,6 +165,24 @@ const PROFILES = {
   // passing a different verb name (callTool's allowedIn() check enforces this
   // at call time, same as every other profile).
   reviewer: new Set(["record-finding"]),
+
+  // HERMES (R0 runtime evaluation, 2026-08-16). The write set is EMPTY, which
+  // is the whole design: the 2026-08-12 frontier council cleared Hermes for a
+  // read-only, synthetic evaluation, and live CARR data behind a second Joe
+  // decision. Reads need no entry, exactly as with `reviewer` — allowedIn()
+  // already grants every read verb in every profile.
+  //
+  // It is a SEPARATE ENTRY rather than a reuse of `read` so the profile a
+  // Hermes call runs under is legible in tool_call rows and in the session
+  // notice, rather than being indistinguishable from a human who happened to
+  // pass ?profile=read. Same reason `probe` and `reviewer` are their own
+  // entries when both are "reads plus a tiny write set".
+  //
+  // Like those two, it is forced in dispatch() on a HERMES_TOKENS bearer match
+  // and ?profile= is ignored for that actor. Unlike those two, nothing is lost
+  // if an ordinary caller asks for ?profile=hermes: an empty write set can only
+  // ever reduce what that caller could already do.
+  hermes: new Set(),
 };
 
 const PROFILE_NOTICE = {
@@ -206,6 +224,13 @@ const PROFILE_NOTICE = {
     "your findings as one or more record-finding calls: source is required on every one (name the " +
     "model, the commit sha, and the contract version), and a clean run with nothing to flag is still " +
     "a finding worth recording (found:false), not silence.</notice>",
+  hermes:
+    "\n\n<notice>This session runs on the HERMES profile: every read verb, and no write verb at " +
+    "all. This profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and " +
+    "cannot be widened by this token under any request. It is the R0 evaluation runtime the " +
+    "2026-08-12 frontier council cleared, never a human seat and never a sponsored one: it carries " +
+    "no personal brain scope, so Joe-personal and Dell-personal material is not yours to read. " +
+    "Report what you would have written and hand it back for a human to file.</notice>",
 };
 
 /** Resolve ?profile= to a name, defaulting to full. An unknown value fails CLOSED to read. */
@@ -215,7 +240,28 @@ function profileFor(request) {
   return Object.prototype.hasOwnProperty.call(PROFILES, raw) ? raw : "read";
 }
 
-function allowedIn(profile, name, tool) {
+/**
+ * The profile an authenticated actor runs under, decided server-side.
+ *
+ * Extracted from dispatch() on 2026-08-16 so the three locks are provable by
+ * `node --test` rather than only by deploying: dispatch() itself needs a
+ * Worker, and a lock nothing can exercise before a deploy is a lock nobody
+ * should trust. The behaviour is unchanged — this is the same expression that
+ * lived inline, with the Hermes arm added.
+ *
+ * A locked actor's flag (probe / review / hermes) is set in exactly one place
+ * each, in index.js, on a bearer match against a Worker secret. Nothing a
+ * caller sends on the wire can set one, which is what makes ?profile= a
+ * voluntary limiter for everyone else and a no-op for these three.
+ */
+export function profileForActor(actor, request) {
+  if (actor?.probe) return "probe";
+  if (actor?.review) return "reviewer";
+  if (actor?.hermes) return "hermes";
+  return profileFor(request);
+}
+
+export function allowedIn(profile, name, tool) {
   if (profile === "full") return true;
   if (tool.fullOnly) return false;            // sensitive operational reads stay off probe/reviewer/read
   if (!tool.write) return true;              // reads are allowed in every profile
@@ -428,7 +474,24 @@ export async function dispatch(request, env, ctx, actor) {
   // REVIEWER LOCK (Automatic Review Council, 2026-08-06): same mechanism, same
   // reasoning, for actor.review, set in exactly one place (index.js's
   // reviewActorFor, on a REVIEW_TOKENS bearer match).
-  const profile = actor.probe ? "probe" : actor.review ? "reviewer" : profileFor(request);
+  // HERMES LOCK (R0 runtime evaluation, 2026-08-16): same mechanism again, for
+  // actor.hermes, set in exactly one place (index.js's hermesActorFor, on a
+  // HERMES_TOKENS bearer match). It forces `read`, whose write set is empty, so
+  // a Hermes runtime gets every read verb and no write verb at all.
+  //
+  // WHY A LOCK RATHER THAN TELLING THE RUNTIME TO PASS ?profile=read. The
+  // council's R0 disposition is read-only and synthetic, and `?profile=` is a
+  // VOLUNTARY limiter — identity.js says so in as many words. A Hermes token
+  // asking for ?profile=capture would get capture's write verbs, which makes
+  // "read-only" a promise the runtime keeps rather than a boundary the server
+  // holds. Hermes is a persistent daemon with its own memory, scheduler and
+  // messaging channels, so its own restraint is the wrong thing to rely on:
+  // within minutes of first install on 2026-08-16 it seeded itself a Copilot
+  // credential off the gh CLI unasked. Held credentials and autonomous
+  // authority are the boundary here, never confidentiality — Joe closed the
+  // exposure question on 2026-08-12 and every frontier council seat already
+  // reads CARR doctrine (rule d7f74c93).
+  const profile = profileForActor(actor, request);
   // The authority class is server-derived from the authenticated actor. The
   // legacy ?profile= remains only a voluntary operational limiter: it can
   // reduce the listed/callable verbs, never select a sponsor or widen humanOnly.

@@ -79,7 +79,7 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken } from "./identity.js";
+import { actorFromProps, agentActorForToken, hermesActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
 import { createCaptureHandler } from "./capture.js";
@@ -358,6 +358,50 @@ function reviewActorFor(request, env) {
   return { slug, display: `Reviewer (${slug})`, human: false, review: true, via: "review-token", client_id: null };
 }
 
+// ---------- hermes token (R0 runtime evaluation, 2026-08-16) ----------
+//
+// The fifth door, built on the PROBE_TOKENS/REVIEW_TOKENS pattern above and
+// differing from them in exactly one way: its locked profile has an EMPTY
+// write set. A Hermes runtime authenticated here reads everything and writes
+// nothing, which is the 2026-08-12 frontier council's R0 disposition rendered
+// as a server control rather than an instruction.
+//
+// WHY A FIFTH DOOR RATHER THAN REUSING AGENT_TOKENS. AGENT_TOKENS is the
+// outside-model CLI door (codex, grok — loop #227/#239), and an actor arriving
+// through it takes profileFor(request), so it can pass ?profile=capture and
+// write. That is correct for a CLI a partner is driving turn by turn with a
+// human reading every result. Hermes is not that: it is a persistent daemon
+// with its own memory, scheduler and messaging channels, and its restraint is
+// not a control. Widening AGENT_TOKENS to cover it would either hand Hermes
+// the CLI's write path or take that path away from Codex and Grok. A separate
+// secret, separate slug and separate lock keeps both true at once, and keeps
+// `via` legible in tool_call rows.
+//
+// WHAT THIS DOOR IS NOT PROTECTING AGAINST. Not confidentiality. Joe closed
+// that on 2026-08-12 ("the added exposure is minimal") and every frontier
+// council seat, Grok included, has read entire CARR doctrines. The boundary is
+// held credentials and autonomous authority (rule d7f74c93). The evidence it
+// is warranted arrived the day Hermes was installed: within minutes it had
+// seeded itself a Copilot credential off the gh CLI without being asked.
+//
+// The actor carries no sponsoring_human_slug, so identity.js resolves it to
+// `unsponsored_agent` with shared-only scope and no personal brain — the R0
+// fixture's cross-brain and unsponsored-metadata cases fall out of that
+// existing rule rather than needing anything new here. humanOnly verbs refuse
+// on human:false, as they do for every machine actor.
+//
+// Checked AFTER probeActorFor and reviewActorFor, matching their ordering
+// reasoning: separate secrets never collide in practice, and a deterministic
+// order is worth more than an equally arbitrary one.
+// The lookup itself lives in identity.js (hermesActorForToken) for the same
+// reason agentActorFor's does: this file imports from `cloudflare:` and cannot
+// be loaded by node --test, so logic left in here is logic nothing can prove
+// before a deploy. A boundary that can only be tested by deploying is not a
+// boundary anyone should trust.
+function hermesActorFor(request, env) {
+  return hermesActorForToken(request.headers.get("authorization"), env.HERMES_TOKENS);
+}
+
 // ---------- agent tokens (outside-model CLIs at full scope, loop #227/#239) ----------
 //
 // WHY A THIRD DOOR. Codex reaches this Worker over OAuth and, since the loop
@@ -527,6 +571,8 @@ async function routeRequest(request, env, ctx) {
     if (probeActor) return dispatch(request, env, ctx, probeActor);
     const reviewActor = reviewActorFor(request, env);
     if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+    const hermesActor = hermesActorFor(request, env);
+    if (hermesActor) return dispatch(request, env, ctx, hermesActor);
     const agentActor = agentActorFor(request, env);
     if (agentActor) return dispatch(request, env, ctx, agentActor);
     const localActor = localActorFor(request, env);
