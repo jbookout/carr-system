@@ -34,6 +34,7 @@ BASE = {
             "guidance_id": "g-constraint",
             "source_id": "aaaaaaaa",
             "source_clause": "whole",
+            "is_primary": True,
             "guidance_type": "constraint",
             "scope": {"tenant": "carr", "actor": "all"},
             "activation": {"trigger": "before a governed write"},
@@ -52,6 +53,7 @@ BASE = {
             "guidance_id": "g-procedure",
             "source_id": "bbbbbbbb",
             "source_clause": "whole",
+            "is_primary": True,
             "guidance_type": "procedure",
             "scope": {"tenant": "carr", "actor": "all"},
             "activation": {"trigger": "a task begins", "entry_condition": "task is in scope"},
@@ -65,6 +67,7 @@ BASE = {
             "guidance_id": "g-doctrine",
             "source_id": "cccccccc",
             "source_clause": "whole",
+            "is_primary": True,
             "guidance_type": "doctrine",
             "scope": {"tenant": "carr", "actor": "all"},
             "activation": {"trigger": "a matching situation is detected", "situation_mappings": ["fixture-situation"]},
@@ -78,6 +81,7 @@ BASE = {
             "guidance_id": "g-rubric",
             "source_id": "dddddddd",
             "source_clause": "whole",
+            "is_primary": True,
             "guidance_type": "rubric",
             "scope": {"tenant": "carr", "actor": "all"},
             "activation": {"trigger": "an artifact is ready for review"},
@@ -91,6 +95,7 @@ BASE = {
             "guidance_id": "g-preference",
             "source_id": "eeeeeeee",
             "source_clause": "whole",
+            "is_primary": True,
             "guidance_type": "preference",
             "scope": {"tenant": "carr", "actor": "joe"},
             "activation": {"trigger": "Joe is the relevant partner"},
@@ -104,6 +109,7 @@ BASE = {
             "guidance_id": "g-precedent",
             "source_id": "ffffffff",
             "source_clause": "whole",
+            "is_primary": True,
             "guidance_type": "precedent",
             "scope": {"tenant": "carr", "actor": "all"},
             "activation": {"trigger": "a similar decision is under review"},
@@ -117,6 +123,7 @@ BASE = {
             "guidance_id": "g-example",
             "source_id": "11111111",
             "source_clause": "whole",
+            "is_primary": True,
             "guidance_type": "example",
             "scope": {"tenant": "carr", "actor": "all"},
             "activation": {"trigger": "a matching teaching case is useful"},
@@ -192,6 +199,7 @@ def main():
         "guidance_id": "g-constraint-split",
         "source_id": "cccccccc",
         "source_clause": "mechanical-clause",
+        "is_primary": False,
         "split_group_id": "split-c",
     })
     mixed["items"][2]["source_clause"] = "judgment-clause"
@@ -203,6 +211,7 @@ def main():
     compound_child.update({
         "guidance_id": "g-procedure-second-clause",
         "source_clause": "second-procedure-clause",
+        "is_primary": False,
         "split_group_id": "split-b",
     })
     compound["items"][1]["source_clause"] = "first-procedure-clause"
@@ -336,6 +345,108 @@ def main():
     boilerplate_pass = any("generated boilerplate" in error for error in boilerplate_errors)
     print(f"{'PASS' if boilerplate_pass else 'FAIL'}  generated manifest boilerplate is refused: {boilerplate_errors}")
     cases.append(boilerplate_pass)
+
+    # The reviewed manifest has fourteen compound sources.  Their child types
+    # are deliberately asserted individually: a parent-field fallback used to
+    # compile every child as the parent's proposed type.
+    with open(os.path.join(REPO, "ops", "config", "rule-enforcement-map.json"), encoding="utf-8") as fh:
+        reviewed_map = json.load(fh)
+    reviewed_manifest, reviewed_errors = registry.load_migration_manifest(
+        os.path.join(REPO, "audits", "guidance-migration-manifest.v1.tsv"))
+    reviewed_registry, reviewed_compile_errors = registry.build_registry(
+        reviewed_map, reviewed_manifest)
+    expected_split_types = {
+        "0c1bac27": ["rubric"], "179be4b8": ["procedure"],
+        "1c42d80c": ["rubric"], "3d185f2b": ["procedure"],
+        "424ba0cc": ["preference"], "6172e7d5": ["preference"],
+        "6901cc3b": ["procedure"], "70e372f0": ["procedure"],
+        "86647daf": ["procedure"], "9873a0d2": ["procedure"],
+        "9e3fb6d0": ["procedure"], "eeb3d106": ["procedure"],
+        "f0f9156e": ["preference"], "f5beac20": ["procedure"],
+    }
+    actual_split_types = {}
+    for item in reviewed_registry.get("items", []):
+        if not item.get("is_primary"):
+            actual_split_types.setdefault(item["source_id"], []).append(item["guidance_type"])
+    reviewed_counts = {
+        "constraint": 74, "procedure": 76, "doctrine": 14, "rubric": 37,
+        "preference": 12, "precedent": 3, "example": 0,
+    }
+    split_compile_pass = (
+        not reviewed_errors and not reviewed_compile_errors
+        and actual_split_types == expected_split_types
+        and registry.type_counts(reviewed_registry) == reviewed_counts)
+    print(f"{'PASS' if split_compile_pass else 'FAIL'}  all 14 split clauses retain their declared types")
+    cases.append(split_compile_pass)
+
+    active_source_ids = sorted({
+        source_id for scope in reviewed_map["active_rule_ids"].values() for source_id in scope})
+    source_rule_ids = {
+        source_id: f"00000000-0000-0000-0000-{index:012x}"
+        for index, source_id in enumerate(active_source_ids, start=1)
+    }
+    doctrine_ids = sorted(item["guidance_id"] for item in reviewed_registry["items"]
+                         if item["guidance_type"] == "doctrine")
+    doctrine_bindings = {
+        guidance_id: [{
+            "concept_id": "10000000-0000-0000-0000-000000000001",
+            "doctrine_section_id": "20000000-0000-0000-0000-000000000001",
+            "reason": "fixture approved situation binding",
+        }]
+        for guidance_id in doctrine_ids
+    }
+    constitution = sorted(item["guidance_id"] for item in reviewed_registry["items"]
+                          if item.get("is_primary"))[:8]
+    manifest_args = {
+        "constitution_guidance_ids": constitution,
+        "source_manifest_provenance": {
+            "path": "audits/guidance-migration-manifest.v1.tsv", "sha256": "a" * 64,
+            "manifest": "carr-guidance-migration", "schema_version": "1.0.0",
+            "source_classification": "judgment_ambient", "entry_count": 93,
+        },
+        "base_inventory": {
+            "path": "ops/config/rule-enforcement-map.json", "sha256": "b" * 64,
+            "active_source_ids": active_source_ids, "source_rule_ids": source_rule_ids,
+        },
+        "situation_mapping_bindings": doctrine_bindings,
+    }
+    activation_manifest, activation_errors = registry.build_activation_manifest(
+        reviewed_registry, **manifest_args)
+    activation_again, activation_again_errors = registry.build_activation_manifest(
+        reviewed_registry, **manifest_args)
+    tampered_activation_manifest = copy.deepcopy(activation_manifest)
+    tampered_activation_manifest["source_manifest"]["sha256"] = "c" * 64
+    activation_pass = (
+        not activation_errors and not activation_again_errors
+        and activation_manifest == activation_again
+        and activation_manifest["schema"] == "guidance-activation-manifest/v1"
+        and activation_manifest["canonicalization"] == "utf8-json-sort-keys-compact-newline/v1"
+        and activation_manifest["constitution_source_rule_ids"] == sorted(
+            source_rule_ids[item["source_id"]]
+            for item in reviewed_registry["items"] if item["guidance_id"] in constitution)
+        and len(activation_manifest["entries"]) == 216
+        and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
+        and len(registry.activation_manifest_sha256(activation_manifest)) == 64
+        and registry.activation_manifest_sha256(activation_manifest)
+        != registry.activation_manifest_sha256(tampered_activation_manifest))
+    print(f"{'PASS' if activation_pass else 'FAIL'}  canonical activation manifest binds exact revisions and inputs: {activation_errors}")
+    cases.append(activation_pass)
+
+    bad_bindings = copy.deepcopy(doctrine_bindings)
+    bad_bindings[doctrine_ids[0]] = ["free-form-retrieval-key"]
+    _, bad_binding_errors = registry.build_activation_manifest(
+        reviewed_registry, **{**manifest_args, "situation_mapping_bindings": bad_bindings})
+    binding_refusal_pass = any("must be an object" in error for error in bad_binding_errors)
+    print(f"{'PASS' if binding_refusal_pass else 'FAIL'}  activation manifest refuses free-form doctrine bindings")
+    cases.append(binding_refusal_pass)
+
+    empty_bindings = copy.deepcopy(doctrine_bindings)
+    empty_bindings[doctrine_ids[0]] = []
+    _, empty_binding_errors = registry.build_activation_manifest(
+        reviewed_registry, **{**manifest_args, "situation_mapping_bindings": empty_bindings})
+    empty_binding_refusal = any("non-empty array" in error for error in empty_binding_errors)
+    print(f"{'PASS' if empty_binding_refusal else 'FAIL'}  activation manifest refuses unmapped doctrine")
+    cases.append(empty_binding_refusal)
 
     if not all(cases):
         return 1

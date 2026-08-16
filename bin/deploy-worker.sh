@@ -500,7 +500,7 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
       echo "  refused. Read the output above, and read the failed check together with"
       echo "  this deploy as ONE journey rather than two unrelated facts:"
       echo "      .venv/bin/python tools/ops-record.py trace $CARR_CORRELATION_ID"
-      echo "  Rolling back is bin/deploy-worker.sh --pinned-release <sha>."
+      echo "  Rolling back is bin/deploy-worker.sh --release-sha <sha>."
       record_deployment failed "$CARR_CORRELATION_ID"
       exit 1
     fi

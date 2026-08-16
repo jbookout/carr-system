@@ -7,6 +7,7 @@ projection from the same primary classification.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from collections import Counter, defaultdict
 from typing import Any, Iterable
@@ -33,6 +34,9 @@ DELIVERY_PROJECTIONS = {
 }
 
 LIFECYCLE_STATUSES = {"proposed", "active", "retired", "superseded"}
+
+ACTIVATION_MANIFEST_SCHEMA = "guidance-activation-manifest/v1"
+ACTIVATION_MANIFEST_CANONICALIZATION = "utf8-json-sort-keys-compact-newline/v1"
 
 
 def _present(value: Any) -> bool:
@@ -78,6 +82,9 @@ def validate_registry(data: dict[str, Any]) -> list[str]:
         guidance_id = _required(item, ("guidance_id",), "guidance id", errors)
         source_id = _required(item, ("source_id",), "stable source id", errors)
         _required(item, ("source_clause",), "source clause", errors)
+        is_primary = _required(item, ("is_primary",), "primary-record marker", errors)
+        if not isinstance(is_primary, bool):
+            errors.append(f"{guidance_id}: primary-record marker must be boolean")
         guidance_type = _required(item, ("guidance_type",), "guidance type", errors)
         _required(item, ("scope", "tenant"), "tenant scope", errors)
         _required(item, ("scope", "actor"), "actor scope", errors)
@@ -129,6 +136,12 @@ def validate_registry(data: dict[str, Any]) -> list[str]:
             actor = item.get("scope", {}).get("actor")
             if actor in (None, "", "all"):
                 errors.append(f"{guidance_id}: preference requires a scoped actor")
+
+    for source_id, linked in sorted(source_items.items()):
+        primary_count = sum(item.get("is_primary") is True for item in linked)
+        if primary_count != 1:
+            errors.append(
+                f"{source_id}: expected exactly one primary guidance record, found {primary_count}")
 
     analyses = data.get("source_analysis", [])
     if not isinstance(analyses, list):
@@ -234,6 +247,7 @@ def _base_item(source_id: str, guidance_id: str, kind: str, actor: str,
         "source_id": source_id,
         "source_clause": "whole",
         "guidance_type": kind,
+        "is_primary": True,
         "scope": {"tenant": "carr", "actor": actor},
         "activation": {"trigger": trigger},
         "consumer": consumer,
@@ -252,7 +266,12 @@ def _base_item(source_id: str, guidance_id: str, kind: str, actor: str,
 def _manifest_item(source_id: str, actor: str, entry: dict[str, Any],
                    part: dict[str, Any] | None = None, index: int = 0) -> tuple[dict[str, Any], list[str]]:
     row = entry if part is None else {**entry, **part}
-    kind = row.get("proposed_type") or row.get("guidance_type") or row.get("type")
+    # A split is a distinct reviewed clause.  ``row`` intentionally inherits
+    # the parent context, but its declared ``type`` must win over the parent's
+    # ``proposed_type``; otherwise every mixed source silently compiles as its
+    # parent type.
+    kind = (part.get("type") if part is not None else None) or (
+        row.get("proposed_type") or row.get("guidance_type") or row.get("type"))
     suffix = "whole" if part is None else f"split-{index}"
     guidance_id = f"rule-{source_id}-{suffix}-v1"
     errors: list[str] = []
@@ -268,6 +287,7 @@ def _manifest_item(source_id: str, actor: str, entry: dict[str, Any],
         source_id, guidance_id, kind, scoped_actor, trigger, consumer,
         verification, "proposed")
     item["source_clause"] = row.get("source_clause") or row.get("clause") or "whole"
+    item["is_primary"] = part is None
     # ``destination`` in the review manifest is a human-readable routing home;
     # the executable projection is deliberately derived from the primary type
     # so no manifest author can route one type through another type's loader.
@@ -419,6 +439,226 @@ def build_registry(source_map: dict[str, Any], migration_manifest: dict[str, Any
         "source_analysis": analyses,
     }
     return result, errors
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Return the portable UTF-8 activation-artifact preimage.
+
+    This deliberately has its own named contract rather than guessing at a
+    PostgreSQL JSONB rendering: recursively sorted JSON keys, compact
+    separators, literal Unicode, and one trailing newline.
+    """
+    return (json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False) + "\n").encode("utf-8")
+
+
+def activation_manifest_sha256(manifest: dict[str, Any]) -> str:
+    """Return the SHA-256 of the named portable activation-artifact encoding."""
+    return hashlib.sha256(activation_manifest_bytes(manifest)).hexdigest()
+
+
+def _digest_metadata(value: Any, label: str, errors: list[str]) -> dict[str, Any]:
+    """Normalize a reviewed external-artifact identity without reading it."""
+    if not isinstance(value, dict):
+        errors.append(f"activation manifest: {label} provenance must be an object")
+        return {}
+    path = value.get("path")
+    digest = value.get("sha256")
+    if not isinstance(path, str) or not path:
+        errors.append(f"activation manifest: {label} provenance requires path")
+    if (not isinstance(digest, str) or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)):
+        errors.append(f"activation manifest: {label} provenance requires lowercase sha256")
+    return {"path": path, "sha256": digest}
+
+
+def build_activation_manifest(
+        data: dict[str, Any], *, constitution_guidance_ids: Iterable[str],
+        source_manifest_provenance: dict[str, Any],
+        base_inventory: dict[str, Any],
+        situation_mapping_bindings: dict[str, list[dict[str, str]]]
+        ) -> tuple[dict[str, Any], list[str]]:
+    """Build the deterministic, reviewable preimage for registry activation.
+
+    This is pure compilation only: it reads no files, writes no state, and
+    grants no approval.  A caller supplies the already-measured source TSV and
+    enforcement-map identities so the resulting digest binds the *exact*
+    reviewed input set, the compiled guidance revisions, and the selected
+    constitution rather than merely a convenient raw-file hash.
+    """
+    errors = validate_registry(data)
+    if errors:
+        return {}, ["activation manifest: invalid compiled registry: " + "; ".join(errors)]
+
+    source_manifest = _digest_metadata(
+        source_manifest_provenance, "source manifest", errors)
+    for field, expected in (
+            ("manifest", "carr-guidance-migration"),
+            ("schema_version", "1.0.0"),
+            ("source_classification", "judgment_ambient")):
+        actual = source_manifest_provenance.get(field) if isinstance(source_manifest_provenance, dict) else None
+        if actual != expected:
+            errors.append(
+                f"activation manifest: source manifest provenance {field} must be {expected!r}")
+        source_manifest[field] = actual
+    entry_count = (source_manifest_provenance.get("entry_count")
+                   if isinstance(source_manifest_provenance, dict) else None)
+    if not isinstance(entry_count, int) or entry_count < 1:
+        errors.append("activation manifest: source manifest provenance requires positive entry_count")
+    elif entry_count != len(data.get("source_analysis", [])):
+        errors.append("activation manifest: source manifest entry_count does not match compiled source analysis")
+    source_manifest["entry_count"] = entry_count
+
+    inventory = _digest_metadata(base_inventory, "base inventory", errors)
+    active_source_ids = base_inventory.get("active_source_ids") if isinstance(base_inventory, dict) else None
+    if (not isinstance(active_source_ids, list) or not active_source_ids
+            or any(not isinstance(source_id, str) or not source_id for source_id in active_source_ids)):
+        errors.append("activation manifest: base inventory requires active_source_ids")
+        active_source_ids = []
+    if len(set(active_source_ids)) != len(active_source_ids):
+        errors.append("activation manifest: base inventory has duplicate active_source_ids")
+    compiled_source_ids = {item["source_id"] for item in data["items"]}
+    if set(active_source_ids) != compiled_source_ids:
+        errors.append("activation manifest: base inventory ids do not exactly match compiled registry")
+    inventory["active_source_ids"] = sorted(active_source_ids)
+    inventory["active_source_count"] = len(active_source_ids)
+    source_rule_ids = base_inventory.get("source_rule_ids") if isinstance(base_inventory, dict) else None
+    if not isinstance(source_rule_ids, dict):
+        errors.append("activation manifest: base inventory requires source_rule_ids")
+        source_rule_ids = {}
+    if set(source_rule_ids) != compiled_source_ids:
+        errors.append("activation manifest: source_rule_ids do not exactly match compiled registry")
+    for source_id, rule_id in source_rule_ids.items():
+        if (not isinstance(rule_id, str) or len(rule_id) != 36
+                or rule_id[8:9] != "-" or rule_id[13:14] != "-"
+                or rule_id[18:19] != "-" or rule_id[23:24] != "-"
+                or any(char not in "0123456789abcdef-" for char in rule_id)):
+            errors.append(f"activation manifest: source_rule_ids[{source_id!r}] must be a lowercase UUID")
+    inventory["source_rule_ids"] = {
+        source_id: source_rule_ids[source_id]
+        for source_id in sorted(source_rule_ids)
+        if source_id in compiled_source_ids
+    }
+
+    constitution = list(constitution_guidance_ids)
+    if (not constitution or any(not isinstance(guidance_id, str) or not guidance_id
+                               for guidance_id in constitution)):
+        errors.append("activation manifest: constitution_guidance_ids must be a non-empty string array")
+    if len(set(constitution)) != len(constitution):
+        errors.append("activation manifest: constitution_guidance_ids must be unique")
+    compiled_guidance_ids = {item["guidance_id"] for item in data["items"]}
+    unknown_constitution = sorted(set(constitution) - compiled_guidance_ids)
+    if unknown_constitution:
+        errors.append("activation manifest: constitution ids absent from compiled registry: "
+                      + ", ".join(unknown_constitution))
+    nonprimary_constitution = sorted(
+        item["guidance_id"] for item in data["items"]
+        if item["guidance_id"] in constitution and not item.get("is_primary"))
+    if nonprimary_constitution:
+        errors.append("activation manifest: constitution ids must select primary guidance: "
+                      + ", ".join(nonprimary_constitution))
+    if errors:
+        return {}, errors
+
+    doctrine_ids = {
+        item["guidance_id"] for item in data["items"]
+        if item["guidance_type"] == "doctrine"
+    }
+    if not isinstance(situation_mapping_bindings, dict) or set(situation_mapping_bindings) != doctrine_ids:
+        missing = sorted(doctrine_ids - set(situation_mapping_bindings or {}))
+        extra = sorted(set(situation_mapping_bindings or {}) - doctrine_ids)
+        errors.append("activation manifest: situation bindings must exactly cover doctrine guidance"
+                      + (f"; missing={','.join(missing)}" if missing else "")
+                      + (f"; extra={','.join(extra)}" if extra else ""))
+    def valid_uuid(value: Any) -> bool:
+        return (isinstance(value, str) and len(value) == 36
+                and value[8:9] == "-" and value[13:14] == "-"
+                and value[18:19] == "-" and value[23:24] == "-"
+                and all(char in "0123456789abcdef-" for char in value))
+    for guidance_id, bindings in (situation_mapping_bindings or {}).items():
+        if not isinstance(bindings, list) or not bindings:
+            errors.append(
+                f"activation manifest: doctrine bindings for {guidance_id} must be a non-empty array")
+            continue
+        for index, binding in enumerate(bindings, start=1):
+            if not isinstance(binding, dict):
+                errors.append(f"activation manifest: doctrine binding {guidance_id}[{index}] must be an object")
+                continue
+            for key in ("concept_id", "doctrine_section_id", "reason"):
+                if not _present(binding.get(key)):
+                    errors.append(f"activation manifest: doctrine binding {guidance_id}[{index}] missing {key}")
+            for key in ("concept_id", "doctrine_section_id"):
+                if not valid_uuid(binding.get(key)):
+                    errors.append(
+                        f"activation manifest: doctrine binding {guidance_id}[{index}] {key} must be a lowercase UUID")
+    if errors:
+        return {}, errors
+
+    rationale_by_source = {
+        analysis["source_id"]: analysis.get("rationale")
+        for analysis in data.get("source_analysis", [])
+        if isinstance(analysis, dict) and isinstance(analysis.get("source_id"), str)
+    }
+    entries = []
+    for ordinal, item in enumerate(
+            sorted(data["items"], key=lambda candidate: candidate["guidance_id"]), start=1):
+        source_id = item["source_id"]
+        activation = item["activation"]
+        delivery = item["delivery"]
+        if item["guidance_type"] == "doctrine":
+            bindings = sorted(
+                situation_mapping_bindings[item["guidance_id"]],
+                key=lambda binding: (binding["concept_id"], binding["doctrine_section_id"], binding["reason"]))
+            activation = {**activation, "situation_mappings": bindings}
+            delivery = {**delivery, "situation_concepts": bindings}
+        entries.append({
+            "ordinal": ordinal,
+            "guidance_id": item["guidance_id"],
+            "source_rule_id": source_rule_ids[source_id],
+            "source_clause": item["source_clause"],
+            "is_primary": item["is_primary"],
+            "split_group_key": item.get("split_group_id"),
+            "guidance_type": item["guidance_type"],
+            "scope": item["scope"],
+            "activation": activation,
+            "consumer": item["consumer"],
+            "verification": item["verification"],
+            "provenance": item["provenance"],
+            "delivery": delivery,
+            "lifecycle": {"version": item["lifecycle"]["version"]},
+            "is_constitution": item["guidance_id"] in constitution,
+            "reason": (rationale_by_source.get(source_id)
+                       or item["provenance"]["classification_basis"]),
+        })
+    payload = {
+        "schema": ACTIVATION_MANIFEST_SCHEMA,
+        "canonicalization": ACTIVATION_MANIFEST_CANONICALIZATION,
+        "registry": {
+            "name": data["registry"],
+            "schema_version": data["schema_version"],
+        },
+        "source_manifest": source_manifest,
+        "base_inventory": inventory,
+        "constitution_guidance_ids": sorted(constitution),
+        "constitution_source_rule_ids": sorted({
+            source_rule_ids[item["source_id"]]
+            for item in data["items"] if item["guidance_id"] in constitution
+        }),
+        "entries": entries,
+    }
+    return payload, []
+
+
+def activation_manifest_bytes(manifest: dict[str, Any]) -> bytes:
+    """Return the named portable digest preimage for an activation manifest."""
+    if not isinstance(manifest, dict):
+        raise ValueError("activation manifest must be an object")
+    if manifest.get("schema") != ACTIVATION_MANIFEST_SCHEMA:
+        raise ValueError("activation manifest has unsupported schema")
+    if manifest.get("canonicalization") != ACTIVATION_MANIFEST_CANONICALIZATION:
+        raise ValueError("activation manifest has unsupported canonicalization")
+    return canonical_json_bytes(manifest)
 
 
 MANIFEST_FIELDS = (
