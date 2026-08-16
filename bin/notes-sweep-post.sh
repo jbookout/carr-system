@@ -63,7 +63,10 @@ if [ "${1:-}" = "--canary" ]; then
   [ "${CARR_CONTROL_PLANE_MODE:-}" = "canary" ] || { print -ru2 -- "notes canary requires CARR_CONTROL_PLANE_MODE=canary"; exit 78; }
   CANARY=1
   CF="${CARR_NOTES_CANARY_ENV:-$HOME/.config/carr/notes-canary.env}"
-  mode="$(/usr/bin/stat -f '%Lp' "$CF" 2>/dev/null || /usr/bin/stat -c '%a' "$CF" 2>/dev/null || true)"
+  # GNU stat accepts ``-f`` too, but gives filesystem data rather than BSD
+  # stat's numeric mode.  Use Python's portable mode API so Linux runners
+  # enforce the same 0600 contract as macOS.
+  mode="$(/usr/bin/python3 -c 'import os, stat, sys; print(format(stat.S_IMODE(os.stat(sys.argv[1]).st_mode), "o"))' "$CF" 2>/dev/null || true)"
   [ "$mode" = "600" ] || { print -ru2 -- "notes canary config must be 0600"; exit 78; }
   typeset -A ce; while IFS= read -r line || [ -n "$line" ]; do
     [ -z "$line" ] || [[ "$line" == \#* ]] && continue

@@ -28,6 +28,10 @@ def main() -> int:
         if not value:
             failed.append(label)
 
+    notes_source = NOTES.read_text(encoding="utf-8")
+    check("Notes canary permission probe is portable, not BSD-stat-specific",
+          "stat.S_IMODE" in notes_source and "/usr/bin/stat -f" not in notes_source)
+
     with tempfile.TemporaryDirectory(prefix="carr-canary-") as raw:
         tmp = Path(raw)
         home = tmp / "home"; home.mkdir()
