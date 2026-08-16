@@ -6,7 +6,7 @@
   "data_class": "D2_internal_metadata_only",
   "action_risk_registry": {
     "path": "control-room/contracts/action-risk-registry.v1.json",
-    "sha256": "c842c94c6ff26d4cacde7c6220886ba2c06da56c09bd6c30ba30d0ce72caeb7a"
+    "sha256": "473b0371e02092b386b387fcdc0ea6aa1ad39b669d8b82cad2b557868ccb3757"
   },
   "selected_slice": "set-lead",
   "dispositions": [

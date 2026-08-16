@@ -13,7 +13,7 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 28,
+  "human_boundary": 29,
   "append_only": 35,
   "read_only": 38,
   "optimistic_concurrency": 17,
@@ -1377,6 +1377,19 @@
     "upserts": 0
    },
    "does": "Undo one Deal Room field change only when it is still the latest change to that exact field"
+  },
+  "review-and-triage": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "HUMAN-ONLY: classify one sourced captured Work Request and make its sole allowed transition, captured to triaged"
   },
   "review-deal": {
    "protection": "upsert_last_writer_wins",
