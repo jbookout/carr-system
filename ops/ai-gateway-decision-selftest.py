@@ -137,6 +137,20 @@ class GatewayDecisionTests(unittest.TestCase):
         stale["evidence_bindings"][0]["sha256"] = "0" * 64
         self.assert_rejected(stale)
 
+    def test_refuses_boolean_and_float_integer_lookalikes(self):
+        for field, mutate in (
+            ("schema_version", lambda artifact, value: artifact.update(schema_version=value)),
+            (
+                "comparison.provider_evidence_count",
+                lambda artifact, value: artifact["comparison"].update(provider_evidence_count=value),
+            ),
+        ):
+            for value in (True, 1.0):
+                with self.subTest(field=field, value=repr(value)):
+                    malformed = self.valid()
+                    mutate(malformed, value)
+                    self.assert_rejected(malformed)
+
     def test_refuses_provider_claims_that_do_not_exactly_project_the_observed_run(self):
         for field, value in (
             ("provider_id", CANARY),

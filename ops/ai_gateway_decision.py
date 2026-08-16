@@ -85,6 +85,11 @@ def _nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _exact_integer(value: Any, expected: int) -> bool:
+    """JSON booleans and floats must not satisfy integer contract fields."""
+    return type(value) is int and value == expected
+
+
 def _repo_file(relative_path: str) -> Path:
     target = (ROOT / relative_path).resolve()
     if ROOT.resolve() not in target.parents or not target.is_file():
@@ -179,7 +184,7 @@ def validate_gateway_decision(artifact: Any) -> dict[str, Any]:
     """Fail closed unless a decision exactly records the current D1 evidence."""
     document = _exact_object(artifact, ARTIFACT_FIELDS, "gateway decision fields are invalid")
     if (
-        document["schema_version"] != 1
+        not _exact_integer(document["schema_version"], 1)
         or document["artifact_type"] != "synthetic_ai_gateway_evidence_decision"
         or document["data_class"] != "synthetic_only"
         or document["execution"] != "offline_deterministic"
@@ -193,11 +198,14 @@ def validate_gateway_decision(artifact: Any) -> dict[str, Any]:
     provider_evidence = _validate_provider_evidence(document["provider_evidence"], bindings)
     _validate_bound_d1_evidence(bindings)
     comparison = _exact_object(document["comparison"], COMPARISON_FIELDS, "gateway comparison fields are invalid")
-    if comparison != {
-        "status": "unavailable",
-        "reason": "insufficient_pinned_provider_evidence",
-        "provider_evidence_count": 1,
-    }:
+    if (
+        not _exact_integer(comparison["provider_evidence_count"], 1)
+        or comparison != {
+            "status": "unavailable",
+            "reason": "insufficient_pinned_provider_evidence",
+            "provider_evidence_count": 1,
+        }
+    ):
         raise GatewayDecisionError("gateway comparison evidence is unavailable or insufficient")
     if document["decision"] != "declined":
         raise GatewayDecisionError("gateway adoption prerequisites are not met")
