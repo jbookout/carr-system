@@ -163,7 +163,11 @@ def registry_prefix_coverage():
 
 def authority_family_coverage():
     """Human-only acceptance/retirement and future proposal/approval writes stay gated."""
-    actions = ["accept-workflow", "disable-legacy-schedule", "approve-work-request", "propose-cognition-job"]
+    actions = [
+        "accept-workflow", "disable-legacy-schedule", "approve-work-request",
+        "propose-cognition-job", "decide-guidance-import-batch",
+        "deactivate-guidance-registry",
+    ]
     missing = [action for action in actions if not mod.is_write_action(action)]
     ok = not missing
     print(f"{'PASS' if ok else 'FAIL'}  authority workflow family coverage"

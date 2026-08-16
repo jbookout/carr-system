@@ -36,6 +36,10 @@ tools/ops-record.py with no database at all.
 
   6. `release require` DEMANDS ITS SHA and refuses without one, so a wrapper
      that loses the variable gets an error rather than a pass.
+
+  7. THE PRINTED ROLLBACK COMMAND USES THE REAL FLAG. A failure message is an
+     operational instruction; it must name `--release-sha`, not a stale flag
+     that the deploy wrapper refuses.
 """
 
 import re
@@ -110,6 +114,11 @@ def main() -> int:
     check("6. `release require` refuses with no --sha",
           out.returncode == 2 and "needs --sha" in (out.stderr + out.stdout),
           f"rc={out.returncode} err={out.stderr.strip()[:120]}")
+
+    check("7. rollback instruction uses the accepted release flag",
+          "Rolling back is bin/deploy-worker.sh --release-sha <sha>." in source
+          and "--pinned-release" not in source,
+          "failure output names a flag the wrapper does not accept")
 
     print()
     if FAILURES:

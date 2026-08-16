@@ -9,6 +9,7 @@ survive an acceptance run.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import uuid
@@ -22,6 +23,9 @@ TABLES = (
     "ops.guidance_registry", "ops.guidance_item", "ops.guidance_revision",
     "ops.guidance_authority_binding", "ops.guidance_lifecycle_event",
     "ops.guidance_situation_mapping", "ops.guidance_registry_event",
+    "ops.guidance_import_batch", "ops.guidance_import_entry",
+    "ops.guidance_import_apply_event", "ops.guidance_import_mapping_execution",
+    "ops.guidance_import_decision_event",
 )
 FUNCTIONS = (
     "ops.guidance_revision_contract_hash(uuid)",
@@ -31,7 +35,40 @@ FUNCTIONS = (
     "ops.assert_guidance_registry_coverage()",
     "ops.standing_guidance(text,text,text,text)",
     "ops.activate_guidance_registry(uuid,text,text,text)",
+    "ops.guidance_import_manifest_digest(text)",
+    "ops.stage_guidance_import_batch(text,text,uuid,text,text)",
+    "ops.apply_guidance_import_batch(uuid,text,text,text)",
+    "ops.decide_guidance_import_batch(uuid,text,text,text,text)",
+    "ops.deactivate_guidance_registry(uuid,text,text,text)",
 )
+
+# These are the reader-facing typed-guidance delivery surfaces.  State and
+# event-history views are deliberately not included: deactivation withdraws
+# guidance delivery, not the immutable evidence that it was once approved.
+READ_SURFACES = (
+    ("v_guidance_current", "select count(*) from ops.v_guidance_current"),
+    ("v_guidance_constraint", "select count(*) from ops.v_guidance_constraint"),
+    ("v_guidance_procedure", "select count(*) from ops.v_guidance_procedure"),
+    ("v_guidance_rubric", "select count(*) from ops.v_guidance_rubric"),
+    ("v_guidance_preference", "select count(*) from ops.v_guidance_preference"),
+    ("v_guidance_precedent", "select count(*) from ops.v_guidance_precedent"),
+    ("v_guidance_example", "select count(*) from ops.v_guidance_example"),
+    ("v_guidance_situation_mapping_current",
+     "select count(*) from ops.v_guidance_situation_mapping_current"),
+    ("v_guidance_doctrine_retrieval",
+     "select count(*) from ops.v_guidance_doctrine_retrieval"),
+    ("v_guidance_projection_summary",
+     "select count(*) from ops.v_guidance_projection_summary"),
+    ("standing_guidance",
+     "select count(*) from ops.standing_guidance('joe',null,null,null)"),
+)
+
+READER_GRANTED_SURFACES = frozenset({
+    "v_guidance_current", "v_guidance_constraint", "v_guidance_procedure",
+    "v_guidance_rubric", "v_guidance_preference", "v_guidance_precedent",
+    "v_guidance_example", "v_guidance_doctrine_retrieval",
+    "v_guidance_projection_summary", "standing_guidance",
+})
 
 
 def fail(message: str) -> NoReturn:
@@ -43,6 +80,17 @@ def one(cur: psycopg.Cursor[Any], query: str, params: tuple[Any, ...] = ()) -> A
     if row is None:
         fail(f"expected one row: {query}")
     return row[0]
+
+
+def guidance_read_surface_counts(cur: psycopg.Cursor[Any]) -> dict[str, int]:
+    """Return every reader-facing delivery count under the present registry state."""
+    return {name: int(one(cur, query)) for name, query in READ_SURFACES}
+
+
+def assert_guidance_read_surfaces_empty(cur: psycopg.Cursor[Any], label: str) -> None:
+    visible = {name: count for name, count in guidance_read_surface_counts(cur).items() if count}
+    if visible:
+        fail(f"{label} still exposes typed guidance: {visible}")
 
 
 def refuses(cur: psycopg.Cursor[Any], query: str, params: tuple[Any, ...], label: str) -> None:
@@ -91,6 +139,14 @@ def item(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> Any:
 
 
 def rule_item(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> Any:
+    rule_id = active_rule_source(cur, actor_id, suffix)
+    return one(cur, """insert into ops.guidance_item
+        (source_rule_id,source_clause,created_by)
+        values (%s,%s,%s) returning id""", (rule_id, f"clause {suffix}", actor_id))
+
+
+def active_rule_source(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> Any:
+    """Create an admitted active rule without pre-creating Guidance rows."""
     rule_id = one(cur, """insert into rule
         (statement,taught_by,scope,status,enforcement)
         values (%s,%s,'{}'::jsonb,'proposed','prose') returning id""",
@@ -109,9 +165,7 @@ def rule_item(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> Any:
         (rule_id, intake_id, actor_id))
     cur.execute("""update rule set status='active',activated_by=%s,activated_at=now()
         where id=%s""", (actor_id, rule_id))
-    return one(cur, """insert into ops.guidance_item
-        (source_rule_id,source_clause,created_by)
-        values (%s,%s,%s) returning id""", (rule_id, f"clause {suffix}", actor_id))
+    return rule_id
 
 
 def revision(cur: psycopg.Cursor[Any], item_id: Any, actor_id: Any, kind: str = "procedure",
@@ -135,9 +189,31 @@ def revision(cur: psycopg.Cursor[Any], item_id: Any, actor_id: Any, kind: str = 
             "example": "example_retrieval",
         }[kind]
     }
-    if kind == "doctrine":
+    if kind == "constraint":
+        control_key = f"guidance-db-gate-{uuid.uuid4()}"
+        implementation_ref = "migrations/0168_guidance_registry.sql"
+        test_ref = "ops/guidance-registry-db-gate.py"
+        source_rule_id = one(
+            cur, "select source_rule_id from ops.guidance_item where id=%s", (item_id,))
+        if source_rule_id is None:
+            fail("constraint fixture requires a rule-backed guidance item")
+        cur.execute("""insert into ops.rule_enforcement_point
+            (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed)
+            values (%s,%s,%s,%s,'transactional_schema',true)""",
+                    (source_rule_id, control_key, implementation_ref, test_ref))
+        delivery.update({
+            "enforcement_control": control_key,
+            "evidence": [implementation_ref],
+            "tests": [test_ref],
+        })
+    elif kind == "doctrine":
         activation["situation_mappings"] = ["db-gate"]
         delivery["projection"] = "doctrine_retrieval"
+    elif kind == "rubric":
+        verification.update({
+            "verifier": "database acceptance gate",
+            "acceptance_criteria": ["fixture reaches the active rubric projection"],
+        })
     return one(cur, """insert into ops.guidance_revision
         (guidance_item_id,version,guidance_type,scope,activation,consumer,
          verification,provenance,delivery,is_constitution,classified_by,reason)
@@ -160,6 +236,78 @@ def refuses_revision(cur: psycopg.Cursor[Any], item_id: Any, actor_id: Any,
     fail(f"{label} unexpectedly succeeded")
 
 
+def import_manifest(cur: psycopg.Cursor[Any]) -> tuple[str, str]:
+    """Build a complete rollback-only v1 artifact from the fresh rule inventory.
+
+    The fixture intentionally classifies every current rule as a procedure so
+    it exercises the import/authority contract without claiming that this is
+    the reviewed production classification.  It is rolled back with the gate.
+    """
+    rule_ids = [str(row[0]) for row in cur.execute(
+        "select id from rule where status='active' order by id").fetchall()]
+    if len(rule_ids) < 5:
+        fail("import fixture requires at least five active rules")
+    source_rule_ids = {rule_id[:8]: rule_id for rule_id in rule_ids}
+    if len(source_rule_ids) != len(rule_ids):
+        fail("active rule UUID prefixes are unexpectedly ambiguous")
+    entries: list[dict[str, Any]] = []
+    for ordinal, short_id in enumerate(sorted(source_rule_ids), start=1):
+        rule_id = source_rule_ids[short_id]
+        guidance_id = f"db-gate-{short_id}-v1"
+        entries.append({
+            "ordinal": ordinal,
+            "guidance_id": guidance_id,
+            "source_rule_id": rule_id,
+            "source_clause": "whole",
+            "is_primary": True,
+            "split_group_key": None,
+            "guidance_type": "procedure",
+            "scope": {"tenant": "carr", "actor": "all"},
+            "activation": {
+                "trigger": "rollback-only import fixture",
+                "entry_condition": "database gate transaction is open",
+                "situation_mappings": [],
+            },
+            "consumer": "guidance registry database gate",
+            "verification": {
+                "mechanism": "rollback-only import fixture",
+                "completion_condition": "import gate passed",
+            },
+            "provenance": {"source": "rule", "preserve_source_record": True},
+            "delivery": {"projection": "procedure_workflow", "situation_concepts": []},
+            "lifecycle": {"version": 1},
+            "is_constitution": ordinal <= 5,
+            "reason": "rollback-only exact import lifecycle fixture",
+        })
+    constitution = [entry["guidance_id"] for entry in entries if entry["is_constitution"]]
+    constitution_source_ids = [entry["source_rule_id"] for entry in entries if entry["is_constitution"]]
+    payload = {
+        "schema": "guidance-activation-manifest/v1",
+        "canonicalization": "utf8-json-sort-keys-compact-newline/v1",
+        "source_manifest": {
+            "path": "audits/guidance-migration-manifest.v1.tsv",
+            "sha256": "1" * 64,
+            "manifest": "carr-guidance-migration",
+            "schema_version": "1.0.0",
+            "source_classification": "judgment_ambient",
+            "entry_count": 93,
+        },
+        "base_inventory": {
+            "path": "ops/guidance-source-map.json",
+            "sha256": "2" * 64,
+            "active_source_ids": sorted(source_rule_ids),
+            "active_source_count": len(source_rule_ids),
+            "source_rule_ids": source_rule_ids,
+        },
+        "constitution_guidance_ids": constitution,
+        "constitution_source_rule_ids": constitution_source_ids,
+        "entries": entries,
+    }
+    artifact = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                          separators=(",", ":"), allow_nan=False) + "\n"
+    return artifact, hashlib.sha256(artifact.encode("utf-8")).hexdigest()
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
@@ -174,6 +322,26 @@ def main() -> int:
                 for function in FUNCTIONS:
                     if one(cur, "select to_regprocedure(%s)", (function,)) is None:
                         fail(f"missing function {function}")
+                for surface, _ in READ_SURFACES:
+                    if surface not in READER_GRANTED_SURFACES:
+                        continue
+                    if surface == "standing_guidance":
+                        if not one(cur, "select has_function_privilege('carr_reader',%s::regprocedure,'execute')",
+                                   ("ops.standing_guidance(text,text,text,text)",)):
+                            fail("carr_reader cannot execute standing_guidance")
+                    elif not one(cur, "select has_table_privilege('carr_reader',%s,'select')",
+                                 (f"ops.{surface}",)):
+                        fail(f"carr_reader cannot read delivery surface ops.{surface}")
+                for materialization_view in (
+                    "ops.v_guidance_materialized_current",
+                    "ops.v_guidance_materialized_situation_mapping_current",
+                ):
+                    if one(cur, "select to_regclass(%s)", (materialization_view,)) is None:
+                        fail(f"missing private materialization view {materialization_view}")
+                    for role in ("public", "carr_reader", "carr_writer", "carr_authority"):
+                        if one(cur, "select has_table_privilege(%s,%s,'select')",
+                               (role, materialization_view)):
+                            fail(f"{role} can bypass the registry delivery fence via {materialization_view}")
 
                 # A proposal writer can construct drafts, but it may not mint
                 # authority evidence, lifecycle state, active mappings, or a
@@ -184,7 +352,11 @@ def main() -> int:
                         fail(f"carr_writer can insert {relation} directly")
                 for function in ("ops.record_guidance_decision(uuid,text,text,text)",
                                  "ops.activate_guidance_situation_mapping(uuid,uuid,text)",
-                                 "ops.activate_guidance_registry(uuid,text,text,text)"):
+                                 "ops.activate_guidance_registry(uuid,text,text,text)",
+                                 "ops.decide_guidance_import_batch(uuid,text,text,text,text)",
+                                 "ops.deactivate_guidance_registry(uuid,text,text,text)",
+                                 "ops.assert_guidance_import_materialization(uuid)",
+                                 "ops.assert_guidance_registry_coverage()"):
                     if one(cur, "select has_function_privilege('carr_writer',%s::regprocedure,'execute')", (function,)):
                         fail(f"carr_writer can execute authority function {function}")
                     if one(cur, "select has_function_privilege('public',%s::regprocedure,'execute')", (function,)):
@@ -194,12 +366,25 @@ def main() -> int:
                 # otherwise a caller can shadow objects through search_path.
                 for function in ("ops.record_guidance_decision(uuid,text,text,text)",
                                  "ops.activate_guidance_situation_mapping(uuid,uuid,text)",
-                                 "ops.activate_guidance_registry(uuid,text,text,text)"):
+                                 "ops.activate_guidance_registry(uuid,text,text,text)",
+                                 "ops.decide_guidance_import_batch(uuid,text,text,text,text)",
+                                 "ops.deactivate_guidance_registry(uuid,text,text,text)"):
                     definition = str(one(cur, "select pg_get_functiondef(%s::regprocedure)", (function,))).lower()
                     if ("security definer" not in definition
                             or "search_path" not in definition
                             or "pg_temp" not in definition):
                         fail(f"{function} is not a pinned security-definer authority boundary")
+
+                for function in ("ops.stage_guidance_import_batch(text,text,uuid,text,text)",
+                                 "ops.apply_guidance_import_batch(uuid,text,text,text)"):
+                    if not one(cur, "select has_function_privilege('carr_writer',%s::regprocedure,'execute')", (function,)):
+                        fail(f"carr_writer cannot execute required import function {function}")
+                    if one(cur, "select has_function_privilege('public',%s::regprocedure,'execute')", (function,)):
+                        fail(f"PUBLIC can execute import function {function}")
+                for function in ("ops.decide_guidance_import_batch(uuid,text,text,text,text)",
+                                 "ops.deactivate_guidance_registry(uuid,text,text,text)"):
+                    if not one(cur, "select has_function_privilege('carr_authority',%s::regprocedure,'execute')", (function,)):
+                        fail(f"carr_authority cannot execute {function}")
 
                 # The real deployment provisions this login externally.  CI's
                 # fresh cluster does not, so create it transactionally and use
@@ -214,8 +399,121 @@ def main() -> int:
                 end $$""")
                 cur.execute("grant carr_authority to carr_authority_joe")
                 cur.execute("grant carr_authority to carr_authority_dell")
+                cur.execute("""do $$ begin
+                  execute format('grant carr_authority_joe,carr_authority_dell to %I', current_user);
+                end $$""")
 
                 actor_id = one(cur, "select id from actor where slug='joe' and kind='human'")
+                codex_actor = one(cur, "select id from actor where slug='codex' and kind='automation'")
+                raw_manifest = '{"schema":"guidance-activation-manifest/v1"}\n'
+                manifest_digest = hashlib.sha256(raw_manifest.encode("utf-8")).hexdigest()
+                if one(cur, "select ops.guidance_import_manifest_digest(%s)", (raw_manifest,)) != manifest_digest:
+                    fail("guidance import digest does not bind exact UTF-8 artifact bytes")
+                # A supplied digest alone is not an import: the full compiler
+                # artifact, source inventory, constitution and entry contracts
+                # are mandatory and a human actor cannot stage it.
+                refuses(cur, "select ops.stage_guidance_import_batch(%s,%s,%s,%s,%s)",
+                         (manifest_digest, raw_manifest, codex_actor,
+                          f"db-gate-invalid-import-{uuid.uuid4()}", "invalid fixture"),
+                         "incomplete import manifest staging")
+                refuses(cur, "select ops.stage_guidance_import_batch(%s,%s,%s,%s,%s)",
+                         (manifest_digest, raw_manifest, actor_id,
+                          f"db-gate-human-import-{uuid.uuid4()}", "invalid fixture"),
+                         "human actor staging import")
+
+                # Full positive lifecycle: the writer stages and applies one
+                # complete canonical artifact, then only Joe's authority
+                # session can approve its exact revisions, activate the
+                # registry, and later deactivate it using the same digest.
+                registry_id = one(cur, "select id from ops.guidance_registry where singleton")
+                for number in range(5):
+                    active_rule_source(cur, actor_id, f"import-source-{number}-{uuid.uuid4().hex}")
+                artifact, import_digest = import_manifest(cur)
+                # The staged bytes, not merely their parsed JSON value, are
+                # the reviewed preimage.  The compiler's named contract is
+                # sorted, compact, literal-UTF-8 JSON plus one final LF.
+                # These semantically identical alternatives must therefore
+                # fail before an import row can be written.
+                parsed_artifact = json.loads(artifact)
+                pretty_artifact = json.dumps(parsed_artifact, ensure_ascii=False, indent=2) + "\n"
+                if pretty_artifact == artifact:
+                    fail("noncanonical pretty fixture unexpectedly matched canonical artifact")
+                refuses(cur, "select ops.stage_guidance_import_batch(%s,%s,%s,%s,%s)",
+                         (hashlib.sha256(pretty_artifact.encode("utf-8")).hexdigest(), pretty_artifact,
+                          codex_actor, f"db-gate-import-pretty-{uuid.uuid4()}", "noncanonical pretty fixture"),
+                         "pretty or unsorted import artifact staging")
+                unicode_artifact_value = json.loads(artifact)
+                unicode_artifact_value["entries"][0]["reason"] = "caf\u00e9 canonical fixture"
+                unicode_canonical = json.dumps(
+                    unicode_artifact_value, sort_keys=True, ensure_ascii=False,
+                    separators=(",", ":"), allow_nan=False) + "\n"
+                unicode_escaped = json.dumps(
+                    unicode_artifact_value, sort_keys=True, ensure_ascii=True,
+                    separators=(",", ":"), allow_nan=False) + "\n"
+                if unicode_canonical == unicode_escaped:
+                    fail("escaped-unicode fixture unexpectedly matched literal UTF-8 artifact")
+                if one(cur, "select ops.guidance_import_canonical_json(%s::jsonb)",
+                       (unicode_canonical,)) != unicode_canonical[:-1]:
+                    fail("database canonical renderer differs from the portable compiler contract")
+                refuses(cur, "select ops.stage_guidance_import_batch(%s,%s,%s,%s,%s)",
+                         (hashlib.sha256(unicode_escaped.encode("utf-8")).hexdigest(), unicode_escaped,
+                          codex_actor, f"db-gate-import-escaped-{uuid.uuid4()}", "escaped unicode fixture"),
+                         "escaped-unicode import artifact staging")
+                stage_key = f"db-gate-import-stage-{uuid.uuid4()}"
+                batch_id = one(cur, "select ops.stage_guidance_import_batch(%s,%s,%s,%s,%s)",
+                               (import_digest, artifact, codex_actor, stage_key,
+                                "rollback-only complete import stage"))
+                if one(cur, "select ops.stage_guidance_import_batch(%s,%s,%s,%s,%s)",
+                       (import_digest, artifact, codex_actor, stage_key,
+                        "rollback-only complete import stage")) != batch_id:
+                    fail("identical guidance import stage replay returned another batch")
+                refuses(cur, "select ops.stage_guidance_import_batch(%s,%s,%s,%s,%s)",
+                         ("f" * 64, artifact, codex_actor, f"db-gate-import-hash-{uuid.uuid4()}",
+                          "wrong digest"), "wrong import digest staging")
+                apply_key = f"db-gate-import-apply-{uuid.uuid4()}"
+                apply_id = one(cur, "select ops.apply_guidance_import_batch(%s,%s,%s,%s)",
+                               (batch_id, import_digest, apply_key,
+                                "rollback-only complete import apply"))
+                if one(cur, "select ops.apply_guidance_import_batch(%s,%s,%s,%s)",
+                       (batch_id, import_digest, apply_key,
+                        "rollback-only complete import apply")) != apply_id:
+                    fail("identical guidance import apply replay returned another event")
+                authority_refuses(cur, "select ops.decide_guidance_import_batch(%s,%s,%s,%s,%s)",
+                                  (batch_id, import_digest, "active", f"db-gate-import-dell-{uuid.uuid4()}",
+                                   "wrong actor"), "Dell authority approved Joe-owned import", actor="dell")
+                decision_key = f"db-gate-import-decide-{uuid.uuid4()}"
+                decision_id = authority_one(
+                    cur, "select ops.decide_guidance_import_batch(%s,%s,%s,%s,%s)",
+                    (batch_id, import_digest, "active", decision_key,
+                     "Joe approves rollback-only complete import"))
+                if authority_one(cur, "select ops.decide_guidance_import_batch(%s,%s,%s,%s,%s)",
+                                 (batch_id, import_digest, "active", decision_key,
+                                  "Joe approves rollback-only complete import")) != decision_id:
+                    fail("identical guidance import decision replay returned another event")
+                authority_refuses(cur, "select ops.decide_guidance_import_batch(%s,%s,%s,%s,%s)",
+                                  (batch_id, "e" * 64, "active", f"db-gate-import-wrong-hash-{uuid.uuid4()}",
+                                   "wrong digest"), "wrong import digest decision")
+                activation_key = f"db-gate-import-registry-{uuid.uuid4()}"
+                activation_id = authority_one(
+                    cur, "select ops.activate_guidance_registry(%s,%s,%s,%s)",
+                    (registry_id, import_digest, activation_key,
+                     "activate exact rollback-only import"))
+                if authority_one(cur, "select ops.activate_guidance_registry(%s,%s,%s,%s)",
+                                 (registry_id, import_digest, activation_key,
+                                  "activate exact rollback-only import")) != activation_id:
+                    fail("identical exact registry activation replay returned another event")
+                authority_refuses(cur, "select ops.activate_guidance_registry(%s,%s,%s,%s)",
+                                  (registry_id, "0" * 64, activation_key,
+                                   "activate exact rollback-only import"),
+                                  "registry activation idempotency digest mismatch")
+                if not one(cur, "select exists(select 1 from ops.v_guidance_registry_state "
+                                "where registry_id=%s and state='active' and manifest_digest=%s)",
+                           (registry_id, import_digest)):
+                    fail("exact import did not activate the registry")
+                active_history_count = one(cur, "select count(*) from ops.v_guidance_revision_state "
+                                                "where lifecycle_status='active'")
+                if active_history_count == 0:
+                    fail("active registry fixture has no immutable active lifecycle history")
                 procedure_item = item(cur, actor_id, uuid.uuid4().hex)
                 procedure_revision = revision(cur, procedure_item, actor_id)
                 contract_hash = one(cur, "select ops.guidance_revision_contract_hash(%s)", (procedure_revision,))
@@ -350,11 +648,38 @@ def main() -> int:
                     fail(f"approved doctrine revision did not reach the situation bridge: {diagnostics}")
                 cur.execute("select * from ops.standing_guidance('joe',null,null,null)").fetchall()
 
+                # Populate every remaining typed delivery projection so the
+                # deactivation assertion proves a transition from visible to
+                # empty, rather than merely observing a view that was already
+                # empty in this rollback-only fixture.
+                for kind in ("constraint", "rubric", "preference", "example"):
+                    typed_revision = revision(
+                        cur, rule_item(cur, actor_id, f"active-{kind}-{uuid.uuid4().hex}"),
+                        actor_id, kind)
+                    authority_one(
+                        cur, "select ops.record_guidance_decision(%s,'active',%s,%s)",
+                        (typed_revision, f"db-gate-active-{kind}-{uuid.uuid4()}",
+                         f"activate {kind} delivery fixture"))
+                inactive_while_active = {
+                    name: count for name, count in guidance_read_surface_counts(cur).items()
+                    if count == 0
+                }
+                if inactive_while_active:
+                    fail(f"active registry has unexercised delivery surfaces: {inactive_while_active}")
+
                 registry_id = one(cur, "select id from ops.guidance_registry where singleton")
+                authority_refuses(cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
+                                  (registry_id, "d" * 64, f"db-gate-inactive-{uuid.uuid4()}",
+                                   "must not deactivate an inactive registry"),
+                                  "registry deactivation without an active exact digest")
+                authority_refuses(cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
+                                  (registry_id, "d" * 64, f"db-gate-dell-deactivate-{uuid.uuid4()}",
+                                   "wrong actor"),
+                                  "Dell authority deactivated Joe-owned registry", actor="dell")
                 constitution_count = one(cur, "select count(*) from ops.v_guidance_current where is_constitution")
-                if constitution_count > 5:
-                    fail("activation fixture inherited more than five constitution rows")
-                for number in range(5 - constitution_count):
+                if constitution_count > 10:
+                    fail("activation fixture exceeds the ten-row constitution ceiling")
+                for number in range(max(0, 5 - constitution_count)):
                     approved_revision = revision(
                         cur, rule_item(cur, actor_id, f"activation-constitution-{uuid.uuid4().hex}"),
                         actor_id, is_constitution=True)
@@ -362,8 +687,10 @@ def main() -> int:
                         cur, "select ops.record_guidance_decision(%s,'active',%s,%s)",
                         (approved_revision, f"db-gate-activation-constitution-{number}-{uuid.uuid4()}",
                          "activation constitution fixture"))
-                if one(cur, "select count(*) from ops.v_guidance_current where is_constitution") != 5:
-                    fail("registry activation fixture did not create five active constitution rows")
+                constitution_count = one(
+                    cur, "select count(*) from ops.v_guidance_current where is_constitution")
+                if not 5 <= constitution_count <= 10:
+                    fail("registry activation fixture is outside the five-to-ten constitution range")
 
                 # Build a complete rollback-only target state through the real
                 # lifecycle path.  The positive activation case must pass the
@@ -396,31 +723,15 @@ def main() -> int:
                 activation_key = f"db-gate-registry-active-{uuid.uuid4()}"
                 manifest_digest = "b" * 64
                 activation_reason = "full reviewed activation fixture"
-                activation_event = authority_one(
-                    cur, "select ops.activate_guidance_registry(%s,%s,%s,%s)",
-                    (registry_id, manifest_digest, activation_key, activation_reason))
-                receipt = cur.execute("""select ar.subject_type,ar.subject_id,ar.actor_id,
-                           ar.contract_hash,ar.decision,ge.manifest_digest,ge.reason
-                      from ops.authority_receipt ar
-                      join ops.guidance_registry_event ge on ge.authority_receipt_id=ar.id
-                     where ge.id=%s""", (activation_event,)).fetchone()
-                if receipt != ("guidance", registry_id, actor_id, manifest_digest, "approved",
-                               manifest_digest, activation_reason):
-                    fail(f"registry activation receipt is not exact/session-bound: {receipt}")
-                replay_event = authority_one(
-                    cur, "select ops.activate_guidance_registry(%s,%s,%s,%s)",
-                    (registry_id, manifest_digest, activation_key, activation_reason))
-                if replay_event != activation_event:
-                    fail("identical registry activation replay returned another event")
-                if one(cur, "select count(*) from ops.guidance_registry_event where authority_receipt_id in "
-                           "(select id from ops.authority_receipt where idempotency_key=%s)",
-                       (activation_key,)) != 1:
-                    fail("registry activation replay wrote another event")
-                if not one(cur, "select exists(select 1 from ops.standing_guidance("
-                                "'joe',null,null,null) where source_rule_id="
-                                "(select source_rule_id from ops.guidance_item where id=%s))",
-                           (constitution_item,)):
-                    fail("rule-backed constitution did not reach standing_guidance after activation")
+                # A bare digest is deliberately no longer an activation
+                # preimage.  The authority route must name a staged, applied,
+                # human-approved compiler artifact with exact materialization.
+                receipts_before_manifest_refusal = one(cur, "select count(*) from ops.authority_receipt")
+                authority_refuses(cur, "select ops.activate_guidance_registry(%s,%s,%s,%s)",
+                                  (registry_id, manifest_digest, activation_key, activation_reason),
+                                  "registry activation without an exact staged manifest")
+                if one(cur, "select count(*) from ops.authority_receipt") != receipts_before_manifest_refusal:
+                    fail("manifest refusal minted a registry authority receipt")
                 authority_refuses(cur, "select ops.activate_guidance_registry(%s,%s,%s,%s)",
                                   (registry_id, manifest_digest, f"db-gate-dell-{uuid.uuid4()}",
                                    activation_reason),
@@ -460,6 +771,33 @@ def main() -> int:
                                   "registry activation without valid coverage")
                 if one(cur, "select count(*) from ops.authority_receipt") != receipts_before:
                     fail("coverage refusal minted a registry authority receipt")
+
+                # Deactivation is a delivery fence, not a history rewrite.
+                # Every reader-granted typed-guidance projection must empty,
+                # while the active lifecycle evidence and append-only registry
+                # events remain available for audit and an identical replay.
+                active_history_count = one(cur, "select count(*) from ops.v_guidance_revision_state "
+                                                "where lifecycle_status='active'")
+                registry_events_before_deactivation = one(
+                    cur, "select count(*) from ops.guidance_registry_event where registry_id=%s", (registry_id,))
+                deactivation_key = f"db-gate-import-deactivate-{uuid.uuid4()}"
+                deactivation_id = authority_one(
+                    cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
+                    (registry_id, import_digest, deactivation_key,
+                     "deactivate exact rollback-only import"))
+                if one(cur, "select state from ops.v_guidance_registry_state where registry_id=%s", (registry_id,)) != "inactive":
+                    fail("registry deactivation did not reversibly make the registry inactive")
+                assert_guidance_read_surfaces_empty(cur, "registry deactivation")
+                if one(cur, "select count(*) from ops.v_guidance_revision_state "
+                            "where lifecycle_status='active'") != active_history_count:
+                    fail("registry deactivation rewrote immutable active lifecycle history")
+                if one(cur, "select count(*) from ops.guidance_registry_event where registry_id=%s", (registry_id,)) != registry_events_before_deactivation + 1:
+                    fail("registry deactivation did not append exactly one immutable registry event")
+                if authority_one(cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
+                                 (registry_id, import_digest, deactivation_key,
+                                  "deactivate exact rollback-only import")) != deactivation_id:
+                    fail("registry deactivation replay returned another event after read-surface fence")
+                assert_guidance_read_surfaces_empty(cur, "registry deactivation replay")
             conn.rollback()
         print("PASS: guidance registry database gate (catalog, privilege, authority, validators, bridge, rollback)")
         return 0

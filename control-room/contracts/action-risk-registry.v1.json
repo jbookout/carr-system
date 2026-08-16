@@ -13,7 +13,7 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 26,
+  "human_boundary": 28,
   "append_only": 34,
   "read_only": 37,
   "optimistic_concurrency": 17,
@@ -442,6 +442,19 @@
    },
    "does": "Create one market transaction under a national account: reuse or create the named franchisee sub-client under the parent org, then create exactly one deal and o"
   },
+  "deactivate-guidance-registry": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Joe-only authority operation to deactivate the active typed Guidance Registry"
+  },
   "deal-board": {
    "protection": "read_only",
    "write": false,
@@ -467,6 +480,19 @@
     "upserts": 0
    },
    "does": "The Deal Room home read: Salesforce-linked work records plus their active/parked operating state, national-account portfolio summaries, current partner identity"
+  },
+  "decide-guidance-import-batch": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Joe-only authority decision for one staged typed-guidance import batch"
   },
   "decline-candidate": {
    "protection": "human_boundary",

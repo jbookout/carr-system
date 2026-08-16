@@ -27,13 +27,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "guidance_id", "source_id", "source_clause", "guidance_type", "scope",
+        "guidance_id", "source_id", "source_clause", "is_primary", "guidance_type", "scope",
         "activation", "consumer", "verification", "provenance", "lifecycle", "delivery"
       ],
       "properties": {
         "guidance_id": {"$ref": "#/$defs/nonEmptyString"},
         "source_id": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
         "source_clause": {"$ref": "#/$defs/nonEmptyString"},
+        "is_primary": {"type": "boolean"},
         "guidance_type": {"$ref": "#/$defs/guidanceType"},
         "split_group_id": {"$ref": "#/$defs/nonEmptyString"},
         "scope": {

@@ -6,7 +6,8 @@ import { authorityDsnForActor, callTool } from "../src/mcp.js";
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe", human: true, via: "test" };
 
 test("control-plane authority operations are explicit human authority verbs", () => {
-  for (const name of ["accept-workflow", "disable-legacy-schedule", "activate-guidance-registry"]) {
+  for (const name of ["accept-workflow", "disable-legacy-schedule", "activate-guidance-registry",
+    "decide-guidance-import-batch", "deactivate-guidance-registry"]) {
     assert.equal(TOOLS[name].humanOnly, true);
     assert.equal(TOOLS[name].authorityOnly, true);
   }
@@ -22,6 +23,8 @@ test("authority operation fails closed instead of falling back to writer credent
   for (const [name, args] of [
     ["accept-workflow", { idempotency_key: "authority-missing", workflow_key: "fixture", mode: "shadow", receipt_ref: "r" }],
     ["activate-guidance-registry", { idempotency_key: "authority-missing", registry_id: "10000000-0000-0000-0000-000000000001", manifest_digest: "a".repeat(64), reason: "fixture" }],
+    ["decide-guidance-import-batch", { idempotency_key: "authority-missing", batch_id: "10000000-0000-0000-0000-000000000001", manifest_digest: "a".repeat(64), reason: "fixture" }],
+    ["deactivate-guidance-registry", { idempotency_key: "authority-missing", registry_id: "10000000-0000-0000-0000-000000000001", manifest_digest: "a".repeat(64), reason: "fixture" }],
   ]) await assert.rejects(() => callTool({ DATABASE_URL_WRITER: "writer-only" }, joe, name, args),
     e => e instanceof ToolError && e.payload.error === "authority_connection_unavailable");
 });
