@@ -51,3 +51,59 @@ so editing a comment in either would break every future migrate run on both.
 series gets exactly one chance to fix the file's own self-references, and that
 chance closes the moment the migration applies anywhere. Renaming and rewriting
 the internals are one commit, or they are never.
+
+## Frozen numeric collisions (2026-08-16)
+
+Migration identity in the database is the **full filename**: `schema_migrations`
+uses `filename` as its primary key and stores that file's SHA-256. The four-digit
+prefix is nevertheless a single global allocation namespace. Concurrent branches
+historically produced a small number of duplicate prefixes, culminating in three
+different `0169` files merging in sequence:
+
+- `0169_control_plane_canary_fencing.sql`
+- `0169_hermes_pilot_actor.sql`
+- `0169_program5_release_binding.sql`
+
+The Control Plane file was applied and read back in isolated staging before the
+other two merged. **All three filenames and contents are now immutable.** An
+environment with the Control Plane filename already in its ledger correctly sees
+only the Hermes and Program 5 filenames as pending. A fresh environment applies
+all three in lexical filename order. Renaming, deleting, consolidating, or editing
+any of them would turn a harmless numeric ambiguity into a new pending migration
+or an applied-file SHA mismatch.
+
+`tools/migration_number_contract.py` freezes the exact filename sets for every
+historical duplicate prefix, and `tools/migrate.py` refuses any new or altered
+collision. `tools/next-migration.py` reports the frozen sets and still allocates
+above the highest four-digit claim across `origin/main` and every local worktree.
+The rule going forward is therefore simple: preserve the frozen history and use
+the allocator immediately before creating every new migration.
+
+### Exact pre-renumber ledger aliases
+
+Isolated Control Plane staging also contains twelve filenames from an early
+branch that was applied before its migrations were renumbered. Those absent
+filenames are the only exception to the runner's missing-applied-file refusal:
+
+| applied legacy filename | required forward migration |
+|---|---|
+| `0134_control_plane_admission.sql` | `0148_control_plane_admission.sql` |
+| `0135_control_plane_jobs.sql` | `0149_control_plane_jobs.sql` |
+| `0136_control_plane_job_fixes.sql` | `0150_control_plane_job_fixes.sql` |
+| `0137_control_plane_admission_grants.sql` | `0151_control_plane_admission_grants.sql` |
+| `0138_rule_writer_grants.sql` | `0152_rule_writer_grants.sql` |
+| `0139_control_plane_resilience.sql` | `0153_control_plane_resilience.sql` |
+| `0140_control_plane_cost_release.sql` | `0154_control_plane_cost_release.sql` |
+| `0141_rule_applicability_wildcard.sql` | `0155_rule_applicability_wildcard.sql` |
+| `0142_control_plane_input_grants.sql` | `0156_control_plane_input_grants.sql` |
+| `0143_control_plane_runtime_guards.sql` | `0157_control_plane_runtime_guards.sql` |
+| `0144_job_timeout_receipts.sql` | `0158_job_timeout_receipts.sql` |
+| `0145_control_plane_evidence_grants.sql` | `0159_control_plane_evidence_grants.sql` |
+
+The aliases do not mark their forward migrations applied: those files still run
+and contain the idempotent convergence guards needed by an old-equivalent
+schema. The runner merely accepts the exact legacy ledger rows as known history
+while requiring every mapped forward file to remain present. Unrelated current
+files in the same numeric band—especially `0134_release_abandon_reason.sql`,
+`0135_situation_retrieval.sql`, and `0136_release_manifest_view_grant.sql`—are
+not aliases and receive no exemption.

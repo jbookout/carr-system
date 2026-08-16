@@ -28,6 +28,12 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+from migration_number_contract import (
+    LEGACY_APPLIED_ALIASES,
+    MigrationNumberError,
+    validate_migration_names,
+)
+
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # NNNN_name.sql, plus an OPTIONAL single lowercase letter after the number:
 # 0013a_name.sql. Widened 2026-08-13 for a defect that could not be fixed inside
@@ -113,7 +119,54 @@ def load_migrations() -> list[tuple[str, str, str]]:
             out.append((p.name, sql, hashlib.sha256(sql.encode()).hexdigest()))
     if not out:
         fail("no .sql files in migrations/")
+    try:
+        validate_migration_names(
+            (name for name, _sql, _digest in out), require_frozen=True
+        )
+    except MigrationNumberError as exc:
+        fail(str(exc))
     return out
+
+
+def pending_migrations(
+    migrations: list[tuple[str, str, str]], applied: dict[str, str]
+) -> list[tuple[str, str, str]]:
+    """Return files absent from the filename-keyed ledger, preserving order."""
+    return [(name, sql, digest) for name, sql, digest in migrations if name not in applied]
+
+
+class AppliedMigrationLedgerError(ValueError):
+    """The database ledger cannot be reconciled to immutable files in the tree."""
+
+
+def validate_applied_ledger(
+    migrations: list[tuple[str, str, str]], applied: dict[str, str]
+) -> None:
+    """Refuse missing/edited applied files, except exact legacy convergence aliases."""
+    current = {name: digest for name, _sql, digest in migrations}
+    missing = sorted(set(applied) - set(current))
+    unknown_missing = [name for name in missing if name not in LEGACY_APPLIED_ALIASES]
+    if unknown_missing:
+        raise AppliedMigrationLedgerError(
+            "applied migration(s) missing from the tree: " + ", ".join(unknown_missing)
+            + ". Restore the exact files; do not rename or delete applied migrations."
+        )
+    absent_targets = sorted({
+        LEGACY_APPLIED_ALIASES[name]
+        for name in missing
+        if LEGACY_APPLIED_ALIASES[name] not in current
+    })
+    if absent_targets:
+        raise AppliedMigrationLedgerError(
+            "legacy applied migration alias target(s) missing from the tree: "
+            + ", ".join(absent_targets)
+        )
+    for name, digest in current.items():
+        if name in applied and applied[name] != digest:
+            raise AppliedMigrationLedgerError(
+                f"{name} was EDITED after being applied (sha mismatch). Write a new "
+                "migration instead; never rewrite an applied one."
+            )
 
 
 def main() -> None:
@@ -141,13 +194,12 @@ def main() -> None:
             cur.execute("select filename, sha256 from schema_migrations")
             applied: dict[str, str] = dict(cur.fetchall())
 
-        # drift check: an applied file must not have changed on disk
-        for name, _sql, digest in migrations:
-            if name in applied and applied[name] != digest:
-                fail(f"{name} was EDITED after being applied (sha mismatch). "
-                     "Write a new migration instead; never rewrite an applied one.")
+        try:
+            validate_applied_ledger(migrations, applied)
+        except AppliedMigrationLedgerError as exc:
+            fail(str(exc))
 
-        pending = [(n, s, d) for n, s, d in migrations if n not in applied]
+        pending = pending_migrations(migrations, applied)
         print(f"host: {host}")
         print(f"applied: {len(applied)}   pending: {len(pending)}")
         for name, _s, _d in pending:
