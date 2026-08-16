@@ -23,11 +23,18 @@ to erase one that shipped. A row that reached approved-and-deployed is history;
 letting it be marked abandoned would let a deploy be written out of the record
 after the fact, which is the opposite of what a release ledger is for.
 
-These fixtures drive the REAL wrapper against a REAL throwaway Neon branch of
-staging, guarded the same way ops/p1-rebuild-gate.py guards its own: never
-production, never the default branch, fresh database, destroyed on every exit
-path. Exit 78 when there is no Neon credential here, which bin/nightly.sh and
-ops/ci.sh both read as "not configured" rather than as a failure.
+WHERE THESE RUN. They need a Postgres carrying the schema and nothing more —
+NOT Neon specifically. So when CARR_CI_DATABASE_URL is set (the throwaway
+Postgres the GitHub runner stands up) they use it directly, and only when it is
+absent do they provision an ephemeral Neon branch of staging, guarded the way
+ops/p1-rebuild-gate.py guards its own: never production, never the default
+branch, fresh database, destroyed on every exit path.
+
+The first version asked for Neon unconditionally and returned 78 in CI, where
+--strict counts a skip as a failure — so a verb with real fixtures shipped with
+its fixtures never running on the one surface that gates the merge. Asking for
+the cheapest thing that can answer the question is also the thing that runs
+everywhere.
 """
 from __future__ import annotations
 
@@ -83,10 +90,121 @@ def record(dsn, *args):
         env={**os.environ, "DATABASE_URL": dsn})
 
 
+def _cases(dsn: str) -> None:
+    record(dsn, "sync-registry")
+    # A FULL manifest. 0131 exempts only draft/candidate/abandoned from
+    # needing rebuild evidence, so a row that must legitimately reach
+    # `complete` (case 4) needs the digest and the lock present from the
+    # start. The first run of these fixtures used a thin manifest, the
+    # setup UPDATE silently failed the constraint, and case 4 then tested
+    # nothing — it passed abandon on a row still sitting at `candidate`.
+    manifest = {"service": "carr-mcp", "environment": "staging",
+                "git_sha": "a" * 40, "plan_hash": "plan:selftest",
+                "artifact_digest": "d" * 64,
+                "dependency_lock_digest": "e" * 64, "migration_set": []}
+    mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-manifest.json"
+    mpath.write_text(json.dumps(manifest))
+
+    for k in ("rel-abandon-a", "rel-abandon-b", "rel-shipped"):
+        record(dsn, "release", "candidate", "--key", k, "--manifest", str(mpath),
+               "--service", "carr-mcp", "--environment", "staging",
+               "--maker", "selftest", "--maker-verification", "ref",
+               "--test-evidence", "ref", "--security-evidence", "ref")
+
+    # ── 1. a candidate can be abandoned, with a reason ──────────────────
+    r = record(dsn, "release", "abandon", "--key", "rel-abandon-a",
+               "--reason", "superseded before approval by a later candidate")
+    check("1. a candidate can be abandoned with a reason", r.returncode == 0,
+          (r.stderr or r.stdout).strip()[:160])
+    got = psql(dsn, "-At", "-c",
+               "select state, abandoned_reason is not null, ended_at is not null "
+               "from ops.release where release_key='rel-abandon-a'")
+    check("1b. it lands as abandoned, with its reason and an end time",
+          got.stdout.strip() == "abandoned|t|t", f"got {got.stdout.strip()!r}")
+
+    # ── 2. no reason, no abandonment ────────────────────────────────────
+    r = record(dsn, "release", "abandon", "--key", "rel-abandon-b")
+    check("2. abandoning without a reason is REFUSED", r.returncode != 0,
+          "a terminal state with no recorded reason is the thing this exists to prevent")
+
+    # ── 3. an APPROVED release can still be abandoned before it ships ──
+    # The window between a signature and a deploy is real, and a plan can be
+    # withdrawn inside it. `approved` is therefore in the allowed set.
+    record(dsn, "release", "approve", "--key", "rel-abandon-b",
+           "--plan-hash", "plan:selftest", "--actor", "selftest")
+    r = record(dsn, "release", "abandon", "--key", "rel-abandon-b",
+               "--reason", "withdrawn after signing, before any deploy ran")
+    check("3. an approved release can be abandoned before it ships",
+          r.returncode == 0, (r.stderr or r.stdout).strip()[:160])
+
+    # ── 4. history is not erasable ──────────────────────────────────────
+    # WALK THE REAL LIFECYCLE rather than forcing the state. 0131's trigger
+    # refuses `complete` unless a deployment attached to the release recorded
+    # a read-back — "shipped is not the same as serving" — so the fixture has
+    # to approve, deploy and read back exactly as a real release does. The
+    # earlier version set state directly, the constraint refused it silently,
+    # and case 4 then proved nothing on a row still sitting at `candidate`.
+    record(dsn, "release", "approve", "--key", "rel-shipped",
+           "--plan-hash", "plan:selftest", "--actor", "selftest")
+    record(dsn, "deployment", "--service", "carr-mcp", "--environment", "staging",
+           "--state", "complete", "--git-sha", "a" * 40, "--verb-count", "1",
+           "--release-key", "rel-shipped", "--source-kind", "wrapper",
+           "--source-ref", "ops/release-abandon-selftest.py",
+           "--read-back-at", "now", "--verification-evidence-ref", "selftest read-back")
+    done = record(dsn, "release", "complete", "--key", "rel-shipped")
+    check("4a. the shipped fixture really reached `complete`",
+          done.returncode == 0,
+          f"setup did not land, so case 4 would test nothing: "
+          f"{(done.stderr or done.stdout).strip()[:140]}")
+    r = record(dsn, "release", "abandon", "--key", "rel-shipped",
+               "--reason", "trying to erase a release that already shipped")
+    check("4. a release that already shipped CANNOT be abandoned",
+          r.returncode != 0,
+          "abandoning is a way to END a release, never a way to erase one that shipped")
+
+    # ── 5. an unknown key is a clear refusal, not a silent no-op ────────
+    r = record(dsn, "release", "abandon", "--key", "rel-does-not-exist",
+               "--reason", "this key was never recorded anywhere")
+    check("5. an unknown release key is refused, not silently ignored",
+          r.returncode != 0 and "rel-does-not-exist" in (r.stderr + r.stdout),
+          (r.stderr or r.stdout).strip()[:160])
+
+
+
+def run_cases(dsn: str) -> None:
+    """Every assertion, against whatever Postgres was handed in."""
+    if psql(dsn, "-f", str(REPO / "db" / "schema.sql")).returncode != 0:
+        check("the schema loads so the rest can run", False)
+        return
+    mig = subprocess.run([sys.executable, str(REPO / "tools" / "migrate.py"),
+                          "--apply", "--yes"], capture_output=True, text=True,
+                         timeout=1800, env={**os.environ, "DATABASE_URL": dsn})
+    check("0. schema and every migration apply, 0134 included",
+          mig.returncode == 0,
+          (mig.stderr or mig.stdout).strip().splitlines()[-1][:160]
+          if (mig.stderr or mig.stdout) else "")
+    if mig.returncode != 0:
+        return
+    _cases(dsn)
+
+
 def main() -> int:
+    # CI's throwaway Postgres first: it is cheaper, faster, and means these
+    # fixtures actually run on the surface that gates the merge.
+    ci_dsn = os.environ.get("CARR_CI_DATABASE_URL")
+    if ci_dsn:
+        print("release-abandon-selftest: using the CI throwaway Postgres")
+        run_cases(ci_dsn)
+        print(f"\nrelease-abandon-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
+        if FAILED:
+            print("FAILURES: " + ", ".join(FAILED))
+            return 1
+        return 0
+
     key = db_tap._neon_api_key()
     if not key and not os.environ.get("NEON_API_KEY"):
-        print("release-abandon-selftest: no Neon credential here — not configured")
+        print("release-abandon-selftest: no Neon credential and no CI database — "
+              "not configured")
         return 78
     env = {**os.environ,
            "PATH": "/usr/local/opt/node@22/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")}
@@ -124,96 +242,7 @@ def main() -> int:
         head, _, q = bdsn.partition("?")
         dsn = head.rsplit("/", 1)[0] + "/" + ABANDON_DB + (f"?{q}" if q else "")
 
-        if psql(dsn, "-f", str(REPO / "db" / "schema.sql")).returncode != 0:
-            check("the schema loads so the rest can run", False)
-            return 1
-        mig = subprocess.run([sys.executable, str(REPO / "tools" / "migrate.py"),
-                              "--apply", "--yes"], capture_output=True, text=True,
-                             timeout=1800, env={**os.environ, "DATABASE_URL": dsn})
-        check("0. schema and every migration apply, 0134 included",
-              mig.returncode == 0,
-              (mig.stderr or mig.stdout).strip().splitlines()[-1][:160] if (mig.stderr or mig.stdout) else "")
-        if mig.returncode != 0:
-            return 1
-
-        record(dsn, "sync-registry")
-        # A FULL manifest. 0131 exempts only draft/candidate/abandoned from
-        # needing rebuild evidence, so a row that must legitimately reach
-        # `complete` (case 4) needs the digest and the lock present from the
-        # start. The first run of these fixtures used a thin manifest, the
-        # setup UPDATE silently failed the constraint, and case 4 then tested
-        # nothing — it passed abandon on a row still sitting at `candidate`.
-        manifest = {"service": "carr-mcp", "environment": "staging",
-                    "git_sha": "a" * 40, "plan_hash": "plan:selftest",
-                    "artifact_digest": "d" * 64,
-                    "dependency_lock_digest": "e" * 64, "migration_set": []}
-        mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-manifest.json"
-        mpath.write_text(json.dumps(manifest))
-
-        for k in ("rel-abandon-a", "rel-abandon-b", "rel-shipped"):
-            record(dsn, "release", "candidate", "--key", k, "--manifest", str(mpath),
-                   "--service", "carr-mcp", "--environment", "staging",
-                   "--maker", "selftest", "--maker-verification", "ref",
-                   "--test-evidence", "ref", "--security-evidence", "ref")
-
-        # ── 1. a candidate can be abandoned, with a reason ──────────────────
-        r = record(dsn, "release", "abandon", "--key", "rel-abandon-a",
-                   "--reason", "superseded before approval by a later candidate")
-        check("1. a candidate can be abandoned with a reason", r.returncode == 0,
-              (r.stderr or r.stdout).strip()[:160])
-        got = psql(dsn, "-At", "-c",
-                   "select state, abandoned_reason is not null, ended_at is not null "
-                   "from ops.release where release_key='rel-abandon-a'")
-        check("1b. it lands as abandoned, with its reason and an end time",
-              got.stdout.strip() == "abandoned|t|t", f"got {got.stdout.strip()!r}")
-
-        # ── 2. no reason, no abandonment ────────────────────────────────────
-        r = record(dsn, "release", "abandon", "--key", "rel-abandon-b")
-        check("2. abandoning without a reason is REFUSED", r.returncode != 0,
-              "a terminal state with no recorded reason is the thing this exists to prevent")
-
-        # ── 3. an APPROVED release can still be abandoned before it ships ──
-        # The window between a signature and a deploy is real, and a plan can be
-        # withdrawn inside it. `approved` is therefore in the allowed set.
-        record(dsn, "release", "approve", "--key", "rel-abandon-b",
-               "--plan-hash", "plan:selftest", "--actor", "selftest")
-        r = record(dsn, "release", "abandon", "--key", "rel-abandon-b",
-                   "--reason", "withdrawn after signing, before any deploy ran")
-        check("3. an approved release can be abandoned before it ships",
-              r.returncode == 0, (r.stderr or r.stdout).strip()[:160])
-
-        # ── 4. history is not erasable ──────────────────────────────────────
-        # WALK THE REAL LIFECYCLE rather than forcing the state. 0131's trigger
-        # refuses `complete` unless a deployment attached to the release recorded
-        # a read-back — "shipped is not the same as serving" — so the fixture has
-        # to approve, deploy and read back exactly as a real release does. The
-        # earlier version set state directly, the constraint refused it silently,
-        # and case 4 then proved nothing on a row still sitting at `candidate`.
-        record(dsn, "release", "approve", "--key", "rel-shipped",
-               "--plan-hash", "plan:selftest", "--actor", "selftest")
-        record(dsn, "deployment", "--service", "carr-mcp", "--environment", "staging",
-               "--state", "complete", "--git-sha", "a" * 40, "--verb-count", "1",
-               "--release-key", "rel-shipped", "--source-kind", "wrapper",
-               "--source-ref", "ops/release-abandon-selftest.py",
-               "--read-back-at", "now", "--verification-evidence-ref", "selftest read-back")
-        done = record(dsn, "release", "complete", "--key", "rel-shipped")
-        check("4a. the shipped fixture really reached `complete`",
-              done.returncode == 0,
-              f"setup did not land, so case 4 would test nothing: "
-              f"{(done.stderr or done.stdout).strip()[:140]}")
-        r = record(dsn, "release", "abandon", "--key", "rel-shipped",
-                   "--reason", "trying to erase a release that already shipped")
-        check("4. a release that already shipped CANNOT be abandoned",
-              r.returncode != 0,
-              "abandoning is a way to END a release, never a way to erase one that shipped")
-
-        # ── 5. an unknown key is a clear refusal, not a silent no-op ────────
-        r = record(dsn, "release", "abandon", "--key", "rel-does-not-exist",
-                   "--reason", "this key was never recorded anywhere")
-        check("5. an unknown release key is refused, not silently ignored",
-              r.returncode != 0 and "rel-does-not-exist" in (r.stderr + r.stdout),
-              (r.stderr or r.stdout).strip()[:160])
-
+        run_cases(dsn)
     finally:
         if branch_id:
             gone = neon(env, "branches", "delete", branch_id, "--project-id", project_id)
