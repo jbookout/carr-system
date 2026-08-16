@@ -33,6 +33,19 @@ begin;
 
 grant insert, update on ops.release to carr_jobs;
 
+-- AND THE READ ITS OWN TRIGGER NEEDS, in this same migration. Granting the write
+-- above is only half a permission: release_completion_requires_a_read_back fires
+-- on ops.release as the writing role and reads ops.deployment to check that a
+-- deployment recorded a read-back. 0115 gave carr_jobs INSERT on ops.deployment
+-- and no SELECT, so the first attempt to complete a release as carr_jobs would
+-- have died on a table it is allowed to write and not to read.
+--
+-- Caught by ops/trigger-grant-check.py in CI, which exists for exactly this and
+-- states the rule in its own output: grant the read to the writing role in the
+-- SAME migration that grants the write. An invoker-rights trigger runs as the
+-- caller, and no rehearsal performed as the owner can ever see this.
+grant select on ops.deployment to carr_jobs;
+
 commit;
 
 -- ── proof, in the same run ───────────────────────────────────────────────────
@@ -47,5 +60,10 @@ begin
   if has_table_privilege('carr_jobs', 'ops.release', 'delete') then
     raise exception '0133 FAILED: carr_jobs can DELETE a release — the audit trail is erasable';
   end if;
-  raise notice '0133: carr_jobs may record and advance a release, and may not erase one';
+  if not has_table_privilege('carr_jobs', 'ops.deployment', 'select') then
+    raise exception '0133 FAILED: carr_jobs cannot SELECT ops.deployment, which its own '
+                    'completion trigger reads';
+  end if;
+  raise notice '0133: carr_jobs may record and advance a release, read the deployments its '
+               'trigger checks, and erase nothing';
 end $$;
