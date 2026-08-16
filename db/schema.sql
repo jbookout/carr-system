@@ -343,10 +343,12 @@ CREATE FUNCTION ops.release_completion_requires_a_read_back() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 begin
-  if new.state = 'complete' and old.state is distinct from 'complete' then
+  if new.state = 'complete'
+     and (tg_op = 'INSERT' or old.state is distinct from 'complete') then
     if not exists (
       select 1 from ops.deployment d
        where d.release_id = new.id
+         and d.service_id = new.service_id
          and d.environment = 'production'
          and d.state = 'complete'
          and d.read_back_at is not null
@@ -358,6 +360,12 @@ begin
                       'completed a read-back for its recorded provider version and git SHA. '
                       'Shipped is not '
                       'the same as serving.', new.release_key;
+    end if;
+    if not exists (select 1 from ops.run r where r.release_id = new.id and r.service_id = new.service_id and r.environment = 'production' and r.run_key like 'performance.%' and r.state = 'succeeded' and r.evidence_ref is not null and r.budget_ms = new.performance_budget_ms and r.duration_ms > 0 and r.duration_ms <= r.budget_ms and exists (select 1 from ops.deployment d where d.release_id = new.id and d.service_id = new.service_id and d.environment = 'production' and d.state = 'complete' and d.read_back_at is not null and d.git_sha = new.git_sha and d.provider = new.provider and d.provider_version_id = new.provider_version_id and d.correlation_id = r.correlation_id)) then
+      raise exception 'release % cannot be complete: no successful Production performance receipt within budget', new.release_key;
+    end if;
+    if not exists (select 1 from ops.run r where r.release_id = new.id and r.service_id = new.service_id and r.environment in ('staging','rehearsal') and r.run_key like 'recovery.rehearsal.%' and r.state = 'succeeded' and r.evidence_ref is not null and r.recovery_strategy = new.recovery_strategy and r.recovery_plan_ref = new.rollback_plan_ref) then
+      raise exception 'release % cannot be complete: no successful recovery rehearsal receipt', new.release_key;
     end if;
   end if;
   return new;
@@ -404,7 +412,127 @@ end $$;
 -- Name: FUNCTION release_completion_requires_a_read_back(); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.release_completion_requires_a_read_back() IS 'Program 5: complete requires an attached Production deployment in complete state, with read-back and the release provider, provider version, and git SHA.';
+COMMENT ON FUNCTION ops.release_completion_requires_a_read_back() IS 'Program 5: completion requires an exact Production deployment read-back plus linked within-budget performance and recovery-plan-matched rehearsal receipts.';
+
+
+--
+-- Name: release_assurance_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.release_assurance_is_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if old.state in ('approved', 'deploying', 'verifying', 'complete')
+     and new.state <> 'candidate'
+     and new.plan_hash is not distinct from old.plan_hash
+     and (new.performance_budget_ref,
+          new.performance_budget_ms,
+          new.recovery_strategy,
+          new.rollback_ready,
+          new.rollback_plan_ref,
+          new.service_id,
+          new.environment,
+          new.git_sha,
+          new.artifact_digest,
+          new.dependency_lock_digest,
+          new.config_fingerprint,
+          new.schema_highest_migration,
+          new.migration_set) is distinct from
+         (old.performance_budget_ref,
+          old.performance_budget_ms,
+          old.recovery_strategy,
+          old.rollback_ready,
+          old.rollback_plan_ref,
+          old.service_id,
+          old.environment,
+          old.git_sha,
+          old.artifact_digest,
+          old.dependency_lock_digest,
+          old.config_fingerprint,
+          old.schema_highest_migration,
+          old.migration_set) then
+    raise exception 'Promoted release material is immutable until approval is invalidated';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: release_approval_requires_recovery_rehearsal(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.release_approval_requires_recovery_rehearsal() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if new.environment = 'production'
+     and new.state = 'approved'
+     and (tg_op = 'INSERT'
+          or old.environment is distinct from 'production'
+          or old.state is distinct from 'approved')
+     and not exists (
+       select 1
+         from ops.run r
+        where r.release_id = new.id
+          and r.service_id = new.service_id
+          and r.environment in ('staging', 'rehearsal')
+          and r.run_key like 'recovery.rehearsal.%'
+          and r.state = 'succeeded'
+          and r.evidence_ref is not null
+          and r.recovery_strategy = new.recovery_strategy
+          and r.recovery_plan_ref = new.rollback_plan_ref
+     ) then
+    raise exception 'Production release % cannot be approved: no successful recovery rehearsal receipt', new.release_key;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION release_assurance_is_immutable(); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.release_assurance_is_immutable() IS 'Program 5: promoted release material is immutable until a changed plan hash invalidates approval and returns it to candidate.';
+
+
+--
+-- Name: FUNCTION release_approval_requires_recovery_rehearsal(); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.release_approval_requires_recovery_rehearsal() IS 'Program 5: Production approval requires a successful linked staging or rehearsal recovery receipt.';
+
+
+--
+-- Name: performance_receipt_requires_read_back(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.performance_receipt_requires_read_back() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if new.run_key like 'performance.%'
+     and not exists (
+       select 1
+         from ops.deployment d
+        where d.release_id = new.release_id
+          and d.service_id = new.service_id
+          and d.environment = 'production'
+          and d.correlation_id = new.correlation_id
+          and d.state in ('verifying', 'complete')
+          and d.read_back_at is not null
+     ) then
+    raise exception 'performance receipt % requires an already-read-back Production deployment for the same release and correlation', new.run_key;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION performance_receipt_requires_read_back(); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.performance_receipt_requires_read_back() IS 'Program 5: a performance receipt must follow the same-correlation Production deployment identity read-back.';
 
 
 --
@@ -1294,6 +1422,9 @@ CREATE TABLE ops.release (
     git_sha text NOT NULL,
     provider text,
     provider_version_id text,
+    performance_budget_ref text,
+    performance_budget_ms integer,
+    recovery_strategy text,
     artifact_digest text,
     dependency_lock_digest text,
     sbom_ref text,
@@ -1349,6 +1480,8 @@ CREATE TABLE ops.release (
 ALTER TABLE ONLY ops.release
     ADD CONSTRAINT promotion_release_requires_independent_attestation CHECK (((state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR ((verifier_actor IS NOT NULL) AND (verifier_evidence_ref IS NOT NULL)))) NOT VALID;
 
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT production_promotion_requires_assurance CHECK (((environment <> 'production'::text) OR (state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR ((performance_budget_ref IS NOT NULL) AND (performance_budget_ms IS NOT NULL) AND (performance_budget_ms > 0) AND (recovery_strategy IS NOT NULL) AND (recovery_strategy = ANY (ARRAY['rollback'::text, 'forward_fix'::text]))))) NOT VALID;
 
 --
 -- Name: release promotion_release_requires_rollback_readiness; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
@@ -1438,6 +1571,7 @@ CREATE TABLE ops.run (
     correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
     kind text NOT NULL,
     service_id uuid NOT NULL,
+    release_id uuid,
     environment text NOT NULL,
     run_key text NOT NULL,
     state text NOT NULL,
@@ -1451,12 +1585,15 @@ CASE
     WHEN ((started_at IS NOT NULL) AND (ended_at IS NOT NULL)) THEN ((EXTRACT(epoch FROM (ended_at - started_at)) * (1000)::numeric))::integer
     ELSE NULL::integer
 END) STORED,
+    budget_ms integer,
     source_kind text NOT NULL,
     source_ref text NOT NULL,
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone,
     evidence_ref text,
     detail text,
+    recovery_strategy text,
+    recovery_plan_ref text,
     CONSTRAINT a_failure_names_its_class CHECK (((state <> ALL (ARRAY['failed'::text, 'timed_out'::text])) OR (failure_class IS NOT NULL))),
     CONSTRAINT a_run_that_ended_also_started CHECK (((ended_at IS NULL) OR (started_at IS NOT NULL))),
     CONSTRAINT a_terminal_run_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text])) OR (ended_at IS NOT NULL))),
@@ -1466,6 +1603,20 @@ END) STORED,
     CONSTRAINT run_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
     CONSTRAINT run_state_check CHECK ((state = ANY (ARRAY['scheduled'::text, 'queued'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text, 'stale'::text, 'unknown'::text])))
 );
+
+
+--
+-- Name: run Program 5 assurance checks; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.run
+    ADD CONSTRAINT run_budget_ms_positive CHECK (((budget_ms IS NULL) OR (budget_ms > 0))) NOT VALID;
+
+ALTER TABLE ONLY ops.run
+    ADD CONSTRAINT performance_run_assurance CHECK (((run_key !~~ 'performance.%'::text) OR ((release_id IS NOT NULL) AND (environment = 'production'::text) AND (evidence_ref IS NOT NULL) AND (budget_ms IS NOT NULL) AND ((state <> 'succeeded'::text) OR ((duration_ms > 0) AND (duration_ms <= budget_ms)))))) NOT VALID;
+
+ALTER TABLE ONLY ops.run
+    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = ANY (ARRAY['staging'::text, 'rehearsal'::text])) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = ANY (ARRAY['rollback'::text, 'forward_fix'::text])) AND (recovery_plan_ref IS NOT NULL)))) NOT VALID;
 
 
 --
@@ -1819,7 +1970,10 @@ CREATE VIEW ops.v_release_manifest AS
     r.source_ref,
     r.observed_at,
     r.expires_at,
-    ops.freshness(r.observed_at, r.expires_at) AS freshness
+    ops.freshness(r.observed_at, r.expires_at) AS freshness,
+    r.performance_budget_ref,
+    r.performance_budget_ms,
+    r.recovery_strategy
    FROM ((ops.release r
      JOIN ops.service s ON ((s.id = r.service_id)))
      LEFT JOIN LATERAL ( SELECT d2.id,
@@ -10558,6 +10712,8 @@ CREATE INDEX release_sha_idx ON ops.release USING btree (git_sha);
 
 CREATE INDEX run_correlation_idx ON ops.run USING btree (correlation_id);
 
+CREATE INDEX run_release_id_idx ON ops.run USING btree (release_id);
+
 
 --
 -- Name: run_open_idx; Type: INDEX; Schema: ops; Owner: -
@@ -11311,10 +11467,21 @@ CREATE TRIGGER deployment_provider_identity_immutable BEFORE UPDATE OF provider,
 
 
 --
+-- Name: run performance_receipt_requires_read_back; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER performance_receipt_requires_read_back BEFORE INSERT OR UPDATE OF release_id, service_id, environment, correlation_id, run_key, state ON ops.run FOR EACH ROW EXECUTE FUNCTION ops.performance_receipt_requires_read_back();
+
+
+--
 -- Name: release release_completion_requires_a_read_back; Type: TRIGGER; Schema: ops; Owner: -
 --
 
-CREATE TRIGGER release_completion_requires_a_read_back BEFORE UPDATE ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_completion_requires_a_read_back();
+CREATE TRIGGER release_completion_requires_a_read_back BEFORE INSERT OR UPDATE OF state ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_completion_requires_a_read_back();
+
+CREATE TRIGGER release_assurance_immutable BEFORE UPDATE OF performance_budget_ref, performance_budget_ms, recovery_strategy, rollback_ready, rollback_plan_ref, service_id, environment, git_sha, artifact_digest, dependency_lock_digest, config_fingerprint, schema_highest_migration, migration_set, plan_hash, state ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_assurance_is_immutable();
+
+CREATE TRIGGER release_approval_requires_recovery_rehearsal BEFORE INSERT OR UPDATE OF state, environment, recovery_strategy, rollback_plan_ref ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_approval_requires_recovery_rehearsal();
 
 
 --
@@ -11695,6 +11862,9 @@ ALTER TABLE ONLY ops.release
 
 ALTER TABLE ONLY ops.run
     ADD CONSTRAINT run_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id);
+
+ALTER TABLE ONLY ops.run
+    ADD CONSTRAINT run_release_id_fkey FOREIGN KEY (release_id) REFERENCES ops.release(id);
 
 
 --

@@ -42,6 +42,10 @@
 #       # upload a Production candidate without changing traffic
 #   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
 #       # promote that exact approved version to 100% of Production traffic
+#   # Both Production modes also require the approval preimage inputs:
+#       --performance-budget-ref <immutable-ref> --performance-budget-ms <ms>
+#       --recovery-strategy <rollback|forward_fix>
+#       --rollback-plan-ref <immutable-runbook-ref>
 #
 # Per rule a8c55a47, this is the same code the manual path and any automated
 # path both run. There is no second way to deploy.
@@ -99,6 +103,10 @@ PINNED_RELEASE=""
 VERSION_MODE="ordinary"
 PROVIDER="cloudflare-workers"
 PROVIDER_VERSION_ID=""
+PERFORMANCE_BUDGET_REF=""
+PERFORMANCE_BUDGET_MS=""
+RECOVERY_STRATEGY=""
+ROLLBACK_PLAN_REF=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check)         CHECK_ONLY=1 ;;
@@ -108,6 +116,18 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --allow-shrink)  ALLOW_SHRINK=1 ;;
+    --performance-budget-ref)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --performance-budget-ref needs a reference" >&2; exit 64; }
+      PERFORMANCE_BUDGET_REF="$2"; shift ;;
+    --performance-budget-ms)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --performance-budget-ms needs milliseconds" >&2; exit 64; }
+      PERFORMANCE_BUDGET_MS="$2"; shift ;;
+    --recovery-strategy)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-strategy needs an approved strategy" >&2; exit 64; }
+      RECOVERY_STRATEGY="$2"; shift ;;
+    --rollback-plan-ref)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --rollback-plan-ref needs an immutable runbook reference" >&2; exit 64; }
+      ROLLBACK_PLAN_REF="$2"; shift ;;
     --release-sha)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --release-sha needs a full commit SHA" >&2; exit 64; }
       PINNED_RELEASE="$2"
@@ -151,6 +171,11 @@ fi
 cd "$REPO"
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 [ -x "$PY" ] || fail "python not found; release truth cannot be checked."
+if [ "$TARGET_ENV" = "production" ]; then
+  [ -n "$PERFORMANCE_BUDGET_REF" ] && [ -n "$PERFORMANCE_BUDGET_MS" ] \
+    && [ -n "$RECOVERY_STRATEGY" ] && [ -n "$ROLLBACK_PLAN_REF" ] \
+    || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required; they are approval inputs, not deploy defaults."
+fi
 
 HEAD_SHA=""
 SHIPPING=""
@@ -305,30 +330,45 @@ case "$LEDGER_RC" in
 esac
 fi
 
-# record_deployment <state> <correlation> — attach what just shipped to the
-# release that authorised it.
+# record_deployment <state> <correlation> [identity-readback] — attach what just
+# shipped to the release that authorised it.
 #
 # ONE FUNCTION, THREE CALL SITES, because the three outcomes of a deploy are
 # genuinely different facts and the ledger has to hold whichever one happened.
-# complete carries a read-back and means the suite proved the Worker answering;
-# verifying means the suite could not run, so nothing was proven; failed means
-# it ran and the Worker answered wrongly. Recording all three as one state, or
-# recording only the happy one, is how a deploy history starts reading greener
-# than the deploys were.
+# complete carries the final read-back and means the suite proved the Worker;
+# one explicit verifying receipt carries the earlier machine identity read-back,
+# while every other verifying state means the suite could not prove completion.
+# failed means a check ran and the Worker answered wrongly. Recording all three
+# as one state, or recording only the happy one, is how a deploy history starts
+# reading greener than the deploys were.
 #
-# IT NEVER FAILS THE DEPLOY. The code has already shipped by the time this runs
-# — refusing to exit zero because the LEDGER write failed would turn a recorded
-# problem into an unrecorded one. It prints, loudly, and returns.
+# A routine/non-Production ledger miss remains loud but non-fatal: the code has
+# already shipped. Program 5 Production assurance is stricter. The durable live
+# identity receipt and the final complete release are acceptance outcomes, so
+# their absence must return non-zero even though the traffic change already
+# happened. The recovery instructions below say exactly what remains to record.
 record_deployment() {
   rd_state="$1"
   rd_corr="${2:-}"
-  [ -x "$PY" ] || return 0
-  [ -f "$REPO/tools/ops-record.py" ] || return 0
+  rd_readback_kind="${3:-}"
+  rd_must_record=0
+  if [ "$TARGET_ENV" = "production" ] \
+      && { [ "$rd_state" = "complete" ] \
+           || [ "$rd_readback_kind" = "identity-readback" ]; }; then
+    rd_must_record=1
+  fi
+  if [ ! -x "$PY" ] || [ ! -f "$REPO/tools/ops-record.py" ]; then
+    echo "  !! deployment assurance recorder is unavailable after traffic changed."
+    [ "$rd_must_record" = "0" ] || return 1
+    return 0
+  fi
 
   set +e
-  # A read-back only exists when the golden suite actually ran and passed. The
-  # 0115 constraint refuses `complete` without one, which is the point.
-  if [ "$rd_state" = "complete" ]; then
+  # The first read-back is the machine-verified serving identity. Complete adds
+  # a later receipt after golden/performance pass. Both are real observations;
+  # ordinary verifying states must not manufacture a timestamp.
+  if [ "$rd_state" = "complete" ] \
+      || [ "$rd_readback_kind" = "identity-readback" ]; then
     rd_read_back="--read-back-at now"
   else
     rd_read_back=""
@@ -365,7 +405,10 @@ record_deployment() {
     [ "$TARGET_ENV" != "production" ] || \
       echo "         --provider $PROVIDER --provider-version-id $PROVIDER_VERSION_ID \\"
     echo "         --release-key ${RELEASE_KEY:-<key>} --source-kind wrapper \\"
-    echo "         --source-ref bin/deploy-worker.sh"
+    echo "         --source-ref bin/deploy-worker.sh \\"
+    [ -z "$rd_read_back" ] || echo "         $rd_read_back \\"
+    echo "         --verification-evidence-ref $rd_evidence_ref"
+    [ "$rd_must_record" = "0" ] || return 1
   else
     echo "  recorded this deploy as $rd_state against release ${RELEASE_KEY:-<none>}"
   fi
@@ -389,8 +432,10 @@ record_deployment() {
       echo "  !! the deploy landed but release $RELEASE_KEY did not close (exit $rc_rel)."
       echo "     Close it by hand so the release and its deployment stop disagreeing:"
       echo "       .venv/bin/python tools/ops-record.py release complete --key $RELEASE_KEY"
+      [ "$TARGET_ENV" != "production" ] || return 1
     fi
   fi
+  return 0
 }
 
 # ---------- preflight 4: release truth (P0-1) ----------
@@ -445,7 +490,10 @@ if [ "$VERSION_MODE" = "promote" ]; then
   PROMOTION_SOURCE_MANIFEST="$(mktemp -t carr-promotion-source-manifest)"
   PROMOTION_BOUND_MANIFEST="$(mktemp -t carr-promotion-bound-manifest)"
   if ! "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-      --environment production > "$PROMOTION_SOURCE_MANIFEST"; then
+      --environment production --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
+      --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
+      --recovery-strategy "$RECOVERY_STRATEGY" \
+      --rollback-plan-ref "$ROLLBACK_PLAN_REF" > "$PROMOTION_SOURCE_MANIFEST"; then
     fail "approved release evidence cannot be rebuilt from git SHA $HEAD_SHA."
   fi
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
@@ -474,8 +522,14 @@ elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
   RELEASE_MANIFEST="$(mktemp -t carr-release-manifest)"
+  if [ "$TARGET_ENV" = "production" ]; then
+    manifest_build_args="--performance-budget-ref $PERFORMANCE_BUDGET_REF --performance-budget-ms $PERFORMANCE_BUDGET_MS --recovery-strategy $RECOVERY_STRATEGY --rollback-plan-ref $ROLLBACK_PLAN_REF"
+  else
+    manifest_build_args=""
+  fi
+  # shellcheck disable=SC2086
   if "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-       --environment "$TARGET_ENV" > "$RELEASE_MANIFEST" 2>/dev/null; then
+       --environment "$TARGET_ENV" $manifest_build_args > "$RELEASE_MANIFEST" 2>/dev/null; then
     RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
                           --manifest "$RELEASE_MANIFEST" 2>/dev/null)"
     echo "  manifest built for ${HEAD_SHA} — plan ${RELEASE_PLAN_HASH:-unknown}"
@@ -548,6 +602,10 @@ if [ "$VERSION_MODE" = "upload" ]; then
   echo "  .venv/bin/python tools/ops-record.py release candidate --key <key> \\"
   echo "    --environment production --provider $PROVIDER \\"
   echo "    --provider-version-id $PROVIDER_VERSION_ID --manifest $RELEASE_MANIFEST ..."
+  echo "Then record the actual release-linked recovery rehearsal before Joe approves:"
+  echo "  .venv/bin/python tools/ops-record.py run --kind check --service carr-mcp \\"
+  echo "    --key recovery.rehearsal.worker --state succeeded --environment staging \\"
+  echo "    --release-key <key> --source-ref <rehearsal-run> --evidence-ref <receipt>"
   exit 0
 fi
 
@@ -596,6 +654,14 @@ if [ "$TARGET_ENV" = "production" ]; then
   fi
   LIVE_RELEASE_VERIFIED=1
   echo "  OK  serving Production identity matches $HEAD_SHA / $PROVIDER_VERSION_ID"
+  # Persist the exact live identity before any later check can claim it measured
+  # this promotion. The performance receipt uses this same correlation, and the
+  # database refuses a pre-seeded result with no prior read-back journey.
+  DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#identity-ok"
+  if ! record_deployment verifying "$CARR_CORRELATION_ID" identity-readback; then
+    echo "  Production is serving, but its durable identity receipt is missing." >&2
+    exit 1
+  fi
 fi
 
 # ---------- postflight ----------
@@ -704,9 +770,66 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
   echo "  correlation $CARR_CORRELATION_ID"
   DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#identity-ok;bin/smoke-and-record.sh#$CARR_CORRELATION_ID"
   DEPLOYMENT_FAILURE_CLASS="golden_workflow_failed"
+  PERFORMANCE_STARTED_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
   if "$REPO/bin/smoke-and-record.sh"; then
     echo "  golden workflow suite PASSED against the deploy you just shipped."
-    record_deployment complete "$CARR_CORRELATION_ID"
+    # Performance is measured around the functional suite, then written as a
+    # release-bound run.  This does not mint a recovery receipt: recovery is
+    # consumed only through the existing DB-enforced release relationship.
+    PERFORMANCE_ENDED_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+    PERFORMANCE_ELAPSED_MS=$((PERFORMANCE_ENDED_MS - PERFORMANCE_STARTED_MS))
+    PERFORMANCE_EVIDENCE_REF="$LIVE_RELEASE_URL#performance-$CARR_CORRELATION_ID"
+    set +e
+    "$PY" "$REPO/ops/performance-budget-gate.py" \
+        --elapsed-ms "$PERFORMANCE_ELAPSED_MS" --budget-ms "$PERFORMANCE_BUDGET_MS" \
+        --budget-ref "$PERFORMANCE_BUDGET_REF" --evidence-ref "$PERFORMANCE_EVIDENCE_REF"
+    PERFORMANCE_GATE_RC=$?
+    set -e
+    if [ "$PERFORMANCE_GATE_RC" -eq 1 ]; then
+      # A measured breach is a real failed release-bound check, not a made-up
+      # recovery receipt. Record it before the deployment failure so the
+      # immediate-incident path receives both linked facts.
+      if ! "$PY" "$REPO/tools/ops-record.py" run --kind check --service carr-mcp \
+          --key performance.release --state failed --environment production \
+          --release-key "$RELEASE_KEY" --budget-ms "$PERFORMANCE_BUDGET_MS" \
+          --duration-ms "$PERFORMANCE_ELAPSED_MS" --correlation "$CARR_CORRELATION_ID" \
+          --source-kind wrapper --source-ref bin/deploy-worker.sh \
+          --evidence-ref "$PERFORMANCE_EVIDENCE_REF" \
+          --failure-class performance_budget_exceeded \
+          --detail "${PERFORMANCE_ELAPSED_MS}ms exceeds ${PERFORMANCE_BUDGET_REF}"; then
+        DEPLOYMENT_EVIDENCE_REF="$PERFORMANCE_EVIDENCE_REF"
+        DEPLOYMENT_FAILURE_CLASS="performance_evidence_unrecorded"
+        record_deployment verifying "$CARR_CORRELATION_ID"
+        exit 1
+      fi
+      DEPLOYMENT_EVIDENCE_REF="$PERFORMANCE_EVIDENCE_REF"
+      DEPLOYMENT_FAILURE_CLASS="performance_budget_exceeded"
+      record_deployment failed "$CARR_CORRELATION_ID"
+      exit 1
+    fi
+    if [ "$PERFORMANCE_GATE_RC" -ne 0 ]; then
+      DEPLOYMENT_EVIDENCE_REF="$PERFORMANCE_EVIDENCE_REF"
+      DEPLOYMENT_FAILURE_CLASS="performance_gate_unavailable"
+      record_deployment verifying "$CARR_CORRELATION_ID"
+      exit 1
+    fi
+    if ! "$PY" "$REPO/tools/ops-record.py" run --kind check --service carr-mcp \
+        --key performance.release --state succeeded --environment production \
+        --release-key "$RELEASE_KEY" --budget-ms "$PERFORMANCE_BUDGET_MS" \
+        --duration-ms "$PERFORMANCE_ELAPSED_MS" --correlation "$CARR_CORRELATION_ID" \
+        --source-kind wrapper --source-ref bin/deploy-worker.sh \
+        --evidence-ref "$PERFORMANCE_EVIDENCE_REF" \
+        --detail "${PERFORMANCE_ELAPSED_MS}ms within ${PERFORMANCE_BUDGET_REF}"; then
+      DEPLOYMENT_EVIDENCE_REF="$PERFORMANCE_EVIDENCE_REF"
+      DEPLOYMENT_FAILURE_CLASS="performance_evidence_unrecorded"
+      record_deployment verifying "$CARR_CORRELATION_ID"
+      exit 1
+    fi
+    DEPLOYMENT_EVIDENCE_REF="$PERFORMANCE_EVIDENCE_REF;golden-workflow-ok"
+    if ! record_deployment complete "$CARR_CORRELATION_ID"; then
+      echo "  Production shipped, but Program 5 assurance did not complete." >&2
+      exit 1
+    fi
   else
     smoke_rc=$?
     if [ "$smoke_rc" -eq 78 ]; then

@@ -35,14 +35,18 @@ is the constraint doing its job. Automating the staging read-back so it could
 honestly claim `complete` is Program 5 work (production read-back is a Program 5
 bullet), deliberately not smuggled in here.
 
-These fixtures parse the SHIPPED SCRIPT rather than run a deploy: a real run costs
-a Cloudflare deploy and a Neon write. Structure is what regressed, so structure is
-what is pinned.
+The structural fixtures parse the shipped script. Program 5's post-promotion
+failure semantics are also executed in a temporary fake repo with mocked
+Wrangler, curl, smoke, and ledger commands; no Cloudflare or database call runs.
 
 Run: .venv/bin/python ops/deploy-ledger-selftest.py
 """
+import os
 import re
+import subprocess
 import sys
+import tempfile
+import textwrap
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -80,6 +84,82 @@ def block_of(text: str, start_pat: str) -> tuple[int, int]:
             if depth == 0:
                 return (start, i)
     return (start, len(lines) - 1)
+
+
+def write_executable(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
+    path.chmod(0o755)
+
+
+def exercise_program5_failure(failure: str) -> subprocess.CompletedProcess[str]:
+    """Run the Production promotion path with every external boundary mocked."""
+    with tempfile.TemporaryDirectory(prefix="deploy-ledger-", dir=REPO) as raw:
+        root = Path(raw)
+        script = root / "bin" / "deploy-worker.sh"
+        write_executable(script, SCRIPT.read_text(encoding="utf-8"))
+        (root / "tools").mkdir(parents=True)
+        (root / "tools" / "ops-record.py").write_text("# fake dispatch target\n")
+
+        write_executable(root / ".venv" / "bin" / "python", r'''
+            #!/usr/bin/env python3
+            import os
+            import sys
+            from pathlib import Path
+
+            args = sys.argv[1:]
+            failure = os.environ.get("FAKE_PROGRAM5_FAILURE", "")
+            if args and args[0] == "-c":
+                print("100")
+                raise SystemExit(0)
+            tool = Path(args[0]).name if args else ""
+            rest = args[1:]
+            if tool == "ops-record.py":
+                if rest[:2] == ["release", "require"]:
+                    print("release-test " + "a" * 40)
+                    raise SystemExit(0)
+                if rest and rest[0] == "deployment":
+                    state = rest[rest.index("--state") + 1]
+                    if failure == "identity" and state == "verifying" and "--read-back-at" in rest:
+                        raise SystemExit(9)
+                    if failure == "deployment" and state == "complete":
+                        raise SystemExit(9)
+                    raise SystemExit(0)
+                if rest[:2] == ["release", "complete"]:
+                    raise SystemExit(9 if failure == "release" else 0)
+                if rest and rest[0] == "run":
+                    raise SystemExit(0)
+            if tool == "release-manifest.py":
+                if rest and rest[0] in ("build", "bind-provider"):
+                    print("{}")
+                elif rest and rest[0] == "plan-hash":
+                    print("plan:selftest")
+                raise SystemExit(0)
+            if tool in ("verify-worker-release.py", "performance-budget-gate.py"):
+                raise SystemExit(0)
+            raise SystemExit(0)
+        ''')
+        write_executable(root / "mcp-server" / "node_modules" / ".bin" / "wrangler",
+                         "#!/bin/sh\nexit 0\n")
+        write_executable(root / "bin" / "smoke-and-record.sh",
+                         "#!/bin/sh\nexit 0\n")
+        fake_bin = root / "fake-bin"
+        write_executable(fake_bin / "curl", "#!/bin/sh\nprintf '%s\\n' '{}'\n")
+
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+        (root / "tmp").mkdir()
+        env["TMPDIR"] = str(root / "tmp")
+        env["CARR_CORRELATION_ID"] = "77777777-7777-4777-8777-777777777777"
+        env["FAKE_PROGRAM5_FAILURE"] = failure
+        return subprocess.run(
+            ["sh", str(script), "--promote-version",
+             "11111111-2222-4333-8444-555555555555",
+             "--performance-budget-ref", "runbook:performance-v1",
+             "--performance-budget-ms", "1000",
+             "--recovery-strategy", "rollback",
+             "--rollback-plan-ref", "runbook:rollback-v1"],
+            cwd=root, env=env, capture_output=True, text=True, check=False)
 
 
 def main() -> int:
@@ -136,12 +216,45 @@ def main() -> int:
           "the golden suite escaped its production guard — that is the 2026-08-13 "
           "routes incident waiting to happen again")
 
-    # Recording must never turn a shipped deploy into a failed command.
+    # Routine/non-Production recording remains non-fatal, while the two durable
+    # Program 5 acceptance receipts must propagate failure after traffic moves.
     fn_start, fn_end = block_of(text, r"^record_deployment\(\)")
     body = text[text.find("record_deployment()"):]
-    check("a failed ledger write still never fails the deploy",
-          "IT NEVER FAILS THE DEPLOY" in text and "rd_rc" in body,
-          "the loud-but-non-fatal contract around the ledger write is gone")
+    check("only Production assurance receipts are required ledger writes",
+          'rd_must_record=0' in body
+          and '[ "$TARGET_ENV" = "production" ]' in body
+          and 'return 1' in body,
+          "the wrapper either made every routine ledger miss fatal or still hides "
+          "a missing Production assurance receipt")
+
+    identity_at = text.find(
+        'record_deployment verifying "$CARR_CORRELATION_ID" identity-readback')
+    smoke_at = text.find('"$REPO/bin/smoke-and-record.sh"', identity_at)
+    performance_at = text.find('performance-budget-gate.py', smoke_at)
+    check("verified identity is durably recorded before golden/performance",
+          -1 not in (identity_at, smoke_at, performance_at)
+          and identity_at < smoke_at < performance_at)
+
+    identity_failure = exercise_program5_failure("identity")
+    identity_output = identity_failure.stdout + identity_failure.stderr
+    check("missing durable identity receipt exits nonzero after promotion",
+          identity_failure.returncode != 0
+          and "durable identity receipt is missing" in identity_output,
+          f"rc={identity_failure.returncode} output={identity_output[-240:]}")
+
+    deployment_failure = exercise_program5_failure("deployment")
+    deployment_output = deployment_failure.stdout + deployment_failure.stderr
+    check("missing complete deployment receipt exits nonzero",
+          deployment_failure.returncode != 0
+          and "ledger row did NOT record" in deployment_output,
+          f"rc={deployment_failure.returncode} output={deployment_output[-240:]}")
+
+    release_failure = exercise_program5_failure("release")
+    release_output = release_failure.stdout + release_failure.stderr
+    check("failed release closure exits nonzero",
+          release_failure.returncode != 0
+          and "did not close" in release_output,
+          f"rc={release_failure.returncode} output={release_output[-240:]}")
 
     print(f"\ndeploy-ledger-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
     if FAILED:

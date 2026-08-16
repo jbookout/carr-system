@@ -208,7 +208,12 @@ def main() -> int:
         source_path = Path(td) / "source.json"
         bound_path = Path(td) / "bound.json"
         tampered_path = Path(td) / "tampered.json"
-        built = run_manifest("build", "--sha", "HEAD", "--environment", "production")
+        built = run_manifest(
+            "build", "--sha", "HEAD", "--environment", "production",
+            "--performance-budget-ref", "runbook:worker-performance-v1",
+            "--performance-budget-ms", "1500",
+            "--recovery-strategy", "rollback",
+            "--rollback-plan-ref", "runbook:rollback-worker-v1")
         if built.returncode == 0:
             source_path.write_text(built.stdout, encoding="utf-8")
             bound = run_manifest(
