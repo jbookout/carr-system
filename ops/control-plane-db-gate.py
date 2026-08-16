@@ -107,23 +107,6 @@ def main() -> int:
                     or "authority_actor<>'joe'" not in acceptance.replace(" ", "")):
                 fail("accepted canary workflow evidence is not Joe-only")
 
-            # CI's disposable cluster lacks the externally provisioned login
-            # roles.  Create rollback-only principals so these calls exercise
-            # the same session_user boundary as production.
-            cur.execute("""do $$ begin
-              if not exists (select 1 from pg_roles where rolname='carr_authority_joe') then
-                create role carr_authority_joe login;
-              end if;
-              if not exists (select 1 from pg_roles where rolname='carr_authority_dell') then
-                create role carr_authority_dell login;
-              end if;
-            end $$""")
-            cur.execute("grant carr_authority to carr_authority_joe")
-            cur.execute("grant carr_authority to carr_authority_dell")
-            cur.execute("""do $$ begin
-              execute format('grant carr_authority_joe,carr_authority_dell to %I', current_user);
-            end $$""")
-
             cur.execute("""
                 select 1 from pg_trigger
                  where tgrelid='public.rule'::regclass
@@ -725,10 +708,9 @@ def main() -> int:
                 fail("fabricated receipt reference accepted for cutover")
             except psycopg.Error:
                 cur.execute("rollback to savepoint fabricated_evidence_refusal")
-            # A live accepted-cutover success requires externally provisioned
-            # carr_authority_joe/dell login DSNs.  This fixture runs as the DB
-            # owner and must refuse as an actor mismatch rather than pretending
-            # an owner connection is Joe.
+            # A real accepted-cutover success requires an externally provisioned
+            # carr_authority_joe/dell login DSN.  This owner-session fixture
+            # proves only the negative: an unmapped DB session is refused.
             cur.execute("savepoint authority_actor_mismatch")
             try:
                 cur.execute("select ops.record_workflow_acceptance(%s,'shadow','accepted','fixture')", (definition,))
@@ -737,33 +719,16 @@ def main() -> int:
                 cur.execute("rollback to savepoint authority_actor_mismatch")
             cur.execute("reset role")
 
-            # Accepted canary evidence is Joe's cutover authority.  Dell can
-            # still accept the matching shadow evidence, but never canary.
-            cur.execute("set session authorization carr_authority_dell")
-            cur.execute("savepoint dell_canary_refusal")
-            try:
-                cur.execute("select ops.record_workflow_acceptance(%s,'canary','accepted','fixture:canary')",
-                            (definition,))
-                fail("Dell authority accepted canary workflow evidence")
-            except psycopg.Error:
-                cur.execute("rollback to savepoint dell_canary_refusal")
-            cur.execute("select ops.record_workflow_acceptance(%s,'shadow','accepted','fixture')",
-                        (definition,))
-            shadow_acceptance = fetchone_required(cur.fetchone(), "Dell shadow acceptance")[0]
-            if shadow_acceptance is None:
-                fail("Dell shadow acceptance did not return a ledger receipt")
-            cur.execute("reset session authorization")
-
-            cur.execute("set session authorization carr_authority_joe")
-            cur.execute("select ops.record_workflow_acceptance(%s,'canary','accepted','fixture:canary')",
-                        (definition,))
-            canary_acceptance = fetchone_required(cur.fetchone(), "Joe canary acceptance")[0]
-            if canary_acceptance is None:
-                fail("Joe canary acceptance did not return a ledger receipt")
-            cur.execute("reset session authorization")
+            # carr_authority_joe/dell are externally provisioned LOGIN roles.
+            # SET SESSION AUTHORIZATION is superuser-only on managed Postgres,
+            # so an owner-driven disposable rebuild must not pretend to be
+            # either partner.  The owner mismatch above is this gate's only
+            # live authority result.  Positive Joe/Dell identity acceptance
+            # requires an externally provisioned real authority-DSN probe;
+            # this disposable owner gate does not perform one.
 
         conn.rollback()
-    print("control-plane-db-gate passed: admission, leases, idempotency, receipts and cutover refusal exercised")
+    print("control-plane-db-gate passed: admission, leases, idempotency, receipts and owner cutover refusal exercised")
     return 0
 
 
