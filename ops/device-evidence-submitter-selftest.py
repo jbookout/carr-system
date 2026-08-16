@@ -111,7 +111,7 @@ def main() -> int:
           == "select ops.record_npi_device_evidence(%s::uuid,%s::timestamptz,%s,%s,%s::jsonb,%s)")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp); credential = root / "device.env"; payload = root / "payload.json"
-        credential.write_text("CARR_DB_DEVICE_EVIDENCE_URL='postgresql://literal-device:secret@host/db'\n", encoding="utf-8")
+        credential.write_text("CARR_DB_DEVICE_EVIDENCE_URL='postgresql://literal-device:secret@host/db'\n", encoding="utf-8")  # ci-secret-scan: allow
         payload.write_text(json.dumps(social()), encoding="utf-8")
         credential.chmod(0o600); payload.chmod(0o600)
         check("quoted dedicated credential is loaded literally", cli.load_dedicated_dsn(credential).startswith("postgresql://literal-device:"))
@@ -121,13 +121,13 @@ def main() -> int:
         check("credential file refuses insecure mode", refused_credential(cli, credential))
         credential.chmod(0o600)
         for dsn_candidate in ("postgresql://device@host/db", "postgresql://device:@host/db", "user=device host=host dbname=db",
-                              "postgresql://device:secret@host/db?service=unexpected",
-                              "postgresql://device:secret@host/db?passfile=unexpected",
-                              "postgresql://device:secret@host/db?sslmode=require",
-                              "postgresql://device:secret@host/db#fragment"):
+                              "postgresql://device:secret@host/db?service=unexpected",  # ci-secret-scan: allow
+                              "postgresql://device:secret@host/db?passfile=unexpected",  # ci-secret-scan: allow
+                              "postgresql://device:secret@host/db?sslmode=require",  # ci-secret-scan: allow
+                              "postgresql://device:secret@host/db#fragment"):  # ci-secret-scan: allow
             credential.write_text(f"CARR_DB_DEVICE_EVIDENCE_URL={dsn_candidate}\n", encoding="utf-8")
             check("credential file refuses incomplete or non-URI device DSN", refused_credential(cli, credential))
-        credential.write_text("CARR_DB_DEVICE_EVIDENCE_URL='postgresql://literal-device:secret@host/db'\n", encoding="utf-8")
+        credential.write_text("CARR_DB_DEVICE_EVIDENCE_URL='postgresql://literal-device:secret@host/db'\n", encoding="utf-8")  # ci-secret-scan: allow
         result = subprocess.run([sys.executable, str(CLI_PATH), "--input", str(payload), "--validate-only"], cwd=REPO,
                                 text=True, capture_output=True, check=False, env={"PATH": "/usr/bin:/bin"})
         check("validate-only stdin/file path never contacts a database", result.returncode == 0 and '"validated": true' in result.stdout.lower())
