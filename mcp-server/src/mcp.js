@@ -363,13 +363,15 @@ export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
 }
 
 // Authority operations have a separate, human-principal-bound database
-// connection.  The scoped variables permit Joe and Dell to have distinct DB
-// login identities; the unscoped value supports a deliberately single-seat
-// deployment and the database rejects it when its session identity disagrees.
+// connection. The scoped variables permit Joe and Dell to have distinct DB
+// login identities. The unscoped value is deliberately Joe-only: letting a
+// Dell-attributed call fall back to a Joe login would make the application actor
+// and database principal disagree, bypassing DB-enforced Joe-only operations.
 export function authorityDsnForActor(env, actor) {
   if (!actor?.human || !["joe", "dell"].includes(actor.slug)) return null;
-  return env?.[`CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL`]
-    || env?.CARR_DB_AUTHORITY_URL || null;
+  const scoped = env?.[`CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL`];
+  if (scoped) return scoped;
+  return actor.slug === "joe" ? env?.CARR_DB_AUTHORITY_URL || null : null;
 }
 
 // Exported for deterministic no-network identity-gate tests. It remains the
@@ -436,7 +438,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       hint: "this session is scoped; report what you would have done and let an interactive partner session do it" });
   if (tool.authorityOnly && !authorityDsnForActor(env, actor))
     throw new ToolError({ error: "authority_connection_unavailable",
-      hint: "this human-only authority operation requires CARR_DB_AUTHORITY_URL (or the partner-scoped authority URL); routine writer credentials cannot perform it" });
+      hint: "this human-only authority operation requires the actor's partner-scoped authority URL; Joe may use the single-seat CARR_DB_AUTHORITY_URL fallback, while Dell requires CARR_DB_AUTHORITY_DELL_URL. Routine writer credentials cannot perform it" });
   // Payload-aware profile guard (2026-08-05). Name-level gating cannot see that
   // add-premises' ownership[].new_party path CREATES a party row — the exact act
   // the away profile's own charter excludes (asserting a new identity while the
