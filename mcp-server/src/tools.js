@@ -2790,15 +2790,17 @@ export const TOOLS = {
   },
 
   "set-lead": {
-    write: true,
-    description: "THE handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
+    write: true, humanOnly: true,
+    description: "THE human ownership handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Ownership is a matter between the two humans, never a machine's call. Requires base_version from a fresh read; the locked deal version makes simultaneous handoffs conflict instead of silently replacing one another. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
-      new_lead: { type: "string", enum: ["joe","dell"] } },
-      required: ["idempotency_key","deal","new_lead"] },
+      new_lead: { type: "string", enum: ["joe","dell"] },
+      base_version: { type: "integer" } },
+      required: ["idempotency_key","deal","new_lead","base_version"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-lead", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      await versionGuard(c, "deal", s.id, args.base_version);
       const na = await c.query("select id from actor where slug=$1", [args.new_lead]);
       const prev = await c.query(
         `update deal_participant set to_at=now() where deal_id=$1 and role='lead' and to_at is null
@@ -6009,12 +6011,36 @@ export const TOOLS = {
   },
 };
 
+// These names describe server-owned authority, never data a tool invocation may
+// claim. This is deliberately TOP-LEVEL only: record findings, template maps,
+// metrics, and correction payloads legitimately carry free-form business keys
+// such as `action` or `profile`, and those nested keys cannot widen authority.
+// call-verb recursion and composite dispatch each hand their inner arguments
+// back to this boundary as a new top-level invocation.
+const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
+  "tenant", "tenant_id", "organization_tenant_id", "sponsor", "sponsoring_human_id",
+  "sponsoring_human_slug", "human_slug", "identity", "actor", "runtime_principal",
+  "authorization", "authorization_class", "profile", "capability", "capabilities",
+  "action", "actions", "action_authority", "action_authorities", "allowed_actions",
+  "write", "writes_records", "calls_models", "call_models",
+]);
+
+export function assertNoCallerAuthorityFields(args) {
+  if (args && typeof args === "object" && !Array.isArray(args) &&
+      Object.keys(args).some((key) => RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key)))
+    throw new ToolError({ error: "caller_authority_field_forbidden" });
+  return args;
+}
+
 // One registered-handler path for direct MCP calls and composite verbs. The
-// MCP layer applies its profile gate first; this helper owns registry lookup,
-// the human-only gate, and the handler/envelope invocation itself.
+// MCP layer applies its profile gate first; this helper owns caller-authority,
+// registry lookup, human-only, coercion, and handler/envelope gates. Keeping
+// the first gate here makes direct MCP, call-verb recursion, and composites
+// fail closed before a handler or database client can be used.
 export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  assertNoCallerAuthorityFields(args);
   // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
   // not just the refusal. Every non-human door (probe/reviewer/agent-token,
   // and — since this same day — the LOCAL_TOKENS machine door local-verb.mjs

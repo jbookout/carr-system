@@ -121,6 +121,7 @@ def main():
             "protection": prot,
             "write": meta["write"],
             "binds_both_partners": meta["humanOnly"],
+            "base_version_required": meta["base_version"],
             "sql": shape,
             "does": meta["summary"],
         }

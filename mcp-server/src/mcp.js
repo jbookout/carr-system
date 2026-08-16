@@ -12,7 +12,7 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
-import { TOOLS, ToolError, executeRegisteredTool, auditIdentity } from "./tools.js";
+import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 
@@ -294,6 +294,10 @@ export async function callTool(env, actor, name, args, profile = "full") {
     throw new ToolError({ error: personalScope.error,
       hint: "this OAuth agent grant lacks its required server-derived sponsor. Reconnect through the registered OAuth flow; no tool argument can select a personal brain." });
   }
+  // Refuse caller-claimed authority before call-verb recursion or a writer pool.
+  // executeRegisteredTool repeats this same pure gate for composite dispatches
+  // that bypass callTool, so no registered handler gets a different boundary.
+  assertNoCallerAuthorityFields(args);
   // call-verb: the deploy-gap passthrough (Joe, 2026-08-08: "theres got to be
   // a way to fix the need for having to reconnect the connector to ship
   // things"). Connectors cache tools/list at connect time, so a freshly
