@@ -14,8 +14,8 @@
  },
  "counts": {
   "human_boundary": 28,
-  "append_only": 34,
-  "read_only": 37,
+  "append_only": 35,
+  "read_only": 38,
   "optimistic_concurrency": 17,
   "NONE": 12,
   "upsert_last_writer_wins": 4
@@ -1261,6 +1261,19 @@
    },
    "does": "Release claims you hold \u2014 the done-editing half of claim-doctrine-sections"
   },
+  "report-problem": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Capture one operational problem from the current deterministic situation source"
+  },
   "resolve-candidate": {
    "protection": "human_boundary",
    "write": true,
@@ -1728,6 +1741,19 @@
     "upserts": 0
    },
    "does": "\"Who gets me to X?\" \u2014 walks the intro graph BACKWARD from a target (a ref like C-155 / V-CPA-006, or a name) and returns every referral path up to 3 hops (walks"
+  },
+  "work-request-card": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Read one same-tenant safe captured Work Request card"
   },
   "write-doctrine-section": {
    "protection": "optimistic_concurrency",

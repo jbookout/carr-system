@@ -56,6 +56,7 @@ export const PROFILES = {
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-signal", "record-branch-evidence",
+    "report-problem",
     // record-defect (0103) belongs in the NARROWEST writing profile, not the widest.
     // An unattended run is exactly where an error is least likely to be caught by a
     // human, so it is the seat that most needs to be able to file its own — and the
