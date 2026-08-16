@@ -23,7 +23,8 @@
     },
     "receipt_tables": [
       "ops.device_evidence_receipt",
-      "ops.npi_device_evidence_receipt"
+      "ops.npi_device_evidence_receipt",
+      "ops.legacy_schedule_observation_receipt"
     ],
     "provisioning": "external_human_approval"
   },

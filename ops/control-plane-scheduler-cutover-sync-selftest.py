@@ -10,7 +10,7 @@ from typing import Any, Literal
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from lib.control_plane_scheduler_cutover import scheduler_surface_rows
+from lib.control_plane_scheduler_cutover import scheduler_provider_rows, scheduler_surface_rows
 from lib.loadpy import load_module_from_path
 
 CONTROL_PLANE = load_module_from_path(
@@ -40,6 +40,7 @@ class Cursor:
 
 def main() -> int:
     expected = scheduler_surface_rows(REGISTRY, manifest=MANIFEST)
+    expected_provider = scheduler_provider_rows(REGISTRY, manifest=MANIFEST, repo=REPO)
     check("complete checked-in inventory converts to exactly 20 typed surface rows",
           len(expected) == 20 and len({row[2] for row in expected}) == 20)
 
@@ -58,19 +59,32 @@ def main() -> int:
     inserts = [call for call in cursor.calls if "insert into ops.legacy_schedule_surface_registry" in call[0]]
     check("sync upserts every exact workflow/version/kind/surface/locator tuple",
           count == len(expected) and [call[1] for call in inserts] == expected)
-    check("sync prunes only after all complete exact upserts", len(cursor.calls) == len(expected) + 1
-          and cursor.calls[-1][0].startswith("delete from ops.legacy_schedule_surface_registry")
-          and cursor.calls[-1][1] == ([row[2] for row in expected],))
+    provider_inserts = [call for call in cursor.calls if "insert into ops.legacy_schedule_provider_contract" in call[0]]
+    check("sync derives all Claude provider contracts from manifest recurrence and tracked definitions",
+          len(expected_provider) == 18 and [call[1] for call in provider_inserts] == [
+              (row[2], row[0], row[1], row[3], row[4], row[5], row[6], row[7]) for row in expected_provider])
+    check("sync prunes only after all complete exact upserts",
+          cursor.calls[0][0] == "delete from ops.legacy_schedule_provider_contract"
+          and next(call for call in cursor.calls if call[0].startswith("delete from ops.legacy_schedule_surface_registry"))[1]
+          == ([row[2] for row in expected],)
+          and cursor.calls[-1][0].startswith("delete from ops.legacy_schedule_provider_contract")
+          and cursor.calls[-1][1] == ([row[2] for row in expected_provider],))
     evolved = json.loads(json.dumps(REGISTRY))
-    evolved["surfaces"][0]["locator"] = "evolved-locator"
+    launchd_index = next(i for i, row in enumerate(evolved["surfaces"]) if row["scheduler_kind"] == "launchd")
+    evolved["surfaces"][launchd_index]["locator"] = "evolved-locator"
     evolved_expected = scheduler_surface_rows(evolved, manifest=MANIFEST)
     evolved_cursor = Cursor()
     CONTROL_PLANE.sync_scheduler_surface_registry(evolved_cursor, manifest=MANIFEST, registry=evolved)
+    evolved_surface_inserts = [call for call in evolved_cursor.calls
+                               if "insert into ops.legacy_schedule_surface_registry" in call[0]]
     check("a complete versioned registry evolution updates every bound surface field before pruning",
-          [call[1] for call in evolved_cursor.calls[:-1]] == evolved_expected
+          [call[1] for call in evolved_surface_inserts] == evolved_expected
           and any(row[3] == "evolved-locator" for row in evolved_expected)
-          and "workflow_key=excluded.workflow_key,workflow_version=excluded.workflow_version," in evolved_cursor.calls[0][0]
-          and "locator=excluded.locator,scheduler_kind=excluded.scheduler_kind" in evolved_cursor.calls[0][0])
+          and "workflow_key=excluded.workflow_key,workflow_version=excluded.workflow_version," in evolved_surface_inserts[0][0]
+          and "locator=excluded.locator,scheduler_kind=excluded.scheduler_kind" in evolved_surface_inserts[0][0])
+    check("current provider projection is removed before any parent tuple evolution",
+          evolved_cursor.calls[0][0] == "delete from ops.legacy_schedule_provider_contract"
+          and evolved_cursor.calls.index(evolved_surface_inserts[0]) > 0)
     check("migration keeps FK and contains no pre-definition surface seed",
           "foreign key (workflow_key, workflow_version) references ops.job_definition(key, version)" in MIGRATION
           and "insert into ops.legacy_schedule_surface_registry" not in MIGRATION)

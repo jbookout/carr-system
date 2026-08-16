@@ -76,8 +76,9 @@ def validate(config: dict[str, Any]) -> list[str]:
     for key, expected in {"table": "ops.device_evidence_principal", "login_role_column": "login_role",
                           "device_id_column": "device_id", "active_column": "active"}.items():
         equals(registry.get(key), expected, f"device_evidence.principal_registry.{key}", errors)
-    if device.get("receipt_tables") != ["ops.device_evidence_receipt", "ops.npi_device_evidence_receipt"]:
-        errors.append("device_evidence.receipt_tables must declare both immutable receipt tables in order")
+    if device.get("receipt_tables") != ["ops.device_evidence_receipt", "ops.npi_device_evidence_receipt",
+                                         "ops.legacy_schedule_observation_receipt"]:
+        errors.append("device_evidence.receipt_tables must declare all immutable receipt tables in order")
     equals(device.get("provisioning"), "external_human_approval", "device_evidence.provisioning", errors)
 
     providers = mapping(config.get("providers"), "providers", errors, {"file", "file_selector_env", "routes"})
@@ -118,6 +119,7 @@ def validate(config: dict[str, Any]) -> list[str]:
     migration_authority = text("migrations/0161_control_plane_authority_boundary.sql")
     migration_device = text("migrations/0163_control_plane_device_evidence.sql")
     migration_npi = text("migrations/0167_control_plane_npi_device_evidence.sql")
+    migration_scheduler = text("migrations/0180_claude_scheduler_observation_receipt.sql")
     tick = text("bin/control-plane-tick.sh")
     ledger = text("tools/control-plane.py")
     nightly = text("bin/nightly.sh")
@@ -133,6 +135,10 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("device evidence bundle/principal registry is not bound by migration 0163")
     if not all(token in migration_npi for token in ("ops.npi_device_evidence_receipt", "login_role=session_user")):
         errors.append("NPI device evidence receipt is not bound by migration 0167")
+    if not all(token in migration_scheduler for token in
+               ("ops.legacy_schedule_observation_receipt", "login_role=session_user",
+                "ops.record_claude_scheduler_observation")):
+        errors.append("Claude scheduler observation receipt is not bound by migration 0180")
     required_provider_tokens = ("CARR_CONTROL_PLANE_PROVIDER_ENV", "CARR_AI_ROUTE_PRIMARY_URL",
                                 "CARR_AI_ROUTE_PRIMARY_TOKEN", "CARR_AI_ROUTE_SECONDARY_URL",
                                 "CARR_AI_ROUTE_SECONDARY_TOKEN", "env -i")

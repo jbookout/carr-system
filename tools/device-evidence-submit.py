@@ -104,6 +104,9 @@ def statement_for_submission(submission: Submission) -> str:
         return "select ops.record_device_evidence(%s::uuid,%s,%s::timestamptz,%s::jsonb,%s)"
     if submission.function == "ops.record_npi_device_evidence":
         return "select ops.record_npi_device_evidence(%s::uuid,%s::timestamptz,%s,%s,%s::jsonb,%s)"
+    if submission.function == "ops.record_claude_scheduler_observation":
+        return ("select ops.record_claude_scheduler_observation("
+                "%s,%s,%s,%s,%s::boolean,%s,%s,%s,%s::timestamptz,%s)")
     raise SubmissionRefused("stored function is unregistered")
 
 
@@ -119,6 +122,11 @@ def execute_submission(dsn: str, submission: Submission,
         row = cursor.fetchone()
     if row is None or len(row) != 1:
         raise SubmissionRefused("stored function did not return a receipt id")
+    if submission.function == "ops.record_claude_scheduler_observation":
+        receipt_ref = str(row[0])
+        if not receipt_ref.startswith("scheduler-observation:device-evidence:v1:"):
+            raise SubmissionRefused("stored function returned an invalid scheduler receipt ref")
+        return receipt_ref
     try:
         return str(UUID(str(row[0])))
     except ValueError as exc:
@@ -134,6 +142,8 @@ def main() -> int:
     try:
         reject_broad_environment(dict(os.environ))
         submission = validate_submission(load_payload(args.input))
+        if submission.kind == "claude_scheduler_observation":
+            raise SubmissionRefused("scheduler observations must come from the native read adapter")
         if args.validate_only:
             print(json.dumps({"ok": True, "validated": True, "kind": submission.kind}, sort_keys=True))
             return 0
@@ -145,7 +155,8 @@ def main() -> int:
     except Exception:
         print("FAIL device-evidence-submit: database submission unavailable", file=sys.stderr)
         return 1
-    print(json.dumps({"ok": True, "kind": submission.kind, "receipt_id": receipt_id}, sort_keys=True))
+    key = "receipt_ref" if submission.kind == "claude_scheduler_observation" else "receipt_id"
+    print(json.dumps({"ok": True, "kind": submission.kind, key: receipt_id}, sort_keys=True))
     return 0
 
 

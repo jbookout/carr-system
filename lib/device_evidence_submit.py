@@ -19,7 +19,7 @@ class SubmissionRefused(ValueError):
     pass
 
 
-Kind = Literal["social_device_evidence", "npi_device_evidence"]
+Kind = Literal["social_device_evidence", "npi_device_evidence", "claude_scheduler_observation"]
 SOCIAL_BUILDERS = frozenset({"linkedin.source-posts", "x.source-posts"})
 NPI_RESULT_KEYS = {"source_ref", "npi", "enumeration_type", "last_updated", "addresses", "taxonomies"}
 
@@ -145,6 +145,45 @@ def _npi(payload: dict[str, Any]) -> Submission:
     return Submission("npi_device_evidence", "ops.record_npi_device_evidence", (job_id, observed_at, release, checksum, _canonical(normalized)), _idempotency("npi_device_evidence", body))
 
 
+def _scheduler(payload: dict[str, Any]) -> Submission:
+    source = _object(
+        payload,
+        {"schema_version", "kind", "surface_id", "provider_task_id", "cron_expression", "timezone",
+         "enabled", "definition_sha256", "provider_revision", "source_fingerprint", "observed_at"},
+        "submission",
+    )
+    if source["schema_version"] != 1 or source["kind"] != "claude_scheduler_observation":
+        raise SubmissionRefused("scheduler observation version or kind is unsupported")
+    surface_id = _text(source["surface_id"], "surface_id")
+    provider_task_id = _text(source["provider_task_id"], "provider_task_id")
+    cron_expression = _text(source["cron_expression"], "cron_expression")
+    timezone_name = _text(source["timezone"], "timezone")
+    if type(source["enabled"]) is not bool:
+        raise SubmissionRefused("enabled must be boolean")
+    definition_sha256 = _text(source["definition_sha256"], "definition_sha256")
+    source_fingerprint = _text(source["source_fingerprint"], "source_fingerprint")
+    if re.fullmatch(r"[0-9a-f]{64}", definition_sha256) is None:
+        raise SubmissionRefused("definition_sha256 must be lowercase SHA-256")
+    if re.fullmatch(r"[0-9a-f]{64}", source_fingerprint) is None:
+        raise SubmissionRefused("source_fingerprint must be lowercase SHA-256")
+    provider_revision = _text(source["provider_revision"], "provider_revision")
+    observed_at = _timestamp(source["observed_at"], "observed_at")
+    body = {
+        "surface_id": surface_id, "provider_task_id": provider_task_id,
+        "cron_expression": cron_expression, "timezone": timezone_name,
+        "enabled": source["enabled"], "definition_sha256": definition_sha256,
+        "provider_revision": provider_revision, "source_fingerprint": source_fingerprint,
+        "observed_at": observed_at,
+    }
+    return Submission(
+        "claude_scheduler_observation", "ops.record_claude_scheduler_observation",
+        (surface_id, provider_task_id, cron_expression, timezone_name,
+         "true" if source["enabled"] else "false", definition_sha256, provider_revision,
+         source_fingerprint, observed_at),
+        _idempotency("claude_scheduler_observation", body),
+    )
+
+
 def validate_submission(payload: Any) -> Submission:
     if not isinstance(payload, dict):
         raise SubmissionRefused("submission must be an object")
@@ -153,4 +192,6 @@ def validate_submission(payload: Any) -> Submission:
         return _social(payload)
     if kind == "npi_device_evidence":
         return _npi(payload)
+    if kind == "claude_scheduler_observation":
+        return _scheduler(payload)
     raise SubmissionRefused("submission kind is unregistered")

@@ -42,6 +42,14 @@ def npi() -> dict[str, Any]:
                          "taxonomies": ["207Q00000X"]}]}
 
 
+def scheduler() -> dict[str, Any]:
+    return {"schema_version": 1, "kind": "claude_scheduler_observation",
+            "surface_id": "cc-update-audit.claude-code.v1", "provider_task_id": "cc-update-audit",
+            "cron_expression": "45 9 * * 1", "timezone": "America/Chicago", "enabled": True,
+            "definition_sha256": "a" * 64, "provider_revision": "provider-revision-1",
+            "source_fingerprint": "b" * 64, "observed_at": "2026-08-16T12:00:00Z"}
+
+
 def refused(value: Any) -> bool:
     try:
         validate_submission(value)
@@ -109,6 +117,19 @@ def main() -> int:
           and cursor.params[-1] == social_submission.idempotency_key)
     check("submitter maps NPI only to its fixed stored function", cli.statement_for_submission(npi_submission)
           == "select ops.record_npi_device_evidence(%s::uuid,%s::timestamptz,%s,%s,%s::jsonb,%s)")
+    scheduler_submission = validate_submission(scheduler())
+    check("scheduler observation selects only its fixed narrow stored function",
+          scheduler_submission.function == "ops.record_claude_scheduler_observation"
+          and cli.statement_for_submission(scheduler_submission) ==
+          "select ops.record_claude_scheduler_observation(%s,%s,%s,%s,%s::boolean,%s,%s,%s,%s::timestamptz,%s)")
+    scheduler_cursor = FakeCursor("scheduler-observation:" + scheduler_submission.idempotency_key)
+    scheduler_ref = cli.execute_submission("opaque-dsn", scheduler_submission,
+                                           lambda _: FakeConnection(scheduler_cursor))
+    check("scheduler receipt result is exact and device submitter never accepts caller SQL",
+          scheduler_ref == "scheduler-observation:" + scheduler_submission.idempotency_key
+          and scheduler_cursor.params[-1] == scheduler_submission.idempotency_key)
+    malformed_scheduler = scheduler(); malformed_scheduler["source_fingerprint"] = "not-a-digest"
+    check("scheduler observation refuses malformed provider provenance", refused(malformed_scheduler))
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp); credential = root / "device.env"; payload = root / "payload.json"
         credential.write_text("CARR_DB_DEVICE_EVIDENCE_URL='postgresql://literal-device:secret@host/db'\n", encoding="utf-8")  # ci-secret-scan: allow
@@ -131,6 +152,13 @@ def main() -> int:
         result = subprocess.run([sys.executable, str(CLI_PATH), "--input", str(payload), "--validate-only"], cwd=REPO,
                                 text=True, capture_output=True, check=False, env={"PATH": "/usr/bin:/bin"})
         check("validate-only stdin/file path never contacts a database", result.returncode == 0 and '"validated": true' in result.stdout.lower())
+        payload.write_text(json.dumps(scheduler()), encoding="utf-8")
+        scheduler_direct = subprocess.run(
+            [sys.executable, str(CLI_PATH), "--input", str(payload), "--validate-only"], cwd=REPO,
+            text=True, capture_output=True, check=False, env={"PATH": "/usr/bin:/bin"})
+        check("generic device JSON path refuses scheduler state assertions",
+              scheduler_direct.returncode == 78 and "refused" in scheduler_direct.stderr.lower())
+        payload.write_text(json.dumps(social()), encoding="utf-8")
         blocked = subprocess.run([sys.executable, str(CLI_PATH), "--input", str(payload), "--validate-only"], cwd=REPO,
                                  text=True, capture_output=True, check=False,
                                  env={"PATH": "/usr/bin:/bin", "CARR_DB_JOBS_URL": "never-use"})
