@@ -281,7 +281,7 @@ begin
                     'because a deploy nobody can trace to an approved plan is the '
                     'exact gap P0-1 closes';
   end if;
-  select state, approval_expires_at, release_key into r
+  select state, approval_expires_at, release_key, git_sha, environment into r
     from ops.release where id = new.release_id;
   if r.state not in ('approved','deploying','verifying','complete') then
     raise exception 'release % is %, not approved — promotion refused',
@@ -290,6 +290,14 @@ begin
   if r.approval_expires_at is null or r.approval_expires_at <= now() then
     raise exception 'release % has an expired approval (%) — re-approve before '
                     'promoting', r.release_key, r.approval_expires_at;
+  end if;
+  if r.environment is distinct from new.environment then
+    raise exception 'release % targets %, not deployment environment % — promotion refused',
+                    r.release_key, r.environment, new.environment;
+  end if;
+  if r.git_sha is distinct from new.git_sha then
+    raise exception 'release % binds git SHA %, not deployment SHA % — promotion refused',
+                    r.release_key, r.git_sha, new.git_sha;
   end if;
   return new;
 end $$;
@@ -329,11 +337,15 @@ begin
   if new.state = 'complete' and old.state is distinct from 'complete' then
     if not exists (
       select 1 from ops.deployment d
-       where d.release_id = new.id and d.read_back_at is not null
+       where d.release_id = new.id
+         and d.environment = 'production'
+         and d.state = 'complete'
+         and d.read_back_at is not null
+         and d.git_sha = new.git_sha
     ) then
-      raise exception 'release % cannot be complete: no deployment attached to it '
-                      'recorded a read-back. Shipped is not the same as serving.',
-                      new.release_key;
+      raise exception 'release % cannot be complete: no attached Production deployment '
+                      'completed a read-back for its recorded git SHA. Shipped is not '
+                      'the same as serving.', new.release_key;
     end if;
   end if;
   return new;
@@ -1250,10 +1262,40 @@ CREATE TABLE ops.release (
 
 
 --
+-- Name: release promotion_release_requires_independent_attestation; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT promotion_release_requires_independent_attestation CHECK (((state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR ((verifier_actor IS NOT NULL) AND (verifier_evidence_ref IS NOT NULL)))) NOT VALID;
+
+
+--
+-- Name: release promotion_release_requires_rollback_readiness; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.release
+    ADD CONSTRAINT promotion_release_requires_rollback_readiness CHECK (((state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR (rollback_ready AND (rollback_plan_ref IS NOT NULL)))) NOT VALID;
+
+
+--
 -- Name: TABLE release; Type: COMMENT; Schema: ops; Owner: -
 --
 
 COMMENT ON TABLE ops.release IS 'P0-1 canonical release truth: the ONE object joining code, schema, config, generated assets, tests, security, approval, deployment and verification. ops.deployment.release_id points here; before 0130 it pointed at nothing.';
+
+
+--
+-- Name: CONSTRAINT promotion_release_requires_independent_attestation on release; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON CONSTRAINT promotion_release_requires_independent_attestation ON ops.release IS 'Program 5: approved through complete releases carry a named independent verifier and evidence; drafts and candidates may still collect it.';
+
+
+--
+-- Name: CONSTRAINT promotion_release_requires_rollback_readiness on release; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON CONSTRAINT promotion_release_requires_rollback_readiness ON ops.release IS 'Program 5: approved through complete releases must name a ready rollback or forward-fix plan; a boolean alone is insufficient.';
 
 
 --
@@ -14386,4 +14428,3 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
-
