@@ -70,6 +70,9 @@ class IntegrationReviewGateTests(unittest.TestCase):
             "writes_records": False,
             "allowed_actions": [],
             "review_status": "reviewed_not_runtime_authorization",
+            "reviewer_owner_id": "platform_reviewer",
+            "reviewed_at": "2026-08-15T12:34:56Z",
+            "review_reference": "WR-AI-003-review-001",
             "router_module": {"path": "ops/ai_read_router.py", "sha256": digest(self.repo / "ops/ai_read_router.py")},
             "policy": {"path": "evals/ai/function-router.v1.json", "sha256": digest(self.repo / "evals/ai/function-router.v1.json")},
             "envelope_suite": {"path": "evals/ai/model-boundary.v1.json", "sha256": digest(self.repo / "evals/ai/model-boundary.v1.json")},
@@ -77,16 +80,22 @@ class IntegrationReviewGateTests(unittest.TestCase):
                 {
                     "consumer": {
                         "path": row["path"], "sha256": row["sha256"], "language": row["language"],
-                        "entrypoint": "approved_entrypoint", "trigger_kinds": row["trigger_kinds"],
+                        "trigger_anchors": row["trigger_anchors"],
                     },
                     "requested_routes": ["find"],
-                    "execution_mode": "descriptor_only",
-                    "security": {
+                    "execution_assurance": {
+                        "execution_mode": "descriptor_only",
+                        "calls_models": False,
+                        "invokes_tools": False,
+                        "writes_records": False,
+                        "allowed_actions": [],
                         "server_owned_identity_tenant_sponsor_capability": True,
                         "caller_override_denied": True,
                         "route_action_risk_revalidated": True,
                         "passing_envelope_required": True,
                         "redacted_audit_observability": True,
+                        "audit_event": "router_descriptor_audit",
+                        "observability_signal": "router_descriptor_metrics",
                         "rollback_owner": "platform_owner",
                         "disable_path": "feature_flag_disable",
                         "safe_behavior": "refuse",
@@ -111,6 +120,10 @@ class IntegrationReviewGateTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(GATE), "--repo", str(ROOT)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("no production consumer", result.stdout)
+
+    def test_orphan_review_artifact_is_refused_when_no_production_consumer_exists(self):
+        self.write_artifact({})
+        self.assert_refused()
 
     def test_test_eval_docs_fixtures_and_unrelated_code_are_not_consumers(self):
         anchor = "ai_read_router route_read_only function-router.v1.json POLICY_SHA256"
@@ -146,7 +159,34 @@ class IntegrationReviewGateTests(unittest.TestCase):
         (self.repo / gate.REVIEW_ARTIFACT_REL).unlink()
         self.assert_refused()
 
-    def test_stale_malformed_authority_audit_rollback_and_route_drift_are_refused(self):
+    def test_attestation_entrypoint_and_execution_assurance_are_exact(self):
+        consumers = [self.consumer()]
+        valid = self.valid_artifact(consumers)
+        mutations = (
+            ("owner_missing", lambda a: a.pop("reviewer_owner_id")),
+            ("owner_malformed", lambda a: a.update(reviewer_owner_id="x")),
+            ("reviewed_at_missing", lambda a: a.pop("reviewed_at")),
+            ("reviewed_at_malformed", lambda a: a.update(reviewed_at="2026-08-15T12:34:56+00:00")),
+            ("reference_missing", lambda a: a.pop("review_reference")),
+            ("reference_malformed", lambda a: a.update(review_reference="x")),
+            ("root_extra", lambda a: a.update(extra=CANARY)),
+            ("anchor_line", lambda a: a["reviews"][0]["consumer"]["trigger_anchors"][0].update(line=99)),
+            ("anchor_kind", lambda a: a["reviews"][0]["consumer"]["trigger_anchors"][0].update(kind="forged")),
+            ("entrypoint_free_string", lambda a: a["reviews"][0]["consumer"].update(entrypoint="forged")),
+            ("read_only_execution", lambda a: a["reviews"][0]["execution_assurance"].update(execution_mode="read_only_tool_execution")),
+            ("writes", lambda a: a["reviews"][0]["execution_assurance"].update(writes_records=True)),
+            ("actions", lambda a: a["reviews"][0]["execution_assurance"].update(allowed_actions=["find"])),
+            ("authority", lambda a: a["reviews"][0]["execution_assurance"].update(caller_override_denied=False)),
+            ("audit", lambda a: a["reviews"][0]["execution_assurance"].update(audit_event="x")),
+            ("rollback", lambda a: a["reviews"][0]["execution_assurance"].update(disable_path="x")),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                artifact = copy.deepcopy(valid)
+                mutate(artifact)
+                self.assert_refused(artifact)
+
+    def test_stale_malformed_raw_payload_and_route_drift_are_refused(self):
         consumers = [self.consumer()]
         valid = self.valid_artifact(consumers)
         mutations = (
@@ -154,10 +194,10 @@ class IntegrationReviewGateTests(unittest.TestCase):
             ("stale_policy", lambda a: a["policy"].update(sha256="0" * 64)),
             ("stale_suite", lambda a: a["envelope_suite"].update(sha256="0" * 64)),
             ("unknown", lambda a: a.update(unexpected=CANARY)),
-            ("authority", lambda a: a["reviews"][0]["security"].update(tenant_id=CANARY)),
-            ("secret", lambda a: a["reviews"][0]["consumer"].update(entrypoint="sk-secret")),
-            ("audit", lambda a: a["reviews"][0]["security"].update(redacted_audit_observability=False)),
-            ("rollback", lambda a: a["reviews"][0]["security"].update(safe_behavior="continue")),
+            ("raw_payload", lambda a: a["reviews"][0]["execution_assurance"].update(raw_args=CANARY)),
+            ("canary", lambda a: a.update(review_reference=CANARY)),
+            ("audit_bool", lambda a: a["reviews"][0]["execution_assurance"].update(redacted_audit_observability=False)),
+            ("rollback_behavior", lambda a: a["reviews"][0]["execution_assurance"].update(safe_behavior="continue")),
             ("route_unknown", lambda a: a["reviews"][0].update(requested_routes=["write-tool"])),
             ("route_duplicate", lambda a: a["reviews"][0].update(requested_routes=["find", "find"])),
             ("route_missing", lambda a: a["reviews"][0].update(requested_routes=[])),
