@@ -198,6 +198,14 @@ def main():
         secondary_bad_output = secondary_bad_out.getvalue()
         modified_task_preserved = modified_task.read_text(encoding="utf-8") == "modified CARR task\n"
         mod.IS_PRIMARY = original_primary
+        definition_only_plist = {
+            "Label": "com.carr.control-plane-tick",
+            "ProgramArguments": ["/usr/bin/true"],
+            "RunAtLoad": False,
+        }
+        (launchd / "com.carr.control-plane-tick.plist").write_bytes(
+            plistlib.dumps(definition_only_plist)
+        )
         failing_plist = {
             "Label": "com.carr.synthetic-load-failure",
             "ProgramArguments": ["/usr/bin/true"],
@@ -219,12 +227,15 @@ def main():
 
         mod.subprocess.run = fail_launchctl
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(io.StringIO()) as launchd_out:
                 launchd_failure_rc = mod.cmd_install(True)
                 launchd_retry_rc = mod.cmd_install(True)
         finally:
             mod.subprocess.run = real_run
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
+        definition_only_absent = not (
+            Path(mod.LAUNCHD_SRC) / "com.carr.control-plane-tick.plist"
+        ).exists()
     cases = [
         ("unrelated top-level key preserved", merged.get("user_setting") == {"keep": True}),
         ("unrelated event preserved", "PostToolUse" in merged["hooks"] and "/Users/booko/other/hooks/post.py" in commands(merged)),
@@ -295,6 +306,9 @@ def main():
          and modified_task_preserved),
         ("LaunchAgent load failure and idempotent retry both stay nonzero",
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
+        ("definition-only control-plane tick is not installed before cutover",
+         definition_only_absent
+         and "SKIP  com.carr.control-plane-tick.plist (definition only:" in launchd_out.getvalue()),
         ("fresh install creates the LaunchAgents directory",
          launchd_dir_created),
     ]
