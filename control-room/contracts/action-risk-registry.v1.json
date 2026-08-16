@@ -13,7 +13,7 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 25,
+  "human_boundary": 26,
   "append_only": 34,
   "read_only": 37,
   "optimistic_concurrency": 17,
@@ -51,6 +51,19 @@
     "upserts": 0
    },
    "does": "Human acceptance of a completed shadow or canary workflow run"
+  },
+  "activate-guidance-registry": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Activate the typed Guidance Registry after its 5\u201310-item constitution and complete coverage pass"
   },
   "activate-rule": {
    "protection": "human_boundary",
@@ -596,7 +609,7 @@
     "inserts": 0,
     "upserts": 0
    },
-   "does": "\"What have we ruled on a fork shaped like this before?\" \u2014 searches the RULING HISTORY, which nothing else could reach"
+   "does": "\"What precedent exists for a fork shaped like this?\" \u2014 searches recorded RULING HISTORY plus activated typed precedents"
   },
   "get-call-context": {
    "protection": "read_only",
