@@ -3,7 +3,7 @@
   "blessed_by": "64207374+jbookout@users.noreply.github.com",
   "blessed_at_rev": "5ec03c06",
   "hashes": {
-    "completion-evidence-gate.py": "1c31072ca191612fd67d334bfd771af973cf087eda7ff3a58cf95afa777f9e10",
+    "completion-evidence-gate.py": "b63d3b1d9348f17015a0c1b32c3796a4b7a3f158f46e9ec7109bb295fa315c1c",
     "conduct-stop-gate.py": "a078cc733015a4a7d9cde6e495898c3d1115bd7c768915cffc545df47b9de2f4",
     "conduct_patterns.py": "c101be9bd78fec4449f28a792a79b505c49c5dc676e7065eafdcfd3d4e45efcb",
     "context-handoff-gate.py": "b6dcf841ab4980bbc3ddd04067a636b2545562763cfb9aa29cfa87b6ccf3cae6",

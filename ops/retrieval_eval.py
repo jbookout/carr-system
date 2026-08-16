@@ -25,6 +25,10 @@ from retrieval_lexical import rank_index  # noqa: E402
 SUITE_SCHEMA = "carr-retrieval-golden-v1"
 OBSERVATION_SCHEMA = "carr-doctrine-fts-observation-v1"
 ENGINES = ("section_index_lexical", "doctrine_postgres_fts")
+# The first eleven cases predate WR-AI-006.  They are a regression contract,
+# not a convenient set of examples which a later retrieval change may rewrite.
+LEGACY_CASE_COUNT = 11
+LEGACY_CASES_DIGEST = "f3489d9cc72ce970b1117385a58674d8814a6ba97bf368d7b11162f8e6846a0b"
 
 
 class ContractError(ValueError):
@@ -52,6 +56,10 @@ def validate_suite(suite: dict[str, Any]) -> None:
     cases = suite.get("cases")
     if not isinstance(cases, list) or not cases:
         raise ContractError("suite cases must be a non-empty array")
+    if (suite["suite_id"] == "carr-retrieval-golden-v1"
+            and (len(cases) < LEGACY_CASE_COUNT
+                 or canonical_digest(cases[:LEGACY_CASE_COUNT]) != LEGACY_CASES_DIGEST)):
+        raise ContractError("the original 11 retrieval cases are immutable")
     seen: set[str] = set()
     for case in cases:
         if not isinstance(case, dict):
@@ -71,12 +79,24 @@ def validate_suite(suite: dict[str, Any]) -> None:
         for engine, expectation in engines.items():
             if not isinstance(expectation, dict):
                 raise ContractError(f"{case_id}/{engine}: expectation must be an object")
-            targets = expectation.get("required_targets")
             top_k = expectation.get("top_k")
-            if not isinstance(targets, list) or not targets or not all(isinstance(x, str) and x for x in targets):
-                raise ContractError(f"{case_id}/{engine}: required_targets must be non-empty strings")
             if not isinstance(top_k, int) or top_k < 1 or top_k > 20:
                 raise ContractError(f"{case_id}/{engine}: top_k must be 1..20")
+            required = expectation.get("required_targets")
+            excluded = expectation.get("expect_no_targets")
+            no_hits = expectation.get("expect_no_hits")
+            kinds = sum(value is not None for value in (required, excluded, no_hits))
+            if kinds != 1:
+                raise ContractError(f"{case_id}/{engine}: declare exactly one expectation kind")
+            if required is not None:
+                if not isinstance(required, list) or not required or not all(isinstance(x, str) and x for x in required):
+                    raise ContractError(f"{case_id}/{engine}: required_targets must be non-empty strings")
+                if "require_all_targets" in expectation and not isinstance(expectation["require_all_targets"], bool):
+                    raise ContractError(f"{case_id}/{engine}: require_all_targets must be boolean")
+            if excluded is not None and (not isinstance(excluded, list) or not excluded or not all(isinstance(x, str) and x for x in excluded)):
+                raise ContractError(f"{case_id}/{engine}: expect_no_targets must be non-empty strings")
+            if no_hits is not None and no_hits is not True:
+                raise ContractError(f"{case_id}/{engine}: expect_no_hits must be true")
         forbidden = case.get("forbidden_target_patterns", [])
         if not isinstance(forbidden, list) or not all(isinstance(x, str) and x for x in forbidden):
             raise ContractError(f"{case_id}: forbidden_target_patterns must be strings")
@@ -91,22 +111,32 @@ def evaluate_hits(
         return {"case_id": case["id"], "status": "unknown", "reason": "engine_unavailable"}
     top_k = expectation["top_k"]
     visible = sorted(hits, key=lambda hit: int(hit.get("rank", 10**9)))[:top_k]
-    targets = set(expectation["required_targets"])
+    targets = set(expectation.get("required_targets", []))
     target_hits = [hit for hit in visible if hit.get("target") in targets]
     forbidden = [re.compile(pattern, re.IGNORECASE) for pattern in case.get("forbidden_target_patterns", [])]
     forbidden_hits = [
         hit.get("target", "") for hit in visible
         if any(pattern.search(str(hit.get("target", ""))) for pattern in forbidden)
     ]
-    current = bool(target_hits) and all(hit.get("current") is True for hit in target_hits)
-    provenance = bool(target_hits) and all(hit.get("provenance_complete") is True for hit in target_hits)
-    passed = bool(target_hits) and current and provenance and not forbidden_hits and scope_proven
+    if "required_targets" in expectation:
+        target_ok = (set(hit.get("target") for hit in target_hits) == targets
+                     if expectation.get("require_all_targets") else bool(target_hits))
+    elif "expect_no_targets" in expectation:
+        target_ok = not any(hit.get("target") in set(expectation["expect_no_targets"]) for hit in visible)
+    else:
+        target_ok = not visible
+    relevant = target_hits if targets else visible
+    current = all(hit.get("current") is True for hit in relevant)
+    provenance = all(hit.get("provenance_complete") is True for hit in relevant)
+    passed = target_ok and current and provenance and not forbidden_hits and scope_proven
     rank = min((int(hit["rank"]) for hit in target_hits), default=None)
     reciprocal_rank = 0.0 if rank is None else 1.0 / rank
     return {
         "case_id": case["id"],
         "status": "pass" if passed else "fail",
         "required_targets": sorted(targets),
+        "expect_no_targets": expectation.get("expect_no_targets", []),
+        "expect_no_hits": expectation.get("expect_no_hits") is True,
         "observed_targets": [hit.get("target") for hit in visible],
         "best_required_rank": rank,
         "reciprocal_rank": reciprocal_rank,
@@ -129,8 +159,8 @@ def run(
     if doctrine_observation.get("scope_ref") != suite["scope_ref"]:
         raise ContractError("doctrine observation scope mismatch")
     observation_status = doctrine_observation.get("status")
-    if observation_status not in ("measured", "unavailable"):
-        raise ContractError("doctrine observation status must be measured or unavailable")
+    if observation_status not in ("measured", "candidate_synthetic", "unavailable"):
+        raise ContractError("doctrine observation status must be measured, candidate_synthetic, or unavailable")
     observed_cases = doctrine_observation.get("cases", {})
     if not isinstance(observed_cases, dict):
         raise ContractError("doctrine observation cases must be an object")

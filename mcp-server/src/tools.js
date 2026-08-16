@@ -7,6 +7,7 @@
 // The doctrine store's verbs (P2, decision 82a2fb62) live in doctrine.js as a
 // factory over this file's envelope machinery, merged at the bottom.
 import { doctrineTools } from "./doctrine.js";
+import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
@@ -7141,6 +7142,10 @@ Object.assign(TOOLS, {
 
 // Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
 Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
+
+// WR-AI-006: curation proposals are machine-callable; approval and retirement
+// remain human-only inside their handlers and the dispatcher boundary.
+Object.assign(TOOLS, situationRetrievalTools({ withEnvelope, writeEvent, ToolError }));
 
 // Bounded investigation control plane (0098): deterministic signals, one
 // reasoning owner, evidence-only worker packets, explicit branch termination.

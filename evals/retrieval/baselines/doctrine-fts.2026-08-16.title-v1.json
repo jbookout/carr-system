@@ -1,0 +1,14 @@
+{
+  "schema_version": "carr-doctrine-fts-observation-v1",
+  "suite_id": "carr-retrieval-golden-v1",
+  "scope_ref": "carr-internal",
+  "scope_applied_before_rank": true,
+  "status": "candidate_synthetic",
+  "observed_at": "2026-08-16T00:00:00-05:00",
+  "data_class": "D2_internal_metadata",
+  "doctrine_generation": null,
+  "source": "candidate-only title-index fixture; no production migration or deployment was authorized",
+  "cases": {
+    "RET-TITLE-001": [{"target": "runbook#diagnosis-checklist-in-order-2-minutes", "rank": 1, "current": true, "provenance_complete": true}]
+  }
+}

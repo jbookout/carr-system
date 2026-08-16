@@ -14,6 +14,7 @@
 // with the findings in the error payload, precise enough to self-repair.
 
 import { organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { searchDoctrineSituations } from "./situation-retrieval.js";
 
 /** Read the count banner emitted by the generated personal/shared rule renders. */
 export function generatedRuleCount(rendered) {
@@ -625,7 +626,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     },
 
     "search-doctrine": {
-      description: "Full-text search over current doctrine revisions (Postgres FTS, websearch syntax: quoted phrases, OR, -exclusions). Returns section hits with snippets. The P3 acceptance bar tunes ranking; this is the working floor.",
+      description: "Deterministic doctrine search: weighted title/body FTS unioned with human-approved situation concepts. Returns current section text plus reconstructible score provenance; never generated prose. The versioned active default policy row controls ranking.",
       inputSchema: { type: "object", properties: {
         q: { type: "string" },
         content_classes: { type: "array", items: { type: "string" } },
@@ -633,22 +634,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         required: ["q"] },
       handler: async (c, actor, args) => {
         await actorId(c, actor);
-        const r = await c.query(
-          `select s.id as section_id, s.section_key, s.title, d.slug as doc_slug,
-                  d.content_class,
-                  ts_rank_cd(rev.search_vector, websearch_to_tsquery('english', $1)) as rank,
-                  ts_headline('english', rev.plain_text, websearch_to_tsquery('english', $1),
-                              'MaxWords=25, MinWords=10') as snippet
-             from doctrine_section s
-             join doctrine_document d on d.id = s.document_id
-             join doctrine_revision rev on rev.id = s.current_revision_id
-            where s.status = 'active'
-              and (d.visibility <> 'personal' or d.owner_actor_id = $2)
-              and ($3::text[] is null or d.content_class = any($3))
-              and rev.search_vector @@ websearch_to_tsquery('english', $1)
-            order by rank desc limit $4`,
-          [args.q, actor.id, args.content_classes || null, args.limit || 20]);
-        return { ok: true, hits: r.rows, total: r.rows.length };
+        return searchDoctrineSituations(c, actor, args);
       },
     },
 

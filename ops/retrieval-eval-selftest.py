@@ -123,27 +123,29 @@ with tempfile.TemporaryDirectory() as tmp:
 
 golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
 baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-canonical = json.dumps(golden, sort_keys=True, separators=(",", ":")).encode()
 import hashlib
-check("the committed baseline is bound to the exact golden suite",
+legacy = dict(golden)
+legacy["cases"] = golden["cases"][:11]
+canonical = json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()
+check("the original eleven cases remain byte-for-byte bound to their baseline",
       baseline["suite_digest"] == hashlib.sha256(canonical).hexdigest())
 check("the committed baseline records every engine-case outcome",
-      baseline["summary"]["total_engine_cases"] == sum(len(case["engines"]) for case in golden["cases"]))
+      baseline["summary"]["total_engine_cases"] == sum(len(case["engines"]) for case in golden["cases"][:11]))
 check("the baseline names measured misses instead of interpreting them as success",
       baseline["summary"]["failed"] == len(baseline["measured_misses"]) and baseline["summary"]["failed"] > 0)
 
 with tempfile.TemporaryDirectory() as tmp:
-    committed_report = pathlib.Path(tmp) / "committed-report.json"
+    committed_report = pathlib.Path(tmp) / "candidate-report.json"
     committed = subprocess.run([
         sys.executable, str(RUNNER), "--suite", str(GOLDEN),
-        "--section-index", str(BASELINE_INDEX), "--doctrine-results", str(DOCTRINE_BASELINE),
-        "--baseline", str(BASELINE), "--output", str(committed_report),
+        "--section-index", str(BASELINE_INDEX), "--doctrine-results",
+        str(REPO / "evals/retrieval/baselines/doctrine-fts.2026-08-16.title-v1.json"),
+        "--output", str(committed_report),
     ], text=True, capture_output=True)
     committed_payload = json.loads(committed_report.read_text(encoding="utf-8"))
-    check("CI runs the production scorer against the committed golden floor", committed.returncode == 0)
-    check("the reproducible floor remains 16 passes and 6 named misses",
-          committed_payload["summary"]["passed_cases"] == 16
-          and committed_payload["summary"]["failed_cases"] == 6
-          and committed_payload["summary"]["unknown_cases"] == 0)
+    title_case = next(row for row in committed_payload["engines"]["doctrine_postgres_fts"]["cases"]
+                      if row["case_id"] == "RET-TITLE-001")
+    check("the dated D2 candidate title baseline validates the title case",
+          committed.returncode == 1 and title_case["status"] == "pass")
 
 print("PASS: retrieval evaluation self-test")

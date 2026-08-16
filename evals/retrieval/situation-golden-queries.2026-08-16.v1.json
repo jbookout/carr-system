@@ -1,0 +1,16 @@
+{
+  "schema_version": "carr-situation-retrieval-suite-v1",
+  "suite_id": "carr-situation-retrieval-2026-08-16-v1",
+  "data_class": "D2_internal_metadata",
+  "scope_ref": "carr-internal",
+  "status": "candidate_synthetic",
+  "cases": [
+    {"id": "RET-002", "required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3},
+    {"id": "RET-003", "required_targets": ["playbook-review#preamble"], "top_k": 3},
+    {"id": "RET-PHRASE-001", "required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3},
+    {"id": "RET-PHRASE-002", "required_targets": ["playbook-review#preamble"], "top_k": 3},
+    {"id": "RET-NEG-001", "expect_no_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3},
+    {"id": "RET-LIFE-001", "expect_no_hits": true, "top_k": 3},
+    {"id": "RET-AMB-001", "required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes", "playbook-review#preamble"], "require_all_targets": true, "top_k": 3}
+  ]
+}
