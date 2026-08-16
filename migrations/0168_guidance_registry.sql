@@ -183,6 +183,20 @@ begin
   if jsonb_typeof(new.delivery) <> 'object' then
     raise exception 'guidance revision requires a delivery contract';
   end if;
+  -- Constitution feeds standing_guidance and precedent feeds the precedent
+  -- projection, both of which resolve the canonical rule record.  Intake-only
+  -- items remain useful for other typed guidance, but they must not be able to
+  -- enter either of these rule-backed read paths (or activation's constitution
+  -- count) and then disappear at retrieval time.
+  if new.is_constitution or new.guidance_type='precedent' then
+    if not exists (
+      select 1 from ops.guidance_item i
+       where i.id=new.guidance_item_id
+         and i.source_rule_id is not null
+    ) then
+      raise exception 'constitution and precedent revisions require a source_rule_id';
+    end if;
+  end if;
   expected_projection := case new.guidance_type
     when 'constraint' then 'constraint_enforcement'
     when 'procedure' then 'procedure_workflow'
@@ -683,32 +697,65 @@ select guidance_type,count(*) as active_items,
 
 create or replace function ops.activate_guidance_registry(
   p_registry_id uuid,
-  p_authority_receipt_id uuid,
   p_manifest_digest text,
+  p_idempotency_key text,
   p_reason text
 ) returns uuid
 language plpgsql security definer set search_path=ops,public,pg_temp as $$
 declare
   authority_slug text;
-  receipt_actor uuid;
+  authority_actor uuid;
+  registry_owner uuid;
+  receipt_id uuid;
   event_id uuid;
   constitution_count integer;
   coverage_count integer;
+  existing record;
 begin
   authority_slug := ops.authority_actor_slug();
-  select ar.actor_id into receipt_actor
-    from ops.authority_receipt ar join actor a on a.id=ar.actor_id
-   where ar.id=p_authority_receipt_id
-     and ar.kind='activation'
-     and ar.subject_type='guidance'
-     and ar.subject_id=p_registry_id
-     and ar.decision='approved'
-     and ar.contract_hash=p_manifest_digest
-     and a.kind='human'
-     and a.slug=authority_slug;
-  if receipt_actor is null then
-    raise exception 'guidance registry activation requires a human authority receipt';
+  select id into authority_actor from actor
+   where slug=authority_slug and kind='human';
+  if authority_actor is null then
+    raise exception 'guidance registry activation requires an admitted human authority actor';
   end if;
+  if p_manifest_digest !~ '^[0-9a-f]{64}$' or coalesce(btrim(p_idempotency_key),'')=''
+     or coalesce(btrim(p_reason),'')='' then
+    raise exception 'activation requires a sha256 manifest digest, idempotency key and reason';
+  end if;
+  select created_by into registry_owner from ops.guidance_registry where id=p_registry_id;
+  if registry_owner is null then
+    raise exception 'unknown guidance registry %',p_registry_id;
+  end if;
+  if registry_owner <> authority_actor then
+    raise exception 'guidance registry activation requires its accountable human authority actor';
+  end if;
+
+  -- Serialize direct database callers as well as MCP callers.  Without this,
+  -- two first-use requests for one key can both miss the replay lookup and the
+  -- loser sees a unique-violation instead of the original activation event.
+  perform pg_advisory_xact_lock(
+    hashtextextended('guidance-registry-activation:' || p_idempotency_key,0));
+
+  -- Replays must name precisely the approval this authority session already
+  -- made.  A key cannot be rebound to another actor, registry, digest, or
+  -- incomplete event.
+  select ar.id,ar.kind,ar.subject_type,ar.subject_id,ar.actor_id,ar.decision,
+         ar.contract_hash,ge.id as event_id,ge.manifest_digest,ge.reason
+    into existing
+    from ops.authority_receipt ar
+    left join ops.guidance_registry_event ge on ge.authority_receipt_id=ar.id
+   where ar.idempotency_key=p_idempotency_key;
+  if existing.id is not null then
+    if existing.kind<>'activation' or existing.subject_type<>'guidance'
+       or existing.subject_id<>p_registry_id or existing.actor_id<>authority_actor
+       or existing.decision<>'approved' or existing.contract_hash<>p_manifest_digest
+       or existing.event_id is null or existing.manifest_digest<>p_manifest_digest
+       or existing.reason<>p_reason then
+      raise exception 'idempotency key already names a different or incomplete guidance registry activation';
+    end if;
+    return existing.event_id;
+  end if;
+
   select count(*) into constitution_count
     from ops.v_guidance_current where is_constitution;
   -- Human-approved constitution must remain between 5 and 10 items.
@@ -719,12 +766,16 @@ begin
   if coverage_count <> 0 then
     raise exception 'guidance registry has % coverage failure(s)',coverage_count;
   end if;
-  if p_manifest_digest !~ '^[0-9a-f]{64}$' or coalesce(btrim(p_reason),'')='' then
-    raise exception 'activation requires a sha256 manifest digest and reason';
-  end if;
+  insert into ops.authority_receipt
+    (idempotency_key,kind,subject_type,subject_id,actor_id,decision,
+     contract_hash,evidence_refs)
+  values
+    (p_idempotency_key,'activation','guidance',p_registry_id,authority_actor,
+     'approved',p_manifest_digest,array[p_registry_id::text])
+  returning id into receipt_id;
   insert into ops.guidance_registry_event
     (registry_id,state,authority_receipt_id,manifest_digest,reason)
-  values (p_registry_id,'active',p_authority_receipt_id,p_manifest_digest,p_reason)
+  values (p_registry_id,'active',receipt_id,p_manifest_digest,p_reason)
   returning id into event_id;
   return event_id;
 end $$;
@@ -755,7 +806,7 @@ revoke all on function ops.propose_guidance_situation_mapping(uuid,uuid,uuid,tex
 revoke all on function ops.activate_guidance_situation_mapping(uuid,uuid,text) from public,carr_writer;
 revoke all on function ops.assert_guidance_registry_coverage() from public;
 revoke all on function ops.standing_guidance(text,text,text,text) from public;
-revoke all on function ops.activate_guidance_registry(uuid,uuid,text,text) from public,carr_writer;
+revoke all on function ops.activate_guidance_registry(uuid,text,text,text) from public,carr_writer;
 
 grant execute on function ops.guidance_revision_contract_hash(uuid)
   to carr_reader,carr_writer,carr_authority;
@@ -768,7 +819,7 @@ grant execute on function ops.activate_guidance_situation_mapping(uuid,uuid,text
 grant execute on function ops.assert_guidance_registry_coverage() to carr_reader,carr_writer;
 grant execute on function ops.standing_guidance(text,text,text,text)
   to carr_reader,carr_writer;
-grant execute on function ops.activate_guidance_registry(uuid,uuid,text,text)
+grant execute on function ops.activate_guidance_registry(uuid,text,text,text)
   to carr_authority;
 
 commit;

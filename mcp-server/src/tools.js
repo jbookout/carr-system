@@ -5001,6 +5001,26 @@ export const TOOLS = {
     }),
   },
 
+  "activate-guidance-registry": {
+    write: true, humanOnly: true, authorityOnly: true,
+    description: "Activate the typed Guidance Registry after its 5–10-item constitution and complete coverage pass. Uses the human authority connection, derives the approving partner from its authenticated database session, and atomically records the registry-bound manifest-digest receipt and activation event.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, registry_id: { type: "string" },
+      manifest_digest: { type: "string", description: "Exact lowercase SHA-256 digest of the reviewed activation manifest." },
+      reason: { type: "string" },
+    }, required: ["idempotency_key", "registry_id", "manifest_digest", "reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "activate-guidance-registry", args, async () => {
+      const activated = await c.query(
+        "select ops.activate_guidance_registry($1,$2,$3,$4) as id",
+        [args.registry_id, args.manifest_digest, args.idempotency_key, args.reason]);
+      await writeEvent(c, actor, "activate-guidance-registry", "guidance_registry", args.registry_id,
+        { new: { manifest_digest: args.manifest_digest, state: "active" },
+          agent_rationale: args.reason, idempotency_key: args.idempotency_key });
+      return { ok: true, registry_id: args.registry_id, activation_event_id: activated.rows[0].id,
+               manifest_digest: args.manifest_digest };
+    }),
+  },
+
   "retire-rule": {
     write: true, humanOnly: true,
     description: "Withdraw a rule — proposed OR active — by setting status='retired'. THE PRESSURE VALVE THE RULE STORE WAS MISSING: until 2026-08-02 a rule could only go proposed -> active, so a rule taught in a wrong scope, a duplicate, or a draft the partner never wanted could never be taken back. 56 proposed rules had piled up by then, including two that stated Joe's own start date differently and no way to kill the wrong one. Retiring is NOT deleting: the row stays, the statement stays readable, and the compiled-rules exports simply stop carrying it (they read active only). A reason is REQUIRED — an unexplained retirement is indistinguishable from a mistake six months later, and the reason is the only thing that stops the same rule being re-taught. Pass superseded_by when a replacement already exists, so the pair reads as one decision rather than two unrelated events. Retiring an ACTIVE rule changes what binds every session, so it is human-gated like teach and activate-rule.",

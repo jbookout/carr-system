@@ -40,6 +40,9 @@ def main() -> int:
                 "constraint", "procedure", "doctrine", "rubric",
                 "preference", "precedent", "example")),
         "typed revision validator": "validate_guidance_revision" in compact,
+        "rule-backed constitution and precedent":
+            "constitution and precedent revisions require a source_rule_id" in compact
+            and "new.is_constitution or new.guidance_type='precedent'" in compact,
         "constraint evidence is installed": "constraint revision requires an installed enforcement point" in compact,
         "constraint projection": "v_guidance_constraint" in compact,
         "procedure projection": "v_guidance_procedure" in compact,
@@ -58,7 +61,14 @@ def main() -> int:
             and "to carr_authority" in compact,
         "registry activation cannot bypass gate":
             "guidance_registry_event to carr_writer" not in compact
-            and "activate_guidance_registry(uuid,uuid,text,text) from public,carr_writer" in compact,
+            and "activate_guidance_registry(uuid,text,text,text) from public,carr_writer" in compact,
+        "registry activation mints its own session-bound receipt":
+            "p_idempotency_key text" in compact
+            and "authority_actor_slug()" in compact
+            and "insert into ops.authority_receipt" in compact
+            and "registry_owner <> authority_actor" in compact
+            and "pg_advisory_xact_lock" in compact
+            and "guidance registry activation" in compact,
         "authority functions deny public execute":
             "record_guidance_decision(uuid,text,text,text) from public,carr_writer" in compact
             and "activate_guidance_situation_mapping(uuid,uuid,text) from public,carr_writer" in compact,
