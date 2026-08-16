@@ -456,13 +456,13 @@ class RuntimeWorkflowFactCollector:
             return False
         markers: dict[tuple[str, str], tuple[str, ...]] = {
             ('calendar-fetch-daily', 'shadow'): (r'calendar-pull: source=calendar .* posted=\d+ duplicate=\d+ failed=0 unparseable=\d+',),
-            ('calendar-fetch-daily', 'canary'): (r'calendar-pull: source=calendar .* posted=\d+ duplicate=\d+ failed=0 unparseable=\d+',),
+            ('calendar-fetch-daily', 'canary'): (r'calendar-pull: source=calendar mode=canary destination=[^\s]+ .* posted=\d+ duplicate=\d+ failed=0 unparseable=\d+',),
             ('calendar-fetch-daily', 'live'): (r'calendar-pull: source=calendar .* posted=\d+ duplicate=\d+ failed=0 unparseable=\d+',),
             ('nightly-record-layer', 'shadow'): (r'nightly preflight: \d+ chain surfaces present; writes=0',),
             ('nightly-record-layer', 'canary'): (r'nightly result: chain_ok',),
             ('nightly-record-layer', 'live'): (r'nightly result: chain_ok',),
             ('notes-sweep-hourly', 'shadow'): (r'notes-sweep shadow: scanned=\d+ unposted=\d+ writes=0 posts=0',),
-            ('notes-sweep-hourly', 'canary'): (r'notes-sweep: source=.+ posted=\d+ duplicate=\d+ failed=0 still_queued=0',),
+            ('notes-sweep-hourly', 'canary'): (r'notes-sweep: source=.+ mode=canary destination=[^\s]+ posted=\d+ duplicate=\d+ failed=0 still_queued=0',),
             ('notes-sweep-hourly', 'live'): (r'notes-sweep: source=.+ posted=\d+ duplicate=\d+ failed=0 still_queued=0',),
             ('restore-rehearse-weekly', 'shadow'): (r'PREFLIGHT OK — every check that runs before anything is created has passed\.', r'Nothing was created, decrypted or charged for\.'),
             ('restore-rehearse-weekly', 'canary'): (r'RESTORE REHEARSAL: PASS',),
@@ -731,7 +731,13 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
     path = (REPO / execution["entrypoint"]).resolve()
     if REPO not in path.parents or not path.is_file():
         raise RuntimeError("deterministic entrypoint is outside the registered repository")
-    env = {**os.environ, "CARR_JOB_PAYLOAD": json.dumps(payload, sort_keys=True)}
+    # Deterministic children never inherit ledger, provider, owner or live-ingest
+    # credentials.  Their explicit canary config is the sole credential seam.
+    env = {key: os.environ[key] for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "CARR_VAULT",
+                                             "CARR_CALENDAR_CANARY_ENV", "CARR_NOTES_CANARY_ENV",
+                                             "CARR_CALENDAR_CANARY_ROOT", "CARR_NOTES_CANARY_ROOT")
+           if os.environ.get(key)}
+    env.update({"CARR_JOB_PAYLOAD": json.dumps(payload, sort_keys=True), "CARR_CONTROL_PLANE_MODE": mode})
     args = deterministic_args(execution, mode)
     proc = subprocess.run([str(path), *args], cwd=REPO, env=env,
                           capture_output=True, text=True, timeout=timeout)

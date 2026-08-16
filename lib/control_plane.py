@@ -25,7 +25,9 @@ BACKOFFS = {"constant", "linear", "exponential"}
 # The registry is deliberately empty until an entrypoint has a real, tested
 # destination boundary.  A manifest edit alone can never turn a live command
 # into a canary.
-CANARY_ISOLATION_GUARDS: frozenset[str] = frozenset()
+CANARY_ISOLATION_GUARDS: frozenset[str] = frozenset({
+    "calendar-fetch-daily.canary.v1", "notes-sweep-hourly.canary.v1",
+})
 DECISION_FIELDS = ("routing", "filtering", "validation", "completion")
 INVENTORY_FIELDS = {
     "trigger", "owner", "inputs", "canonical_reads", "canonical_writes",

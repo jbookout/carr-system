@@ -130,10 +130,12 @@ def main() -> int:
           and post_kwargs.get("receipt_ref") == "receipt:1")
 
     calls: list[list[str]] = []
+    call_envs: list[dict[str, str]] = []
     original_run = module.subprocess.run
 
-    def fake_run(argv, **_kwargs):
+    def fake_run(argv, **kwargs):
         calls.append(argv)
+        call_envs.append(kwargs["env"])
         return subprocess.CompletedProcess(argv, 0, "shadow evidence", "")
 
     module.subprocess.run = fake_run
@@ -147,6 +149,10 @@ def main() -> int:
           bool(calls) and calls[0][1:] == ["--preflight"])
     check("execution evidence records mode and exact arguments",
           evidence["mode"] == "shadow" and evidence["args"] == ["--preflight"])
+    check("every deterministic subprocess receives its exact control-plane mode",
+          bool(call_envs) and call_envs[0].get("CARR_CONTROL_PLANE_MODE") == "shadow")
+    check("deterministic subprocesses never inherit ledger, provider, owner, or live-ingest secrets",
+          bool(call_envs) and not any(key in call_envs[0] for key in ("CARR_DB_JOBS_URL", "DATABASE_URL", "CARR_DB_OWNER_URL", "CARR_DB_WRITER_URL", "CARR_AI_ROUTE_PRIMARY_TOKEN", "CARR_INGEST_TOKEN_CALENDAR")))
 
     canary_calls: list[list[str]] = []
 
@@ -205,15 +211,18 @@ def main() -> int:
     original_connect = getattr(module, "connect")
     setattr(module, "connect", should_not_connect)
     try:
+        unsafe_manifest = module.load_manifest()
+        next(workflow for workflow in unsafe_manifest["workflows"]
+             if workflow["key"] == "calendar-fetch-daily")["execution"]["canary"]["isolation_guard"] = "forged-canary-guard"
         try:
             module.enqueue_due(
-                module.load_manifest(),
+                unsafe_manifest,
                 datetime.fromisoformat("2026-08-17T12:09:00+00:00"),
                 "canary",
             )
             schedule_refused = False
         except RuntimeError as exc:
-            schedule_refused = "canary isolation is disabled" in str(exc)
+            schedule_refused = "canary isolation guard is not registered" in str(exc)
     finally:
         setattr(module, "connect", original_connect)
     check("unsafe deterministic canary is refused before a ledger write",

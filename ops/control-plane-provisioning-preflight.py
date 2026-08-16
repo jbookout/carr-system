@@ -49,8 +49,8 @@ def equals(value: Any, expected: str, path: str, errors: list[str]) -> None:
 
 def validate(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if set(config) != {"version", "authority", "device_evidence", "providers", "routine_jobs", "routine_backup"}:
-        errors.append("config must contain exactly version, authority, device_evidence, providers, routine_jobs, routine_backup")
+    if set(config) != {"version", "authority", "device_evidence", "providers", "routine_jobs", "routine_backup", "deterministic_canaries"}:
+        errors.append("config must contain exactly version, authority, device_evidence, providers, routine_jobs, routine_backup, deterministic_canaries")
         return errors
     if config.get("version") != 1:
         errors.append("version must be 1")
@@ -107,6 +107,13 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("routine_backup.consumers must name only backup dump and portability mirror")
     equals(backup.get("provisioning"), "external_human_approval", "routine_backup.provisioning", errors)
 
+    canaries = mapping(config.get("deterministic_canaries"), "deterministic_canaries", errors,
+                       {"file", "required_names", "scope"})
+    equals(canaries.get("file"), "~/.config/carr/{calendar,notes}-canary.env", "deterministic_canaries.file", errors)
+    if canaries.get("required_names") != ["CARR_CANARY_INGEST_URL", "CARR_CANARY_DESTINATION_ID"]:
+        errors.append("deterministic_canaries.required_names must declare only the isolated calendar/Notes names")
+    equals(canaries.get("scope"), "isolated calendar and Notes canary destinations only; no live URL or local state root", "deterministic_canaries.scope", errors)
+
     mcp = text("mcp-server/src/mcp.js")
     migration_authority = text("migrations/0161_control_plane_authority_boundary.sql")
     migration_device = text("migrations/0163_control_plane_device_evidence.sql")
@@ -116,6 +123,8 @@ def validate(config: dict[str, Any]) -> list[str]:
     nightly = text("bin/nightly.sh")
     backup_dump = text("bin/backup-dump.sh")
     backup_role = text("migrations/0119_backup_role.sql")
+    calendar = text("bin/pull-gmail-calendar.py")
+    notes = text("bin/notes-sweep-post.sh")
     if "CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL" not in mcp or "CARR_DB_AUTHORITY_URL" not in mcp:
         errors.append("authority declarations are not bound by mcp-server/src/mcp.js")
     if not all(role in migration_authority for role in ("carr_authority_joe", "carr_authority_dell", "carr_authority")):
@@ -137,6 +146,8 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("backup credential and login boundary are not bound by backup-dump")
     if 'DATABASE_URL="$CARR_DB_BACKUP_URL"' not in nightly or "pipelines/doctrine_mirror.py" not in nightly:
         errors.append("backup credential is not scoped to the portability mirror step")
+    if not all(token in calendar and token in notes for token in ("CARR_CANARY_DESTINATION_ID", "CARR_CONTROL_PLANE_MODE")) or "CARR_CALENDAR_CANARY_ENV" not in calendar or "CARR_NOTES_CANARY_ENV" not in notes:
+        errors.append("isolated deterministic canary declarations are not bound by both entrypoints")
     return errors
 
 

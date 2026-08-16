@@ -53,6 +53,53 @@ SOURCE_LABEL="notes_sweep"
 FOLDER_NAME="Call Recordings"
 MAX_TEXT_BYTES=900000                       # socket ceiling is 1 MiB; leave headroom
 
+# A canary reads Notes but never shares the live queue, ledger, logs, URL or
+# token.  Parse literal config only; do not source a credential file.
+CANARY=0
+if [ "${CARR_CONTROL_PLANE_MODE:-}" = "canary" ] && [ "${1:-}" != "--canary" ]; then
+  print -ru2 -- "notes canary mode requires --canary"; exit 78
+fi
+if [ "${1:-}" = "--canary" ]; then
+  [ "${CARR_CONTROL_PLANE_MODE:-}" = "canary" ] || { print -ru2 -- "notes canary requires CARR_CONTROL_PLANE_MODE=canary"; exit 78; }
+  CANARY=1
+  CF="${CARR_NOTES_CANARY_ENV:-$HOME/.config/carr/notes-canary.env}"
+  mode="$(/usr/bin/stat -f '%Lp' "$CF" 2>/dev/null || /usr/bin/stat -c '%a' "$CF" 2>/dev/null || true)"
+  [ "$mode" = "600" ] || { print -ru2 -- "notes canary config must be 0600"; exit 78; }
+  typeset -A ce; while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] || [[ "$line" == \#* ]] && continue
+    [[ "$line" == *=* ]] || { print -ru2 -- "notes canary config malformed"; exit 78; }
+    k="${line%%=*}"; v="${line#*=}"
+    [[ "$k" == CARR_CANARY_INGEST_URL || "$k" == CARR_CANARY_INGEST_TOKEN_NOTES || "$k" == CARR_CANARY_DESTINATION_ID ]] && [[ "$v" != *'$('* && "$v" != *'`'* && -z "${ce[$k]:-}" ]] || { print -ru2 -- "notes canary config refused"; exit 78; }
+    if [[ "$v" == \"* || "$v" == \'* ]]; then
+      [[ "${v[-1]}" == "${v[1]}" && ${#v} -ge 2 ]] || { print -ru2 -- "notes canary config malformed"; exit 78; }
+      v="${v[2,-2]}"
+    fi
+    ce[$k]="$v"
+  done < "$CF"
+  [ -n "${ce[CARR_CANARY_INGEST_URL]:-}" ] && [ -n "${ce[CARR_CANARY_INGEST_TOKEN_NOTES]:-}" ] && [ -n "${ce[CARR_CANARY_DESTINATION_ID]:-}" ] || { print -ru2 -- "notes canary config missing"; exit 78; }
+  [[ "${ce[CARR_CANARY_DESTINATION_ID]}" =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' ]] || { print -ru2 -- "notes canary destination is unsafe"; exit 78; }
+  live_url="${CARR_INGEST_URL:-https://api.practicecre.com/ingest}"
+  live_file="$HOME/.config/carr/ingest.env"
+  if [ -f "$live_file" ]; then
+    while IFS= read -r live_line || [ -n "$live_line" ]; do
+      [[ "$live_line" == CARR_INGEST_URL=* ]] || continue
+      live_url="${live_line#*=}"
+      if [[ "$live_url" == \"* || "$live_url" == \'* ]]; then
+        [[ "${live_url[-1]}" == "${live_url[1]}" && ${#live_url} -ge 2 ]] && live_url="${live_url[2,-2]}"
+      fi
+      break
+    done < "$live_file"
+  fi
+  [ "${ce[CARR_CANARY_INGEST_URL]}" != "$live_url" ] || { print -ru2 -- "notes canary URL equals live"; exit 78; }
+  canary_base="${REPO}/out/canary"
+  canary_base="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$canary_base")"
+  DIR="${CARR_NOTES_CANARY_ROOT:-$canary_base/notes}"
+  DIR="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$DIR")"
+  [[ "$DIR" == "$canary_base"/* ]] || { print -ru2 -- "notes canary root must stay under out/canary"; exit 78; }
+  PENDING="$DIR/pending"; SENT="$DIR/sent"; FAILED="$DIR/failed"; LEDGER="$DIR/swept-ids.txt"; AUDIO_ONLY="$DIR/audio-only.txt"; LOG="$DIR/notes-sweep.log"
+  shift
+fi
+
 # Control-plane shadow path. It exercises the real Apple Notes collector and
 # the real local dedup predicate, but creates no directories, queue entries,
 # ledger rows, logs, or network requests.
@@ -79,7 +126,8 @@ if [ "${1:-}" = "--dry-run" ]; then
   exit 0
 fi
 
-mkdir -p "$PENDING" "$SENT" "$FAILED" "$REPO/out"
+mkdir -p "$PENDING" "$SENT" "$FAILED"
+[ "$CANARY" -eq 1 ] || mkdir -p "$REPO/out"
 [ -f "$LEDGER" ] || : > "$LEDGER"
 [ -f "$AUDIO_ONLY" ] || : > "$AUDIO_ONLY"
 
@@ -100,6 +148,7 @@ if [ "${1:-}" = "--scheduled" ]; then
 fi
 
 if [ "${1:-}" = "--status" ]; then
+  [ "$CANARY" -eq 0 ] || print -r -- "notes-sweep: source=$SOURCE_LABEL mode=canary destination=${ce[CARR_CANARY_DESTINATION_ID]} posted=0 duplicate=0 failed=0 still_queued=$(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
   print -r -- "folder-to-sweep: $FOLDER_NAME"
   print -r -- "pending-dir: $PENDING"
   print -r -- "queued-now: $(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
@@ -258,6 +307,9 @@ fi
 
 # ---------------------------------------------------------------- 3. credential
 ENVFILE="$HOME/.config/carr/ingest.env"
+if [ "$CANARY" -eq 1 ]; then
+  URL="${ce[CARR_CANARY_INGEST_URL]}"; TOKEN="${ce[CARR_CANARY_INGEST_TOKEN_NOTES]}"
+else
 if [ ! -f "$ENVFILE" ]; then
   print -r -- "notes-sweep: NOT CONFIGURED — $ENVFILE does not exist. $(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true) payload(s) stay queued and go out on the first run after the token lands."
   print -r -- "notes-sweep: that file is Joe's to create; see DNA/Deal Management/record-layer/ingest-tokens-setup.md"
@@ -272,6 +324,7 @@ if [ -z "$TOKEN" ]; then
   say "NOT CONFIGURED (no token)"
   exit 78
 fi
+fi
 
 # ---------------------------------------------------------------- 4. post
 setopt null_glob
@@ -279,7 +332,11 @@ files=("$PENDING"/*.json)
 unsetopt null_glob
 
 if [ "${#files[@]}" -eq 0 ]; then
-  print -r -- "notes-sweep: source=$SOURCE_LABEL posted=0 duplicate=0 failed=0 still_queued=0"
+  if [ "$CANARY" -eq 1 ]; then
+    print -r -- "notes-sweep: source=$SOURCE_LABEL mode=canary destination=${ce[CARR_CANARY_DESTINATION_ID]} posted=0 duplicate=0 failed=0 still_queued=0"
+  else
+    print -r -- "notes-sweep: source=$SOURCE_LABEL posted=0 duplicate=0 failed=0 still_queued=0"
+  fi
   say "nothing queued"
   exit 0
 fi
@@ -340,7 +397,11 @@ except Exception: print("no")' "$BODYFILE" 2>/dev/null || echo no)"
 done
 
 left="$(ls -1 "$PENDING" 2>/dev/null | grep -c '\.json$' || true)"
-print -r -- "notes-sweep: source=$SOURCE_LABEL posted=$posted duplicate=$dup failed=$failed still_queued=$left"
+if [ "$CANARY" -eq 1 ]; then
+  print -r -- "notes-sweep: source=$SOURCE_LABEL mode=canary destination=${ce[CARR_CANARY_DESTINATION_ID]} posted=$posted duplicate=$dup failed=$failed still_queued=$left"
+else
+  print -r -- "notes-sweep: source=$SOURCE_LABEL posted=$posted duplicate=$dup failed=$failed still_queued=$left"
+fi
 say "summary posted=$posted duplicate=$dup failed=$failed still_queued=$left"
 
 tail -n 2000 "$LOG" > "$LOG.trim" && mv "$LOG.trim" "$LOG"

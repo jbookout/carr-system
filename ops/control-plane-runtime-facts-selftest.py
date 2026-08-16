@@ -174,6 +174,21 @@ for key,evidence in command_fixtures.items():
     altered={**evidence,'stdout_tail':str(evidence['stdout_tail'])+' altered'}
     check(f'{key} nonidentical receipt evidence refuses',not evaluate_stage(workflow,'completion',cp._workflow_fact_collector(workflow,weekday_payload,execution=evidence,receipt_ref='job:fixture:attempt:1',receipt_evidence=altered,mode='shadow')))
 
+# The two enabled deterministic canaries have a separate registered command
+# and must attest their nonsecret destination in the receipt marker.
+canary_fixtures={
+ 'calendar-fetch-daily': {'entrypoint':'bin/pull-gmail-calendar.py','mode':'canary','args':['--canary'],'exit_code':0,
+   'stdout_tail':'calendar-pull: source=calendar mode=canary destination=canary-destination window=now posted=1 duplicate=0 failed=0 unparseable=0'},
+ 'notes-sweep-hourly': {'entrypoint':'bin/notes-sweep-post.sh','mode':'canary','args':['--canary'],'exit_code':0,
+   'stdout_tail':'notes-sweep: source=notes_sweep mode=canary destination=canary-destination posted=1 duplicate=0 failed=0 still_queued=0'},
+}
+for key,evidence in canary_fixtures.items():
+    workflow=by[key]
+    canary=cp._workflow_fact_collector(workflow,weekday_payload,execution=evidence,mode='canary')
+    check(f'{key} isolated canary marker and registered arguments validate',evaluate_stage(workflow,'validation',canary))
+    missing_destination={**evidence,'stdout_tail':str(evidence['stdout_tail']).replace(' destination=canary-destination','')}
+    check(f'{key} canary marker without destination identity refuses',not evaluate_stage(workflow,'validation',cp._workflow_fact_collector(workflow,weekday_payload,execution=missing_destination,mode='canary')))
+
 # Nightly's actual completion result goes to stdout for the live receipt.  The
 # old canary used the same command and destination as live, so it is now
 # deliberately unregistered and must fail closed even when handed a valid live
