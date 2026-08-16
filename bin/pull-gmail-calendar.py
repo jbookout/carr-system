@@ -49,6 +49,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import stat
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VAULT = os.environ.get(
@@ -232,6 +233,57 @@ def load_env():
     return out
 
 
+def canary_env():
+    path = os.environ.get("CARR_CALENDAR_CANARY_ENV", os.path.expanduser("~/.config/carr/calendar-canary.env"))
+    try:
+        if stat.S_IMODE(os.stat(path).st_mode) != 0o600:
+            raise ValueError("insecure config")
+        out = {}
+        for raw in open(path, encoding="utf-8"):
+            line = raw.rstrip("\r\n")
+            if not line or line.startswith("#"): continue
+            if "=" not in line: raise ValueError("malformed config")
+            key, value = line.split("=", 1)
+            if (key not in {"CARR_CANARY_INGEST_URL", "CARR_CANARY_INGEST_TOKEN_CALENDAR", "CARR_CANARY_DESTINATION_ID"}
+                    or "$(" in value or "`" in value
+                    or (bool(value) and value[:1] in "\"'" and value[-1:] != value[:1])):
+                raise ValueError("unsafe config")
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'": value = value[1:-1]
+            if key in out: raise ValueError("duplicate config")
+            out[key] = value
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"calendar canary config refused: {exc}")
+    required = ("CARR_CANARY_INGEST_URL", "CARR_CANARY_INGEST_TOKEN_CALENDAR", "CARR_CANARY_DESTINATION_ID")
+    if any(not out.get(k) for k in required): raise RuntimeError("calendar canary config missing required value")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", out["CARR_CANARY_DESTINATION_ID"]):
+        raise RuntimeError("calendar canary destination is unsafe")
+    live_url = literal_live_url()
+    if out["CARR_CANARY_INGEST_URL"] == live_url: raise RuntimeError("calendar canary URL equals live URL")
+    return out
+
+
+def literal_live_url() -> str:
+    """Read only the nonsecret live URL; never parse or retain live tokens."""
+    try:
+        for raw in open(ENVFILE, encoding="utf-8"):
+            if raw.startswith("CARR_INGEST_URL="):
+                value = raw.rstrip("\r\n").split("=", 1)[1]
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                return value
+    except OSError:
+        pass
+    return os.environ.get("CARR_INGEST_URL", DEFAULT_URL)
+
+
+def canary_root(name):
+    base = os.path.realpath(os.path.join(REPO, "out", "canary"))
+    root = os.path.realpath(os.environ.get(name, os.path.join(base, "calendar")))
+    if os.path.commonpath((base, root)) != base or root == base:
+        raise RuntimeError("calendar canary root must stay under out/canary")
+    return root
+
+
 def post(url, token, payload, timeout=30):
     body = json.dumps(payload).encode()
     if len(body) > 1_000_000:                 # the socket rejects >1MiB outright
@@ -265,15 +317,27 @@ def post(url, token, payload, timeout=30):
 # ---------------------------------------------------------------- halves
 
 def run_calendar(args):
+    global LOG
     # A shadow run must be observational only: even its audit log is a write
     # to canonical local state, so keep all log appends out of --dry-run.
     def record(message):
         if not args.dry_run:
             say(message)
 
-    env = load_env()
-    url = env.get("CARR_INGEST_URL", DEFAULT_URL)
-    token = env.get("CARR_INGEST_TOKEN_CALENDAR", "")
+    # Keep the long-standing direct ``run_calendar(Namespace(...))`` test and
+    # operator seam compatible: older callers predate the CLI's canary flag.
+    canary = bool(getattr(args, "canary", False))
+    if os.environ.get("CARR_CONTROL_PLANE_MODE") == "canary" and not canary:
+        raise RuntimeError("calendar canary mode requires --canary")
+    if canary and os.environ.get("CARR_CONTROL_PLANE_MODE") != "canary":
+        raise RuntimeError("calendar canary requires CARR_CONTROL_PLANE_MODE=canary")
+    env = canary_env() if canary else load_env()
+    if canary:
+        root = canary_root("CARR_CALENDAR_CANARY_ROOT")
+        os.makedirs(root, exist_ok=True)
+        LOG = os.path.join(root, "calendar-pull.log")
+    url = env.get("CARR_CANARY_INGEST_URL") if canary else env.get("CARR_INGEST_URL", DEFAULT_URL)
+    token = env.get("CARR_CANARY_INGEST_TOKEN_CALENDAR", "") if canary else env.get("CARR_INGEST_TOKEN_CALENDAR", "")
     if not args.dry_run and not token:
         print(
             "calendar-pull: NOT CONFIGURED — CARR_INGEST_TOKEN_CALENDAR is not set in "
@@ -339,7 +403,7 @@ def run_calendar(args):
         record(f"{owner}: feed_events={len(events)} in_window={in_window} age_h={age_h:.1f}")
 
     print(
-        f"calendar-pull: source=calendar window={lo}..{hi} posted={posted} "
+        f"calendar-pull: source=calendar mode={'canary' if canary else 'live'}" + (f" destination={env['CARR_CANARY_DESTINATION_ID']}" if canary else "") + f" window={lo}..{hi} posted={posted} "
         f"duplicate={dup} failed={failed} unparseable={skipped}"
     )
     record(f"summary posted={posted} duplicate={dup} failed={failed} unparseable={skipped}")
@@ -382,15 +446,23 @@ def main():
     ap.add_argument("--gmail", action="store_true", help="print the auth decision and stop")
     ap.add_argument("--dry-run", action="store_true",
                     help="parse/count only; POST and event payload output are suppressed")
+    ap.add_argument("--canary", action="store_true", help="post only to configured isolated canary destination")
     ap.add_argument("--days-back", type=int, default=1)
     ap.add_argument("--days-ahead", type=int, default=14)
     args = ap.parse_args()
 
+    if args.gmail and (args.canary or os.environ.get("CARR_CONTROL_PLANE_MODE") == "canary"):
+        print("calendar-pull: REFUSED — --gmail cannot share a canary invocation", file=sys.stderr)
+        return 78
     if args.gmail:
         print(GMAIL_BOUNDARY)
         say("gmail half invoked; stopped at the auth boundary as ordered")
         return 78
-    return run_calendar(args)
+    try:
+        return run_calendar(args)
+    except RuntimeError as exc:
+        print(f"calendar-pull: REFUSED — {exc}", file=sys.stderr)
+        return 78
 
 
 if __name__ == "__main__":

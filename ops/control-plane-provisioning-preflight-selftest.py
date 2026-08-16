@@ -39,6 +39,20 @@ def main() -> int:
     check("declared external boundary contract passes without credential values",
           accepted.returncode == 0, accepted.stderr or accepted.stdout)
 
+    missing_canary_name = json.loads(json.dumps(config))
+    missing_canary_name["deterministic_canaries"]["required_names"].pop()
+    rejected = run(missing_canary_name)
+    check("canary provisioning refuses an incomplete isolated destination contract",
+          rejected.returncode != 0 and "deterministic_canaries.required_names" in rejected.stdout,
+          rejected.stdout or rejected.stderr)
+
+    broad_canary_scope = json.loads(json.dumps(config))
+    broad_canary_scope["deterministic_canaries"]["scope"] = "live destinations allowed"
+    rejected = run(broad_canary_scope)
+    check("canary provisioning refuses a live-equivalent scope declaration",
+          rejected.returncode != 0 and "deterministic_canaries.scope" in rejected.stdout,
+          rejected.stdout or rejected.stderr)
+
     ci = (REPO / "ops" / "ci.sh").read_text(encoding="utf-8")
     check("the standard CI gate class discovers this selftest",
           "for t in ops/*-selftest.py tools/test-*.py" in ci)
