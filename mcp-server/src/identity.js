@@ -32,6 +32,14 @@ const SERVER_MACHINE_IDENTITIES = Object.freeze({
   "smoke-probe": { marker: "probe", via: "probe-token" },
   "codex-reviewer": { marker: "review", via: "review-token" },
   "grok-reviewer": { marker: "review", via: "review-token" },
+  // The R0 Hermes evaluation runtime (2026-08-16). Registered here for the
+  // reason stated above: personalScopeForActor refuses any slug that is neither
+  // a DISPLAY actor nor a registered machine identity, so an unregistered
+  // Hermes token would fail every call with invalid_runtime_principal. Its
+  // scope resolves to shared-only, exactly like the probe and reviewer seats.
+  // Adding a second evaluation seat is a deliberate edit here, never something
+  // a token can claim.
+  "hermes-pilot": { marker: "hermes", via: "hermes-token" },
 });
 // CARR has one internal tenant at launch. This is intentionally a server
 // constant, not a claim accepted from an OAuth client, tool payload, or job.
@@ -273,4 +281,50 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
   return { slug, display: `Agent (${slug})`, human: false, agent: true,
            via: viaLabel, client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
+}
+
+/**
+ * HERMES_TOKENS bearer -> the R0 evaluation runtime's actor, or null.
+ *
+ * The pure half of index.js's hermesActorFor, split out for the same reason as
+ * agentActorForToken above: the Worker entrypoint imports from `cloudflare:`
+ * and cannot be loaded by node --test. A locked profile whose lock can only be
+ * exercised by deploying is a lock nobody can prove.
+ *
+ * DELIBERATELY NOT A CALL INTO agentActorForToken. That function's contract is
+ * an outside-model CLI: it sets agent:true, honours LOCAL_SPONSOR, and its
+ * actors take profileFor(request) in dispatch, so they can pass ?profile= and
+ * write. Every one of those is wrong here. This actor sets hermes:true (which
+ * dispatch turns into the locked, write-empty `hermes` profile), never consults
+ * LOCAL_SPONSOR, and carries no sponsor at all — so authorizationClassForActor
+ * resolves it to `unsponsored_agent` and personalScopeForActor returns
+ * shared-only. The R0 fixture's cross-brain-scope and unsponsored-metadata
+ * cases are satisfied by those existing rules rather than by anything new.
+ *
+ * The slug is not checked against DISPLAY here, and it does not need to be:
+ * personalScopeForActor refuses any slug that is neither a DISPLAY actor nor a
+ * registered entry in SERVER_MACHINE_IDENTITIES, so registration is enforced
+ * one layer down and a typo'd slug fails every call with
+ * invalid_runtime_principal rather than acquiring a quiet identity. That is
+ * the same shape the probe and reviewer doors rely on. Found by the R0 test
+ * suite before deploy, which is the point of the split.
+ *
+ * Fails closed on every path: no header, unparseable JSON, a non-object map, an
+ * empty map, or a token matching nothing.
+ */
+export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
+  const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  let tokens;
+  try {
+    tokens = JSON.parse(hermesTokensRaw || "{}");
+  } catch {
+    return null;
+  }
+  if (!tokens || typeof tokens !== "object") return null;
+  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
+  if (!slug) return null;
+  return { slug, display: `Hermes (${slug})`, human: false, hermes: true,
+           via: "hermes-token", client_id: null,
+           sponsoring_human_slug: null, human_slug: null, sponsor_required: false };
 }

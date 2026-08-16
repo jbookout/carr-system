@@ -1,0 +1,171 @@
+// hermes-r0-lock.test.mjs — the twelve R0 refusal cases, run against the real
+// server logic instead of against a fixture that asserts itself.
+//
+// PROVENANCE. phase0/hermes-runtime-evaluation-fixtures.v1.json has carried
+// twelve expected outcomes since 2026-08-12 and had never been executed: its
+// capability profile (`hermes_r0_readonly_pilot`) and its three named verbs
+// existed nowhere in the server, so there was nothing for the cases to run
+// against. This file is what makes them a test rather than a description.
+//
+// WHAT CHANGED IN THE MAPPING, stated plainly rather than quietly. The fixture
+// names three bespoke read verbs (carr.deal_health.read_v1,
+// carr.doctrine_excerpt.read_v1, carr.runtime_context_metadata.read_v1). None
+// was built, and building them would have duplicated deal-board, read-doctrine
+// and standing-context, which already return exactly those three things. Rule
+// 49c627cc says to match a capability on BEHAVIOR, never on a verb name, so the
+// allow cases assert the behaviour the fixture asked for — reads reach the
+// runtime — against the verbs that actually serve it. The refusal cases are
+// unchanged in substance, because a refusal is the half that has to be exact.
+//
+// The boundary being tested is held credentials and autonomous authority, never
+// confidentiality (rule d7f74c93). Joe closed the exposure question on
+// 2026-08-12, and every frontier council seat, Grok included, has read entire
+// CARR doctrines already.
+//
+//   node --test mcp-server/test/hermes-r0-lock.test.mjs
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  hermesActorForToken,
+  agentActorForToken,
+  authorizationClassForActor,
+  personalScopeForActor,
+} from "../src/identity.js";
+import { PROFILES, allowedIn, profileForActor } from "../src/mcp.js";
+
+const TOKENS = JSON.stringify({ "hermes-pilot": "s3cr3t-r0" });
+const BEARER = "Bearer s3cr3t-r0";
+const actor = () => hermesActorForToken(BEARER, TOKENS);
+
+// A stand-in for the tool registry's shape. `write` and `fullOnly` are the only
+// two fields allowedIn reads.
+const READ = { write: false };
+const WRITE = { write: true };
+const FULL_ONLY = { write: false, fullOnly: true };
+
+// ---------- the door itself ----------
+
+test("a matching HERMES_TOKENS bearer resolves to a locked, unsponsored actor", () => {
+  const a = actor();
+  assert.equal(a.slug, "hermes-pilot");
+  assert.equal(a.hermes, true);
+  assert.equal(a.human, false, "never a human seat: humanOnly verbs refuse on this");
+  assert.equal(a.sponsoring_human_slug, null, "R0 carries no sponsor, so no personal brain");
+  assert.equal(a.via, "hermes-token", "the door is legible in tool_call rows");
+});
+
+test("the door fails closed on every malformed input", () => {
+  assert.equal(hermesActorForToken("", TOKENS), null, "no header");
+  assert.equal(hermesActorForToken(BEARER, "{not json"), null, "unparseable map");
+  assert.equal(hermesActorForToken(BEARER, "[]"), null, "non-object map");
+  assert.equal(hermesActorForToken(BEARER, "{}"), null, "empty map");
+  assert.equal(hermesActorForToken("Bearer wrong", TOKENS), null, "token matches nothing");
+  assert.equal(hermesActorForToken(BEARER, JSON.stringify({ x: "" }), null), null, "empty secret never matches");
+});
+
+test("a Hermes token is not an outside-model CLI token", () => {
+  // AGENT_TOKENS actors take profileFor(request) and can therefore ask for a
+  // writing profile. If the two doors ever collapsed into one, this fails.
+  assert.equal(agentActorForToken(BEARER, TOKENS), null,
+    "the Hermes secret must not authenticate through the CLI door");
+});
+
+// ---------- the lock ----------
+
+test("dispatch forces the hermes profile and ignores ?profile=", () => {
+  const a = actor();
+  for (const asked of [null, "full", "capture", "away", "read", "probe", "reviewer", "nonsense"]) {
+    const url = asked === null
+      ? "https://api.doctorcre.com/mcp"
+      : `https://api.doctorcre.com/mcp?profile=${asked}`;
+    assert.equal(profileForActor(a, new Request(url)), "hermes",
+      `?profile=${asked} must not widen a Hermes token`);
+  }
+});
+
+test("the hermes profile's write set is empty", () => {
+  assert.equal(PROFILES.hermes.size, 0,
+    "R0 is read-only; a write verb here would be a silent graduation");
+});
+
+// ---------- HERMES-CASE-001: an allowed read reaches the runtime ----------
+
+test("HERMES-CASE-001 — reads are allowed", () => {
+  for (const verb of ["deal-board", "read-doctrine", "standing-context", "catch-me-up", "find"]) {
+    assert.equal(allowedIn("hermes", verb, READ), true, `${verb} should reach R0`);
+  }
+});
+
+// ---------- HERMES-CASE-002..005: the client cannot select its own identity ----------
+//
+// These four are satisfied by the actor shape rather than by a per-call check:
+// the server derives identity from the token, and callTool's
+// assertNoCallerAuthorityFields refuses caller-claimed authority arguments
+// outright. What this file proves is the half those cases actually turn on —
+// that the derived identity is unsponsored and shared-only, so there is no
+// personal brain for a client hint to point at.
+
+test("HERMES-CASE-002/003/004 — the derived class is unsponsored, never a partner", () => {
+  assert.equal(authorizationClassForActor(actor()), "unsponsored_agent",
+    "a Hermes token must never resolve to verified_partner or sponsored_agent");
+});
+
+test("HERMES-CASE-005/010 — no personal brain scope, so cross-brain reads have no target", () => {
+  const scope = personalScopeForActor(actor());
+  assert.equal(scope.status, "none", "R0 is shared-only");
+  assert.equal(scope.sponsor, null);
+});
+
+// ---------- HERMES-CASE-006: mutations refuse ----------
+
+test("HERMES-CASE-006 — every write verb refuses", () => {
+  for (const verb of ["update-deal", "new-client", "add-party", "log-decision", "close-loop",
+                      "stamp-touch", "record-finding", "log-activity", "set-next-action"]) {
+    assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must refuse under R0`);
+  }
+});
+
+test("HERMES-CASE-006 — the probe and reviewer write sets do not leak in", () => {
+  // probe and reviewer are the two other locked machine profiles. A refactor
+  // that shared a write set between locked profiles would show up here.
+  for (const verb of [...PROFILES.probe, ...PROFILES.reviewer]) {
+    assert.equal(allowedIn("hermes", verb, WRITE), false,
+      `${verb} belongs to another locked profile, never to R0`);
+  }
+});
+
+// ---------- HERMES-CASE-007: humanOnly verbs refuse ----------
+
+test("HERMES-CASE-007 — humanOnly verbs refuse on a machine actor", () => {
+  assert.equal(actor().human, false,
+    "mcp.js's humanOnly gate keys on this; activate-rule and friends refuse by construction");
+  assert.equal(allowedIn("hermes", "activate-rule", WRITE), false);
+});
+
+// ---------- HERMES-CASE-008/009: no channels, no scheduler ----------
+
+test("HERMES-CASE-008/009 — message delivery and scheduling are absent", () => {
+  // There is no send verb in this system at all (one human gate: Claude drafts,
+  // Joe sends) and no scheduler verb. Absence is the control; this asserts the
+  // absence rather than assuming it.
+  for (const verb of ["channel.send", "cron.create", "send-message", "schedule-task"]) {
+    assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must not be reachable`);
+  }
+});
+
+// ---------- HERMES-CASE-011/012: no engineering dispatch in R0 ----------
+
+test("HERMES-CASE-011/012 — request creation and engineering dispatch refuse", () => {
+  for (const verb of ["carr.engineering_work_request.create_v1", "carr.engineering_dispatch.execute_v1"]) {
+    assert.equal(allowedIn("hermes", verb, WRITE), false,
+      `${verb} graduates behind its own separate gate, never by R0 succeeding`);
+  }
+});
+
+// ---------- the fullOnly carve-out ----------
+
+test("sensitive operational reads stay off R0", () => {
+  assert.equal(allowedIn("hermes", "integrity-digest", FULL_ONLY), false,
+    "fullOnly reads are withheld from every locked profile, R0 included");
+});
