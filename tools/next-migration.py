@@ -44,6 +44,12 @@ import re
 import subprocess
 import sys
 
+from migration_number_contract import (
+    MigrationNumberError,
+    collision_report,
+    validate_migration_names,
+)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NUM = re.compile(r"^(\d{4})[_a-z0-9]*.*\.sql$", re.IGNORECASE)
 
@@ -90,10 +96,18 @@ def main():
 
     # 1. everything merged on the remote
     remote = run(["git", "ls-tree", "--name-only", "origin/main", "migrations/"])
-    merge(claims, numbers_from_names(remote.splitlines()), "origin/main")
+    remote_names = [os.path.basename(name.strip()) for name in remote.splitlines() if name.strip()]
+    merge(claims, numbers_from_names(remote_names), "origin/main")
     if not remote:
         print("WARNING: could not read origin/main — the number below is based only on "
               "local trees and may collide with something already merged.", file=sys.stderr)
+    else:
+        try:
+            validate_migration_names(remote_names, require_frozen=True)
+        except MigrationNumberError as exc:
+            print(f"ERROR: origin/main violates the migration-number contract: {exc}",
+                  file=sys.stderr)
+            return 1
 
     # 2 & 3. every worktree's migrations/ directory, on disk, committed or not
     here = os.path.realpath(REPO)
@@ -103,9 +117,16 @@ def main():
             continue
         label = "this tree" if os.path.realpath(wt) == here else f"worktree {os.path.basename(wt)}"
         try:
-            merge(claims, numbers_from_names(os.listdir(mdir)), label)
+            tree_names = os.listdir(mdir)
         except OSError:
             continue
+        try:
+            validate_migration_names(tree_names, allow_frozen_subset=True)
+        except MigrationNumberError as exc:
+            print(f"ERROR: {label} violates the migration-number contract: {exc}",
+                  file=sys.stderr)
+            return 1
+        merge(claims, numbers_from_names(tree_names), label)
 
     if not claims:
         print("0001", flush=True)
@@ -118,6 +139,13 @@ def main():
 
     print(f"next free migration number: {nxt:04d}")
     print(f"  highest claimed: {max(claims):04d}")
+
+    frozen = collision_report(remote_names)
+    if frozen:
+        print("\n  frozen numeric collisions on origin/main — full filenames are distinct")
+        print("  ledger identities; never rename, delete, edit, or add to these sets:")
+        for slot, names in frozen.items():
+            print(f"    {slot}: {', '.join(names)}")
 
     # A number absent from origin/main is the dangerous case. It may be genuinely
     # uncommitted, or committed on a branch that has not merged — the distinction
