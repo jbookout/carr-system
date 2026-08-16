@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doctorcre.com/contracts/guidance-registry.schema.v1.json",
+  "title": "CARR typed Guidance Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry", "schema_version", "items", "source_analysis"],
+  "properties": {
+    "registry": {"const": "carr-guidance-registry"},
+    "schema_version": {"const": "1.0.0"},
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/guidanceItem"}
+    },
+    "source_analysis": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sourceAnalysis"}
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "guidanceType": {
+      "enum": ["constraint", "procedure", "doctrine", "rubric", "preference", "precedent", "example"]
+    },
+    "guidanceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guidance_id", "source_id", "source_clause", "guidance_type", "scope",
+        "activation", "consumer", "verification", "provenance", "lifecycle", "delivery"
+      ],
+      "properties": {
+        "guidance_id": {"$ref": "#/$defs/nonEmptyString"},
+        "source_id": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
+        "source_clause": {"$ref": "#/$defs/nonEmptyString"},
+        "guidance_type": {"$ref": "#/$defs/guidanceType"},
+        "split_group_id": {"$ref": "#/$defs/nonEmptyString"},
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tenant", "actor"],
+          "properties": {
+            "tenant": {"$ref": "#/$defs/nonEmptyString"},
+            "actor": {"$ref": "#/$defs/nonEmptyString"},
+            "task_kinds": {"type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "uniqueItems": true}
+          }
+        },
+        "activation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trigger"],
+          "properties": {
+            "trigger": {"$ref": "#/$defs/nonEmptyString"},
+            "entry_condition": {"$ref": "#/$defs/nonEmptyString"},
+            "situation_mappings": {
+              "type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "minItems": 1, "uniqueItems": true
+            }
+          }
+        },
+        "consumer": {"$ref": "#/$defs/nonEmptyString"},
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mechanism"],
+          "properties": {
+            "mechanism": {"$ref": "#/$defs/nonEmptyString"},
+            "completion_condition": {"$ref": "#/$defs/nonEmptyString"},
+            "verifier": {"$ref": "#/$defs/nonEmptyString"},
+            "acceptance_criteria": {
+              "type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "minItems": 1
+            }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "preserve_source_record"],
+          "properties": {
+            "source": {"$ref": "#/$defs/nonEmptyString"},
+            "preserve_source_record": {"const": true},
+            "classification_author": {"$ref": "#/$defs/nonEmptyString"},
+            "classification_basis": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "version"],
+          "properties": {
+            "status": {"enum": ["proposed", "active", "retired", "superseded"]},
+            "version": {"type": "integer", "minimum": 1},
+            "supersedes_guidance_id": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["projection"],
+          "properties": {
+            "projection": {
+              "enum": [
+                "constraint_enforcement", "procedure_workflow", "doctrine_retrieval",
+                "verification_rubric", "scoped_preference", "precedent_search", "example_retrieval"
+              ]
+            },
+            "enforcement_control": {"$ref": "#/$defs/nonEmptyString"},
+            "evidence": {"type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "minItems": 1},
+            "tests": {"type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "minItems": 1},
+            "situation_concepts": {"type": "array", "items": {"$ref": "#/$defs/nonEmptyString"}, "uniqueItems": true}
+          }
+        }
+      }
+    },
+    "sourceAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "mixed_type_detected", "clause_types"],
+      "properties": {
+        "source_id": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
+        "mixed_type_detected": {"type": "boolean"},
+        "clause_types": {
+          "type": "array", "items": {"$ref": "#/$defs/guidanceType"}, "minItems": 1, "uniqueItems": true
+        },
+        "split_group_id": {"$ref": "#/$defs/nonEmptyString"},
+        "rationale": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    }
+  }
+}
