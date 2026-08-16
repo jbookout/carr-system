@@ -42,6 +42,7 @@ function actor(slug, sponsor = null, extra = {}) {
 function mockClient() {
   return { query: async (sql, params = []) => {
     if (sql.includes("select id from actor")) return { rows: [{ id: "actor-id" }] };
+    if (sql.includes("from ops.v_guidance_registry_state")) return { rows: [{ state: "inactive" }] };
     if (sql.includes("from v_compiled_rules")) {
       const who = params[0];
       return { rows: [...shared, ...(who === "joe" ? joePersonal : who === "dell" ? dellPersonal : [])] };
@@ -50,6 +51,30 @@ function mockClient() {
     if (sql.includes("from rule")) return { rows: [] };
     if (sql.includes("from doctrine_meta")) return { rows: [{ generation: 1 }] };
     throw new Error(`unexpected mock query: ${sql}`);
+  } };
+}
+
+function activeGuidanceClient() {
+  const base = mockClient();
+  return { query: async (sql, params = []) => {
+    if (sql.includes("from ops.v_guidance_registry_state")) {
+      return { rows: [{ state: "active", manifest_digest: "a".repeat(64) }] };
+    }
+    if (sql.includes("from ops.standing_guidance")) {
+      return { rows: [
+        { ...shared[0], guidance_type: "doctrine", is_constitution: true },
+        { ...shared[1], guidance_type: "constraint", is_constitution: false },
+        { ...joePersonal[0], guidance_type: "constraint", is_constitution: false },
+      ] };
+    }
+    if (sql.includes("from ops.v_guidance_projection_summary")) {
+      return { rows: [
+        { guidance_type: "constraint", active_items: 2, projection_digest: "b".repeat(64) },
+        { guidance_type: "doctrine", active_items: 4, projection_digest: "c".repeat(64) },
+        { guidance_type: "rubric", active_items: 3, projection_digest: "d".repeat(64) },
+      ] };
+    }
+    return base.query(sql, params);
   } };
 }
 
@@ -66,6 +91,21 @@ test("Joe-sponsored Codex receives the complete sample shared corpus plus Joe-pe
     personal_scope_source: "verified_grant_sponsor", session_capability_profile: "unknown",
     operational_profile: "full", human_only_authority: false,
   });
+});
+
+test("active typed registry slims boot to constitution plus applicable constraints without hiding coverage", async () => {
+  const result = await standing(activeGuidanceClient(), actor("codex", "joe"), {
+    workflow: "fixture-workflow", surface: "codex", tier: "shared",
+  });
+  assert.equal(result.recite, `Rules loaded: ${SAMPLE_SHARED_RULE_COUNT} shared, 30 joe-personal`);
+  assert.equal(result.shared_rules.length, 2);
+  assert.equal(result.personal_rules.length, 1);
+  assert.equal(result.guidance_registry.state, "active");
+  assert.equal(result.guidance_registry.loaded.constitution, 1);
+  assert.equal(result.guidance_registry.loaded.applicable_constraints, 2);
+  assert.deepEqual(result.guidance_registry.deferred_by_type, { doctrine: 3, rubric: 3 });
+  assert.equal(result.guidance_registry.manifest_digest, "a".repeat(64));
+  assert.match(result.guidance_registry.hint, /search-doctrine-situations/);
 });
 
 test("connector counts match the exact shared, Joe, and Dell generated-render headers", async () => {

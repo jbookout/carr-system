@@ -62,7 +62,7 @@ create table ops.guidance_revision (
 
 create table ops.guidance_authority_binding (
   id                       uuid primary key default gen_random_uuid(),
-  guidance_revision_id     uuid not null unique
+  guidance_revision_id     uuid not null
     references ops.guidance_revision(id) on delete restrict,
   authority_receipt_id     uuid not null unique
     references ops.authority_receipt(id) on delete restrict,
@@ -72,6 +72,7 @@ create table ops.guidance_authority_binding (
 
 create table ops.guidance_lifecycle_event (
   id                       uuid primary key default gen_random_uuid(),
+  event_seq                bigint generated always as identity unique,
   guidance_revision_id     uuid not null references ops.guidance_revision(id) on delete restrict,
   state                    text not null check (state in ('active','retired','superseded')),
   authority_binding_id     uuid not null references ops.guidance_authority_binding(id) on delete restrict,
@@ -83,6 +84,7 @@ create table ops.guidance_lifecycle_event (
 
 create table ops.guidance_situation_mapping (
   id                       uuid primary key default gen_random_uuid(),
+  mapping_seq              bigint generated always as identity unique,
   guidance_revision_id     uuid not null references ops.guidance_revision(id) on delete restrict,
   concept_id               uuid not null references retrieval_concept(id) on delete restrict,
   doctrine_section_id      uuid not null references doctrine_section(id) on delete restrict,
@@ -98,6 +100,7 @@ create table ops.guidance_situation_mapping (
 
 create table ops.guidance_registry_event (
   id                    uuid primary key default gen_random_uuid(),
+  event_seq             bigint generated always as identity unique,
   registry_id           uuid not null references ops.guidance_registry(id) on delete restrict,
   state                 text not null check (state in ('active','inactive')),
   authority_receipt_id  uuid not null references ops.authority_receipt(id) on delete restrict,
@@ -132,11 +135,33 @@ create trigger guidance_registry_event_append_only
   before update or delete on ops.guidance_registry_event
   for each row execute function ops.refuse_guidance_history_rewrite();
 
+create or replace function ops.guidance_revision_contract_hash(p_revision_id uuid)
+returns text language sql stable as $$
+  select encode(digest(jsonb_build_object(
+    'guidance_revision_id',r.id,
+    'guidance_item_id',r.guidance_item_id,
+    'version',r.version,
+    'guidance_type',r.guidance_type,
+    'scope',r.scope,
+    'activation',r.activation,
+    'consumer',r.consumer,
+    'verification',r.verification,
+    'provenance',r.provenance,
+    'delivery',r.delivery,
+    'is_constitution',r.is_constitution,
+    'supersedes_revision_id',r.supersedes_revision_id,
+    'reason',r.reason
+  )::text,'sha256'),'hex')
+    from ops.guidance_revision r where r.id=p_revision_id
+$$;
+
 create or replace function ops.validate_guidance_revision()
 returns trigger language plpgsql as $$
 declare
   expected_projection text;
   prior_item uuid;
+  prior_version integer;
+  installed_evidence boolean;
 begin
   if jsonb_typeof(new.scope) <> 'object'
      or coalesce(btrim(new.scope->>'tenant'),'') = ''
@@ -195,6 +220,27 @@ begin
         and new.scope->>'actor' in ('','all') then
     raise exception 'preference requires a scoped actor';
   end if;
+  if new.guidance_type='constraint' then
+    select exists (
+      select 1
+        from ops.guidance_item i
+        join ops.rule_enforcement_point ep
+          on ep.rule_id=i.source_rule_id
+         and ep.control_key=new.delivery->>'enforcement_control'
+         and ep.installed
+       where i.id=new.guidance_item_id
+         and new.delivery->'evidence' ? ep.implementation_ref
+         and new.delivery->'tests' ? ep.test_ref
+    ) into installed_evidence;
+    if not installed_evidence then
+      raise exception 'constraint revision requires an installed enforcement point with exact implementation and test evidence';
+    end if;
+  end if;
+  select max(version) into prior_version
+    from ops.guidance_revision where guidance_item_id=new.guidance_item_id;
+  if new.version <> coalesce(prior_version,0)+1 then
+    raise exception 'guidance revision version must be the next append-only version';
+  end if;
   if new.supersedes_revision_id is not null then
     select guidance_item_id into prior_item
       from ops.guidance_revision where id=new.supersedes_revision_id;
@@ -215,18 +261,30 @@ declare
   receipt_subject uuid;
   receipt_type text;
   receipt_hash text;
+  receipt_decision text;
+  receipt_actor_kind text;
   item_id uuid;
 begin
-  select subject_id, subject_type, contract_hash
-    into receipt_subject, receipt_type, receipt_hash
-    from ops.authority_receipt where id=new.authority_receipt_id;
+  select ar.subject_id,ar.subject_type,ar.contract_hash,ar.decision,a.kind
+    into receipt_subject,receipt_type,receipt_hash,receipt_decision,receipt_actor_kind
+    from ops.authority_receipt ar join actor a on a.id=ar.actor_id
+   where ar.id=new.authority_receipt_id
+     and ar.kind in ('activation','amendment','rejection');
   select guidance_item_id into item_id
     from ops.guidance_revision where id=new.guidance_revision_id;
   if receipt_type <> 'guidance' or receipt_subject <> item_id then
     raise exception 'authority receipt must name the exact guidance item';
   end if;
+  if receipt_actor_kind is distinct from 'human'
+     or receipt_decision not in ('approved','retired','superseded') then
+    raise exception 'guidance authority binding requires an explicit human decision';
+  end if;
   if receipt_hash is distinct from new.contract_hash then
     raise exception 'authority receipt hash does not match the exact guidance revision contract';
+  end if;
+  if new.contract_hash is distinct from
+       ops.guidance_revision_contract_hash(new.guidance_revision_id) then
+    raise exception 'authority binding hash does not match the exact stored guidance revision';
   end if;
   return new;
 end $$;
@@ -234,6 +292,220 @@ end $$;
 create trigger guidance_authority_binding_validate
   before insert on ops.guidance_authority_binding
   for each row execute function ops.validate_guidance_authority_binding();
+
+create or replace function ops.validate_guidance_lifecycle_event()
+returns trigger language plpgsql as $$
+declare
+  bound_revision uuid;
+  receipt_decision text;
+begin
+  select b.guidance_revision_id,ar.decision
+    into bound_revision,receipt_decision
+    from ops.guidance_authority_binding b
+    join ops.authority_receipt ar on ar.id=b.authority_receipt_id
+   where b.id=new.authority_binding_id;
+  if bound_revision is distinct from new.guidance_revision_id then
+    raise exception 'lifecycle event authority must bind the exact guidance revision';
+  end if;
+  if (new.state='active' and receipt_decision <> 'approved')
+     or (new.state='retired' and receipt_decision <> 'retired')
+     or (new.state='superseded' and receipt_decision <> 'superseded') then
+    raise exception 'lifecycle state % does not match authority decision %',
+      new.state,receipt_decision;
+  end if;
+  return new;
+end $$;
+
+create trigger guidance_lifecycle_event_validate
+  before insert on ops.guidance_lifecycle_event
+  for each row execute function ops.validate_guidance_lifecycle_event();
+
+create or replace function ops.validate_guidance_situation_mapping()
+returns trigger language plpgsql as $$
+declare
+  bound_revision uuid;
+  receipt_decision text;
+  revision_type text;
+begin
+  if new.state='active' then
+    select b.guidance_revision_id,ar.decision,r.guidance_type
+      into bound_revision,receipt_decision,revision_type
+      from ops.guidance_authority_binding b
+      join ops.authority_receipt ar on ar.id=b.authority_receipt_id
+      join ops.guidance_revision r on r.id=b.guidance_revision_id
+     where b.id=new.authority_binding_id;
+    if bound_revision is distinct from new.guidance_revision_id
+       or receipt_decision <> 'approved'
+       or revision_type <> 'doctrine' then
+      raise exception 'active situation mapping requires approved human authority for the exact doctrine revision';
+    end if;
+  end if;
+  return new;
+end $$;
+
+create trigger guidance_situation_mapping_validate
+  before insert on ops.guidance_situation_mapping
+  for each row execute function ops.validate_guidance_situation_mapping();
+
+-- Only an authenticated authority session may turn a proposed revision into
+-- standing guidance (or retire/supersede it).  carr_writer can build proposed
+-- items and revisions, but cannot mint the binding or lifecycle event.
+create or replace function ops.record_guidance_decision(
+  p_revision_id uuid,
+  p_state text,
+  p_idempotency_key text,
+  p_reason text
+) returns uuid
+language plpgsql security definer set search_path=ops,public,pg_temp as $$
+declare
+  authority_slug text;
+  authority_actor uuid;
+  item_id uuid;
+  revision_hash text;
+  receipt_id uuid;
+  binding_id uuid;
+  event_id uuid;
+  receipt_kind text;
+  receipt_decision text;
+  existing record;
+begin
+  authority_slug := ops.authority_actor_slug();
+  select id into authority_actor from actor
+   where slug=authority_slug and kind='human';
+  if authority_actor is null then
+    raise exception 'guidance decision requires an admitted human authority actor';
+  end if;
+  if p_state not in ('active','retired','superseded') then
+    raise exception 'unsupported guidance lifecycle decision %',p_state;
+  end if;
+  if coalesce(btrim(p_idempotency_key),'')='' or coalesce(btrim(p_reason),'')='' then
+    raise exception 'guidance decision requires idempotency key and reason';
+  end if;
+  select guidance_item_id,ops.guidance_revision_contract_hash(id)
+    into item_id,revision_hash
+    from ops.guidance_revision where id=p_revision_id;
+  if item_id is null or revision_hash is null then
+    raise exception 'unknown guidance revision %',p_revision_id;
+  end if;
+  receipt_kind := case p_state
+    when 'active' then 'activation'
+    when 'retired' then 'rejection'
+    else 'amendment' end;
+  receipt_decision := case p_state
+    when 'active' then 'approved'
+    when 'retired' then 'retired'
+    else 'superseded' end;
+
+  select ar.id,ar.kind,ar.subject_type,ar.subject_id,ar.actor_id,ar.decision,
+         ar.contract_hash,le.id as event_id
+    into existing
+    from ops.authority_receipt ar
+    left join ops.guidance_authority_binding b on b.authority_receipt_id=ar.id
+    left join ops.guidance_lifecycle_event le
+      on le.authority_binding_id=b.id and le.state=p_state
+   where ar.idempotency_key=p_idempotency_key;
+  if existing.id is not null then
+    if existing.kind<>receipt_kind or existing.subject_type<>'guidance'
+       or existing.subject_id<>item_id or existing.actor_id<>authority_actor
+       or existing.decision<>receipt_decision
+       or existing.contract_hash is distinct from revision_hash
+       or existing.event_id is null then
+      raise exception 'idempotency key already names a different or incomplete guidance decision';
+    end if;
+    return existing.event_id;
+  end if;
+
+  insert into ops.authority_receipt
+    (idempotency_key,kind,subject_type,subject_id,actor_id,decision,
+     contract_hash,evidence_refs)
+  values
+    (p_idempotency_key,receipt_kind,'guidance',item_id,authority_actor,
+     receipt_decision,revision_hash,array[p_revision_id::text])
+  returning id into receipt_id;
+  insert into ops.guidance_authority_binding
+    (guidance_revision_id,authority_receipt_id,contract_hash)
+  values (p_revision_id,receipt_id,revision_hash)
+  returning id into binding_id;
+  insert into ops.guidance_lifecycle_event
+    (guidance_revision_id,state,authority_binding_id,reason)
+  values (p_revision_id,p_state,binding_id,p_reason)
+  returning id into event_id;
+  return event_id;
+end $$;
+
+create or replace function ops.propose_guidance_situation_mapping(
+  p_revision_id uuid,
+  p_concept_id uuid,
+  p_doctrine_section_id uuid,
+  p_reason text
+) returns uuid
+language plpgsql security definer set search_path=ops,public,pg_temp as $$
+declare mapping_id uuid;
+begin
+  if coalesce(btrim(p_reason),'')='' then
+    raise exception 'situation mapping proposal requires a reason';
+  end if;
+  if not exists (
+    select 1 from ops.guidance_revision
+     where id=p_revision_id and guidance_type='doctrine') then
+    raise exception 'situation mappings may be proposed only for doctrine revisions';
+  end if;
+  insert into ops.guidance_situation_mapping
+    (guidance_revision_id,concept_id,doctrine_section_id,state,reason)
+  values (p_revision_id,p_concept_id,p_doctrine_section_id,'proposed',p_reason)
+  returning id into mapping_id;
+  return mapping_id;
+end $$;
+
+create or replace function ops.activate_guidance_situation_mapping(
+  p_proposed_mapping_id uuid,
+  p_authority_binding_id uuid,
+  p_reason text
+) returns uuid
+language plpgsql security definer set search_path=ops,public,pg_temp as $$
+declare
+  authority_slug text;
+  authority_actor uuid;
+  mapping_id uuid;
+  proposal ops.guidance_situation_mapping%rowtype;
+begin
+  authority_slug := ops.authority_actor_slug();
+  select id into authority_actor from actor
+   where slug=authority_slug and kind='human';
+  if coalesce(btrim(p_reason),'')='' then
+    raise exception 'situation mapping activation requires a reason';
+  end if;
+  select * into proposal from ops.guidance_situation_mapping
+   where id=p_proposed_mapping_id and state='proposed';
+  if proposal.id is null then
+    raise exception 'unknown proposed situation mapping %',p_proposed_mapping_id;
+  end if;
+  if not exists (
+    select 1
+      from ops.guidance_authority_binding b
+      join ops.authority_receipt ar on ar.id=b.authority_receipt_id
+     where b.id=p_authority_binding_id
+       and b.guidance_revision_id=proposal.guidance_revision_id
+       and ar.actor_id=authority_actor
+       and ar.decision='approved') then
+    raise exception 'mapping activation requires this authority session approval for the exact doctrine revision';
+  end if;
+  if not exists (
+    select 1 from doctrine_concept_mapping
+     where concept_id=proposal.concept_id
+       and section_id=proposal.doctrine_section_id
+       and status='approved') then
+    raise exception 'mapping activation requires an approved WR-AI-006 doctrine bridge';
+  end if;
+  insert into ops.guidance_situation_mapping
+    (guidance_revision_id,concept_id,doctrine_section_id,state,
+     authority_binding_id,supersedes_mapping_id,reason)
+  values
+    (proposal.guidance_revision_id,proposal.concept_id,proposal.doctrine_section_id,
+     'active',p_authority_binding_id,proposal.id,p_reason)
+  returning id into mapping_id;
+  return mapping_id;
+end $$;
 
 create or replace view ops.v_guidance_revision_state as
 select r.*,
@@ -245,7 +517,7 @@ select r.*,
   left join lateral (
     select le.* from ops.guidance_lifecycle_event le
      where le.guidance_revision_id=r.id
-     order by le.created_at desc,le.id desc limit 1
+     order by le.event_seq desc limit 1
   ) e on true;
 
 create or replace view ops.v_guidance_current as
@@ -270,9 +542,9 @@ select distinct on (i.id)
        r.reason,
        r.lifecycle_at
   from ops.guidance_item i
-  join ops.v_guidance_revision_state r on r.guidance_item_id=i.id
+ join ops.v_guidance_revision_state r on r.guidance_item_id=i.id
  where r.lifecycle_status='active'
- order by i.id,r.version desc,r.lifecycle_at desc,r.guidance_revision_id desc;
+ order by i.id,r.version desc,r.lifecycle_at desc,r.id desc;
 
 create or replace view ops.v_guidance_constraint as
 select g.*,a.enforcement_class,a.binding_moment,a.applicability,
@@ -311,7 +583,7 @@ select distinct on (m.guidance_revision_id,m.concept_id,m.doctrine_section_id)
        m.*
   from ops.guidance_situation_mapping m
  order by m.guidance_revision_id,m.concept_id,m.doctrine_section_id,
-          m.created_at desc,m.id desc;
+          m.mapping_seq desc;
 
 create or replace view ops.v_guidance_doctrine_retrieval as
 select g.*,c.concept_key,s.document_id,s.section_key,
@@ -319,7 +591,7 @@ select g.*,c.concept_key,s.document_id,s.section_key,
   from ops.v_guidance_current g
   join ops.v_guidance_situation_mapping_current m
     on m.guidance_revision_id=g.guidance_revision_id and m.state='active'
-  join retrieval_concept c on c.id=m.concept_id and c.status='active'
+  join retrieval_concept c on c.id=m.concept_id and c.status='approved'
   join doctrine_section s on s.id=m.doctrine_section_id and s.status='active'
   join doctrine_concept_mapping dcm
     on dcm.concept_id=m.concept_id
@@ -335,7 +607,7 @@ select r.id as registry_id,
   left join lateral (
     select ge.* from ops.guidance_registry_event ge
      where ge.registry_id=r.id
-     order by ge.created_at desc,ge.id desc limit 1
+     order by ge.event_seq desc limit 1
   ) e on true;
 
 create or replace function ops.assert_guidance_registry_coverage()
@@ -379,19 +651,21 @@ create or replace function ops.standing_guidance(
   source_rule_id uuid,
   statement text,
   human_quote text,
-  taught_by uuid,
+  taught_by text,
   personal_to text,
   scope jsonb,
   guidance_type text,
   is_constitution boolean
 )
 language sql stable as $$
-  select r.id,r.statement,r.human_quote,r.taught_by,r.personal_to,g.scope,
+  select r.id,r.statement,r.human_quote,teacher.display_name,owner.slug,g.scope,
          g.guidance_type,g.is_constitution
     from ops.v_guidance_current g
     join rule r on r.id=g.source_rule_id and r.status='active'
+    join actor teacher on teacher.id=r.taught_by
+    left join actor owner on owner.id=r.personal_to
    where exists (select 1 from ops.v_guidance_registry_state s where s.state='active')
-     and (r.personal_to is null or r.personal_to=p_actor)
+     and (r.personal_to is null or owner.slug=p_actor)
      and (
        g.is_constitution
        or (g.guidance_type='constraint' and exists (
@@ -413,20 +687,25 @@ create or replace function ops.activate_guidance_registry(
   p_manifest_digest text,
   p_reason text
 ) returns uuid
-language plpgsql as $$
+language plpgsql security definer set search_path=ops,public,pg_temp as $$
 declare
+  authority_slug text;
   receipt_actor uuid;
   event_id uuid;
   constitution_count integer;
   coverage_count integer;
 begin
+  authority_slug := ops.authority_actor_slug();
   select ar.actor_id into receipt_actor
     from ops.authority_receipt ar join actor a on a.id=ar.actor_id
    where ar.id=p_authority_receipt_id
      and ar.kind='activation'
      and ar.subject_type='guidance'
      and ar.subject_id=p_registry_id
-     and a.kind='human';
+     and ar.decision='approved'
+     and ar.contract_hash=p_manifest_digest
+     and a.kind='human'
+     and a.slug=authority_slug;
   if receipt_actor is null then
     raise exception 'guidance registry activation requires a human authority receipt';
   end if;
@@ -463,14 +742,34 @@ grant select on ops.guidance_registry,ops.guidance_item,ops.guidance_revision,
   ops.v_guidance_preference,ops.v_guidance_precedent,ops.v_guidance_example,
   ops.v_guidance_registry_state,ops.v_guidance_projection_summary
   to carr_reader,carr_writer;
-grant insert on ops.guidance_item,ops.guidance_revision,
-  ops.guidance_authority_binding,ops.guidance_lifecycle_event,
-  ops.guidance_situation_mapping,ops.guidance_registry_event to carr_writer;
+grant insert on ops.guidance_item,ops.guidance_revision to carr_writer;
+
+revoke all on function ops.refuse_guidance_history_rewrite() from public;
+revoke all on function ops.guidance_revision_contract_hash(uuid) from public;
+revoke all on function ops.validate_guidance_revision() from public;
+revoke all on function ops.validate_guidance_authority_binding() from public;
+revoke all on function ops.validate_guidance_lifecycle_event() from public;
+revoke all on function ops.validate_guidance_situation_mapping() from public;
+revoke all on function ops.record_guidance_decision(uuid,text,text,text) from public,carr_writer;
+revoke all on function ops.propose_guidance_situation_mapping(uuid,uuid,uuid,text) from public;
+revoke all on function ops.activate_guidance_situation_mapping(uuid,uuid,text) from public,carr_writer;
+revoke all on function ops.assert_guidance_registry_coverage() from public;
+revoke all on function ops.standing_guidance(text,text,text,text) from public;
+revoke all on function ops.activate_guidance_registry(uuid,uuid,text,text) from public,carr_writer;
+
+grant execute on function ops.guidance_revision_contract_hash(uuid)
+  to carr_reader,carr_writer,carr_authority;
+grant execute on function ops.record_guidance_decision(uuid,text,text,text)
+  to carr_authority;
+grant execute on function ops.propose_guidance_situation_mapping(uuid,uuid,uuid,text)
+  to carr_writer;
+grant execute on function ops.activate_guidance_situation_mapping(uuid,uuid,text)
+  to carr_authority;
 grant execute on function ops.assert_guidance_registry_coverage() to carr_reader,carr_writer;
 grant execute on function ops.standing_guidance(text,text,text,text)
-  to carr_reader,carr_writer,carr_jobs;
+  to carr_reader,carr_writer;
 grant execute on function ops.activate_guidance_registry(uuid,uuid,text,text)
-  to carr_writer;
+  to carr_authority;
 
 commit;
 

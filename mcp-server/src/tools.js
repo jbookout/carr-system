@@ -7371,7 +7371,7 @@ Object.assign(TOOLS, {
   },
   "find-precedent": {
     write: false,
-    description: "\"What have we ruled on a fork shaped like this before?\" — searches the RULING HISTORY, which nothing else could reach. Hundreds of decisions are recorded and `find` matches party names, deal names and client refs only, so until this verb the entire decision history was retrievable by nothing but a human remembering that a ruling existed. Search it BEFORE re-arguing a settled point, and before telling a partner something is an open question. THIS IS THE MISSING EVIDENCE BEHIND THE TWO COUNTERPARTY CHAIRS: council-landlord and council-listing-agent are each required to announce that they run at very low n, and a searchable ruling history is precisely what raises it. Matches on the ruling's title, the partner's own verbatim words, and the reasoning — the partner's phrasing matters because a fork is often findable only by how he said it, which is never how the summary says it. Trigram similarity, so near-misses and different word order still match; a query of two or three concrete words beats a sentence. NOT for doctrine (search-doctrine), NOT for records (find), NOT for open work (loop-board). Read-only.",
+    description: "\"What precedent exists for a fork shaped like this?\" — searches recorded RULING HISTORY plus activated typed precedents. Results carry record_kind: settled_ruling is a recorded decision; typed_precedent is governed guidance and must not be presented as a settled decision. Search before re-arguing a settled point or declaring a fork open. Matches titles, partner wording, and reasoning with trigram similarity; two or three concrete nouns beat a sentence. NOT for doctrine (search-doctrine), records (find), or open work (loop-board). Read-only.",
     inputSchema: { type: "object", properties: {
       query: { type: "string", description: "the fork in a few concrete words — 'party merge survivor', 'markdown vs database', 'national account modelling'. Two or three specific nouns beat a full sentence: this is trigram matching, not a question answerer." },
       limit: { type: "integer", description: `rulings returned, capped at ${PRECEDENT_CAP} (default 8)` },
@@ -7386,6 +7386,17 @@ Object.assign(TOOLS, {
       if (!present.rows[0].t)
         throw new ToolError({ error: "migration_not_applied", migration: "0106_precedent_and_point_in_time",
           hint: "precedent search needs 0106. Apply it (`~/carr-system/run.sh migrate --apply --yes`) and retry." });
+      // Typed guidance is deliberately additive to ruling history, not a replacement for it.
+      // 0168 may not yet exist on a local or older environment, so its presence and active
+      // lifecycle state are both required before it can contribute searchable precedents.
+      const registryPresent = await c.query(
+        "select to_regclass('ops.v_guidance_registry_state') is not null as t");
+      let guidanceRegistryActive = false;
+      if (registryPresent.rows[0].t) {
+        const registryState = await c.query(
+          "select state from ops.v_guidance_registry_state limit 1");
+        guidanceRegistryActive = registryState.rows[0]?.state === "active";
+      }
       // WORD SIMILARITY, NOT similarity(). This was built with similarity() first and it
       // returned ZERO for every realistic query, because similarity() compares two whole
       // trigram sets: a three-word query against a thousand-character ruling scores near
@@ -7397,10 +7408,21 @@ Object.assign(TOOLS, {
       // The second branch is the one that catches an exact multi-word phrase whose words
       // are far apart in the text — every word present, order and distance irrelevant.
       const words = q.split(/\s+/).filter(w => w.length > 2);
+      const precedentSource = guidanceRegistryActive
+        ? `(select decision_id, entry_date, title, human_quote, agent_rationale, author,
+                   provenance::text as provenance, haystack,
+                   'settled_ruling'::text as record_kind from v_precedent
+            union all
+            select decision_id, entry_date, title, human_quote, agent_rationale, author,
+                   provenance::text as provenance, haystack,
+                   'typed_precedent'::text as record_kind from ops.v_guidance_precedent) as precedent_history`
+        : `(select decision_id, entry_date, title, human_quote, agent_rationale, author,
+                   provenance, haystack, 'settled_ruling'::text as record_kind
+              from v_precedent) as precedent_history`;
       const r = await c.query(
         `select decision_id, entry_date, title, human_quote, agent_rationale, author,
-                provenance, word_similarity($1, haystack) as score
-           from v_precedent
+                provenance, record_kind, word_similarity($1, haystack) as score
+           from ${precedentSource}
           where (word_similarity($1, haystack) >= 0.3
                  or ($2::text[] <> '{}' and haystack ilike all(
                        select '%' || w || '%' from unnest($2::text[]) w)))
@@ -7421,15 +7443,15 @@ Object.assign(TOOLS, {
           + ((x.agent_rationale || "").length > 400 ? " …" : ""),
         author: x.author,
         provenance: x.provenance || null,
+        record_kind: x.record_kind || "settled_ruling",
         match_score: Number(x.score?.toFixed?.(3) ?? x.score),
       }));
       return { ok: true, query: q, count: rulings.length, rulings,
         note: rulings.length
-          ? "A ruling found here is a SETTLED point, not a suggestion — read the full reasoning " +
-            "before departing from it, and say so out loud if you do. An older ruling may have " +
-            "been superseded by a newer one in this same list, so read the dates; nothing here " +
-            "marks supersession automatically."
-          : "No ruling matches. That is NOT proof none exists — this is trigram matching over " +
+          ? "Only settled_ruling results are settled decisions. typed_precedent results are " +
+            "governed guidance patterns, not proof that Joe or Dell ruled on this fork. Read " +
+            "the kind, date, provenance, and full reasoning before relying on any result."
+          : "No precedent matches. That is NOT proof none exists — this is trigram matching over " +
             "the words actually used, so try the partner's likely phrasing and a couple of " +
             "different concrete nouns before concluding the fork is unsettled." };
     },

@@ -596,7 +596,7 @@
     "inserts": 0,
     "upserts": 0
    },
-   "does": "\"What have we ruled on a fork shaped like this before?\" \u2014 searches the RULING HISTORY, which nothing else could reach"
+   "does": "\"What precedent exists for a fork shaped like this?\" \u2014 searches recorded RULING HISTORY plus activated typed precedents"
   },
   "get-call-context": {
    "protection": "read_only",

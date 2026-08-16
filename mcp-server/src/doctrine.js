@@ -860,7 +860,10 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       description: "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store — the taught rules (shared + this partner's personal set, with the counts to recite), pending action-required items, and the doctrine catalog pointer. This replaces file-based rule loading: a session that calls this needs no compiled-rules file, no vault read, no Drive. Call it FIRST in any session; recite the counts back to the partner. DEFAULT detail is `gist` — one line per rule, which is what a boot call can actually hold. Pull full text for the handful you need with rule_ids, or everything with detail=full (large; see the payload note in the handler).",
       inputSchema: { type: "object", properties: {
         detail: { type: "string", enum: ["gist", "full"], description: "gist (DEFAULT) = one line per rule, no human_quote. full = every rule's complete text; ~180KB at 147 rules, which overflows a tool result on most clients. Prefer gist + rule_ids." },
-        rule_ids: { type: "array", items: { type: "string" }, description: "Short ids (the 8-char form the gist prints, e.g. '4e104d4c'). These rules come back in FULL regardless of detail — the lookup path for 'read the binding text before acting on a gist'." } },
+        rule_ids: { type: "array", items: { type: "string" }, description: "Short ids (the 8-char form the gist prints, e.g. '4e104d4c'). These rules come back in FULL regardless of detail — the lookup path for 'read the binding text before acting on a gist'." },
+        workflow: { type: "string", description: "Optional current workflow key used to select applicable typed constraints after registry activation." },
+        surface: { type: "string", description: "Optional execution surface used to select applicable typed constraints; defaults to the authenticated runtime." },
+        tier: { type: "string", description: "Optional work tier used to select applicable typed constraints." } },
         },
       handler: async (c, actor, args) => {
         await actorId(c, actor);
@@ -889,14 +892,49 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // file and are NOT part of the recited counts — the verb's numbers
         // must match the files' numbers exactly or the recitation audit
         // (rule 4f7c348f) breaks the day a session compares them.
-        const rules = (await c.query(
+        const allRules = (await c.query(
           `select statement, human_quote, taught_by, personal_to, scope, id
              from v_compiled_rules
             where (personal_to is null or ($1::text is not null and personal_to = $1))
               and coalesce(scope->>'kind','') <> 'intro_politics'
             order by personal_to nulls first, activated_at, statement`, [who])).rows;
+        // The typed registry deliberately changes what is loaded at boot, not
+        // what the recited coverage count means. Until a human activates the
+        // registry this path is behavior-identical to the compiled-rule path.
+        // A missing migration is also inactive so rolling deploys remain safe.
+        const registryState = (await c.query(
+          `select state,manifest_digest from ops.v_guidance_registry_state limit 1`)
+          .catch(() => ({ rows: [] }))).rows[0];
+        const registryActive = registryState?.state === "active";
+        let standingRules = [];
+        let projectionSummary = [];
+        if (registryActive) {
+          standingRules = (await c.query(
+            `select source_rule_id as id,statement,human_quote,taught_by,personal_to,
+                    scope,guidance_type,is_constitution
+               from ops.standing_guidance($1,$2,$3,$4)`,
+            [who, args.workflow || null, args.surface || actor.slug,
+              args.tier || null])).rows;
+          projectionSummary = (await c.query(
+            `select guidance_type,active_items,projection_digest
+               from ops.v_guidance_projection_summary
+              order by guidance_type`)).rows;
+        }
+        // Full is an explicit request for the whole corpus. Short-id lookups
+        // likewise remain authoritative even when typed boot loading is active.
+        const selectedById = new Map((registryActive && detail !== "full"
+          ? standingRules : allRules).map(r => [String(r.id).slice(0, 8).toLowerCase(), r]));
+        if (registryActive && detail !== "full" && wanted.size) {
+          for (const r of allRules) {
+            const id = String(r.id).slice(0, 8).toLowerCase();
+            if (wanted.has(id)) selectedById.set(id, r);
+          }
+        }
+        const rules = [...selectedById.values()];
         const shared = rules.filter(r => !r.personal_to);
         const personal = rules.filter(r => r.personal_to);
+        const allShared = allRules.filter(r => !r.personal_to);
+        const allPersonal = allRules.filter(r => r.personal_to);
         const actionReq = (await c.query(
           `select number, title, body, owner
              from loop_item
@@ -979,11 +1017,24 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           return { id, gist: gist(r.statement) };
         };
         const missing = [...wanted].filter(
-          w => !rules.some(r => String(r.id).slice(0, 8).toLowerCase() === w));
+          w => !allRules.some(r => String(r.id).slice(0, 8).toLowerCase() === w));
+        const constitutionLoaded = standingRules.filter(r => r.is_constitution).length;
+        const constraintLoaded = standingRules.filter(
+          r => r.guidance_type === "constraint" && !r.is_constitution).length;
+        const constitutionByType = new Map();
+        for (const r of standingRules.filter(r => r.is_constitution)) {
+          constitutionByType.set(r.guidance_type,
+            (constitutionByType.get(r.guidance_type) || 0) + 1);
+        }
+        const deferredByType = Object.fromEntries(projectionSummary
+          .filter(r => r.guidance_type !== "constraint")
+          .map(r => [r.guidance_type,
+            Math.max(0, Number(r.active_items) - (constitutionByType.get(r.guidance_type) || 0))])
+          .filter(([, count]) => count > 0));
         return { ok: true,
           recite: scope.status === "personal"
-            ? `Rules loaded: ${shared.length} shared, ${personal.length} ${who}-personal`
-            : `Rules loaded: ${shared.length} shared, 0 personal (unsponsored runtime)`,
+            ? `Rules loaded: ${allShared.length} shared, ${allPersonal.length} ${who}-personal`
+            : `Rules loaded: ${allShared.length} shared, 0 personal (unsponsored runtime)`,
           identity: {
             organization_tenant_id: organizationTenantForActor(actor),
             sponsoring_human_id: who,
@@ -1001,6 +1052,18 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             "One line per rule. NEVER quote a gist as the rule — call standing-context again with rule_ids:['<id>',…] for the binding text before acting on one." } : {}),
           shared_rules: shared.map(r => shape(r, true)),
           personal_rules: personal.map(r => shape(r, false)),
+          ...(registryActive ? { guidance_registry: {
+            state: "active",
+            manifest_digest: registryState.manifest_digest,
+            loaded: {
+              constitution: constitutionLoaded,
+              applicable_constraints: constraintLoaded,
+            },
+            deferred_by_type: deferredByType,
+            projection_digests: Object.fromEntries(projectionSummary.map(
+              r => [r.guidance_type, r.projection_digest])),
+            hint: "Non-standing guidance is loaded at the work surface: use search-doctrine-situations for doctrine, and the typed procedure, rubric, preference, precedent, and example projections for their matching workflows.",
+          } } : {}),
           ...(defectClasses.length ? { known_failure_classes: {
             say: "ways this system has actually been wrong before, worst first — " +
                  "not a warning, a reading list",
