@@ -256,6 +256,10 @@ def main() -> int:
           and "did not close" in release_output,
           f"rc={release_failure.returncode} output={release_output[-240:]}")
 
+    check("promotion temp files are portable across macOS and GNU mktemp",
+          "mktemp -t" not in text and text.count(".XXXXXX") >= 4,
+          "use an explicit TMPDIR template ending in six Xs")
+
     print(f"\ndeploy-ledger-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
     if FAILED:
         print("FAILURES: " + ", ".join(FAILED))

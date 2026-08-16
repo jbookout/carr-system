@@ -487,8 +487,8 @@ if [ "$VERSION_MODE" = "promote" ]; then
   # the evidence from that git object without uploading or building a Worker,
   # bind the same canonical provider UUID, then ask release truth a second time
   # with every immutable dimension and the freshly computed plan hash.
-  PROMOTION_SOURCE_MANIFEST="$(mktemp -t carr-promotion-source-manifest)"
-  PROMOTION_BOUND_MANIFEST="$(mktemp -t carr-promotion-bound-manifest)"
+  PROMOTION_SOURCE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-source-manifest.XXXXXX")"
+  PROMOTION_BOUND_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-bound-manifest.XXXXXX")"
   if ! "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
       --environment production --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
       --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
@@ -521,7 +521,7 @@ if [ "$VERSION_MODE" = "promote" ]; then
 elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
-  RELEASE_MANIFEST="$(mktemp -t carr-release-manifest)"
+  RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-release-manifest.XXXXXX")"
   if [ "$TARGET_ENV" = "production" ]; then
     manifest_build_args="--performance-budget-ref $PERFORMANCE_BUDGET_REF --performance-budget-ms $PERFORMANCE_BUDGET_MS --recovery-strategy $RECOVERY_STRATEGY --rollback-plan-ref $ROLLBACK_PLAN_REF"
   else
@@ -580,7 +580,7 @@ if [ "$VERSION_MODE" = "upload" ]; then
     | tail -n 1 | tr 'A-F' 'a-f')"
   [ -n "$PROVIDER_VERSION_ID" ] \
     || fail "Cloudflare uploaded a version but returned no parseable immutable version id; traffic was not changed."
-  BOUND_RELEASE_MANIFEST="$(mktemp -t carr-bound-release-manifest)"
+  BOUND_RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-bound-release-manifest.XXXXXX")"
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
       --manifest "$RELEASE_MANIFEST" --provider "$PROVIDER" \
       --provider-version-id "$PROVIDER_VERSION_ID" > "$BOUND_RELEASE_MANIFEST"; then
