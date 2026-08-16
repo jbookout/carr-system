@@ -13,10 +13,10 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 29,
+  "human_boundary": 30,
   "append_only": 35,
   "read_only": 38,
-  "optimistic_concurrency": 17,
+  "optimistic_concurrency": 18,
   "NONE": 12,
   "upsert_last_writer_wins": 4
  },
@@ -39,6 +39,19 @@
   "attach-to-campaign carries piece_base_version on its reattach path only. The guard sits on the destructive path and the additive path stays cheap, which is correct \u2014 but that plain attach refuses an already-attached piece is implied by the reattach contract and was not separately verified."
  ],
  "verbs": {
+  "accept-ready-plan": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "HUMAN-ONLY: accept one exact immutable ready-plan hash and make the sole triaged-to-ready transition"
+  },
   "accept-workflow": {
    "protection": "human_boundary",
    "write": true,
@@ -1052,6 +1065,19 @@
     "upserts": 0
    },
    "does": "Promote a candidate_pool row into a real lead: mints the party, mints the next L-ref, copies the identity, contact and est-lease-event stamps across, points the"
+  },
+  "propose-ready-plan": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Append one immutable, bounded ready-plan proposal to a triaged Work Request"
   },
   "propose-retrieval-concept": {
    "protection": "append_only",

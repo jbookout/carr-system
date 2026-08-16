@@ -127,7 +127,7 @@ def main() -> int:
             cur.execute("set local role carr_reader")
             dell_card = cur.execute("select * from ops.work_request_card(%s,%s)", (ref, "carr-internal")).fetchone()
             cur.execute("reset role")
-            if not dell_card or dell_card[0] != ref or dell_card[2] != "triaged" or dell_card[11:] != ("operational", "dell", triaged[6]):
+            if not dell_card or dell_card[0] != ref or dell_card[2] != "triaged" or dell_card[11:14] != ("operational", "dell", triaged[6]):
                 return fail(f"triaged Dell card lost review attribution or classification: {dell_card}")
             cur.execute("set session authorization carr_authority_joe")
             expect_refusal(cur, "select * from ops.triage_sourced_work_request(%s,%s,%s,%s)",
@@ -147,7 +147,7 @@ def main() -> int:
             cur.execute("set local role carr_reader")
             joe_card = cur.execute("select * from ops.work_request_card(%s,%s)", (joe_ref, "carr-internal")).fetchone()
             cur.execute("reset role")
-            if not joe_card or joe_card[11:] != ("needs_judgment", "joe", joe_triaged[6]):
+            if not joe_card or joe_card[11:14] != ("needs_judgment", "joe", joe_triaged[6]):
                 return fail(f"triaged Joe card lost review attribution or classification: {joe_card}")
             cur.execute("set session authorization carr_authority_dell")
             expect_refusal(cur, "select * from ops.triage_sourced_work_request(%s,%s,%s,%s)",

@@ -11,7 +11,7 @@
   },
   "transport": "authenticated MCP-backed read, not implemented by this static prototype",
   "lifecycle": {
-    "canonical_from": ["captured", "triaged"],
+    "canonical_from": ["captured", "triaged", "ready"],
     "projection_state": "queued"
   },
   "output": {
@@ -22,6 +22,8 @@
       "acceptance_criteria",
       "source",
       "triage",
+      "plan",
+      "shape",
       "state",
       "next_human_action",
       "actions"
@@ -33,13 +35,16 @@
     },
     "next_human_action": {
       "captured": {"label": "Review and triage", "effect": "none"},
-      "triaged": {"label": "Prepare scope and acceptance", "effect": "none"}
+      "triaged": {"label": "Prepare scope and acceptance", "effect": "none"},
+      "ready": {"label": "Plan accepted", "effect": "none"}
     },
     "triage": {
       "captured": null,
       "triaged": ["classification", "human_actor_slug", "triaged_at"],
       "rule": "present only for canonical triaged rows; it is durable readback, never an action authority"
     },
+    "plan": {"rule": "immutable plan hash, bounded scope summary, and persisted references only; never commands or caller-authored steps"},
+    "shape": {"rule": "durable derived shape disposition and fixed surface reference only; never caller-controlled"},
     "actions": []
   },
   "prohibitions": [
