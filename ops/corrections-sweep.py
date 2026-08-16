@@ -36,6 +36,7 @@ import os
 import re
 import sys
 from collections import defaultdict
+from urllib.parse import unquote, urlsplit
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -61,7 +62,7 @@ def defect_repeats(cur):
     cur.execute("""
         select defect_class, occurrences, caught_by_human, first_seen, last_seen,
                sources_unread, rules_violated
-          from v_defect_class where occurrences > 1
+          from v_correction_sweep_defects where occurrences > 1
          order by caught_by_human desc, occurrences desc
     """)
     return [dict(zip(("defect_class", "occurrences", "caught_by_human", "first_seen",
@@ -72,8 +73,7 @@ def defect_repeats(cur):
 def quoted_corrections(cur):
     cur.execute("""
         select entry_date, title, human_quote
-          from v_decision_entry
-         where human_quote is not null and btrim(human_quote) <> ''
+          from v_correction_sweep_decisions
          order by entry_date desc
     """)
     out = []
@@ -86,6 +86,32 @@ def quoted_corrections(cur):
 def active_rule_text(cur):
     cur.execute("select statement from v_compiled_rules")
     return " \n ".join((r[0] or "").lower() for r in cur.fetchall())
+
+
+def jobs_dsn() -> str:
+    """Require the routine jobs credential; never inherit a broad DSN."""
+    value = os.environ.get("CARR_DB_JOBS_URL", "").strip()
+    if not value:
+        raise RuntimeError("CARR_DB_JOBS_URL is required for correction sweep")
+    try:
+        login = unquote(urlsplit(value).username or "").strip().lower()
+    except ValueError:
+        login = ""
+    if login in {"carr_writer", "carr_owner", "owner", "writer", "postgres"}:
+        raise RuntimeError("CARR_DB_JOBS_URL must not name an owner or writer login")
+    return value
+
+
+def jobs_connection(psycopg):
+    conn = psycopg.connect(jobs_dsn())
+    with conn.cursor() as cur:
+        cur.execute("select session_user, current_user")
+        row = cur.fetchone()
+        if not isinstance(row, (tuple, list)) or tuple(map(str, row)) != ("carr_jobs", "carr_jobs"):
+            conn.close()
+            raise RuntimeError("correction sweep requires the carr_jobs database identity")
+        cur.execute("begin transaction read only")
+    return conn
 
 
 def transcript_corrections(limit_files=None):
@@ -160,10 +186,11 @@ def cluster(texts):
 
 def main():
     import psycopg
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        sys.exit("no DSN — run this through tools/db-tap.py")
-    with psycopg.connect(dsn) as conn:
+    try:
+        conn = jobs_connection(psycopg)
+    except RuntimeError as exc:
+        sys.exit(str(exc))
+    with conn:
         cur = conn.cursor()
         repeats = defect_repeats(cur)
         quotes = quoted_corrections(cur)

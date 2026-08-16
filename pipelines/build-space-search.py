@@ -26,7 +26,14 @@ Writes:
     <client-slug>-space-search-<date>.html
 """
 
+import argparse
 import base64, json, os, re, sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+from lib.client_asset_controls import (AssetControlRefusal, require_asset_tier,
+                                       require_declined_and_why, require_search_commentary,
+                                       write_artifact_atomically)
 
 # CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant.
 BRAND = os.path.join(os.environ.get("CARR_VAULT",
@@ -357,11 +364,24 @@ def build_out_row(p):
 
 
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else "."
+    ap = argparse.ArgumentParser()
+    ap.add_argument("folder", nargs="?", default=".")
+    ap.add_argument("--supersede-existing", action="store_true",
+                    help="tombstone a same-name prior render after its canonical add-loop receipt exists")
+    ap.add_argument("--loop-ref", help="canonical add-loop receipt/reference for the supersession")
+    a = ap.parse_args()
+    folder = a.folder
     with open(os.path.join(folder, "properties.json"), encoding="utf-8") as fh:
         data = json.load(fh)
 
     c = data["client"]
+    try:
+        require_search_commentary(c)
+        require_declined_and_why(c)
+        require_asset_tier(data.get("asset") or {})
+    except AssetControlRefusal as exc:
+        print(f"STOP: {exc}", file=sys.stderr)
+        return 2
     props = data["properties"]
 
     photos = {}
@@ -468,8 +488,19 @@ def main():
     slug = re.sub(r"[^a-z0-9]+", "-", c["name"].split(",")[0].split()[-1].lower())
     date = re.sub(r"[^0-9a-zA-Z]+", "-", c["prepared"]).strip("-")
     outp = os.path.join(folder, f"{slug}-space-search-{date}.html")
-    with open(outp, "w", encoding="utf-8") as fh:
-        fh.write(html)
+    tombstone = None
+    if os.path.exists(outp):
+        tombstone = os.path.join(folder, "_TO_DELETE", os.path.basename(outp))
+        if not a.supersede_existing:
+            print("STOP: replacement refused: existing client artifact requires "
+                  "--supersede-existing and --loop-ref", file=sys.stderr)
+            return 2
+    try:
+        write_artifact_atomically(outp, html, tombstone_path=tombstone,
+                                  loop_ref=a.loop_ref)
+    except (AssetControlRefusal, OSError) as exc:
+        print(f"STOP: {exc}", file=sys.stderr)
+        return 2
 
     print(f"wrote {outp}")
     print(f"  {len(props)} properties: {len(tour)} tour, {len(look)} look, {len(out)} ruled out")
@@ -477,4 +508,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

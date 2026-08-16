@@ -25,8 +25,13 @@ LEARN_DIR="$VAULT/Automation/Learning"
 mkdir -p "$REPO/out" "$LEARN_DIR"
 
 [ -f "$HOME/.config/carr/db.env" ] && { set -a; . "$HOME/.config/carr/db.env"; set +a; }
-: "${DATABASE_URL:=${CARR_DB_WRITER_URL:-${CARR_DB_CADENCE_URL:-}}}"
-[ -n "$DATABASE_URL" ] && export DATABASE_URL || unset DATABASE_URL
+jobs_url="${CARR_DB_JOBS_URL:-}"
+unset DATABASE_URL CARR_DB_WRITER_URL CARR_DB_OWNER_URL CARR_DB_CADENCE_URL CARR_IMPORT_DB_URL
+if [ -z "$jobs_url" ]; then
+  print -ru2 -- "learning-monthly: CARR_DB_JOBS_URL is required; refusing writer/owner fallback"
+  exit 78
+fi
+export CARR_DB_JOBS_URL="$jobs_url"
 
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
@@ -49,7 +54,7 @@ rc=0
 #
 # Its exit code is deliberately not checked: a sweep that finds nothing is a normal
 # month, and a broken sweep must not take the learning chain down with it.
-./.venv/bin/python tools/db-tap.py run ops/corrections-sweep.py \
+./.venv/bin/python ops/corrections-sweep.py \
   > "$REPO/out/Learning/corrections-sweep-$(date -u +%Y%m).md" 2>> "$LOG" \
   && say "corrections sweep written to out/Learning/corrections-sweep-$(date -u +%Y%m).md" \
   || say "corrections sweep did not complete — see $LOG (chain continues)"

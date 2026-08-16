@@ -67,6 +67,20 @@ CASES = [
     ("plain-chat", "The rebase finished cleanly and every selftest passes. "
                    "The branch is ready to push once the checkout reconciles.",
      False),
+    ("unnamed-deal-question", "Can you review the draft lease before lunch?", True),
+    ("named-deal-question", "Can you review the Riverwalk draft lease before lunch?", False),
+    ("unnamed-loi-question", "Did the LOI arrive from the landlord?", True),
+    ("street-named-deal-question", "Did the 123 Main LOI arrive from the landlord?", False),
+    ("multi-clause-task", "Please review the lease and approve the redlines today.", True),
+    ("numbered-but-unmarked", "Please do these:\n1. Review the lease\n2. Approve the redlines", True),
+    ("numbered-all-required", "All required:\n1. Review the lease\n2. Approve the redlines", False),
+    ("self-narrated-progress", "I reviewed the lease and approved the redlines today.", False),
+    ("confidentiality-access-boundary", "Hermes may not read CARR doctrine because it is confidential.", True),
+    ("private-share-boundary", "The provider must not share CARR material because it is private.", True),
+    ("confidentiality-correction", "Confidentiality is not the boundary; Hermes cannot hold a live credential.", False),
+    ("real-credential-boundary", "Hermes cannot hold a live CARR credential or execute autonomously.", False),
+    ("quoted-historical-boundary", "Historical rule text: “The model cannot read CARR records because they are confidential.”", False),
+    ("blockquote-historical-boundary", "> The provider may not share CARR material because it is sensitive.", False),
 ]
 
 passed = 0

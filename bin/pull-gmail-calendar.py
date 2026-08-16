@@ -265,6 +265,12 @@ def post(url, token, payload, timeout=30):
 # ---------------------------------------------------------------- halves
 
 def run_calendar(args):
+    # A shadow run must be observational only: even its audit log is a write
+    # to canonical local state, so keep all log appends out of --dry-run.
+    def record(message):
+        if not args.dry_run:
+            say(message)
+
     env = load_env()
     url = env.get("CARR_INGEST_URL", DEFAULT_URL)
     token = env.get("CARR_INGEST_TOKEN_CALENDAR", "")
@@ -274,7 +280,7 @@ def run_calendar(args):
             f"{ENVFILE}.\ncalendar-pull: that token is Joe's to create; see "
             "DNA/Deal Management/record-layer/ingest-tokens-setup.md"
         )
-        say("NOT CONFIGURED (no calendar token)")
+        record("NOT CONFIGURED (no calendar token)")
         return 78
 
     today = dt.date.today()
@@ -286,7 +292,7 @@ def run_calendar(args):
     for owner, path in FEEDS.items():
         if not os.path.exists(path):
             print(f"calendar-pull: {owner}: no feed at {os.path.basename(path)} (skipped)")
-            say(f"{owner}: feed absent {path}")
+            record(f"{owner}: feed absent {path}")
             continue
         age_h = (dt.datetime.now().timestamp() - os.path.getmtime(path)) / 3600.0
         with open(path, errors="replace") as fh:
@@ -322,18 +328,18 @@ def run_calendar(args):
                     posted += 1
             else:
                 failed += 1
-                say(f"FAIL {item['external_id'][:80]} -> {code} {resp}")
+                record(f"FAIL {item['external_id'][:80]} -> {code} {resp}")
         print(
             f"calendar-pull: {owner}: {len(events)} events in feed, {in_window} in window "
             f"(feed age {age_h:.1f}h)"
         )
-        say(f"{owner}: feed_events={len(events)} in_window={in_window} age_h={age_h:.1f}")
+        record(f"{owner}: feed_events={len(events)} in_window={in_window} age_h={age_h:.1f}")
 
     print(
         f"calendar-pull: source=calendar window={lo}..{hi} posted={posted} "
         f"duplicate={dup} failed={failed} unparseable={skipped}"
     )
-    say(f"summary posted={posted} duplicate={dup} failed={failed} unparseable={skipped}")
+    record(f"summary posted={posted} duplicate={dup} failed={failed} unparseable={skipped}")
     return 1 if failed else 0
 
 

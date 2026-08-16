@@ -499,6 +499,136 @@
         "mcp-server/test/map-architecture.test.mjs"
       ],
       "failure_mode": "Stop block until the current governed map task loads the validated live doctrine and machine contract"
+    },
+    "path_hygiene": {
+      "implementation": [
+        "ops/githooks/path-hygiene-check.py",
+        "ops/githooks/pre-commit"
+      ],
+      "test": [
+        "ops/path-index-hygiene-selftest.py"
+      ],
+      "failure_mode": "pre-commit refusal"
+    },
+    "weekly_social_route": {
+      "implementation": [
+        "lib/control_plane_runner.py",
+        "tools/social-batch-candidates.py"
+      ],
+      "test": [
+        "ops/control-plane-runner-selftest.py",
+        "ops/client-asset-controls-selftest.py"
+      ],
+      "failure_mode": "weekly proposal is rejected before acceptance"
+    },
+    "shared_rename_absence": {
+      "implementation": [
+        "mcp-server/src/tools.js"
+      ],
+      "test": [
+        "mcp-server/test/shared-row-rename-registry.test.mjs"
+      ],
+      "failure_mode": "CI refuses introduction of an ungated shared-row rename surface"
+    },
+    "client_asset_packet": {
+      "implementation": [
+        "lib/client_asset_controls.py",
+        "pipelines/build-space-search.py"
+      ],
+      "test": [
+        "ops/client-asset-controls-selftest.py"
+      ],
+      "failure_mode": "renderer refusal"
+    },
+    "verification_status": {
+      "implementation": [
+        "migrations/0104_reverify_queue_supersession.sql",
+        "tools/control-plane.py",
+        "lib/control_plane_inputs.py"
+      ],
+      "test": [
+        "ops/control-plane-inputs-selftest.py",
+        "ops/control-plane-db-gate.py"
+      ],
+      "failure_mode": "expired or unstamped volatile subjects are surfaced as explicitly not-current re-verification work; they are never relabeled verified"
+    },
+    "merge_survivor": {
+      "implementation": [
+        "mcp-server/src/tools.js"
+      ],
+      "test": [
+        "mcp-server/test/confirm-merge-lead-client.test.mjs"
+      ],
+      "failure_mode": "confirm-merge refuses the wrong survivor before mutation"
+    },
+    "record_research": {
+      "implementation": [
+        "mcp-server/src/tools.js"
+      ],
+      "test": [
+        "mcp-server/test/intake-research-gates.test.mjs"
+      ],
+      "failure_mode": "record verb refuses an unsourced intake"
+    },
+    "cognition_token_admission": {
+      "implementation": [
+        "ops/config/control-plane-workflows.v1.json",
+        "lib/control_plane.py",
+        "lib/control_plane_runner.py",
+        "tools/control-plane.py"
+      ],
+      "test": [
+        "ops/control-plane-selftest.py",
+        "ops/control-plane-db-gate.py"
+      ],
+      "failure_mode": "control-plane manifest loading and the cognition dispatcher refuse an untyped, unbudgeted, or canonical-write-authorized cognition contract before it is registered or dispatched"
+    },
+    "index_upkeep": {
+      "implementation": [
+        "ops/githooks/index-upkeep-check.py",
+        "ops/githooks/pre-commit"
+      ],
+      "test": [
+        "ops/path-index-hygiene-selftest.py"
+      ],
+      "failure_mode": "pre-commit refusal"
+    },
+    "loop_successor": {
+      "implementation": [
+        "mcp-server/src/tools.js"
+      ],
+      "test": [
+        "mcp-server/test/loop-version-and-marker.test.mjs"
+      ],
+      "failure_mode": "bookkeeping close refuses without an open successor"
+    },
+    "calendar_intake": {
+      "implementation": [
+        "tools/calendar-intake-gate.py",
+        "bin/calendar-eventkit-capture.sh"
+      ],
+      "test": [
+        "ops/calendar-intake-gate-selftest.py"
+      ],
+      "failure_mode": "calendar intake refuses completion without mail, research and record receipts"
+    },
+    "candidate_match": {
+      "implementation": [
+        "pipelines/import_candidate_pool.py"
+      ],
+      "test": [
+        "ops/candidate-match-threshold-selftest.py"
+      ],
+      "failure_mode": "name-only candidates remain reviewable; only exact email suppresses"
+    },
+    "vault_salvage": {
+      "implementation": [
+        "ops/vault-drift-watch.py"
+      ],
+      "test": [
+        "ops/vault-drift-watch-selftest.py"
+      ],
+      "failure_mode": "quarantine, diff and intake evidence precede healing"
     }
   },
   "rule_controls": {
@@ -1000,14 +1130,18 @@
       "exceptions": "a mention with no ask, the session narrating its own reads, and code fences"
     },
     "5be2f462": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Point tools/writing-lint.py's existing 'contrast-reframe' + vocab HARD regexes at the assistant's own outgoing chat text via a Stop hook, not just vault files."
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "before an assistant reply with a banned contrast-reframe or hard AI-tell construction can end",
+      "control": "chat_lint",
+      "exceptions": "the inherently contextual deletion test remains advisory; the built gate covers the rule's explicit hard construction and vocabulary set"
     },
     "c315befa": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Lint on outgoing questions/interview boxes: regex flags bare 'the draft lease/the LOI/the landlord' with no proper noun nearby, refuse."
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "before a question, interview box, draft or status ask can end without naming its deal",
+      "control": "chat_lint",
+      "exceptions": "code fences and messages that already name the deal"
     },
     "d8c9b1f0": {
       "category": "judgment_advisory",
@@ -1026,8 +1160,8 @@
     },
     "8c812bed": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Publish-gate: before any Monday-brief/fit-summary render, check Dell's evidence-row count against a threshold; refuse render below it."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "No complementarity or fit-summary publisher exists in the repository or its 20 tracked definitions, so there is no reachable write seam to gate. The only actual brief-pack renderer carries no complementarity input. Reclassify to a deny gate when such a publisher is created; until then the required output is absent."
     },
     "b42e217e": {
       "category": "transactional_schema",
@@ -1057,9 +1191,11 @@
       "why_unenforceable": "Process/relationship judgment."
     },
     "57d83b75": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "client-intake pipeline could require a research_verified_at stamp before an intake record is marked complete."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "new-client creation",
+      "control": "record_research",
+      "exceptions": "none — sourced evidence is recorded before the client row"
     },
     "2ca2add2": {
       "category": "judgment_advisory",
@@ -1067,9 +1203,11 @@
       "why_unenforceable": "Data-capture completeness judgment (what counts as 'useful')."
     },
     "5d44d3f3": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "A verified_at/verified_source column plus a view (like v_expired_verification) flags unstamped records; could refuse using an unstamped record in a decision."
+      "category": "session_task_rail",
+      "enforcement_class": "surfacing",
+      "binding_moment": "canonical enrichment and deal-history queue construction",
+      "control": "verification_status",
+      "exceptions": "identity corrections remain proposals requiring the owning partner; contextual human decisions must still identify an unverified record as such"
     },
     "d26d63b0": {
       "category": "judgment_advisory",
@@ -1106,8 +1244,8 @@
     },
     "94806da2": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Gate any teach/log-decision/write-doctrine-section call whose cited source was only touched by WebFetch this turn; require a raw-read tool call first."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The record verb sees a proposed write but cannot know that an external source motivated it or whether an earlier client-side fetch returned transformed versus raw bytes. That causal provenance is session context, not a finite record field; source-aware workflows must carry raw-source evidence explicitly."
     },
     "49c627cc": {
       "category": "judgment_advisory",
@@ -1122,14 +1260,18 @@
       "exceptions": "paths the manifest declares machine-required"
     },
     "4c21d86b": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "confirm-merge is humanOnly (gated to a verified partner), but WHICH row should win per this rule's precedence order is not itself checked -- a human could still pick wrong."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "confirm-merge before either party row changes",
+      "control": "merge_survivor",
+      "exceptions": "a deterministic tie remains a human choice; orphan sweep still records"
     },
     "7105955b": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "loop-close verb could require a superseded_by/renumber field when the closer selects a bookkeeping reason, refusing a bare 'dropped' with no linked successor row."
+      "category": "transactional_schema",
+      "enforcement_class": "schema",
+      "binding_moment": "close-loop for a renumbered, superseded, merged or split row",
+      "control": "loop_successor",
+      "exceptions": "ordinary completed or genuinely dropped work"
     },
     "424ba0cc": {
       "category": "judgment_advisory",
@@ -1150,9 +1292,11 @@
       "why_unenforceable": "Requires judging what is 'common' vs policy, and the sample size behind that judgment."
     },
     "f92dfab2": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Packet-render check: refuse to render properties.json into a client packet if the findings/confirmations blocks are empty."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "client search-packet render",
+      "control": "client_asset_packet",
+      "exceptions": "none — both sourced findings and confirmations are required"
     },
     "e7a620cc": {
       "category": "judgment_advisory",
@@ -1202,8 +1346,8 @@
     },
     "a8c55a47": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "CI lint: grep .md docs for raw shell commands that duplicate a bin/*.sh wrapper's behavior; flag drift between the two."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "Determining that arbitrary prose and a script perform the same semantic job is contextual. Known duplicate paths are consolidated and CI/manual/pre-push all call ops/ci.sh, but a regex cannot prove equivalence for every future command without false authority."
     },
     "61551180": {
       "category": "judgment_advisory",
@@ -1239,9 +1383,11 @@
       "why_unenforceable": "Architecture-fork judgment (present the tradeoff, Joe decides)."
     },
     "0e22e34a": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Periodic sweep script greps for depth>4 paths and _v2/_final-style filenames, flags them."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "pre-commit over staged paths",
+      "control": "path_hygiene",
+      "exceptions": "existing legacy paths are not retroactively renamed"
     },
     "1fddcffb": {
       "category": "judgment_advisory",
@@ -1249,9 +1395,11 @@
       "why_unenforceable": "Judgment on what counts as 'needed regardless of task'."
     },
     "99e951b9": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "pre-commit check: if a commit adds a file under a multi-folder category, the same commit's diff must also touch that folder's INDEX.md."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "pre-commit when content is added under an indexed multi-folder category",
+      "control": "index_upkeep",
+      "exceptions": "categories without an existing INDEX.md"
     },
     "a3f6c7f9": {
       "category": "judgment_advisory",
@@ -1296,8 +1444,8 @@
     },
     "f2d58a30": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Document-render check: client packet/proposal/LOI-recommendation templates refuse to render with an empty 'declined and why' block."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "Whether an arbitrary client-facing artifact is a recommendation is a content judgment. Structured search packets now refuse an empty declined_and_why block through client_asset_controls; unstructured recommendations require task-level review until they share that schema."
     },
     "48083552": {
       "category": "judgment_advisory",
@@ -1319,18 +1467,20 @@
     },
     "61c64d91": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Asset-creation verbs (new-doctrine-doc etc.) could require a non-null tier field, refusing creation without one."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "What counts as a new asset and whether it is shared-ready or personal is a creation-time judgment across files, records and UI surfaces. Structured client assets now require a tier through client_asset_controls; no universal asset-creation verb exists to gate all other forms."
     },
     "def3e84e": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "A 'supersede' path on generated artifacts could require writing the _TO_DELETE marker and queuing add-loop before the old artifact can be overwritten."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "Recognising that an arbitrary thing supersedes another is contextual across galleries, documents, records and redirect stubs. The structured client-artifact replacement path now requires _TO_DELETE plus an add-loop reference; other surfaces have no common supersede operation."
     },
     "388cc81e": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Merge-candidate generator could require 2+ corroborating fields before a pair is even surfaced for confirm-merge, refusing single-field candidates."
+      "category": "transactional_schema",
+      "enforcement_class": "schema",
+      "binding_moment": "candidate-pool duplicate classification",
+      "control": "candidate_match",
+      "exceptions": "name-only candidates remain visible for human review; exact email is a stable suppression key"
     },
     "df8f1da0": {
       "category": "judgment_advisory",
@@ -1382,8 +1532,8 @@
     },
     "179be4b8": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "add-loop's DB check constraint (migration 0081) refuses vague blocker_detail text like 'later/revisit/tbd', which substantially covers this rule's 'no vague parking' intent even though it was taught for a different rule (647f843d)."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "Whether a follow-up discovered during a build can be completed in the same session depends on live scope, authority and remaining context. The loop deferral gate separately refuses vague parking, but no predicate can decide build-now proportionality."
     },
     "efbdfb1a": {
       "category": "judgment_advisory",
@@ -1391,14 +1541,16 @@
       "why_unenforceable": "Self-reflection judgment (is a materially simpler shape now visible); explicitly skipped for trivial work by the rule's own text."
     },
     "8cddc6ad": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "A rename/update-vendor-style verb could require a pre-write COUNT(*) of foreign-key attachments, refusing an in-place rename when count>1 without an explicit re-point target."
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "CI when a shared-row rename SQL surface is introduced",
+      "control": "shared_rename_absence",
+      "exceptions": "none while the reachable rename-surface count is zero; a future rename must replace this absence proof with an attachment-count deny gate"
     },
     "af7de070": {
       "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Client-side retry wrapper: catch the specific classifier-error text and auto-retry the identical (idempotent) call once before ever surfacing a hand-over to chat."
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The probabilistic permission classifier lives in the client transport before repository code or the MCP handler executes. Only that client can distinguish its transient classifier error from a human denial and retry the identical call; repository code never receives the refused attempt."
     },
     "740bb505": {
       "category": "judgment_advisory",
@@ -1440,14 +1592,18 @@
       "why_unenforceable": "Statistical-reasoning judgment (does the window contain an intervention or migration)."
     },
     "cff429f5": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "new-vendor/new-client verbs could refuse a blank company/category/market field without an attached research_attempted flag naming the sources checked."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "every reachable new contact creation path before party insertion",
+      "control": "record_research",
+      "exceptions": "none — direct intake, premises, pool promotion, national account and conditional franchisee creation require sourced research evidence"
     },
     "d7c69aa6": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Calendar-ingest pipeline could require, for any unmatched attendee email, an automatic mail-search + research pass before that run reports complete."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "live calendar capture completion for an unmatched attendee",
+      "control": "calendar_intake",
+      "exceptions": "dry-run remains read-only and cannot claim completion"
     },
     "bc9188b4": {
       "category": "post_action_verification",
@@ -1473,19 +1629,72 @@
       "exceptions": "CARR_ALLOW_GATE_BLESS_SKIP, same idiom as its neighbours"
     },
     "38b15dc6": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Message-shape lint: count imperative clauses in outgoing task text; below a numbered-list format with >1 clause, warn/refuse."
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "before an outgoing multi-clause partner instruction can end",
+      "control": "chat_lint",
+      "exceptions": "single-clause requests and already numbered or explicitly marked clauses"
     },
     "5e89c211": {
-      "category": "judgment_advisory",
-      "enforcement_class": "judgment_ambient",
-      "why_unenforceable": "Broad architecture-design judgment; the rule's OWN text says it is 'activated as prose guidance... to be re-admitted through the Phase 1 rule-admission contract with executable fixtures' -- i.e. self-declared as pending, not yet enforceable at this scope."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "before a cognition workflow is registered or dispatched",
+      "control": "cognition_token_admission",
+      "exceptions": "This boundary does not decide whether an otherwise valid task genuinely needs AI; it refuses only untyped, unbudgeted, write-authorized, or unregistered cognition contracts.",
+      "admission": {
+        "applicability": {
+          "workflows": [
+            "*"
+          ]
+        },
+        "projection": {
+          "targets": [
+            "workflow-manifest",
+            "typed-broker"
+          ]
+        },
+        "reachability": {
+          "paths": [
+            "record-layer",
+            "CI",
+            "runner"
+          ]
+        },
+        "input_contract": {
+          "type": "object",
+          "required": [
+            "execution",
+            "input_schema_version",
+            "output_schema_version",
+            "budget",
+            "canonical_write_authority"
+          ],
+          "properties": {
+            "execution": {
+              "type": "object"
+            },
+            "input_schema_version": {
+              "type": "integer"
+            },
+            "output_schema_version": {
+              "type": "integer"
+            },
+            "budget": {
+              "type": "object"
+            },
+            "canonical_write_authority": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
     },
     "4402973a": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Modify the existing vault-drift-watch healing script to diff-and-quarantine (write the diff + queue intake) before any regenerate/overwrite call."
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "after drift detection and before any regeneration or overwrite",
+      "control": "vault_salvage",
+      "exceptions": "none — the evidence is created even when healing continues"
     },
     "24e10ee8": {
       "category": "hard_pre_action",
@@ -1666,9 +1875,11 @@
       "why_unenforceable": "Requires judging whether a property test was genuinely failed vs pattern-matched away."
     },
     "25fab860": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "The weekly social-batch generator could filter/refuse any candidate row tagged content_type=quote-tweet at creation time."
+      "category": "hard_pre_action",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "weekly social cognition proposal validation",
+      "control": "weekly_social_route",
+      "exceptions": "quote tweets remain valid in the daily X reply workflow"
     },
     "8117b414": {
       "category": "judgment_advisory",
@@ -1706,9 +1917,11 @@
       "why_unenforceable": "The binding condition is recognising that a finding describes an ACQUISITION — a platform filing an entity on an existing practice address, an ownership change, a retirement sale — which is a judgment about what a finding means, not a field any record carries. Nothing can mechanically tell an acquisition from an ordinary entity filing at a shared address. The downstream halves inherit that: cadence and outreach-queue placement would be checkable only once a lead already carried a source-was-an-acquisition flag, and nothing sets one. Reopen as enforceable if the finding lanes ever stamp that provenance on the lead at creation, which would make the nurture-cadence and never-an-outreach-queue halves a predicate."
     },
     "d7f74c93": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "A chat_lint pattern that fires when an outgoing reply argues an agent-access or connector boundary using confidentiality, data exposure, or trust-in-the-model language. The exposure fork is closed (decision 94c0206f), so that framing is always a re-argument. Detectable as co-occurrence: boundary/withhold/access vocabulary within a few sentences of confidential/exposure/leak/trust-with-our-data, in a reply naming Hermes, Grok, Codex or a connector. The gate should demand the held-credential and autonomous-authority framing instead."
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "before an outgoing assistant reply justifies denying a model, provider, or agent access to CARR material because it is confidential, private, or sensitive",
+      "control": "chat_lint",
+      "exceptions": "explicit corrections that confidentiality is not the boundary, historical or quoted rule text, and real credential/autonomous-execution boundary explanations"
     }
   },
   "active_rule_ids": {
@@ -1921,67 +2134,84 @@
   },
   "category_overrides": {
     "hard_pre_action": [
+      "236ca227",
       "e313a3ca",
       "1e62c007",
       "fb110a39",
+      "57d83b75",
+      "ca841807",
+      "4c21d86b",
+      "4dd44fd7",
+      "f92dfab2",
+      "0e22e34a",
+      "99e951b9",
       "14181e60",
+      "f5d97b4a",
+      "2a3ff869",
       "9ff56260",
+      "2e8b4840",
       "76a53dfe",
       "308ef1de",
       "647f843d",
       "aa411351",
       "eaa31ac5",
+      "e065aa82",
+      "cff429f5",
+      "d7c69aa6",
+      "88e9b5eb",
+      "c0b38d80",
+      "5e89c211",
+      "24e10ee8",
+      "58b44ccb",
+      "4a53ff82",
+      "ab814a26",
       "faae6748",
       "9b081605",
-      "58b44ccb",
-      "ca841807",
-      "236ca227",
-      "4a53ff82",
-      "88e9b5eb",
-      "ab814a26",
-      "f5d97b4a",
-      "24e10ee8",
-      "c0b38d80",
-      "e065aa82",
-      "2e8b4840",
-      "4dd44fd7",
-      "2a3ff869"
+      "25fab860"
     ],
     "transactional_schema": [
+      "b42e217e",
       "54e2bcb9",
       "c53beeaa",
       "d7e6de46",
+      "7105955b",
       "5409731b",
       "9f15f21a",
+      "388cc81e",
       "23ea0607",
-      "b42e217e",
       "4039b9b5"
     ],
     "post_action_verification": [
       "2271e684",
       "fa217e48",
+      "8c1e6057",
+      "5be2f462",
+      "c315befa",
       "767f9b41",
       "97326357",
+      "17ffd587",
       "6a4e6283",
       "708c2150",
       "f04a05aa",
       "590b11e1",
+      "b01edd26",
       "f47a8fe9",
       "73381d78",
+      "4e104d4c",
       "a9ecd5b4",
       "43e2ef76",
       "a6e6ab4e",
+      "8cddc6ad",
       "1f3a7372",
-      "847f9995",
       "e8868cbe",
-      "4e104d4c",
-      "dcf98880",
-      "bc9188b4",
-      "1d50a3bb",
       "3a9dbafd",
-      "b01edd26",
-      "8c1e6057",
-      "17ffd587"
+      "847f9995",
+      "bc9188b4",
+      "38b15dc6",
+      "4402973a",
+      "1d50a3bb",
+      "d7f74c93",
+      "dcf98880"
     ],
     "session_task_rail": [
       "25fcddee",
@@ -1992,16 +2222,23 @@
       "14e0408b",
       "c6f69dee",
       "75c2e4c9",
+      "5d44d3f3",
+      "d5dcfe26",
+      "faf1b643",
+      "ede4c735",
+      "412d37d3",
+      "725dff46",
       "4f7c348f",
       "4a9188f3",
       "581cb3fe",
       "015183f5",
       "2dbb0ad8",
       "185013c6",
-      "df55c398",
       "fc21a431",
-      "dff58fef",
+      "df55c398",
       "d9874334",
+      "dff58fef",
+      "173119a8",
       "634a2d94",
       "c864b8cb",
       "113b3833",
@@ -2011,13 +2248,7 @@
       "c66dc739",
       "0156e9fa",
       "49533583",
-      "557838a5",
-      "ede4c735",
-      "725dff46",
-      "d5dcfe26",
-      "412d37d3",
-      "173119a8",
-      "faf1b643"
+      "557838a5"
     ]
   }
 }

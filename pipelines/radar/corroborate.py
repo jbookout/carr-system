@@ -27,6 +27,13 @@ AUTO = os.path.join(ROOT, "Automation")
 # Needed only to import pipelines.map_radar_lanes for the ORDER 26b pool hook
 # below; never used for anything file-facing.
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+try:
+    from lib.record_sources import (MODE_RECORDS, load_leads, load_pool, pool_reach)
+    _HAVE_RECORDS = True
+except ImportError:
+    _HAVE_RECORDS = False
 
 WEIGHTS = {"human-tip":4, "deed":3, "pecos-enroll":3, "nppes-move":2, "job-post":2, "new-license":1, "domain":1}
 POOL_FILES = {"tips.json":"human-tip","deeds.json":"deed","pecos.json":"pecos-enroll",
@@ -77,8 +84,21 @@ def load_pools():
     return pools, report
 
 def known_people():
-    """Suppressor set: names already in the registry or the entity feed."""
+    """Suppressor set from canonical rows, with the retained file fallback."""
     known = set()
+    if _HAVE_RECORDS:
+        ok, why, _, _ = pool_reach(("corp-filings",))
+        if ok:
+            try:
+                for r in load_pool(("corp-filings",)).get("corp-filings", []):
+                    k = key(r.get("n")); known.add(("entity", k)) if k else None
+                for r in load_leads(ROOT, MODE_RECORDS):
+                    k = key(r.get("Contact Name")); known.add(("registry", k)) if k else None
+                return known
+            except Exception as exc:  # the file fallback is the recovery surface
+                print(f"[warn] canonical suppressor read failed ({type(exc).__name__}: {exc}) — using files")
+        else:
+            print(f"[warn] canonical suppressor read unavailable ({why}) — using files")
     ef = os.path.join(AUTO, "entity-formation-leads.json")
     if os.path.exists(ef):
         for r in json.load(open(ef)):
@@ -207,7 +227,7 @@ def main():
               f".venv/bin/python -m pipelines.map_radar_lanes --lane upstream",
               file=sys.stderr)
     else:
-        run_lane("upstream")
+        run_lane("upstream", rows=candidates)
 
 if __name__ == "__main__":
     main()

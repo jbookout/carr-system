@@ -114,6 +114,16 @@ CASES = [
         codex_tool("exec", "await tools.mcp__carr__write_doctrine_section({ doctrine_id: 'x' });"),
         codex_assistant("Completed."),
     ], True),
+    ("Codex workflow acceptance requires evidence", [
+        codex_user("accept the canary"),
+        codex_tool("exec", "await tools.mcp__carr__accept_workflow({ workflow_key: 'fixture' });"),
+        codex_assistant("Completed."),
+    ], True),
+    ("Codex legacy schedule disable requires evidence", [
+        codex_user("retire the old schedule"),
+        codex_tool("exec", "await tools.mcp__carr__disable_legacy_schedule({ workflow_key: 'fixture' });"),
+        codex_assistant("Completed."),
+    ], True),
     ("CARR read action permits completion", [
         codex_user("reconcile Musicologie"),
         codex_tool("exec", "await tools.mcp__carr__patch_deal_field({ id: 'd1' });"),
@@ -148,6 +158,16 @@ def registry_prefix_coverage():
           f"{len(writes) - len(missing)}/{len(writes)} writes classified"
           + (f"; missing={','.join(missing)}" if missing else "")
           + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
+
+
+def authority_family_coverage():
+    """Human-only acceptance/retirement and future proposal/approval writes stay gated."""
+    actions = ["accept-workflow", "disable-legacy-schedule", "approve-work-request", "propose-cognition-job"]
+    missing = [action for action in actions if not mod.is_write_action(action)]
+    ok = not missing
+    print(f"{'PASS' if ok else 'FAIL'}  authority workflow family coverage"
+          + (f"; missing={','.join(missing)}" if missing else ""))
     return ok
 
 
@@ -195,6 +215,7 @@ def main():
     outcomes.append(non_carr)
     print(f"{'PASS' if non_carr else 'FAIL'}  non-CARR cwd is out of scope")
     outcomes.append(registry_prefix_coverage())
+    outcomes.append(authority_family_coverage())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
 

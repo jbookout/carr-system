@@ -42,24 +42,17 @@ mkdir -p "$REPO/out" "$LEARN_DIR"
 [ -f "$HOME/.config/carr/db.env" ] && { set -a; . "$HOME/.config/carr/db.env"; set +a; }
 [ -f "$HOME/.zprofile" ] && . "$HOME/.zprofile" >/dev/null 2>&1
 
-# The metrics pull WRITES, so the exporter URL cannot run it. SETTLED by ORDER
-# 19a: the single name is CARR_DB_JOBS_URL, the one nightly-jobs role, and the
-# python reads it directly and prefers it over everything below. The older names
-# stay in the chain, so a Mac carrying only CARR_DB_WRITER_URL or
-# CARR_DB_CADENCE_URL keeps working exactly as it did.
-#
-# CARR_DB_JOBS_URL leads the chain as of 2026-08-12. It was missing here, and the
-# omission was silent and total: this file decides the --apply branch below on
-# DATABASE_URL alone, so a Mac carrying ONLY the ORDER 19a name took the DRY RUN
-# arm and logged "no writer credential" while the python, one process later,
-# connected with that very credential and reported "read OK". Every weekly run
-# since the rename read the whole Blotato history and wrote none of it: 33
-# content_piece, 33 placement and 90 placement_metric rows pending on 2026-08-12,
-# with all 42 X placements unmeasured. The python's own preference order is
-# unchanged by this line, so which connection gets used is exactly what it was;
-# what changes is that the branch below can now see the credential.
-: "${DATABASE_URL:=${CARR_DB_JOBS_URL:-${CARR_DB_WRITER_URL:-${CARR_DB_CADENCE_URL:-}}}}"
-[ -n "$DATABASE_URL" ] && export DATABASE_URL || unset DATABASE_URL
+# The metrics pull writes the three narrow tables granted to carr_jobs.  Routine
+# work therefore has exactly one database credential path.  Clear every legacy
+# and ambient fallback before spawning children: a writer URL in db.env must not
+# become authority merely because this wrapper happened to source that file.
+jobs_url="${CARR_DB_JOBS_URL:-}"
+unset DATABASE_URL CARR_DB_WRITER_URL CARR_DB_OWNER_URL CARR_DB_CADENCE_URL CARR_IMPORT_DB_URL
+if [ -z "$jobs_url" ]; then
+  print -ru2 -- "learning-weekly: CARR_DB_JOBS_URL is required; refusing writer/owner fallback"
+  exit 78
+fi
+export CARR_DB_JOBS_URL="$jobs_url"
 
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
@@ -88,16 +81,10 @@ step() {                        # step <label> <command...>
 say "===== learning weekly chain begin ====="
 cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
 
-# Step 1 writes only when DATABASE_URL resolved above; with no writer credential
-# it exits 78 having written nothing, and the two jobs below still run and still
-# report honestly. Nothing is lost by waiting — Blotato holds the history.
-if [ -n "${DATABASE_URL:-}" ]; then
-  step "placements + metrics (Blotato -> records)" \
-    ./.venv/bin/python pipelines/pull_placement_metrics.py --apply --report-dir "$LEARN_DIR"
-else
-  step "placements + metrics (Blotato -> records, DRY RUN — no writer credential)" \
-    ./.venv/bin/python pipelines/pull_placement_metrics.py --report-dir "$LEARN_DIR"
-fi
+# CARR_DB_JOBS_URL is required above, so an admitted weekly run always takes
+# the registered write path and never degrades by borrowing a writer credential.
+step "placements + metrics (Blotato -> records)" \
+  ./.venv/bin/python pipelines/pull_placement_metrics.py --apply --report-dir "$LEARN_DIR"
 
 step "weekly learning + correction miner" \
   ./.venv/bin/python pipelines/learning_jobs.py weekly-chain \

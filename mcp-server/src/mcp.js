@@ -332,6 +332,16 @@ export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
   }
 }
 
+// Authority operations have a separate, human-principal-bound database
+// connection.  The scoped variables permit Joe and Dell to have distinct DB
+// login identities; the unscoped value supports a deliberately single-seat
+// deployment and the database rejects it when its session identity disagrees.
+export function authorityDsnForActor(env, actor) {
+  if (!actor?.human || !["joe", "dell"].includes(actor.slug)) return null;
+  return env?.[`CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL`]
+    || env?.CARR_DB_AUTHORITY_URL || null;
+}
+
 // Exported for deterministic no-network identity-gate tests. It remains the
 // single normal dispatcher path; callers receive no additional route or grant.
 export async function callTool(env, actor, name, args, profile = "full") {
@@ -394,6 +404,9 @@ export async function callTool(env, actor, name, args, profile = "full") {
   if (!allowedIn(profile, name, tool))
     throw new ToolError({ error: "not_in_profile", verb: name, profile,
       hint: "this session is scoped; report what you would have done and let an interactive partner session do it" });
+  if (tool.authorityOnly && !authorityDsnForActor(env, actor))
+    throw new ToolError({ error: "authority_connection_unavailable",
+      hint: "this human-only authority operation requires CARR_DB_AUTHORITY_URL (or the partner-scoped authority URL); routine writer credentials cannot perform it" });
   // Payload-aware profile guard (2026-08-05). Name-level gating cannot see that
   // add-premises' ownership[].new_party path CREATES a party row — the exact act
   // the away profile's own charter excludes (asserting a new identity while the
@@ -438,8 +451,10 @@ export async function callTool(env, actor, name, args, profile = "full") {
     }
   }
 
-  // writes: real transaction on the writer pool; actor row resolved inside it
-  const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
+  // Writes use the routine writer pool except the two authority operations,
+  // which receive a separate DB identity and cannot fall back to writer.
+  const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
+  const pool = new Pool({ connectionString });
   const client = await pool.connect();
   try {
     await client.query("begin");

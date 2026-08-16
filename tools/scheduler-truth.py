@@ -87,6 +87,15 @@ WRAPPER_EXEMPT = {
     "quill-dictate": "KeepAlive server — probed by bin/probe-keepalive.py, "
                      "process liveness only (no port to knock on); same wrapper "
                      "reason as call-mode",
+    # The control-plane tick has its own durable result: it uses the jobs-role
+    # credential to make idempotent ledger enqueues.  Sending it through
+    # bin/run-scheduled.sh would introduce the broad service-run writer on the
+    # execution path and defeat the narrow-credential boundary it exists to
+    # enforce.  It is therefore deliberately direct, with this explicit reason
+    # rather than an invisible coverage hole.
+    "control-plane-tick": "jobs-role ledger adapter — durable work state is the "
+                          "idempotent enqueue; run-scheduled.sh would require a "
+                          "broader writer credential",
 }
 
 # A plist that is deliberately NOT installed here. Without this, the reconciliation
@@ -96,6 +105,10 @@ INSTALL_EXEMPT = {
     "com.carr.fetch-allowlist": "SECONDARY MACHINE ONLY — on Joe's primary Mac the "
                                 "allowlist is regenerated as a step of the nightly "
                                 "chain, so this agent is correct to be absent here",
+    "com.carr.control-plane-tick": "DEFINITION ONLY — the ledger adapter is not "
+                                     "installed until its shadow/canary evidence and "
+                                     "the required cutover approval exist; legacy "
+                                     "schedules remain active in the meantime",
 }
 
 DRIFT: list[str] = []

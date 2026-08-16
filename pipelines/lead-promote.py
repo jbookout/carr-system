@@ -99,12 +99,6 @@ def rows(path, sheet=None):
     wb.close(); return out
 
 # ---------- sources ----------
-routers = sorted(glob.glob(os.path.join(ROOT, "DNA/Leads/lead-router-*.xlsx")))
-if not routers:
-    sys.exit("no lead-router-*.xlsx found in DNA/Leads/")
-RESERVOIR = routers[-1]                                    # latest by name; the FILENAME
-                                                             # still carries the router's own
-                                                             # date for display, in both modes
 if MODE == MODE_RECORDS:
     _pool = load_pool((ROUTER_SOURCE, RADAR_SOURCE))
     reservoir = _pool[ROUTER_SOURCE]
@@ -112,7 +106,14 @@ if MODE == MODE_RECORDS:
     registry  = load_leads(ROOT, MODE_RECORDS)
     clients   = load_clients(ROOT, MODE_RECORDS)
     deals     = load_deals_doc(ROOT, MODE_RECORDS).get("deals", [])
+    reservoir_label = "candidate_pool (source='lead-router')"
 else:
+    # Explicit recovery path only.  The normal records path must keep working
+    # after the generated router is unavailable.
+    routers = sorted(glob.glob(os.path.join(ROOT, "DNA/Leads/lead-router-*.xlsx")))
+    if not routers:
+        sys.exit("no lead-router-*.xlsx found in DNA/Leads/")
+    RESERVOIR = routers[-1]
     reservoir = rows(RESERVOIR, "Lead Router")
     radarp    = os.path.join(ROOT, "Automation/renewal-radar.json")
     radar_raw = json.load(open(radarp)) if os.path.exists(radarp) else []
@@ -120,6 +121,7 @@ else:
     clients   = rows(os.path.join(ROOT, "DNA/Clients/client-roster.xlsx"), "Clients")
     dealsp    = os.path.join(ROOT, "DNA/Deal Management/panhandle-team-deals.json")
     deals     = json.load(open(dealsp)).get("deals", []) if os.path.exists(dealsp) else []
+    reservoir_label = os.path.basename(RESERVOIR)
 
 print(f"[lead-promote] source: "
       f"{source_note(MODE) if _HAVE_RECORDS else 'generated files (no lib/record_sources.py)'}",
@@ -254,7 +256,7 @@ cands.sort(key=lambda r: (LANE_ORDER[lane_of(s(r.get("SEGMENT")))],
                           -len(s(r.get("Email"))), s(r.get("County")), s(r.get("Name"))))
 
 # ---------- report ----------
-print(f"\nLEAD PROMOTION — shortlist from {os.path.basename(RESERVOIR)} + renewal radar")
+print(f"\nLEAD PROMOTION — shortlist from {reservoir_label} + renewal radar")
 print("=" * 78)
 print(f"reservoir {len(reservoir):,} · renewal radar {len(radar_all):,} "
       f"(T1 {len(radar_t1):,}) · already known (deduped out) {dropped_dupe:,} · "
@@ -291,7 +293,7 @@ for i, r in enumerate(cands[:a.count], 1):
               f"Source Type = Renewal Radar · Source Detail = renewal-radar.json")
     else:
         print(f"     → registry Segment = {registry_segment(s(r.get('SEGMENT')))} · "
-              f"Source Type = Lead Router · Source Detail = {os.path.basename(RESERVOIR)}")
+              f"Source Type = Lead Router · Source Detail = {reservoir_label}")
     print()
 
 print("=" * 78)

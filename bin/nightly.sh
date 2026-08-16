@@ -34,6 +34,34 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Control-plane shadow path. Validate the exact versioned chain's executable
+# surfaces without loading credentials, taking locks, writing logs, touching
+# Drive, or calling production. A canary uses the normal path under the same
+# singleton lock as the legacy schedule.
+if [ "${1:-}" = "--preflight" ]; then
+  required=(
+    ops/vault-drift-watch.py bin/schema-snapshot.sh ops/p1-environment-gate.py
+    ops/p1-rebuild-gate.py ops/p1-integration-gate.py pipelines/cadence_engine.py
+    pipelines/availability_matcher.py ops/fetch-allowlist.py
+    ops/cutover-readiness.py ops/codex-hook-smoke.sh tools/corpus-sync.py
+    ops/vendor-level-drift-check.py bin/backup-dump.sh bin/archive-calendar.sh
+    bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
+    generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
+    bin/smoke-and-record.sh tools/ops-record.py
+  )
+  missing=0
+  for path in "${required[@]}"; do
+    if [ ! -f "$REPO/$path" ]; then
+      print -ru2 -- "nightly preflight missing: $path"
+      missing=$((missing+1))
+    fi
+  done
+  [ "$missing" -eq 0 ] || exit 1
+  /bin/zsh -n "$REPO/bin/nightly.sh" || exit 1
+  print -r -- "nightly preflight: ${#required[@]} chain surfaces present; writes=0"
+  exit 0
+fi
 LOG="$REPO/out/nightly.log"
 mkdir -p "$REPO/out"
 
@@ -594,8 +622,13 @@ step "incident sweep (close windows that elapsed clean)" \
 
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="
+  # The dispatcher captures stdout as immutable command evidence.  Keep this
+  # concise, emitted only after the chain has completed, and independent of
+  # the human-readable log line above.
+  print -r -- "nightly result: chain_ok"
 else
   say "===== nightly chain FINISHED WITH FAILURES — see above ====="
+  print -r -- "nightly result: chain_failed"
 fi
 
 # Keep the log from growing without bound: last 2000 lines is several months.

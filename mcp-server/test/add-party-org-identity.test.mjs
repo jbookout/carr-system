@@ -113,6 +113,7 @@ class Fake {
       }
       return { rows: [{ id: ids.newParty }] };
     }
+    if (sql.startsWith("insert into record_flag")) return { rows: [] };
 
     // post-rollback re-read of the surviving org row(s)
     if (sql.includes("org_identity_key(name) = org_identity_key($1)")) return { rows: this.survivors };
@@ -136,8 +137,18 @@ class Fake {
   }
 }
 
+const evidenceFor = fields => ({
+  sources: [{ url: "https://example.test/identity", observed_at: "2026-08-16T12:00:00Z" }],
+  field_evidence: Object.fromEntries(fields.map(field => [field, [0]])), discrepancies: [],
+});
+const PARTY_FIELDS = ["name", "company", "phone", "specialty", "market"];
+
 const addParty = (c, args) => TOOLS["add-party"].handler(c, joe, {
-  idempotency_key: "11111111-1111-1111-1111-111111111111", ...args });
+  idempotency_key: "11111111-1111-1111-1111-111111111111",
+  research_evidence: evidenceFor(PARTY_FIELDS),
+  ...args });
+
+const partyEvidence = evidenceFor(PARTY_FIELDS);
 
 // ── the defect itself ────────────────────────────────────────────────────────
 
@@ -227,7 +238,8 @@ test("add-premises new_party org restating itself in org_name creates one row", 
     building: { address: "123 Front Beach Rd" },
     spaces: [{ suite: "A" }],
     ownership: [{ kind: "owner",
-      new_party: { name: "Ruff House Resort", kind: "org", org_name: "Ruff House Resort" } }],
+      new_party: { name: "Ruff House Resort", kind: "org", org_name: "Ruff House Resort",
+        research_evidence: partyEvidence } }],
   });
   assert.equal(res.ok, true);
   assert.equal(c.orgPartyIdCalls.length, 0, "no second minting of the same org");
@@ -245,9 +257,23 @@ test("add-premises new_party org collision surfaces the survivor as needs_confir
       building: { address: "123 Front Beach Rd" },
       spaces: [{ suite: "A" }],
       ownership: [{ kind: "owner",
-        new_party: { name: "Ruff House Resort", kind: "org", force_new: true } }],
+        new_party: { name: "Ruff House Resort", kind: "org", force_new: true,
+          research_evidence: partyEvidence } }],
     }),
     (e) => e.payload?.error === "needs_confirm" &&
            Array.isArray(e.payload.candidates) && e.payload.candidates[0].id === ids.survivor);
   assert.equal(c.rollbacks.length, 1, "add-premises' insert is savepoint-guarded too");
+});
+
+test("add-premises refuses a thin new ownership party before its party insert", async () => {
+  const c = new Fake();
+  await assert.rejects(
+    TOOLS["add-premises"].handler(c, joe, {
+      idempotency_key: "44444444-4444-4444-4444-444444444444",
+      deal_ref: ids.deal, label: "123 Front Beach Rd",
+      building: { address: "123 Front Beach Rd" }, spaces: [{ suite: "A" }],
+      ownership: [{ kind: "owner", new_party: { name: "Unresearched Owner", kind: "person" } }],
+    }),
+    e => e.payload?.error === "research_evidence_required" && e.payload.gate === "add-premises.new_party");
+  assert.equal(c.partyInserts.length, 0);
 });

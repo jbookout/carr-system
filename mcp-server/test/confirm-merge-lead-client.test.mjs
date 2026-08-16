@@ -43,8 +43,12 @@ const joe = { id: ids.joe, slug: "joe", display: "Joe", human: true,
 
 // roles: { [partyId]: ["lead"] | ["client"] | ["lead","client"] | ["vendor"] … }
 class Fake {
-  constructor(roles) {
+  constructor(roles, metrics = null) {
     this.roles = roles;
+    this.metrics = metrics || {
+      [ids.clientSide]: { has_business_ref: true, verified_identity_fields: 2, linked_records: 3, created_at: "2020-01-01" },
+      [ids.leadSide]: { has_business_ref: false, verified_identity_fields: 1, linked_records: 1, created_at: "2021-01-01" },
+    };
     this.updates = [];
     this.events = [];
   }
@@ -64,6 +68,10 @@ class Fake {
       const held = this.roles[params[0]] || [];
       return { rows: held.map(k => ({ kind: k })) };
     }
+    if (sql.includes("merge_survivorship")) {
+      return { rows: params[0].map(id => ({ id, ...this.metrics[id] })) };
+    }
+    if (sql.includes("merge_orphan_sweep")) return { rows: [{ attachment: "party_link", count: 0 }] };
 
     if (sql.startsWith("update lead set party_id") ||
         sql.startsWith("update client set party_id") ||
@@ -95,6 +103,7 @@ async function merge(fake, extra = {}) {
     idempotency_key: "k-" + Math.random().toString(36).slice(2),
     survivor_party: ids.clientSide,
     merged_party: ids.leadSide,
+    match_basis: "exact email domain",
     ...extra,
   });
 }
@@ -141,6 +150,23 @@ test("the stated basis is recorded on the event, so the reason survives the merg
     "a merge is permanent; the reason it was allowed has to outlive the session that gave it");
 });
 
+test("deterministic precedence refuses a human-selected loser with fewer cited facts", async () => {
+  const fake = new Fake({ [ids.leadSide]: ["lead"], [ids.clientSide]: ["client"] });
+  await assert.rejects(() => verb.handler(fake, joe, {
+    idempotency_key: "wrong-survivor", survivor_party: ids.leadSide, merged_party: ids.clientSide,
+    match_basis: "exact phone and address", same_person_because: "same NPI and address in the intake evidence",
+  }), /wrong_merge_survivor/);
+  assert.deepEqual(fake.updates, [], "the wrong survivor is refused before any row moves");
+});
+
+test("merge evidence records both basis and the pre-merge orphan sweep", async () => {
+  const fake = new Fake({ [ids.leadSide]: ["lead"], [ids.clientSide]: ["client"] });
+  await merge(fake, { same_person_because: "same NPI and address, verified in the record" });
+  const written = JSON.stringify(fake.events);
+  assert.match(written, /exact email domain/);
+  assert.match(written, /orphan_sweep/);
+});
+
 test("an empty or throwaway basis does not open the gate", async () => {
   for (const excuse of ["", "   ", "ok", "yes", "same person"]) {
     const fake = new Fake({ [ids.leadSide]: ["lead"], [ids.clientSide]: ["client"] });
@@ -181,6 +207,7 @@ test("the gate is symmetric — it does not depend on which side is the survivor
     idempotency_key: "k-sym",
     survivor_party: ids.leadSide,   // reversed
     merged_party: ids.clientSide,
-  }), /lead_client_pair/,
-    "a caller who swaps the arguments must not slip past the gate");
+    match_basis: "exact email domain",
+  }), /lead_client_pair|wrong_merge_survivor/,
+    "a caller who swaps the arguments cannot slip past either the pair gate or survivor precedence");
 });

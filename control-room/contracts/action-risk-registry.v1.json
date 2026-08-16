@@ -13,10 +13,10 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 22,
+  "human_boundary": 25,
   "append_only": 34,
+  "read_only": 37,
   "optimistic_concurrency": 17,
-  "read_only": 36,
   "NONE": 12,
   "upsert_last_writer_wins": 4
  },
@@ -39,6 +39,19 @@
   "attach-to-campaign carries piece_base_version on its reattach path only. The guard sits on the destructive path and the additive path stays cheap, which is correct \u2014 but that plain attach refuses an already-attached piece is implied by the reattach contract and was not separately verified."
  ],
  "verbs": {
+  "accept-workflow": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Human acceptance of a completed shadow or canary workflow run"
+  },
   "activate-rule": {
    "protection": "human_boundary",
    "write": true,
@@ -47,7 +60,7 @@
    "sql": {
     "updates": 1,
     "deletes": 0,
-    "inserts": 0,
+    "inserts": 1,
     "upserts": 0
    },
    "does": "Set a rule's status proposed -> active"
@@ -130,6 +143,19 @@
    },
    "does": "Owner-only branch judgment after evidence is present"
   },
+  "admit-rule": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": false,
+   "sql": {
+    "updates": 2,
+    "deletes": 0,
+    "inserts": 4,
+    "upserts": 2
+   },
+   "does": "Normalize and admit one PROPOSED rule into executable authority"
+  },
   "amend-rule": {
    "protection": "human_boundary",
    "write": true,
@@ -142,6 +168,19 @@
     "upserts": 0
    },
    "does": "Correct the WORDS of an existing rule in place, keeping its id, created_at, taught_by, quote and activation history"
+  },
+  "applicable-rules": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Compile the active admitted rule set for a finite workflow, surface and tier"
   },
   "approve-retrieval-proposals": {
    "protection": "human_boundary",
@@ -441,6 +480,19 @@
     "upserts": 0
    },
    "does": "Take a decision back off a record it was wrongly attached to"
+  },
+  "disable-legacy-schedule": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Joe-only authority operation to retire one legacy schedule after accepted shadow and canary completion receipts exist"
   },
   "doctrine-index": {
    "protection": "read_only",
@@ -1503,7 +1555,7 @@
    "sql": {
     "updates": 0,
     "deletes": 0,
-    "inserts": 1,
+    "inserts": 2,
     "upserts": 0
    },
    "does": "Write a rule from the human's own words (status: proposed \u2014 it activates only via activate-rule, also human-gated)"

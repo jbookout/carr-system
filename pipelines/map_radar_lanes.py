@@ -210,12 +210,24 @@ LANES = {
 }
 
 
-def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep):
+def lane_rows(spec, rows=None):
+    """Return newly-produced rows, or the retained file for a recovery replay."""
+    if rows is not None:
+        if not isinstance(rows, list):
+            raise ValueError(f"in-memory lane rows are {type(rows).__name__}, expected a list")
+        return rows
     path = spec["path"]
     if not path.exists():
-        rep[slug] = {"error": f"lane output missing: {path}"}
+        raise FileNotFoundError(f"lane output missing: {path}")
+    return json.load(open(path))
+
+
+def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep, rows=None):
+    try:
+        rows = lane_rows(spec, rows)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        rep[slug] = {"error": str(exc)}
         return
-    rows = json.load(open(path))
     if not isinstance(rows, list):
         rep[slug] = {"error": f"lane output is {type(rows).__name__}, expected a list"}
         return
@@ -328,7 +340,7 @@ def map_lane(cur, slug, spec, known, by_email, strict, dry, refresh, sys_id, rep
     rep[slug] = r
 
 
-def run_lane(slug, dry_run=False, refresh=False, strict=False, url=None, quiet=False):
+def run_lane(slug, dry_run=False, refresh=False, strict=False, url=None, quiet=False, rows=None):
     """Single-lane writer-side hook (ORDER 26b). A lane writer (corroborate.py,
     build-renewal-feed.py, ...) calls this at the END of its own run, right
     after it writes its lane's JSON file, so the pool is current the moment
@@ -377,7 +389,7 @@ def run_lane(slug, dry_run=False, refresh=False, strict=False, url=None, quiet=F
                 if g["email"] and g["email"] not in by_email:
                     by_email[g["email"]] = g
             map_lane(cur, slug, LANES[slug], known, by_email, strict, dry_run, refresh,
-                     sys_id, rep)
+                     sys_id, rep, rows=rows)
             if dry_run:
                 conn.rollback()
             else:
