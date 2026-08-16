@@ -1203,6 +1203,28 @@ except Exception as e:
     print(f"  ⚠︎ {'rule coverage':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# The Hermes runtime writes its own memory files and injects them into every one
+# of its sessions. They are a second, ungated rule store with no provenance, and
+# they go stale silently when the record layer moves. This is a predicate rather
+# than a scheduled model run on Joe's ruling of 2026-08-16 ("that drift check
+# needs to be code, not a scheduled routine"), which is rule 5e89c211 applied.
+# A machine with no Hermes install reads OK — there is nothing to drift.
+try:
+    _hmc = os.path.join(REPO_ROOT, "ops", "hermes-memory-check.py")
+    if os.path.exists(_hmc):
+        _p = subprocess.run([sys.executable, _hmc], capture_output=True, text=True, timeout=20)
+        _line = next((l for l in (_p.stdout or "").splitlines()
+                      if l.startswith("hermes-memory:")), "(no output)")
+        _summary = _line.split(" — ", 1)[-1] if " — " in _line else _line.split(": ", 1)[-1]
+        if _p.returncode == 0:
+            print(f"  OK {'hermes memory':<18} {_summary}")
+        else:
+            print(f"  ✗✗ {'hermes memory':<18} {_summary} · python3 ops/hermes-memory-check.py for the entries")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'hermes memory':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 # Equality of ~/.codex/hooks.json with the tracked contract is useful, but it
 # cannot establish that Codex has trusted that hook or actually invokes it.
 # ops/codex-hook-smoke.sh is the live negative smoke that closes that gap: it
