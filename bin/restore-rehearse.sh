@@ -74,9 +74,16 @@ export PATH="/usr/local/opt/node@22/bin:/opt/homebrew/opt/node@22/bin:/opt/homeb
 # expired credential. NEON_API_KEY does not expire on a timer and needs no
 # browser. Sourced from db.env, the same file db-tap.py and migrate-prod.sh read,
 # so all four neonctl callers share one credential and one failure mode.
-if [ -z "${NEON_API_KEY:-}" ] && [ -f "$HOME/.config/carr/db.env" ]; then
-  set -a; . "$HOME/.config/carr/db.env"; set +a
+source "$REPO/bin/routine-credential-env.sh"
+# A dispatcher supplies CARR_JOB_PAYLOAD.  It must never trigger the recovery
+# administrator path until a distinct recovery capability is provisioned.
+if [ -n "${CARR_JOB_PAYLOAD:-}" ] && [ "${1:-}" != "--preflight" ]; then
+  print -ru2 -- "restore-rehearse: routine dispatch refused; recovery admin capability is not provisioned"
+  exit 78
 fi
+unset NEON_API_KEY
+carr_clear_routine_db_env
+carr_load_routine_db_env NEON_API_KEY CARR_DB_JOBS_URL || exit $?
 
 PROJECT_ID="steep-field-48688294"
 PROD_BRANCH="production"

@@ -59,7 +59,7 @@ def main() -> int:
         env = os.environ.copy()
         env.update(
             {
-                "BACKUP_DATABASE_URL": "postgresql://example.invalid/carr",
+                "CARR_DB_BACKUP_URL": "postgresql://carr_backup:fixture@example.invalid/carr",  # ci-secret-scan: allow
                 "BACKUP_SKIP_R2": "1",
                 "BACKUP_OUTPUT_DIR": str(output),
                 "CARR_TEST_DUMP_ARGS": str(args_file),
@@ -105,10 +105,17 @@ def main() -> int:
             f"pg_dump connection string must carry connect_timeout — got {url}"
         )
         # The original query params must survive being appended to.
-        assert url.startswith("postgresql://example.invalid/carr"), url
+        assert url.startswith("postgresql://carr_backup:fixture@example.invalid/carr"), url  # ci-secret-scan: allow
         artifacts = list(output.glob("carr-*.sql.age"))
         assert len(artifacts) == 1, artifacts
         assert artifacts[0].stat().st_size == 2 * 1024 * 1024
+
+        owner = subprocess.run(
+            ["/bin/zsh", str(SCRIPT)], cwd=REPO,
+            env={**env, "CARR_DB_BACKUP_URL": "postgresql://neondb_owner:fixture@example.invalid/carr"},  # ci-secret-scan: allow
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+        assert owner.returncode == 78 and "carr_backup" in owner.stderr, owner.stderr
 
     print("backup-dump-selftest: scoped public+ops dump, keepalives and artifact path passed")
     return 0

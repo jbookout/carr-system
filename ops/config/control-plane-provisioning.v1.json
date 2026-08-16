@@ -51,5 +51,15 @@
       "CARR_DB_OWNER_URL",
       "CARR_DB_EXPORTER_URL"
     ]
+  },
+  "routine_backup": {
+    "scope": "backup_dump_and_portability_mirror_only",
+    "credential_env": "CARR_DB_BACKUP_URL",
+    "login_role": "carr_backup",
+    "consumers": [
+      "bin/backup-dump.sh",
+      "pipelines/doctrine_mirror.py"
+    ],
+    "provisioning": "external_human_approval"
   }
 }

@@ -49,8 +49,8 @@ def equals(value: Any, expected: str, path: str, errors: list[str]) -> None:
 
 def validate(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if set(config) != {"version", "authority", "device_evidence", "providers", "routine_jobs"}:
-        errors.append("config must contain exactly version, authority, device_evidence, providers, routine_jobs")
+    if set(config) != {"version", "authority", "device_evidence", "providers", "routine_jobs", "routine_backup"}:
+        errors.append("config must contain exactly version, authority, device_evidence, providers, routine_jobs, routine_backup")
         return errors
     if config.get("version") != 1:
         errors.append("version must be 1")
@@ -98,12 +98,24 @@ def validate(config: dict[str, Any]) -> list[str]:
     if jobs.get("forbidden_environment_variables") != ["DATABASE_URL", "CARR_DB_WRITER_URL", "CARR_DB_OWNER_URL", "CARR_DB_EXPORTER_URL"]:
         errors.append("routine_jobs.forbidden_environment_variables must declare every broad database credential")
 
+    backup = mapping(config.get("routine_backup"), "routine_backup", errors,
+                     {"scope", "credential_env", "login_role", "consumers", "provisioning"})
+    equals(backup.get("scope"), "backup_dump_and_portability_mirror_only", "routine_backup.scope", errors)
+    equals(backup.get("credential_env"), "CARR_DB_BACKUP_URL", "routine_backup.credential_env", errors)
+    equals(backup.get("login_role"), "carr_backup", "routine_backup.login_role", errors)
+    if backup.get("consumers") != ["bin/backup-dump.sh", "pipelines/doctrine_mirror.py"]:
+        errors.append("routine_backup.consumers must name only backup dump and portability mirror")
+    equals(backup.get("provisioning"), "external_human_approval", "routine_backup.provisioning", errors)
+
     mcp = text("mcp-server/src/mcp.js")
     migration_authority = text("migrations/0161_control_plane_authority_boundary.sql")
     migration_device = text("migrations/0163_control_plane_device_evidence.sql")
     migration_npi = text("migrations/0167_control_plane_npi_device_evidence.sql")
     tick = text("bin/control-plane-tick.sh")
     ledger = text("tools/control-plane.py")
+    nightly = text("bin/nightly.sh")
+    backup_dump = text("bin/backup-dump.sh")
+    backup_role = text("migrations/0119_backup_role.sql")
     if "CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL" not in mcp or "CARR_DB_AUTHORITY_URL" not in mcp:
         errors.append("authority declarations are not bound by mcp-server/src/mcp.js")
     if not all(role in migration_authority for role in ("carr_authority_joe", "carr_authority_dell", "carr_authority")):
@@ -119,6 +131,12 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("provider file separation or primary/secondary route boundary is not bound by tick adapter")
     if "CARR_DB_JOBS_URL" not in ledger or "_assert_jobs_identity" not in ledger or "must not name an owner or writer" not in ledger:
         errors.append("jobs-only routine database boundary is not bound by ledger CLI")
+    if not all(token in backup_role.lower() for token in ("carr_backup", "login")):
+        errors.append("backup login-role mapping is not bound by migration 0119")
+    if "CARR_DB_BACKUP_URL" not in backup_dump or "carr_backup" not in backup_dump:
+        errors.append("backup credential and login boundary are not bound by backup-dump")
+    if 'DATABASE_URL="$CARR_DB_BACKUP_URL"' not in nightly or "pipelines/doctrine_mirror.py" not in nightly:
+        errors.append("backup credential is not scoped to the portability mirror step")
     return errors
 
 
@@ -136,7 +154,7 @@ def main() -> int:
         for error in errors:
             print(f"  - {error}")
         return 1
-    print("PASS control-plane provisioning preflight: static ledger/tick declarations are complete and bound; external provisioning remains human-controlled")
+    print("PASS control-plane provisioning preflight: static ledger/tick and scoped backup declarations are complete and bound; external provisioning remains human-controlled")
     return 0
 
 
