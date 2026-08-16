@@ -69,6 +69,7 @@ meant to be run through tools/db-tap.py.
 import argparse
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -766,7 +767,50 @@ def cmd_assess(args) -> int:
 
 
 # ── deployment ───────────────────────────────────────────────────────────────
+def _validate_provider_identity(args, subject: str) -> bool:
+    """Keep provider-version evidence exclusive to Production promotion.
+
+    Staging is a source rehearsal.  Giving it the same immutable provider
+    version identity as Production would collapse two different facts into one
+    label, so non-Production writers refuse the fields instead of ignoring them.
+    """
+    provider = (getattr(args, "provider", None) or "").strip()
+    version_id = (getattr(args, "provider_version_id", None) or "").strip()
+    args.provider = provider or None
+    args.provider_version_id = version_id or None
+    if args.environment == "production":
+        if not provider or not version_id:
+            print(f"ops-record: Production {subject} requires --provider and "
+                  "--provider-version-id", file=sys.stderr)
+            return False
+        if any(ch.isspace() for ch in provider + version_id):
+            print("ops-record: provider identity may not contain whitespace",
+                  file=sys.stderr)
+            return False
+        if provider == "cloudflare-workers":
+            try:
+                parsed_version = uuid.UUID(version_id)
+            except ValueError:
+                parsed_version = None
+            if parsed_version is None or str(parsed_version) != version_id.lower():
+                print("ops-record: cloudflare-workers provider version must be an "
+                      "exact UUID", file=sys.stderr)
+                return False
+            args.provider_version_id = version_id.lower()
+    elif provider or version_id:
+        print("ops-record: --provider and --provider-version-id are only valid for "
+              "Production; staging/rehearsal are source rehearsals, not the same "
+              "provider version", file=sys.stderr)
+        return False
+    return True
+
+
 def cmd_deployment(args) -> int:
+    if not _validate_provider_identity(args, "deployment"):
+        return 2
+    if args.environment == "production" and not args.release_key:
+        print("ops-record: Production deployment requires --release-key", file=sys.stderr)
+        return 2
     if args.state == "complete" and not args.read_back_at:
         print("ops-record: complete requires --read-back-at. A successful deploy "
               "command without live verification is Verifying, never Complete.",
@@ -788,25 +832,41 @@ def cmd_deployment(args) -> int:
             if getattr(args, "release_key", None):
                 cur.execute("select to_regclass('ops.release')")
                 if cur.fetchone()[0] is not None:
-                    cur.execute("select id from ops.release where release_key = %s",
+                    cur.execute(
+                        """select id, environment, git_sha, provider, provider_version_id
+                             from ops.release where release_key = %s""",
                                 (args.release_key,))
                     row = cur.fetchone()
                     if not row:
-                        print(f"ops-record: no release {args.release_key!r} — recording "
-                              f"the deployment without it", file=sys.stderr)
+                        print(f"ops-record: no release {args.release_key!r}", file=sys.stderr)
+                        if args.environment == "production":
+                            return 2
                     else:
                         release_id = row[0]
+                        if args.environment == "production":
+                            _, release_env, release_sha, release_provider, release_version = row
+                            if (release_env != args.environment
+                                    or release_sha != args.git_sha
+                                    or release_provider != args.provider
+                                    or release_version != args.provider_version_id):
+                                print("ops-record: Production deployment identity does not "
+                                      "exactly match its release (environment, git SHA, "
+                                      "provider, and provider version must all agree)",
+                                      file=sys.stderr)
+                                return 2
             cur.execute(
                 """insert into ops.deployment
                        (correlation_id, service_id, environment, state, git_sha,
-                        release_ref, release_id, deployed_by_actor, verb_count,
+                        provider, provider_version_id, release_ref, release_id,
+                        deployed_by_actor, verb_count,
                         schema_highest_migration, doctrine_generation,
                         started_at, ended_at, read_back_at, verification_evidence_ref,
                         failure_class, source_kind, source_ref, observed_at, detail)
-                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), %s)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), %s)
                    returning id""",
                 (corr, sid, args.environment, args.state, args.git_sha,
-                 args.release_ref, release_id, args.actor, args.verb_count,
+                 args.provider, args.provider_version_id, args.release_ref, release_id,
+                 args.actor, args.verb_count,
                  args.schema_migration, args.doctrine_generation,
                  parse_ts(args.started_at), parse_ts(ended_at),
                  parse_ts(args.read_back_at), args.verification_evidence_ref,
@@ -838,8 +898,11 @@ def cmd_release(args) -> int:
     here means the human is told which field changed rather than watching an
     approval silently evaporate.
     """
+    if args.action in ("candidate", "require"):
+        if not _validate_provider_identity(args, f"release {args.action}"):
+            return 2
     if args.action == "require":
-        if not args.sha:
+        if args.environment != "production" and not args.sha:
             print("ops-record: release require needs --sha", file=sys.stderr)
             return 2
     elif not args.key:
@@ -853,6 +916,31 @@ def cmd_release(args) -> int:
         except Exception as e:                                   # noqa: BLE001
             print(f"ops-record: could not read the manifest: {e}", file=sys.stderr)
             return 2
+    if args.action == "candidate" and args.environment == "production":
+        manifest_target = (manifest.get("service"), manifest.get("environment"))
+        requested_target = (args.service, args.environment)
+        if manifest_target != requested_target:
+            print("ops-record: Production candidate manifest service/environment "
+                  "must exactly match the requested release target", file=sys.stderr)
+            return 2
+        manifest_identity = (manifest.get("provider"),
+                             manifest.get("provider_version_id"))
+        requested_identity = (args.provider, args.provider_version_id)
+        if manifest_identity != requested_identity:
+            print("ops-record: Production candidate provider/version must exactly "
+                  "match the bound release manifest so the approval plan hash "
+                  "covers the version that can be promoted", file=sys.stderr)
+            return 2
+        verified = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+             "verify", "--manifest", args.manifest],
+            cwd=REPO, capture_output=True, text=True, check=False)
+        if verified.returncode != 0:
+            detail = (verified.stdout + verified.stderr).strip().splitlines()
+            summary = detail[-1][:240] if detail else "verification returned no evidence"
+            print("ops-record: Production candidate manifest verification failed "
+                  f"before ledger intake: {summary}", file=sys.stderr)
+            return 2
 
     try:
         with connect("write") as conn, conn.cursor() as cur:
@@ -862,19 +950,21 @@ def cmd_release(args) -> int:
                 cur.execute(
                     """insert into ops.release
                            (correlation_id, release_key, service_id, environment,
-                            state, git_sha, artifact_digest, dependency_lock_digest,
+                            state, git_sha, provider, provider_version_id,
+                            artifact_digest, dependency_lock_digest,
                             sbom_ref, migration_set, schema_highest_migration,
                             config_fingerprint, declared_env_differences,
                             asset_versions, maker_actor, maker_verification_ref,
                             test_evidence_ref, security_evidence_ref,
                             rollback_ready, rollback_plan_ref, work_request_ref,
                             plan_hash, source_kind, source_ref, expires_at)
-                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                                %s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
                                'tools/release-manifest.py', %s)
                        returning id, release_key""",
                     (corr, args.key, sid, args.environment,
-                     manifest.get("git_sha"), manifest.get("artifact_digest"),
+                     manifest.get("git_sha"), args.provider, args.provider_version_id,
+                     manifest.get("artifact_digest"),
                      manifest.get("dependency_lock_digest"), manifest.get("sbom_ref"),
                      manifest.get("migration_set"),
                      manifest.get("schema_highest_migration"),
@@ -903,6 +993,11 @@ def cmd_release(args) -> int:
                 # every run, and the enforcement begins the moment 0131 applies.
                 cur.execute("select to_regclass('ops.release')")
                 if cur.fetchone()[0] is None:
+                    if args.environment == "production":
+                        print("RELEASE TRUTH IS NOT ENFORCED ON THIS DATABASE.\n"
+                              "  Production provider-version promotion is refused "
+                              "until ops.release exists.", file=sys.stderr)
+                        return 3
                     print("RELEASE TRUTH IS NOT ENFORCED ON THIS DATABASE.\n"
                           "  ops.release does not exist, so migration 0131 has not "
                           "been applied here.\n"
@@ -912,35 +1007,72 @@ def cmd_release(args) -> int:
                           file=sys.stderr)
                     return 0
 
-                cur.execute(
-                    """select release_key, state, approval_expires_at, plan_hash
-                         from ops.release
-                        where git_sha = %s and environment = %s
-                          and state in ('approved','deploying','verifying')
-                          and approval_expires_at > now()
-                        order by approved_at desc
-                        limit 1""",
-                    (args.sha, args.environment))
+                if args.environment == "production":
+                    cur.execute(
+                        """select release_key, state, approval_expires_at, plan_hash,
+                                  git_sha
+                             from ops.release
+                            where environment = %s
+                              and provider = %s
+                              and provider_version_id = %s
+                              and (%s::text is null or git_sha = %s)
+                              and state in ('approved','deploying','verifying')
+                              and approval_expires_at > now()
+                            order by approved_at desc
+                            limit 1""",
+                        (args.environment, args.provider, args.provider_version_id,
+                         args.sha, args.sha))
+                else:
+                    cur.execute(
+                        """select release_key, state, approval_expires_at, plan_hash,
+                                  git_sha
+                             from ops.release
+                            where git_sha = %s and environment = %s
+                              and state in ('approved','deploying','verifying')
+                              and approval_expires_at > now()
+                            order by approved_at desc
+                            limit 1""",
+                        (args.sha, args.environment))
                 row = cur.fetchone()
                 if not row:
-                    print(f"NO LIVE APPROVAL for {args.sha[:12]} in {args.environment}.\n"
-                          f"  Build the manifest, record the candidate, and have Joe "
-                          f"approve the plan hash it prints:\n"
-                          f"    tools/release-manifest.py build --sha {args.sha} "
-                          f"> out/release.json\n"
-                          f"    tools/ops-record.py release candidate --key <key> "
-                          f"--manifest out/release.json\n"
-                          f"    tools/ops-record.py release approve --key <key> "
-                          f"--plan-hash <hash> --actor joe",
-                          file=sys.stderr)
+                    release_identity = (args.sha[:12] if args.sha else
+                                        f"{args.provider}:{args.provider_version_id}")
+                    if args.environment == "production":
+                        print(f"NO LIVE APPROVAL for {release_identity} in production.\n"
+                              "  Record a candidate from the manifest bound to this "
+                              "exact provider version, then have Joe approve that "
+                              "bound plan hash:\n"
+                              "    tools/ops-record.py release candidate --key <key> "
+                              "--environment production "
+                              f"--provider {args.provider} --provider-version-id "
+                              f"{args.provider_version_id} --manifest out/bound.json\n"
+                              "    tools/ops-record.py release approve --key <key> "
+                              "--plan-hash <bound-hash> --actor joe",
+                              file=sys.stderr)
+                    else:
+                        print(f"NO LIVE APPROVAL for {release_identity} in {args.environment}.\n"
+                              "  Build the manifest, record the candidate, and have Joe "
+                              "approve the plan hash it prints:\n"
+                              f"    tools/release-manifest.py build --sha {args.sha} "
+                              "> out/release.json\n"
+                              "    tools/ops-record.py release candidate --key <key> "
+                              "--manifest out/release.json\n"
+                              "    tools/ops-record.py release approve --key <key> "
+                              "--plan-hash <hash> --actor joe",
+                              file=sys.stderr)
                     return 3
-                key, state, expires, stored_plan = row
+                key, state, expires, stored_plan, release_sha = row
                 if args.plan_hash and args.plan_hash != stored_plan:
                     print(f"THE PLAN MOVED SINCE APPROVAL. Release {key} was approved "
                           f"against {stored_plan}; this tree builds {args.plan_hash}. "
                           f"Re-approve before shipping.", file=sys.stderr)
                     return 3
-                print(key)
+                if args.environment == "production":
+                    # The promotion wrapper must get provenance from the approved
+                    # immutable version, not from whichever checkout invokes it.
+                    print(f"{key} {release_sha}")
+                else:
+                    print(key)
                 return 0
 
             if args.action == "abandon":
@@ -1219,6 +1351,9 @@ def main() -> int:
                             "deploying", "verifying", "complete", "failed", "aborted",
                             "rolled_back", "superseded"])
     d.add_argument("--git-sha")
+    d.add_argument("--provider", help="Production provider, e.g. cloudflare-workers")
+    d.add_argument("--provider-version-id", dest="provider_version_id",
+                   help="immutable Production provider version actually promoted")
     d.add_argument("--release-ref", help="SUPERSEDED by --release-key (0131); kept "
                                          "so nothing that wrote it breaks")
     d.add_argument("--release-key", help="the release this deploy is shipping, by key. "
@@ -1256,6 +1391,9 @@ def main() -> int:
     rel.add_argument("action", choices=["candidate", "approve", "require", "complete",
                                         "abandon", "show"])
     rel.add_argument("--sha", help="require only: the SHA about to ship")
+    rel.add_argument("--provider", help="Production provider, e.g. cloudflare-workers")
+    rel.add_argument("--provider-version-id", dest="provider_version_id",
+                     help="immutable Production provider version bound to this release")
     rel.add_argument("--key", help="the release key, e.g. r-2026-08-15-01. Required "
                                    "for every action except `require`, which asks "
                                    "about a SHA rather than a named release.")

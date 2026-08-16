@@ -99,6 +99,8 @@ PASSES: list[str] = []
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
+PROVIDER = "cloudflare-workers"
+PROVIDER_VERSION = "11111111-2222-4333-8444-555555555555"
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -156,7 +158,8 @@ def main() -> int:
         cur.execute(
             """insert into ops.release
                    (correlation_id, release_key, service_id, environment, state,
-                    git_sha, artifact_digest, dependency_lock_digest, sbom_ref,
+                    git_sha, provider, provider_version_id,
+                    artifact_digest, dependency_lock_digest, sbom_ref,
                     schema_highest_migration, migration_set,
                     config_fingerprint, declared_env_differences,
                     asset_versions,
@@ -167,7 +170,7 @@ def main() -> int:
                     work_request_ref,
                     source_kind, source_ref, observed_at, expires_at)
                values (%s, %s, %s, %s, 'candidate',
-                       %s, %s, %s, %s,
+                       %s, %s, %s, %s, %s, %s,
                        %s, %s,
                        %s, %s,
                        %s,
@@ -179,7 +182,8 @@ def main() -> int:
                        'wrapper', 'tools/release-manifest.py', %s, %s)
                returning id""",
             (corr, f"gate-{corr}", service_id, env,
-             SHA, "sha256:" + "c" * 64, "sha256:" + "d" * 64, "sbom/gate.json",
+             SHA, PROVIDER, PROVIDER_VERSION,
+             "sha256:" + "c" * 64, "sha256:" + "d" * 64, "sbom/gate.json",
              "0131", ["0131"],
              "cfg:" + "e" * 16, "synthetic Production fixture in isolated CI",
              '{"deal-room": "2026-08-15T00:00:00Z"}',
@@ -272,11 +276,12 @@ def main() -> int:
         refuses(
             cur,
             """insert into ops.deployment
-                   (service_id, environment, state, git_sha, release_id,
+                   (service_id, environment, state, git_sha, provider,
+                    provider_version_id, release_id,
                     started_at, source_kind, source_ref)
-               values (%s, 'production', 'deploying', %s, %s, %s,
+               values (%s, 'production', 'deploying', %s, %s, %s, %s, %s,
                        'wrapper', 'bin/deploy-worker.sh')""",
-            (service_id, OTHER_SHA, unapproved_id, now),
+            (service_id, OTHER_SHA, PROVIDER, PROVIDER_VERSION, unapproved_id, now),
             "5a. a production deployment of an UNAPPROVED release is refused",
         )
 
@@ -295,11 +300,12 @@ def main() -> int:
         refuses(
             cur,
             """insert into ops.deployment
-                   (service_id, environment, state, git_sha, release_id,
+                   (service_id, environment, state, git_sha, provider,
+                    provider_version_id, release_id,
                     started_at, source_kind, source_ref)
-               values (%s, 'production', 'deploying', %s, %s, %s,
+               values (%s, 'production', 'deploying', %s, %s, %s, %s, %s,
                        'wrapper', 'bin/deploy-worker.sh')""",
-            (service_id, SHA, release_id, now),
+            (service_id, SHA, PROVIDER, PROVIDER_VERSION, release_id, now),
             "5b. a production deployment on an EXPIRED approval is refused",
         )
         # Restore a live approval: approved_at moves back to now as well, so the
@@ -339,14 +345,15 @@ def main() -> int:
         cur.execute(
             """insert into ops.deployment
                    (correlation_id, service_id, environment, state, git_sha,
-                    release_id, started_at, ended_at, read_back_at,
+                    provider, provider_version_id, release_id,
+                    started_at, ended_at, read_back_at,
                     verification_evidence_ref,
                     source_kind, source_ref, observed_at, expires_at)
-               values (%s, %s, 'production', 'complete', %s, %s, %s, %s, %s,
+               values (%s, %s, 'production', 'complete', %s, %s, %s, %s, %s, %s, %s,
                        'ops/smoke-and-record.sh#run-1',
                        'wrapper', 'bin/deploy-worker.sh', %s, %s)
                returning id""",
-            (corr, service_id, SHA, release_id,
+            (corr, service_id, SHA, PROVIDER, PROVIDER_VERSION, release_id,
              now - timedelta(minutes=5), now - timedelta(minutes=4),
              now - timedelta(minutes=3), now, now + timedelta(days=30)))
         deployment_id = fetch_one(cur)[0]

@@ -25,12 +25,16 @@ whether a release may ship. It computes evidence and compares evidence.
   build     Compute the manifest for a SHA and print it as JSON.
   verify    Recompute from a manifest's own recorded SHA and diff. Exit 1 on
             any mismatch. THIS IS THE ACCEPTANCE TEST for the rebuild clause.
+  bind-provider  Record the immutable provider version returned after upload,
+            recompute the approval-plan hash, and print the updated manifest.
   plan-hash Hash the fields an approver actually reads, so a changed plan is
             detectable by the database trigger that voids stale approvals.
 
 USAGE
   tools/release-manifest.py build --sha HEAD
   tools/release-manifest.py build --sha HEAD > out/release.json
+  tools/release-manifest.py bind-provider --manifest out/release.json \
+      --provider cloudflare-workers --provider-version-id <version-id> > out/bound.json
   tools/release-manifest.py verify --manifest out/release.json
   tools/release-manifest.py plan-hash --manifest out/release.json
 """
@@ -64,7 +68,9 @@ CONFIG_GLOBS = ("ops/config/*.json",)
 # The fields an approver reads. Changing any of them is a material plan
 # revision, and migration 0131's trigger destroys the approval when the hash
 # moves. Deploy-time facts (read-backs, verification) are NOT here: they happen
-# after the approval and cannot retroactively invalidate it.
+# after the approval and cannot retroactively invalidate it. A provider version
+# is different: it is returned by upload before approval, identifies exactly
+# what later promotion deploys, and therefore belongs in the approval preimage.
 PLAN_FIELDS = (
     "git_sha",
     "artifact_digest",
@@ -74,6 +80,8 @@ PLAN_FIELDS = (
     "migration_set",
     "environment",
     "service",
+    "provider",
+    "provider_version_id",
 )
 
 
@@ -226,6 +234,49 @@ def plan_hash(manifest: dict) -> str:
     return "plan:" + hashlib.sha256(blob.encode()).hexdigest()[:32]
 
 
+def provider_binding(manifest: dict) -> tuple[str | None, str | None]:
+    """Validate an optional immutable provider-version binding.
+
+    A source manifest deliberately has neither field: a source rebuild cannot
+    honestly know a provider-generated version ID. Once upload returns it, the
+    pair is all-or-nothing. Accept absent/null for backwards-compatible source
+    manifests; reject a partial or blank pair rather than hashing ambiguity.
+    """
+    provider = manifest.get("provider")
+    version_id = manifest.get("provider_version_id")
+    if provider is None and version_id is None:
+        return None, None
+    if (not isinstance(provider, str) or not provider.strip()
+            or not isinstance(version_id, str) or not version_id.strip()):
+        raise ValueError("provider and provider_version_id must be non-empty strings together")
+    return provider, version_id
+
+
+def bind_provider(manifest: dict, provider: str, version_id: str) -> dict:
+    """Return a post-upload manifest bound to one immutable provider version.
+
+    This does not rebuild or alter source evidence. It only records the version
+    identity the provider already assigned and recalculates the approval plan
+    hash over that now-complete preimage. A different later version must start
+    from a fresh source manifest and approval plan; it cannot overwrite history.
+    """
+    if not provider.strip() or not version_id.strip():
+        raise ValueError("--provider and --provider-version-id must be non-empty")
+    recorded_provider, recorded_version = provider_binding(manifest)
+    if recorded_provider is not None:
+        if (recorded_provider, recorded_version) != (provider, version_id):
+            raise ValueError("manifest is already bound to a different provider/version")
+        # An exact retry is safe and deterministic (for example, after a
+        # transport failure while persisting stdout); do not create a new ID.
+        bound = dict(manifest)
+    else:
+        bound = dict(manifest)
+        bound["provider"] = provider
+        bound["provider_version_id"] = version_id
+    bound["plan_hash"] = plan_hash(bound)
+    return bound
+
+
 def verify(manifest: dict) -> int:
     """Rebuild from the manifest's OWN recorded SHA and diff. This is the
     acceptance clause, executable."""
@@ -234,11 +285,17 @@ def verify(manifest: dict) -> int:
         print("verify: the manifest records no git_sha — nothing to rebuild from")
         return 1
 
+    try:
+        provider_binding(manifest)
+    except ValueError as exc:
+        print(f"verify: invalid provider binding: {exc}")
+        return 1
+
     rebuilt = build(sha, manifest.get("service", ""), manifest.get("environment", ""),
                     manifest.get("migration_set_since"))
     compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint",
                 "schema_highest_migration", "migration_set", "artifact_file_count",
-                "plan_hash")
+                )
 
     failures = []
     for field in compared:
@@ -247,6 +304,18 @@ def verify(manifest: dict) -> int:
             failures.append(f"  {field}\n    recorded: {want}\n    rebuilt:  {got}")
         else:
             print(f"  ok    {field}")
+
+    # Rebuild knows source inputs only, so it intentionally does not generate
+    # provider fields. Validate the recorded hash against this manifest's own
+    # approval preimage instead of comparing it to the unbound rebuilt hash.
+    recorded_hash = manifest.get("plan_hash")
+    expected_hash = plan_hash(manifest)
+    if recorded_hash != expected_hash:
+        failures.append("  plan_hash\n"
+                        f"    recorded: {recorded_hash}\n"
+                        f"    expected: {expected_hash}")
+    else:
+        print("  ok    plan_hash")
 
     if failures:
         print(f"\nverify: {len(failures)} mismatch(es) rebuilding {sha[:12]}")
@@ -278,6 +347,11 @@ def main() -> int:
     ph = sub.add_parser("plan-hash", help="hash the fields an approver reads")
     ph.add_argument("--manifest", required=True)
 
+    bp = sub.add_parser("bind-provider", help="bind a post-upload provider version to a manifest")
+    bp.add_argument("--manifest", required=True)
+    bp.add_argument("--provider", required=True)
+    bp.add_argument("--provider-version-id", required=True)
+
     args = p.parse_args()
 
     if args.cmd == "build":
@@ -288,6 +362,14 @@ def main() -> int:
     manifest = json.loads(Path(args.manifest).read_text())
     if args.cmd == "verify":
         return verify(manifest)
+    if args.cmd == "bind-provider":
+        try:
+            print(json.dumps(bind_provider(manifest, args.provider,
+                                           args.provider_version_id), indent=2))
+        except ValueError as exc:
+            print(f"release-manifest: {exc}", file=sys.stderr)
+            return 1
+        return 0
     print(plan_hash(manifest))
     return 0
 
