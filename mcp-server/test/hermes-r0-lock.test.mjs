@@ -94,9 +94,26 @@ test("dispatch forces the hermes profile and ignores ?profile=", () => {
   }
 });
 
-test("the hermes profile's write set is empty", () => {
-  assert.equal(PROFILES.hermes.size, 0,
-    "R0 is read-only; a write verb here would be a silent graduation");
+test("the hermes write set is a strict subset of capture", () => {
+  // The set is written out rather than spread from capture, so a verb added to
+  // capture never lands in a persistent daemon's hands unreviewed. This is the
+  // assertion that keeps the two honest in the other direction: hermes may
+  // never hold a verb capture does not.
+  for (const verb of PROFILES.hermes) {
+    assert.ok(PROFILES.capture.has(verb),
+      `${verb} is in hermes but not in capture — hermes must never exceed the additive set`);
+  }
+  assert.ok(PROFILES.hermes.size < PROFILES.capture.size,
+    "strict subset: hermes deliberately excludes the investigation verbs");
+});
+
+test("the investigation verbs stay out of the hermes set", () => {
+  // An investigation is a chain of reasoning a human is steering. A runtime
+  // dropping evidence into one mid-flight changes what the adjudicator sees.
+  for (const verb of ["record-signal", "record-branch-evidence"]) {
+    assert.ok(PROFILES.capture.has(verb), `${verb} should still be in capture`);
+    assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must refuse under hermes`);
+  }
 });
 
 // ---------- HERMES-CASE-001: an allowed read reaches the runtime ----------
@@ -141,20 +158,30 @@ test("HERMES-CASE-010 — an unsponsored Hermes runtime still resolves, shared-o
 
 // ---------- HERMES-CASE-006: mutations refuse ----------
 
-test("HERMES-CASE-006 — every write verb refuses", () => {
-  for (const verb of ["update-deal", "new-client", "add-party", "log-decision", "close-loop",
-                      "stamp-touch", "record-finding", "log-activity", "set-next-action"]) {
-    assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must refuse under R0`);
+test("HERMES-CASE-006 — the consequential write verbs still refuse", () => {
+  // Joe granted the additive set on 2026-08-16. These are the ones that stayed
+  // out, and they are the substance of the boundary: destroy, re-point
+  // ownership, create a party, advance a deal, touch a rule, draft for a client.
+  for (const verb of ["update-deal", "new-client", "new-lead", "new-vendor", "add-party",
+                      "confirm-merge", "reassign-deal", "set-lead", "log-decision",
+                      "activate-rule", "retire-rule", "prepare-document", "close-loop"]) {
+    assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must refuse under hermes`);
   }
 });
 
-test("HERMES-CASE-006 — the probe and reviewer write sets do not leak in", () => {
-  // probe and reviewer are the two other locked machine profiles. A refactor
-  // that shared a write set between locked profiles would show up here.
-  for (const verb of [...PROFILES.probe, ...PROFILES.reviewer]) {
-    assert.equal(allowedIn("hermes", verb, WRITE), false,
-      `${verb} belongs to another locked profile, never to R0`);
+test("the granted additive verbs are allowed", () => {
+  for (const verb of ["log-activity", "stamp-touch", "add-loop", "update-loop",
+                      "set-next-action", "complete-action", "add-critical-date",
+                      "record-finding", "record-defect"]) {
+    assert.equal(allowedIn("hermes", verb, WRITE), true, `${verb} should be callable`);
   }
+});
+
+test("close-loop is excluded even though add-loop is granted", () => {
+  // add-loop opens a task; close-loop asserts an outcome, which is a claim
+  // about work having been finished. capture does not hold it either.
+  assert.equal(allowedIn("hermes", "add-loop", WRITE), true);
+  assert.equal(allowedIn("hermes", "close-loop", WRITE), false);
 });
 
 // ---------- HERMES-CASE-007: humanOnly verbs refuse ----------

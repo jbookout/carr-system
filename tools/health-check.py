@@ -1225,6 +1225,26 @@ except Exception as e:
     print(f"  ⚠︎ {'hermes memory':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# The condition on the 2026-08-16 write grant. Hermes holds nine additive write
+# verbs against the record; that grant assumed a human in the session. Its own
+# scheduler and messaging gateway answer to none of CARR's scheduled-run rules,
+# so this row is what notices the moment it can act unattended.
+try:
+    _hac = os.path.join(REPO_ROOT, "ops", "hermes-autonomy-check.py")
+    if os.path.exists(_hac):
+        _p = subprocess.run([sys.executable, _hac], capture_output=True, text=True, timeout=30)
+        _line = next((l for l in (_p.stdout or "").splitlines()
+                      if l.startswith("hermes-autonomy:")), "(no output)")
+        _summary = _line.split(" — ", 1)[-1] if " — " in _line else _line.split(": ", 1)[-1]
+        if _p.returncode == 0:
+            print(f"  OK {'hermes autonomy':<18} {_summary}")
+        else:
+            print(f"  ✗✗ {'hermes autonomy':<18} {_summary} · python3 ops/hermes-autonomy-check.py")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'hermes autonomy':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 # Equality of ~/.codex/hooks.json with the tracked contract is useful, but it
 # cannot establish that Codex has trusted that hook or actually invokes it.
 # ops/codex-hook-smoke.sh is the live negative smoke that closes that gap: it
