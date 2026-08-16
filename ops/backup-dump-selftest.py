@@ -86,11 +86,31 @@ def main() -> int:
             "--schema=ops",
         ], args
         assert all("neon_auth" not in arg for arg in args), args
+
+        # KEEPALIVES, added 2026-08-16 after a five-and-a-half-hour outage.
+        # Neon dropped the connection and pg_dump never noticed: it held a
+        # half-open socket, wrote zero bytes, and kept the nightly chain's lock
+        # the whole time, so every later run skipped with exit 0. There was no
+        # backend left to terminate server-side (pg_stat_activity was empty),
+        # which makes a client-side timeout the only thing that can end it.
+        # These params make libpq probe a silent peer and fail in minutes.
+        url = args[-1]
+        for param in ("keepalives=1", "keepalives_idle=", "keepalives_interval=",
+                      "keepalives_count="):
+            assert param in url, (
+                f"pg_dump connection string must carry {param} so a dropped "
+                f"connection fails instead of hanging forever — got {url}"
+            )
+        assert "connect_timeout=" in url, (
+            f"pg_dump connection string must carry connect_timeout — got {url}"
+        )
+        # The original query params must survive being appended to.
+        assert url.startswith("postgresql://example.invalid/carr"), url
         artifacts = list(output.glob("carr-*.sql.age"))
         assert len(artifacts) == 1, artifacts
         assert artifacts[0].stat().st_size == 2 * 1024 * 1024
 
-    print("backup-dump-selftest: scoped public+ops dump and artifact path passed")
+    print("backup-dump-selftest: scoped public+ops dump, keepalives and artifact path passed")
     return 0
 
 

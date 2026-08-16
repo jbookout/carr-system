@@ -56,6 +56,46 @@ else
   URL="$("$REPO/mcp-server/node_modules/.bin/neonctl" connection-string production \
         --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
 fi
+
+# KEEPALIVES + CONNECT TIMEOUT, ADDED 2026-08-16, and the reason is a five and
+# a half hour outage rather than tidiness.
+#
+# WHAT HAPPENED. The 02:00 chain began, took its catch-up backup as step 0, and
+# Neon dropped the connection from its side. pg_dump never noticed. libpq's
+# default is to wait forever on a silent peer, so it sat on a half-open socket
+# having written ZERO bytes, and it held the nightly lock the entire time. Every
+# invocation after it printed "another 'nightly' run is in progress" and exited
+# 0 — a green exit code from a lock skip, not from a chain. Nothing past step 0
+# ran for two days: no cadence engine, no matcher, no export, no boards, no
+# Graph, no backup. Found only because the export register still read 28 hours
+# stale while the health check's own row said the chain was fine.
+#
+# WHY THIS FIX AND NOT A SERVER-SIDE ONE. pg_stat_activity on Neon showed NO
+# backend for the dump at all — the server side was already gone. There was
+# nothing to pg_terminate_backend. When the peer has vanished, only the client
+# can end the wait, so this has to be a libpq setting.
+#
+# WHAT THESE DO. keepalives makes libpq probe an idle connection; after
+# roughly idle + (interval x count) of silence, about four minutes here, the
+# socket errors out and the step FAILS instead of wedging. A failed backup
+# leaves the previous one untouched (see the guard below) and, far more
+# importantly, releases the lock so the rest of the chain runs. connect_timeout
+# bounds the handshake the same way. Overridable for a slow link, never
+# unbounded.
+#
+# Appended with the right separator: these connection strings already carry
+# sslmode and channel_binding, so a blind "?" would corrupt them.
+_KEEPALIVE_PARAMS="keepalives=1"
+_KEEPALIVE_PARAMS="$_KEEPALIVE_PARAMS&keepalives_idle=${BACKUP_KEEPALIVE_IDLE:-60}"
+_KEEPALIVE_PARAMS="$_KEEPALIVE_PARAMS&keepalives_interval=${BACKUP_KEEPALIVE_INTERVAL:-15}"
+_KEEPALIVE_PARAMS="$_KEEPALIVE_PARAMS&keepalives_count=${BACKUP_KEEPALIVE_COUNT:-12}"
+_KEEPALIVE_PARAMS="$_KEEPALIVE_PARAMS&connect_timeout=${BACKUP_CONNECT_TIMEOUT:-30}"
+case "$URL" in
+  *keepalives=*) : ;;                       # already carries them; leave it alone
+  *\?*) URL="$URL&$_KEEPALIVE_PARAMS" ;;    # has a query string; append
+  *)    URL="$URL?$_KEEPALIVE_PARAMS" ;;    # no query string; start one
+esac
+
 STAMP="$(date -u +%Y%m%d)"
 OUTDIR="${BACKUP_OUTPUT_DIR:-$REPO/backups}"
 mkdir -p "$OUTDIR"
