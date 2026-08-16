@@ -234,6 +234,27 @@ KNOWN_HOSTS = (
     # it — every client has a different domain, so the list would have to grow
     # by one entry per client forever. linkedin.com is also omitted: it blocks
     # automated fetches behind a login wall, so listing it would buy nothing.
+    #
+    # hermes-agent.nousresearch.com: the vendor host serving the Hermes Agent
+    # installer and its documentation. Hermes is the runtime the 2026-08-12
+    # frontier council cleared for an R0 evaluation (decision 94c0206f,
+    # "Present Hermes on Nous Portal Cloud as a constrained council evaluation
+    # candidate") — read-only and synthetic, with live CARR data held behind a
+    # second Joe decision. The install was blocked here on 2026-08-16 and Joe
+    # approved this entry in session the same day, after being told the host,
+    # the installer, and that a gate edit was the price.
+    #
+    # SCOPE, stated because an allowlist entry is a standing permission: this
+    # buys the installer download and the docs on that host. It buys Hermes
+    # NOTHING inside CARR. The R0 pilot profile and its three permitted read
+    # verbs are unbuilt planning fixtures in phase0/, so there is nothing for a
+    # Hermes runtime to connect to, and connecting it to the live record layer
+    # under Joe's own profile is the thing all three council seats refused. A
+    # future session finding Hermes reaching CARR has found a defect, not a
+    # permission granted here. api.x.ai is deliberately absent: the sanctioned
+    # sign-in is browser OAuth against Joe's own subscription, which runs in his
+    # browser rather than through a session's network calls.
+    "hermes-agent.nousresearch.com",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
