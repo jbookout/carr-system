@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "artifact_type": "synthetic_ai_gateway_evidence_decision",
+  "data_class": "synthetic_only",
+  "execution": "offline_deterministic",
+  "calls_models": false,
+  "writes_records": false,
+  "allowed_actions": [],
+  "decision_id": "carr-ai-gateway-decision-v1",
+  "evidence_bindings": [
+    {"path": "evals/ai/synthetic-observed-run.v1.json", "sha256": "fc7195d2207a067919d030162f05e1879f351f60fce1056e2ffa3ff8eefe586f"},
+    {"path": "evals/ai/model-boundary.v1.json", "sha256": "b11f90c24435dae528451e67c171f7ca190f2f230885d820ae9c2ae876bd9b34"},
+    {"path": "evals/ai/function-router.v1.json", "sha256": "3bee20959741be4cc13a2ac48263e4694a5ec6d6ff88252cb1d0d1fabadb4be1"},
+    {"path": "ops/ai_read_router.py", "sha256": "3130eb6346514ed42d8fd17201581bf6d99ebd4af8f889ca106db7dc9f784e57"},
+    {"path": "ops/ai_eval.py", "sha256": "de003e25804807625885479e23c45d60c9feb3503322ba8aecdcf7cfc391af52"}
+  ],
+  "provider_evidence": [
+    {
+      "source_path": "evals/ai/synthetic-observed-run.v1.json",
+      "source_digest": "fc7195d2207a067919d030162f05e1879f351f60fce1056e2ffa3ff8eefe586f",
+      "run_id": "synthetic-observed-run-001",
+      "provider_id": "synthetic-provider-v1",
+      "model_id": "synthetic-model-v1",
+      "route_id": "synthetic-route-v1"
+    }
+  ],
+  "comparison": {
+    "status": "unavailable",
+    "reason": "insufficient_pinned_provider_evidence",
+    "provider_evidence_count": 1
+  },
+  "decision": "declined",
+  "runtime_absence": {
+    "gateway_runtime": false,
+    "provider_transport": false,
+    "fallback_runtime": false
+  },
+  "future_gate": "new_pinned_provider_evidence_and_new_gateway_shape_decision_required"
+}
