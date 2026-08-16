@@ -224,6 +224,17 @@ PRIMARY_ONLY = {
 SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 
 
+# Versioned definitions that deliberately must not become live merely because
+# config-as-code reconciles the rest of the machine.  These adapters have their
+# own evidence/approval cutover gates; installing one early would turn a source
+# artifact into an active schedule before those gates pass.
+DEFINITION_ONLY = {
+    "com.carr.control-plane-tick.plist": (
+        "awaits accepted shadow/canary evidence and cutover approval"
+    ),
+}
+
+
 # Claude scheduled-task definitions are not merely configuration files: their
 # presence asks a local AI client to perform work later.  Every tracked task is
 # therefore primary-only until its *own* machine scope has been reviewed and
@@ -864,6 +875,9 @@ def cmd_install(apply):
     if apply:
         os.makedirs(LAUNCHD_SRC, exist_ok=True)
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
+        if f in DEFINITION_ONLY:
+            print(f"  SKIP  {f} (definition only: {DEFINITION_ONLY[f]})")
+            continue
         if f in PRIMARY_ONLY and not IS_PRIMARY:
             print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
             continue
