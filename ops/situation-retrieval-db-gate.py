@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -39,6 +40,12 @@ def fail(message: str) -> int:
     return 1
 
 
+def required_value(row: tuple[Any, ...] | None, label: str) -> Any:
+    if row is None:
+        raise RuntimeError(f"{label} returned no row")
+    return row[0]
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL", "")
     if not dsn:
@@ -46,29 +53,29 @@ def main() -> int:
     conn = psycopg.connect(dsn)
     try:
         with conn.cursor() as cur:
-            actor_id = cur.execute(
+            actor_id = required_value(cur.execute(
                 "select id from actor where slug='joe' and kind='human'"
-            ).fetchone()[0]
+            ).fetchone(), "human actor lookup")
             for slug, section_key, title, body in FIXTURES:
-                doc_id = cur.execute(
+                doc_id = required_value(cur.execute(
                     """insert into doctrine_document
                          (slug,title,content_class,visibility,created_by)
                        values (%s,%s,'sop','shared',%s) returning id""",
                     (slug, slug.replace("-", " "), actor_id),
-                ).fetchone()[0]
-                section_id = cur.execute(
+                ).fetchone(), "fixture document insert")
+                section_id = required_value(cur.execute(
                     """insert into doctrine_section
                          (document_id,section_key,title,ordinal,status,current_version)
                        values (%s,%s,%s,10,'active',1) returning id""",
                     (doc_id, section_key, title),
-                ).fetchone()[0]
+                ).fetchone(), "fixture section insert")
                 content_hash = hashlib.sha256(body.encode()).hexdigest()
-                revision_id = cur.execute(
+                revision_id = required_value(cur.execute(
                     """insert into doctrine_revision
                          (section_id,version,actor_id,body,plain_text,content_hash,commit_message)
                        values (%s,1,%s,%s,%s,%s,'acceptance fixture') returning id""",
                     (section_id, actor_id, Jsonb({"text": body}), body, content_hash),
-                ).fetchone()[0]
+                ).fetchone(), "fixture revision insert")
                 cur.execute(
                     """update doctrine_section
                           set current_revision_id=%s,body_hash=%s where id=%s""",
@@ -125,40 +132,43 @@ def main() -> int:
                     replay_sql, (replay_query,)).fetchall():
                 return fail("deterministic replay mismatch")
 
-            near_miss = cur.execute(
+            near_miss = required_value(cur.execute(
                 """select count(*) from search_doctrine_situations(
                        'outage communication template',null,null,100,null)
                      where doc_slug='runbook'
                        and section_key='diagnosis-checklist-in-order-2-minutes'"""
-            ).fetchone()[0]
+            ).fetchone(), "near-miss count")
             if near_miss:
                 return fail("near-miss query returned the governed diagnosis target")
 
-            target_id = cur.execute(
+            target_id = required_value(cur.execute(
                 """select m.section_id from doctrine_concept_mapping m
                      join retrieval_concept c on c.id=m.concept_id
                     where c.concept_key='record-layer-outage-diagnosis'
                       and m.status='approved'"""
-            ).fetchone()[0]
+            ).fetchone(), "approved mapping target lookup")
             cur.execute("update doctrine_section set status='retired' where id=%s", (target_id,))
-            leaked = cur.execute(
+            leaked = required_value(cur.execute(
                 """select count(*) from search_doctrine_situations(
                        'record layer outage diagnosis runbook',null,null,100,null)
                      where doc_slug='runbook'
                        and section_key='diagnosis-checklist-in-order-2-minutes'"""
-            ).fetchone()[0]
-            repairs = cur.execute("select count(*) from v_retrieval_mapping_repair").fetchone()[0]
+            ).fetchone(), "retired target leakage count")
+            repairs = required_value(
+                cur.execute("select count(*) from v_retrieval_mapping_repair").fetchone(),
+                "repair queue count",
+            )
             if leaked or not repairs:
                 return fail("retired target leaked or its mapping missed the repair queue")
 
-            raw_columns = cur.execute(
+            raw_columns = required_value(cur.execute(
                 """select count(*) from information_schema.columns
                     where table_name='retrieval_query_log'
                       and column_name in ('raw_query','query_text')"""
-            ).fetchone()[0]
-            bad_hashes = cur.execute(
+            ).fetchone(), "raw query column count")
+            bad_hashes = required_value(cur.execute(
                 "select count(*) from retrieval_query_log where length(normalized_hash)<>64"
-            ).fetchone()[0]
+            ).fetchone(), "malformed query hash count")
             if raw_columns or bad_hashes:
                 return fail("query evidence contains raw text or a malformed normalized hash")
         conn.rollback()
