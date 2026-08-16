@@ -32,7 +32,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from lib.control_plane import validate_manifest  # noqa: E402
+from lib.control_plane import deterministic_args, validate_manifest  # noqa: E402
 from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
                                             validate_rotation_policy)  # noqa: E402
@@ -145,9 +145,31 @@ def sync_registry(manifest: dict[str, Any]) -> dict[str, int]:
         for workflow in manifest["workflows"]:
             execution = workflow["execution"]
             # The partial unique index permits one enabled version per key.
-            # Disable superseded control-plane versions in this same
-            # transaction before installing the declared version; a failed
-            # insert rolls the disable back with it.
+            # Lock superseded definitions before checking for running work.
+            # Claim functions lock the same row, so either a claim wins and
+            # sync refuses until that worker drains, or sync wins and no old
+            # worker can obtain a new lease.  A database cannot undo an
+            # external command after launch, so silently disabling a running
+            # version would be false fencing.
+            cur.execute(
+                "select version from ops.job_definition "
+                "where key=%s and version<>%s and enabled for update",
+                (workflow["key"], workflow["version"]),
+            )
+            superseded = [int(row[0]) for row in cur.fetchall()]
+            if superseded:
+                cur.execute(
+                    "select count(*) from ops.job where definition_key=%s "
+                    "and definition_version=any(%s) and state='running'",
+                    (workflow["key"], superseded),
+                )
+                running = int(cur.fetchone()[0])
+                if running:
+                    raise RuntimeError(
+                        f"drain running jobs before superseding {workflow['key']}: {running} active")
+            # Disable superseded versions in this same transaction before
+            # installing the declared version; a failed insert rolls the
+            # disable and its queued-job fencing receipts back with it.
             cur.execute(
                 "update ops.job_definition set enabled=false,updated_at=now() "
                 "where key=%s and version<>%s and enabled",
@@ -211,9 +233,17 @@ def enqueue_due(manifest: dict[str, Any], instant: datetime,
                 mode: str = "live") -> list[dict[str, str]]:
     if mode not in {"shadow", "canary", "live", "replay"}:
         raise ValueError(f"invalid job mode: {mode}")
+    due = due_workflows(manifest, instant)
+    # Resolve every deterministic canary contract before opening a database
+    # transaction.  A live-equivalent command must not even produce a queued
+    # canary job that could later be mistaken for acceptance evidence.
+    if mode in {"canary", "replay"}:
+        for workflow in due:
+            if workflow.get("execution", {}).get("kind") == "deterministic":
+                deterministic_args(workflow["execution"], mode)
     rows: list[dict[str, str]] = []
     with connect() as conn, conn.cursor() as cur:
-        for workflow in due_workflows(manifest, instant):
+        for workflow in due:
             key, version = workflow["key"], workflow["version"]
             idem = f"schedule:{mode}:{key}:v{version}:{instant.isoformat()}"
             payload = {"workflow_key": key, "scheduled_for": instant.isoformat()}
@@ -400,10 +430,10 @@ class RuntimeWorkflowFactCollector:
 
     def _registered_args(self) -> list[str] | None:
         execution = self.workflow.get('execution', {})
-        selected = (execution.get('shadow_args') if self.mode == 'shadow' else
-                    execution.get('canary_args') if self.mode == 'canary' else
-                    execution.get('args'))
-        return selected if isinstance(selected, list) and all(isinstance(x, str) for x in selected) else None
+        try:
+            return deterministic_args(execution, self.mode)
+        except RuntimeError:
+            return None
 
     def _command_identity_valid(self, evidence: Any) -> bool:
         if not isinstance(evidence, dict):
@@ -700,14 +730,7 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
     if REPO not in path.parents or not path.is_file():
         raise RuntimeError("deterministic entrypoint is outside the registered repository")
     env = {**os.environ, "CARR_JOB_PAYLOAD": json.dumps(payload, sort_keys=True)}
-    if mode == "shadow":
-        args = execution.get("shadow_args")
-    elif mode == "canary":
-        args = execution.get("canary_args")
-    else:
-        args = execution.get("args", [])
-    if not isinstance(args, list):
-        raise RuntimeError(f"deterministic {mode} execution is not explicitly registered")
+    args = deterministic_args(execution, mode)
     proc = subprocess.run([str(path), *args], cwd=REPO, env=env,
                           capture_output=True, text=True, timeout=timeout)
     if proc.returncode:

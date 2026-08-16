@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -53,6 +54,19 @@ def main() -> int:
 
     errors = validate_manifest(manifest, repo=REPO)
     check("manifest validates", not errors, "; ".join(errors[:5]))
+
+    forged_canary = deepcopy(manifest)
+    deterministic = next(w for w in forged_canary["workflows"]
+                         if w["execution"]["kind"] == "deterministic")
+    deterministic["execution"]["canary"] = {
+        "enabled": True,
+        "args": [],
+        "isolation_guard": "manifest-only-claim",
+    }
+    forged_errors = validate_manifest(forged_canary, repo=REPO)
+    check("a manifest edit alone cannot enable deterministic canary execution",
+          any("canary isolation guard is not registered" in error
+              for error in forged_errors))
 
     tracked = {p.stem.replace(".SKILL", "") for p in
                (REPO / "ops" / "scheduled-tasks").glob("*.SKILL.md")}

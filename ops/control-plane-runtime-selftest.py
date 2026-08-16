@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -97,6 +98,108 @@ def main() -> int:
           bool(calls) and calls[0][1:] == ["--preflight"])
     check("execution evidence records mode and exact arguments",
           evidence["mode"] == "shadow" and evidence["args"] == ["--preflight"])
+
+    canary_calls: list[list[str]] = []
+
+    def canary_run(argv, **_kwargs):
+        canary_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "nightly result: chain_ok\n", "")
+
+    module.subprocess.run = canary_run
+    try:
+        disabled_canary = {
+            "execution": {
+                "entrypoint": "bin/nightly.sh",
+                "args": [],
+                "shadow_args": ["--preflight"],
+                "canary": {
+                    "enabled": False,
+                    "reason": "the registered canary is live-equivalent",
+                },
+            }
+        }
+        try:
+            module._execute_deterministic(disabled_canary, {}, 30, "canary")
+            canary_refused = False
+        except RuntimeError as exc:
+            canary_refused = "canary isolation is disabled" in str(exc)
+    finally:
+        module.subprocess.run = original_run
+    check("disabled deterministic canary refuses before launching a subprocess",
+          canary_refused and not canary_calls)
+
+    replay_calls: list[list[str]] = []
+
+    def replay_run(argv, **_kwargs):
+        replay_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "nightly result: chain_ok\n", "")
+
+    module.subprocess.run = replay_run
+    try:
+        try:
+            module._execute_deterministic(disabled_canary, {}, 30, "replay")
+            replay_refused = False
+        except RuntimeError as exc:
+            replay_refused = "deterministic replay execution is disabled" in str(exc)
+    finally:
+        module.subprocess.run = original_run
+    check("deterministic replay cannot alias the live command",
+          replay_refused and not replay_calls)
+
+    connect_calls = 0
+
+    def should_not_connect():
+        nonlocal connect_calls
+        connect_calls += 1
+        raise AssertionError("unsafe canary scheduling reached the database")
+
+    original_connect = getattr(module, "connect")
+    setattr(module, "connect", should_not_connect)
+    try:
+        try:
+            module.enqueue_due(
+                module.load_manifest(),
+                datetime.fromisoformat("2026-08-17T12:09:00+00:00"),
+                "canary",
+            )
+            schedule_refused = False
+        except RuntimeError as exc:
+            schedule_refused = "canary isolation is disabled" in str(exc)
+    finally:
+        setattr(module, "connect", original_connect)
+    check("unsafe deterministic canary is refused before a ledger write",
+          schedule_refused and connect_calls == 0)
+
+    sync_sql: list[str] = []
+
+    class SyncCursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, statement, _args=()): sync_sql.append(str(statement))
+        def fetchall(self): return [(1,)]
+        def fetchone(self): return (1,)
+
+    class SyncConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def cursor(self): return SyncCursor()
+        def commit(self): pass
+
+    manifest = module.load_manifest()
+    nightly = next(w for w in manifest["workflows"] if w["key"] == "nightly-record-layer")
+    original_connect = getattr(module, "connect")
+    setattr(module, "connect", lambda **_kwargs: SyncConnection())
+    try:
+        try:
+            module.sync_registry({"cognition_jobs": [], "workflows": [nightly]})
+            running_version_refused = False
+        except RuntimeError as exc:
+            running_version_refused = "drain running jobs" in str(exc)
+    finally:
+        setattr(module, "connect", original_connect)
+    check("definition sync refuses to supersede a running old version",
+          running_version_refused
+          and not any("update ops.job_definition" in statement.lower() for statement in sync_sql))
 
     observations: list[tuple] = []
 
