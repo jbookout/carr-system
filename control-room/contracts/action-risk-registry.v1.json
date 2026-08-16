@@ -16,7 +16,7 @@
   "human_boundary": 22,
   "append_only": 34,
   "optimistic_concurrency": 17,
-  "read_only": 35,
+  "read_only": 36,
   "NONE": 12,
   "upsert_last_writer_wins": 4
  },
@@ -298,6 +298,19 @@
     "upserts": 0
    },
    "does": "Close a loop \u2014 done, or deliberately dropped"
+  },
+  "compare-lease-terms": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Pure CARR 5-vs-10 lease economics comparison"
   },
   "complete-action": {
    "protection": "NONE",

@@ -11,6 +11,7 @@ import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
+import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -7156,3 +7157,6 @@ Object.assign(TOOLS, capabilityProgramTools({ withEnvelope, writeEvent, ToolErro
 
 // Evidence-backed implementation form, linked to canonical Work Requests.
 Object.assign(TOOLS, workShapeTools({ withEnvelope, writeEvent, ToolError }));
+
+// Pure workbook-derived lease economics. No database, model, or write path.
+Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
