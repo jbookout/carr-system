@@ -127,6 +127,36 @@ def dlog(msg):
         pass
 
 
+def carry_path(session):
+    """One pending-note file per session, so two sessions never cross wires."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session or "unknown"))[:64]
+    return os.path.join(REPO, "out", "chat-lint-carry", f"{safe}.txt")
+
+
+def carry(note, session=None):
+    """Park the finding for the NEXT turn instead of blocking this one.
+
+    Blocking a Stop costs a whole extra assistant message, and the offending
+    text has already reached Joe by then, so the block buys a restatement he
+    pays for twice (rule 1d50a3bb). hooks/chat-lint-carryover.py reads this on
+    the next UserPromptSubmit, injects it as context before the reply is
+    written, and deletes it. Writing failures are swallowed: a lint note is
+    never worth breaking a turn over.
+
+    Unlike audit(), fixtures are NOT skipped here: the parked note is this
+    gate's only observable output now that it does not block, so the selftest
+    has to be able to read it. Carry files are per-session and consumed on
+    delivery, so a fixture's note cannot leak into a real session.
+    """
+    try:
+        p = carry_path(session)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(note)
+    except Exception as exc:
+        dlog(f"carry-failed {exc}")
+
+
 def audit(record):
     if record.get("session") == "selftest":
         return
@@ -291,9 +321,10 @@ def main():
                "session": payload.get("session_id"),
                "excerpt": findings[0][1][:200]})
         lines = [
-            "CHAT LINT — this reply breaks writing rules that bind chat "
-            "(5be2f462 banned constructions / 3a9dbafd bare ids). Revise the "
-            "reply, keeping its content:",
+            "CHAT LINT — your PREVIOUS reply broke writing rules that bind chat "
+            "(5be2f462 banned constructions / 3a9dbafd bare ids). It has already "
+            "reached Joe and cannot be unsent, so do NOT reissue it. Simply avoid "
+            "these from here on:",
             ""]
         for rid, quote, fix in findings[:6]:
             lines.append(f"  [{rid}] …{quote}…")
@@ -303,8 +334,8 @@ def main():
                      "client surface already enforces; a bare 8-hex id or "
                      "'loop #N' needs its plain-language gloss in the same "
                      "sentence. Code fences are exempt.")
-        print("\n".join(lines), file=sys.stderr)
-        sys.exit(2)
+        carry("\n".join(lines), payload.get("session_id"))
+        sys.exit(0)
 
     except SystemExit:
         raise

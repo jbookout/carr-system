@@ -26,7 +26,12 @@ output is full of hex), all-digit tokens are exempt (20260814 is a date, not
 an id), and an id WITH plain words in its sentence is a gloss, not a bare id.
 
 Spawns the REAL hook with REAL Stop payloads + transcript fixtures.
-Exit 2 = blocked, 0 = allowed.
+
+THE CONTRACT CHANGED 2026-08-16 and these fixtures pin the new one: a wording
+fault no longer BLOCKS the turn, because the offending text has already reached
+Joe and a block only buys a restatement he pays for twice (rule 1d50a3bb). The
+gate now parks a note that hooks/chat-lint-carryover.py injects before the next
+reply. CAUGHT = a note was parked; exit 2 is now itself a regression.
 """
 import json
 import os
@@ -37,7 +42,7 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "chat-lint-gate.py")
 
-# (name, assistant_text, expect_block)
+# (name, assistant_text, expect_caught)
 CASES = [
     ("vocab-banned", "This will seamlessly unlock a transformative workflow "
                      "for the whole pipeline.", True),
@@ -78,9 +83,26 @@ def run_stop(assistant_text, event="Stop", stop_active=False):
                 "message": {"content": [{"type": "text", "text": assistant_text}]}}) + "\n")
         payload = {"hook_event_name": event, "transcript_path": path,
                    "session_id": "selftest", "stop_hook_active": stop_active}
+        # The gate no longer BLOCKS on a wording fault (rule 1d50a3bb: the bad
+        # text has already reached Joe, so a block only buys a restatement he
+        # pays for twice). It parks a note that hooks/chat-lint-carryover.py
+        # injects before the next reply. So "caught" now means a note was
+        # written, and exit 2 would itself be a regression.
+        carry = os.path.join(REPO, "out", "chat-lint-carry", "selftest.txt")
+        try:
+            os.unlink(carry)
+        except Exception:
+            pass
         p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
                            capture_output=True, text=True, timeout=30)
-        return p.returncode == 2, (p.stdout or "") + (p.stderr or "")
+        if p.returncode == 2:
+            return False, "REGRESSION: gate blocked instead of carrying"
+        note = ""
+        if os.path.exists(carry):
+            with open(carry) as fh:
+                note = fh.read()
+            os.unlink(carry)
+        return bool(note.strip()), note
     finally:
         try:
             os.unlink(path)
@@ -101,7 +123,7 @@ def main():
         else:
             bad.append(name)
         print(f"  {'ok  ' if ok else 'FAIL'} {name:20} "
-              f"want={'BLOCK' if expect else 'allow'} got={'BLOCK' if got else 'allow'}")
+              f"want={'CAUGHT' if expect else 'clean'} got={'CAUGHT' if got else 'clean'}")
 
     got, _ = run_stop(CASES[0][1], stop_active=True)
     if not got:
@@ -109,15 +131,15 @@ def main():
     else:
         bad.append("stop-active-loops")
     print(f"  {'ok  ' if not got else 'FAIL'} {'stop-active-never-loops':20} "
-          f"want=allow got={'BLOCK' if got else 'allow'}")
+          f"want=clean got={'CAUGHT' if got else 'clean'}")
 
     got, out = run_stop(CASES[0][1])
     if "writing" in out.lower() or "vocab" in out.lower():
         passed += 1
-        print("  ok   the block names what it caught")
+        print("  ok   the carried note names what it caught")
     else:
-        bad.append("block-text")
-        print(f"  FAIL the block names what it caught — {out[:100]}")
+        bad.append("carry-text")
+        print(f"  FAIL the carried note names what it caught — {out[:100]}")
 
     print(f"\nchat-lint-gate-selftest: {passed}/{passed + len(bad)} passed")
     if bad:

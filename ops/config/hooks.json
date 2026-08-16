@@ -265,5 +265,15 @@
         }
       ]
     }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/chat-lint-carryover.py"
+        }
+      ]
+    }
   ]
 }
