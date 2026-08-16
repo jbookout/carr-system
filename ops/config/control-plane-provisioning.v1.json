@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "authority": {
+    "environment_variables": {
+      "joe": "CARR_DB_AUTHORITY_JOE_URL",
+      "dell": "CARR_DB_AUTHORITY_DELL_URL",
+      "single_seat_fallback": "CARR_DB_AUTHORITY_URL"
+    },
+    "login_roles": {
+      "joe": "carr_authority_joe",
+      "dell": "carr_authority_dell"
+    },
+    "privilege_bundle_role": "carr_authority",
+    "provisioning": "external_human_approval"
+  },
+  "device_evidence": {
+    "privilege_bundle_role": "carr_device_evidence",
+    "principal_registry": {
+      "table": "ops.device_evidence_principal",
+      "login_role_column": "login_role",
+      "device_id_column": "device_id",
+      "active_column": "active"
+    },
+    "receipt_tables": [
+      "ops.device_evidence_receipt",
+      "ops.npi_device_evidence_receipt"
+    ],
+    "provisioning": "external_human_approval"
+  },
+  "providers": {
+    "file": "~/.config/carr/control-plane.env",
+    "file_selector_env": "CARR_CONTROL_PLANE_PROVIDER_ENV",
+    "routes": {
+      "primary": {
+        "url_env": "CARR_AI_ROUTE_PRIMARY_URL",
+        "token_env": "CARR_AI_ROUTE_PRIMARY_TOKEN"
+      },
+      "secondary": {
+        "url_env": "CARR_AI_ROUTE_SECONDARY_URL",
+        "token_env": "CARR_AI_ROUTE_SECONDARY_TOKEN"
+      }
+    }
+  },
+  "routine_jobs": {
+    "scope": "ledger_cli_and_tick_adapter_only",
+    "credential_env": "CARR_DB_JOBS_URL",
+    "login_role": "carr_jobs",
+    "forbidden_environment_variables": [
+      "DATABASE_URL",
+      "CARR_DB_WRITER_URL",
+      "CARR_DB_OWNER_URL",
+      "CARR_DB_EXPORTER_URL"
+    ]
+  }
+}
