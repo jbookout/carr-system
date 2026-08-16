@@ -11,7 +11,6 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import re
 from typing import Any
 
 import ai_eval
@@ -20,7 +19,8 @@ import ai_eval
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = REPO_ROOT / "evals" / "ai" / "function-router.v1.json"
 BOUND_SUITE_PATH = REPO_ROOT / "evals" / "ai" / "model-boundary.v1.json"
-POLICY_SHA256 = "3bee20959741be4cc13a2ac48263e4694a5ec6d6ff88252cb1d0d1fabadb4be1"
+POLICY_SHA256 = "ff1acac17d99f02e07aacf29281a7155a64aeaf65d83087ccfd4f4dd89f1633e"
+ACTION_RISK_REGISTRY_PATH = REPO_ROOT / "control-room" / "contracts" / "action-risk-registry.v1.json"
 SERVER_CONTEXT = {
     "organization_tenant_id": "carr-internal",
     "runtime_principal": "synthetic-router-v1",
@@ -29,10 +29,8 @@ SERVER_CONTEXT = {
 }
 POLICY_FIELDS = {
     "schema_version", "artifact_type", "data_class", "execution", "calls_models",
-    "writes_records", "allowed_actions", "tool_registry", "action_risk_registry",
-    "selected_tool_evidence", "routes", "denied_targets",
+    "writes_records", "allowed_actions", "selected_tool_evidence", "routes", "denied_targets",
 }
-FILE_BINDING_FIELDS = {"path", "sha256"}
 ROUTE_FIELDS = {"tool_name", "write", "full_only", "input_schema"}
 SELECTED_TOOL_EVIDENCE_FIELDS = ROUTE_FIELDS | {"input_schema_digest"}
 DENIED_TARGET_FIELDS = {"tool_name", "write", "full_only"}
@@ -57,7 +55,6 @@ ROUTER_VIOLATION_CODES = {
     "router_arguments_unknown",
     "router_arguments_type_invalid",
 }
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SCHEMA_FIELDS = {
     "type", "properties", "required", "items", "enum", "description", "default",
     "additionalProperties",
@@ -92,17 +89,6 @@ def _canonical_digest(value: Any) -> str:
 def _detached(value: Any) -> Any:
     """Return a JSON-value copy with no caller or module-owned aliases."""
     return json.loads(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
-
-
-def _validate_file_binding(value: Any, label: str) -> None:
-    binding = _exact_object(value, FILE_BINDING_FIELDS, label)
-    relative_path = binding["path"]
-    if not _nonempty_string(relative_path) or not SHA256_RE.fullmatch(binding["sha256"]):
-        raise RouterError(f"{label} has an invalid file binding")
-    root = REPO_ROOT.resolve()
-    target = (root / relative_path).resolve()
-    if root not in target.parents or not target.is_file() or _sha256(target) != binding["sha256"]:
-        raise RouterError(f"{label} does not bind the current file")
 
 
 def _validate_schema(schema: Any) -> None:
@@ -149,11 +135,8 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise RouterError("router policy cannot call models or write records")
     if artifact["allowed_actions"] != []:
         raise RouterError("router policy cannot authorize actions")
-    _validate_file_binding(artifact["tool_registry"], "tool registry")
-    _validate_file_binding(artifact["action_risk_registry"], "action risk registry")
-    risk_path = REPO_ROOT / artifact["action_risk_registry"]["path"]
     try:
-        risk_rows = json.loads(risk_path.read_text())["verbs"]
+        risk_rows = json.loads(ACTION_RISK_REGISTRY_PATH.read_text())["verbs"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise RouterError("action risk registry cannot be read") from exc
     if not isinstance(artifact["routes"], list) or len(artifact["routes"]) < 2:

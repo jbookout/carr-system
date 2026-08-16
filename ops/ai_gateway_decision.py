@@ -17,13 +17,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DECISION_PATH = ROOT / "evals" / "ai" / "gateway-decision.v1.json"
-DECISION_FIXTURE_SHA256 = "9a6a3930a8b1e53ccab8d84071508c08ca8f4c77de2a70e97ff655ba3250005c"
+DECISION_FIXTURE_SHA256 = "bc91f9bd7621d632b9d18807fdfa1713d7027e5ea5221f08e037182428677f3d"
 REQUIRED_BINDING_PATHS = (
     "evals/ai/synthetic-observed-run.v1.json",
     "evals/ai/model-boundary.v1.json",
-    "evals/ai/function-router.v1.json",
-    "ops/ai_read_router.py",
-    "ops/ai_eval.py",
 )
 ABSENT_RUNTIME_PATHS = (
     "ops/ai_gateway.py",
@@ -152,8 +149,7 @@ def _validate_provider_evidence(value: Any, bindings: dict[str, str]) -> list[di
 def _validate_bound_d1_evidence(bindings: dict[str, str]) -> None:
     observed_run = _load_bound_json(REQUIRED_BINDING_PATHS[0])
     model_boundary = _load_bound_json(REQUIRED_BINDING_PATHS[1])
-    router_policy = _load_bound_json(REQUIRED_BINDING_PATHS[2])
-    for artifact in (observed_run, model_boundary, router_policy):
+    for artifact in (observed_run, model_boundary):
         if (
             artifact.get("data_class") != "synthetic_only"
             or artifact.get("execution") != "offline_deterministic"

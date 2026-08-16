@@ -6,14 +6,6 @@
   "calls_models": false,
   "writes_records": false,
   "allowed_actions": [],
-  "tool_registry": {
-    "path": "mcp-server/src/tools.js",
-    "sha256": "02ed5e2658848a9677f91d504768bf53d1f768b89a5da003d4a5ef564c2cae62"
-  },
-  "action_risk_registry": {
-    "path": "control-room/contracts/action-risk-registry.v1.json",
-    "sha256": "b3b2e079db4c36b4ddb48d5adb3a33a372e1c459f8b878415ca7c6914ef9a8f8"
-  },
   "selected_tool_evidence": [
     {
       "tool_name": "find",

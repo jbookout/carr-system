@@ -37,15 +37,17 @@ class ReadRouterTests(unittest.TestCase):
         self.assertEqual(result, {"state": "refused", "violation_codes": [code]})
         self.assertNotIn(CANARY, json.dumps(result, sort_keys=True))
 
-    def test_policy_is_fixed_and_binds_two_safe_server_derived_read_routes(self):
+    def test_policy_is_fixed_and_contains_only_selected_route_semantics(self):
         self.assertEqual(hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest(), ai_read_router.POLICY_SHA256)
         self.assertEqual([row["tool_name"] for row in self.policy["routes"]], ["find", "who-do-we-know"])
-        self.assertEqual(self.policy["tool_registry"]["path"], "mcp-server/src/tools.js")
-        self.assertEqual(
-            self.policy["action_risk_registry"]["path"],
-            "control-room/contracts/action-risk-registry.v1.json",
-        )
+        self.assertNotIn("tool_registry", self.policy)
+        self.assertNotIn("action_risk_registry", self.policy)
         self.assertNotIn("server_context", self.policy)
+
+    def test_runtime_does_not_pin_or_repin_the_whole_tools_registry(self):
+        source = (ROOT / "ops" / "ai_read_router.py").read_text()
+        self.assertNotIn("mcp-server/src/tools.js", source)
+        self.assertFalse((ROOT / "ops" / "ai-read-router-repin.py").exists())
 
     def test_selected_tool_evidence_exactly_matches_current_registry_in_test_only_node_check(self):
         probe = (
