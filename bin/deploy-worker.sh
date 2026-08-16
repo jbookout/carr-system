@@ -80,7 +80,6 @@ set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORKER_DIR="$REPO/mcp-server"
-COUNT_FILE="$WORKER_DIR/.last-deployed-verb-count"
 # Set again after argument parsing when a non-production env is chosen, so a
 # staging deploy can never overwrite the baseline production is measured against.
 WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
@@ -111,10 +110,6 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-
-if [ "$TARGET_ENV" != "production" ]; then
-  COUNT_FILE="$WORKER_DIR/.last-deployed-verb-count.$TARGET_ENV"
-fi
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
@@ -217,25 +212,54 @@ case "$SHIPPING" in
 esac
 echo "  OK  registry imports cleanly: $SHIPPING verbs about to ship"
 
-if [ -f "$COUNT_FILE" ]; then
-  PREVIOUS="$(tr -dc '0-9' < "$COUNT_FILE")"
-  if [ -n "$PREVIOUS" ] && [ "$SHIPPING" -lt "$PREVIOUS" ]; then
-    LOST=$((PREVIOUS - SHIPPING))
-    if [ "$ALLOW_SHRINK" = "0" ]; then
-      fail "this deploy would REMOVE $LOST verb(s) from production.
+# THE BASELINE COMES FROM THE LEDGER, NOT A FILE (defect d737c09c, 2026-08-16).
+# It used to live in mcp-server/.last-deployed-verb-count.<env>, which the
+# postflight told you to commit — and committing it fails
+# ops/release-manifest-selftest.py, because manifest artifact_paths are
+# ['mcp-server','dealroom'] so the file sits inside the digested artifact while
+# the digest skips dotfiles. It moved the deployed TREE without moving its
+# DIGEST, the exact condition that test guards. Two halves of one control giving
+# opposite instructions.
+#
+# The file was always a DUPLICATE: every deploy already records --verb-count
+# into ops.deployment, and since the ledger fix earlier today it does so for
+# staging too. Write law 14181e60 settles which copy survives.
+PREVIOUS=""
+LEDGER_RC=0
+PREVIOUS="$("$PY" "$REPO/ops/last-deployed-verb-count.py" carr-mcp "$TARGET_ENV" 2>/dev/null)" \
+  || LEDGER_RC=$?
+case "$LEDGER_RC" in
+  0)
+    if [ -n "$PREVIOUS" ] && [ "$SHIPPING" -lt "$PREVIOUS" ]; then
+      LOST=$((PREVIOUS - SHIPPING))
+      if [ "$ALLOW_SHRINK" = "0" ]; then
+        fail "this deploy would REMOVE $LOST verb(s) from $TARGET_ENV.
   last deployed: $PREVIOUS
   about to ship: $SHIPPING
 
   If verbs were deliberately retired, say so: re-run with --allow-shrink.
   If not, you are about to reproduce loop #276."
+      fi
+      echo "  !!  shrinking by $LOST verb(s), allowed explicitly via --allow-shrink"
+    else
+      echo "  OK  no verb loss (last deployed to $TARGET_ENV: $PREVIOUS)"
     fi
-    echo "  !!  shrinking by $LOST verb(s), allowed explicitly via --allow-shrink"
-  else
-    echo "  OK  no verb loss (last deployed: $PREVIOUS)"
-  fi
-else
-  echo "  --  no previous count recorded; this run establishes the baseline"
-fi
+    ;;
+  3)
+    echo "  --  no previous deployment recorded for $TARGET_ENV; this run establishes the baseline"
+    ;;
+  *)
+    # FAIL CLOSED, and no escape flag. Not caution: the Worker being deployed
+    # needs Postgres for every verb it serves, so a deploy attempted while the
+    # ledger is unreachable ships something that cannot work anyway. Refusing
+    # costs nothing real, and a loss guard that cannot check must never wave a
+    # deploy through — that is exactly how loop #276 happened.
+    fail "could not read the previous verb count from the ledger (exit $LEDGER_RC).
+  The verb-loss guard cannot run, so this deploy is refused rather than shipped blind.
+  Diagnose with: .venv/bin/python ops/last-deployed-verb-count.py carr-mcp $TARGET_ENV
+  If Postgres is down, the Worker you are about to ship cannot serve a verb anyway."
+    ;;
+esac
 
 # record_deployment <state> <correlation> — attach what just shipped to the
 # release that authorised it.
@@ -387,10 +411,15 @@ fi
 # should trust.
 echo ""
 echo "== postflight =="
-printf '%s\n' "$SHIPPING" > "$COUNT_FILE"
-echo "  recorded $SHIPPING verbs in $(basename "$COUNT_FILE")"
+# NO BASELINE FILE IS WRITTEN, and nothing is left for a human to commit. The
+# baseline is the --verb-count this run records into ops.deployment below, which
+# the next deploy reads back through ops/last-deployed-verb-count.py. The file
+# this used to write could not be committed at all: it sits inside the digested
+# artifact while the digest skips dotfiles, so committing it failed
+# ops/release-manifest-selftest.py (defect d737c09c).
+echo "  shipping $SHIPPING verbs — the baseline for the next deploy is the"
+echo "  ledger row recorded below, not a file"
 echo "  stamped GIT_SHA=$HEAD_SHA into this deploy (see /release)"
-echo "  COMMIT THAT FILE — it is the baseline the next deploy is measured against."
 echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
 echo "  confirm it reports $SHIPPING. A deploy that returns success and a"
