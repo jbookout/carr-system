@@ -25,6 +25,7 @@ const surfaceMap = contracts["surface-registry-migration-map.v1.json"];
 const manifest = contracts["phase0-manifest.v1.json"];
 const tenantGovernance = contracts["tenant-workflow-governance.v1.json"];
 const marketMap = contracts["market-map-route-planning.v1.json"];
+const sharedContinuity = contracts["phase4-shared-continuity.v1.json"];
 const tenantDenialFixture = await readJson(new URL("test/fixtures/", workspaceDir), "tenant-boundary-denials.v1.json");
 const sponsorIdentityFixture = await readJson(new URL("test/fixtures/", workspaceDir), "sponsor-runtime-identity.v1.json");
 const hermesCandidate = await readJson(new URL("../../phase0/", contractDir), "hermes-runtime-council-candidate.v1.json");
@@ -283,6 +284,33 @@ const identityEnvelopeFields = new Set(events.event_envelope.required);
 for (const field of ["organization_tenant_id", "agent_principal_id", "runtime_principal", "sponsoring_human_id", "partner_id", "personal_brain_scope", "personal_brain_version", "shared_rule_count", "personal_rule_count", "session_capability_profile", "identity_resolution_status"]) assert(identityEnvelopeFields.has(field), `identity audit field ${field}`);
 assert(events.event_envelope.forbidden.includes("personal_rule_bodies") && events.event_envelope.forbidden.includes("shared_rule_bodies"), "identity audit body exclusion");
 assert.match(acceptance.sponsor_runtime_identity_acceptance.current_gate_status, /^passed_live_and_deterministic_matrix/, "identity acceptance must record verified gate");
+
+assert.equal(sharedContinuity.version, "1.0.0", "Phase 4 shared-continuity contract version");
+assert.equal(sharedContinuity.status, "approved_acceptance_contract_not_yet_implemented", "Phase 4 contract must not claim implementation");
+assert.equal(sharedContinuity.governing_phase, 4, "shared continuity is a Phase 4 completion gate");
+exact(sharedContinuity.directions, ["joe_to_dell", "dell_to_joe"], "shared continuity direction matrix");
+exact(sharedContinuity.gates.map(gate => gate.id), [
+  "PH4-MEMORY-FRESH-001",
+  "PH4-MEMORY-TENTATIVE-001",
+  "PH4-MEMORY-CONFLICT-001",
+  "PH4-MEMORY-SCOPE-001",
+  "PH4-DOCUMENT-RETRIEVAL-001",
+  "PH4-SHARED-CONTINUITY-SOAK-001"
+], "Phase 4 shared-continuity gates");
+assert.match(sharedContinuity.completion_rule, /all six gates pass in both Joe-to-Dell and Dell-to-Joe directions using fresh independent sessions/i, "bidirectional fresh-session completion rule");
+assert.match(sharedContinuity.completion_rule, /database row existence alone.*not passing evidence/i, "storage alone is not continuity evidence");
+assert.match(sharedContinuity.implementation_entry_rule, /every Phase 4 Doc or capture work item must name the gate IDs/i, "Phase 4 work must trace to a continuity gate");
+assert.match(sharedContinuity.shared_truth_boundary.tentative, /require confirmation before promotion/i, "tentative statements remain proposals");
+assert.match(sharedContinuity.shared_truth_boundary.personal, /never crosses partner scope/i, "personal context remains partner-scoped");
+assert.equal(sharedContinuity.required_receipt_fields.includes("write_audit_event_id"), true, "capture receipt write audit evidence");
+assert.equal(sharedContinuity.required_receipt_fields.includes("retrieval_audit_event_id"), true, "capture receipt retrieval audit evidence");
+const sharedContinuityGates = new Map(sharedContinuity.gates.map(gate => [gate.id, gate]));
+assert.match(sharedContinuityGates.get("PH4-MEMORY-FRESH-001").pass.join(" "), /without being told where it was stored.*source, freshness, and exact canonical record/i, "fresh session retrieves grounded shared fact");
+assert.match(sharedContinuityGates.get("PH4-MEMORY-TENTATIVE-001").refuse.join(" "), /silent promotion/i, "tentative statement cannot silently become fact");
+assert.match(sharedContinuityGates.get("PH4-MEMORY-CONFLICT-001").refuse.join(" "), /last-write-wins/i, "silent conflict overwrite refused");
+assert.match(sharedContinuityGates.get("PH4-MEMORY-SCOPE-001").pass.join(" "), /personal canary is absent.*privacy-safe refusal/i, "cross-brain personal scope denial");
+assert.match(sharedContinuityGates.get("PH4-DOCUMENT-RETRIEVAL-001").pass.join(" "), /different supported computer.*bytes match the stored content hash/i, "cross-device exact deliverable evidence");
+assert.match(sharedContinuityGates.get("PH4-SHARED-CONTINUITY-SOAK-001").pass.join(" "), /both directions.*no partner hand-carries.*without Claude Code or Codex/i, "bidirectional 48-hour adoption evidence");
 
 const endpointFields = api.api_policy.required_endpoint_declarations.map(field => field === "idempotency" ? "idempotency_or_read_semantics" : field === "response_schema" ? "response_schema" : field);
 for (const endpoint of api.prototype_read_routes) for (const field of endpointFields) assert(field in endpoint, `${endpoint.operation_id}.${field}`);
