@@ -459,6 +459,38 @@ def load_mirror_manifest(root):
     return files, None
 
 
+def staged_basenames(root):
+    """Every .md filename currently sitting under the vault's _to_delete/.
+
+    WHY THIS EXISTS. Joe's rule faae6748 forbids deleting a vault file: a
+    candidate deletion is MOVED into _to_delete/ instead, in a dated folder
+    naming the reason. The monthly sweep obeys that rule, so every retirement
+    it makes looks, from this checker's side of the fence, exactly like a
+    deletion — the file is gone from its home and _to_delete/ is in SKIP_DIRS,
+    so nothing here ever saw where it went.
+
+    On 2026-08-16 that cost a wrong conclusion rather than just a noisy line:
+    the nightly reported sweep-sop.md, review-task.md and a July network brief
+    as UNEXPECTED deletions, and the session on duty told Joe his monthly sweep
+    procedure might have been deleted by something unknown. All three were in
+    _to_delete/ the whole time, each in a folder naming its reason.
+
+    Matched on BASENAME, not full path, because staging moves the file into a
+    differently-named folder by design — the path cannot match and requiring it
+    to would defeat the check. That is deliberately loose, which is why the
+    caller applies it to DELETED paths only.
+    """
+    names = set()
+    staged_root = os.path.join(root, "_to_delete")
+    if not os.path.isdir(staged_root):
+        return names
+    for dirpath, _dirnames, filenames in os.walk(staged_root):
+        for fn in filenames:
+            if fn.endswith(".md"):
+                names.add(fn)
+    return names
+
+
 def classify_mirror_file(sub, current_sha, mirror_manifest):
     """Classify one path under MIRROR_PREFIX against the mirror's own
     manifest.json. Returns (tag, reason). current_sha is None when the file
@@ -1074,6 +1106,8 @@ def run_check(args):
         deleted = sorted(p for p in old if p not in new)
         modified = sorted(p for p in new if p in old and new[p]["sha256"] != old[p]["sha256"])
 
+        staged_for_deletion = staged_basenames(root)
+
         def report_group(label, paths):
             if not paths:
                 print(f"\n{label}: none")
@@ -1082,6 +1116,14 @@ def run_check(args):
             for p in paths:
                 cur_sha = new.get(p, {}).get("sha256")
                 tag = classify_tracking(p, cur_sha)
+                # A file that left its home and now sits under _to_delete/ was
+                # RETIRED by a sanctioned process, not deleted. DELETED only:
+                # an added or modified file is untouched by this, and a file
+                # that vanished with no staged copy stays UNEXPECTED, which is
+                # the real signal this alarm exists for.
+                if (label == "DELETED" and tag == "UNEXPECTED"
+                        and os.path.basename(p) in staged_for_deletion):
+                    tag = "RETIRED: staged in _to_delete"
                 print(f"  {tag:<55} {p}")
                 if tag == "UNEXPECTED":
                     if p.startswith(MIRROR_PREFIX):
