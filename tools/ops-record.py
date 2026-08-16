@@ -923,6 +923,37 @@ def cmd_release(args) -> int:
                 print(key)
                 return 0
 
+            if args.action == "complete":
+                # THE LIFECYCLE HAS TO CLOSE, or a release sits at `approved`
+                # forever while its deployment reads `complete`. Observed on the
+                # first real release, 2026-08-16: bin/deploy-worker.sh recorded
+                # the DEPLOYMENT complete and nothing advanced the RELEASE, so
+                # the manifest view showed a deploy that had landed against a
+                # release still waiting to ship. Two states of one fact
+                # disagreeing is the fragmentation P0-1 exists to end.
+                #
+                # The read-back is NOT re-checked here on purpose: migration
+                # 0131's trigger already refuses completion unless a deployment
+                # attached to this release recorded one, and duplicating that
+                # test in the wrapper would let the two drift apart. Failing
+                # here means the trigger refused, and its message is the answer.
+                cur.execute(
+                    """update ops.release
+                          set state = 'complete', ended_at = now(),
+                              verifier_actor = coalesce(%s, verifier_actor),
+                              verifier_evidence_ref = coalesce(%s, verifier_evidence_ref)
+                        where release_key = %s
+                          and state in ('approved','deploying','verifying')
+                    returning state""",
+                    (args.verifier, args.verifier_evidence, args.key))
+                row = cur.fetchone()
+                if not row:
+                    print(f"ops-record: {args.key!r} is not in a state that can complete "
+                          f"(already complete, or never approved)", file=sys.stderr)
+                    return 2
+                print(f"{args.key} {row[0]}")
+                return 0
+
             if args.action == "approve":
                 cur.execute(
                     "select plan_hash, state from ops.release where release_key = %s",
@@ -1145,7 +1176,7 @@ def main() -> int:
                     default="production")
 
     rel = sub.add_parser("release", help="record, approve or read one release (P0-1)")
-    rel.add_argument("action", choices=["candidate", "approve", "require", "show"])
+    rel.add_argument("action", choices=["candidate", "approve", "require", "complete", "show"])
     rel.add_argument("--sha", help="require only: the SHA about to ship")
     rel.add_argument("--key", help="the release key, e.g. r-2026-08-15-01. Required "
                                    "for every action except `require`, which asks "
@@ -1166,6 +1197,9 @@ def main() -> int:
     rel.add_argument("--expires-at", help="when this candidate's evidence goes stale")
     rel.add_argument("--plan-hash", help="approve only: the hash the approver read")
     rel.add_argument("--actor", help="approve only: who is approving")
+    rel.add_argument("--verifier", help="complete only: who verified, and it may not be the maker")
+    rel.add_argument("--verifier-evidence", dest="verifier_evidence",
+                     help="complete only: ref to the verification that closed it")
     rel.add_argument("--expires-hours", type=int, default=24,
                      help="approve only: how long the approval stays live. An "
                           "approval that never expires is how a plan-hash check "

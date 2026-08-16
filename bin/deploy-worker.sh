@@ -288,6 +288,28 @@ record_deployment() {
   else
     echo "  recorded this deploy as $rd_state against release ${RELEASE_KEY:-<none>}"
   fi
+
+  # AND CLOSE THE RELEASE, when the deploy actually landed and was verified.
+  # Without this the release sits at `approved` while its own deployment reads
+  # `complete` — observed on the first real release, 2026-08-16, where the
+  # manifest view showed a landed deploy against a release still waiting to
+  # ship. Only the complete path closes it: `verifying` means nothing was
+  # proven and `failed` means the opposite, and neither is a finished release.
+  if [ "$rd_state" = "complete" ] && [ -n "$RELEASE_KEY" ]; then
+    set +e
+    "$PY" "$REPO/tools/ops-record.py" release complete --key "$RELEASE_KEY" \
+      --verifier "golden-workflow-suite" \
+      --verifier-evidence "bin/smoke-and-record.sh#${rd_corr:-unknown}" >/dev/null 2>&1
+    rc_rel=$?
+    set -e
+    if [ "$rc_rel" -eq 0 ]; then
+      echo "  release $RELEASE_KEY is complete"
+    else
+      echo "  !! the deploy landed but release $RELEASE_KEY did not close (exit $rc_rel)."
+      echo "     Close it by hand so the release and its deployment stop disagreeing:"
+      echo "       .venv/bin/python tools/ops-record.py release complete --key $RELEASE_KEY"
+    fi
+  fi
 }
 
 # ---------- preflight 4: release truth (P0-1) ----------
