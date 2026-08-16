@@ -1,0 +1,134 @@
+{
+  "contract": "carr-workspace-phase4-shared-continuity",
+  "version": "1.0.0",
+  "status": "approved_acceptance_contract_not_yet_implemented",
+  "governing_phase": 4,
+  "purpose": "Make cross-partner session memory and exact cross-device deliverable retrieval hard completion gates for Calls and Doc.",
+  "implementation_entry_rule": "Every Phase 4 Doc or capture work item must name the gate IDs it advances and the planned evidence. Work that maps to none of these gates does not advance shared continuity.",
+  "completion_rule": "Phase 4 cannot pass, and shared memory or conversational deliverable retrieval cannot be claimed, until all six gates pass in both Joe-to-Dell and Dell-to-Joe directions using fresh independent sessions. Static fixtures, same-session recall, model summaries, and database row existence alone are not passing evidence.",
+  "shared_truth_boundary": {
+    "canonical": "Only a governed record-layer write becomes shared business truth.",
+    "tentative": "Tentative, ambiguous, contradicted, or low-confidence statements remain proposals and require confirmation before promotion.",
+    "personal": "Joe-personal and Dell-personal context never crosses partner scope; shared business records contain only the minimum necessary business fact and provenance.",
+    "raw_session": "A raw model conversation is evidence and intake, not the canonical shared record."
+  },
+  "required_receipt_fields": [
+    "test_id",
+    "direction",
+    "origin_session_id",
+    "fresh_receiving_session_id",
+    "organization_tenant_id",
+    "originating_partner_id",
+    "receiving_partner_id",
+    "source_locator",
+    "canonical_record_or_document_id",
+    "canonical_version",
+    "write_audit_event_id",
+    "retrieval_audit_event_id",
+    "observed_at",
+    "result",
+    "failure_detail"
+  ],
+  "directions": [
+    "joe_to_dell",
+    "dell_to_joe"
+  ],
+  "gates": [
+    {
+      "id": "PH4-MEMORY-FRESH-001",
+      "name": "Fresh-session shared fact retrieval",
+      "setup": "The originating partner states one sourced, durable business fact tied to an existing stable client, deal, lead, party, or system record.",
+      "pass": [
+        "the capture path promotes the fact through the governed record layer with source, actor, target, version, and audit evidence",
+        "a fresh independent session sponsored by the other partner retrieves the fact without being told where it was stored",
+        "the receiving answer names the source, freshness, and exact canonical record",
+        "no transcript copy, pasted summary, or hand-carried context is used"
+      ],
+      "refuse": [
+        "same-session recall",
+        "retrieval only after the user provides the storage location",
+        "a model answer without canonical source and freshness"
+      ]
+    },
+    {
+      "id": "PH4-MEMORY-TENTATIVE-001",
+      "name": "Tentative statement does not become fact",
+      "setup": "The originating partner makes a plausible but explicitly tentative or ambiguous business statement.",
+      "pass": [
+        "the statement remains unpromoted or is stored only as a visibly pending proposal",
+        "the system asks for confirmation only when promotion would materially change shared truth",
+        "the receiving partner's fresh session does not present the statement as confirmed fact",
+        "later confirmation or rejection preserves the source and disposition history"
+      ],
+      "refuse": [
+        "silent promotion from conversational confidence",
+        "dropping the statement without a visible proposal when it is materially useful"
+      ]
+    },
+    {
+      "id": "PH4-MEMORY-CONFLICT-001",
+      "name": "Concurrent conflict is surfaced, not overwritten",
+      "setup": "Joe and Dell update the same governed field from independent sessions based on the same prior version.",
+      "pass": [
+        "one write succeeds and the stale write receives an explicit version conflict",
+        "neither value is silently lost",
+        "the conflict view shows both proposed values, actors, sources, and timestamps",
+        "the resolved value is written as a new version with an attributed resolution receipt and undo path"
+      ],
+      "refuse": [
+        "last-write-wins without disclosure",
+        "automatic model-selected conflict resolution"
+      ]
+    },
+    {
+      "id": "PH4-MEMORY-SCOPE-001",
+      "name": "Personal context cannot cross partner scope",
+      "setup": "Each partner's session contains a personal-scope canary and a separate minimum-necessary shared business fact.",
+      "pass": [
+        "the shared business fact is available to the other partner after governed promotion",
+        "the personal canary is absent from shared records, retrieval context, model output, search, logs, and telemetry",
+        "direct and indirect cross-brain personal retrieval receive privacy-safe refusal",
+        "audit preserves sponsor and runtime identity without personal rule or conversation bodies"
+      ],
+      "refuse": [
+        "prompt-only privacy enforcement",
+        "a denial that reveals the existence or content of the personal canary"
+      ]
+    },
+    {
+      "id": "PH4-DOCUMENT-RETRIEVAL-001",
+      "name": "Exact deliverable retrieval on the other partner's computer",
+      "setup": "The originating partner creates or prepares a named deliverable attached to a stable client, deal, lead, call, or project record.",
+      "pass": [
+        "the document record and immutable attachment version store filename, MIME type, byte count, content hash, source record, creator, and audit evidence",
+        "the other partner opens a fresh signed-in session on a different supported computer and requests the deliverable naturally by name or business context",
+        "Doc resolves ambiguity rather than guessing and returns the exact current document with source, version, and freshness",
+        "the secure download bytes match the stored content hash and the link expires without breaking the stable document deep link"
+      ],
+      "refuse": [
+        "metadata-only retrieval",
+        "a locally mounted path",
+        "a public permanent object URL",
+        "a similarly named but different version"
+      ]
+    },
+    {
+      "id": "PH4-SHARED-CONTINUITY-SOAK-001",
+      "name": "Bidirectional 48-hour normal-use soak",
+      "setup": "Joe and Dell use the Phase 4 pilot normally for at least 48 consecutive hours across their supported web devices.",
+      "pass": [
+        "the first five gates pass at least once in both directions during the observation window",
+        "every acknowledged capture is either promoted, visibly pending, refused with reason, or recoverably failed",
+        "no partner hand-carries business context or a deliverable between sessions to make a test pass",
+        "no silent overwrite, cross-scope disclosure, wrong-target retrieval, hash mismatch, or unexplained missing capture occurs",
+        "both partners complete the tested routines without Claude Code or Codex"
+      ],
+      "refuse": [
+        "synthetic-only evidence",
+        "one-direction evidence",
+        "a test window shorter than 48 consecutive hours",
+        "passing after an operator manually repairs hidden state"
+      ]
+    }
+  ]
+}
