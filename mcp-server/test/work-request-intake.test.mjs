@@ -181,6 +181,7 @@ test("work-request-card returns a safe captured projection with no executable ac
   const result = await executeRegisteredTool(db, { ...ACTOR }, "work-request-card", { work_request: "WR-0001" });
   assert.equal(result.human_ref, "WR-0001");
   assert.equal(result.state, "captured");
+  assert.equal(result.triage, null);
   assert.equal(result.source.freshness, "current");
   assert.equal(result.source.provenance.doctrine_revision_id, "40000000-0000-0000-0000-000000000001");
   assert.deepEqual(result.next_human_action, { label: "Review and triage", effect: "none" });
@@ -188,4 +189,21 @@ test("work-request-card returns a safe captured projection with no executable ac
   const read = db.calls.find(call => call.sql.includes("work_request_card"));
   assert.equal(read.params.includes(ACTOR.id), false);
   assert.equal(read.params.includes("carr-internal"), true);
+});
+
+test("work-request-card keeps a triaged request queued and returns only durable triage readback", async () => {
+  const db = new IntakeFake();
+  const original = db.query.bind(db);
+  db.query = async (sql, params) => {
+    const result = await original(sql, params);
+    if (String(sql).includes("work_request_card")) Object.assign(result.rows[0], {
+      state: "triaged", triage_classification: "operational", triaged_by_actor_slug: "joe", triaged_at: "2026-08-16T00:00:00Z",
+    });
+    return result;
+  };
+  const result = await executeRegisteredTool(db, { ...ACTOR }, "work-request-card", { work_request: "WR-0001" });
+  assert.equal(result.projection_state, "queued");
+  assert.deepEqual(result.triage, { classification: "operational", human_actor_slug: "joe", triaged_at: "2026-08-16T00:00:00Z" });
+  assert.deepEqual(result.next_human_action, { label: "Prepare scope and acceptance", effect: "none" });
+  assert.deepEqual(result.actions, []);
 });

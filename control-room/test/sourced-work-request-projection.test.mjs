@@ -14,12 +14,23 @@ test("sourced captured-request projection is a closed, versioned read contract",
   assert.equal(contract.version, "1.0.0");
   assert.match(contract.status, /^phase1_/);
   assert.equal(contract.transport, "authenticated MCP-backed read, not implemented by this static prototype");
-  assert.deepEqual(contract.lifecycle, {canonical_from: "captured", projection_state: "queued"});
+  assert.deepEqual(contract.lifecycle, {canonical_from: ["captured", "triaged"], projection_state: "queued"});
   assert.deepEqual(contract.output.required_fields, [
-    "human_ref", "title", "desired_outcome", "acceptance_criteria", "source", "state", "next_human_action", "actions"
+    "human_ref", "title", "desired_outcome", "acceptance_criteria", "source", "triage", "state", "next_human_action", "actions"
   ]);
   assert.deepEqual(contract.output.actions, []);
-  assert.deepEqual(contract.output.next_human_action, {label: "Review and triage", effect: "none"});
+  assert.deepEqual(contract.output.next_human_action.captured, {label: "Review and triage", effect: "none"});
+});
+
+test("triaged projection supplies only durable triage readback and another inert next step", () => {
+  const contract = read("contracts/sourced-work-request-projection.v1.json");
+  assert.equal(contract.output.triage.captured, null);
+  assert.deepEqual(contract.output.triage.triaged, ["classification", "human_actor_slug", "triaged_at"]);
+  assert.match(contract.output.triage.rule, /never an action authority/i);
+  assert.deepEqual(contract.output.next_human_action, {
+    captured: {label: "Review and triage", effect: "none"},
+    triaged: {label: "Prepare scope and acceptance", effect: "none"}
+  });
 });
 
 test("the safe card names only durable human references and source evidence", () => {
@@ -33,8 +44,12 @@ test("the safe card names only durable human references and source evidence", ()
 
 test("Review and triage is an inert navigation affordance, never an action route", () => {
   const contract = read("contracts/sourced-work-request-projection.v1.json");
-  assert.deepEqual(contract.output.next_human_action, {
+  assert.deepEqual(contract.output.next_human_action.captured, {
     label: "Review and triage",
+    effect: "none"
+  });
+  assert.deepEqual(contract.output.next_human_action.triaged, {
+    label: "Prepare scope and acceptance",
     effect: "none"
   });
   assert.equal(contract.action_card, undefined, "the card shape has one next_human_action home");

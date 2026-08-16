@@ -129,6 +129,11 @@ CASES = [
         codex_tool("exec", "await tools.mcp__carr__report_problem({ idempotency_key: 'fixture' });"),
         codex_assistant("Completed."),
     ], True),
+    ("Codex Work Request triage requires evidence", [
+        codex_user("review and triage this request"),
+        codex_tool("exec", "await tools.mcp__carr__review_and_triage({ human_ref: 'WR-000001' });"),
+        codex_assistant("Completed."),
+    ], True),
     ("CARR read action permits completion", [
         codex_user("reconcile Musicologie"),
         codex_tool("exec", "await tools.mcp__carr__patch_deal_field({ id: 'd1' });"),

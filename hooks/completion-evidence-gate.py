@@ -63,6 +63,8 @@ WRITE_ACTION_EXACT = {
     "presence-lease",
     "report-problem",       # Program 6 additive Work Request capture; "report"
                               # is not generalized because report-style reads exist
+    "review-and-triage",    # Program 6 human state transition; exact because
+                              # other review-* actions include non-mutating reads
     "review-deal",
 }
 NESTED_CARR_CALL = re.compile(r"(?:tools\.)?(mcp__carr(?:_records)?__([A-Za-z0-9_]+))")

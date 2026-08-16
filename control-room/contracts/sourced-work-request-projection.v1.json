@@ -11,7 +11,7 @@
   },
   "transport": "authenticated MCP-backed read, not implemented by this static prototype",
   "lifecycle": {
-    "canonical_from": "captured",
+    "canonical_from": ["captured", "triaged"],
     "projection_state": "queued"
   },
   "output": {
@@ -21,6 +21,7 @@
       "desired_outcome",
       "acceptance_criteria",
       "source",
+      "triage",
       "state",
       "next_human_action",
       "actions"
@@ -31,8 +32,13 @@
       "label_rule": "exact source label from the current retrieved result; never a generated summary"
     },
     "next_human_action": {
-      "label": "Review and triage",
-      "effect": "none"
+      "captured": {"label": "Review and triage", "effect": "none"},
+      "triaged": {"label": "Prepare scope and acceptance", "effect": "none"}
+    },
+    "triage": {
+      "captured": null,
+      "triaged": ["classification", "human_actor_slug", "triaged_at"],
+      "rule": "present only for canonical triaged rows; it is durable readback, never an action authority"
     },
     "actions": []
   },

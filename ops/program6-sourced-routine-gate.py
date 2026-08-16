@@ -140,17 +140,17 @@ def main() -> int:
                 ("doctrine:invented#evidence", "Invented", "No", Jsonb([{"id":"INVENTED", "text":"No"}]), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()),
                 "invented evidence")
             card = cur.execute("select * from ops.work_request_card(%s,%s)", (ref, "carr-internal")).fetchone()
-            if not card or card[0] != ref or card[-1] is not True:
+            if not card or card[0] != ref or card[10] is not True:
                 return fail("same-tenant requester card did not return current source provenance")
             if cur.execute("select * from ops.work_request_card(%s,%s)", (ref, "other")).fetchone():
                 return fail("wrong tenant received a Work Request card")
-            cur.execute("savepoint program6_noncaptured_card")
+            cur.execute("savepoint program6_later_state_card")
             cur.execute("alter table ops.work_request drop constraint work_request_sourced_capture_shape")
             cur.execute("alter table ops.work_request disable trigger sourced_work_request_is_immutable")
-            cur.execute("update ops.work_request set state='triaged' where id=%s", (request_id,))
+            cur.execute("update ops.work_request set state='needs_joe' where id=%s", (request_id,))
             if cur.execute("select * from ops.work_request_card(%s,%s)", (ref, "carr-internal")).fetchone():
-                return fail("noncaptured Work Request returned a card")
-            cur.execute("rollback to savepoint program6_noncaptured_card")
+                return fail("later-state Work Request returned a card")
+            cur.execute("rollback to savepoint program6_later_state_card")
             conn.rollback()
         print("PASS: Program 6 sourced Work Request capture is current, scoped, idempotent, and captured-only")
         return 0

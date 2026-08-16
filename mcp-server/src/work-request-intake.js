@@ -7,6 +7,8 @@ import { organizationTenantForActor } from "./identity.js";
 const FIELDS = new Set(["idempotency_key", "situation", "title", "desired_outcome", "acceptance_criteria"]);
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const CRITERION_ID = /^[A-Z][A-Z0-9-]{1,63}$/;
+const TRIAGE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "classification"]);
+const TRIAGE_CLASSES = new Set(["operational", "needs_judgment", "safety_review"]);
 
 function text(value) { return typeof value === "string" ? value.trim() : ""; }
 
@@ -34,6 +36,13 @@ function sourceProjection(row) {
       doctrine_section_id: row.doctrine_section_id || null,
       doctrine_revision_id: row.doctrine_revision_id || null,
     } };
+}
+
+function validateTriage(args, ToolError) {
+  if (Object.keys(args).some(key => !TRIAGE_FIELDS.has(key))) throw new ToolError({ error: "invalid_triage_fields" });
+  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
+      !Number.isInteger(args.base_version) || args.base_version < 1 || !TRIAGE_CLASSES.has(args.classification))
+    throw new ToolError({ error: "invalid_triage" });
 }
 
 export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) {
@@ -104,10 +113,45 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           `select * from ops.work_request_card($1::text, $2::text)
              /* work-request-intake:card */`, [args.work_request, tenant]);
         const row = result.rows[0];
-        if (!row || row.state !== "captured") throw new ToolError({ error: "work_request_not_found" });
+        if (!row || !["captured", "triaged"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
+        const triaged = row.state === "triaged";
         return { ok: true, human_ref: row.ref, title: row.title, desired_outcome: row.desired_outcome,
           acceptance_criteria: row.acceptance_criteria, state: row.state, projection_state: "queued", source: sourceProjection(row),
-          next_human_action: { label: "Review and triage", effect: "none" }, actions: [] };
+          triage: triaged ? { classification: row.triage_classification, human_actor_slug: row.triaged_by_actor_slug,
+            triaged_at: row.triaged_at } : null,
+          next_human_action: triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
+          actions: [] };
+      },
+    },
+    "review-and-triage": {
+      write: true, humanOnly: true, authorityOnly: true,
+      description: "HUMAN-ONLY: classify one sourced captured Work Request and make its sole allowed transition, captured to triaged. It never assigns, dispatches, approves, executes, or advances any later state.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
+        human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
+        base_version: { type: "integer", minimum: 1 },
+        classification: { type: "string", enum: ["operational", "needs_judgment", "safety_review"] },
+      }, required: ["idempotency_key", "human_ref", "base_version", "classification"] },
+      handler: async (c, actor, args) => {
+        validateTriage(args, ToolError);
+        // Bind replays to the authenticated actor without admitting actor data
+        // into the closed client schema.
+        return withEnvelope(c, actor, "review-and-triage", { ...args, _server_actor_id: actor.id }, async () => {
+          const result = await c.query(
+            `select * from ops.triage_sourced_work_request($1::text, $2::integer, $3::text, $4::uuid)
+               /* work-request-intake:triage */`, [args.human_ref, args.base_version, args.classification, args.idempotency_key]);
+          const row = result.rows[0];
+          if (!row) throw new ToolError({ error: "version_conflict", human_ref: args.human_ref,
+            resolution: "re-read the Work Request card; only its current captured version may be triaged" });
+          await writeEvent(c, actor, "review-and-triage", "ops_work_request", row.id, {
+            field: "state", old: { state: "captured", version: args.base_version },
+            new: { state: "triaged", version: Number(row.version), classification: row.classification },
+            idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
+            classification: row.classification, triaged_by_actor_slug: row.triaged_by_actor_slug,
+            triaged_at: row.triaged_at };
+        });
       },
     },
   };
