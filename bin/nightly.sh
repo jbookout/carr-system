@@ -284,6 +284,14 @@ step "environment isolation + currency (G1)" ./.venv/bin/python ops/p1-environme
 # an argument nobody has tested.
 step "environment rebuild proof (ephemeral branch)" ./.venv/bin/python ops/p1-rebuild-gate.py
 
+# Program 1's INTEGRATION clause, the third use of the rehearsal lane. The
+# rebuild gate above proves the SCHEMA stands up; this proves the APPLICATION
+# works on what it built — the catalog populates, a real entry point writes, the
+# value reads back, and the grant surface matches production's. The distinction
+# is not academic: on 2026-08-16 a table whose CREATE had succeeded refused every
+# write, which `to_regclass` calls perfect.
+step "environment integration proof (ephemeral branch)" ./.venv/bin/python ops/p1-integration-gate.py
+
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
 # credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first
