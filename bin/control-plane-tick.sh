@@ -31,6 +31,22 @@ trap release_lock EXIT
 # config file arbitrary code execution before the worker's environment is
 # scrubbed.  Values stay literal; shell expansion syntax is not accepted.
 typeset -A PARSED_ENV
+credential_file_mode() {
+  local file="$1" mode
+
+  # macOS ships BSD stat; Ubuntu ships GNU stat.  Do not treat an unsupported
+  # format flag as a clean permission result: a credential file whose mode
+  # cannot be determined must be refused.
+  mode="$(/usr/bin/stat -f '%Lp' "$file" 2>/dev/null || true)"
+  if [[ "$mode" != <-> ]]; then
+    mode="$(/usr/bin/stat -c '%a' "$file" 2>/dev/null || true)"
+  fi
+  if [[ "$mode" != <-> ]]; then
+    return 1
+  fi
+  print -r -- "$mode"
+}
+
 parse_env_file() {
   local file="$1" line key value mode
 
@@ -38,8 +54,12 @@ parse_env_file() {
     print -ru2 -- "control-plane-tick: configuration file is not readable: $file"
     return 1
   fi
-  mode="$(/usr/bin/stat -f '%Lp' "$file" 2>/dev/null || true)"
-  if [[ "$mode" == <-> ]] && (( (8#$mode & 077) != 0 )); then
+  mode="$(credential_file_mode "$file" || true)"
+  if [[ "$mode" != <-> ]]; then
+    print -ru2 -- "control-plane-tick: cannot determine credential file permissions for $file"
+    return 1
+  fi
+  if (( (8#$mode & 077) != 0 )); then
     print -ru2 -- "control-plane-tick: refusing insecure credential file permissions on $file (require 0600)"
     return 1
   fi
