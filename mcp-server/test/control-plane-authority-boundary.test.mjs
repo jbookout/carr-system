@@ -10,6 +10,7 @@ class AcceptanceAuthorityFake {
   constructor(sessionSlug) {
     this.sessionSlug = sessionSlug;
     this.acceptanceCalls = [];
+    this.disableCalls = [];
     this.envelopeWrites = 0;
     this.eventWrites = 0;
   }
@@ -21,6 +22,11 @@ class AcceptanceAuthorityFake {
       if (params[1] === "canary" && this.sessionSlug !== "joe")
         throw new Error("canary workflow acceptance requires Joe authority session");
       return { rows: [{ id: `acceptance-${this.sessionSlug}-${params[1]}` }] };
+    }
+    if (text.includes("ops.disable_legacy_schedule")) {
+      this.disableCalls.push(params);
+      if (this.sessionSlug !== "joe") throw new Error("legacy schedule retirement requires Joe authority session");
+      return { rows: [{ receipt_ref: `legacy-disable:${params[4]}` }] };
     }
     if (text.includes("insert into tool_call")) {
       this.envelopeWrites += 1;
@@ -91,4 +97,22 @@ test("workflow acceptance leaves canary Joe-only in DB while shadow remains part
   assert.deepEqual(dellCanary.acceptanceCalls, [["fixture", "canary", "receipt:canary"]]);
   assert.equal(dellCanary.envelopeWrites, 0);
   assert.equal(dellCanary.eventWrites, 0);
+});
+
+test("legacy disable emits a distinct Joe-bound surface receipt", async () => {
+  const tool = TOOLS["disable-legacy-schedule"];
+  assert.deepEqual(tool.inputSchema.required, ["idempotency_key", "workflow_key", "surface_id", "locator", "reason"]);
+  const c = new AcceptanceAuthorityFake("joe");
+  const result = await tool.handler(c, joe, {
+    idempotency_key: "disable-fixture", workflow_key: "nightly-record-layer",
+    surface_id: "nightly-record-layer.launchd.v1", locator: "com.carr.nightly-record-layer", reason: "accepted evidence",
+  });
+  assert.equal(result.receipt_ref, "legacy-disable:disable-fixture");
+  assert.deepEqual(c.disableCalls, [["nightly-record-layer", "nightly-record-layer.launchd.v1",
+    "com.carr.nightly-record-layer", "accepted evidence", "disable-fixture"]]);
+  const dellC = new AcceptanceAuthorityFake("dell");
+  await assert.rejects(() => tool.handler(dellC, dell, {
+    idempotency_key: "disable-dell", workflow_key: "nightly-record-layer",
+    surface_id: "nightly-record-layer.launchd.v1", locator: "com.carr.nightly-record-layer", reason: "no",
+  }), /requires Joe authority session/);
 });
