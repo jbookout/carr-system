@@ -55,7 +55,7 @@
 # THE ROLES THEMSELVES ARE NOT, and assuming they were is a bug this file shipped
 # on 2026-08-14. The reasoning above was true only while every role-creating
 # migration was still PENDING relative to this snapshot: 0115 declares
-# carr_reader, carr_writer and carr_jobs (NOLOGIN, 0021's idiom), so while the
+# carr_reader, carr_writer and carr_exporter (NOLOGIN privilege bundles), so while the
 # ledger stopped at 0114 a fresh database got the roles by replaying it. The
 # moment a refresh advanced the ledger PAST 0115, that migration stopped being
 # pending, the role creation stopped running anywhere, and the next migration to
@@ -64,10 +64,11 @@
 #
 # The snapshot is the base for every fresh database, so it has to carry the
 # roles itself rather than inherit them from a migration it has already absorbed.
-# Same idiom as 0115: an existing role is left exactly as it is — no password
-# touched, no attribute altered — and a missing one is created NOLOGIN, so a
-# rebuilt environment has somewhere for privileges to attach and no new door.
-# Production is untouched because production already has all three.
+# The privilege bundles remain NOLOGIN. carr_jobs is different: it is the
+# narrow unattended runtime identity, so the preamble creates it LOGIN with an
+# unprinted random placeholder, or converts an older NOLOGIN placeholder. An
+# already-login carr_jobs is left exactly as it is, including its password.
+# Production is untouched because its existing carr_jobs is already LOGIN.
 #
 # Usage:
 #   bin/schema-snapshot.sh            # regenerate db/schema.sql from production
@@ -117,17 +118,32 @@ cat > "$TMP" <<'ROLES'
 -- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
 -- carr_exporter aged into the same trap by way of 0006 and joined the list on
 -- 2026-08-14, when the grants section below started carrying its privileges.
--- An existing role is left exactly as it is; a missing one is created NOLOGIN
--- purely so privileges have somewhere to attach in a rebuilt environment.
+-- carr_reader, carr_writer and carr_exporter are privilege bundles, so they
+-- stay NOLOGIN. carr_jobs is the narrow unattended runtime identity: a fresh
+-- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
+-- it with a fresh random placeholder password; an already-login role is left
+-- completely unchanged. The placeholder is generated in-process and never
+-- selected, logged, or written into this dump.
 --
 do $$
-declare r text;
+declare
+  r text;
+  jobs_can_login boolean;
+  jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_jobs','carr_exporter'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
   end loop;
+  select rolcanlogin into jobs_can_login from pg_roles where rolname='carr_jobs';
+  if not found then
+    jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('create role %I login password %L', 'carr_jobs', jobs_placeholder);
+  elsif not jobs_can_login then
+    jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
+  end if;
 end $$;
 
 ROLES
@@ -141,7 +157,8 @@ fi
 # principals and whatever login roles neonctl has minted per environment, and
 # the first grant naming an absent role aborts the load. Instead the app roles'
 # privileges are read from the catalogs and emitted as plain GRANTs, scoped by
-# grantee to exactly the four NOLOGIN roles the preamble creates. Membership
+# grantee to the three NOLOGIN bundles plus the narrow carr_jobs login the
+# preamble creates. Membership
 # bundles may additionally name neondb_owner (0005/0006 grant it the bundles),
 # which every loading environment already has: .github/workflows/ci.yml creates
 # it for the same reason.
