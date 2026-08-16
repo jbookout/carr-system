@@ -12,7 +12,8 @@ sys.path.insert(0, str(REPO))
 
 def main() -> int:
     from lib.control_plane_runner import (
-        BudgetExceeded, CognitionDispatcher, cron_matches, due_workflows,
+        BudgetExceeded, CognitionDispatcher, ProviderExhausted, cron_matches,
+        due_workflows,
     )
 
     failures: list[str] = []
@@ -94,6 +95,18 @@ def main() -> int:
     dispatcher.execute(contract, {"x": 1})
     check("validated results are served from provider-neutral cache",
           provider.calls == ["primary", "secondary"])
+
+    class AlwaysFails:
+        def call(self, route, *_args):
+            raise ValueError(f"untrusted detail from {route}")
+    try:
+        CognitionDispatcher(AlwaysFails(), Cache()).execute(contract, {"x": 7})
+        exhausted_detail = ""
+    except ProviderExhausted as exc:
+        exhausted_detail = str(exc)
+    check("provider exhaustion exposes only bounded route and error classes",
+          exhausted_detail ==
+          "all registered provider routes failed: primary=ValueError, secondary=ValueError")
 
     class NeverDispatch:
         def __init__(self): self.calls = 0

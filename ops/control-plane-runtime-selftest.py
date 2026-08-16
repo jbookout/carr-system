@@ -80,6 +80,55 @@ def main() -> int:
           generic_empty == {"claimed": 0} and claim_calls[1] ==
           ("select * from ops.claim_job(%s,1,300)", ("manual-worker",)))
 
+    cognition_order: list[str] = []
+    cognition_input = {"facts": {"release": {"from": "r1", "to": "r2"}}}
+    original_build_input = getattr(module, "build_input")
+    original_evidence_collector = getattr(module, "RuntimeEvidenceCollector")
+    original_fact_collector = getattr(module, "_workflow_fact_collector")
+    original_evaluate_stage = getattr(module, "evaluate_stage")
+    def fake_build_input(*_args, **_kwargs):
+        cognition_order.append("build")
+        return cognition_input
+    def fake_cognition_facts(_workflow, _payload, **kwargs):
+        cognition_order.append("facts")
+        return kwargs.get("input_payload")
+    def fake_cognition_stage(_workflow, stage, facts):
+        cognition_order.append(stage)
+        return facts is cognition_input
+    setattr(module, "RuntimeEvidenceCollector", lambda *_args, **_kwargs: object())
+    setattr(module, "build_input", fake_build_input)
+    setattr(module, "_workflow_fact_collector", fake_cognition_facts)
+    setattr(module, "evaluate_stage", fake_cognition_stage)
+    try:
+        admitted_input = module._build_and_admit_cognition_input(
+            {}, {"key": "cc-update-audit", "execution": {"input_builder": "cc-release-diff"}},
+            {"payload": {}, "mode": "shadow"})
+    finally:
+        setattr(module, "build_input", original_build_input)
+        setattr(module, "RuntimeEvidenceCollector", original_evidence_collector)
+        setattr(module, "_workflow_fact_collector", original_fact_collector)
+        setattr(module, "evaluate_stage", original_evaluate_stage)
+    check("cognition routing and filtering run only after canonical typed input is built",
+          admitted_input is cognition_input
+          and cognition_order == ["build", "facts", "routing", "filtering"])
+
+    post_kwargs: dict[str, object] = {}
+    original_fact_collector = getattr(module, "_workflow_fact_collector")
+    def fake_post_facts(_workflow, _payload, **kwargs):
+        post_kwargs.update(kwargs)
+        return "facts"
+    setattr(module, "_workflow_fact_collector", fake_post_facts)
+    try:
+        post_facts = module._post_execution_facts(
+            {"key": "cc-update-audit"}, {"payload": {}, "mode": "shadow"},
+            {"proposal": {}}, cognition_input, receipt_ref="receipt:1",
+            receipt_evidence={"proposal": {}})
+    finally:
+        setattr(module, "_workflow_fact_collector", original_fact_collector)
+    check("cognition validation and completion retain the exact typed input",
+          post_facts == "facts" and post_kwargs.get("input_payload") is cognition_input
+          and post_kwargs.get("receipt_ref") == "receipt:1")
+
     calls: list[list[str]] = []
     original_run = module.subprocess.run
 

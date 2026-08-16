@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,7 +49,24 @@ def main() -> int:
             refused = False
     finally:
         control_plane.connect = original
-    if not refused or not conn.committed or "ops.admit_job_cost" not in conn.statement:
+    params = conn.params if isinstance(conn.params, tuple) else ()
+    numeric_bound = (len(params) == 4 and isinstance(params[3], Decimal)
+                     and params[3] == Decimal("1.0"))
+    settle_conn = Connection()
+    control_plane.connect = lambda: settle_conn
+    try:
+        control_plane._settle(
+            "reservation", "job", "lease",
+            {"usage": {"input_tokens": 2, "output_tokens": 5,
+                       "total_tokens": 7, "cost_usd": 0.01}})
+    finally:
+        control_plane.connect = original
+    settle_params = settle_conn.params if isinstance(settle_conn.params, tuple) else ()
+    settle_numeric_bound = (
+        len(settle_params) == 6 and isinstance(settle_params[5], Decimal)
+        and settle_params[5] == Decimal("0.01") and settle_conn.committed)
+    if (not refused or not conn.committed or "ops.admit_job_cost" not in conn.statement
+            or not numeric_bound or not settle_numeric_bound):
         print("FAIL runtime did not convert durable non-admission into pre-dispatch BudgetExceeded")
         return 1
     print("ok: runtime commits typed cost refusal then raises BudgetExceeded before dispatch")

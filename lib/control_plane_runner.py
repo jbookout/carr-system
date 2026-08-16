@@ -19,7 +19,13 @@ class BudgetExceeded(RuntimeError):
 
 class ProviderExhausted(RuntimeError):
     def __init__(self, failures: list[dict[str, str]]):
-        super().__init__("all registered provider routes failed")
+        bounded = ", ".join(
+            f"{failure.get('route', 'unknown')}={failure.get('error_class', 'Exception')}"
+            for failure in failures
+        )
+        super().__init__(
+            "all registered provider routes failed"
+            + (f": {bounded}" if bounded else ""))
         self.failures = failures
 
 
