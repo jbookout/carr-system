@@ -1662,6 +1662,8 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
 const FIND_CATCH_UP_QUERY_MAX = 200;
 const FIND_CATCH_UP_LIMIT_MAX = 50;
 const FIND_CATCH_UP_CANDIDATE_CAP = 25;
+const CONVERSATION_TIMELINE_MAX = 20;
+const CONVERSATION_PATH_MAX = 10;
 
 function kindFromRef(ref) {
   if (/^L-/i.test(ref)) return "lead";
@@ -2306,6 +2308,67 @@ export const TOOLS = {
       const match = candidates[0];
       const catchUp = await TOOLS["catch-me-up"].handler(c, actor, { ref: match.target, limit });
       return { state: "completed", query, match: { ...match }, catch_up: catchUp };
+    },
+  },
+
+  "prepare-conversation": {
+    write: false,
+    description: "Prepare for one conversation by resolving a name to exactly one live record, returning its recent catch-up timeline, and—when the target is a person or organization—showing the existing introduction paths to that exact ref. This is a fixed bounded read composition: ambiguous or missing identity stops before timeline/graph reads; deals receive timeline context but are never pretended to be intro-graph people. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      query: { type: "string", description: `person, organization, vendor, or deal name; at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
+      timeline_limit: { type: "integer", minimum: 1, maximum: CONVERSATION_TIMELINE_MAX, default: 10,
+        description: `recent timeline rows, 1-${CONVERSATION_TIMELINE_MAX}` },
+      path_limit: { type: "integer", minimum: 1, maximum: CONVERSATION_PATH_MAX, default: 10,
+        description: `introduction paths, 1-${CONVERSATION_PATH_MAX}` },
+      max_depth: { type: "integer", minimum: 1, maximum: WHO_MAX_DEPTH, default: WHO_MAX_DEPTH,
+        description: `introduction hops, 1-${WHO_MAX_DEPTH}` },
+    }, required: ["query"] },
+    handler: async (c, actor, args) => {
+      const allowed = new Set(["query", "timeline_limit", "path_limit", "max_depth"]);
+      if (!args || typeof args !== "object" || Array.isArray(args) ||
+          Object.keys(args).some((key) => !allowed.has(key)))
+        throw new ToolError({ error: "unexpected_arguments" });
+      if (typeof args.query !== "string" || !args.query.trim() ||
+          args.query.trim().length > FIND_CATCH_UP_QUERY_MAX)
+        throw new ToolError({ error: "invalid_query",
+          hint: `query must be a nonempty string of at most ${FIND_CATCH_UP_QUERY_MAX} characters` });
+
+      const timelineLimit = args.timeline_limit === undefined ? 10 : args.timeline_limit;
+      const pathLimit = args.path_limit === undefined ? 10 : args.path_limit;
+      const maxDepth = args.max_depth === undefined ? WHO_MAX_DEPTH : args.max_depth;
+      if (!Number.isInteger(timelineLimit) || timelineLimit < 1 ||
+          timelineLimit > CONVERSATION_TIMELINE_MAX)
+        throw new ToolError({ error: "invalid_timeline_limit" });
+      if (!Number.isInteger(pathLimit) || pathLimit < 1 || pathLimit > CONVERSATION_PATH_MAX)
+        throw new ToolError({ error: "invalid_path_limit" });
+      if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > WHO_MAX_DEPTH)
+        throw new ToolError({ error: "invalid_max_depth" });
+
+      // Three fixed read stages, no caller-selected route: find, catch-up, then
+      // (only for a live non-deal target) the introduction graph. The first two
+      // already live behind find-and-catch-up's exact one-candidate gate.
+      const located = await TOOLS["find-and-catch-up"].handler(c, actor, {
+        query: args.query.trim(),
+        limit: timelineLimit,
+      });
+      if (located.state !== "completed")
+        return { workflow: "prepare-conversation", ...located };
+
+      if (located.match.kind === "deal") {
+        return { workflow: "prepare-conversation", ...located,
+          introduction: {
+            status: "not_applicable",
+            reason: "Deals do not represent people or organizations in the introduction graph.",
+          } };
+      }
+
+      const graph = await TOOLS["who-do-we-know"].handler(c, actor, {
+        target: located.match.target,
+        max_depth: maxDepth,
+        limit: pathLimit,
+      });
+      return { workflow: "prepare-conversation", ...located,
+        introduction: { status: "evaluated", ...graph } };
     },
   },
 
