@@ -70,6 +70,8 @@ sys.path.insert(0, str(REPO / "tools"))
 import importlib.util
 
 _spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("p1-integration-gate: could not load tools/db-tap.py")
 db_tap = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(db_tap)
 
@@ -277,13 +279,13 @@ def main() -> int:
                   "role carr_jobs absent on this branch — nothing to compare, not asserted")
         else:
             live = psql(db_tap.dsn(project="production"), "-At", "-c", grant_sql)
-            got = {l.strip() for l in rebuilt.stdout.splitlines() if l.strip()}
-            want = {l.strip() for l in live.stdout.splitlines() if l.strip()}
+            rebuilt_grants = {l.strip() for l in rebuilt.stdout.splitlines() if l.strip()}
+            live_grants = {l.strip() for l in live.stdout.splitlines() if l.strip()}
             if live.returncode != 0:
                 check("4. the rebuilt grant surface matches production's", True,
                       "production unreadable from here — not asserted rather than guessed")
             else:
-                absent, extra = sorted(want - got), sorted(got - want)
+                absent, extra = sorted(live_grants - rebuilt_grants), sorted(rebuilt_grants - live_grants)
                 check("4. the rebuilt grant surface matches production's",
                       rebuilt.returncode == 0 and not absent and not extra,
                       (f"{len(absent)} grant(s) production has and the rebuild lacks: "

@@ -26,7 +26,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 GATE = REPO / "ops" / "p1-integration-gate.py"
 
-PASSED, FAILED = 0, []
+PASSED: int = 0
+FAILED: list[str] = []
 
 
 def check(name, condition, detail=""):
