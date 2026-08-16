@@ -50,12 +50,15 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/usr/local/opt/node@22/bin:/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
 PG_DUMP_BIN="${PG_DUMP_BIN:-pg_dump}"
 PUBKEY="$(cat "$REPO/backups-public-key.txt")"
-if [ -n "${BACKUP_DATABASE_URL:-}" ]; then
-  URL="$BACKUP_DATABASE_URL"
-else
-  URL="$("$REPO/mcp-server/node_modules/.bin/neonctl" connection-string production \
-        --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
-fi
+# A routine backup is read-only and must use the dedicated carr_backup login.
+# Resolving an owner URL through neonctl turned a scheduled dump into an owner
+# credential path.  Explicit manual recovery has a separate entrypoint.
+URL="${CARR_DB_BACKUP_URL:-${BACKUP_DATABASE_URL:-}}"
+[ -n "$URL" ] || { echo "backup-dump: CARR_DB_BACKUP_URL is required for routine backup" >&2; exit 78; }
+case "$URL" in
+  *"://carr_backup:"*|*"user=carr_backup"*) ;;
+  *) echo "backup-dump: routine backup URL must authenticate as carr_backup" >&2; exit 78 ;;
+esac
 
 # KEEPALIVES + CONNECT TIMEOUT, ADDED 2026-08-16, and the reason is a five and
 # a half hour outage rather than tidiness.

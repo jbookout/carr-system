@@ -65,10 +65,11 @@ fi
 LOG="$REPO/out/nightly.log"
 mkdir -p "$REPO/out"
 
-# Exporter credential. Same file the manual runs use; never inlined here.
-if [ -f "$HOME/.config/carr/db.env" ]; then
-  set -a; . "$HOME/.config/carr/db.env"; set +a
-fi
+# Routine work receives only named least-privilege database capabilities.  Do
+# not source db.env: it also holds owner/admin credentials and shell syntax.
+source "$REPO/bin/routine-credential-env.sh"
+carr_clear_routine_db_env
+carr_load_routine_db_env CARR_DB_JOBS_URL CARR_DB_EXPORTER_URL CARR_DB_BACKUP_URL || exit $?
 
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
@@ -133,7 +134,7 @@ step() {                        # step <label> <command...>
   local t0; t0="$(date -u +%FT%TZ)"
   say "START $label"
   LAST_STEP_RC=0
-  if "$@" >> "$LOG" 2>&1; then
+  if carr_routine_exec "$@" >> "$LOG" 2>&1; then
     say "OK    $label"
     record_run "$label" succeeded 0 "$t0"
   else
@@ -254,12 +255,12 @@ RPO_HOURS=24
 newest_backup="$(ls -t "$REPO"/backups/*.sql.age 2>/dev/null | head -1)"
 if [ -z "$newest_backup" ]; then
   say "CATCH-UP  no prior backup found — taking one before the chain begins"
-  step "recovery-point catch-up (no prior backup)" ./bin/backup-dump.sh
+  step "recovery-point catch-up (no prior backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 else
   backup_age_h=$(( ( $(date +%s) - $(stat -f %m "$newest_backup") ) / 3600 ))
   if [ "$backup_age_h" -ge "$RPO_HOURS" ]; then
     say "CATCH-UP  newest backup is ${backup_age_h}h old, objective is ${RPO_HOURS}h — taking one before the chain begins"
-    step "recovery-point catch-up (${backup_age_h}h since last backup)" ./bin/backup-dump.sh
+    step "recovery-point catch-up (${backup_age_h}h since last backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
   else
     say "OK    recovery point intact (newest backup ${backup_age_h}h old, objective ${RPO_HOURS}h)"
   fi
@@ -274,7 +275,7 @@ step "vault drift watch (check, first)"              env CARR_DRIFT_INGEST=1 ./.
 # a green check measuring the wrong database, which is the failure mode this
 # whole session kept finding. It runs HERE and not in CI because it needs
 # production, and CI cannot reach production by construction.
-step "schema snapshot drift (db/schema.sql vs production)" ./bin/schema-snapshot.sh --check
+step "schema snapshot drift (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "schema snapshot requires separately provisioned admin capability"
 
 # ── PROGRAM 1's GATE, ASKED NIGHTLY (2026-08-15) ─────────────────────────────
 # "Staging cannot access Production data or credentials" is G1's gate, and until
@@ -294,7 +295,7 @@ step "schema snapshot drift (db/schema.sql vs production)" ./bin/schema-snapshot
 # opens production read-only at the session level rather than merely intending
 # to. step() records the outcome to the operational ledger, so a night it fails
 # is a row rather than a line in a log nobody opens (rule 1f3a7372).
-step "environment isolation + currency (G1)" ./.venv/bin/python ops/p1-environment-gate.py
+step "environment isolation gate (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "environment isolation gate requires separately provisioned admin capability"
 
 # ── PROGRAM 1's REBUILD CLAUSE, PROVEN NIGHTLY (2026-08-15) ──────────────────
 # "A fresh non-production environment can be reconstructed from repository
@@ -310,7 +311,7 @@ step "environment isolation + currency (G1)" ./.venv/bin/python ops/p1-environme
 # The nightly cost is one Neon branch created and deleted. The thing it buys is
 # that the repository's sufficiency is a measured fact each morning rather than
 # an argument nobody has tested.
-step "environment rebuild proof (ephemeral branch)" ./.venv/bin/python ops/p1-rebuild-gate.py
+step "environment rebuild proof (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "environment rebuild proof requires separately provisioned admin capability"
 
 # Program 1's INTEGRATION clause, the third use of the rehearsal lane. The
 # rebuild gate above proves the SCHEMA stands up; this proves the APPLICATION
@@ -318,7 +319,7 @@ step "environment rebuild proof (ephemeral branch)" ./.venv/bin/python ops/p1-re
 # value reads back, and the grant surface matches production's. The distinction
 # is not academic: on 2026-08-16 a table whose CREATE had succeeded refused every
 # write, which `to_regclass` calls perfect.
-step "environment integration proof (ephemeral branch)" ./.venv/bin/python ops/p1-integration-gate.py
+step "environment integration proof (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "environment integration proof requires separately provisioned admin capability"
 
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
@@ -441,10 +442,10 @@ step "system graph (Graph-System/, derived)"         ./run.sh graph-system
 # credential, same contract as the other steps.
 step "vendor level drift (reports, never changes a level)" ./.venv/bin/python ops/vendor-level-drift-check.py
 
-step "encrypted backup -> R2"                        ./bin/backup-dump.sh
+step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
-step "portability mirror (md+csv, 2 locations)"      .venv/bin/python tools/db-tap.py run pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
+step "portability mirror (md+csv, 2 locations)" env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
 BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
@@ -615,10 +616,7 @@ step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/o
 # set. The reason is stated here rather than typed fresh each night, and every
 # run appends to out/break-glass-receipts.log, so the escalation is auditable
 # instead of invisible.
-step "incident sweep (close windows that elapsed clean)" \
-  env CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py \
-    --reason "nightly incident sweep: close monitoring incidents whose 24h window elapsed with no repeat failure; anything still open needs a human outcome" \
-    run tools/ops-record.py sweep --environment production
+step "incident sweep (admin capability unavailable)" sh ./bin/routine-admin-refusal.sh "incident closure requires separately provisioned authority capability"
 
 if [ "$rc_total" -eq 0 ]; then
   say "===== nightly chain OK ====="

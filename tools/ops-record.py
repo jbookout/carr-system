@@ -53,10 +53,12 @@ WHAT IT DELIBERATELY DOES NOT DO
   a pointer. Client content, secrets and raw transcripts are absent from
   ordinary telemetry by the observability contract.
 
-CREDENTIALS. run and deployment prefer CARR_DB_JOBS_URL — the carr_jobs role,
-which holds INSERT and no UPDATE on ops.run, because a ledger whose writer can
-rewrite history is not a ledger. Reads prefer the exporter credential. Registry
-sync needs the owner and is meant to be run through tools/db-tap.py.
+CREDENTIALS. unattended run and assess require CARR_DB_JOBS_URL — the
+carr_jobs role, which holds narrow operational grants because a ledger whose
+routine writer can rewrite history is not a ledger. Explicit release,
+deployment and settings operations preserve the deliberate DATABASE_URL path;
+reads prefer the exporter credential. Registry sync needs the owner and is
+meant to be run through tools/db-tap.py.
 
   bin/nightly.sh                                   (records every step)
   .venv/bin/python tools/db-tap.py run tools/ops-record.py sync-registry
@@ -71,15 +73,15 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = REPO / "ops" / "config" / "services.json"
 
-# Ordered credential preference per mode. The first name that is set wins, so a
-# db-tap invocation (which sets DATABASE_URL) always overrides the ambient
-# job credential — that is what makes `db-tap run` a deliberate escalation
-# rather than an accident.
+# Routine ledger writes are jobs-only.  The broader write mode remains the
+# explicit operator/release path used by db-tap and disposable DB tests.
 DSN_FOR = {
+    "routine": ("CARR_DB_JOBS_URL",),
     "write": ("DATABASE_URL", "CARR_DB_JOBS_URL"),
     "owner": ("DATABASE_URL", "CARR_DB_EXPORTER_URL"),
     "read":  ("DATABASE_URL", "CARR_DB_EXPORTER_URL", "CARR_DB_JOBS_URL"),
@@ -108,10 +110,20 @@ def dsn(kind: str) -> str:
     for name in DSN_FOR[kind]:
         value = os.environ.get(name)
         if value:
+            if kind == "routine" and not _is_jobs_dsn(value):
+                raise SystemExit("ops-record: CARR_DB_JOBS_URL must authenticate as carr_jobs")
             return value
     raise SystemExit(
         f"ops-record: no credential — set one of {', '.join(DSN_FOR[kind])} "
         f"(they live in ~/.config/carr/db.env)")
+
+
+def _is_jobs_dsn(value: str) -> bool:
+    """Reject a misleading jobs variable before it reaches psycopg."""
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        return unquote(parsed.username or "") == "carr_jobs"
+    return any(part == "user=carr_jobs" for part in value.split())
 
 
 def connect(kind: str):
@@ -119,7 +131,15 @@ def connect(kind: str):
         import psycopg
     except ImportError:
         raise SystemExit("ops-record: psycopg not installed (pip install 'psycopg[binary]')")
-    return psycopg.connect(dsn(kind), autocommit=True)
+    conn = psycopg.connect(dsn(kind), autocommit=True)
+    if kind == "routine":
+        with conn.cursor() as cur:
+            cur.execute("select session_user,current_user")
+            row = cur.fetchone()
+        if row != ("carr_jobs", "carr_jobs"):
+            conn.close()
+            raise SystemExit("ops-record: routine ledger connection is not carr_jobs")
+    return conn
 
 
 def parse_ts(value: str | None) -> datetime | None:
@@ -255,7 +275,7 @@ def cmd_run(args) -> int:
 
     corr = correlation_of(args.correlation)
     try:
-        with connect("write") as conn, conn.cursor() as cur:
+        with connect("routine") as conn, conn.cursor() as cur:
             try:
                 sid = service_id(cur, args.service)
             except SystemExit as e:
@@ -723,7 +743,7 @@ def cmd_sweep(args) -> int:
 
 
 def cmd_assess(args) -> int:
-    with connect("write") as conn, conn.cursor() as cur:
+    with connect("routine") as conn, conn.cursor() as cur:
         opened = assess(cur, environment=args.environment, window_hours=args.window_hours)
         conn.commit()
         cur.execute(

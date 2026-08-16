@@ -85,6 +85,20 @@ def main() -> int:
           rejected.returncode != 0 and "routine_jobs.scope" in rejected.stdout,
           rejected.stdout or rejected.stderr)
 
+    owner_backup = json.loads(json.dumps(config))
+    owner_backup["routine_backup"]["login_role"] = "neondb_owner"
+    rejected = run(owner_backup)
+    check("routine backup declaration cannot name an owner role",
+          rejected.returncode != 0 and "routine_backup.login_role" in rejected.stdout,
+          rejected.stdout or rejected.stderr)
+
+    broad_backup = json.loads(json.dumps(config))
+    broad_backup["routine_backup"]["consumers"].append("bin/nightly.sh")
+    rejected = run(broad_backup)
+    check("backup capability cannot be declared for every nightly child",
+          rejected.returncode != 0 and "routine_backup.consumers" in rejected.stdout,
+          rejected.stdout or rejected.stderr)
+
     return 1 if FAILED else 0
 
 

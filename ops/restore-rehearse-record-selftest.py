@@ -47,8 +47,8 @@ transcript) can see exactly what was derived from a fixture without needing a
 reachable database. This suite asserts against THAT line, the same way
 ops/run-scheduled-selftest.py asserts against out/run-scheduled.log's line.
 
-TIER 1 (always runs; no DB, no credential; DATABASE_URL is deliberately
-unreachable so the recorder's own write always fails LOUD on stderr, proving
+TIER 1 (always runs; no DB, no credential; a fixture CARR_DB_JOBS_URL is
+deliberately unreachable so the recorder's own write always fails LOUD on stderr, proving
 that failure never touches the rehearsal's own exit code). Covers: the three
 failure_class buckets, the detail line's shape (dump, bytes, date, pct,
 tables, rows, duration), state=succeeded on exit 0, --preflight and
@@ -68,10 +68,19 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SCRIPT = os.path.join(REPO, "bin", "restore-rehearse.sh")
+ROUTINE_ENV_TMP = tempfile.TemporaryDirectory()
+ROUTINE_ENV_FILE = Path(ROUTINE_ENV_TMP.name) / "db.env"
+ROUTINE_ENV_FILE.write_text(
+    "CARR_DB_JOBS_URL='postgresql://carr_jobs@127.0.0.1:1/nothing'\n",
+    encoding="utf-8",
+)
+ROUTINE_ENV_FILE.chmod(0o600)
 
 FAILED: list[str] = []
 
@@ -87,16 +96,12 @@ def check(label: str, cond: bool, detail: str = "") -> bool:
 
 def unreachable_env(extra: Optional[dict] = None) -> dict:
     """The environment a Mac has before its DB credential loads — port 1 on
-    loopback refuses instantly rather than hanging. Same shape as
-    ops/run-scheduled-selftest.py's helper of the same name. DATABASE_URL is
-    checked FIRST by tools/ops-record.py's dsn(), so this wins regardless of
-    whatever real credentials ~/.config/carr/db.env would otherwise supply —
-    and HOME is NOT touched, so the identity/NEON_API_KEY sourcing at the top
-    of restore-rehearse.sh (harmless env-var reads, no network call) behaves
-    exactly as it does for a real invocation.
+    loopback refuses instantly rather than hanging. The restore wrapper loads
+    this exact 0600 no-eval fixture through its production credential adapter,
+    so the test cannot fall through to a developer's real db.env.
     """
     env = dict(os.environ)
-    env["DATABASE_URL"] = "postgresql://nobody@127.0.0.1:1/nothing"
+    env["CARR_ROUTINE_DB_ENV_FILE"] = str(ROUTINE_ENV_FILE)
     for leak in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL", "PGSERVICE"):
         env.pop(leak, None)
     if extra:
