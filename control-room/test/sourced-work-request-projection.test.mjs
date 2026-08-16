@@ -11,7 +11,7 @@ const UUID = /\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b/i;
 
 test("sourced captured-request projection is a closed, versioned read contract", () => {
   const contract = read("contracts/sourced-work-request-projection.v1.json");
-  assert.equal(contract.version, "1.1.0");
+  assert.equal(contract.version, "1.0.0");
   assert.match(contract.status, /^phase1_/);
   assert.equal(contract.transport, "authenticated MCP-backed read, not implemented by this static prototype");
   assert.deepEqual(contract.lifecycle, {canonical_from: ["captured", "triaged", "ready"], projection_state: "queued"});

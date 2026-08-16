@@ -1,6 +1,6 @@
 {
   "contract": "carr-sourced-work-request-projection",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "status": "phase1_draft",
   "purpose": "A closed read projection for a Work Request captured from a current sourced routine answer. It specifies what an authenticated server-side reader may return; it does not add capture, triage, claim, approval, dispatch, or execution transport to the static Control Room prototype.",
   "authority": {
