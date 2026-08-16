@@ -90,6 +90,23 @@ class BoundedReadLoopTests(unittest.TestCase):
             malformed[0]["observed_elapsed_ms"] = bad
             self.assert_refused(self.run_loop(malformed), "loop_observation_invalid")
 
+    def test_fixed_policy_and_observation_digest_drift_refuses(self):
+        original_observations_digest = loop.OBSERVATIONS_SHA256
+        try:
+            loop.OBSERVATIONS_SHA256 = "0" * 64
+            self.assert_refused(self.run_loop(), "loop_observation_invalid")
+        finally:
+            loop.OBSERVATIONS_SHA256 = original_observations_digest
+        original_policy_digest = loop.POLICY_SHA256
+        try:
+            loop.POLICY_SHA256 = "0" * 64
+            self.assert_refused(
+                loop._evaluate_observations(copy.deepcopy(self.observations), copy.deepcopy(self.envelope)),
+                "loop_policy_invalid",
+            )
+        finally:
+            loop.POLICY_SHA256 = original_policy_digest
+
     def test_unknown_or_first_failure_stops_without_retry_or_payload_echo(self):
         failed = copy.deepcopy(self.observations)
         failed[0].update(state="failed", failure_code="source_unavailable", evidence_refs=[])
