@@ -597,6 +597,105 @@ begin
   return v_decision_id;
 end $$;
 
+-- Lifecycle evidence remains readable after deactivation, but no reader-facing
+-- delivery projection may expose its materialized guidance until the singleton
+-- registry is active.  Keep the ungated materialization private to in-database
+-- activation validation: activation must validate its candidate before it
+-- appends the active registry event that opens the public delivery fence.
+create or replace view ops.v_guidance_materialized_current as
+select distinct on (i.id)
+       i.id as guidance_item_id,
+       i.source_rule_id,
+       i.guidance_intake_id,
+       i.source_clause,
+       i.is_primary,
+       i.split_group_id,
+       r.id as guidance_revision_id,
+       r.version,
+       r.guidance_type,
+       r.scope,
+       r.activation,
+       r.consumer,
+       r.verification,
+       r.provenance,
+       r.delivery,
+       r.is_constitution,
+       r.classified_by,
+       r.reason,
+       r.lifecycle_at
+  from ops.guidance_item i
+  join ops.v_guidance_revision_state r on r.guidance_item_id=i.id
+ where r.lifecycle_status='active'
+ order by i.id,r.version desc,r.lifecycle_at desc,r.id desc;
+
+create or replace view ops.v_guidance_materialized_situation_mapping_current as
+select distinct on (m.guidance_revision_id,m.concept_id,m.doctrine_section_id)
+       m.*
+  from ops.guidance_situation_mapping m
+ order by m.guidance_revision_id,m.concept_id,m.doctrine_section_id,
+          m.mapping_seq desc;
+
+create or replace view ops.v_guidance_current as
+select g.*
+  from ops.v_guidance_materialized_current g
+ where exists (
+   select 1
+     from ops.v_guidance_registry_state s
+     join ops.guidance_registry registry on registry.id=s.registry_id and registry.singleton
+    where s.state='active'
+ );
+
+create or replace view ops.v_guidance_situation_mapping_current as
+select m.*
+  from ops.v_guidance_materialized_situation_mapping_current m
+ where exists (
+   select 1
+     from ops.v_guidance_registry_state s
+     join ops.guidance_registry registry on registry.id=s.registry_id and registry.singleton
+    where s.state='active'
+ );
+
+-- standing_guidance is a direct reader-facing function, so retain an explicit
+-- singleton-state fence in addition to its dependency on v_guidance_current.
+create or replace function ops.standing_guidance(
+  p_actor text,
+  p_workflow text default null,
+  p_surface text default null,
+  p_tier text default null
+) returns table(
+  source_rule_id uuid,
+  statement text,
+  human_quote text,
+  taught_by text,
+  personal_to text,
+  scope jsonb,
+  guidance_type text,
+  is_constitution boolean
+)
+language sql stable as $$
+  select r.id,r.statement,r.human_quote,teacher.display_name,owner.slug,g.scope,
+         g.guidance_type,g.is_constitution
+    from ops.v_guidance_current g
+    join rule r on r.id=g.source_rule_id and r.status='active'
+    join actor teacher on teacher.id=r.taught_by
+    left join actor owner on owner.id=r.personal_to
+   where exists (
+           select 1
+             from ops.v_guidance_registry_state s
+             join ops.guidance_registry registry
+               on registry.id=s.registry_id and registry.singleton
+            where s.state='active'
+         )
+     and (r.personal_to is null or owner.slug=p_actor)
+     and (
+       g.is_constitution
+       or (g.guidance_type='constraint' and exists (
+         select 1 from ops.applicable_rules(p_workflow,p_surface,p_tier) ar
+          where ar.rule_id=r.id))
+     )
+   order by g.is_constitution desc,r.personal_to nulls first,r.created_at,r.id
+$$;
+
 -- Prove that the exact approved batch, not merely its primary-rule coverage,
 -- is what the registry would expose.  This catches stale extras, omitted split
 -- clauses, and doctrine mappings that did not become retrievable.
@@ -616,7 +715,7 @@ begin
     raise exception 'guidance import batch lacks an exact materialized revision for one or more entries';
   end if;
   if exists (
-    (select g.guidance_revision_id from ops.v_guidance_current g)
+    (select g.guidance_revision_id from ops.v_guidance_materialized_current g)
     except
     (select r.id from ops.guidance_import_entry e
       join ops.guidance_item i on i.source_rule_id=e.source_rule_id and i.source_clause=e.source_clause
@@ -628,14 +727,14 @@ begin
       join ops.guidance_revision r on r.guidance_item_id=i.id and r.version=1
      where e.batch_id=p_batch_id)
     except
-    (select g.guidance_revision_id from ops.v_guidance_current g)
+    (select g.guidance_revision_id from ops.v_guidance_materialized_current g)
   ) then
     raise exception 'active guidance revisions do not exactly match the approved import batch';
   end if;
   if exists (
     (select m.guidance_revision_id,m.concept_id,m.doctrine_section_id
-       from ops.v_guidance_situation_mapping_current m
-       join ops.v_guidance_current g on g.guidance_revision_id=m.guidance_revision_id
+       from ops.v_guidance_materialized_situation_mapping_current m
+       join ops.v_guidance_materialized_current g on g.guidance_revision_id=m.guidance_revision_id
       where m.state='active' and g.guidance_type='doctrine')
     except
     (select r.id,x.concept_id,x.doctrine_section_id
@@ -653,13 +752,59 @@ begin
       where x.batch_id=p_batch_id)
     except
     (select m.guidance_revision_id,m.concept_id,m.doctrine_section_id
-       from ops.v_guidance_situation_mapping_current m
-       join ops.v_guidance_current g on g.guidance_revision_id=m.guidance_revision_id
+       from ops.v_guidance_materialized_situation_mapping_current m
+       join ops.v_guidance_materialized_current g on g.guidance_revision_id=m.guidance_revision_id
       where m.state='active' and g.guidance_type='doctrine')
   ) then
     raise exception 'active doctrine mappings do not exactly match the approved import batch';
   end if;
 end $$;
+
+-- This authority preflight intentionally reads the private materialization
+-- layer.  It runs before activation appends the singleton active event, so the
+-- reader-facing delivery fence must not turn a valid candidate into a false
+-- coverage failure.
+create or replace function ops.assert_guidance_registry_coverage()
+returns table(source_rule_id uuid, issue text)
+language sql stable security definer set search_path=ops,public,pg_temp as $$
+  with active_rules as (
+    select id from rule where status='active'
+  ), primary_counts as (
+    select ar.id,
+           count(g.*) filter (where g.is_primary) as primary_count
+      from active_rules ar
+      left join ops.v_guidance_materialized_current g on g.source_rule_id=ar.id
+     group by ar.id
+  )
+  select id,
+         case when primary_count=0 then 'missing active primary guidance'
+              else 'multiple active primary guidance records' end
+    from primary_counts where primary_count <> 1
+  union all
+  select g.source_rule_id,'constraint lacks admitted installed enforcement projection'
+    from ops.v_guidance_materialized_current g
+   where g.is_primary and g.guidance_type='constraint'
+     and not exists (
+       select 1
+         from ops.rule_admission a
+         join ops.rule_enforcement_point ep
+           on ep.rule_id=a.rule_id and ep.installed
+        where a.rule_id=g.source_rule_id and a.state='admitted')
+  union all
+  select g.source_rule_id,'doctrine lacks active WR-AI-006 situation bridge'
+    from ops.v_guidance_materialized_current g
+   where g.is_primary and g.guidance_type='doctrine'
+     and not exists (
+       select 1
+         from ops.v_guidance_materialized_situation_mapping_current m
+         join retrieval_concept c on c.id=m.concept_id and c.status='approved'
+         join doctrine_section s on s.id=m.doctrine_section_id and s.status='active'
+         join doctrine_concept_mapping dcm
+           on dcm.concept_id=m.concept_id
+          and dcm.section_id=m.doctrine_section_id
+          and dcm.status='approved'
+        where m.guidance_revision_id=g.guidance_revision_id and m.state='active')
+$$;
 
 -- Bind registry activation to an actually staged, applied, human-approved
 -- manifest.  It preserves the original function signature for the MCP
@@ -725,7 +870,7 @@ begin
     return existing.event_id;
   end if;
   select count(*) into constitution_count
-    from ops.v_guidance_current where is_constitution;
+    from ops.v_guidance_materialized_current where is_constitution;
   if constitution_count not between 5 and 10 then
     raise exception 'guidance constitution must contain between 5 and 10 active items';
   end if;
@@ -810,12 +955,20 @@ grant select on ops.guidance_import_batch,ops.guidance_import_entry,
   ops.guidance_import_apply_event,ops.guidance_import_mapping_execution,
   ops.guidance_import_decision_event to carr_reader,carr_writer,carr_authority;
 
+-- The raw materialization views exist only so activation can validate before
+-- it opens the public registry fence.  They are not a reader escape hatch.
+revoke all on ops.v_guidance_materialized_current,
+  ops.v_guidance_materialized_situation_mapping_current
+  from public,carr_reader,carr_writer,carr_authority;
+
 revoke all on function ops.guidance_import_manifest_digest(text) from public;
 revoke all on function ops.guidance_import_canonical_json(jsonb) from public;
 revoke all on function ops.guidance_import_split_group_id(text) from public;
 revoke all on function ops.assert_guidance_import_inventory(uuid) from public;
 revoke all on function ops.assert_guidance_import_materialization(uuid) from public;
 revoke all on function ops.validate_guidance_import_manifest(jsonb) from public;
+revoke all on function ops.assert_guidance_registry_coverage()
+  from public,carr_reader,carr_writer,carr_authority;
 revoke all on function ops.stage_guidance_import_batch(text,text,uuid,text,text) from public;
 revoke all on function ops.apply_guidance_import_batch(uuid,text,text,text) from public;
 revoke all on function ops.decide_guidance_import_batch(uuid,text,text,text,text) from public,carr_writer;

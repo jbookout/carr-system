@@ -5,8 +5,9 @@ This is deliberately not an authority path.  Its default mode compiles the
 checked-in enforcement map and reviewed TSV, resolves source-rule UUIDs from
 the *ambient* DATABASE_URL read-only, validates an explicit doctrine mapping
 plan, and renders the exact canonical activation-manifest preimage.  `--apply`
-only stages then applies that reviewed digest through the writer functions; it
-cannot decide a batch or activate/deactivate a registry.
+only stages then applies that reviewed digest through a separately authenticated
+CARR_DB_WRITER_URL connection to the same live database; it cannot decide a
+batch or activate/deactivate a registry.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from lib import guidance_registry as registry
 DEFAULT_MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
 DEFAULT_MANIFEST = REPO / "audits" / "guidance-migration-manifest.v1.tsv"
 MAPPING_PLAN_SCHEMA = "guidance-situation-mapping-plan/v1"
+WRITER_ROLE = "carr_writer"
 
 
 class ImportRefusal(ValueError):
@@ -181,6 +183,63 @@ def require_apply_args(args: argparse.Namespace) -> None:
         raise ImportRefusal("stage and apply require distinct idempotency keys")
 
 
+def require_writer_dsn(env: Mapping[str, str]) -> str:
+    """Return the separately scoped writer credential for canonical writes.
+
+    `DATABASE_URL` is deliberately read/preview-only.  It must never become an
+    implicit fallback for --apply, because that could turn an owner connection
+    into a routine canonical-write path.
+    """
+    dsn = env.get("CARR_DB_WRITER_URL", "").strip()
+    if not dsn:
+        raise ImportRefusal("--apply requires CARR_DB_WRITER_URL; DATABASE_URL is preview-only")
+    return dsn
+
+
+def assert_writer_identity(cur: Any) -> None:
+    """Fail closed unless the live write connection is the scoped writer role."""
+    row = cur.execute(
+        "select session_user::text as session_user, current_user::text as current_user"
+    ).fetchone()
+    if not isinstance(row, Mapping) or (
+        row.get("session_user") != WRITER_ROLE or row.get("current_user") != WRITER_ROLE
+    ):
+        raise ImportRefusal(
+            "writer connection identity refused: session_user and current_user must both be carr_writer"
+        )
+
+
+def begin_read_only(cur: Any) -> None:
+    """Make the generic preview connection incapable of canonical writes."""
+    cur.execute("set transaction read only")
+
+
+def apply_reviewed_batch(writer_dsn: str, *, digest: str,
+                         canonical_manifest_text: str,
+                         classifier_actor_slug: str, stage_idempotency_key: str,
+                         stage_reason: str, apply_idempotency_key: str,
+                         apply_reason: str) -> tuple[Any, Any]:
+    """Apply a reviewed artifact only through a separately authenticated writer."""
+    with psycopg.connect(writer_dsn) as write_conn:
+        with write_conn.cursor(row_factory=psycopg.rows.dict_row) as write_cur:
+            # This must precede every writer-function call and even the
+            # writer-side actor lookup.  An owner DSN, an arbitrary login, or
+            # SET ROLE mismatch cannot become a routine path.
+            assert_writer_identity(write_cur)
+            actor_rows = write_cur.execute(
+                "select id::text as id from actor where slug=%s "
+                "and kind in ('automation','system') and active",
+                (classifier_actor_slug,)).fetchall()
+            classifier_actor_id = resolve_classifier_actor(actor_rows, classifier_actor_slug)
+            batch_id, apply_event_id = stage_and_apply(
+                write_cur, digest=digest, canonical_manifest_text=canonical_manifest_text,
+                classifier_actor_id=classifier_actor_id,
+                stage_idempotency_key=stage_idempotency_key, stage_reason=stage_reason,
+                apply_idempotency_key=apply_idempotency_key, apply_reason=apply_reason)
+            write_conn.commit()
+            return batch_id, apply_event_id
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -190,17 +249,19 @@ def main(argv: list[str] | None = None) -> int:
         dsn = os.environ.get("DATABASE_URL")
         if not dsn:
             raise ImportRefusal("DATABASE_URL is required; this CLI never accepts a DSN argument")
+        writer_dsn = require_writer_dsn(os.environ) if args.apply else None
         source_map = json.loads(args.enforcement_map.read_text(encoding="utf-8"))
         manifest, errors = registry.load_migration_manifest(str(args.manifest))
         if errors:
             raise ImportRefusal("reviewed migration manifest refused: " + "; ".join(errors))
         mappings = load_mapping_plan(args.mapping_plan)
-        with psycopg.connect(dsn) as conn:
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        with psycopg.connect(dsn) as read_conn:
+            with read_conn.cursor(row_factory=psycopg.rows.dict_row) as read_cur:
+                begin_read_only(read_cur)
                 preview, preview_errors = registry.build_registry(source_map, manifest)
                 if preview_errors:
                     raise ImportRefusal("compiled registry refused: " + "; ".join(preview_errors))
-                active_rows = cur.execute(
+                active_rows = read_cur.execute(
                     "select id::text as id, left(id::text,8) as source_id from rule "
                     "where status='active' order by id").fetchall()
                 artifact, canonical, digest = build_review_artifact(
@@ -219,21 +280,17 @@ def main(argv: list[str] | None = None) -> int:
                     with args.output_manifest.open("xb") as fh:
                         fh.write(canonical)
                     review["output_manifest"] = str(args.output_manifest)
-                if args.apply:
-                    actor_rows = cur.execute(
-                        "select id::text as id from actor where slug=%s "
-                        "and kind in ('automation','system') and active",
-                        (args.classifier_actor_slug,)).fetchall()
-                    classifier_actor_id = resolve_classifier_actor(actor_rows, args.classifier_actor_slug)
-                    batch_id, apply_event_id = stage_and_apply(
-                        cur, digest=digest, canonical_manifest_text=canonical.decode("utf-8"),
-                        classifier_actor_id=classifier_actor_id,
-                        stage_idempotency_key=args.stage_idempotency_key, stage_reason=args.stage_reason,
-                        apply_idempotency_key=args.apply_idempotency_key, apply_reason=args.apply_reason)
-                    conn.commit()
-                    review.update({"batch_id": str(batch_id), "apply_event_id": str(apply_event_id)})
-                print(json.dumps(review, sort_keys=True, indent=2))
-                return 0
+        if args.apply:
+            assert writer_dsn is not None  # narrowed by require_writer_dsn above
+            batch_id, apply_event_id = apply_reviewed_batch(
+                writer_dsn, digest=digest,
+                canonical_manifest_text=canonical.decode("utf-8"),
+                classifier_actor_slug=args.classifier_actor_slug,
+                stage_idempotency_key=args.stage_idempotency_key, stage_reason=args.stage_reason,
+                apply_idempotency_key=args.apply_idempotency_key, apply_reason=args.apply_reason)
+            review.update({"batch_id": str(batch_id), "apply_event_id": str(apply_event_id)})
+        print(json.dumps(review, sort_keys=True, indent=2))
+        return 0
     except (ImportRefusal, OSError, json.JSONDecodeError, psycopg.Error) as exc:
         print(f"guidance-registry-import: REFUSED — {exc}", file=sys.stderr)
         return 2

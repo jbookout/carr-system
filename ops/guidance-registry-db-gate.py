@@ -42,6 +42,34 @@ FUNCTIONS = (
     "ops.deactivate_guidance_registry(uuid,text,text,text)",
 )
 
+# These are the reader-facing typed-guidance delivery surfaces.  State and
+# event-history views are deliberately not included: deactivation withdraws
+# guidance delivery, not the immutable evidence that it was once approved.
+READ_SURFACES = (
+    ("v_guidance_current", "select count(*) from ops.v_guidance_current"),
+    ("v_guidance_constraint", "select count(*) from ops.v_guidance_constraint"),
+    ("v_guidance_procedure", "select count(*) from ops.v_guidance_procedure"),
+    ("v_guidance_rubric", "select count(*) from ops.v_guidance_rubric"),
+    ("v_guidance_preference", "select count(*) from ops.v_guidance_preference"),
+    ("v_guidance_precedent", "select count(*) from ops.v_guidance_precedent"),
+    ("v_guidance_example", "select count(*) from ops.v_guidance_example"),
+    ("v_guidance_situation_mapping_current",
+     "select count(*) from ops.v_guidance_situation_mapping_current"),
+    ("v_guidance_doctrine_retrieval",
+     "select count(*) from ops.v_guidance_doctrine_retrieval"),
+    ("v_guidance_projection_summary",
+     "select count(*) from ops.v_guidance_projection_summary"),
+    ("standing_guidance",
+     "select count(*) from ops.standing_guidance('joe',null,null,null)"),
+)
+
+READER_GRANTED_SURFACES = frozenset({
+    "v_guidance_current", "v_guidance_constraint", "v_guidance_procedure",
+    "v_guidance_rubric", "v_guidance_preference", "v_guidance_precedent",
+    "v_guidance_example", "v_guidance_doctrine_retrieval",
+    "v_guidance_projection_summary", "standing_guidance",
+})
+
 
 def fail(message: str) -> NoReturn:
     raise RuntimeError(message)
@@ -52,6 +80,17 @@ def one(cur: psycopg.Cursor[Any], query: str, params: tuple[Any, ...] = ()) -> A
     if row is None:
         fail(f"expected one row: {query}")
     return row[0]
+
+
+def guidance_read_surface_counts(cur: psycopg.Cursor[Any]) -> dict[str, int]:
+    """Return every reader-facing delivery count under the present registry state."""
+    return {name: int(one(cur, query)) for name, query in READ_SURFACES}
+
+
+def assert_guidance_read_surfaces_empty(cur: psycopg.Cursor[Any], label: str) -> None:
+    visible = {name: count for name, count in guidance_read_surface_counts(cur).items() if count}
+    if visible:
+        fail(f"{label} still exposes typed guidance: {visible}")
 
 
 def refuses(cur: psycopg.Cursor[Any], query: str, params: tuple[Any, ...], label: str) -> None:
@@ -150,9 +189,31 @@ def revision(cur: psycopg.Cursor[Any], item_id: Any, actor_id: Any, kind: str = 
             "example": "example_retrieval",
         }[kind]
     }
-    if kind == "doctrine":
+    if kind == "constraint":
+        control_key = f"guidance-db-gate-{uuid.uuid4()}"
+        implementation_ref = "migrations/0168_guidance_registry.sql"
+        test_ref = "ops/guidance-registry-db-gate.py"
+        source_rule_id = one(
+            cur, "select source_rule_id from ops.guidance_item where id=%s", (item_id,))
+        if source_rule_id is None:
+            fail("constraint fixture requires a rule-backed guidance item")
+        cur.execute("""insert into ops.rule_enforcement_point
+            (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed)
+            values (%s,%s,%s,%s,'transactional_schema',true)""",
+                    (source_rule_id, control_key, implementation_ref, test_ref))
+        delivery.update({
+            "enforcement_control": control_key,
+            "evidence": [implementation_ref],
+            "tests": [test_ref],
+        })
+    elif kind == "doctrine":
         activation["situation_mappings"] = ["db-gate"]
         delivery["projection"] = "doctrine_retrieval"
+    elif kind == "rubric":
+        verification.update({
+            "verifier": "database acceptance gate",
+            "acceptance_criteria": ["fixture reaches the active rubric projection"],
+        })
     return one(cur, """insert into ops.guidance_revision
         (guidance_item_id,version,guidance_type,scope,activation,consumer,
          verification,provenance,delivery,is_constitution,classified_by,reason)
@@ -261,6 +322,26 @@ def main() -> int:
                 for function in FUNCTIONS:
                     if one(cur, "select to_regprocedure(%s)", (function,)) is None:
                         fail(f"missing function {function}")
+                for surface, _ in READ_SURFACES:
+                    if surface not in READER_GRANTED_SURFACES:
+                        continue
+                    if surface == "standing_guidance":
+                        if not one(cur, "select has_function_privilege('carr_reader',%s::regprocedure,'execute')",
+                                   ("ops.standing_guidance(text,text,text,text)",)):
+                            fail("carr_reader cannot execute standing_guidance")
+                    elif not one(cur, "select has_table_privilege('carr_reader',%s,'select')",
+                                 (f"ops.{surface}",)):
+                        fail(f"carr_reader cannot read delivery surface ops.{surface}")
+                for materialization_view in (
+                    "ops.v_guidance_materialized_current",
+                    "ops.v_guidance_materialized_situation_mapping_current",
+                ):
+                    if one(cur, "select to_regclass(%s)", (materialization_view,)) is None:
+                        fail(f"missing private materialization view {materialization_view}")
+                    for role in ("public", "carr_reader", "carr_writer", "carr_authority"):
+                        if one(cur, "select has_table_privilege(%s,%s,'select')",
+                               (role, materialization_view)):
+                            fail(f"{role} can bypass the registry delivery fence via {materialization_view}")
 
                 # A proposal writer can construct drafts, but it may not mint
                 # authority evidence, lifecycle state, active mappings, or a
@@ -273,7 +354,9 @@ def main() -> int:
                                  "ops.activate_guidance_situation_mapping(uuid,uuid,text)",
                                  "ops.activate_guidance_registry(uuid,text,text,text)",
                                  "ops.decide_guidance_import_batch(uuid,text,text,text,text)",
-                                 "ops.deactivate_guidance_registry(uuid,text,text,text)"):
+                                 "ops.deactivate_guidance_registry(uuid,text,text,text)",
+                                 "ops.assert_guidance_import_materialization(uuid)",
+                                 "ops.assert_guidance_registry_coverage()"):
                     if one(cur, "select has_function_privilege('carr_writer',%s::regprocedure,'execute')", (function,)):
                         fail(f"carr_writer can execute authority function {function}")
                     if one(cur, "select has_function_privilege('public',%s::regprocedure,'execute')", (function,)):
@@ -427,17 +510,10 @@ def main() -> int:
                                 "where registry_id=%s and state='active' and manifest_digest=%s)",
                            (registry_id, import_digest)):
                     fail("exact import did not activate the registry")
-                deactivation_key = f"db-gate-import-deactivate-{uuid.uuid4()}"
-                deactivation_id = authority_one(
-                    cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
-                    (registry_id, import_digest, deactivation_key,
-                     "deactivate exact rollback-only import"))
-                if authority_one(cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
-                                 (registry_id, import_digest, deactivation_key,
-                                  "deactivate exact rollback-only import")) != deactivation_id:
-                    fail("identical registry deactivation replay returned another event")
-                if one(cur, "select state from ops.v_guidance_registry_state where registry_id=%s", (registry_id,)) != "inactive":
-                    fail("registry deactivation did not reversibly make the registry inactive")
+                active_history_count = one(cur, "select count(*) from ops.v_guidance_revision_state "
+                                                "where lifecycle_status='active'")
+                if active_history_count == 0:
+                    fail("active registry fixture has no immutable active lifecycle history")
                 procedure_item = item(cur, actor_id, uuid.uuid4().hex)
                 procedure_revision = revision(cur, procedure_item, actor_id)
                 contract_hash = one(cur, "select ops.guidance_revision_contract_hash(%s)", (procedure_revision,))
@@ -572,6 +648,25 @@ def main() -> int:
                     fail(f"approved doctrine revision did not reach the situation bridge: {diagnostics}")
                 cur.execute("select * from ops.standing_guidance('joe',null,null,null)").fetchall()
 
+                # Populate every remaining typed delivery projection so the
+                # deactivation assertion proves a transition from visible to
+                # empty, rather than merely observing a view that was already
+                # empty in this rollback-only fixture.
+                for kind in ("constraint", "rubric", "preference", "example"):
+                    typed_revision = revision(
+                        cur, rule_item(cur, actor_id, f"active-{kind}-{uuid.uuid4().hex}"),
+                        actor_id, kind)
+                    authority_one(
+                        cur, "select ops.record_guidance_decision(%s,'active',%s,%s)",
+                        (typed_revision, f"db-gate-active-{kind}-{uuid.uuid4()}",
+                         f"activate {kind} delivery fixture"))
+                inactive_while_active = {
+                    name: count for name, count in guidance_read_surface_counts(cur).items()
+                    if count == 0
+                }
+                if inactive_while_active:
+                    fail(f"active registry has unexercised delivery surfaces: {inactive_while_active}")
+
                 registry_id = one(cur, "select id from ops.guidance_registry where singleton")
                 authority_refuses(cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
                                   (registry_id, "d" * 64, f"db-gate-inactive-{uuid.uuid4()}",
@@ -676,6 +771,33 @@ def main() -> int:
                                   "registry activation without valid coverage")
                 if one(cur, "select count(*) from ops.authority_receipt") != receipts_before:
                     fail("coverage refusal minted a registry authority receipt")
+
+                # Deactivation is a delivery fence, not a history rewrite.
+                # Every reader-granted typed-guidance projection must empty,
+                # while the active lifecycle evidence and append-only registry
+                # events remain available for audit and an identical replay.
+                active_history_count = one(cur, "select count(*) from ops.v_guidance_revision_state "
+                                                "where lifecycle_status='active'")
+                registry_events_before_deactivation = one(
+                    cur, "select count(*) from ops.guidance_registry_event where registry_id=%s", (registry_id,))
+                deactivation_key = f"db-gate-import-deactivate-{uuid.uuid4()}"
+                deactivation_id = authority_one(
+                    cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
+                    (registry_id, import_digest, deactivation_key,
+                     "deactivate exact rollback-only import"))
+                if one(cur, "select state from ops.v_guidance_registry_state where registry_id=%s", (registry_id,)) != "inactive":
+                    fail("registry deactivation did not reversibly make the registry inactive")
+                assert_guidance_read_surfaces_empty(cur, "registry deactivation")
+                if one(cur, "select count(*) from ops.v_guidance_revision_state "
+                            "where lifecycle_status='active'") != active_history_count:
+                    fail("registry deactivation rewrote immutable active lifecycle history")
+                if one(cur, "select count(*) from ops.guidance_registry_event where registry_id=%s", (registry_id,)) != registry_events_before_deactivation + 1:
+                    fail("registry deactivation did not append exactly one immutable registry event")
+                if authority_one(cur, "select ops.deactivate_guidance_registry(%s,%s,%s,%s)",
+                                 (registry_id, import_digest, deactivation_key,
+                                  "deactivate exact rollback-only import")) != deactivation_id:
+                    fail("registry deactivation replay returned another event after read-surface fence")
+                assert_guidance_read_surfaces_empty(cur, "registry deactivation replay")
             conn.rollback()
         print("PASS: guidance registry database gate (catalog, privilege, authority, validators, bridge, rollback)")
         return 0

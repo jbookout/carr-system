@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 
@@ -54,6 +55,55 @@ def main() -> int:
         apply_idempotency_key = "same"
         apply_reason = "apply"
     refuses(lambda: mod.require_apply_args(Args()), "distinct idempotency")
+    refuses(lambda: mod.require_writer_dsn({}), "CARR_DB_WRITER_URL")
+    writer_url = "postgresql://carr_writer@example.invalid/carr"
+    assert mod.require_writer_dsn({"CARR_DB_WRITER_URL": writer_url}) == writer_url
+    class IdentityCursor:
+        def __init__(self, identity): self.identity = identity; self.calls = []
+        def execute(self, sql): self.calls.append(sql); return self
+        def fetchone(self): return self.identity
+    writer_identity = IdentityCursor({"session_user": "carr_writer", "current_user": "carr_writer"})
+    mod.assert_writer_identity(writer_identity)
+    assert writer_identity.calls == ["select session_user::text as session_user, current_user::text as current_user"]
+    refuses(lambda: mod.assert_writer_identity(IdentityCursor({"session_user": "carr_owner", "current_user": "carr_owner"})),
+            "must both be carr_writer")
+    refuses(lambda: mod.assert_writer_identity(IdentityCursor({"session_user": "unrecognized", "current_user": "unrecognized"})),
+            "must both be carr_writer")
+    refuses(lambda: mod.assert_writer_identity(IdentityCursor({"session_user": "carr_writer", "current_user": "carr_owner"})),
+            "must both be carr_writer")
+    read_only_cursor = IdentityCursor({})
+    mod.begin_read_only(read_only_cursor)
+    assert read_only_cursor.calls == ["set transaction read only"]
+    class WriterCursor(IdentityCursor):
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+    class WriterConnection:
+        def __init__(self, cursor): self.cursor_value = cursor; self.committed = False
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def cursor(self, **_kwargs): return self.cursor_value
+        def commit(self): self.committed = True
+    denied_cursor = WriterCursor({"session_user": "carr_owner", "current_user": "carr_owner"})
+    denied_connection = WriterConnection(denied_cursor)
+    writer_dsns = []
+    original_psycopg = getattr(mod, "psycopg")
+    def denied_connect(dsn):
+        writer_dsns.append(dsn)
+        return denied_connection
+    setattr(mod, "psycopg", types.SimpleNamespace(
+        connect=denied_connect,
+        rows=types.SimpleNamespace(dict_row=object()),
+    ))
+    try:
+        refuses(lambda: mod.apply_reviewed_batch(
+            "writer-dsn", digest="d", canonical_manifest_text="{}\\n", classifier_actor_slug="codex",
+            stage_idempotency_key="stage", stage_reason="stage", apply_idempotency_key="apply",
+            apply_reason="apply"), "must both be carr_writer")
+    finally:
+        setattr(mod, "psycopg", original_psycopg)
+    assert writer_dsns == ["writer-dsn"]
+    assert denied_cursor.calls == ["select session_user::text as session_user, current_user::text as current_user"]
+    assert not denied_connection.committed
     class FakeCursor:
         def __init__(self): self.calls = []; self.rows = iter([{"id": "batch"}, {"id": "applied"}])
         def execute(self, sql, params): self.calls.append((sql, params)); return self
@@ -68,8 +118,13 @@ def main() -> int:
     source = (REPO / "ops" / "guidance-registry-import.py").read_text(encoding="utf-8")
     assert "where status='active' order by id" in source
     assert "left(id::text,8) = any" not in source
+    assert 'env.get("CARR_DB_WRITER_URL"' in source
+    assert 'os.environ.get("DATABASE_URL")' in source
+    assert "select session_user::text as session_user, current_user::text as current_user" in source
+    assert 'cur.execute("set transaction read only")' in source
+    assert "apply_reviewed_batch(" in source
     assert '.open("xb")' in source
-    print("guidance-registry-import-selftest: 11 cases passed")
+    print("guidance-registry-import-selftest: 18 cases passed")
     return 0
 
 
