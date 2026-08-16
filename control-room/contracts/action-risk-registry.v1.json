@@ -50,7 +50,7 @@
     "inserts": 0,
     "upserts": 0
    },
-   "does": "Human acceptance of a completed shadow or canary workflow run"
+   "does": "Authority acceptance of a completed workflow run"
   },
   "activate-guidance-registry": {
    "protection": "human_boundary",

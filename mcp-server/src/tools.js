@@ -4968,7 +4968,7 @@ export const TOOLS = {
 
   "accept-workflow": {
     write: true, humanOnly: true, authorityOnly: true,
-    description: "Human acceptance of a completed shadow or canary workflow run. Uses the authority database connection, derives the partner from that connection's authenticated session, and refuses an arbitrary receipt reference.",
+    description: "Authority acceptance of a completed workflow run. Shadow acceptance remains available to either admitted human partner; canary acceptance is Joe-only and is enforced by the authenticated authority database session, never a caller field. Uses the authority connection, derives the partner from that connection's authenticated session, and refuses an arbitrary receipt reference.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, workflow_key: { type: "string" },
       mode: { type: "string", enum: ["shadow", "canary"] }, receipt_ref: { type: "string" },

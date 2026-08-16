@@ -4,6 +4,35 @@ import { TOOLS, ToolError } from "../src/tools.js";
 import { authorityDsnForActor, callTool } from "../src/mcp.js";
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe", human: true, via: "test" };
+const dell = { id: "10000000-0000-0000-0000-000000000003", slug: "dell", display: "Dell", human: true, via: "test" };
+
+class AcceptanceAuthorityFake {
+  constructor(sessionSlug) {
+    this.sessionSlug = sessionSlug;
+    this.acceptanceCalls = [];
+    this.envelopeWrites = 0;
+    this.eventWrites = 0;
+  }
+
+  async query(text, params = []) {
+    if (text.includes("from tool_call where idempotency_key")) return { rows: [] };
+    if (text.includes("ops.record_workflow_acceptance")) {
+      this.acceptanceCalls.push(params);
+      if (params[1] === "canary" && this.sessionSlug !== "joe")
+        throw new Error("canary workflow acceptance requires Joe authority session");
+      return { rows: [{ id: `acceptance-${this.sessionSlug}-${params[1]}` }] };
+    }
+    if (text.includes("insert into tool_call")) {
+      this.envelopeWrites += 1;
+      return { rows: [] };
+    }
+    if (text.includes("insert into event")) {
+      this.eventWrites += 1;
+      return { rows: [] };
+    }
+    throw new Error(`unexpected SQL: ${text}`);
+  }
+}
 
 test("control-plane authority operations are explicit human authority verbs", () => {
   for (const name of ["accept-workflow", "disable-legacy-schedule", "activate-guidance-registry",
@@ -13,9 +42,11 @@ test("control-plane authority operations are explicit human authority verbs", ()
   }
 });
 
-test("authority DSNs are partner-scoped with a single-seat fallback", () => {
+test("authority DSNs are partner-scoped and the single-seat fallback is Joe-only", () => {
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_JOE_URL: "joe-dsn" }, joe), "joe-dsn");
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "fallback" }, joe), "fallback");
+  assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_DELL_URL: "dell-dsn" }, dell), "dell-dsn");
+  assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "joe-fallback" }, dell), null);
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "fallback" }, { slug: "codex", human: false }), null);
 });
 
@@ -27,4 +58,37 @@ test("authority operation fails closed instead of falling back to writer credent
     ["deactivate-guidance-registry", { idempotency_key: "authority-missing", registry_id: "10000000-0000-0000-0000-000000000001", manifest_digest: "a".repeat(64), reason: "fixture" }],
   ]) await assert.rejects(() => callTool({ DATABASE_URL_WRITER: "writer-only" }, joe, name, args),
     e => e instanceof ToolError && e.payload.error === "authority_connection_unavailable");
+});
+
+test("workflow acceptance leaves canary Joe-only in DB while shadow remains partner-capable", async () => {
+  const tool = TOOLS["accept-workflow"];
+  assert.match(tool.description, /Shadow acceptance remains available to either admitted human partner/);
+  assert.match(tool.description, /canary acceptance is Joe-only.*authenticated authority database session/i);
+
+  const dellShadow = new AcceptanceAuthorityFake("dell");
+  const shadow = await tool.handler(dellShadow, dell, {
+    idempotency_key: "accept-shadow-dell", workflow_key: "fixture",
+    mode: "shadow", receipt_ref: "receipt:shadow",
+  });
+  assert.equal(shadow.ok, true);
+  assert.deepEqual(dellShadow.acceptanceCalls, [["fixture", "shadow", "receipt:shadow"]]);
+  assert.equal(dellShadow.envelopeWrites, 1);
+  assert.equal(dellShadow.eventWrites, 1);
+
+  const joeCanary = new AcceptanceAuthorityFake("joe");
+  const canary = await tool.handler(joeCanary, joe, {
+    idempotency_key: "accept-canary-joe", workflow_key: "fixture",
+    mode: "canary", receipt_ref: "receipt:canary",
+  });
+  assert.equal(canary.ok, true);
+  assert.deepEqual(joeCanary.acceptanceCalls, [["fixture", "canary", "receipt:canary"]]);
+
+  const dellCanary = new AcceptanceAuthorityFake("dell");
+  await assert.rejects(() => tool.handler(dellCanary, dell, {
+    idempotency_key: "accept-canary-dell", workflow_key: "fixture",
+    mode: "canary", receipt_ref: "receipt:canary",
+  }), /canary workflow acceptance requires Joe authority session/);
+  assert.deepEqual(dellCanary.acceptanceCalls, [["fixture", "canary", "receipt:canary"]]);
+  assert.equal(dellCanary.envelopeWrites, 0);
+  assert.equal(dellCanary.eventWrites, 0);
 });
