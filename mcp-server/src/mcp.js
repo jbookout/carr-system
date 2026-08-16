@@ -179,10 +179,37 @@ export const PROFILES = {
   // entries when both are "reads plus a tiny write set".
   //
   // Like those two, it is forced in dispatch() on a HERMES_TOKENS bearer match
-  // and ?profile= is ignored for that actor. Unlike those two, nothing is lost
-  // if an ordinary caller asks for ?profile=hermes: an empty write set can only
-  // ever reduce what that caller could already do.
-  hermes: new Set(),
+  // and ?profile= is ignored for that actor.
+  //
+  // R0 SHIPPED THIS EMPTY, on 2026-08-16, and it stayed empty for a few hours.
+  // Joe's grant the same day: give it the additive write set so it can file the
+  // work he tells it to file. The engineering path he asked about first (create
+  // a durable work request, dispatch it to Claude Code or Codex) stays shut —
+  // the work_request store exists as of migration 0114 but its transition
+  // guards do not, and the council made a canonical action-risk registry
+  // blocking before any of it.
+  //
+  // THE SET IS A STRICT SUBSET OF `capture`, ASSERTED BY TEST rather than by
+  // this comment. Written out rather than spread from capture on purpose: a
+  // spread means a verb added to capture for a scheduled run's benefit lands
+  // silently in a persistent daemon's hands, and "silently" is the whole
+  // problem with this class of actor. Widening here is an edit somebody makes
+  // and reviews.
+  //
+  // WHAT IT DELIBERATELY EXCLUDES, beyond everything outside capture:
+  // record-signal and record-branch-evidence, which are investigation
+  // machinery. An investigation is a chain of reasoning a human is steering,
+  // and a runtime dropping evidence into one mid-flight changes what the
+  // adjudicator sees without being asked.
+  //
+  // Nothing here can destroy, re-point, or create a party, advance a deal,
+  // touch a rule, draft a client document, or send anything. Every verb is
+  // additive and idempotency-keyed.
+  hermes: new Set([
+    "log-activity", "stamp-touch", "add-loop", "update-loop",
+    "set-next-action", "complete-action", "add-critical-date", "record-finding",
+    "record-defect",
+  ]),
 };
 
 const PROFILE_NOTICE = {
@@ -225,12 +252,15 @@ const PROFILE_NOTICE = {
     "model, the commit sha, and the contract version), and a clean run with nothing to flag is still " +
     "a finding worth recording (found:false), not silence.</notice>",
   hermes:
-    "\n\n<notice>This session runs on the HERMES profile: every read verb, and no write verb at " +
-    "all. This profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and " +
-    "cannot be widened by this token under any request. It is the R0 evaluation runtime the " +
-    "2026-08-12 frontier council cleared, never a human seat and never a sponsored one: it carries " +
-    "no personal brain scope, so Joe-personal and Dell-personal material is not yours to read. " +
-    "Report what you would have written and hand it back for a human to file.</notice>",
+    "\n\n<notice>This session runs on the HERMES profile: every read verb, plus exactly nine " +
+    "additive write verbs — log-activity, stamp-touch, add-loop, update-loop, set-next-action, " +
+    "complete-action, add-critical-date, record-finding, record-defect. Every other write verb " +
+    "refuses with not_in_profile: no advancing a deal, no creating a party, no merging, no touching " +
+    "a rule, no drafting a client document, and there is no send verb in this system at all. This " +
+    "profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and cannot be " +
+    "widened by this token under any request. You carry Joe's personal brain and never Dell's. " +
+    "File what he tells you to file; for anything outside those nine verbs, say what you would have " +
+    "written and hand it back for a human.</notice>",
 };
 
 /** Resolve ?profile= to a name, defaulting to full. An unknown value fails CLOSED to read. */
