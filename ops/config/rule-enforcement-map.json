@@ -142,7 +142,7 @@
         "ops/chat-lint-gate-selftest.py",
         "baselines/writing-lint.txt"
       ],
-      "failure_mode": "advisory surfacing at write time \u2014 HARD findings are reported, not refused"
+      "failure_mode": "advisory surfacing at write time — HARD findings are reported, not refused"
     },
     "weekend_quiet": {
       "implementation": [
@@ -182,7 +182,7 @@
         "ops/chat-lint-gate-selftest.py",
         "ops/unlinked-file-ask-selftest.py"
       ],
-      "failure_mode": "deferred surfacing \u2014 the finding is parked and injected as context before the NEXT reply (UserPromptSubmit); it does not block the Stop, because the offending text has already reached the partner and a block would only buy a paid-for restatement (rule 1d50a3bb)"
+      "failure_mode": "deferred surfacing — the finding is parked and injected as context before the NEXT reply (UserPromptSubmit); it does not block the Stop, because the offending text has already reached the partner and a block would only buy a paid-for restatement (rule 1d50a3bb)"
     },
     "trigger_grant": {
       "implementation": [
@@ -591,8 +591,8 @@
       "enforcement_class": "surfacing",
       "binding_moment": "nightly, over every active vendor",
       "control": "vendor_level_drift",
-      "exceptions": "the level stays a HUMAN JUDGMENT and is stored, not computed \u2014 the rule says so itself, because a relationship can matter for reasons no event count can see. The check reports and never writes.",
-      "note": "CORRECTED 2026-08-15. This rule was mapped transactional_schema/versioned_record with the claim 'countable evidence required by verb'. That claim was false: `relationship_level` appears exactly once in the whole MCP server, inside merge-vendor-rows' survivorship field list. No verb exposes it as an editable field, so no verb could have been requiring evidence for it. What actually exists is the mechanism the rule names itself, v_vendor_level_suggestion \u2014 present since migration 0052, refined 0053/0065, rebuilt 0069 to exclude merged rows, and read by NOTHING outside the migrations until now. It is read nightly and reports only the view's own `disagrees` rows, which require both sides known: 16 of 301 active vendors on the first live run, where a crude recorded<>suggested comparison returns 239. Twelve of the sixteen sit at Established or Core with no introduction or referral recorded in either direction, which usually means the edges were never written down rather than the level being wrong."
+      "exceptions": "the level stays a HUMAN JUDGMENT and is stored, not computed — the rule says so itself, because a relationship can matter for reasons no event count can see. The check reports and never writes.",
+      "note": "CORRECTED 2026-08-15. This rule was mapped transactional_schema/versioned_record with the claim 'countable evidence required by verb'. That claim was false: `relationship_level` appears exactly once in the whole MCP server, inside merge-vendor-rows' survivorship field list. No verb exposes it as an editable field, so no verb could have been requiring evidence for it. What actually exists is the mechanism the rule names itself, v_vendor_level_suggestion — present since migration 0052, refined 0053/0065, rebuilt 0069 to exclude merged rows, and read by NOTHING outside the migrations until now. It is read nightly and reports only the view's own `disagrees` rows, which require both sides known: 16 of 301 active vendors on the first live run, where a crude recorded<>suggested comparison returns 239. Twelve of the sixteen sit at Established or Core with no introduction or referral recorded in either direction, which usually means the edges were never written down rather than the level being wrong."
     },
     "54e2bcb9": {
       "category": "transactional_schema",
@@ -769,7 +769,7 @@
       "enforcement_class": "deny_gate",
       "binding_moment": "before a partner-facing send",
       "control": "weekend_quiet",
-      "exceptions": "a partner has typed in this session \u2014 his own election to work, which a session cannot assert for him"
+      "exceptions": "a partner has typed in this session — his own election to work, which a session cannot assert for him"
     },
     "25fcddee": {
       "category": "session_task_rail",
@@ -1034,7 +1034,7 @@
       "enforcement_class": "schema",
       "binding_moment": "at every humanOnly verb call",
       "control": "versioned_record",
-      "exceptions": "none \u2014 the check is on verified partner actor, not on identity"
+      "exceptions": "none — the check is on verified partner actor, not on identity"
     },
     "80def9d2": {
       "category": "judgment_advisory",
@@ -1142,7 +1142,7 @@
       "binding_moment": "update-document-status, when a human marks a document sent",
       "control": "outbound_format",
       "exceptions": "`format_exception` with a stated reason; draft and handed_to_joe are not gated; a status-free update recording lint results is not gated; an unreadable template kind is not a violation",
-      "note": "Built 2026-08-15. Binds at update-document-status, the only place a human states a document went out. An LOI or letter marked sent with no Word file recorded is refused; a spreadsheet marked sent with no PDF is refused. Not about whether the file was produced \u2014 output_kinds {working,pdf} names roles, not formats, and both exist by then \u2014 but about which one was handed over. Overridable by `format_exception` with a stated reason, because Joe's rule ends 'unless the partner says otherwise'; the exception rides the event. An unreadable template kind is not treated as a violation."
+      "note": "Built 2026-08-15. Binds at update-document-status, the only place a human states a document went out. An LOI or letter marked sent with no Word file recorded is refused; a spreadsheet marked sent with no PDF is refused. Not about whether the file was produced — output_kinds {working,pdf} names roles, not formats, and both exist by then — but about which one was handed over. Overridable by `format_exception` with a stated reason, because Joe's rule ends 'unless the partner says otherwise'; the exception rides the event. An unreadable template kind is not treated as a violation."
     },
     "4399df76": {
       "category": "judgment_advisory",
@@ -1171,7 +1171,7 @@
       "enforcement_class": "surfacing",
       "binding_moment": "writing HIPAA in any surface",
       "control": "writing_lint",
-      "exceptions": "none \u2014 HARD findings are reported at write time, not refused"
+      "exceptions": "none — HARD findings are reported at write time, not refused"
     },
     "51d9f05f": {
       "category": "judgment_advisory",
@@ -1215,8 +1215,8 @@
       "enforcement_class": "stop_gate",
       "binding_moment": "over the rendered glanceable surfaces",
       "control": "glanceable_lead",
-      "exceptions": "the rule's own DEAL carve-out, resolved against the RECORD rather than the render \u2014 a lead ref whose party also holds a client row or a live deal is permitted; bookkeeping and provenance mentions are not outreach; open-loops-backlog.md is read on cadence rather than glanceable",
-      "note": "Built 2026-08-15. Its first version flagged loop 338 (the Ramsey buyer advisory) and a session baselined it as a known violation. The record showed Ramsey holds a client row C-199 and a live deal, making the row a dated deal follow-up \u2014 the carve-out the rule writes into itself. Two bugs fed that: the render alone cannot answer the carve-out question, and `find` returns nothing for a bare ref, so asking it for the ref gave an empty answer that read as no-client-link. It now asks by the person name written before the ref, and an unreachable record reports UNVERIFIED rather than clean (rule 2b889e80)."
+      "exceptions": "the rule's own DEAL carve-out, resolved against the RECORD rather than the render — a lead ref whose party also holds a client row or a live deal is permitted; bookkeeping and provenance mentions are not outreach; open-loops-backlog.md is read on cadence rather than glanceable",
+      "note": "Built 2026-08-15. Its first version flagged loop 338 (the Ramsey buyer advisory) and a session baselined it as a known violation. The record showed Ramsey holds a client row C-199 and a live deal, making the row a dated deal follow-up — the carve-out the rule writes into itself. Two bugs fed that: the render alone cannot answer the carve-out question, and `find` returns nothing for a bare ref, so asking it for the ref gave an empty answer that read as no-client-link. It now asks by the person name written before the ref, and an unreachable record reports UNVERIFIED rather than clean (rule 2b889e80)."
     },
     "b1521526": {
       "category": "judgment_advisory",
@@ -1287,7 +1287,7 @@
       "enforcement_class": "deny_gate",
       "binding_moment": "a Chrome-extension tool call whose target host is costar.com",
       "control": "costar_lane",
-      "exceptions": "none \u2014 the sanctioned Browser-pane lane is always open on the same URL, so a refusal never blocks the work"
+      "exceptions": "none — the sanctioned Browser-pane lane is always open on the same URL, so a refusal never blocks the work"
     },
     "8aefcdce": {
       "category": "judgment_advisory",
@@ -1310,7 +1310,7 @@
       "binding_moment": "update-document-status, when a human marks a document sent",
       "control": "outbound_format",
       "exceptions": "`format_exception` with a stated reason; draft and handed_to_joe are not gated; a status-free update recording lint results is not gated; an unreadable template kind is not a violation",
-      "note": "Built 2026-08-15. Binds at update-document-status, the only place a human states a document went out. An LOI or letter marked sent with no Word file recorded is refused; a spreadsheet marked sent with no PDF is refused. Not about whether the file was produced \u2014 output_kinds {working,pdf} names roles, not formats, and both exist by then \u2014 but about which one was handed over. Overridable by `format_exception` with a stated reason, because Joe's rule ends 'unless the partner says otherwise'; the exception rides the event. An unreadable template kind is not treated as a violation. Same control: this rule carries the same split and points at 4dd44fd7 for it."
+      "note": "Built 2026-08-15. Binds at update-document-status, the only place a human states a document went out. An LOI or letter marked sent with no Word file recorded is refused; a spreadsheet marked sent with no PDF is refused. Not about whether the file was produced — output_kinds {working,pdf} names roles, not formats, and both exist by then — but about which one was handed over. Overridable by `format_exception` with a stated reason, because Joe's rule ends 'unless the partner says otherwise'; the exception rides the event. An unreadable template kind is not treated as a violation. Same control: this rule carries the same split and points at 4dd44fd7 for it."
     },
     "0f38532e": {
       "category": "judgment_advisory",
@@ -1377,7 +1377,7 @@
       "enforcement_class": "deny_gate",
       "binding_moment": "confirm-merge, before anything is written",
       "control": "lead_client_pair",
-      "exceptions": "the Petersen shape \u2014 two party rows for one human \u2014 passes `same_person_because` with what establishes it; two leads, two clients, a party already holding both roles, and anything touching a vendor row are all out of scope",
+      "exceptions": "the Petersen shape — two party rows for one human — passes `same_person_because` with what establishes it; two leads, two clients, a party already holding both roles, and anything touching a vendor row are all out of scope",
       "note": "Built 2026-08-15 after the Ramsey false positive showed the same confusion from the other direction. Joe's ruling: everyone starts as a lead, so an L- and a C- ref for one person is the system working. The gate refuses a merge whose only basis is a name match, is symmetric so swapping the arguments does not slip past, writes nothing when it refuses, and records the stated basis on the event because a merge is permanent and a retired ref is never reissued."
     },
     "179be4b8": {
@@ -1432,7 +1432,7 @@
       "enforcement_class": "deny_gate",
       "binding_moment": "an add-loop carrying marker='decision'",
       "control": "escalation",
-      "exceptions": "client-facing, public, money and irreversible calls, which are Joe\u2019s"
+      "exceptions": "client-facing, public, money and irreversible calls, which are Joe’s"
     },
     "4fae20f4": {
       "category": "judgment_advisory",
@@ -1558,15 +1558,15 @@
       "enforcement_class": "schema",
       "binding_moment": "at every doctrine-section write",
       "control": "versioned_record",
-      "exceptions": "none \u2014 base_version and the humanOnly boundary both apply"
+      "exceptions": "none — base_version and the humanOnly boundary both apply"
     },
     "173119a8": {
       "category": "session_task_rail",
       "enforcement_class": "surfacing",
       "binding_moment": "before any claim about uncommitted work, a dirty tree, or who is blocking whom",
       "control": "whose_work",
-      "exceptions": "none \u2014 the measurement is always available; what cannot be gated is a session choosing not to ask",
-      "note": "Built 2026-08-15. bin/whose-work.py fetches, then reports AHEAD and BEHIND as two separate facts plus loose files with their last author; tools/health-check.py carries the same measurement as its `landed against origin` row, so the manual and automated paths are one implementation (rule a8c55a47). SURFACING rather than deny, stated honestly: a hook can make the right answer cheap and put it on the surface Joe reads, but no predicate can catch a session that reasons about tree state without asking. The half that IS deniable \u2014 ending a session with unpushed commits \u2014 is already held by loose_work.",
+      "exceptions": "none — the measurement is always available; what cannot be gated is a session choosing not to ask",
+      "note": "Built 2026-08-15. bin/whose-work.py fetches, then reports AHEAD and BEHIND as two separate facts plus loose files with their last author; tools/health-check.py carries the same measurement as its `landed against origin` row, so the manual and automated paths are one implementation (rule a8c55a47). SURFACING rather than deny, stated honestly: a hook can make the right answer cheap and put it on the surface Joe reads, but no predicate can catch a session that reasons about tree state without asking. The half that IS deniable — ending a session with unpushed commits — is already held by loose_work.",
       "planned_control": "A sanctioned helper script (bin/whose-work.sh) that always fetches + diffs against origin/<branch> and prints the sign, made the ONLY documented way to check 'who is blocking whom'."
     },
     "4a53ff82": {
@@ -1693,7 +1693,7 @@
     "1c42d80c": {
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
-      "why_unenforceable": "Requires judging whether a given move fixes the cause or routes around it, which no predicate can decide: reshaping a command to get through a false refusal and writing a different correct command are the same keystrokes. The rule works by being recited at the moment friction appears, and its own text names the tell \u2014 the system still does the wrong thing and only this session knows the trick."
+      "why_unenforceable": "Requires judging whether a given move fixes the cause or routes around it, which no predicate can decide: reshaping a command to get through a false refusal and writing a different correct command are the same keystrokes. The rule works by being recited at the moment friction appears, and its own text names the tell — the system still does the wrong thing and only this session knows the trick."
     },
     "6172e7d5": {
       "category": "judgment_advisory",
@@ -1703,7 +1703,12 @@
     "c8ebeb5b": {
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
-      "why_unenforceable": "The binding condition is recognising that a finding describes an ACQUISITION \u2014 a platform filing an entity on an existing practice address, an ownership change, a retirement sale \u2014 which is a judgment about what a finding means, not a field any record carries. Nothing can mechanically tell an acquisition from an ordinary entity filing at a shared address. The downstream halves inherit that: cadence and outreach-queue placement would be checkable only once a lead already carried a source-was-an-acquisition flag, and nothing sets one. Reopen as enforceable if the finding lanes ever stamp that provenance on the lead at creation, which would make the nurture-cadence and never-an-outreach-queue halves a predicate."
+      "why_unenforceable": "The binding condition is recognising that a finding describes an ACQUISITION — a platform filing an entity on an existing practice address, an ownership change, a retirement sale — which is a judgment about what a finding means, not a field any record carries. Nothing can mechanically tell an acquisition from an ordinary entity filing at a shared address. The downstream halves inherit that: cadence and outreach-queue placement would be checkable only once a lead already carried a source-was-an-acquisition flag, and nothing sets one. Reopen as enforceable if the finding lanes ever stamp that provenance on the lead at creation, which would make the nurture-cadence and never-an-outreach-queue halves a predicate."
+    },
+    "d7f74c93": {
+      "category": "judgment_advisory",
+      "enforcement_class": "unbuilt",
+      "planned_control": "A chat_lint pattern that fires when an outgoing reply argues an agent-access or connector boundary using confidentiality, data exposure, or trust-in-the-model language. The exposure fork is closed (decision 94c0206f), so that framing is always a re-argument. Detectable as co-occurrence: boundary/withhold/access vocabulary within a few sentences of confidential/exposure/leak/trust-with-our-data, in a reply naming Hermes, Grok, Codex or a connector. The gate should demand the held-credential and autonomous-authority framing instead."
     }
   },
   "active_rule_ids": {
@@ -1875,7 +1880,8 @@
       "ab814a26",
       "5cd8d0f6",
       "1c42d80c",
-      "c8ebeb5b"
+      "c8ebeb5b",
+      "d7f74c93"
     ],
     "joe": [
       "6330bec8",
