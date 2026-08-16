@@ -144,6 +144,16 @@ CASES = [
         codex_tool("exec", "await tools.mcp__carr__accept_ready_plan({ human_ref: 'WR-000001' });"),
         codex_assistant("Completed."),
     ], True),
+    ("Codex outcome-feedback proposal requires evidence", [
+        codex_user("propose observed outcome feedback"),
+        codex_tool("exec", "await tools.mcp__carr__propose_outcome_feedback({ human_ref: 'WR-000001' });"),
+        codex_assistant("Completed."),
+    ], True),
+    ("Codex outcome-feedback acceptance requires evidence", [
+        codex_user("accept the exact observed outcome"),
+        codex_tool("exec", "await tools.mcp__carr__accept_outcome_feedback({ human_ref: 'WR-000001' });"),
+        codex_assistant("Completed."),
+    ], True),
     ("CARR read action permits completion", [
         codex_user("reconcile Musicologie"),
         codex_tool("exec", "await tools.mcp__carr__patch_deal_field({ id: 'd1' });"),
@@ -185,6 +195,7 @@ def authority_family_coverage():
     """Human-only acceptance/retirement and future proposal/approval writes stay gated."""
     actions = [
         "accept-workflow", "disable-legacy-schedule", "approve-work-request",
+        "accept-outcome-feedback",
         "propose-cognition-job", "decide-guidance-import-batch",
         "deactivate-guidance-registry",
     ]
