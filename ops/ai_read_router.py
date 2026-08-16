@@ -19,7 +19,7 @@ import ai_eval
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = REPO_ROOT / "evals" / "ai" / "function-router.v1.json"
 BOUND_SUITE_PATH = REPO_ROOT / "evals" / "ai" / "model-boundary.v1.json"
-POLICY_SHA256 = "ff1acac17d99f02e07aacf29281a7155a64aeaf65d83087ccfd4f4dd89f1633e"
+POLICY_SHA256 = "15e7980822c5b4959e0e9a73dfd814753a9c95bfd15eb2fbce5f58d30c58cd4c"
 ACTION_RISK_REGISTRY_PATH = REPO_ROOT / "control-room" / "contracts" / "action-risk-registry.v1.json"
 SERVER_CONTEXT = {
     "organization_tenant_id": "carr-internal",
@@ -29,10 +29,10 @@ SERVER_CONTEXT = {
 }
 POLICY_FIELDS = {
     "schema_version", "artifact_type", "data_class", "execution", "calls_models",
-    "writes_records", "allowed_actions", "selected_tool_evidence", "routes", "denied_targets",
+    "writes_records", "allowed_actions", "routes", "denied_targets",
 }
-ROUTE_FIELDS = {"tool_name", "write", "full_only", "input_schema"}
-SELECTED_TOOL_EVIDENCE_FIELDS = ROUTE_FIELDS | {"input_schema_digest"}
+TOOL_SEMANTIC_FIELDS = {"tool_name", "write", "full_only", "input_schema"}
+ROUTE_FIELDS = TOOL_SEMANTIC_FIELDS | {"protection"}
 DENIED_TARGET_FIELDS = {"tool_name", "write", "full_only"}
 PROPOSAL_FIELDS = {"schema_version", "tool_name", "arguments"}
 FORBIDDEN_AUTHORITY_FIELDS = {
@@ -141,22 +141,6 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         raise RouterError("action risk registry cannot be read") from exc
     if not isinstance(artifact["routes"], list) or len(artifact["routes"]) < 2:
         raise RouterError("router policy needs two safe routes")
-    if not isinstance(artifact["selected_tool_evidence"], list):
-        raise RouterError("selected tool evidence is invalid")
-    evidence_by_name: dict[str, dict[str, Any]] = {}
-    for row in artifact["selected_tool_evidence"]:
-        evidence = _exact_object(row, SELECTED_TOOL_EVIDENCE_FIELDS, "selected tool evidence")
-        name = evidence["tool_name"]
-        if not _nonempty_string(name) or name in evidence_by_name:
-            raise RouterError("selected tool evidence must have unique names")
-        if evidence["write"] is not False or evidence["full_only"] is not False:
-            raise RouterError("selected tool evidence is not read-only")
-        _validate_schema(evidence["input_schema"])
-        if evidence["input_schema_digest"] != _canonical_digest(evidence["input_schema"]):
-            raise RouterError("selected tool schema digest does not match")
-        evidence_by_name[name] = evidence
-    if len(evidence_by_name) != len(artifact["routes"]):
-        raise RouterError("selected tool evidence does not match routes")
     names: set[str] = set()
     for row in artifact["routes"]:
         route = _exact_object(row, ROUTE_FIELDS, "router route")
@@ -164,14 +148,15 @@ def _validate_policy(policy: Any) -> dict[str, Any]:
         if not _nonempty_string(name) or name in names:
             raise RouterError("router routes must have unique names")
         names.add(name)
-        if route["write"] is not False or route["full_only"] is not False:
+        if route["write"] is not False or route["full_only"] is not False or route["protection"] != "read_only":
             raise RouterError("router route is not safe for read-only selection")
         _validate_schema(route["input_schema"])
-        expected = evidence_by_name.get(name)
-        if expected is None or route != {key: expected[key] for key in ROUTE_FIELDS}:
-            raise RouterError("router route drifts from selected tool evidence")
         risk = risk_rows.get(name)
-        if not isinstance(risk, dict) or risk.get("write") is not False or risk.get("protection") != "read_only":
+        if (
+            not isinstance(risk, dict)
+            or risk.get("write") != route["write"]
+            or risk.get("protection") != route["protection"]
+        ):
             raise RouterError("router route does not match action risk evidence")
     if not isinstance(artifact["denied_targets"], list):
         raise RouterError("router denied targets are invalid")
