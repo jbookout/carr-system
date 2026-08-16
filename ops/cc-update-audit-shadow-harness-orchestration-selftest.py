@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 PATH = Path(__file__).with_name("cc-update-audit-shadow-harness.py")
@@ -97,11 +98,24 @@ def main() -> int:
     assert any(sql.startswith("rollback to savepoint") for sql in refusing.calls)
     refuses(lambda: mod.assert_receipt_append_only_cursor(PermissiveCursor(), "job-1", FakeDbError),
             "update was accepted")
+    secret_url = "postgresql://carr_jobs:top-secret@example.invalid/carr"
+    try:
+        mod.must(subprocess.CompletedProcess(
+            args=["fixture"], returncode=1,
+            stdout="", stderr=f"connection failed at {secret_url}\n",
+        ), "redaction fixture")
+    except mod.HarnessRefusal as exc:
+        detail = str(exc)
+        assert secret_url not in detail
+        assert "top-secret" not in detail
+        assert "[url]" in detail
+    else:
+        raise AssertionError("expected failed subprocess refusal")
     source = PATH.read_text(encoding="utf-8")
     assert "'wrapper','fixture:release:'||k" in source
     assert "'wrapper','fixture:deployment'" in source
     assert "'fixture','fixture:release:'||k" not in source
-    print("cc-update-audit-shadow-harness-orchestration-selftest: 11 cases passed")
+    print("cc-update-audit-shadow-harness-orchestration-selftest: 12 cases passed")
     return 0
 
 

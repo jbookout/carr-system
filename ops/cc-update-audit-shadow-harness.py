@@ -145,7 +145,10 @@ def psql(dsn: str, sql: str) -> subprocess.CompletedProcess[str]:
 
 
 def must(result: subprocess.CompletedProcess[str], label: str) -> None:
-    if result.returncode: raise HarnessRefusal(f"{label} failed: {(result.stderr or result.stdout).strip()[-240:]}")
+    if result.returncode:
+        raise HarnessRefusal(
+            f"{label} failed: {safe_failure_detail(result.stderr or result.stdout)}"
+        )
 
 
 def preflight_migration_contract(env: dict[str, str]) -> None:
