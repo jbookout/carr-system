@@ -13,9 +13,9 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 20,
-  "append_only": 31,
-  "optimistic_concurrency": 16,
+  "human_boundary": 22,
+  "append_only": 34,
+  "optimistic_concurrency": 17,
   "read_only": 35,
   "NONE": 12,
   "upsert_last_writer_wins": 4
@@ -142,6 +142,19 @@
     "upserts": 0
    },
    "does": "Correct the WORDS of an existing rule in place, keeping its id, created_at, taught_by, quote and activation history"
+  },
+  "approve-retrieval-proposals": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "HUMAN-ONLY atomic batch approval"
   },
   "attach-to-campaign": {
    "protection": "optimistic_concurrency",
@@ -936,6 +949,58 @@
    },
    "does": "Promote a candidate_pool row into a real lead: mints the party, mints the next L-ref, copies the identity, contact and est-lease-event stamps across, points the"
   },
+  "propose-retrieval-concept": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Propose a human-named operating-situation concept"
+  },
+  "propose-retrieval-mapping": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Propose a concept-to-current-doctrine-section mapping with a required rationale"
+  },
+  "propose-retrieval-phrase": {
+   "protection": "append_only",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Propose an approved real-world phrase for an existing retrieval concept"
+  },
+  "propose-retrieval-retirement": {
+   "protection": "optimistic_concurrency",
+   "write": true,
+   "binds_both_partners": false,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Propose retirement of a concept, phrase, or mapping without mutating active curation"
+  },
   "read-deal-reconciliation": {
    "protection": "read_only",
    "write": false,
@@ -1157,6 +1222,19 @@
    },
    "does": "Retire a section (status='retired'): it leaves snapshots and search but its history stays queryable forever"
   },
+  "retire-retrieval-curation": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": true,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "HUMAN-ONLY guarded retirement of approved retrieval curation"
+  },
   "retire-rule": {
    "protection": "human_boundary",
    "write": true,
@@ -1220,7 +1298,7 @@
     "inserts": 0,
     "upserts": 0
    },
-   "does": "Full-text search over current doctrine revisions (Postgres FTS, websearch syntax: quoted phrases, OR, -exclusions)"
+   "does": "Deterministic doctrine search: weighted title/body FTS unioned with human-approved situation concepts"
   },
   "set-doctrine-refs": {
    "protection": "optimistic_concurrency",
