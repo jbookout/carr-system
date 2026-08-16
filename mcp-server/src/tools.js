@@ -1659,6 +1659,59 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
   return { old_value: oldRow.rows[0].value, new_value: value };
 }
 
+const FIND_CATCH_UP_QUERY_MAX = 200;
+const FIND_CATCH_UP_LIMIT_MAX = 50;
+const FIND_CATCH_UP_CANDIDATE_CAP = 25;
+
+function kindFromRef(ref) {
+  if (/^L-/i.test(ref)) return "lead";
+  if (/^C-/i.test(ref)) return "client";
+  if (/^[VT]-/i.test(ref)) return "vendor";
+  if (/^P-/i.test(ref)) return "party";
+  return "record";
+}
+
+// Turn find's deliberately rich result into the one thing a composition may
+// act on: an explicit LIVE target. Related lead/client links and deals_via_link
+// are context, not matches, so they never enter this list. Ref-bearing rows are
+// deduplicated because find can surface the same survivor in both parties and
+// organizations; deal-name rows are not deduplicated because two deals with one
+// name are still two records and therefore must stop for disambiguation.
+function findCatchUpCandidates(found) {
+  if (!found || typeof found !== "object" || Array.isArray(found) ||
+      !Array.isArray(found.parties) || !Array.isArray(found.organizations) ||
+      !Array.isArray(found.deals))
+    throw new ToolError({ error: "find_result_invalid" });
+
+  const refs = new Map();
+  const addRef = (target, name, kind) => {
+    if (typeof target !== "string" || !target.trim()) return;
+    const clean = target.trim();
+    if (!refs.has(clean)) refs.set(clean, {
+      kind: typeof kind === "string" && kind ? kind : kindFromRef(clean),
+      name: typeof name === "string" && name ? name : clean,
+      target: clean,
+    });
+  };
+
+  for (const row of found.parties) {
+    if (row && row.merged === false) addRef(row.ref, row.name, row.kind);
+  }
+  for (const row of found.organizations) {
+    if (!row || typeof row !== "object") continue;
+    for (const ref of [...(Array.isArray(row.refs) ? row.refs : []),
+                       ...(Array.isArray(row.role_refs) ? row.role_refs : [])])
+      addRef(ref, row.name, kindFromRef(ref));
+  }
+
+  const deals = found.deals.flatMap((row) =>
+    row && typeof row.name === "string" && row.name.trim()
+      ? [{ kind: "deal", name: row.name.trim(), target: row.name.trim() }]
+      : []);
+  return [...refs.values(), ...deals].sort((a, b) =>
+    a.target.localeCompare(b.target) || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
+}
+
 // ---------- the registry ----------
 // Each: { description, inputSchema, write: bool, humanOnly?: bool, handler(client, actor, args) }
 
@@ -2200,6 +2253,59 @@ export const TOOLS = {
          from v_subject_timeline where subject_type=$1 and subject_id=$2
          order by occurred_at desc limit $3`, [s.type, s.id, args.limit || 20]);
       return { subject: s, timeline: rows.rows };
+    },
+  },
+
+  "find-and-catch-up": {
+    write: false,
+    description: "Find one live person, practice, vendor, or deal by name and immediately return that record's catch-me-up timeline. This is the bounded read-only composition of find then catch-me-up: exactly one live match proceeds; zero returns not_found; multiple matches return needs_disambiguation and no timeline. Retired aliases, linked neighbours, and related deals are never selected as the target. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      query: { type: "string", description: `name to find, at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
+      limit: { type: "integer", minimum: 1, maximum: FIND_CATCH_UP_LIMIT_MAX, default: 20,
+        description: `timeline rows returned, 1-${FIND_CATCH_UP_LIMIT_MAX}` },
+    }, required: ["query"] },
+    handler: async (c, actor, args) => {
+      const allowed = new Set(["query", "limit"]);
+      if (!args || typeof args !== "object" || Array.isArray(args) ||
+          Object.keys(args).some((key) => !allowed.has(key)))
+        throw new ToolError({ error: "unexpected_arguments" });
+
+      if (typeof args.query !== "string" || !args.query.trim() ||
+          args.query.trim().length > FIND_CATCH_UP_QUERY_MAX)
+        throw new ToolError({ error: "invalid_query",
+          hint: `query must be a nonempty string of at most ${FIND_CATCH_UP_QUERY_MAX} characters` });
+      const query = args.query.trim();
+      const limit = args.limit === undefined ? 20 : args.limit;
+      if (!Number.isInteger(limit) || limit < 1 || limit > FIND_CATCH_UP_LIMIT_MAX)
+        throw new ToolError({ error: "invalid_limit",
+          hint: `limit must be an integer from 1 to ${FIND_CATCH_UP_LIMIT_MAX}` });
+
+      // Reuse the registered read handlers directly on the same reader client.
+      // This is not a generic composite dispatcher: the two names are fixed in
+      // code, no callback/tool name/provider is accepted, and the second handler
+      // is unreachable until the first yields exactly one live target.
+      const found = await TOOLS["find"].handler(c, actor, { query });
+      const candidates = findCatchUpCandidates(found);
+      if (candidates.length === 0) {
+        const retiredMatches = found.parties.filter((row) => row?.merged === true).length +
+          found.organizations.reduce((total, row) => total +
+            (Number.isInteger(row?.retired_aliases) ? row.retired_aliases : 0), 0);
+        return { state: "not_found", query, candidates: [], retired_matches: retiredMatches,
+          hint: retiredMatches
+            ? "Only retired aliases matched; search the survivor name or call catch-me-up with a known retired ref."
+            : "No live record matched this name." };
+      }
+      if (candidates.length !== 1) {
+        return { state: "needs_disambiguation", query,
+          candidate_count: candidates.length,
+          candidates: candidates.slice(0, FIND_CATCH_UP_CANDIDATE_CAP),
+          candidates_truncated: candidates.length > FIND_CATCH_UP_CANDIDATE_CAP,
+          hint: "Choose one exact target and call catch-me-up; this verb never guesses." };
+      }
+
+      const match = candidates[0];
+      const catchUp = await TOOLS["catch-me-up"].handler(c, actor, { ref: match.target, limit });
+      return { state: "completed", query, match: { ...match }, catch_up: catchUp };
     },
   },
 

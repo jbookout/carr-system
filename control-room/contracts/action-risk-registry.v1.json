@@ -16,7 +16,7 @@
   "human_boundary": 20,
   "append_only": 31,
   "optimistic_concurrency": 16,
-  "read_only": 33,
+  "read_only": 34,
   "NONE": 12,
   "upsert_last_writer_wins": 4
  },
@@ -493,6 +493,19 @@
     "upserts": 0
    },
    "does": "Search people, practices, buildings, deals, leads, vendors by name (fuzzy)"
+  },
+  "find-and-catch-up": {
+   "protection": "read_only",
+   "write": false,
+   "binds_both_partners": false,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Find one live person, practice, vendor, or deal by name and immediately return that record's catch-me-up timeline"
   },
   "find-precedent": {
    "protection": "read_only",
