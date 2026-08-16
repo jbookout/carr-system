@@ -279,6 +279,20 @@ def main() -> int:
               "pending: 0" in verify.stdout,
               verify.stdout.strip().splitlines()[-1][:160] if verify.stdout.strip() else "")
 
+        # 0176 intentionally leaves its FK-bound scheduler surface registry
+        # empty at migration time.  Synchronize the checked-in manifest before
+        # the DB gate verifies exact registry parity; seeding it earlier would
+        # fail on a fresh database where job definitions do not yet exist.
+        synced = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "control-plane.py"), "sync"],
+            capture_output=True, text=True, timeout=600,
+            env={**os.environ, "DATABASE_URL": rebuilt_dsn})
+        check("2b1. authority sync populates the FK-bound scheduler registry after definitions",
+              synced.returncode == 0,
+              synced.stderr.strip().splitlines()[-1][:200]
+              if synced.stderr.strip() else
+              synced.stdout.strip().splitlines()[-1][:200] if synced.stdout.strip() else "")
+
         # A role can exist and receive every grant while still being NOLOGIN.
         # Use an in-process password only on this disposable database and prove
         # the actual authenticated session; never repair LOGIN in this probe.

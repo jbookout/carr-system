@@ -4990,15 +4990,17 @@ export const TOOLS = {
     description: "Joe-only authority operation to retire one legacy schedule after accepted shadow and canary completion receipts exist. Uses the authority connection; a routine writer credential cannot invoke it.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, workflow_key: { type: "string" }, reason: { type: "string" },
-    }, required: ["idempotency_key", "workflow_key", "reason"] },
+      surface_id: { type: "string" }, locator: { type: "string" },
+    }, required: ["idempotency_key", "workflow_key", "surface_id", "locator", "reason"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "disable-legacy-schedule", args, async () => {
-      const retired = await c.query("select ops.disable_legacy_schedule($1,$2) as disabled",
-        [args.workflow_key, args.reason]);
-      if (!retired.rows[0].disabled)
+      const retired = await c.query("select ops.disable_legacy_schedule($1,$2,$3,$4,$5) as receipt_ref",
+        [args.workflow_key, args.surface_id, args.locator, args.reason, args.idempotency_key]);
+      if (!retired.rows[0].receipt_ref)
         throw new ToolError({ error: "legacy_schedule_not_disabled", workflow_key: args.workflow_key });
       await writeEvent(c, actor, "disable-legacy-schedule", "system", args.workflow_key,
-        { new: { workflow_key: args.workflow_key, reason: args.reason }, idempotency_key: args.idempotency_key });
-      return { ok: true, workflow_key: args.workflow_key, disabled: true };
+        { new: { workflow_key: args.workflow_key, surface_id: args.surface_id, locator: args.locator,
+                 reason: args.reason, receipt_ref: retired.rows[0].receipt_ref }, idempotency_key: args.idempotency_key });
+      return { ok: true, workflow_key: args.workflow_key, disabled: true, receipt_ref: retired.rows[0].receipt_ref };
     }),
   },
 

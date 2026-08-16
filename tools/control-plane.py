@@ -43,8 +43,10 @@ from lib.control_plane_proposal_contracts import (ProposalContractError,
                                                   validate_proposal_contract)  # noqa: E402
 from lib.control_plane_runner import BudgetExceeded, CognitionDispatcher, due_workflows  # noqa: E402
 from lib.control_plane_runtime_collectors import RuntimeCanonicalEvidenceCollector  # noqa: E402
+from lib.control_plane_scheduler_cutover import CutoverRefusal, scheduler_surface_rows  # noqa: E402
 
 MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
+SCHEDULER_CUTOVER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
 
 
 def load_manifest() -> dict[str, Any]:
@@ -53,6 +55,41 @@ def load_manifest() -> dict[str, Any]:
     if errors:
         raise SystemExit("invalid control-plane manifest:\n  " + "\n  ".join(errors))
     return data
+
+
+def load_scheduler_cutover_registry() -> dict[str, Any]:
+    data = json.loads(SCHEDULER_CUTOVER_REGISTRY_PATH.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit("scheduler cutover registry must be an object")
+    return data
+
+
+def sync_scheduler_surface_registry(cur: Any, *, manifest: dict[str, Any], registry: dict[str, Any]) -> int:
+    """Reconcile the canonical scheduler surface projection after definition sync.
+
+    This runs inside the same authority transaction as ``ops.job_definition``
+    synchronization.  Validation completes before the first registry write;
+    hence an incomplete evolution cannot prune a previously usable surface.
+    """
+    try:
+        rows = scheduler_surface_rows(registry, manifest=manifest)
+    except CutoverRefusal as exc:
+        raise RuntimeError(str(exc)) from exc
+    for workflow_key, workflow_version, surface_id, locator, scheduler_kind in rows:
+        cur.execute(
+            """insert into ops.legacy_schedule_surface_registry
+                 (workflow_key,workflow_version,surface_id,locator,scheduler_kind)
+               values (%s,%s,%s,%s,%s)
+               on conflict (surface_id) do update set
+                 workflow_key=excluded.workflow_key,workflow_version=excluded.workflow_version,
+                 locator=excluded.locator,scheduler_kind=excluded.scheduler_kind""",
+            (workflow_key, workflow_version, surface_id, locator, scheduler_kind),
+        )
+    cur.execute(
+        "delete from ops.legacy_schedule_surface_registry where not (surface_id = any(%s))",
+        ([row[2] for row in rows],),
+    )
+    return len(rows)
 
 
 def _dsn_login(value: str) -> str:
@@ -202,9 +239,13 @@ def sync_registry(manifest: dict[str, Any]) -> dict[str, int]:
                  json.dumps(workflow["filtering"]),json.dumps(workflow["validation"]),
                  json.dumps(workflow["retry"]),json.dumps(workflow["deduplication"]),
                  json.dumps(workflow["completion"]),json.dumps(workflow["legacy_schedule"])))
+        # Migration 0176 creates an empty, FK-bound registry.  Populate it
+        # only after every manifest job definition exists, in this transaction.
+        scheduler_surfaces = sync_scheduler_surface_registry(
+            cur, manifest=manifest, registry=load_scheduler_cutover_registry())
         conn.commit()
     return {"provider_routes": len(routes), "cognition_jobs": len(manifest["cognition_jobs"]),
-            "workflows": len(manifest["workflows"])}
+            "workflows": len(manifest["workflows"]), "scheduler_surfaces": scheduler_surfaces}
 
 
 def parse_instant(raw: str | None) -> datetime:

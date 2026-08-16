@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "contract": "control-plane-scheduler-cutover",
+  "observation_max_age_seconds": 900,
+  "surfaces": [
+    {"surface_id":"calendar-fetch-daily.claude-code.v1","workflow_key":"calendar-fetch-daily","workflow_version":3,"scheduler_kind":"claude-code","locator":"calendar-fetch-daily"},
+    {"surface_id":"cc-update-audit.claude-code.v1","workflow_key":"cc-update-audit","workflow_version":1,"scheduler_kind":"claude-code","locator":"cc-update-audit"},
+    {"surface_id":"contact-enrichment-weekly.claude-code.v1","workflow_key":"contact-enrichment-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"contact-enrichment-weekly"},
+    {"surface_id":"content-fuel-harvest-weekly.claude-code.v1","workflow_key":"content-fuel-harvest-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"content-fuel-harvest-weekly"},
+    {"surface_id":"deal-history-research-weekly.claude-code.v1","workflow_key":"deal-history-research-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"deal-history-research-weekly"},
+    {"surface_id":"health-audit-monthly.claude-code.v1","workflow_key":"health-audit-monthly","workflow_version":1,"scheduler_kind":"claude-code","locator":"health-audit-monthly"},
+    {"surface_id":"idea-resurface-monthly.claude-code.v1","workflow_key":"idea-resurface-monthly","workflow_version":1,"scheduler_kind":"claude-code","locator":"idea-resurface-monthly"},
+    {"surface_id":"linkedin-engagement-daily.claude-code.v1","workflow_key":"linkedin-engagement-daily","workflow_version":1,"scheduler_kind":"claude-code","locator":"linkedin-engagement-daily"},
+    {"surface_id":"loop-drain-weekdays.claude-code.v1","workflow_key":"loop-drain-weekdays","workflow_version":1,"scheduler_kind":"claude-code","locator":"loop-drain-weekdays"},
+    {"surface_id":"nightly-record-layer.launchd.v1","workflow_key":"nightly-record-layer","workflow_version":2,"scheduler_kind":"launchd","locator":"com.carr.nightly-record-layer","repo_plist_relpath":"ops/launchd/com.carr.nightly-record-layer.plist","installed_plist_name":"com.carr.nightly-record-layer.plist","canonical_program_arguments":["/bin/zsh","{{REPO}}/bin/nightly.sh"],"canonical_plist_fingerprint":"29a626822aa2f1496a9d54d038bb2a16d6e56f62cda4e111be7d4e15d184713d"},
+    {"surface_id":"notes-sweep-hourly.launchd.v1","workflow_key":"notes-sweep-hourly","workflow_version":3,"scheduler_kind":"launchd","locator":"com.carr.notes-sweep","duplicate_group":"notes-sweep-hourly.legacy","repo_plist_relpath":"ops/launchd/com.carr.notes-sweep.plist","installed_plist_name":"com.carr.notes-sweep.plist","canonical_program_arguments":["/bin/zsh","{{REPO}}/bin/run-scheduled.sh","notes-sweep","launchd.run","/bin/zsh","{{REPO}}/bin/notes-sweep-post.sh","--scheduled"],"canonical_plist_fingerprint":"e0b169a73ac1ccb2482896c796873f86a6072b56c663867c82f9e6df0a4628b3"},
+    {"surface_id":"notes-sweep-hourly.claude-code.v1","workflow_key":"notes-sweep-hourly","workflow_version":3,"scheduler_kind":"claude-code","locator":"notes-sweep-hourly","duplicate_group":"notes-sweep-hourly.legacy"},
+    {"surface_id":"npi-sweep-weekly.claude-code.v1","workflow_key":"npi-sweep-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"npi-sweep-weekly"},
+    {"surface_id":"playbook-review-monthly.claude-code.v1","workflow_key":"playbook-review-monthly","workflow_version":1,"scheduler_kind":"claude-code","locator":"playbook-review-monthly"},
+    {"surface_id":"radar-weekly.claude-code.v1","workflow_key":"radar-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"radar-weekly"},
+    {"surface_id":"restore-rehearse-weekly.claude-code.v1","workflow_key":"restore-rehearse-weekly","workflow_version":2,"scheduler_kind":"claude-code","locator":"restore-rehearse-weekly"},
+    {"surface_id":"social-batch-weekly.claude-code.v1","workflow_key":"social-batch-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"social-batch-weekly"},
+    {"surface_id":"social-metrics-pull-weekly.claude-code.v1","workflow_key":"social-metrics-pull-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"social-metrics-pull-weekly"},
+    {"surface_id":"system-sweep-monthly.claude-code.v1","workflow_key":"system-sweep-monthly","workflow_version":1,"scheduler_kind":"claude-code","locator":"system-sweep-monthly"},
+    {"surface_id":"x-reply-run-daily.claude-code.v1","workflow_key":"x-reply-run-daily","workflow_version":1,"scheduler_kind":"claude-code","locator":"x-reply-run-daily"}
+  ]
+}

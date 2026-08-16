@@ -11,15 +11,20 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+import json
+from pathlib import Path
 from typing import Any
 
 import psycopg
 from psycopg import sql
 
+REPO = Path(__file__).resolve().parents[1]
+SCHEDULER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
+
 
 REQUIRED_TABLES = [
     "ops.guidance_intake", "ops.rule_admission", "ops.rule_enforcement_point",
-    "ops.authority_receipt", "ops.job_definition", "ops.job",
+    "ops.authority_receipt", "ops.legacy_schedule_disable_receipt", "ops.legacy_schedule_surface_registry", "ops.job_definition", "ops.job",
     "ops.job_attempt", "ops.job_receipt", "ops.cognition_job",
     "ops.cognition_result_cache", "ops.workflow_acceptance",
     "ops.provider_route", "ops.provider_observation",
@@ -36,7 +41,7 @@ REQUIRED_FUNCTIONS = [
     "ops.timeout_job(uuid,uuid,text)",
     "ops.reap_expired_jobs()",
     "ops.record_workflow_acceptance(text,text,text,text)",
-    "ops.disable_legacy_schedule(text,text)",
+    "ops.disable_legacy_schedule(text,text,text,text,text)",
     "ops.authority_actor_slug()",
     "ops.select_provider_routes(text[])",
     "ops.get_cognition_cache(text)",
@@ -69,6 +74,16 @@ def main() -> int:
     if not dsn:
         fail("DATABASE_URL is required")
         return 2
+    try:
+        registry = json.loads(SCHEDULER_REGISTRY_PATH.read_text(encoding="utf-8"))
+        expected_surfaces = sorted(
+            (str(surface["workflow_key"]), int(surface["workflow_version"]), str(surface["surface_id"]),
+             str(surface["locator"]), str(surface["scheduler_kind"]))
+            for surface in registry["surfaces"]
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        fail(f"could not load checked-in scheduler surface registry: {exc}")
+        return 2
 
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
@@ -80,6 +95,12 @@ def main() -> int:
                 cur.execute("select to_regprocedure(%s)", (function,))
                 if fetchone_required(cur.fetchone(), f"function {function}")[0] is None:
                     fail(f"missing function {function}")
+            cur.execute("""select workflow_key,workflow_version,surface_id,locator,scheduler_kind
+                             from ops.legacy_schedule_surface_registry
+                             order by workflow_key,workflow_version,surface_id""")
+            actual_surfaces = [tuple(row) for row in cur.fetchall()]
+            if actual_surfaces != expected_surfaces:
+                fail("scheduler surface registry is empty, stale, or does not exactly match checked-in sync inventory")
 
             # The reaper must lock a finite expired-job set before it changes
             # attempt evidence.  Otherwise a heartbeat can renew the lease
@@ -96,7 +117,7 @@ def main() -> int:
             if fetchone_required(cur.fetchone(), "writer workflow acceptance privilege")[0]:
                 fail("carr_writer can forge workflow acceptance")
             cur.execute("select has_function_privilege('carr_writer', "
-                        "'ops.disable_legacy_schedule(text,text)'::regprocedure, 'execute')")
+                        "'ops.disable_legacy_schedule(text,text,text,text,text)'::regprocedure, 'execute')")
             if fetchone_required(cur.fetchone(), "writer legacy-disable privilege")[0]:
                 fail("carr_writer can retire a legacy schedule")
             cur.execute("select pg_get_functiondef('ops.record_workflow_acceptance(text,text,text,text)'::regprocedure)")
@@ -689,7 +710,7 @@ def main() -> int:
             cur.execute("savepoint early_cutover")
             try:
                 cur.execute("set local role carr_writer")
-                cur.execute("select ops.disable_legacy_schedule(%s,'too early')", (definition,))
+                cur.execute("select ops.disable_legacy_schedule(%s,'surface','locator','too early','db-gate')", (definition,))
                 fail("routine writer disabled a legacy schedule")
             except psycopg.Error:
                 cur.execute("rollback to savepoint early_cutover")
