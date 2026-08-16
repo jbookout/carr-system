@@ -9,7 +9,7 @@ the default is a no-network dry-run and ``--self-test`` is hermetic.
 """
 from __future__ import annotations
 
-import argparse, hashlib, importlib.util, json, os, secrets, subprocess, sys, threading, uuid
+import argparse, hashlib, importlib.util, json, os, re, secrets, subprocess, sys, threading, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,15 @@ DB_NAME = "cc_shadow_check"
 
 
 class HarnessRefusal(RuntimeError): pass
+
+
+def safe_failure_detail(value: Any) -> str:
+    """Keep the assertion message while stripping URLs and control characters."""
+    if not isinstance(value, str):
+        return "[missing]"
+    clean = re.sub(r"\b(?:postgres(?:ql)?|https?)://\S+", "[url]", value)
+    clean = " ".join(clean.split())
+    return clean[-240:]
 
 
 def redacted(value: Any) -> Any:
@@ -170,13 +179,13 @@ def fixture_releases(dsn: str, token: str) -> tuple[str, str]:
         values (gen_random_uuid(),k,svc,'production','candidate',repeat('a',40),'sha256:'||repeat('b',64),
           'sha256:'||repeat('c',64),'sbom/fixture',highest,array[highest],'cfg:fixture','disposable fixture',
           '{{}}','codex','fixture:maker','fixture:test','fixture:security','joe','fixture:verify',true,
-          'fixture:rollback','WR-FIXTURE','fixture','fixture:release:'||k,now_utc,now_utc+interval '1 day') returning id into r;
+          'fixture:rollback','WR-FIXTURE','wrapper','fixture:release:'||k,now_utc,now_utc+interval '1 day') returning id into r;
         update ops.release set state='approved',plan_hash='plan:fixture',approved_by_actor='joe',approved_at=now_utc,
           approval_expires_at=now_utc+interval '1 day' where id=r;
         insert into ops.deployment(correlation_id,service_id,environment,state,git_sha,release_id,started_at,ended_at,
           read_back_at,verification_evidence_ref,source_kind,source_ref,observed_at,expires_at)
         values (gen_random_uuid(),svc,'production','complete',repeat('a',40),r,now_utc-interval '5 minutes',now_utc-interval '4 minutes',
-          now_utc-interval '3 minutes','fixture:readback','fixture','fixture:deployment',now_utc,now_utc+interval '1 day');
+          now_utc-interval '3 minutes','fixture:readback','wrapper','fixture:deployment',now_utc,now_utc+interval '1 day');
         update ops.release set state='complete',ended_at=now_utc + case when k='{key_b}' then interval '1 second' else interval '0 seconds' end where id=r;
       end loop;
     end $$;"""
@@ -188,11 +197,15 @@ def assert_evidence(dsn: str, job_id: str, before_releases: tuple[int, str]) -> 
     import psycopg
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select state,mode,definition_key from ops.job where id=%s", (job_id,)); job = cur.fetchone()
-        cur.execute("select provider_route,input_tokens,output_tokens,cost_usd from ops.job_attempt where job_id=%s", (job_id,)); attempts = cur.fetchall()
+        cur.execute("select provider_route,input_tokens,output_tokens,cost_usd,state,failure_class,detail from ops.job_attempt where job_id=%s", (job_id,)); attempts = cur.fetchall()
         cur.execute("select evidence from ops.job_receipt where job_id=%s and kind='completion'", (job_id,)); receipt = cur.fetchone()
+        cur.execute("select kind,count(*) from ops.job_receipt where job_id=%s group by kind order by kind", (job_id,)); receipt_kinds = cur.fetchall()
         cur.execute("select count(*) from ops.release"); release_row = cur.fetchone()
         cur.execute("select count(*) from ops.job where mode in ('live','canary')"); forbidden_row = cur.fetchone()
-    if job != ('succeeded','shadow',WORKFLOW) or len(attempts) != 1 or not receipt: raise HarnessRefusal("shadow job/attempt/completion receipt mismatch")
+    if job != ('succeeded','shadow',WORKFLOW) or len(attempts) != 1 or not receipt:
+        attempt_state = [(row[4], row[5], safe_failure_detail(row[6])) for row in attempts]
+        raise HarnessRefusal(
+            f"shadow evidence mismatch: job={job!r} attempts={attempt_state!r} receipts={receipt_kinds!r}")
     if release_row is None or forbidden_row is None: raise HarnessRefusal("post-run isolation counts were unavailable")
     release_count, forbidden = release_row[0], forbidden_row[0]
     if not isinstance(release_count, int) or not isinstance(forbidden, int): raise HarnessRefusal("post-run isolation counts were malformed")
@@ -262,6 +275,7 @@ def assert_receipt_append_only_cursor(cur: Any, job_id: str, database_error: typ
 
 def self_test() -> int:
     assert redacted({"dsn":"postgres://secret","mode":"shadow","n":1}) == {"dsn":"[redacted]","mode":"shadow","n":1}
+    assert safe_failure_detail("failed at https://example.invalid/token\nnext") == "failed at [url] next"
     try: host_of("not-a-dsn")
     except HarnessRefusal: pass
     else: raise AssertionError("non-Postgres URL accepted")

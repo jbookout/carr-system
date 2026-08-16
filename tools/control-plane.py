@@ -26,6 +26,7 @@ import time
 import urllib.request
 from urllib.parse import unquote, urlsplit
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -329,7 +330,7 @@ def _reserve(job_id, lease, route: str, estimate: float):
     with connect() as conn, conn.cursor() as cur:
         cur.execute("select admitted,reservation_id,refusal_id,reason "
                     "from ops.admit_job_cost(%s,%s,%s,%s)",
-                    (job_id,lease,route,estimate))
+                    (job_id,lease,route,Decimal(str(estimate))))
         admitted, reservation, refusal, reason = cur.fetchone()
         conn.commit()
         if admitted is not True or reservation is None:
@@ -344,7 +345,8 @@ def _settle(reservation, job_id, lease, result: dict[str, Any]) -> None:
     with connect() as conn, conn.cursor() as cur:
         cur.execute("select ops.settle_job_cost(%s,%s,%s,%s,%s,%s)",
                     (reservation,job_id,lease,usage.get("input_tokens",0),
-                     usage.get("output_tokens",usage["total_tokens"]),usage["cost_usd"]))
+                     usage.get("output_tokens",usage["total_tokens"]),
+                     Decimal(str(usage["cost_usd"]))))
         conn.commit()
 
 
@@ -775,6 +777,32 @@ class LeaseKeeper:
         return False
 
 
+def _build_and_admit_cognition_input(
+    manifest: dict[str, Any], workflow: dict[str, Any], claim: dict[str, Any]
+) -> dict[str, Any]:
+    """Build canonical input before evaluating any cognition routing predicate."""
+    input_payload = build_input(
+        manifest, workflow["execution"]["input_builder"],
+        RuntimeEvidenceCollector(claim["payload"], mode=claim["mode"]),
+        workflow_key=workflow["key"])
+    facts = _workflow_fact_collector(
+        workflow, claim["payload"], input_payload=input_payload, mode=claim["mode"])
+    for stage in ("routing", "filtering"):
+        if not evaluate_stage(workflow, stage, facts):
+            raise RuntimeError(f"{workflow['key']}.{stage} predicate was not satisfied")
+    return input_payload
+
+
+def _post_execution_facts(
+    workflow: dict[str, Any], claim: dict[str, Any], evidence: dict[str, Any],
+    input_payload: dict[str, Any] | None, **receipt: Any
+) -> CompositeFactCollector:
+    """Carry the admitted typed input through validation and receipt completion."""
+    return _workflow_fact_collector(
+        workflow, claim["payload"], execution=evidence,
+        input_payload=input_payload, mode=claim["mode"], **receipt)
+
+
 def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> dict[str, Any]:
     with connect() as conn, conn.cursor() as cur:
         if mode is None:
@@ -794,20 +822,18 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
         conn.commit()
         try:
             workflow = _workflow(manifest,claim["definition_key"],claim["definition_version"])
-            facts = _workflow_fact_collector(workflow, claim["payload"], mode=claim["mode"])
-            # A deterministic command itself collects the records it filters,
-            # so only its routing is knowable before launch. Cognition obtains
-            # its canonical input below, then its filter facts are evaluated.
-            pre_stages = ("routing",) if workflow["execution"]["kind"] == "deterministic" else ("routing",)
-            for stage in pre_stages:
-                if not evaluate_stage(workflow, stage, facts):
-                    raise RuntimeError(f"{workflow['key']}.{stage} predicate was not satisfied")
+            if workflow["execution"]["kind"] == "deterministic":
+                facts = _workflow_fact_collector(workflow, claim["payload"], mode=claim["mode"])
+                if not evaluate_stage(workflow, "routing", facts):
+                    raise RuntimeError(f"{workflow['key']}.routing predicate was not satisfied")
+            input_payload: dict[str, Any] | None = None
             with LeaseKeeper(job_id,lease):
                 if claim["execution_kind"] == "deterministic":
                     evidence = _execute_deterministic(
                         workflow,claim["payload"],claim["timeout_seconds"],claim["mode"])
                 else:
                     cognition = _contract(manifest,workflow["execution"]["cognition_job"])
+                    input_payload = _build_and_admit_cognition_input(manifest, workflow, claim)
                 # Health selection is a database predicate and is committed
                 # before any network call; no transaction stays open over I/O.
                     with conn.cursor() as route_cur:
@@ -818,14 +844,6 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                     if not eligible:
                         raise RuntimeError("no eligible provider route")
                     cognition = {**cognition,"provider_routes":eligible}
-                    input_payload=build_input(
-                        manifest,workflow["execution"]["input_builder"],
-                        RuntimeEvidenceCollector(claim["payload"], mode=claim["mode"]),
-                        workflow_key=workflow["key"])
-                    facts = _workflow_fact_collector(
-                        workflow, claim["payload"], input_payload=input_payload, mode=claim["mode"])
-                    if not evaluate_stage(workflow, "filtering", facts):
-                        raise RuntimeError(f"{workflow['key']}.filtering predicate was not satisfied")
                     cache = DatabaseCache(cognition["key"],cognition["version"],
                                           cognition["output_schema_version"],
                                           [x["source_ref"] for x in input_payload.get("source_evidence",[])])
@@ -869,7 +887,7 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                                 "cognition": {"key": cognition["key"], "version": cognition["version"],
                                               "output_schema_version": cognition["output_schema_version"],
                                               "canonical_write_authority": False}}
-            facts = _workflow_fact_collector(workflow, claim["payload"], execution=evidence, mode=claim["mode"])
+            facts = _post_execution_facts(workflow, claim, evidence, input_payload)
             if workflow["execution"]["kind"] == "deterministic" and not evaluate_stage(workflow, "filtering", facts):
                 raise RuntimeError(f"{workflow['key']}.filtering predicate was not satisfied")
             if not evaluate_stage(workflow, "validation", facts):
@@ -887,8 +905,8 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
             row = cur.fetchone()
             if row is None or row[0] != receipt or not isinstance(row[1], dict):
                 raise RuntimeError("ledger completion receipt did not read back")
-            completion_facts = _workflow_fact_collector(
-                workflow, claim["payload"], execution=evidence, mode=claim["mode"], receipt_ref=receipt,
+            completion_facts = _post_execution_facts(
+                workflow, claim, evidence, input_payload, receipt_ref=receipt,
                 receipt_evidence=row[1])
             if not evaluate_stage(workflow, "completion", completion_facts):
                 raise RuntimeError(f"{workflow['key']}.completion predicate was not satisfied")

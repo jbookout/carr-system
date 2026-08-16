@@ -97,7 +97,11 @@ def main() -> int:
     assert any(sql.startswith("rollback to savepoint") for sql in refusing.calls)
     refuses(lambda: mod.assert_receipt_append_only_cursor(PermissiveCursor(), "job-1", FakeDbError),
             "update was accepted")
-    print("cc-update-audit-shadow-harness-orchestration-selftest: 10 cases passed")
+    source = PATH.read_text(encoding="utf-8")
+    assert "'wrapper','fixture:release:'||k" in source
+    assert "'wrapper','fixture:deployment'" in source
+    assert "'fixture','fixture:release:'||k" not in source
+    print("cc-update-audit-shadow-harness-orchestration-selftest: 11 cases passed")
     return 0
 
 
