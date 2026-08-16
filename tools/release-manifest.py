@@ -42,6 +42,7 @@ USAGE
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -83,6 +84,19 @@ PLAN_FIELDS = (
     "provider",
     "provider_version_id",
 )
+ASSURANCE_PLAN_FIELDS = (
+    "performance_budget_ref",
+    "performance_budget_ms",
+    "recovery_strategy",
+    "rollback_ready",
+    "rollback_plan_ref",
+)
+
+RECOVERY_STRATEGIES = (
+    "rollback",
+    "forward_fix",
+)
+REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{2,200}$")
 
 
 def git(*args: str) -> str:
@@ -186,8 +200,48 @@ def migration_set(sha: str, since: str | None = None) -> tuple[list[str], str]:
     return [m for m in here if m not in before], f"added-since {resolve_sha(since)[:12]}"
 
 
+def performance_contract(budget_ref: object, budget_ms: object,
+                         recovery_strategy: object,
+                         rollback_plan_ref: object = None
+                         ) -> tuple[str | None, int | None, str | None, str | None]:
+    """Validate the performance/recovery plan that an approver reads."""
+    if (budget_ref is None and budget_ms is None and recovery_strategy is None
+            and rollback_plan_ref is None):
+        return None, None, None, None
+    if (budget_ref is None or budget_ms is None or recovery_strategy is None
+            or rollback_plan_ref is None):
+        raise ValueError("performance assurance fields must be supplied together")
+    if not isinstance(budget_ref, str) or not REFERENCE_RE.fullmatch(budget_ref):
+        raise ValueError("performance_budget_ref must be a non-empty stable reference")
+    if isinstance(budget_ms, bool) or not isinstance(budget_ms, int) or budget_ms <= 0:
+        raise ValueError("performance_budget_ms must be a positive integer")
+    if recovery_strategy not in RECOVERY_STRATEGIES:
+        raise ValueError("recovery_strategy must be one of: " + ", ".join(RECOVERY_STRATEGIES))
+    if (not isinstance(rollback_plan_ref, str)
+            or not REFERENCE_RE.fullmatch(rollback_plan_ref)):
+        raise ValueError("rollback_plan_ref must be a non-empty stable reference")
+    return budget_ref, budget_ms, recovery_strategy, rollback_plan_ref
+
+
+def manifest_performance_contract(
+        manifest: dict) -> tuple[str | None, int | None, str | None, str | None]:
+    return performance_contract(manifest.get("performance_budget_ref"),
+                                manifest.get("performance_budget_ms"),
+                                manifest.get("recovery_strategy"),
+                                manifest.get("rollback_plan_ref"))
+
+
 def build(sha_ref: str, service: str, environment: str,
-          since: str | None = None) -> dict:
+          since: str | None = None, performance_budget_ref: str | None = None,
+          performance_budget_ms: int | None = None,
+          recovery_strategy: str | None = None,
+          rollback_plan_ref: str | None = None) -> dict:
+    try:
+        budget_ref, budget_ms, strategy, recovery_plan = performance_contract(
+            performance_budget_ref, performance_budget_ms, recovery_strategy,
+            rollback_plan_ref)
+    except ValueError as exc:
+        sys.exit(f"release-manifest: {exc}")
     sha = resolve_sha(sha_ref)
     entries = tree_entries(sha, DEPLOYED_PATHS)
     if not entries:
@@ -201,6 +255,11 @@ def build(sha_ref: str, service: str, environment: str,
         "manifest_version": 1,
         "service": service,
         "environment": environment,
+        "performance_budget_ref": budget_ref,
+        "performance_budget_ms": budget_ms,
+        "recovery_strategy": strategy,
+        "rollback_ready": recovery_plan is not None,
+        "rollback_plan_ref": recovery_plan,
 
         "git_sha": sha,
         "artifact_digest": digest_entries(entries),
@@ -230,6 +289,12 @@ def build(sha_ref: str, service: str, environment: str,
 
 def plan_hash(manifest: dict) -> str:
     material = {k: manifest.get(k) for k in PLAN_FIELDS}
+    # Old manifests predate assurance fields. Omitting an all-null assurance
+    # group preserves their recorded hash; once any assurance input exists, the
+    # whole recovery/performance plan enters the approval preimage.
+    if any(manifest.get(k) is not None for k in ASSURANCE_PLAN_FIELDS
+           if k != "rollback_ready"):
+        material.update({k: manifest.get(k) for k in ASSURANCE_PLAN_FIELDS})
     blob = json.dumps(material, sort_keys=True, separators=(",", ":"))
     return "plan:" + hashlib.sha256(blob.encode()).hexdigest()[:32]
 
@@ -262,6 +327,7 @@ def bind_provider(manifest: dict, provider: str, version_id: str) -> dict:
     """
     if not provider.strip() or not version_id.strip():
         raise ValueError("--provider and --provider-version-id must be non-empty")
+    manifest_performance_contract(manifest)
     recorded_provider, recorded_version = provider_binding(manifest)
     if recorded_provider is not None:
         if (recorded_provider, recorded_version) != (provider, version_id):
@@ -287,12 +353,17 @@ def verify(manifest: dict) -> int:
 
     try:
         provider_binding(manifest)
+        manifest_performance_contract(manifest)
     except ValueError as exc:
         print(f"verify: invalid provider binding: {exc}")
         return 1
 
     rebuilt = build(sha, manifest.get("service", ""), manifest.get("environment", ""),
-                    manifest.get("migration_set_since"))
+                    manifest.get("migration_set_since"),
+                    manifest.get("performance_budget_ref"),
+                    manifest.get("performance_budget_ms"),
+                    manifest.get("recovery_strategy"),
+                    manifest.get("rollback_plan_ref"))
     compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint",
                 "schema_highest_migration", "migration_set", "artifact_file_count",
                 )
@@ -340,6 +411,14 @@ def main() -> int:
     b.add_argument("--since", default=None,
                    help="the previous release's SHA, so migration_set means "
                         "'added since that release' rather than 'every migration'")
+    b.add_argument("--performance-budget-ref",
+                   help="approved performance budget reference")
+    b.add_argument("--performance-budget-ms", type=int,
+                   help="approved maximum elapsed milliseconds")
+    b.add_argument("--recovery-strategy", choices=RECOVERY_STRATEGIES,
+                   help="approved recovery strategy")
+    b.add_argument("--rollback-plan-ref",
+                   help="immutable rollback or forward-fix plan reference")
 
     v = sub.add_parser("verify", help="rebuild from the manifest's own SHA and diff")
     v.add_argument("--manifest", required=True)
@@ -356,7 +435,9 @@ def main() -> int:
 
     if args.cmd == "build":
         print(json.dumps(
-            build(args.sha, args.service, args.environment, args.since), indent=2))
+            build(args.sha, args.service, args.environment, args.since,
+                  args.performance_budget_ref, args.performance_budget_ms,
+                  args.recovery_strategy, args.rollback_plan_ref), indent=2))
         return 0
 
     manifest = json.loads(Path(args.manifest).read_text())

@@ -118,7 +118,11 @@ def _cases(dsn: str) -> None:
     # the real intake path must correctly refuse.
     built = subprocess.run(
         [sys.executable, str(REPO / "tools" / "release-manifest.py"),
-         "build", "--sha", "HEAD", "--environment", "production"],
+         "build", "--sha", "HEAD", "--environment", "production",
+         "--performance-budget-ref", "runbook:worker-performance-v1",
+         "--performance-budget-ms", "1500",
+         "--recovery-strategy", "rollback",
+         "--rollback-plan-ref", "runbook:rollback-worker-v1"],
         cwd=REPO, capture_output=True, text=True, timeout=300)
     check("0a. canonical Production source manifest builds",
           built.returncode == 0, (built.stderr or built.stdout).strip()[:160])
@@ -163,9 +167,33 @@ def _cases(dsn: str) -> None:
         "    verifier_evidence_ref='ops/release-abandon-selftest.py#verification', "
         "    rollback_ready=true, "
         "    rollback_plan_ref='ops/release-abandon-selftest.py#rollback' "
-        "where release_key in ('rel-abandon-b','rel-shipped')")
+        "where release_key='rel-abandon-b'; "
+        "update ops.release "
+        "set verifier_actor='independent-selftest', "
+        "    verifier_evidence_ref='ops/release-abandon-selftest.py#verification' "
+        "where release_key='rel-shipped'")
     check("0b. promoted fixtures carry verifier and rollback evidence",
           ready.returncode == 0, (ready.stderr or ready.stdout).strip()[:160])
+    # This test owns an explicit throwaway database. Do not call the routine
+    # writer here: it intentionally authenticates only through CARR_DB_JOBS_URL,
+    # which may point at a real environment on a developer machine. The exact
+    # writer contract is covered separately; this fixture needs only the
+    # release-linked receipt required to exercise abandon semantics.
+    recovery = psql(
+        dsn, "-c",
+        "insert into ops.run "
+        "(correlation_id,kind,service_id,release_id,environment,run_key,state,"
+        " started_at,ended_at,recovery_strategy,recovery_plan_ref,source_kind,"
+        " source_ref,evidence_ref) "
+        "select gen_random_uuid(),'check',service_id,id,'staging',"
+        " 'recovery.rehearsal.worker','succeeded',now(),"
+        " now()+interval '1 millisecond',recovery_strategy,rollback_plan_ref,"
+        " 'wrapper','ops/release-abandon-selftest.py',"
+        " 'evidence:release-abandon-recovery' "
+        "from ops.release where release_key='rel-shipped'")
+    check("0c. Production fixture carries a linked recovery rehearsal",
+          recovery.returncode == 0,
+          (recovery.stderr or recovery.stdout).strip()[:160])
 
     # ── 1. a candidate can be abandoned, with a reason ──────────────────
     r = record(dsn, "release", "abandon", "--key", "rel-abandon-a",
@@ -202,12 +230,27 @@ def _cases(dsn: str) -> None:
     # and case 4 then proved nothing on a row still sitting at `candidate`.
     record(dsn, "release", "approve", "--key", "rel-shipped",
            "--plan-hash", production_plan, "--actor", "selftest")
+    journey_corr = "77777777-7777-4777-8777-777777777777"
     record(dsn, "deployment", "--service", "carr-mcp", "--environment", "production",
            "--state", "complete", "--git-sha", production_sha, "--verb-count", "1",
            "--provider", PROVIDER, "--provider-version-id", PROVIDER_VERSION,
+           "--correlation", journey_corr,
            "--release-key", "rel-shipped", "--source-kind", "wrapper",
            "--source-ref", "ops/release-abandon-selftest.py",
            "--read-back-at", "now", "--verification-evidence-ref", "selftest read-back")
+    performance = psql(
+        dsn, "-c",
+        "insert into ops.run "
+        "(correlation_id,kind,service_id,release_id,environment,run_key,state,"
+        " started_at,ended_at,budget_ms,source_kind,source_ref,evidence_ref) "
+        f"select '{journey_corr}'::uuid,'check',service_id,id,'production',"
+        " 'performance.release','succeeded',now()-interval '1 second',now(),"
+        " performance_budget_ms,'wrapper','ops/release-abandon-selftest.py',"
+        " 'evidence:release-abandon-performance' "
+        "from ops.release where release_key='rel-shipped'")
+    check("4aa. shipped fixture carries a measured performance receipt",
+          performance.returncode == 0,
+          (performance.stderr or performance.stdout).strip()[:160])
     done = record(dsn, "release", "complete", "--key", "rel-shipped")
     check("4a. the shipped fixture really reached `complete`",
           done.returncode == 0,

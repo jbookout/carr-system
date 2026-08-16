@@ -24,8 +24,8 @@ tools/ops-record.py with no database at all.
      reaches `fail`; a ledger outage cannot become permission to ship.
 
   3. ALL THREE OUTCOMES REACH THE LEDGER. complete, verifying and failed each
-     have a record_deployment call, and `complete` is the only one that claims a
-     read-back.
+     have a record_deployment call. A read-back belongs only to complete or the
+     explicit machine-verified Production identity receipt.
 
   4. THE FAILED PATH RECORDS BEFORE IT EXITS. Recording after `exit 1` records
      nothing at all.
@@ -90,9 +90,11 @@ def main() -> int:
         check(f"3. the {state} outcome records a deployment",
               f"record_deployment {state}" in source)
 
-    check("3b. only `complete` claims a read-back",
-          '"$rd_state" = "complete"' in source and "--read-back-at now" in source,
-          "the read-back is not conditioned on the state")
+    check("3b. only complete/verified identity claims a read-back",
+          '"$rd_state" = "complete"' in source
+          and '"$rd_readback_kind" = "identity-readback"' in source
+          and "--read-back-at now" in source,
+          "the read-back is not conditioned on complete or verified identity")
 
     # 3c. a verified deploy CLOSES its release
     close_at = source.find("release complete --key")

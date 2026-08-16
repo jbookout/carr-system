@@ -69,7 +69,10 @@ def run(*args: str) -> subprocess.CompletedProcess:
 
 
 def build(*args: str) -> dict:
-    out = run("build", *args)
+    out = run("build", "--performance-budget-ref", "runbook:worker-performance-v1",
+              "--performance-budget-ms", "1500",
+              "--recovery-strategy", "rollback",
+              "--rollback-plan-ref", "runbook:rollback-worker-v1", *args)
     if out.returncode != 0:
         raise SystemExit(f"release-manifest-selftest: build failed: {out.stderr.strip()}")
     return json.loads(out.stdout)
@@ -156,6 +159,27 @@ def main() -> int:
     check("6b. a non-material field does NOT move the plan hash",
           out.stdout.strip() == first["plan_hash"])
 
+    performance = dict(first)
+    performance["performance_budget_ms"] = 1501
+    out = run("plan-hash", "--manifest", _tmp_json(performance))
+    check("6c. changing the approved performance budget moves the plan hash",
+          out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
+    partial = run("build", "--sha", "HEAD", "--performance-budget-ref",
+                  "runbook:worker-performance-v1")
+    check("6d. partial performance assurance input is refused", partial.returncode != 0)
+    recovery_plan = dict(first)
+    recovery_plan["rollback_plan_ref"] = "runbook:rollback-worker-v2"
+    out = run("plan-hash", "--manifest", _tmp_json(recovery_plan))
+    check("6e. changing the recovery plan moves the plan hash",
+          out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
+
+    legacy_out = run("build", "--sha", "HEAD")
+    legacy = json.loads(legacy_out.stdout) if legacy_out.returncode == 0 else {}
+    legacy_path = _tmp_json(legacy)
+    legacy_verify = run("verify", "--manifest", legacy_path)
+    check("6f. an all-absent historical assurance group still round-trips",
+          legacy_out.returncode == 0 and legacy_verify.returncode == 0)
+
     # 7. Provider versions do not exist until Cloudflare has uploaded the
     # source. Binding that returned identity must preserve source evidence and
     # produce the exact plan hash an approver sees.
@@ -203,6 +227,14 @@ def main() -> int:
         tampered_path.write_text(json.dumps(hash_tampered))
         out = run("verify", "--manifest", str(tampered_path))
         check("7h. a tampered bound plan hash FAILS verify", out.returncode != 0)
+
+        invalid_contract = dict(bound)
+        invalid_contract["recovery_strategy"] = "make-up-a-recovery-receipt"
+        invalid_contract["plan_hash"] = "plan:" + "0" * 32
+        invalid_path = Path(tmp) / "invalid-contract.json"
+        invalid_path.write_text(json.dumps(invalid_contract))
+        out = run("verify", "--manifest", str(invalid_path))
+        check("7i. invalid recovery strategy FAILS verify", out.returncode != 0)
 
     # 8. all seven acceptance classes present
     classes = {

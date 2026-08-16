@@ -159,6 +159,8 @@ def main() -> int:
             """insert into ops.release
                    (correlation_id, release_key, service_id, environment, state,
                     git_sha, provider, provider_version_id,
+                    performance_budget_ref, performance_budget_ms,
+                    recovery_strategy,
                     artifact_digest, dependency_lock_digest, sbom_ref,
                     schema_highest_migration, migration_set,
                     config_fingerprint, declared_env_differences,
@@ -171,6 +173,7 @@ def main() -> int:
                     source_kind, source_ref, observed_at, expires_at)
                values (%s, %s, %s, %s, 'candidate',
                        %s, %s, %s, %s, %s, %s,
+                       %s, %s, %s,
                        %s, %s,
                        %s, %s,
                        %s,
@@ -183,6 +186,7 @@ def main() -> int:
                returning id""",
             (corr, f"gate-{corr}", service_id, env,
              SHA, PROVIDER, PROVIDER_VERSION,
+             "runbook:worker-performance-v1", 250, "rollback",
              "sha256:" + "c" * 64, "sha256:" + "d" * 64, "sbom/gate.json",
              "0131", ["0131"],
              "cfg:" + "e" * 16, "synthetic Production fixture in isolated CI",
@@ -194,6 +198,22 @@ def main() -> int:
              "WR-P0-1",
              now, now + timedelta(days=30)))
         release_id = fetch_one(cur)[0]
+
+        # Program 5 makes recovery rehearsal a prerequisite to Production
+        # approval. This receipt is linked to the candidate so the P0-1 probes
+        # below continue to isolate their original rebuild/approval controls.
+        cur.execute(
+            """insert into ops.run
+                   (correlation_id, kind, service_id, release_id, environment,
+                    run_key, state, started_at, ended_at, source_kind,
+                    source_ref, evidence_ref, recovery_strategy,
+                    recovery_plan_ref)
+               values (%s, 'check', %s, %s, 'staging',
+                       'recovery.rehearsal.p0-1', 'succeeded', %s, %s,
+                       'collector', 'ops/p0-1-release-gate.py',
+                       'evidence:p0-1-recovery', 'rollback',
+                       'runbooks/rollback-worker.md')""",
+            (corr, service_id, release_id, now, now))
 
         # ── 2. approval demands the rebuild evidence ─────────────────────────
         for column in ("artifact_digest", "dependency_lock_digest"):
@@ -374,6 +394,17 @@ def main() -> int:
                 where id = %s""",
             (now - timedelta(minutes=3), now - timedelta(minutes=4), deployment_id))
         cur.execute(
+            """insert into ops.run
+                   (correlation_id, kind, service_id, release_id, environment,
+                    run_key, state, started_at, ended_at, budget_ms,
+                    source_kind, source_ref, evidence_ref)
+               values (%s, 'check', %s, %s, 'production',
+                       'performance.p0-1', 'succeeded', %s, %s, 250,
+                       'collector', 'ops/p0-1-release-gate.py',
+                       'evidence:p0-1-performance')""",
+            (corr, service_id, release_id, now,
+             now + timedelta(milliseconds=100)))
+        cur.execute(
             "update ops.release set state = 'complete', ended_at = %s where id = %s",
             (now, release_id))
         cur.execute("select state from ops.release where id = %s", (release_id,))
@@ -386,6 +417,8 @@ def main() -> int:
                       test_evidence_ref, approval_plan_hash, approved_by_actor,
                       deploy_state, deploy_read_back_at,
                       verifier_actor, verifier_evidence_ref,
+                      performance_budget_ref, performance_budget_ms,
+                      recovery_strategy,
                       source_kind, source_ref, freshness
                  from ops.v_release_manifest where release_id = %s""",
             (release_id,))
@@ -397,6 +430,8 @@ def main() -> int:
                     ("code sha", "artifact digest", "schema", "config", "tests",
                      "approval plan hash", "approver", "deploy state",
                      "deploy read-back", "verifier", "verification evidence",
+                     "performance budget ref", "performance budget ms",
+                     "recovery strategy",
                      "source kind", "source ref", "freshness"),
                     row,
                 ) if value in (None, "")

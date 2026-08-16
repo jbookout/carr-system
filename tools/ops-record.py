@@ -72,7 +72,7 @@ import os
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -267,8 +267,54 @@ def cmd_run(args) -> int:
               file=sys.stderr)
         return 2
 
-    started = parse_ts(args.started_at)
-    ended = parse_ts(args.ended_at)
+    release_key = getattr(args, "release_key", None)
+    budget_ms = getattr(args, "budget_ms", None)
+    duration_ms = getattr(args, "duration_ms", None)
+    is_performance = args.key.startswith("performance.")
+    is_recovery = args.key.startswith("recovery.rehearsal.")
+
+    if duration_ms is not None and duration_ms < 0:
+        print("ops-record: --duration-ms must be zero or greater", file=sys.stderr)
+        return 2
+    if duration_ms is not None and (args.started_at or args.ended_at):
+        print("ops-record: --duration-ms cannot be combined with --started-at or "
+              "--ended-at", file=sys.stderr)
+        return 2
+    if is_performance:
+        if (args.environment != "production" or not release_key
+                or budget_ms is None or budget_ms <= 0 or not args.evidence_ref
+                or duration_ms is None):
+            print("ops-record: performance.* requires Production, --release-key, "
+                  "positive --budget-ms, --duration-ms, and --evidence-ref",
+                  file=sys.stderr)
+            return 2
+        if args.state == "succeeded":
+            if duration_ms == 0:
+                print("ops-record: a successful performance run must have a "
+                      "positive measured duration", file=sys.stderr)
+                return 2
+            if duration_ms > budget_ms:
+                print("ops-record: an over-budget performance run cannot be "
+                      "recorded as succeeded", file=sys.stderr)
+                return 2
+    elif budget_ms is not None:
+        print("ops-record: --budget-ms is only valid for performance.* runs",
+              file=sys.stderr)
+        return 2
+    if is_recovery and (args.environment not in ("staging", "rehearsal")
+                        or not release_key or not args.evidence_ref):
+        print("ops-record: recovery.rehearsal.* requires staging/rehearsal, "
+              "--release-key, and --evidence-ref", file=sys.stderr)
+        return 2
+
+    started: datetime | None
+    ended: datetime | None
+    if duration_ms is not None:
+        ended = datetime.now(timezone.utc)
+        started = ended - timedelta(milliseconds=duration_ms)
+    else:
+        started = parse_ts(args.started_at)
+        ended = parse_ts(args.ended_at)
     if args.state in TERMINAL_RUN_STATES and ended is None:
         ended = datetime.now(timezone.utc)
     if ended is not None and started is None:
@@ -276,7 +322,7 @@ def cmd_run(args) -> int:
 
     corr = correlation_of(args.correlation)
     try:
-        with connect("routine") as conn, conn.cursor() as cur:
+        with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
             try:
                 sid = service_id(cur, args.service)
             except SystemExit as e:
@@ -294,13 +340,44 @@ def cmd_run(args) -> int:
                 # "say it once and stop" path covers both without new logic.
                 print(str(e), file=sys.stderr)   # already carries the prefix
                 return 78
+            release_id = None
+            recovery_strategy = None
+            recovery_plan_ref = None
+            if release_key:
+                cur.execute(
+                    """select id, service_id, performance_budget_ms,
+                              recovery_strategy, rollback_plan_ref
+                         from ops.release
+                        where release_key = %s""",
+                    (release_key,))
+                release = cur.fetchone()
+                if not release:
+                    print(f"ops-record: no release {release_key!r}", file=sys.stderr)
+                    return 2
+                (release_id, release_service_id, release_budget_ms,
+                 recovery_strategy, recovery_plan_ref) = release
+                if release_service_id != sid:
+                    print("ops-record: run service does not match its release",
+                          file=sys.stderr)
+                    return 2
+                if is_performance and release_budget_ms != budget_ms:
+                    print("ops-record: performance budget does not match the "
+                          "approved release budget", file=sys.stderr)
+                    return 2
+                if is_recovery and (recovery_strategy not in ("rollback", "forward_fix")
+                                    or not recovery_plan_ref):
+                    print("ops-record: recovery rehearsal requires the release's "
+                          "exact strategy and recovery plan", file=sys.stderr)
+                    return 2
             cur.execute(
                 """insert into ops.run
-                       (kind, correlation_id, service_id, environment, run_key, state,
+                       (kind, correlation_id, service_id, release_id, environment,
+                        run_key, state,
                         failure_class, exit_code, attempt, started_at, ended_at,
+                        budget_ms, recovery_strategy, recovery_plan_ref,
                         source_kind, source_ref, observed_at, expires_at,
                         evidence_ref, detail)
-                   select %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(),
+                   select %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(),
                           -- THE OBSERVATION DECLARES ITS OWN EXPIRY, taken from
                           -- the registry at write time when the caller does not
                           -- name one. Without this the row reads `unknown`
@@ -321,13 +398,24 @@ def cmd_run(args) -> int:
                      left join ops.service_environment se
                        on se.service_id = %s and se.environment = %s
                    returning id""",
-                (args.kind, corr, sid, args.environment, args.key, args.state,
+                (args.kind, corr, sid, release_id, args.environment, args.key, args.state,
                  args.failure_class, args.exit_code, args.attempt, started, ended,
+                 budget_ms, recovery_strategy if is_recovery else None,
+                 recovery_plan_ref if is_recovery else None,
                  args.source_kind, args.source_ref,
                  args.expires_in, args.expires_in,
                  args.evidence_ref, (args.detail or None),
                  sid, args.environment))
             run_id = cur.fetchone()[0]
+            if args.state in ("failed", "timed_out"):
+                cur.execute("select criticality from ops.service where id = %s", (sid,))
+                criticality = cur.fetchone()[0]
+                _record_failure_incident(
+                    cur=cur, correlation_id=corr, service_id=sid,
+                    service_key=args.service, criticality=criticality,
+                    environment=args.environment, source_kind="run",
+                    source_id=run_id, source_label=args.key, state=args.state,
+                    failure_class=args.failure_class, detail=args.detail)
     except SystemExit:
         raise
     except Exception as e:                                   # noqa: BLE001
@@ -451,6 +539,154 @@ def _next_incident_ref(cur) -> str:
     return f"INC-{datetime.now(timezone.utc):%Y%m%d}-{cur.fetchone()[0]:02d}"
 
 
+def _record_failure_incident(
+        *, cur, correlation_id, service_id, service_key, criticality,
+        environment, source_kind, source_id, source_label, state,
+        failure_class, detail=None):
+    """Open or append one incident immediately after a failed ledger write.
+
+    Correlation joins the failed run and the deployment it caused into one
+    journey. Signature still preserves 0116's recurring-failure deduplication
+    when the same failure arrives under another correlation. Caller detail is
+    deliberately ignored: incident facts repeat only typed, redacted ledger
+    fields and point back to the source row for everything else.
+    """
+    del detail  # Explicitly never copy an open-ended caller string into a fact.
+    if state not in ("failed", "timed_out"):
+        return None, False, False
+    if source_kind not in ("run", "deployment"):
+        raise ValueError("incident source must be run or deployment")
+
+    signature_label = source_label if source_kind == "run" else "deployment"
+    signature = (f"{service_key}|{environment}|{signature_label}|"
+                 f"{failure_class or ''}")
+
+    # ONE JOURNEY FIRST. A golden/performance check and the failed deployment
+    # that follows it have different signatures but one correlation, so they
+    # are two links on one incident rather than two pages for one event.
+    # correlation_id has no unique incident index: serialize the first lookup
+    # and insert inside the caller's transaction so a simultaneous failed run
+    # and deployment cannot both observe absence and open two incidents.
+    cur.execute(
+        "select pg_advisory_xact_lock(hashtextextended(%s::text, 0))",
+        (correlation_id,))
+    cur.execute(
+        """select i.id from ops.incident i
+            where i.state not in ('resolved','reviewed')
+              and (
+                i.correlation_id = %s
+                or exists (
+                  select 1 from ops.incident_fact f
+                   where f.incident_id = i.id
+                     and f.source_ref = 'correlation:' || %s::text
+                )
+              )
+         order by i.detected_at
+            limit 1""",
+        (correlation_id, correlation_id))
+    row = cur.fetchone()
+    if row is None:
+        # Preserve 0116's cross-run recurrence rule as the second dedupe key.
+        cur.execute(
+            """select id from ops.incident
+                where signature = %s and state not in ('resolved','reviewed')""",
+            (signature,))
+        row = cur.fetchone()
+
+    if row is None:
+        # Refs share one max+1 namespace across EVERY correlation. Take its
+        # global lock only after the correlation lock (one consistent order),
+        # then recheck both dedupe keys: another transaction with a different
+        # correlation may have opened this signature while we waited.
+        cur.execute(
+            "select pg_advisory_xact_lock("
+            "hashtextextended('ops.incident.ref-allocation', 0))")
+        cur.execute(
+            """select i.id from ops.incident i
+                where i.state not in ('resolved','reviewed')
+                  and (
+                    i.correlation_id = %s
+                    or exists (
+                      select 1 from ops.incident_fact f
+                       where f.incident_id = i.id
+                         and f.source_ref = 'correlation:' || %s::text
+                    )
+                  )
+             order by i.detected_at
+                limit 1""",
+            (correlation_id, correlation_id))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute(
+                """select id from ops.incident
+                    where signature = %s
+                      and state not in ('resolved','reviewed')""",
+                (signature,))
+            row = cur.fetchone()
+
+    opened = row is None
+    if opened:
+        cur.execute(
+            """insert into ops.incident
+                   (ref, correlation_id, title, severity, state, environment,
+                    owner_actor, next_action, detected_source, detected_at,
+                    source_kind, source_ref, signature, observed_at, expires_at)
+               values (%s,%s,%s,%s,'detected',%s,'joe',%s,%s, now(),
+                       'collector','tools/ops-record.py immediate',%s, now(),
+                       now() + make_interval(hours => %s))
+               returning id""",
+            (_next_incident_ref(cur), correlation_id,
+             f"{source_label} {state} on {service_key} ({environment})",
+             SEVERITY_BY_CRITICALITY.get(criticality, "SEV-3"), environment,
+             f"read the trace: ops-record trace {correlation_id}",
+             f"{source_kind} ledger: {source_label}", signature,
+             MONITORING_HOURS))
+        incident_id = cur.fetchone()[0]
+    else:
+        incident_id = row[0]
+
+    # Signature dedupe can reuse an incident opened by an older correlation.
+    # Persist the new journey edge in the exact shape ops.v_trace's 0123
+    # recurrence arm consumes, then let later observations in this correlation
+    # find the same incident before considering their different signatures.
+    correlation_ref = f"correlation:{correlation_id}"
+    cur.execute(
+        """insert into ops.incident_fact (incident_id, text, source_ref)
+           select %s, %s, %s
+            where exists (
+                    select 1 from ops.incident i
+                     where i.id = %s
+                       and i.correlation_id is distinct from %s
+                  )
+              and not exists (
+                    select 1 from ops.incident_fact f
+                     where f.incident_id = %s and f.source_ref = %s
+                  )
+           returning id""",
+        (incident_id,
+         f"recurrence on {service_key} ({environment}) under correlation "
+         f"{correlation_id}",
+         correlation_ref, incident_id, correlation_id,
+         incident_id, correlation_ref))
+
+    cur.execute(
+        """insert into ops.incident_link (incident_id, kind, ref, note)
+           values (%s, %s, %s, %s)
+           on conflict do nothing
+           returning incident_id""",
+        (incident_id, source_kind, str(source_id), source_label))
+    linked = cur.fetchone() is not None
+    if linked:
+        fact = f"{source_label} on {service_key} ({environment}) ended {state}"
+        if failure_class:
+            fact += f", failure class {failure_class}"
+        cur.execute(
+            """insert into ops.incident_fact (incident_id, text, source_ref)
+               values (%s, %s, %s)""",
+            (incident_id, fact, f"ops.{source_kind}:{source_id}"))
+    return incident_id, opened, linked
+
+
 def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
     """Turn the latest run of every job into incident state. Returns how many
     incidents were OPENED (recoveries and appends are not openings)."""
@@ -471,57 +707,16 @@ def assess(cur, environment: str | None = None, window_hours: int = 24) -> int:
     latest = cur.fetchall()
 
     for (run_id, service_id_, service_key, criticality, env, run_key,
-         state, failure_class, correlation_id, detail) in latest:
+        state, failure_class, correlation_id, detail) in latest:
 
         if state in ("failed", "timed_out"):
-            signature = f"{service_key}|{env}|{run_key}|{failure_class or ''}"
-            cur.execute(
-                """select id from ops.incident
-                    where signature = %s and state not in ('resolved','reviewed')""",
-                (signature,))
-            row = cur.fetchone()
-
-            if row is None:
-                # A NEW incident. The unique index over open incidents is what
-                # actually guarantees there is only ever one; this lookup is the
-                # polite path to the same answer.
-                cur.execute(
-                    """insert into ops.incident
-                           (ref, correlation_id, title, severity, state, environment,
-                            owner_actor, next_action, detected_source, detected_at,
-                            source_kind, source_ref, signature, observed_at, expires_at)
-                       values (%s,%s,%s,%s,'detected',%s,'joe',%s,%s, now(),
-                               'collector','tools/ops-record.py assess',%s, now(),
-                               now() + make_interval(hours => %s))
-                       returning id""",
-                    (_next_incident_ref(cur), correlation_id,
-                     f"{run_key} failed on {service_key} ({env})",
-                     SEVERITY_BY_CRITICALITY.get(criticality, "SEV-3"), env,
-                     f"read the trace: ops-record trace {correlation_id}",
-                     f"job-run ledger: {run_key}",
-                     signature, MONITORING_HOURS))
-                incident_id = cur.fetchone()[0]
-                opened += 1
-            else:
-                incident_id = row[0]
-
-            # Link the run and record it as a FACT — but only once per run, or a
-            # repeated assess would grow the fact list without new information.
-            cur.execute(
-                """insert into ops.incident_link (incident_id, kind, ref, note)
-                   values (%s, 'run', %s, %s)
-                   on conflict do nothing
-                   returning incident_id""",
-                (incident_id, str(run_id), run_key))
-            if cur.fetchone() is not None:
-                cur.execute(
-                    """insert into ops.incident_fact (incident_id, text, source_ref)
-                       values (%s, %s, %s)""",
-                    (incident_id,
-                     f"{run_key} on {service_key} ({env}) ended {state}"
-                     + (f", failure class {failure_class}" if failure_class else "")
-                     + (f" — {detail}" if detail else ""),
-                     f"ops.run:{run_id}"))
+            _, was_opened, _ = _record_failure_incident(
+                cur=cur, correlation_id=correlation_id,
+                service_id=service_id_, service_key=service_key,
+                criticality=criticality, environment=env,
+                source_kind="run", source_id=run_id, source_label=run_key,
+                state=state, failure_class=failure_class, detail=detail)
+            opened += int(was_opened)
 
         elif state == "succeeded":
             # RECOVERY IS NOT RESOLUTION. One green run says the symptom stopped,
@@ -744,9 +939,8 @@ def cmd_sweep(args) -> int:
 
 
 def cmd_assess(args) -> int:
-    with connect("routine") as conn, conn.cursor() as cur:
+    with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
         opened = assess(cur, environment=args.environment, window_hours=args.window_hours)
-        conn.commit()
         cur.execute(
             """select ref, severity, state, title, next_action
                  from ops.incident
@@ -826,7 +1020,7 @@ def cmd_deployment(args) -> int:
                                        "rolled_back", "superseded"):
         ended_at = "now"
     try:
-        with connect("write") as conn, conn.cursor() as cur:
+        with connect("write") as conn, conn.transaction(), conn.cursor() as cur:
             sid = service_id(cur, args.service)
             release_id = None
             if getattr(args, "release_key", None):
@@ -873,6 +1067,16 @@ def cmd_deployment(args) -> int:
                  args.failure_class, args.source_kind, args.source_ref,
                  (args.detail or None)))
             dep_id = cur.fetchone()[0]
+            if args.state == "failed":
+                cur.execute("select criticality from ops.service where id = %s", (sid,))
+                criticality = cur.fetchone()[0]
+                _record_failure_incident(
+                    cur=cur, correlation_id=corr, service_id=sid,
+                    service_key=args.service, criticality=criticality,
+                    environment=args.environment, source_kind="deployment",
+                    source_id=dep_id, source_label="deployment",
+                    state=args.state, failure_class=args.failure_class,
+                    detail=args.detail)
     except SystemExit:
         raise
     except Exception as e:                                   # noqa: BLE001
@@ -931,6 +1135,22 @@ def cmd_release(args) -> int:
                   "match the bound release manifest so the approval plan hash "
                   "covers the version that can be promoted", file=sys.stderr)
             return 2
+        assurance = (manifest.get("performance_budget_ref"),
+                     manifest.get("performance_budget_ms"),
+                     manifest.get("recovery_strategy"),
+                     manifest.get("rollback_ready"),
+                     manifest.get("rollback_plan_ref"))
+        if (not isinstance(assurance[0], str) or not assurance[0].strip()
+                or isinstance(assurance[1], bool)
+                or not isinstance(assurance[1], int) or assurance[1] <= 0
+                or assurance[2] not in ("rollback", "forward_fix")
+                or assurance[3] is not True
+                or not isinstance(assurance[4], str) or not assurance[4].strip()):
+            print("ops-record: Production candidate manifest requires a positive "
+                  "performance budget/ref, recovery strategy "
+                  "(rollback or forward_fix), and ready recovery plan",
+                  file=sys.stderr)
+            return 2
         verified = subprocess.run(
             [sys.executable, str(REPO / "tools" / "release-manifest.py"),
              "verify", "--manifest", args.manifest],
@@ -951,6 +1171,8 @@ def cmd_release(args) -> int:
                     """insert into ops.release
                            (correlation_id, release_key, service_id, environment,
                             state, git_sha, provider, provider_version_id,
+                            performance_budget_ref, performance_budget_ms,
+                            recovery_strategy,
                             artifact_digest, dependency_lock_digest,
                             sbom_ref, migration_set, schema_highest_migration,
                             config_fingerprint, declared_env_differences,
@@ -958,12 +1180,15 @@ def cmd_release(args) -> int:
                             test_evidence_ref, security_evidence_ref,
                             rollback_ready, rollback_plan_ref, work_request_ref,
                             plan_hash, source_kind, source_ref, expires_at)
-                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                               %s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
+                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                               %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
                                'tools/release-manifest.py', %s)
                        returning id, release_key""",
                     (corr, args.key, sid, args.environment,
                      manifest.get("git_sha"), args.provider, args.provider_version_id,
+                     manifest.get("performance_budget_ref"),
+                     manifest.get("performance_budget_ms"),
+                     manifest.get("recovery_strategy"),
                      manifest.get("artifact_digest"),
                      manifest.get("dependency_lock_digest"), manifest.get("sbom_ref"),
                      manifest.get("migration_set"),
@@ -973,7 +1198,10 @@ def cmd_release(args) -> int:
                      json.dumps(manifest.get("asset_versions")) if manifest.get("asset_versions") else None,
                      args.maker, args.maker_verification,
                      args.test_evidence, args.security_evidence,
-                     args.rollback_ready, args.rollback_plan,
+                     (manifest.get("rollback_ready") if args.environment == "production"
+                      else args.rollback_ready),
+                     (manifest.get("rollback_plan_ref") if args.environment == "production"
+                      else args.rollback_plan),
                      args.work_request, manifest.get("plan_hash"),
                      parse_ts(args.expires_at) if args.expires_at else None))
                 row = cur.fetchone()
@@ -1332,6 +1560,12 @@ def main() -> int:
     r.add_argument("--attempt", type=int, default=1)
     r.add_argument("--started-at")
     r.add_argument("--ended-at")
+    r.add_argument("--duration-ms", type=int,
+                   help="measured elapsed milliseconds; derives exact start/end times")
+    r.add_argument("--release-key",
+                   help="release this assurance run proves, resolved to ops.release.id")
+    r.add_argument("--budget-ms", type=int,
+                   help="approved performance budget; performance.* only")
     r.add_argument("--correlation")
     r.add_argument("--source-kind", default="wrapper",
                    choices=["collector", "registry", "wrapper", "operator"])
