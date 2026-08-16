@@ -292,13 +292,13 @@ def main() -> int:
               jobs_login_ok, jobs_login_detail)
 
         # The migration chain existing is not enough: exercise the job ledger,
-        # authority boundaries, retries, leases, receipts, cache, provider
+        # authority structure and owner-session refusal, retries, leases, receipts, cache, provider
         # health, and cost admission on the same disposable Neon database.
         control_plane = subprocess.run(
             [sys.executable, str(REPO / "ops" / "control-plane-db-gate.py")],
             capture_output=True, text=True, timeout=900,
             env={**os.environ, "DATABASE_URL": rebuilt_dsn})
-        check("2d. control-plane ledger and authority integration gate passes",
+        check("2d. control-plane ledger, authority structure/owner-refusal gate passes",
               control_plane.returncode == 0,
               control_plane.stderr.strip().splitlines()[-1][:200]
               if control_plane.stderr.strip() else
