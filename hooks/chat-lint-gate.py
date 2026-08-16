@@ -292,8 +292,10 @@ def main():
                "excerpt": findings[0][1][:200]})
         lines = [
             "CHAT LINT — this reply breaks writing rules that bind chat "
-            "(5be2f462 banned constructions / 3a9dbafd bare ids). Revise the "
-            "reply, keeping its content:",
+            "(5be2f462 banned constructions / 3a9dbafd bare ids). Send ONLY THE "
+            "CORRECTED LINES, not the whole reply again — Joe has already read it, "
+            "and rule 1d50a3bb makes a full restatement a second charge for text "
+            "he owns. Fix these:",
             ""]
         for rid, quote, fix in findings[:6]:
             lines.append(f"  [{rid}] …{quote}…")
