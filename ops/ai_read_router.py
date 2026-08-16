@@ -19,7 +19,7 @@ import ai_eval
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = REPO_ROOT / "evals" / "ai" / "function-router.v1.json"
 BOUND_SUITE_PATH = REPO_ROOT / "evals" / "ai" / "model-boundary.v1.json"
-POLICY_SHA256 = "15e7980822c5b4959e0e9a73dfd814753a9c95bfd15eb2fbce5f58d30c58cd4c"
+POLICY_SHA256 = "45a6075598db613870130921522101eecbe4a43145d3bd37872dd9190f02c7ea"
 ACTION_RISK_REGISTRY_PATH = REPO_ROOT / "control-room" / "contracts" / "action-risk-registry.v1.json"
 SERVER_CONTEXT = {
     "organization_tenant_id": "carr-internal",
