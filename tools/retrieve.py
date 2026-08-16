@@ -47,8 +47,8 @@ def main():
     # ---- DUAL-READ, store pass first (doctrine-store build P4, 2026-08-08;
     # decisions 82a2fb62 + the import-door entry). Migrated doctrine lives in
     # the record layer; its vault .md copies are frozen dual-read fallbacks
-    # until the cutoff. The store pass runs the SAME FTS the search-doctrine
-    # verb runs; a store hit prints as a verb pointer, never a file path.
+    # until the cutoff. The store pass runs the SAME database retrieval function
+    # as search-doctrine; a store hit prints as a verb pointer, never a file path.
     # FAIL-SOFT: any error prints one line and the file pass still answers —
     # a dead store must never make retrieval blind (record_sources doctrine).
     #
@@ -64,27 +64,17 @@ def main():
         from lib.record_sources import _connect, doctrine_migrated_paths
         migrated_rel = doctrine_migrated_paths(vault)
         with _connect() as conn, conn.cursor() as cur:
-            # AND first (websearch), OR fallback: long natural questions rarely
-            # land every word in one section, and the file scorer is OR-based —
-            # without the fallback the store looked blind exactly on the queries
-            # humans actually type (caught on the batch-5 sanity check).
-            def _fts(qtext):
-                cur.execute("""
-                    select d.slug, s.section_key, coalesce(s.title,''),
-                           ts_rank_cd(r.search_vector, websearch_to_tsquery('english', %s)) as rank,
-                           ts_headline('english', r.plain_text,
-                                       websearch_to_tsquery('english', %s),
-                                       'MaxWords=18, MinWords=8') as snippet
-                      from doctrine_section s
-                      join doctrine_document d on d.id = s.document_id
-                      join doctrine_revision r on r.id = s.current_revision_id
-                     where s.status = 'active' and d.visibility = 'shared'
-                       and r.search_vector @@ websearch_to_tsquery('english', %s)
-                     order by rank desc limit %s""", (qtext, qtext, qtext, top))
-                return cur.fetchall()
-            store_hits = _fts(" ".join(words))
-            if not store_hits and len(words) > 1:
-                store_hits = _fts(" OR ".join(words))
+            # The database function is the one production ranker for both MCP
+            # and this CLI.  It retains the raw question for its lexical lane,
+            # applies scope before rank, and adds only approved concept evidence.
+            cur.execute("""
+                select doc_slug, section_key, title, rank, snippet
+                  from search_doctrine_situations(
+                    %s, null, null, %s, null)
+                 order by final_score desc, concept_score desc,
+                          lexical_score desc, section_key asc
+            """, (" ".join(words), top))
+            store_hits = cur.fetchall()
     except Exception as exc:
         print(f"retrieve: store pass skipped ({type(exc).__name__}) — file index only")
 

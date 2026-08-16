@@ -104,6 +104,68 @@
         "doctrine_postgres_fts": {"required_targets": ["2026-07-30-agent-systems-explainer-takeaways#preamble"], "top_k": 3}
       },
       "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "store-duplicates"]
+    },
+    {
+      "id": "RET-TITLE-001",
+      "query": "diagnosis checklist",
+      "failure_class": "title_index_gap",
+      "engines": {
+        "section_index_lexical": {"required_targets": ["doctrine:runbook"], "top_k": 3},
+        "doctrine_postgres_fts": {"required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3}
+      },
+      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
+    },
+    {
+      "id": "RET-PHRASE-001",
+      "query": "database service unavailable troubleshooting steps",
+      "failure_class": "situation_language_positive",
+      "engines": {
+        "doctrine_postgres_fts": {"required_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3}
+      },
+      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
+    },
+    {
+      "id": "RET-PHRASE-002",
+      "query": "how the operating playbook learns from mistakes",
+      "failure_class": "situation_language_positive",
+      "engines": {
+        "doctrine_postgres_fts": {"required_targets": ["playbook-review#preamble"], "top_k": 3}
+      },
+      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
+    },
+    {
+      "id": "RET-NEG-001",
+      "query": "outage communication template",
+      "failure_class": "near_miss_negative",
+      "engines": {
+        "doctrine_postgres_fts": {"expect_no_targets": ["runbook#diagnosis-checklist-in-order-2-minutes"], "top_k": 3}
+      },
+      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
+    },
+    {
+      "id": "RET-LIFE-001",
+      "query": "retired retrieval lifecycle fixture",
+      "failure_class": "lifecycle_negative",
+      "engines": {
+        "doctrine_postgres_fts": {"expect_no_hits": true, "top_k": 3}
+      },
+      "forbidden_target_patterns": ["retired", "superseded", "archive", "old-revision"]
+    },
+    {
+      "id": "RET-AMB-001",
+      "query": "review cycle after a record layer outage",
+      "failure_class": "ambiguous_dual",
+      "engines": {
+        "doctrine_postgres_fts": {
+          "required_targets": [
+            "runbook#diagnosis-checklist-in-order-2-minutes",
+            "playbook-review#preamble"
+          ],
+          "require_all_targets": true,
+          "top_k": 3
+        }
+      },
+      "forbidden_target_patterns": ["_to_delete/", "\\.generations/", "archive"]
     }
   ]
 }

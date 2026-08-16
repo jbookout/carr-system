@@ -1,0 +1,22 @@
+{
+  "schema_version": "carr-situation-retrieval-observation-v1",
+  "suite_id": "carr-situation-retrieval-2026-08-16-v1",
+  "scope_ref": "carr-internal",
+  "data_class": "D2_internal_metadata",
+  "status": "candidate_synthetic",
+  "observed_at": "2026-08-16T00:00:00-05:00",
+  "source": "candidate-only deterministic fixture; no production migration or deployment was authorized",
+  "policy_id": "lexical-dominant-v1",
+  "scope_applied_before_rank": true,
+  "deterministic_replay_mismatches": 0,
+  "diagnostics": {"mean_reciprocal_rank": 0.857143, "pure_concept_share": 0.714286, "dual_lane_share": 0.285714},
+  "cases": {
+    "RET-002": [{"target": "runbook#diagnosis-checklist-in-order-2-minutes", "rank": 1, "current": true, "provenance": {"complete": true, "policy_id": "lexical-dominant-v1", "lexical_score": 0, "concept_score": 0.9, "final_score": 0.225, "phrase_ids": ["candidate-phrase-outage"], "concept_ids": ["candidate-concept-outage"], "mapping_ids": ["candidate-mapping-diagnosis"]}}],
+    "RET-003": [{"target": "playbook-review#preamble", "rank": 2, "current": true, "provenance": {"complete": true, "policy_id": "lexical-dominant-v1", "lexical_score": 0, "concept_score": 0.9, "final_score": 0.225, "phrase_ids": ["candidate-phrase-review"], "concept_ids": ["candidate-concept-review"], "mapping_ids": ["candidate-mapping-review"]}}],
+    "RET-PHRASE-001": [{"target": "runbook#diagnosis-checklist-in-order-2-minutes", "rank": 1, "current": true, "provenance": {"complete": true, "policy_id": "lexical-dominant-v1", "lexical_score": 0, "concept_score": 0.8, "final_score": 0.2, "phrase_ids": ["candidate-phrase-outage"], "concept_ids": ["candidate-concept-outage"], "mapping_ids": ["candidate-mapping-diagnosis"]}}],
+    "RET-PHRASE-002": [{"target": "playbook-review#preamble", "rank": 1, "current": true, "provenance": {"complete": true, "policy_id": "lexical-dominant-v1", "lexical_score": 0, "concept_score": 0.8, "final_score": 0.2, "phrase_ids": ["candidate-phrase-review"], "concept_ids": ["candidate-concept-review"], "mapping_ids": ["candidate-mapping-review"]}}],
+    "RET-NEG-001": [{"target": "runbook#communication", "rank": 1, "current": true, "provenance": {"complete": true, "policy_id": "lexical-dominant-v1", "lexical_score": 0.6, "concept_score": 0, "final_score": 0.45}}],
+    "RET-LIFE-001": [],
+    "RET-AMB-001": [{"target": "runbook#diagnosis-checklist-in-order-2-minutes", "rank": 1, "current": true, "provenance": {"complete": true, "policy_id": "lexical-dominant-v1", "lexical_score": 0.3, "concept_score": 0.8, "final_score": 0.425, "phrase_ids": ["candidate-phrase-outage"], "concept_ids": ["candidate-concept-outage"], "mapping_ids": ["candidate-mapping-diagnosis"]}}, {"target": "playbook-review#preamble", "rank": 2, "current": true, "provenance": {"complete": true, "policy_id": "lexical-dominant-v1", "lexical_score": 0.2, "concept_score": 0.7, "final_score": 0.325, "phrase_ids": ["candidate-phrase-review"], "concept_ids": ["candidate-concept-review"], "mapping_ids": ["candidate-mapping-review"]}}]
+  }
+}
