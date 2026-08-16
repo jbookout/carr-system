@@ -11,6 +11,10 @@
       "check": "migrate-dell-selftest.py",
       "reason": "Exercises LaunchAgent load and idempotent retry. launchd is macOS. Evidence: 'LaunchAgent load failure and idempotent retry both stay nonzero' failed on the ubuntu runner 2026-08-13, run 31750582043.",
       "added": "2026-08-13"
+    },
+    {
+      "check": "release-abandon-selftest.py",
+      "reason": "Needs a Neon BRANCH, not merely a Postgres. Its guards are the Neon ones \u2014 refuse the production project id, refuse the default branch, refuse a shared endpoint host, destroy the branch on every exit path \u2014 and a GitHub runner holds no Neon credential, so on a runner it exits 78 'not configured' and --strict correctly reads that as a skip. Evidence: run on branch release-abandon 2026-08-16 failed the gates class with exactly that message. It runs locally and in the nightly chain, 8/8 against a real ephemeral branch, which is where the behaviour it proves actually lives."
     }
   ],
   "quarantined": [],

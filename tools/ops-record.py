@@ -923,6 +923,63 @@ def cmd_release(args) -> int:
                 print(key)
                 return 0
 
+            if args.action == "abandon":
+                # A RELEASE THAT ENDS WITHOUT SHIPPING STILL HAS TO SAY WHY, and
+                # the two ways it can end are genuinely different facts that 0131
+                # already models separately:
+                #   superseded  a NAMED later release replaced it, and
+                #               a_superseded_release_names_its_successor forces
+                #               the pointer, which is the useful half — collapsing
+                #               it into `abandoned` loses that a successor exists.
+                #   abandoned   nothing replaced it; it will simply never ship,
+                #               and 0134 forces a reason so the row is not a
+                #               terminal state nobody can explain.
+                #
+                # THIS IS A WAY TO END A RELEASE, NEVER A WAY TO ERASE ONE. The
+                # state filter below refuses anything that reached deployment or
+                # completion: a release that shipped is history, and letting it be
+                # marked abandoned afterwards would write a real deploy out of the
+                # ledger, which is the opposite of what P0-1 exists to do.
+                # SUPERSEDED IS NOT AN OPTION HERE, and that is the schema's
+                # ruling rather than a simplification. 0131's
+                # an_approved_release_can_be_rebuilt and
+                # an_approved_release_names_its_approval both exempt only
+                # draft/candidate/abandoned, so reaching `superseded` requires a
+                # full artifact digest, dependency lock, plan hash, approver and
+                # expiry. That is a release which was APPROVED — and usually one
+                # that shipped and was replaced by a later deploy. An unapproved
+                # candidate overtaken before signing has none of that evidence and
+                # is not superseded in the sense this table means; it is abandoned,
+                # and its reason can name the successor in words.
+                if not args.reason or len(args.reason.strip()) < 12:
+                    print("ops-record: release abandon needs --reason (at least a "
+                          "dozen characters). A terminal row nobody can explain is "
+                          "the thing this action exists to prevent.", file=sys.stderr)
+                    return 2
+                cur.execute(
+                    """update ops.release
+                          set state = 'abandoned', abandoned_reason = %s,
+                              ended_at = now()
+                        where release_key = %s
+                          and state in ('draft','candidate','approved')
+                    returning state""",
+                    (args.reason.strip(), args.key))
+                row = cur.fetchone()
+                if not row:
+                    cur.execute("select state from ops.release where release_key = %s",
+                                (args.key,))
+                    existing = cur.fetchone()
+                    if not existing:
+                        print(f"ops-record: no release {args.key!r}", file=sys.stderr)
+                    else:
+                        print(f"ops-record: {args.key!r} is {existing[0]} and cannot be "
+                              f"abandoned. Only a release that never shipped can be "
+                              f"ended this way; one that deployed is history.",
+                              file=sys.stderr)
+                    return 2
+                print(f"{args.key} {row[0]}")
+                return 0
+
             if args.action == "complete":
                 # THE LIFECYCLE HAS TO CLOSE, or a release sits at `approved`
                 # forever while its deployment reads `complete`. Observed on the
@@ -1176,7 +1233,8 @@ def main() -> int:
                     default="production")
 
     rel = sub.add_parser("release", help="record, approve or read one release (P0-1)")
-    rel.add_argument("action", choices=["candidate", "approve", "require", "complete", "show"])
+    rel.add_argument("action", choices=["candidate", "approve", "require", "complete",
+                                        "abandon", "show"])
     rel.add_argument("--sha", help="require only: the SHA about to ship")
     rel.add_argument("--key", help="the release key, e.g. r-2026-08-15-01. Required "
                                    "for every action except `require`, which asks "
@@ -1200,6 +1258,9 @@ def main() -> int:
     rel.add_argument("--verifier", help="complete only: who verified, and it may not be the maker")
     rel.add_argument("--verifier-evidence", dest="verifier_evidence",
                      help="complete only: ref to the verification that closed it")
+    rel.add_argument("--reason", help="abandon only: why this release will never "
+                                      "ship. Required unless --superseded-by names "
+                                      "the release that replaced it.")
     rel.add_argument("--expires-hours", type=int, default=24,
                      help="approve only: how long the approval stays live. An "
                           "approval that never expires is how a plan-hash check "
