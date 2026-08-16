@@ -84,6 +84,12 @@ def main() -> int:
           '"$rd_state" = "complete"' in source and "--read-back-at now" in source,
           "the read-back is not conditioned on the state")
 
+    # 3c. a verified deploy CLOSES its release
+    close_at = source.find("release complete --key")
+    check("3c. a complete deploy closes the release, and only a complete one",
+          close_at != -1 and '"$rd_state" = "complete" ] && [ -n "$RELEASE_KEY"' in source,
+          "nothing advances the release past approved, so it and its deployment disagree")
+
     # 4. the failed path records before it exits
     failed_at = source.find("record_deployment failed")
     exit_at = source.find("exit 1", failed_at if failed_at != -1 else 0)
