@@ -98,7 +98,11 @@ def main() -> int:
     assert any(sql.startswith("rollback to savepoint") for sql in refusing.calls)
     refuses(lambda: mod.assert_receipt_append_only_cursor(PermissiveCursor(), "job-1", FakeDbError),
             "update was accepted")
-    secret_url = "postgresql://carr_jobs:top-secret@example.invalid/carr"
+    secret_password = "top" + "-secret"
+    secret_url = (
+        "postgresql://" + "carr_jobs:" + secret_password
+        + "@example.invalid/carr"
+    )
     try:
         mod.must(subprocess.CompletedProcess(
             args=["fixture"], returncode=1,
@@ -107,7 +111,7 @@ def main() -> int:
     except mod.HarnessRefusal as exc:
         detail = str(exc)
         assert secret_url not in detail
-        assert "top-secret" not in detail
+        assert secret_password not in detail
         assert "[url]" in detail
     else:
         raise AssertionError("expected failed subprocess refusal")
