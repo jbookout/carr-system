@@ -89,20 +89,6 @@ COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching
 
 
 --
--- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
---
-
-CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
-
-
---
--- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: -
---
-
-COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
-
-
---
 -- Name: capability_agent_session_guard(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -513,59 +499,6 @@ COMMENT ON FUNCTION public.assert_no_orphaned_edges() IS 'Raises unless v_orphan
 
 
 --
--- Name: assert_situation_retrieval_golden(text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.assert_situation_retrieval_golden(p_suite_digest text) RETURNS TABLE(case_id text, status text, target_rank integer)
-    LANGUAGE plpgsql
-    AS $$
-declare c record; targets text[]; selected_policy text; required_ok boolean;
-        forbidden_ok boolean; empty_ok boolean;
-begin
-  select rp.policy_id into selected_policy from retrieval_ranking_policy rp
-   where rp.is_default and rp.status='active'
-     and rp.golden_suite_digest=p_suite_digest;
-  if selected_policy is null then
-    raise exception 'golden suite digest mismatch';
-  end if;
-  for c in select * from (values
-    ('RET-001','write acceptance tests first',array['carr-mature-software-end-state-bduf#s39-fresh-session-prompt']::text[],false,'{}'::text[],false),
-    ('RET-002','record layer outage diagnosis runbook',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
-    ('RET-003','playbook self improvement review cycle',array['playbook-review#preamble']::text[],false,'{}'::text[],false),
-    ('RET-004','document factory',array['document-factory-routing#preamble']::text[],false,'{}'::text[],false),
-    ('RET-005','weekly new provider detection',array['npi-sweep-sop#preamble']::text[],false,'{}'::text[],false),
-    ('RET-006','social publishing review approval',array['social-media-workflow#placement-the-entire-social-run-is-local-now-joe-july-18-2026']::text[],false,'{}'::text[],false),
-    ('RET-007','space search multi source',array['space-search-sop#preamble']::text[],false,'{}'::text[],false),
-    ('RET-008','lead system',array['lead-system-handoff#preamble']::text[],false,'{}'::text[],false),
-    ('RET-009','restore backup rehearsal',array['carr-control-room-bduf#s30-test-and-verification-strategy']::text[],false,'{}'::text[],false),
-    ('RET-010','single source of truth',array['deal-enrichment-sop#rules']::text[],false,'{}'::text[],false),
-    ('RET-ARCH-001','agent systems validation',array['2026-07-30-agent-systems-explainer-takeaways#preamble']::text[],false,'{}'::text[],false),
-    ('RET-TITLE-001','diagnosis checklist',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
-    ('RET-PHRASE-001','database service unavailable troubleshooting steps',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
-    ('RET-PHRASE-002','how the operating playbook learns from mistakes',array['playbook-review#preamble']::text[],false,'{}'::text[],false),
-    ('RET-NEG-001','outage communication template','{}'::text[],false,array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false),
-    ('RET-LIFE-001','retired retrieval lifecycle fixture','{}'::text[],false,'{}'::text[],true),
-    ('RET-AMB-001','review cycle after a record layer outage',array['runbook#diagnosis-checklist-in-order-2-minutes','playbook-review#preamble']::text[],true,'{}'::text[],false)
-  ) q(case_id,query,required_targets,require_all,forbidden_targets,expect_no_hits)
-  loop
-    select array_agg(x.doc_slug||'#'||x.section_key order by x.final_score desc,
-                     x.concept_score desc,x.lexical_score desc,x.section_key)
-      into targets from search_doctrine_situations(c.query,null,null,3,selected_policy) x;
-    targets := coalesce(targets,'{}'); case_id := c.case_id;
-    required_ok := case when cardinality(c.required_targets)=0 then true
-                        when c.require_all then c.required_targets <@ targets
-                        else c.required_targets && targets end;
-    forbidden_ok := not (c.forbidden_targets && targets);
-    empty_ok := not c.expect_no_hits or cardinality(targets)=0;
-    target_rank := case when cardinality(c.required_targets)=0 then null
-                        else array_position(targets,c.required_targets[1]) end;
-    status := case when required_ok and forbidden_ok and empty_ok then 'pass' else 'fail' end;
-    return next;
-  end loop;
-end $$;
-
-
---
 -- Name: assert_view_disjoint(text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -678,53 +611,6 @@ COMMENT ON FUNCTION public.carr_business_days(a date, b date) IS 'Whole business
 
 
 --
--- Name: current_retrievable_doctrine(uuid, text[]); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[]) RETURNS TABLE(section_id uuid, section_key text, section_title text, doc_slug text, doc_title text, content_class text, plain_text text, body_search_vector tsvector, section_title_vector tsvector, document_title_vector tsvector)
-    LANGUAGE sql STABLE
-    AS $$
-  select s.id, s.section_key, s.title, d.slug, d.title, d.content_class,
-         r.plain_text, r.search_vector, s.title_search_vector, d.title_search_vector
-    from doctrine_section s
-    join doctrine_document d on d.id = s.document_id
-    join doctrine_revision r on r.id = s.current_revision_id
-   where s.status = 'active'
-     and (d.visibility <> 'personal' or d.owner_actor_id = p_actor_id)
-     and (p_content_classes is null or d.content_class = any(p_content_classes))
-$$;
-
-
---
--- Name: mark_retrieval_mappings_for_repair(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.mark_retrieval_mappings_for_repair() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-begin
-  if old.status = 'active' and new.status <> 'active' then
-    update doctrine_concept_mapping
-       set status = 'needs_repair', repair_reason = 'target section is no longer active',
-           version = version + 1, updated_at = now()
-     where section_id = new.id and status = 'approved';
-  end if;
-  return new;
-end $$;
-
-
---
--- Name: normalize_retrieval_phrase(text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.normalize_retrieval_phrase(value text) RETURNS text
-    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
-    AS $$
-  select regexp_replace(lower(btrim(value)), '\s+', ' ', 'g')
-$$;
-
-
---
 -- Name: org_identity_key(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -795,264 +681,6 @@ $$;
 --
 
 COMMENT ON FUNCTION public.org_party_id(p_name text, p_actor uuid) IS 'Find-or-create an organisation party by normalised name, atomically (0059). Replaces the blind `insert into party ... values (''org'', $1, ...)` at mcp-server/src/tools.js:1156 (add-party) and :1281 (add-premises), which is what minted 17 Henry Schein rows. Race-safe against party_org_identity_uniq: the loser of a concurrent insert re-reads rather than failing. A placeholder name still mints a fresh row, on purpose.';
-
-
---
--- Name: promote_retrieval_proposal(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) RETURNS uuid
-    LANGUAGE plpgsql
-    AS $$
-declare p retrieval_proposal%rowtype; landed uuid; cid uuid; sid uuid;
-begin
-  if not exists (select 1 from actor where actor.id=p_approver_id and kind='human') then
-    raise exception 'human_only';
-  end if;
-  select * into p from retrieval_proposal where id=p_proposal_id for update;
-  if not found or p.status <> 'pending' then raise exception 'proposal is not pending'; end if;
-  if p.proposal_type = 'concept' then
-    insert into retrieval_concept
-      (concept_key,label,definition,status,review_after,proposer_id,approver_id,approved_at)
-    values (p.payload->>'concept_key',p.payload->>'label',p.payload->>'definition','approved',
-            (p.payload->>'review_after')::timestamptz,p.proposer_id,p_approver_id,now()) returning id into landed;
-  elsif p.proposal_type = 'phrase' then
-    select id into cid from retrieval_concept
-     where concept_key=p.payload->>'concept_key' and status='approved';
-    if cid is null then raise exception 'approved concept not found'; end if;
-    insert into retrieval_phrase
-      (concept_id,display_phrase,match_mode,min_similarity,weight,status,source,source_ref,
-       proposer_id,approver_id,approved_at)
-    values (cid,p.payload->>'phrase',p.payload->>'match_mode',
-            coalesce((p.payload->>'min_similarity')::numeric,.35),
-            (p.payload->>'weight')::numeric,'approved',p.payload->>'source',p.payload->>'source_ref',
-            p.proposer_id,p_approver_id,now()) returning id into landed;
-  elsif p.proposal_type = 'mapping' then
-    select id into cid from retrieval_concept
-     where concept_key=p.payload->>'concept_key' and status='approved';
-    select s.id into sid from doctrine_section s join doctrine_document d on d.id=s.document_id
-     where d.slug=split_part(p.payload->>'section_address','#',1)
-       and s.section_key=split_part(p.payload->>'section_address','#',2) and s.status='active';
-    if cid is null or sid is null then raise exception 'approved concept or current section not found'; end if;
-    insert into doctrine_concept_mapping
-      (concept_id,section_id,role,weight,rationale,status,proposer_id,approver_id,approved_at)
-    values (cid,sid,p.payload->>'role',(p.payload->>'weight')::numeric,p.payload->>'rationale',
-            'approved',p.proposer_id,p_approver_id,now()) returning id into landed;
-  elsif p.proposal_type = 'retire' then
-    select r.id into landed from retire_retrieval_curation(
-      p.payload->>'target_type',(p.payload->>'target_id')::uuid,
-      (p.payload->>'base_version')::bigint,p_approver_id,p.reason) r;
-    if landed is null then raise exception 'retirement version conflict'; end if;
-  end if;
-  update retrieval_proposal set status='approved', reviewer_id=p_approver_id,
-         resulting_row_ids=array[landed], reviewed_at=now(), version=version+1
-   where id=p.id;
-  return landed;
-end $$;
-
-
---
--- Name: retire_retrieval_curation(text, uuid, bigint, uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) RETURNS TABLE(id uuid, version bigint, status text)
-    LANGUAGE plpgsql
-    AS $$
-begin
-  if btrim(p_reason) = '' then raise exception 'retirement reason required'; end if;
-  if not exists (select 1 from actor where actor.id=p_actor_id and kind='human') then
-    raise exception 'human_only';
-  end if;
-  if p_target_type = 'concept' then
-    update retrieval_concept set status='retired', retired_at=now(), version=version+1, updated_at=now()
-     where retrieval_concept.id=p_target_id and retrieval_concept.version=p_base_version and status='approved'
-     returning retrieval_concept.id, retrieval_concept.version, retrieval_concept.status into id, version, status;
-    if id is not null then
-      update retrieval_phrase set status='retired', retired_at=now(), version=version+1, updated_at=now()
-       where concept_id=p_target_id and status='approved';
-      update doctrine_concept_mapping set status='retired', retired_at=now(), version=version+1, updated_at=now()
-       where concept_id=p_target_id and status in ('approved','needs_repair');
-    end if;
-  elsif p_target_type = 'phrase' then
-    update retrieval_phrase set status='retired', retired_at=now(), version=version+1, updated_at=now()
-     where retrieval_phrase.id=p_target_id and retrieval_phrase.version=p_base_version and status='approved'
-     returning retrieval_phrase.id, retrieval_phrase.version, retrieval_phrase.status into id, version, status;
-  elsif p_target_type = 'mapping' then
-    update doctrine_concept_mapping set status='retired', retired_at=now(), version=version+1, updated_at=now()
-     where doctrine_concept_mapping.id=p_target_id and doctrine_concept_mapping.version=p_base_version
-       and status in ('approved','needs_repair')
-     returning doctrine_concept_mapping.id, doctrine_concept_mapping.version,
-               doctrine_concept_mapping.status into id, version, status;
-  else raise exception 'unknown retrieval curation type %', p_target_type;
-  end if;
-  if id is not null then return next; end if;
-end $$;
-
-
---
--- Name: retrieval_proposal_guard(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.retrieval_proposal_guard() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-begin
-  if tg_op = 'DELETE' then raise exception 'retrieval proposals are append-only'; end if;
-  if old.proposal_type is distinct from new.proposal_type
-     or old.payload is distinct from new.payload
-     or old.reason is distinct from new.reason
-     or old.proposer_id is distinct from new.proposer_id
-     or old.idempotency_key is distinct from new.idempotency_key
-     or old.created_at is distinct from new.created_at then
-    raise exception 'retrieval proposal evidence is immutable';
-  end if;
-  if old.status <> 'pending' or new.status not in ('approved','rejected','superseded') then
-    raise exception 'retrieval proposal review transition invalid';
-  end if;
-  return new;
-end $$;
-
-
---
--- Name: search_doctrine_situations(text, uuid, text[], integer, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20, p_policy_id text DEFAULT NULL::text) RETURNS TABLE(section_id uuid, section_key text, title text, doc_slug text, content_class text, rank double precision, snippet text, lexical_score double precision, concept_score double precision, final_score double precision, provenance jsonb)
-    LANGUAGE sql SECURITY DEFINER
-    SET search_path TO 'public', 'pg_temp'
-    AS $$
-with
-  normalized as materialized (
-    select normalize_retrieval_phrase(p_query) as q
-  ),
-  policy as materialized (
-    select * from retrieval_ranking_policy
-     where policy_id = coalesce(
-       p_policy_id,
-       (select policy_id from retrieval_ranking_policy where is_default and status='active'))
-       and status in ('candidate','active')
-  ),
-  query_terms as materialized (
-    select websearch_to_tsquery('english', q) as tsq from normalized
-  ),
-  current_set as materialized (
-    select * from current_retrievable_doctrine(p_actor_id, p_content_classes)
-  ),
-  lexical_raw as (
-    select c.section_id,
-           ts_rank_cd(
-             setweight(c.section_title_vector, 'A') ||
-             setweight(c.document_title_vector, 'A') ||
-             setweight(c.body_search_vector, 'B'), q.tsq) as raw_score,
-           ts_headline('english', c.plain_text, q.tsq, 'MaxWords=25, MinWords=10') as snippet
-      from current_set c cross join query_terms q
-     where c.section_title_vector @@ q.tsq
-        or c.document_title_vector @@ q.tsq
-        or c.body_search_vector @@ q.tsq
-  ),
-  phrase_match as (
-    select p.id as phrase_id, p.concept_id, p.weight as phrase_weight,
-           case p.match_mode
-             when 'exact' then case when p.normalized_phrase = n.q then 1.0 else 0.0 end
-             when 'fts' then case
-               when to_tsvector('english', p.normalized_phrase) @@ websearch_to_tsquery('english', n.q)
-               then least(1.0, ts_rank_cd(to_tsvector('english', p.normalized_phrase),
-                                         websearch_to_tsquery('english', n.q))::double precision)
-               else 0.0 end
-             when 'trgm' then case when similarity(p.normalized_phrase, n.q) >= p.min_similarity
-               then similarity(p.normalized_phrase, n.q) else 0.0 end
-           end::double precision as phrase_strength
-      from retrieval_phrase p cross join normalized n
-     where p.status = 'approved'
-  ),
-  concept_evidence as (
-    select m.section_id, pm.phrase_id, pm.concept_id, m.id as mapping_id,
-           pm.phrase_strength, pm.phrase_weight::double precision,
-           m.weight::double precision as mapping_weight,
-           (pm.phrase_strength * pm.phrase_weight * m.weight)::double precision as contribution
-      from phrase_match pm
-      join retrieval_concept c on c.id = pm.concept_id and c.status = 'approved'
-      join doctrine_concept_mapping m on m.concept_id = c.id and m.status = 'approved'
-      join current_set visible on visible.section_id = m.section_id
-     where pm.phrase_strength > 0
-  ),
-  concept_by_section as (
-    select section_id, max(contribution)::double precision as concept_score,
-           array_agg(distinct phrase_id order by phrase_id) as phrase_ids,
-           array_agg(distinct concept_id order by concept_id) as concept_ids,
-           array_agg(distinct mapping_id order by mapping_id) as mapping_ids
-      from concept_evidence group by section_id
-  ),
-  unioned as (
-    select c.*, coalesce(least(1.0, l.raw_score), 0)::double precision as lexical_score,
-           coalesce(least(1.0, ce.concept_score), 0)::double precision as concept_score,
-           l.snippet, coalesce(ce.phrase_ids, '{}') as phrase_ids,
-           coalesce(ce.concept_ids, '{}') as concept_ids,
-           coalesce(ce.mapping_ids, '{}') as mapping_ids
-      from current_set c
-      left join lexical_raw l on l.section_id = c.section_id
-      left join concept_by_section ce on ce.section_id = c.section_id
-     where l.section_id is not null or ce.section_id is not null
-  ),
-  maxima as (
-    select greatest(max(lexical_score), 0) as max_lexical,
-           greatest(max(concept_score), 0) as max_concept from unioned
-  ),
-  scored as (
-    select u.*,
-           case p.formula
-             when 'weighted_sum' then
-               ((p.config->>'lexical_weight')::double precision * u.lexical_score +
-                (p.config->>'concept_weight')::double precision *
-                  case when coalesce((p.config->>'concept_enabled')::boolean,true)
-                       then u.concept_score else 0 end)
-             when 'coequal_normalized' then
-               (case when x.max_lexical > 0 then u.lexical_score / x.max_lexical else 0 end) +
-               (case when coalesce((p.config->>'concept_enabled')::boolean,true) and x.max_concept > 0
-                     then u.concept_score / x.max_concept else 0 end) +
-               (case when coalesce((p.config->>'concept_enabled')::boolean,true)
-                           and u.lexical_score > 0 and u.concept_score > 0
-                     then (p.config->>'dual_evidence_bonus')::double precision else 0 end)
-           end::double precision as final_score,
-           p.policy_id, p.version as policy_version
-      from unioned u cross join maxima x cross join policy p
-  ),
-  limited as materialized (
-    select * from scored
-     where final_score > 0
-     order by final_score desc, concept_score desc, lexical_score desc, section_key asc
-     limit greatest(1, least(coalesce(p_limit, 20), 100))
-  ),
-  log_write as (
-    insert into retrieval_query_log
-      (normalized_hash, result_count, score_bands, selected_row_ids,
-       policy_id, policy_version, explicit_hit, scope_ref)
-    select encode(digest(convert_to((select q from normalized), 'UTF8'), 'sha256'), 'hex'),
-           count(l.section_id)::integer,
-           jsonb_build_object(
-             'high', count(*) filter (where final_score >= .75),
-             'medium', count(*) filter (where final_score >= .25 and final_score < .75),
-             'low', count(*) filter (where final_score < .25)),
-           coalesce(array_agg(section_id order by final_score desc, concept_score desc,
-                              lexical_score desc, section_key asc)
-                    filter (where section_id is not null), '{}'),
-           p.policy_id, p.version, count(l.section_id) > 0, 'carr-internal'
-      from policy p left join limited l on true
-     group by p.policy_id, p.version
-    returning id
-  )
-select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class,
-       l.final_score as rank,
-       coalesce(l.snippet, left(l.plain_text, 240)) as snippet,
-       l.lexical_score, l.concept_score, l.final_score,
-       jsonb_build_object(
-         'complete', true, 'policy_id', l.policy_id, 'policy_version', l.policy_version,
-         'lexical_score', l.lexical_score, 'concept_score', l.concept_score,
-         'final_score', l.final_score, 'phrase_ids', to_jsonb(l.phrase_ids),
-         'concept_ids', to_jsonb(l.concept_ids), 'mapping_ids', to_jsonb(l.mapping_ids))
-  from limited l cross join (select count(*) from log_write) logged
- order by l.final_score desc, l.concept_score desc, l.lexical_score desc, l.section_key asc
-$$;
 
 
 --
@@ -3494,35 +3122,6 @@ COMMENT ON TABLE public.doctrine_claim IS 'Cooperative expiring claims (default 
 
 
 --
--- Name: doctrine_concept_mapping; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.doctrine_concept_mapping (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    concept_id uuid NOT NULL,
-    section_id uuid NOT NULL,
-    role text NOT NULL,
-    weight numeric(5,4) DEFAULT 1 NOT NULL,
-    rationale text NOT NULL,
-    status text DEFAULT 'proposed'::text NOT NULL,
-    version bigint DEFAULT 1 NOT NULL,
-    review_after timestamp with time zone,
-    proposer_id uuid NOT NULL,
-    approver_id uuid,
-    approved_at timestamp with time zone,
-    retired_at timestamp with time zone,
-    repair_reason text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT doctrine_concept_mapping_check CHECK ((((status = 'approved'::text) = ((approver_id IS NOT NULL) AND (approved_at IS NOT NULL))) OR (status = ANY (ARRAY['retired'::text, 'needs_repair'::text])))),
-    CONSTRAINT doctrine_concept_mapping_rationale_check CHECK ((btrim(rationale) <> ''::text)),
-    CONSTRAINT doctrine_concept_mapping_role_check CHECK ((role = ANY (ARRAY['governs'::text, 'supports'::text]))),
-    CONSTRAINT doctrine_concept_mapping_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'retired'::text, 'needs_repair'::text]))),
-    CONSTRAINT doctrine_concept_mapping_weight_check CHECK (((weight > (0)::numeric) AND (weight <= (1)::numeric)))
-);
-
-
---
 -- Name: doctrine_document; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3537,7 +3136,6 @@ CREATE TABLE public.doctrine_document (
     created_by uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    title_search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, ((COALESCE(title, ''::text) || ' '::text) || replace(slug, '-'::text, ' '::text)))) STORED,
     CONSTRAINT doctrine_document_content_class_check CHECK ((content_class = ANY (ARRAY['playbook'::text, 'sop'::text, 'index'::text, 'reference'::text, 'dossier_narrative'::text, 'distillation'::text, 'rule'::text]))),
     CONSTRAINT doctrine_document_visibility_check CHECK ((visibility = ANY (ARRAY['shared'::text, 'personal'::text])))
 );
@@ -3759,7 +3357,6 @@ CREATE TABLE public.doctrine_section (
     body_hash text,
     review_after timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    title_search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, ((COALESCE(title, ''::text) || ' '::text) || replace(section_key, '-'::text, ' '::text)))) STORED,
     CONSTRAINT doctrine_section_status_check CHECK ((status = ANY (ARRAY['active'::text, 'retired'::text])))
 );
 
@@ -4993,133 +4590,6 @@ CREATE TABLE public.registration (
     doc_attachment uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid NOT NULL
-);
-
-
---
--- Name: retrieval_concept; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.retrieval_concept (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    concept_key text NOT NULL,
-    label text NOT NULL,
-    definition text NOT NULL,
-    status text DEFAULT 'proposed'::text NOT NULL,
-    version bigint DEFAULT 1 NOT NULL,
-    review_after timestamp with time zone,
-    proposer_id uuid NOT NULL,
-    approver_id uuid,
-    approved_at timestamp with time zone,
-    retired_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT retrieval_concept_check CHECK ((((status = 'approved'::text) = ((approver_id IS NOT NULL) AND (approved_at IS NOT NULL))) OR (status = 'retired'::text))),
-    CONSTRAINT retrieval_concept_concept_key_check CHECK ((concept_key ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)),
-    CONSTRAINT retrieval_concept_definition_check CHECK ((btrim(definition) <> ''::text)),
-    CONSTRAINT retrieval_concept_label_check CHECK ((btrim(label) <> ''::text)),
-    CONSTRAINT retrieval_concept_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'retired'::text])))
-);
-
-
---
--- Name: retrieval_phrase; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.retrieval_phrase (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    concept_id uuid NOT NULL,
-    display_phrase text NOT NULL,
-    normalized_phrase text GENERATED ALWAYS AS (public.normalize_retrieval_phrase(display_phrase)) STORED,
-    match_mode text NOT NULL,
-    min_similarity numeric(4,3) DEFAULT 0.350 NOT NULL,
-    weight numeric(5,4) DEFAULT 1 NOT NULL,
-    status text DEFAULT 'proposed'::text NOT NULL,
-    version bigint DEFAULT 1 NOT NULL,
-    review_after timestamp with time zone,
-    source text NOT NULL,
-    source_ref text NOT NULL,
-    proposer_id uuid NOT NULL,
-    approver_id uuid,
-    approved_at timestamp with time zone,
-    retired_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT retrieval_phrase_check CHECK ((((status = 'approved'::text) = ((approver_id IS NOT NULL) AND (approved_at IS NOT NULL))) OR (status = 'retired'::text))),
-    CONSTRAINT retrieval_phrase_display_phrase_check CHECK ((btrim(display_phrase) <> ''::text)),
-    CONSTRAINT retrieval_phrase_match_mode_check CHECK ((match_mode = ANY (ARRAY['exact'::text, 'fts'::text, 'trgm'::text]))),
-    CONSTRAINT retrieval_phrase_min_similarity_check CHECK (((min_similarity >= (0)::numeric) AND (min_similarity <= (1)::numeric))),
-    CONSTRAINT retrieval_phrase_normalized_phrase_check CHECK ((array_length(regexp_split_to_array(normalized_phrase, '\s+'::text), 1) >= 2)),
-    CONSTRAINT retrieval_phrase_source_check CHECK ((source = ANY (ARRAY['golden_miss'::text, 'no_hit_log'::text, 'session_proposal'::text, 'manual'::text]))),
-    CONSTRAINT retrieval_phrase_source_ref_check CHECK ((btrim(source_ref) <> ''::text)),
-    CONSTRAINT retrieval_phrase_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'retired'::text]))),
-    CONSTRAINT retrieval_phrase_weight_check CHECK (((weight > (0)::numeric) AND (weight <= (1)::numeric)))
-);
-
-
---
--- Name: retrieval_proposal; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.retrieval_proposal (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    proposal_type text NOT NULL,
-    payload jsonb NOT NULL,
-    reason text NOT NULL,
-    proposer_id uuid NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL,
-    reviewer_id uuid,
-    resulting_row_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
-    idempotency_key uuid NOT NULL,
-    version bigint DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    reviewed_at timestamp with time zone,
-    CONSTRAINT retrieval_proposal_check CHECK (((status = 'pending'::text) = ((reviewer_id IS NULL) AND (reviewed_at IS NULL)))),
-    CONSTRAINT retrieval_proposal_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
-    CONSTRAINT retrieval_proposal_proposal_type_check CHECK ((proposal_type = ANY (ARRAY['concept'::text, 'phrase'::text, 'mapping'::text, 'retire'::text]))),
-    CONSTRAINT retrieval_proposal_reason_check CHECK ((btrim(reason) <> ''::text)),
-    CONSTRAINT retrieval_proposal_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'superseded'::text])))
-);
-
-
---
--- Name: retrieval_query_log; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.retrieval_query_log (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    normalized_hash text NOT NULL,
-    result_count integer NOT NULL,
-    score_bands jsonb NOT NULL,
-    selected_row_ids uuid[] NOT NULL,
-    policy_id text NOT NULL,
-    policy_version bigint NOT NULL,
-    explicit_hit boolean NOT NULL,
-    scope_ref text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT retrieval_query_log_normalized_hash_check CHECK ((normalized_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT retrieval_query_log_result_count_check CHECK ((result_count >= 0))
-);
-
-
---
--- Name: retrieval_ranking_policy; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.retrieval_ranking_policy (
-    policy_id text NOT NULL,
-    version bigint DEFAULT 1 NOT NULL,
-    formula text NOT NULL,
-    config jsonb NOT NULL,
-    golden_suite_digest text NOT NULL,
-    status text DEFAULT 'candidate'::text NOT NULL,
-    is_default boolean DEFAULT false NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    approved_at timestamp with time zone,
-    CONSTRAINT retrieval_ranking_policy_config_check CHECK ((jsonb_typeof(config) = 'object'::text)),
-    CONSTRAINT retrieval_ranking_policy_formula_check CHECK ((formula = ANY (ARRAY['weighted_sum'::text, 'coequal_normalized'::text]))),
-    CONSTRAINT retrieval_ranking_policy_golden_suite_digest_check CHECK ((golden_suite_digest ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT retrieval_ranking_policy_status_check CHECK ((status = ANY (ARRAY['candidate'::text, 'active'::text, 'retired'::text])))
 );
 
 
@@ -9000,68 +8470,6 @@ COMMENT ON VIEW public.v_record_flag_subject IS 'Every record_flag with its subj
 
 
 --
--- Name: v_retrieval_concepts_without_targets; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_retrieval_concepts_without_targets AS
- SELECT id,
-    concept_key,
-    label,
-    review_after
-   FROM public.retrieval_concept c
-  WHERE ((status = 'approved'::text) AND (NOT (EXISTS ( SELECT 1
-           FROM (public.doctrine_concept_mapping m
-             JOIN public.doctrine_section s ON (((s.id = m.section_id) AND (s.status = 'active'::text) AND (s.current_revision_id IS NOT NULL))))
-          WHERE ((m.concept_id = c.id) AND (m.status = 'approved'::text))))));
-
-
---
--- Name: v_retrieval_mapping_repair; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_retrieval_mapping_repair AS
- SELECT m.id,
-    m.concept_id,
-    m.section_id,
-    m.role,
-    m.weight,
-    m.rationale,
-    m.status,
-    m.version,
-    m.review_after,
-    m.proposer_id,
-    m.approver_id,
-    m.approved_at,
-    m.retired_at,
-    m.repair_reason,
-    m.created_at,
-    m.updated_at,
-    d.slug AS doc_slug,
-    s.section_key,
-    s.status AS section_status
-   FROM ((public.doctrine_concept_mapping m
-     JOIN public.doctrine_section s ON ((s.id = m.section_id)))
-     JOIN public.doctrine_document d ON ((d.id = s.document_id)))
-  WHERE ((m.status = 'needs_repair'::text) OR (s.status <> 'active'::text) OR (s.current_revision_id IS NULL));
-
-
---
--- Name: v_retrieval_health; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_retrieval_health AS
- SELECT 'mapping_repair_queue'::text AS metric,
-    count(*) AS count,
-    'nonzero -> work v_retrieval_mapping_repair before approving more curation'::text AS bound_action
-   FROM public.v_retrieval_mapping_repair
-UNION ALL
- SELECT 'concepts_without_active_targets'::text AS metric,
-    count(*) AS count,
-    'nonzero -> map or retire every row in v_retrieval_concepts_without_targets'::text AS bound_action
-   FROM public.v_retrieval_concepts_without_targets;
-
-
---
 -- Name: v_role_timeouts; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -10110,22 +9518,6 @@ ALTER TABLE ONLY public.doctrine_claim
 
 
 --
--- Name: doctrine_concept_mapping doctrine_concept_mapping_concept_id_section_id_role_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.doctrine_concept_mapping
-    ADD CONSTRAINT doctrine_concept_mapping_concept_id_section_id_role_key UNIQUE (concept_id, section_id, role);
-
-
---
--- Name: doctrine_concept_mapping doctrine_concept_mapping_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.doctrine_concept_mapping
-    ADD CONSTRAINT doctrine_concept_mapping_pkey PRIMARY KEY (id);
-
-
---
 -- Name: doctrine_document doctrine_document_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10686,70 +10078,6 @@ ALTER TABLE ONLY public.registration
 
 
 --
--- Name: retrieval_concept retrieval_concept_concept_key_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_concept
-    ADD CONSTRAINT retrieval_concept_concept_key_key UNIQUE (concept_key);
-
-
---
--- Name: retrieval_concept retrieval_concept_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_concept
-    ADD CONSTRAINT retrieval_concept_pkey PRIMARY KEY (id);
-
-
---
--- Name: retrieval_phrase retrieval_phrase_concept_id_normalized_phrase_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_phrase
-    ADD CONSTRAINT retrieval_phrase_concept_id_normalized_phrase_key UNIQUE (concept_id, normalized_phrase);
-
-
---
--- Name: retrieval_phrase retrieval_phrase_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_phrase
-    ADD CONSTRAINT retrieval_phrase_pkey PRIMARY KEY (id);
-
-
---
--- Name: retrieval_proposal retrieval_proposal_idempotency_key_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_proposal
-    ADD CONSTRAINT retrieval_proposal_idempotency_key_key UNIQUE (idempotency_key);
-
-
---
--- Name: retrieval_proposal retrieval_proposal_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_proposal
-    ADD CONSTRAINT retrieval_proposal_pkey PRIMARY KEY (id);
-
-
---
--- Name: retrieval_query_log retrieval_query_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_query_log
-    ADD CONSTRAINT retrieval_query_log_pkey PRIMARY KEY (id);
-
-
---
--- Name: retrieval_ranking_policy retrieval_ranking_policy_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_ranking_policy
-    ADD CONSTRAINT retrieval_ranking_policy_pkey PRIMARY KEY (policy_id);
-
-
---
 -- Name: rule rule_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11297,24 +10625,10 @@ CREATE INDEX doctrine_claim_expiry_idx ON public.doctrine_claim USING btree (exp
 
 
 --
--- Name: doctrine_concept_mapping_active_section_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX doctrine_concept_mapping_active_section_idx ON public.doctrine_concept_mapping USING btree (section_id) WHERE (status = 'approved'::text);
-
-
---
 -- Name: doctrine_document_class_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX doctrine_document_class_idx ON public.doctrine_document USING btree (content_class, updated_at DESC);
-
-
---
--- Name: doctrine_document_title_search_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX doctrine_document_title_search_idx ON public.doctrine_document USING gin (title_search_vector);
 
 
 --
@@ -11378,13 +10692,6 @@ CREATE INDEX doctrine_section_doc_idx ON public.doctrine_section USING btree (do
 --
 
 CREATE INDEX doctrine_section_review_idx ON public.doctrine_section USING btree (review_after) WHERE (review_after IS NOT NULL);
-
-
---
--- Name: doctrine_section_title_search_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX doctrine_section_title_search_idx ON public.doctrine_section USING gin (title_search_vector);
 
 
 --
@@ -11675,48 +10982,6 @@ CREATE INDEX record_source_entity_idx ON public.record_source USING btree (entit
 
 
 --
--- Name: retrieval_phrase_fts_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX retrieval_phrase_fts_idx ON public.retrieval_phrase USING gin (to_tsvector('english'::regconfig, normalized_phrase)) WHERE (status = 'approved'::text);
-
-
---
--- Name: retrieval_phrase_global_active_uq; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX retrieval_phrase_global_active_uq ON public.retrieval_phrase USING btree (normalized_phrase) WHERE (status = 'approved'::text);
-
-
---
--- Name: retrieval_phrase_trgm_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX retrieval_phrase_trgm_idx ON public.retrieval_phrase USING gin (normalized_phrase public.gin_trgm_ops) WHERE (status = 'approved'::text);
-
-
---
--- Name: retrieval_proposal_pending_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX retrieval_proposal_pending_idx ON public.retrieval_proposal USING btree (created_at) WHERE (status = 'pending'::text);
-
-
---
--- Name: retrieval_query_log_miss_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX retrieval_query_log_miss_idx ON public.retrieval_query_log USING btree (created_at DESC) WHERE (NOT explicit_hit);
-
-
---
--- Name: retrieval_ranking_policy_one_default; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX retrieval_ranking_policy_one_default ON public.retrieval_ranking_policy USING btree (is_default) WHERE is_default;
-
-
---
 -- Name: signal_event_queue_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11999,13 +11264,6 @@ CREATE TRIGGER deal_touch BEFORE UPDATE ON public.deal FOR EACH ROW EXECUTE FUNC
 
 
 --
--- Name: doctrine_section doctrine_section_retrieval_repair_after_update; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER doctrine_section_retrieval_repair_after_update AFTER UPDATE OF status ON public.doctrine_section FOR EACH ROW EXECUTE FUNCTION public.mark_retrieval_mappings_for_repair();
-
-
---
 -- Name: lead lead_touch; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -12059,20 +11317,6 @@ CREATE TRIGGER party_touch BEFORE UPDATE ON public.party FOR EACH ROW EXECUTE FU
 --
 
 CREATE TRIGGER prospect_pool_touch BEFORE UPDATE ON public.candidate_pool FOR EACH ROW EXECUTE FUNCTION public.trg_touch_row();
-
-
---
--- Name: retrieval_proposal retrieval_proposal_guard_before_delete; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER retrieval_proposal_guard_before_delete BEFORE DELETE ON public.retrieval_proposal FOR EACH ROW EXECUTE FUNCTION public.retrieval_proposal_guard();
-
-
---
--- Name: retrieval_proposal retrieval_proposal_guard_before_update; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER retrieval_proposal_guard_before_update BEFORE UPDATE ON public.retrieval_proposal FOR EACH ROW EXECUTE FUNCTION public.retrieval_proposal_guard();
 
 
 --
@@ -13160,38 +12404,6 @@ ALTER TABLE ONLY public.doctrine_claim
 
 
 --
--- Name: doctrine_concept_mapping doctrine_concept_mapping_approver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.doctrine_concept_mapping
-    ADD CONSTRAINT doctrine_concept_mapping_approver_id_fkey FOREIGN KEY (approver_id) REFERENCES public.actor(id);
-
-
---
--- Name: doctrine_concept_mapping doctrine_concept_mapping_concept_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.doctrine_concept_mapping
-    ADD CONSTRAINT doctrine_concept_mapping_concept_id_fkey FOREIGN KEY (concept_id) REFERENCES public.retrieval_concept(id);
-
-
---
--- Name: doctrine_concept_mapping doctrine_concept_mapping_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.doctrine_concept_mapping
-    ADD CONSTRAINT doctrine_concept_mapping_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
-
-
---
--- Name: doctrine_concept_mapping doctrine_concept_mapping_section_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.doctrine_concept_mapping
-    ADD CONSTRAINT doctrine_concept_mapping_section_id_fkey FOREIGN KEY (section_id) REFERENCES public.doctrine_section(id);
-
-
---
 -- Name: doctrine_document doctrine_document_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14032,70 +13244,6 @@ ALTER TABLE ONLY public.registration
 
 
 --
--- Name: retrieval_concept retrieval_concept_approver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_concept
-    ADD CONSTRAINT retrieval_concept_approver_id_fkey FOREIGN KEY (approver_id) REFERENCES public.actor(id);
-
-
---
--- Name: retrieval_concept retrieval_concept_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_concept
-    ADD CONSTRAINT retrieval_concept_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
-
-
---
--- Name: retrieval_phrase retrieval_phrase_approver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_phrase
-    ADD CONSTRAINT retrieval_phrase_approver_id_fkey FOREIGN KEY (approver_id) REFERENCES public.actor(id);
-
-
---
--- Name: retrieval_phrase retrieval_phrase_concept_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_phrase
-    ADD CONSTRAINT retrieval_phrase_concept_id_fkey FOREIGN KEY (concept_id) REFERENCES public.retrieval_concept(id);
-
-
---
--- Name: retrieval_phrase retrieval_phrase_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_phrase
-    ADD CONSTRAINT retrieval_phrase_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
-
-
---
--- Name: retrieval_proposal retrieval_proposal_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_proposal
-    ADD CONSTRAINT retrieval_proposal_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
-
-
---
--- Name: retrieval_proposal retrieval_proposal_reviewer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_proposal
-    ADD CONSTRAINT retrieval_proposal_reviewer_id_fkey FOREIGN KEY (reviewer_id) REFERENCES public.actor(id);
-
-
---
--- Name: retrieval_query_log retrieval_query_log_policy_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.retrieval_query_log
-    ADD CONSTRAINT retrieval_query_log_policy_id_fkey FOREIGN KEY (policy_id) REFERENCES public.retrieval_ranking_policy(policy_id);
-
-
---
 -- Name: rule rule_activated_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14445,8 +13593,6 @@ grant insert, select, update on table public.doc_template to carr_writer;
 grant insert, select, update on table public.doctrine_change_item to carr_writer;
 grant insert, select, update on table public.doctrine_change_set to carr_writer;
 grant delete, insert, select, update on table public.doctrine_claim to carr_writer;
-grant select on table public.doctrine_concept_mapping to carr_reader;
-grant insert, select, update on table public.doctrine_concept_mapping to carr_writer;
 grant select on table public.doctrine_document to carr_exporter;
 grant select on table public.doctrine_document to carr_reader;
 grant insert, select, update on table public.doctrine_document to carr_writer;
@@ -14546,14 +13692,6 @@ grant select, usage on sequence public.ref_client_seq to carr_writer;
 grant select, usage on sequence public.ref_lead_seq to carr_writer;
 grant select, usage on sequence public.ref_vendor_seq to carr_writer;
 grant insert, select, update on table public.registration to carr_writer;
-grant select on table public.retrieval_concept to carr_reader;
-grant insert, select, update on table public.retrieval_concept to carr_writer;
-grant select on table public.retrieval_phrase to carr_reader;
-grant insert, select, update on table public.retrieval_phrase to carr_writer;
-grant insert, select, update on table public.retrieval_proposal to carr_writer;
-grant insert on table public.retrieval_query_log to carr_writer;
-grant select on table public.retrieval_ranking_policy to carr_reader;
-grant select on table public.retrieval_ranking_policy to carr_writer;
 grant insert, select, update on table public.rule to carr_writer;
 grant insert, select, update on table public.schema_migrations to carr_writer;
 grant insert, select, update on table public.search_candidate to carr_writer;
@@ -14701,12 +13839,6 @@ grant select on table public.v_record_flag_subject to carr_writer;
 grant select on table public.v_ref_index to carr_jobs;
 grant select on table public.v_ref_index to carr_reader;
 grant select on table public.v_ref_index to carr_writer;
-grant select on table public.v_retrieval_concepts_without_targets to carr_reader;
-grant select on table public.v_retrieval_concepts_without_targets to carr_writer;
-grant select on table public.v_retrieval_health to carr_reader;
-grant select on table public.v_retrieval_health to carr_writer;
-grant select on table public.v_retrieval_mapping_repair to carr_reader;
-grant select on table public.v_retrieval_mapping_repair to carr_writer;
 grant select on table public.v_role_timeouts to carr_reader;
 grant select on table public.v_schema_ledger to carr_exporter;
 grant select on table public.v_schema_ledger to carr_reader;
@@ -14737,16 +13869,8 @@ grant select (id, name) on table public.party to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
-grant execute on function public.assert_situation_retrieval_golden(p_suite_digest text) to carr_writer;
 grant execute on function public.capture_call_context(requested_deal_ids uuid[]) to carr_reader;
 grant execute on function public.capture_call_context(requested_deal_ids uuid[]) to carr_writer;
-grant execute on function public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[]) to carr_reader;
-grant execute on function public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[]) to carr_writer;
-grant execute on function public.normalize_retrieval_phrase(value text) to carr_writer;
-grant execute on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) to carr_writer;
-grant execute on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) to carr_writer;
-grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_reader;
-grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_writer;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_exporter;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_reader;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_writer;
@@ -14922,7 +14046,6 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0132_work_shape_revision.sql	c08f63f665a84e31fde1317c79d5ce3addf36d30609abba39c040943f5b735c2	2026-08-15 18:19:28.649741+00
 0133_release_writer_grants.sql	85fce1968fa3598694113bd52c6729a98c7dfd3826f53daab072b541b2c6ef64	2026-08-16 00:33:51.969943+00
 0134_release_abandon_reason.sql	61c10b1eae104deb6a6f6719027946cf1fea82d6da9216c13d1c0e8895ea6289	2026-08-16 12:24:10.6226+00
-0135_situation_retrieval.sql	69a88f6b7553dc7ccf351c75ad0df96b03f01bd2adf67dc7ea9aa10914b25a3b	2026-08-16 14:49:59.579677+00
 \.
 
 
@@ -15263,5 +14386,4 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
-
 
