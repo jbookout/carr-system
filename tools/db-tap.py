@@ -141,7 +141,7 @@ def _project_id_by_name(name: str, env: dict) -> str:
     return matches[0]
 
 
-def dsn(branch=None, project: str = "production") -> str:
+def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner") -> str:
     """Connection string for a branch of a named PROJECT.
 
     The value is returned to the caller and never printed. neonctl prints the
@@ -154,6 +154,8 @@ def dsn(branch=None, project: str = "production") -> str:
     spec = PROJECTS.get(project)
     if spec is None:
         sys.exit(f"db-tap: unknown project '{project}' (known: {', '.join(PROJECTS)})")
+    if role_name not in ("neondb_owner", "app_writer"):
+        sys.exit("db-tap: role_name must be one of neondb_owner or app_writer")
     key = _neon_api_key()
     env = {**os.environ,
            "PATH": "/usr/local/opt/node@22/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")}
@@ -165,7 +167,7 @@ def dsn(branch=None, project: str = "production") -> str:
     out = subprocess.run(
         [NEONCTL, "connection-string", branch,
          "--project-id", project_id,
-         "--role-name", "neondb_owner"],
+         "--role-name", role_name],
         capture_output=True, text=True, timeout=60, env=env,
     )
     if out.returncode != 0 or not out.stdout.strip():
