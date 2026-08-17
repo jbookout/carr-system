@@ -23,6 +23,7 @@
       "source",
       "triage",
       "plan",
+      "pending_outcome_feedback",
       "outcome_feedback",
       "outcome_feedback_history",
       "accepted_feedback_count",
@@ -40,6 +41,7 @@
       "captured": {"label": "Review and triage", "effect": "none"},
       "triaged": {"label": "Prepare scope and acceptance", "effect": "none"},
       "ready": {"label": "Plan accepted", "effect": "none"},
+      "ready_with_pending_feedback": {"label": "Review outcome feedback", "effect": "none"},
       "ready_with_accepted_feedback": {"label": "Outcome feedback accepted", "effect": "none"}
     },
     "triage": {
@@ -48,6 +50,11 @@
       "rule": "present only for canonical triaged rows; it is durable readback, never an action authority"
     },
     "plan": {"rule": "immutable plan hash, bounded scope summary, and persisted references only; never commands or caller-authored steps"},
+    "pending_outcome_feedback": {
+      "rule": "null unless one latest unaccepted proposal remains bound to the exact current ready Work Request version and accepted plan; then exposes its closed safe proposal fields separately for human review after reload. It never appears in accepted history and never claims acceptance, execution, completion, success, release, or displacement.",
+      "required_fields": ["feedback_ref", "feedback_hash", "proposed_outcome", "criterion_results", "evidence_refs", "blocker_code", "result_summary", "observed_minutes", "interaction_surface", "heavy_session_used", "manual_context_transfers", "proposed_at", "status"],
+      "status": "pending_human_acceptance"
+    },
     "outcome_feedback": {
       "rule": "null until a human authority accepts one exact immutable evidence proposal; then exposes only the durable safe outcome readback. It is observational feedback, never execution, completion, release, approval, or a state transition.",
       "required_fields": ["feedback_ref", "feedback_hash", "outcome", "criterion_results", "evidence_refs", "blocker_code", "result_summary", "observed_minutes", "interaction_surface", "heavy_session_used", "manual_context_transfers", "accepted_by_actor_slug", "accepted_at"],
@@ -73,5 +80,5 @@
     "copy business payload or raw question text into the projection",
     "add POST, dispatch, claim, approve, or execute routes"
   ],
-  "integration_boundary": "An authenticated server-side reader must validate tenant and actor scope, current source freshness, and provenance before returning this projection. Capture and transition ownership remain in the MCP/record-layer implementation. Outcome-feedback proposal and human acceptance remain separate record-layer writes; the reader returns accepted receipts only."
+  "integration_boundary": "An authenticated server-side reader must validate tenant and actor scope, current source freshness, and provenance before returning this projection. Capture and transition ownership remain in the MCP/record-layer implementation. Outcome-feedback proposal and human acceptance remain separate record-layer writes; the reader returns the latest unaccepted proposal only in pending_outcome_feedback and accepted receipts only in outcome_feedback/history."
 }

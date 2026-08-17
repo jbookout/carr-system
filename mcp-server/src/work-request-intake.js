@@ -55,6 +55,17 @@ function outcomeFeedbackProjection(row) {
     accepted_by_actor_slug: row.accepted_by_actor_slug, accepted_at: row.accepted_at };
 }
 
+function pendingOutcomeFeedbackProjection(row) {
+  if (!row) return null;
+  return { feedback_ref: row.feedback_ref, feedback_hash: row.feedback_hash,
+    proposed_outcome: row.outcome, criterion_results: row.criterion_results || [],
+    evidence_refs: row.evidence_refs || [], blocker_code: row.blocker_code,
+    result_summary: row.result_summary, observed_minutes: Number(row.observed_minutes),
+    interaction_surface: row.interaction_surface, heavy_session_used: row.heavy_session_used,
+    manual_context_transfers: Number(row.manual_context_transfers), proposed_at: row.proposed_at,
+    status: "pending_human_acceptance" };
+}
+
 function validateTriage(args, ToolError) {
   if (Object.keys(args).some(key => !TRIAGE_FIELDS.has(key))) throw new ToolError({ error: "invalid_triage_fields" });
   if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
@@ -182,20 +193,31 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         const row = result.rows[0];
         if (!row || !["captured", "triaged", "ready"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
         const triaged = ["triaged", "ready"].includes(row.state);
+        let pendingOutcomeFeedback = null;
+        if (row.state === "ready") {
+          const pending = await c.query(
+            `select * from ops.pending_sourced_work_request_outcome_feedback($1::text,$2::text)
+               /* work-request-intake:pending-outcome-feedback */`, [args.work_request, tenant]);
+          pendingOutcomeFeedback = pendingOutcomeFeedbackProjection(pending.rows[0]);
+        }
         return { ok: true, human_ref: row.ref, title: row.title, desired_outcome: row.desired_outcome,
-          acceptance_criteria: row.acceptance_criteria, state: row.state, projection_state: "queued", source: sourceProjection(row),
+          acceptance_criteria: row.acceptance_criteria, state: row.state, version: Number(row.version),
+          projection_state: "queued", source: sourceProjection(row),
           triage: triaged ? { classification: row.triage_classification, human_actor_slug: row.triaged_by_actor_slug,
             triaged_at: row.triaged_at } : null,
           plan: row.plan_hash ? { plan_ref: row.plan_ref || null, plan_hash: row.plan_hash, runbook_ref: row.runbook_ref || null,
             scope_summary: row.scope_summary || null,
             runbook_revision_id: row.runbook_revision_id || null, runbook_content_hash: row.runbook_content_hash || null,
             caps: row.plan_caps || null, dependency_refs: row.dependency_refs || [], recovery_ref: row.recovery_ref || null,
-            observability_ref: row.observability_ref || null } : null,
+            observability_ref: row.observability_ref || null,
+            accepted_by_actor_slug: row.accepted_by_actor_slug || null,
+            accepted_at: row.accepted_at || null } : null,
           outcome_feedback: row.outcome_feedback && typeof row.outcome_feedback === "object" ? outcomeFeedbackProjection(row.outcome_feedback) : null,
+          pending_outcome_feedback: pendingOutcomeFeedback,
           outcome_feedback_history: Array.isArray(row.outcome_feedback_history) ? row.outcome_feedback_history.map(outcomeFeedbackProjection) : [],
           accepted_feedback_count: Number(row.accepted_feedback_count || 0),
           shape: row.shape_disposition ? { disposition: row.shape_disposition, fixed_surface_ref: row.shape_fixed_surface_ref || null } : null,
-          next_human_action: row.state === "ready" ? (row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
+          next_human_action: row.state === "ready" ? (pendingOutcomeFeedback ? { label: "Review outcome feedback", effect: "none" } : row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
           actions: [] };
       },
     },

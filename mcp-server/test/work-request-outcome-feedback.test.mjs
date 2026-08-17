@@ -58,6 +58,9 @@ class OutcomeFake {
 class CardFake {
   constructor(mode = "a") { this.mode = mode; }
   async query(text) {
+    if (String(text).includes("pending_sourced_work_request_outcome_feedback")) return { rows: this.mode === "pending" ? [{
+      ...acceptedB, outcome: acceptedB.outcome, proposed_at: "2026-08-16T02:00:00Z",
+    }] : [] };
     if (!String(text).includes("work_request_card")) throw new Error(`unexpected query: ${text}`);
     const history = this.mode === "b" ? [acceptedA, acceptedB] : [acceptedA];
     return { rows: [{ ref: "WR-000001", title: "Sourced routine", desired_outcome: "Routine is usable", acceptance_criteria: [],
@@ -126,15 +129,16 @@ test("closed evidence, measurement, and outcome consistency refuse before databa
   assert.equal((await refused(() => callTool({}, JOE, "accept-outcome-feedback", structuredClone(ACCEPT), "full"))).error, "authority_connection_unavailable");
 });
 
-test("card hides pending proposals and reads accepted history A then B without execution controls", async () => {
-  // CardFake("a") models accepted A plus a later pending B: the DB card
-  // projection intentionally has no pending-proposal fields to return.
-  const pending = await executeRegisteredTool(new CardFake("a"), JOE, "work-request-card", { work_request: "WR-000001" });
+test("card exposes pending separately and reads accepted history A then B without execution controls", async () => {
+  const pending = await executeRegisteredTool(new CardFake("pending"), JOE, "work-request-card", { work_request: "WR-000001" });
   assert.equal(pending.outcome_feedback.feedback_ref, acceptedA.feedback_ref);
+  assert.equal(pending.pending_outcome_feedback.feedback_ref, acceptedB.feedback_ref);
+  assert.equal(pending.pending_outcome_feedback.status, "pending_human_acceptance");
   assert.deepEqual(pending.outcome_feedback_history.map(x => x.feedback_ref), [acceptedA.feedback_ref]);
   assert.equal(pending.accepted_feedback_count, 1); assert.equal(pending.state, "ready"); assert.equal(pending.projection_state, "queued"); assert.deepEqual(pending.actions, []);
   const accepted = await executeRegisteredTool(new CardFake("b"), JOE, "work-request-card", { work_request: "WR-000001" });
   assert.deepEqual(accepted.outcome_feedback_history.map(x => x.feedback_ref), [acceptedA.feedback_ref, acceptedB.feedback_ref]);
   assert.equal(accepted.outcome_feedback.feedback_ref, acceptedB.feedback_ref); assert.equal(accepted.accepted_feedback_count, 2);
+  assert.equal(accepted.pending_outcome_feedback, null);
   assert.deepEqual(accepted.next_human_action, { label: "Outcome feedback accepted", effect: "none" });
 });
