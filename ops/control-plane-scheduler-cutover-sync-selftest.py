@@ -63,11 +63,13 @@ def main() -> int:
           count == len(expected) and [call[1] for call in inserts] == expected)
     provider_inserts = [call for call in cursor.calls if "insert into ops.legacy_schedule_provider_contract" in call[0]]
     check("sync derives all Claude provider contracts from manifest recurrence and tracked definitions",
-          len(expected_provider) == 18 and [call[1] for call in provider_inserts] == [
+          len(expected_provider) == sum(row["scheduler_kind"] == "claude-code" for row in REGISTRY["surfaces"])
+          and [call[1] for call in provider_inserts] == [
               (row[2], row[0], row[1], row[3], row[4], row[5], row[6], row[7]) for row in expected_provider])
     launchd_inserts = [call for call in cursor.calls if "insert into ops.legacy_schedule_launchd_contract" in call[0]]
-    check("sync derives both launchd contracts from tracked plists and native recurrences",
-          len(expected_launchd) == 2 and [call[1] for call in launchd_inserts] == [
+    check("sync derives every launchd contract from tracked plists and native recurrences",
+          len(expected_launchd) == sum(row["scheduler_kind"] == "launchd" for row in REGISTRY["surfaces"])
+          and [call[1] for call in launchd_inserts] == [
               (row[2], row[0], row[1], row[3], row[4], row[5], row[6], row[7], row[8], row[9])
               for row in expected_launchd])
     check("sync prunes only after all complete exact upserts",
@@ -78,7 +80,8 @@ def main() -> int:
           and cursor.calls[-1][1] == ([row[2] for row in expected_launchd],))
     evolved = json.loads(json.dumps(REGISTRY))
     claude_index = next(i for i, row in enumerate(evolved["surfaces"]) if row["scheduler_kind"] == "claude-code")
-    evolved["surfaces"][claude_index]["surface_id"] = "calendar-fetch-daily.claude-code.v2"
+    evolved_surface_id = evolved["surfaces"][claude_index]["surface_id"] + ".evolved"
+    evolved["surfaces"][claude_index]["surface_id"] = evolved_surface_id
     evolved_expected = scheduler_surface_rows(evolved, manifest=MANIFEST)
     evolved_cursor = Cursor()
     CONTROL_PLANE.sync_scheduler_surface_registry(evolved_cursor, manifest=MANIFEST, registry=evolved)
@@ -86,7 +89,7 @@ def main() -> int:
                                if "insert into ops.legacy_schedule_surface_registry" in call[0]]
     check("a complete versioned registry evolution updates every bound surface field before pruning",
           [call[1] for call in evolved_surface_inserts] == evolved_expected
-          and any(row[2] == "calendar-fetch-daily.claude-code.v2" for row in evolved_expected)
+          and any(row[2] == evolved_surface_id for row in evolved_expected)
           and "workflow_key=excluded.workflow_key,workflow_version=excluded.workflow_version," in evolved_surface_inserts[0][0]
           and "locator=excluded.locator,scheduler_kind=excluded.scheduler_kind" in evolved_surface_inserts[0][0])
     check("current provider projection is removed before any parent tuple evolution",

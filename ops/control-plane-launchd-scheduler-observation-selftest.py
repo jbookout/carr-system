@@ -28,8 +28,9 @@ def check(label: str, condition: bool) -> None:
 
 def main() -> int:
     rows = scheduler_launchd_rows(REGISTRY, manifest=MANIFEST, repo=REPO)
-    check("both launchd surfaces derive exact tracked plist and recurrence contracts",
-          len(rows) == 2 and len({row[2] for row in rows}) == 2
+    declared = sum(item["scheduler_kind"] == "launchd" for item in REGISTRY["surfaces"])
+    check("every launchd surface derives an exact tracked plist and recurrence contract",
+          len(rows) == declared and len({row[2] for row in rows}) == declared
           and all(len(row[7]) == 64 and len(row[8]) == 64 for row in rows))
     check("migration does not preseed FK-bound launchd contracts",
           "insert into ops.legacy_schedule_launchd_contract" not in MIGRATION)

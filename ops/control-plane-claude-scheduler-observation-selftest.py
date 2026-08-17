@@ -32,8 +32,9 @@ def check(label: str, condition: bool) -> None:
 
 def main() -> int:
     rows = scheduler_provider_rows(REGISTRY, manifest=MANIFEST, repo=REPO)
-    check("all 18 Claude surfaces derive exact recurrence and tracked definition hashes",
-          len(rows) == 18 and len({row[2] for row in rows}) == 18
+    declared = sum(item["scheduler_kind"] == "claude-code" for item in REGISTRY["surfaces"])
+    check("all Claude surfaces derive exact recurrence and tracked definition hashes",
+          len(rows) == declared and len({row[2] for row in rows}) == declared
           and all(len(row[7]) == 64 and row[6].startswith("ops/scheduled-tasks/") for row in rows))
     check("provider contract is populated only by post-definition authority sync",
           "insert into ops.legacy_schedule_provider_contract" not in MIGRATION

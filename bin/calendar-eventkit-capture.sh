@@ -39,6 +39,7 @@
 #
 #   bin/calendar-eventkit-capture.sh            # capture, log exact touches
 #   bin/calendar-eventkit-capture.sh --dry-run  # report only, write nothing
+#   bin/calendar-eventkit-capture.sh --dry-run --receipt-safe  # aggregate-only receipt output
 #   bin/calendar-eventkit-capture.sh --days 14  # widen the window
 set -u
 
@@ -46,23 +47,34 @@ REPO="${CARR_REPO:-$HOME/carr-system}"
 cd "$REPO" || { echo "calendar-capture: FAIL cannot reach $REPO" >&2; exit 1; }
 
 APP="$REPO/tools/CARR Calendar Access.app"
-ACCESS_LOG="$REPO/out/calendar-access.log"
+OUTPUT_ROOT="${CARR_CALENDAR_OUTPUT_ROOT:-$REPO/out}"
+ACCESS_LOG="$OUTPUT_ROOT/calendar-access.log"
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 
 DAYS=7
 DRY=0
+RECEIPT_SAFE=0
+WAIT_SECONDS="${CARR_CALENDAR_CAPTURE_WAIT_SECONDS:-60}"
+case "$WAIT_SECONDS" in
+  ''|*[!0-9]*) echo "calendar-capture: invalid wait bound" >&2; exit 64 ;;
+esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --days) DAYS="${2:-7}"; shift ;;
     --dry-run) DRY=1 ;;
+    --receipt-safe) RECEIPT_SAFE=1 ;;
     -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
     *) echo "calendar-capture: unknown argument: $1" >&2; exit 64 ;;
   esac
   shift
 done
+if [ "$RECEIPT_SAFE" -eq 1 ] && [ "$DRY" -ne 1 ]; then
+  echo "calendar-capture: --receipt-safe requires --dry-run" >&2
+  exit 64
+fi
 
-mkdir -p "$REPO/out"
+mkdir -p "$OUTPUT_ROOT"
 
 # ---------------------------------------------------------------- 1. the read
 # Mark the log so we judge THIS run's lines and not a previous run's success —
@@ -76,13 +88,13 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
-open -a "$APP" --args dump || {
+open -a "$APP" --args dump "$OUTPUT_ROOT" || {
   echo "calendar-capture: FAIL could not launch the access bundle" >&2; exit 1; }
 
 # `open` returns as soon as the app is launched, so wait for the bundle's own
 # exit line to appear after our marker rather than assuming it finished.
 i=0
-while [ "$i" -lt 60 ]; do
+while [ "$i" -lt "$WAIT_SECONDS" ]; do
   if sed -n "/=== capture-run $MARK ===/,\$p" "$ACCESS_LOG" 2>/dev/null | grep -q '^exit='; then
     break
   fi
@@ -92,7 +104,7 @@ done
 
 RUN_LOG="$(sed -n "/=== capture-run $MARK ===/,\$p" "$ACCESS_LOG" 2>/dev/null)"
 if [ -z "$RUN_LOG" ] || ! printf '%s' "$RUN_LOG" | grep -q '^exit='; then
-  echo "calendar-capture: FAIL the read did not finish within 60s" >&2
+  echo "calendar-capture: FAIL the read did not finish within ${WAIT_SECONDS}s" >&2
   exit 1
 fi
 
@@ -112,9 +124,9 @@ echo "calendar-capture: read OK — ${SCANNED:-?} events scanned"
 # job failed with "the matcher did not complete" and nothing else, because this
 # line sent the reason to /dev/null — a job reporting a failure it has already
 # thrown away, which is the same shape as answering emptily instead of refusing.
-MATCH_JSON="$REPO/out/calendar-touch-proposals.json"
-MATCH_ERR="$REPO/out/calendar-matcher.err"
-INTAKE_EVIDENCE="$REPO/out/calendar-intake-evidence.json"
+MATCH_JSON="$OUTPUT_ROOT/calendar-touch-proposals.json"
+MATCH_ERR="$OUTPUT_ROOT/calendar-matcher.err"
+INTAKE_EVIDENCE="$OUTPUT_ROOT/calendar-intake-evidence.json"
 # --from-dump, and this is the whole reason the job works unattended. The
 # matcher's default path opens the local Calendar DATABASE, which needs FULL DISK
 # ACCESS granted to the responsible process — held by a terminal, NOT by a launchd
@@ -123,7 +135,7 @@ INTAKE_EVIDENCE="$REPO/out/calendar-intake-evidence.json"
 # read the same meetings through EventKit under a permission that DOES survive
 # into the agent, so the match runs off its dump and the pipeline needs ONE grant
 # instead of two. Verified identical output both ways: 1 exact, 0 domain, 2 unknown.
-DUMP="$REPO/out/calendar-attendees.json"
+DUMP="$OUTPUT_ROOT/calendar-attendees.json"
 if [ ! -s "$DUMP" ]; then
   echo "calendar-capture: FAIL the bundle read OK but wrote no dump at $DUMP" >&2
   exit 1
@@ -160,30 +172,39 @@ if [ "$DRY" -ne 1 ]; then
   fi
 fi
 
-"$PY" - "$MATCH_JSON" "$DRY" "$DAYS" <<'PYEOF'
+"$PY" - "$MATCH_JSON" "$DRY" "$DAYS" "${SCANNED:-0}" "$RECEIPT_SAFE" <<'PYEOF'
 import json, subprocess, sys, pathlib
-path, dry, days = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
+path, dry, days, scanned, receipt_safe = (sys.argv[1], sys.argv[2] == "1", sys.argv[3],
+                                          sys.argv[4], sys.argv[5] == "1")
 d = json.load(open(path))
 c = d["counts"]
 print(f"calendar-capture: window {days}d — {c['emails']} attendee address(es): "
       f"{c['exact']} exact, {c['domain']} domain-only, {c['unknown']} unknown")
 
-for u in d["unknown"]:
-    print(f"  research candidate  {u['email']}  (last seen {u['last_seen']})")
-for m in d["domain"]:
-    print(f"  domain-only, NOT logged  {m['email']} -> {m['org'][:50]}")
+if not receipt_safe:
+    for u in d["unknown"]:
+        print(f"  research candidate  {u['email']}  (last seen {u['last_seen']})")
+    for m in d["domain"]:
+        print(f"  domain-only, NOT logged  {m['email']} -> {m['org'][:50]}")
 
 if not d["exact"]:
     print("calendar-capture: no exact matches in this window — nothing to log")
+    print(f"calendar-capture: source=eventkit mode={'shadow' if dry else 'live'} "
+          f"scanned={scanned} exact=0 domain={c['domain']} unknown={c['unknown']} "
+          "writes=0 failed=0")
     sys.exit(0)
 
 if dry:
-    for e in d["exact"]:
-        print(f"  would log touch  {e['ref']}  via {e['email']}  ({e['last_seen']})")
+    if not receipt_safe:
+        for e in d["exact"]:
+            print(f"  would log touch  {e['ref']}  via {e['email']}  ({e['last_seen']})")
+    print(f"calendar-capture: source=eventkit mode=shadow scanned={scanned} "
+          f"exact={c['exact']} domain={c['domain']} unknown={c['unknown']} writes=0 failed=0")
     sys.exit(0)
 
 repo = pathlib.Path(__file__).resolve().parent if False else pathlib.Path.cwd()
 failed = 0
+written = 0
 for e in d["exact"]:
     ev = (e["events"] or [{}])[0]
     # log-activity with kind "meeting", NOT stamp-touch. stamp-touch is shorthand
@@ -209,5 +230,9 @@ for e in d["exact"]:
     if not ok:
         failed += 1
         print("    " + (r.stdout or r.stderr).strip().replace("\n", "\n    ")[:400])
+    else:
+        written += 1
+print(f"calendar-capture: source=eventkit mode=live scanned={scanned} exact={c['exact']} "
+      f"domain={c['domain']} unknown={c['unknown']} writes={written} failed={failed}")
 sys.exit(1 if failed else 0)
 PYEOF

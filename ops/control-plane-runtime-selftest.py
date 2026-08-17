@@ -154,6 +154,22 @@ def main() -> int:
     check("deterministic subprocesses never inherit ledger, provider, owner, or live-ingest secrets",
           bool(call_envs) and not any(key in call_envs[0] for key in ("CARR_DB_JOBS_URL", "DATABASE_URL", "CARR_DB_OWNER_URL", "CARR_DB_WRITER_URL", "CARR_AI_ROUTE_PRIMARY_TOKEN", "CARR_INGEST_TOKEN_CALENDAR")))
 
+    module.subprocess.run = fake_run
+    try:
+        calendar_workflow = next(item for item in module.load_manifest()["workflows"]
+                                 if item["key"] == "calendar-fetch-daily")
+        module._execute_deterministic(calendar_workflow, {}, 30, "shadow")
+    finally:
+        module.subprocess.run = original_run
+    calendar_env = call_envs[-1]
+    check("calendar shadow binds the current checkout and isolated scratch root",
+          calendar_env.get("CARR_REPO") == str(REPO)
+          and calendar_env.get("CARR_CALENDAR_OUTPUT_ROOT")
+          == str(REPO / "out" / "control-plane" / "calendar" / "shadow"))
+    check("calendar EventKit child receives no legacy Drive or obsolete canary path",
+          not any(key in calendar_env for key in (
+              "CARR_VAULT", "CARR_CALENDAR_CANARY_ENV", "CARR_CALENDAR_CANARY_ROOT")))
+
     canary_calls: list[list[str]] = []
 
     def canary_run(argv, **_kwargs):
@@ -213,11 +229,11 @@ def main() -> int:
     try:
         unsafe_manifest = module.load_manifest()
         next(workflow for workflow in unsafe_manifest["workflows"]
-             if workflow["key"] == "calendar-fetch-daily")["execution"]["canary"]["isolation_guard"] = "forged-canary-guard"
+             if workflow["key"] == "notes-sweep-hourly")["execution"]["canary"]["isolation_guard"] = "forged-canary-guard"
         try:
             module.enqueue_due(
                 unsafe_manifest,
-                datetime.fromisoformat("2026-08-17T12:09:00+00:00"),
+                datetime.fromisoformat("2026-08-17T13:00:00+00:00"),
                 "canary",
             )
             schedule_refused = False

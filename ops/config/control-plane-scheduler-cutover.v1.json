@@ -3,7 +3,7 @@
   "contract": "control-plane-scheduler-cutover",
   "observation_max_age_seconds": 900,
   "surfaces": [
-    {"surface_id":"calendar-fetch-daily.claude-code.v1","workflow_key":"calendar-fetch-daily","workflow_version":3,"scheduler_kind":"claude-code","locator":"calendar-fetch-daily"},
+    {"surface_id":"calendar-fetch-daily.launchd.v1","workflow_key":"calendar-fetch-daily","workflow_version":4,"scheduler_kind":"launchd","locator":"com.carr.calendar-eventkit","repo_plist_relpath":"ops/launchd/com.carr.calendar-eventkit.plist","installed_plist_name":"com.carr.calendar-eventkit.plist","canonical_program_arguments":["/bin/zsh","{{REPO}}/bin/run-scheduled.sh","calendar-eventkit","launchd.run","/bin/sh","{{REPO}}/bin/calendar-eventkit-capture.sh","--days","7"],"canonical_plist_fingerprint":"445b2fe067162a14bcfe96b92ca39c6505cd6328bc45d1fb4688f7223e31dfaa"},
     {"surface_id":"cc-update-audit.claude-code.v1","workflow_key":"cc-update-audit","workflow_version":1,"scheduler_kind":"claude-code","locator":"cc-update-audit"},
     {"surface_id":"contact-enrichment-weekly.claude-code.v1","workflow_key":"contact-enrichment-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"contact-enrichment-weekly"},
     {"surface_id":"content-fuel-harvest-weekly.claude-code.v1","workflow_key":"content-fuel-harvest-weekly","workflow_version":1,"scheduler_kind":"claude-code","locator":"content-fuel-harvest-weekly"},
