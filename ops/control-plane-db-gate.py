@@ -377,21 +377,52 @@ def main() -> int:
             intake_id = fetchone_required(cur.fetchone(), "fixture guidance intake")[0]
             cur.execute("""
                 insert into ops.rule_admission
-                  (rule_id,guidance_intake_id,enforcement_class,binding_moment,
+                  (rule_id,guidance_intake_id,enforcement_class,enforcement_status,binding_moment,
                    applicability,projection,reachability,input_contract,fixture_refs,
                    state,admitted_by,admitted_at)
-                values (%s,%s,'machine_enforceable','before fixture action',
+                values (%s,%s,'machine_enforceable','hard_enforced','before fixture action',
                         '{"workflows":["db-gate"]}',
                         '{"targets":["db-gate"]}', '{"paths":["database"]}',
                         '{"type":"object"}',
                         array['ops/control-plane-db-gate.py'],'admitted',%s,now())
             """, (rule_id, intake_id, actor))
             cur.execute("""
-                insert into ops.rule_enforcement_point
-                  (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed)
-                values (%s,'db-gate-fixture','migration:0148',
-                        'ops/control-plane-db-gate.py','transactional_schema',true)
+                insert into ops.enforcement_control_catalog
+                  (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+                values ('db-gate-fixture','migration:0185',
+                        'ops/control-plane-db-gate.py','transactional_schema',true,now())
+                on conflict (control_key) do update set installed=true,verified_at=now()
+            """)
+            cur.execute("""
+                insert into ops.rule_control_binding
+                  (rule_id,control_key,statement_hash,binding_contract)
+                select id,'db-gate-fixture',encode(digest(statement,'sha256'),'hex'),
+                       '{"fixture":"control-plane-db-gate"}'::jsonb
+                  from rule where id=%s
             """, (rule_id,))
+            cur.execute("""
+                insert into ops.rule_enforcement_point
+                  (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+                values (%s,'db-gate-fixture','migration:0148',
+                        'ops/control-plane-db-gate.py','transactional_schema',true,now())
+            """, (rule_id,))
+            cur.execute("""
+                with approved as (
+                  select r.id,r.version,encode(digest(r.statement,'sha256'),'hex') statement_hash,
+                         jsonb_build_object('fixture','control-plane-db-gate') contract
+                    from rule r where r.id=%s
+                )
+                insert into ops.rule_approval_receipt
+                  (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,
+                   enforcement_status,requested_control_keys,installed_control_keys,reason,
+                   normalized_contract,contract_hash,evidence_refs)
+                select 'db-gate-approval:'||id::text,id,version,statement_hash,%s,
+                       'machine_enforceable','hard_enforced',array['db-gate-fixture'],
+                       array['db-gate-fixture'],'rollback-only enforced activation fixture',
+                       contract,encode(digest(contract::text,'sha256'),'hex'),
+                       array['ops/control-plane-db-gate.py']
+                  from approved
+            """, (rule_id, actor))
             # Exercise the trigger as its real firing role, not as owner. A
             # grant that exists only for the migration actor is not a control.
             # The Neon owner credential is intentionally not standing SET-role

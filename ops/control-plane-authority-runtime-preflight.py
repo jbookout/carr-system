@@ -39,6 +39,7 @@ ALLOWED_MUTATION_PRIVILEGES = {
     ("public.tool_call", "INSERT"),
 }
 REQUIRED_AUTHORITY_FUNCTIONS = (
+    "ops.approve_rule(uuid,text,text[],text,text)",
     "ops.authority_actor_slug()",
     "ops.record_workflow_acceptance(text,text,text,text)",
     "ops.record_guidance_decision(uuid,text,text,text)",

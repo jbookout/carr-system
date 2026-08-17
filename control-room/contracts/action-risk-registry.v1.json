@@ -13,7 +13,7 @@
   "NONE": "updates an existing row with no version check \u2014 two callers can silently lose each other's work. THE GAP."
  },
  "counts": {
-  "human_boundary": 31,
+  "human_boundary": 32,
   "append_only": 35,
   "read_only": 38,
   "optimistic_concurrency": 19,
@@ -97,12 +97,12 @@
    "binds_both_partners": true,
    "base_version_required": false,
    "sql": {
-    "updates": 1,
+    "updates": 0,
     "deletes": 0,
-    "inserts": 1,
+    "inserts": 0,
     "upserts": 0
    },
-   "does": "Set a rule's status proposed -> active"
+   "does": "Retired compatibility verb"
   },
   "add-critical-date": {
    "protection": "append_only",
@@ -233,6 +233,19 @@
     "upserts": 0
    },
    "does": "HUMAN-ONLY atomic batch approval"
+  },
+  "approve-rule": {
+   "protection": "human_boundary",
+   "write": true,
+   "binds_both_partners": true,
+   "base_version_required": false,
+   "sql": {
+    "updates": 0,
+    "deletes": 0,
+    "inserts": 0,
+    "upserts": 0
+   },
+   "does": "Approve one captured rule in a single human act"
   },
   "attach-to-campaign": {
    "protection": "optimistic_concurrency",
@@ -557,7 +570,7 @@
     "inserts": 0,
     "upserts": 0
    },
-   "does": "Joe-only authority operation to retire one legacy schedule after accepted shadow and canary completion receipts exist"
+   "does": "Joe-only authority readback after native legacy schedules are disabled"
   },
   "doctrine-index": {
    "protection": "read_only",
@@ -1675,7 +1688,7 @@
     "inserts": 2,
     "upserts": 0
    },
-   "does": "Write a rule from the human's own words (status: proposed \u2014 it activates only via activate-rule, also human-gated)"
+   "does": "Write a rule from the human's own words (status: proposed \u2014 after exact enforcement is built and verified, one explicit human approve-rule act atomically activa"
   },
   "today-triage": {
    "protection": "read_only",

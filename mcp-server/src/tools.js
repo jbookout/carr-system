@@ -4721,7 +4721,7 @@ export const TOOLS = {
 
   "teach": {
     write: true, humanOnly: true,
-    description: "Write a rule from the human's own words (status: proposed — it activates only via activate-rule, also human-gated). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect only when a human calls activate-rule. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
@@ -4773,6 +4773,7 @@ export const TOOLS = {
       const scopeApplied = r.rows[0].personal_to ? `personal:${actor.slug}` : "shared";
       const scopeMismatch = args.personal === true && !r.rows[0].personal_to;
       return { ok: true, rule_id: r.rows[0].id, status: "proposed",
+               next_authority_action: "approve-rule",
                scope_applied: scopeApplied,
                personal_requested: args.personal === true,
                supersedes: args.supersedes || null,
@@ -4896,60 +4897,44 @@ export const TOOLS = {
     }),
   },
 
+  "approve-rule": {
+    write: true, humanOnly: true, authorityOnly: true,
+    description: "Approve one captured rule in a single human act. Approval means the server atomically verifies exact registered enforcement, records the immutable authority receipt, and activates the rule in the same transaction. There is no approved-but-inactive or active-but-pending state. If enforcement is missing, approval refuses so the system must build and verify the control before asking the human to approve. Advisory guidance is not mislabeled as an unbreakable rule.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      rule_id: { type: "string", description: "Full UUID or the short id printed by standing-context." },
+      policy_kind: { type: "string", enum: ["machine_enforceable","human_only"] },
+      control_keys: { type: "array", items: { type: "string" }, description: "Compiler-selected registered controls. Unknown or unverified controls refuse approval; callers cannot supply implementation or test evidence." },
+      reason: { type: "string" },
+    }, required: ["idempotency_key","rule_id","policy_kind","control_keys","reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "approve-rule", args, async () => {
+      args.rule_id = await resolveRuleId(c, args.rule_id);
+      const approved = await c.query(
+        "select ops.approve_rule($1,$2,$3,$4,$5) as result",
+        [args.rule_id,args.policy_kind,args.control_keys,args.idempotency_key,args.reason]);
+      const result = approved.rows[0]?.result;
+      if (!result || result.policy_status !== "active")
+        throw new ToolError({ error: "rule_approval_failed", rule_id: args.rule_id });
+      await writeEvent(c, actor, "approve-rule", "rule", args.rule_id, {
+        new: { status: "active", enforcement_status: result.enforcement_status,
+          installed_controls: result.installed_controls,
+          pending_controls: result.pending_controls },
+        agent_rationale: args.reason, idempotency_key: args.idempotency_key,
+      });
+      return result;
+    }),
+  },
+
   "activate-rule": {
     write: true, humanOnly: true,
-    description: "Set a rule's status proposed -> active. The context compiler (compiled-rules exports) reads ACTIVE rules only; activation is a human decision by design.",
+    description: "Retired compatibility verb. Direct activation is forbidden because it could separate human approval from verified enforcement. Use approve-rule, which succeeds only when it can enforce and activate the rule atomically.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string", description: "Accepts either the full 36-character uuid or the 8-character SHORT FORM the gist index and standing-context print (e.g. '179be4b8'); an ambiguous prefix returns the candidates rather than guessing." } },
       required: ["idempotency_key","rule_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "activate-rule", args, async () => {
-      args.rule_id = await resolveRuleId(c, args.rule_id);          // loop #261
-      // The database trigger is the non-bypassable backstop. This explicit
-      // read is the server-side authority gate: it provides a typed refusal and
-      // makes the admission evidence part of this same transaction.
-      const admission = await c.query(
-        `select a.state,a.enforcement_class,
-                count(ep.id) filter (where ep.installed) as installed_controls,
-                encode(digest(jsonb_build_object(
-                  'enforcement_class',a.enforcement_class,'binding_moment',a.binding_moment,
-                  'applicability',a.applicability,'projection',a.projection,
-                  'reachability',a.reachability,'input_contract',a.input_contract,
-                  'fixture_refs',a.fixture_refs)::text,'sha256'),'hex') as contract_hash
-           from ops.rule_admission a
-           left join ops.rule_enforcement_point ep on ep.rule_id=a.rule_id
-          where a.rule_id=$1
-          group by a.rule_id,a.state,a.enforcement_class,a.binding_moment,a.applicability,
-                   a.projection,a.reachability,a.input_contract,a.fixture_refs`, [args.rule_id]);
-      if (!admission.rows.length || admission.rows[0].state !== "admitted")
-        throw new ToolError({ error: "admission_required", rule_id: args.rule_id,
-          hint: "call admit-rule with applicability, projection, reachability, fixtures and enforcement evidence first" });
-      if (admission.rows[0].enforcement_class === "machine_enforceable"
-          && Number(admission.rows[0].installed_controls) < 1)
-        throw new ToolError({ error: "installed_enforcement_point_required", rule_id: args.rule_id });
-      const r = await c.query(
-        `update rule set status='active', activated_by=$1, activated_at=now()
-         where id=$2 and status='proposed' returning id`, [actor.id, args.rule_id]);
-      // The id resolved, so a miss here means the STATUS was wrong, not the id —
-      // say which, because "not_proposed_or_missing" sent readers hunting for a
-      // typo that was never there.
-      if (!r.rows.length) {
-        const cur = await c.query("select status from rule where id=$1", [args.rule_id]);
-        throw new ToolError({ error: "not_proposed", rule_id: args.rule_id,
-          current_status: cur.rows[0]?.status ?? null,
-          hint: cur.rows.length
-            ? "only a PROPOSED rule can be activated; this one is already past that point"
-            : "no rule carries that id" });
-      }
-      await c.query(
-        `insert into ops.authority_receipt
-           (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
-         values ($1,'activation','rule',$2,$3,'activated admitted rule',$4,$5)`,
-        [`activation:${args.idempotency_key}`,args.rule_id,actor.id,
-         admission.rows[0].contract_hash,[]]);
-      await writeEvent(c, actor, "activate-rule", "rule", args.rule_id,
-        { new: { status: "active" }, idempotency_key: args.idempotency_key });
-      return { ok: true };
+      throw new ToolError({ error: "direct_rule_activation_retired", rule_id: args.rule_id,
+        hint: "use approve-rule; approval succeeds only with exact installed enforcement and activates atomically" });
     }),
   },
 
