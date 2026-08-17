@@ -13,6 +13,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from lib.control_plane_scheduler_cutover import (CutoverRefusal, observe_claude_scheduler_receipt, observe_launchd,
+                                                  observe_launchd_scheduler_receipt,
                                                   prepare_disable, validate_registry,
                                                   verify_disabled)
 
@@ -82,11 +83,13 @@ def approval_verifier(ref: str) -> dict | None:
     return {"kind": "human_authority_receipt", "receipt_ref": ref, "immutable": True,
             "authority_subject": "joe", "action": "disable-legacy-schedule",
             "subject": {"workflow_key": "nightly-record-layer", "workflow_version": 2,
-                        "surface_id": "nightly-record-layer.launchd.v1", "locator": "com.carr.nightly-record-layer"}}
+                        "surface_id": "nightly-record-layer.launchd.v1", "locator": "com.carr.nightly-record-layer"},
+            "observation_refs": {"pre": "launchd:enabled", "post": "launchd:disabled", "sibling": None}}
 
 
 def prepared() -> tuple[dict, dict]:
-    pre = observed("nightly-record-layer.launchd.v1", loaded={"com.carr.nightly-record-layer"})
+    pre = observe_launchd_scheduler_receipt(
+        surface("nightly-record-layer.launchd.v1"), launchd_receipt("enabled", "launchd:enabled", NOW_TEXT))
     return prepare_disable(REGISTRY, surface_id="nightly-record-layer.launchd.v1", observation=pre,
                            replacement=healthy_replacement(), receipt_verifier=receipt_verifier, now=NOW), pre
 
@@ -97,6 +100,16 @@ def provider_receipt(state: str, ref: str, at: str) -> dict:
             "workflow_version": 1, "locator": "cc-update-audit", "scheduler_state": state,
             "observed_at": at, "provider_revision": hashlib.sha256(("revision:" + ref).encode()).hexdigest(),
             "source_fingerprint": hashlib.sha256(("source:" + ref).encode()).hexdigest(),
+            "device_principal_bound": True, "immutable": True}
+
+
+def launchd_receipt(state: str, ref: str, at: str) -> dict:
+    return {"kind": "scheduler_observation_receipt", "receipt_ref": ref,
+            "surface_id": "nightly-record-layer.launchd.v1", "workflow_key": "nightly-record-layer",
+            "workflow_version": 2, "locator": "com.carr.nightly-record-layer",
+            "scheduler_kind": "launchd", "scheduler_state": state, "observed_at": at,
+            "provider_revision": hashlib.sha256(("launchctl:" + ref).encode()).hexdigest(),
+            "source_fingerprint": hashlib.sha256(("launchd-source:" + ref).encode()).hexdigest(),
             "device_principal_bound": True, "immutable": True}
 
 
@@ -146,6 +159,12 @@ def main() -> int:
           enabled["scheduler_state"] == "enabled" and all(enabled["sources"].values()))
     check("local readback reports disabled only from exact local sources",
           disabled["scheduler_state"] == "disabled")
+    enabled = observe_launchd_scheduler_receipt(
+        surface("nightly-record-layer.launchd.v1"), launchd_receipt("enabled", "launchd:enabled", NOW_TEXT))
+    disabled = observe_launchd_scheduler_receipt(
+        surface("nightly-record-layer.launchd.v1"), launchd_receipt("disabled", "launchd:disabled", LATER_TEXT))
+    check("launchd cutover uses an immutable device-bound native receipt",
+          enabled["sources"]["launchd_receipt_read"] is True)
     provider_surface = surface("cc-update-audit.claude-code.v1")
     provider_enabled = observe_claude_scheduler_receipt(
         provider_surface, provider_receipt("enabled", "provider:enabled", NOW_TEXT))

@@ -43,7 +43,8 @@ from lib.control_plane_proposal_contracts import (ProposalContractError,
                                                   validate_proposal_contract)  # noqa: E402
 from lib.control_plane_runner import BudgetExceeded, CognitionDispatcher, due_workflows  # noqa: E402
 from lib.control_plane_runtime_collectors import RuntimeCanonicalEvidenceCollector  # noqa: E402
-from lib.control_plane_scheduler_cutover import (CutoverRefusal, scheduler_provider_rows,
+from lib.control_plane_scheduler_cutover import (CutoverRefusal, scheduler_launchd_rows,
+                                                  scheduler_provider_rows,
                                                   scheduler_surface_rows)  # noqa: E402
 
 MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
@@ -84,6 +85,7 @@ def sync_scheduler_surface_registry(cur: Any, *, manifest: dict[str, Any], regis
     # reinterpreted. They intentionally do not FK to this mutable projection,
     # so retiring a legacy surface cannot erase or strand its history.
     cur.execute("delete from ops.legacy_schedule_provider_contract")
+    cur.execute("delete from ops.legacy_schedule_launchd_contract")
     for workflow_key, workflow_version, surface_id, locator, scheduler_kind in rows:
         cur.execute(
             """insert into ops.legacy_schedule_surface_registry
@@ -117,6 +119,29 @@ def sync_scheduler_surface_registry(cur: Any, *, manifest: dict[str, Any], regis
     cur.execute(
         "delete from ops.legacy_schedule_provider_contract where not (surface_id = any(%s))",
         ([row[2] for row in provider_rows],),
+    )
+    launchd_rows = scheduler_launchd_rows(registry, manifest=manifest, repo=REPO)
+    for (workflow_key, workflow_version, surface_id, locator, repo_plist_relpath,
+         installed_plist_name, program_arguments_json, plist_sha256, schedule_sha256,
+         timezone_name) in launchd_rows:
+        cur.execute(
+            """insert into ops.legacy_schedule_launchd_contract
+                 (surface_id,workflow_key,workflow_version,locator,repo_plist_relpath,
+                  installed_plist_name,program_arguments,plist_sha256,schedule_sha256,timezone)
+               values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)
+               on conflict (surface_id) do update set
+                 workflow_key=excluded.workflow_key,workflow_version=excluded.workflow_version,
+                 locator=excluded.locator,repo_plist_relpath=excluded.repo_plist_relpath,
+                 installed_plist_name=excluded.installed_plist_name,
+                 program_arguments=excluded.program_arguments,plist_sha256=excluded.plist_sha256,
+                 schedule_sha256=excluded.schedule_sha256,timezone=excluded.timezone""",
+            (surface_id, workflow_key, workflow_version, locator, repo_plist_relpath,
+             installed_plist_name, program_arguments_json, plist_sha256, schedule_sha256,
+             timezone_name),
+        )
+    cur.execute(
+        "delete from ops.legacy_schedule_launchd_contract where not (surface_id = any(%s))",
+        ([row[2] for row in launchd_rows],),
     )
     return len(rows)
 
