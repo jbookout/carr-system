@@ -207,15 +207,16 @@ grant insert, select on table ops.work_request to carr_writer;
     check("owner/app_writer must share immutable scope, endpoint, port and database", True)
 
     class DsnRunner:
-        def __init__(self):
+        def __init__(self, query: str = "sslmode=require&channel_binding=require"):
             self.calls: list[list[str]] = []
+            self.query = query
 
         def __call__(self, args, **kwargs):
             self.calls.append(list(args))
             role = args[args.index("--role-name") + 1]
             return subprocess.CompletedProcess(
                 args, 0,
-                f"postgresql://{role}:fixture@{endpoint_host}:5432/neondb?sslmode=require",  # ci-secret-scan: allow — hermetic non-routable fixture
+                f"postgresql://{role}:fixture@{endpoint_host}:5432/neondb?{self.query}",  # ci-secret-scan: allow — hermetic non-routable fixture
                 "",
             )
 
@@ -228,6 +229,29 @@ grant insert, select on table ops.work_request to carr_writer;
           and dsn_runner.calls[0][dsn_runner.calls[0].index("--project-id") + 1] == scope.project_id
           and scoped_owner.endpoint == endpoint_host
           and scoped_owner.port == 5432)
+    unsafe_queries = (
+        "sslmode=require&channel_binding=require&host=elsewhere",
+        "sslmode=require&channel_binding=require&hostaddr=192.0.2.1",
+        "sslmode=require&channel_binding=require&port=5433",
+        "sslmode=require&channel_binding=require&dbname=postgres",
+        "sslmode=require&channel_binding=require&user=app_writer",
+        "sslmode=require&channel_binding=require&service=staging",
+        "sslmode=require&channel_binding=require&options=-csearch_path%3Dpublic",
+        "sslmode=require&sslmode=require&channel_binding=require",
+        "sslmode=require", "channel_binding=require",
+        "sslmode=verify-full&channel_binding=require",
+    )
+    for unsafe_query in unsafe_queries:
+        try:
+            provision.provider_dsn(
+                scope, "neondb_owner", neonctl="neonctl",
+                run=DsnRunner(unsafe_query), environ={},
+            )
+        except provision.ProvisioningRefusal:
+            pass
+        else:
+            raise AssertionError(f"unsafe provider DSN query accepted: {unsafe_query}")
+    check("provider DSN refuses query overrides, duplicates, missing keys and wrong values", True)
     try:
         provision.provider_dsn(
             scope, "app_writer", neonctl="neonctl", run=dsn_runner, environ={},

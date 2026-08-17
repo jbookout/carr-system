@@ -11,6 +11,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+from urllib.parse import unquote, urlsplit
 
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -97,6 +98,7 @@ def main() -> int:
         shared_dependencies=(),
         reader_role_exists=False,
         active_sessions=0,
+        database_census=(("neondb", True), ("postgres", True)),
     )
     cleanup.validate_provider_managed_fingerprint(good)
     check("only the exact observed provider-managed fingerprint is deletable", True)
@@ -110,6 +112,9 @@ def main() -> int:
         dataclasses.replace(good, reader_role_exists=True),
         dataclasses.replace(good, role_config=("statement_timeout=60s",)),
         dataclasses.replace(good, active_sessions=1),
+        dataclasses.replace(good, database_census=(("neondb", True), ("postgres", False))),
+        dataclasses.replace(good, database_census=(("postgres", True),)),
+        dataclasses.replace(good, database_census=(("postgres", True), ("neondb", True))),
     )
     for candidate in negatives:
         try:
@@ -119,6 +124,143 @@ def main() -> int:
         else:
             raise AssertionError(f"unsafe cleanup fingerprint accepted: {candidate!r}")
     check("SQL-created, in-use, configured, owned, ACL-bearing and drifted roles refuse", True)
+
+    class DatabaseCursor:
+        def __init__(self, database: str, identity: tuple[str, str, str]):
+            self.database = database
+            self.identity = identity
+        def execute(self, _statement: str):
+            pass
+        def fetchone(self):
+            return self.identity
+
+    class DatabaseConnection:
+        def __init__(self, database: str, identity: tuple[str, str, str]):
+            self.database = database
+            self.identity = identity
+            self.begins: list[str] = []
+            self.rollbacks = 0
+            self.closes = 0
+        def execute(self, statement: str):
+            self.begins.append(statement)
+        def cursor(self):
+            return DatabaseCursor(self.database, self.identity)
+        def rollback(self):
+            self.rollbacks += 1
+        def close(self):
+            self.closes += 1
+
+    class DatabaseConnector:
+        def __init__(
+            self, fail_database: str | None = None,
+            identity_overrides: dict[str, tuple[str, str, str]] | None = None,
+        ):
+            self.fail_database = fail_database
+            self.identity_overrides = identity_overrides or {}
+            self.connections: list[DatabaseConnection] = []
+            self.values: list[str] = []
+        def __call__(self, value: str, **_kwargs):
+            self.values.append(value)
+            database = unquote(urlsplit(value).path.lstrip("/"))
+            if database == self.fail_database:
+                raise RuntimeError("connection failed with owner-fixture")
+            identity = self.identity_overrides.get(
+                database, ("neondb_owner", "neondb_owner", database)
+            )
+            connection = DatabaseConnection(database, identity)
+            self.connections.append(connection)
+            return connection
+
+    owner_dsn_base = (
+        "postgresql://neondb_owner:owner-fixture@ep-fixture.c-10.us-east-1.aws.neon.tech/"  # ci-secret-scan: allow — hermetic fixture
+        "neondb"
+    )
+    owner_dsn = owner_dsn_base + "?sslmode=require&channel_binding=require"
+    for unsafe_query in (
+        "sslmode=require&channel_binding=require&host=elsewhere",
+        "sslmode=require&channel_binding=require&hostaddr=192.0.2.1",
+        "sslmode=require&channel_binding=require&port=5433",
+        "sslmode=require&channel_binding=require&dbname=postgres",
+        "sslmode=require&channel_binding=require&user=app_writer",
+        "sslmode=require&channel_binding=require&service=staging",
+        "sslmode=require&channel_binding=require&options=-csearch_path%3Dpublic",
+        "sslmode=require&sslmode=require&channel_binding=require",
+        "sslmode=require", "channel_binding=require", "sslmode=verify-full&channel_binding=require",
+    ):
+        unsafe = owner_dsn_base + "?" + unsafe_query
+        try:
+            cleanup._owner_dsn_for_database(unsafe, "postgres")
+        except cleanup.CleanupRefusal as exc:
+            if "owner-fixture" in str(exc):
+                raise AssertionError("unsafe owner URI refusal leaked a credential")
+        else:
+            raise AssertionError(f"unsafe owner URI query accepted: {unsafe_query}")
+    check("owner URI query overrides, duplicates, and missing safe keys refuse", True)
+    original_acl_collector = cleanup.provision.collect_role_acl_facts
+    try:
+        connector = DatabaseConnector()
+        cleanup.provision.collect_role_acl_facts = lambda cur, _role: ()
+        scanned = cleanup.collect_all_database_acl_closure(
+            good.database_census, owner_dsn, connect=connector,
+        )
+        check("two connectable databases are scanned in explicit read-only transactions",
+              scanned == ("neondb", "postgres")
+              and [connection.database for connection in connector.connections]
+                  == ["neondb", "postgres"]
+              and all(connection.begins == ["begin transaction read only"]
+                      and connection.rollbacks == 1 and connection.closes == 1
+                      for connection in connector.connections))
+
+        connector = DatabaseConnector()
+        cleanup.provision.collect_role_acl_facts = lambda cur, _role: (
+            (("table", "public.hidden", "select", False),)
+            if cur.database == "postgres" else ()
+        )
+        try:
+            cleanup.collect_all_database_acl_closure(
+                good.database_census, owner_dsn, connect=connector,
+            )
+        except cleanup.CleanupRefusal:
+            check("a hidden direct ACL in the secondary database refuses after rollback/close",
+                  len(connector.connections) == 2
+                  and all(connection.rollbacks == 1 and connection.closes == 1
+                          for connection in connector.connections))
+        else:
+            raise AssertionError("secondary-database ACL was accepted")
+
+        connector = DatabaseConnector(fail_database="postgres")
+        cleanup.provision.collect_role_acl_facts = lambda cur, _role: ()
+        try:
+            cleanup.collect_all_database_acl_closure(
+                good.database_census, owner_dsn, connect=connector,
+            )
+        except cleanup.CleanupRefusal as exc:
+            check("secondary connection failure is secret-free and prior connection is cleaned up",
+                  "owner-fixture" not in str(exc)
+                  and len(connector.connections) == 1
+                  and connector.connections[0].rollbacks == 1
+                  and connector.connections[0].closes == 1)
+        else:
+            raise AssertionError("secondary-database connection failure was accepted")
+
+        for label, identity in (
+            ("wrong user", ("app_writer", "app_writer", "postgres")),
+            ("wrong database", ("neondb_owner", "neondb_owner", "neondb")),
+        ):
+            connector = DatabaseConnector(identity_overrides={"postgres": identity})
+            try:
+                cleanup.collect_all_database_acl_closure(
+                    good.database_census, owner_dsn, connect=connector,
+                )
+            except cleanup.CleanupRefusal:
+                check(f"secondary database {label} refuses after rollback/close",
+                      len(connector.connections) == 2
+                      and all(connection.rollbacks == 1 and connection.closes == 1
+                              for connection in connector.connections))
+            else:
+                raise AssertionError(f"secondary database {label} was accepted")
+    finally:
+        cleanup.provision.collect_role_acl_facts = original_acl_collector
     cleanup.require_quiescent_reads((0, 0))
     for readings in ((0,), (1, 0), (0, 1), (0, 0, 0)):
         try:
@@ -201,12 +343,19 @@ def main() -> int:
     changed, _ = cleanup.cleanup_fingerprint(
         scope, row, good, {"reader": "pending", "writer": "pending"}
     )
+    changed_database_digest, _ = cleanup.cleanup_fingerprint(
+        scope, row, dataclasses.replace(
+            good, database_census=(("analytics", True), ("neondb", True), ("postgres", True))
+        ), states,
+    )
     check("dry-run fingerprint binds full scope/provider/database/both credential states",
           len(digest) == 64 and digest == digest_again
           and digest != changed and digest != changed_provider_digest
+          and digest != changed_database_digest
           and receipt["project_id"] == scope.project_id
           and receipt["endpoint_id"] == scope.endpoint_id
           and receipt["endpoint_host"] == scope.endpoint_host
+          and receipt["database_census"] == good.database_census
           and receipt["pending_credential_states"] == states)
     for bad_states in (
         {"reader": "final", "writer": "pending"},
@@ -398,7 +547,9 @@ def main() -> int:
           "pg_advisory_lock" in source and "exclusive_lock" in source
           and '"roles", "create"' not in provision_source)
     check("cleanup inspects all non-template databases and every shared role dependency",
-          "where not datistemplate" in source and "datallowconn" not in source
+          "where not datistemplate" in source and "datallowconn" in source
+          and "collect_all_database_acl_closure" in source
+          and "select session_user,current_user,current_database()" in source
           and "d.deptype::text" in source and "shared_dependencies" in source)
     print(f"PASS: staging app_writer cleanup self-test ({checked} checks)")
     return 0
