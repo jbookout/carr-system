@@ -110,6 +110,12 @@ def accept(cur, ref: str, version: int, feedback_hash: str, key: uuid.UUID, acto
       (ref, version, feedback_hash, key))
 
 
+def pending(cur, ref: str, tenant: str = "carr-internal"):
+    return cur.execute(
+      "select * from ops.pending_sourced_work_request_outcome_feedback(%s,%s)",
+      (ref, tenant)).fetchall()
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL", "")
     if not dsn:
@@ -165,6 +171,16 @@ def main() -> int:
             card = one(cur, "select * from ops.work_request_card(%s,'carr-internal')", (ref,))
             if card[28] is not None or card[29] != [] or card[30] != 0:
                 raise RuntimeError(f"pending outcome proposal leaked into card: {card[28:31]}")
+            pending_a = pending(cur, ref)
+            if (len(pending_a) != 1
+                    or pending_a[0][0:6] != (ref, "ready", ready_version, plan[1], plan_hash, proposal_a[1])
+                    or pending_a[0][6] != proposal_a[2]
+                    or pending_a[0][-1] != "pending_human_acceptance"):
+                raise RuntimeError(f"pending outcome proposal readback is not exact: {pending_a}")
+            if pending(cur, ref) != pending_a:
+                raise RuntimeError("pending outcome proposal readback is not stable after reload")
+            if pending(cur, ref, "other-tenant") != []:
+                raise RuntimeError("pending outcome feedback crossed its tenant boundary")
             # The ready-plan accepter may also accept outcome feedback: no invented two-human gate.
             accepted_a_key = uuid.uuid4()
             accepted_a = accept(cur, ref, ready_version, proposal_a[2], accepted_a_key, "dell")
@@ -173,6 +189,8 @@ def main() -> int:
                 raise RuntimeError(f"acceptance advanced a ready Work Request: {accepted_a}")
             if replay_accepted_a[:-1] != accepted_a[:-1] or replay_accepted_a[-1] is not True:
                 raise RuntimeError("acceptance did not preserve exact idempotent readback")
+            if pending(cur, ref) != []:
+                raise RuntimeError("accepted outcome feedback remained in the pending readback")
             refusal(cur, "select * from ops.accept_sourced_work_request_outcome_feedback(%s,%s,%s,%s)",
               (ref, ready_version, proposal_a[2], accepted_a_key), "cross-human acceptance replay")
 
@@ -182,11 +200,36 @@ def main() -> int:
             card_pending_b = one(cur, "select * from ops.work_request_card(%s,'carr-internal')", (ref,))
             if card_pending_b[28]["feedback_ref"] != proposal_a[1] or card_pending_b[29] != [card_pending_b[28]] or card_pending_b[30] != 1:
                 raise RuntimeError(f"pending B leaked or accepted history is wrong: {card_pending_b[28:31]}")
+            pending_b = pending(cur, ref)
+            if len(pending_b) != 1 or pending_b[0][5:7] != (proposal_b[1], proposal_b[2]):
+                raise RuntimeError(f"latest pending outcome feedback is not B: {pending_b}")
             accepted_b = accept(cur, ref, ready_version, proposal_b[2], uuid.uuid4(), "dell")
+            if pending(cur, ref) != []:
+                raise RuntimeError("accepted B remained in the pending readback")
             card_b = one(cur, "select * from ops.work_request_card(%s,'carr-internal')", (ref,))
             history = card_b[29]
             if card_b[28]["feedback_ref"] != proposal_b[1] or card_b[30] != 2 or [x["feedback_ref"] for x in history] != [proposal_a[1], proposal_b[1]]:
                 raise RuntimeError(f"accepted history is not deterministic A then B: {card_b[28:31]}")
+
+            # A reload must recover the newest of more than one still-pending
+            # proposal, while the card remains exclusively about accepted facts.
+            cur.execute("set local role carr_writer")
+            proposal_c = propose(cur, ref, ready_version, plan_hash, uuid.uuid4(), summary="An earlier pending observation")
+            proposal_d = propose(cur, ref, ready_version, plan_hash, uuid.uuid4(), summary="The latest pending observation")
+            cur.execute("reset role")
+            latest_pending = pending(cur, ref)
+            if len(latest_pending) != 1 or latest_pending[0][5:7] != (proposal_d[1], proposal_d[2]):
+                raise RuntimeError(f"pending readback did not select its latest proposal: {latest_pending}")
+            card_with_pending = one(cur, "select * from ops.work_request_card(%s,'carr-internal')", (ref,))
+            if card_with_pending[28:31] != card_b[28:31]:
+                raise RuntimeError("pending proposals altered accepted-only card history")
+            accept(cur, ref, ready_version, proposal_d[2], uuid.uuid4(), "dell")
+            older_pending = pending(cur, ref)
+            if len(older_pending) != 1 or older_pending[0][5:7] != (proposal_c[1], proposal_c[2]):
+                raise RuntimeError(f"pending readback did not recover the remaining exact proposal: {older_pending}")
+            accept(cur, ref, ready_version, proposal_c[2], uuid.uuid4(), "dell")
+            if pending(cur, ref) != []:
+                raise RuntimeError("no pending proposal should remain after both acceptances")
 
             # Replays are facts about the original accepted proposal/receipt, not a claim that a later lifecycle remains ready.
             cur.execute("savepoint historical_replay")
