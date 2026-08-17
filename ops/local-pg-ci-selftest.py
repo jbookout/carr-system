@@ -48,8 +48,8 @@ source = {
     "PATH": "/usr/bin:/bin",
     "HOME": "/tmp/home",
     "TMPDIR": "/tmp",
-    "DATABASE_URL": "postgres://owner:secret@remote/db",
-    "CARR_DB_JOBS_URL": "postgres://jobs:secret@remote/db",
+    "DATABASE_URL": "postgres://owner:secret@remote/db",  # ci-secret-scan: allow - synthetic non-routable fixture
+    "CARR_DB_JOBS_URL": "postgres://jobs:secret@remote/db",  # ci-secret-scan: allow - synthetic non-routable fixture
     "CARR_AI_ROUTE_PRIMARY_TOKEN": "secret",
     "NEON_API_KEY": "secret",
     "PGPASSWORD": "secret",
