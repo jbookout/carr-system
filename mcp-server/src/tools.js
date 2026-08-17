@@ -5067,8 +5067,8 @@ export const TOOLS = {
   },
 
   "retire-rule": {
-    write: true, humanOnly: true,
-    description: "Withdraw a rule — proposed OR active — by setting status='retired'. THE PRESSURE VALVE THE RULE STORE WAS MISSING: until 2026-08-02 a rule could only go proposed -> active, so a rule taught in a wrong scope, a duplicate, or a draft the partner never wanted could never be taken back. 56 proposed rules had piled up by then, including two that stated Joe's own start date differently and no way to kill the wrong one. Retiring is NOT deleting: the row stays, the statement stays readable, and the compiled-rules exports simply stop carrying it (they read active only). A reason is REQUIRED — an unexplained retirement is indistinguishable from a mistake six months later, and the reason is the only thing that stops the same rule being re-taught. Pass superseded_by when a replacement already exists, so the pair reads as one decision rather than two unrelated events. Retiring an ACTIVE rule changes what binds every session, so it is human-gated like teach and activate-rule.",
+    write: true, humanOnly: true, authorityOnly: true,
+    description: "Joe-authority retirement of a proposed or active rule through one database transaction. It writes an immutable retirement receipt bound to the exact rule version, statement hash, prior approval, reason and replacement before changing status. Direct writer updates cannot retire a rule. Retirement preserves the frozen rule text and history; a changed rule must be taught and approved separately.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string", description: "Accepts either the full 36-character uuid or the 8-character SHORT FORM the gist index and standing-context print (e.g. '179be4b8'); an ambiguous prefix returns the candidates rather than guessing." },
@@ -5096,12 +5096,15 @@ export const TOOLS = {
       }
 
       const was = cur.rows[0].status;
-      await c.query("update rule set status='retired' where id=$1", [args.rule_id]);
+      const retired = await c.query(
+        "select ops.retire_rule($1,$2,$3,$4) as result",
+        [args.rule_id, reason, args.superseded_by || null, args.idempotency_key]);
+      const result = retired.rows[0].result;
       await writeEvent(c, actor, "retire-rule", "rule", args.rule_id, {
         field: "status", old: { status: was }, new: { status: "retired" },
         agent_rationale: reason,
         idempotency_key: args.idempotency_key });
-      return { ok: true, rule_id: args.rule_id, was, now: "retired", reason,
+      return { ...result, rule_id: args.rule_id, was, now: "retired", reason,
                superseded_by: args.superseded_by || null,
                note: was === "active"
                  ? "this rule was BINDING — re-export compiled-rules so sessions stop loading it"
@@ -5123,7 +5126,7 @@ export const TOOLS = {
   // re-litigated; rules simply never got the same affordance.
   "amend-rule": {
     write: true, humanOnly: true,
-    description: "Correct the WORDS of an existing rule in place, keeping its id, created_at, taught_by, quote and activation history. THE LINE: amend = same rule, better words; teach + retire = a different rule. Use it to fix compiled prose, tighten an over-broad statement, drop a clause that has gone stale, or re-scope a rule shipped in the wrong scope — anywhere the RULE is right and the SENTENCE is not. Do NOT use it to change what a rule means: a genuinely different ruling is a new rule (teach, with the partner's own words) plus retire-rule on the old one, so the change reads as a decision instead of an edit. human_quote is IMMUTABLE once set — it is the partner's testimony, not prose, and this verb refuses to overwrite it. It WILL fill a NULL quote, which is the backfill path for the imported rules that never had one. Requires base_version from a fresh read; a conflict means someone else wrote, so ask the human and never retry blind. Amending an ACTIVE rule changes what binds every session, so it is human-gated like teach, activate-rule and retire-rule, and the old text is written onto the event so the change is auditable and reversible.",
+    description: "Correct the WORDS of a PROPOSED rule in place, keeping its id, created_at, taught_by and quote. THE LINE: amend = same proposed rule, better words; teach + retire = a different rule. Once approved, the exact statement, quote, scope, audience and enforcement preimage are frozen by the database: changing any of them would make an old receipt appear to approve new substance. Correct an ACTIVE rule by teaching and approving the corrected replacement, then retiring the old rule. human_quote is immutable once set and may only be filled when absent on a proposed import. Requires base_version from a fresh read; a conflict is never retried blind.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string" },
@@ -5173,6 +5176,10 @@ export const TOOLS = {
       if (!changed.length) throw new ToolError({ error: "no_change",
         hint: "nothing was written; the rule already reads exactly this way" });
 
+      if (row.status === "active")
+        throw new ToolError({ error: "active_rule_approval_frozen", rule_id: args.rule_id,
+          hint: "an enforced rule cannot change substance under its old approval; teach the corrected rule, approve it, and retire this one" });
+
       await c.query("update rule set statement=$1, human_quote=$2, scope=$3 where id=$4",
         [nextStatement, nextQuote, JSON.stringify(nextScope), args.rule_id]);
 
@@ -5187,9 +5194,7 @@ export const TOOLS = {
       const after = await c.query("select version from rule where id=$1", [args.rule_id]);
       return { ok: true, rule_id: args.rule_id, status: row.status,
                changed, version: after.rows[0].version, reason,
-               note: row.status === "active"
-                 ? "this rule is BINDING — re-export compiled-rules so sessions load the corrected words"
-                 : "it binds nobody yet; activate-rule is still the gate" };
+               note: "it binds nobody yet; approve-rule is the atomic enforcement and activation gate" };
     }),
   },
 

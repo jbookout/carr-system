@@ -6,10 +6,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 MIGRATION = REPO / "migrations" / "0185_atomic_rule_approval.sql"
+TOOLS = REPO / "mcp-server" / "src" / "tools.js"
+DB_GATE = REPO / "ops" / "control-plane-db-gate.py"
 
 
 def main() -> int:
     sql = MIGRATION.read_text(encoding="utf-8").lower()
+    tools = TOOLS.read_text(encoding="utf-8")
+    gate = DB_GATE.read_text(encoding="utf-8")
     failures: list[str] = []
 
     def check(name: str, condition: bool) -> None:
@@ -34,6 +38,27 @@ def main() -> int:
           "rule_approval_receipt_append_only" in sql
           and "immutable enforced approval receipt is missing" in sql
           and "active requires installed enforcement" in sql)
+    check("active rule preimage is frozen under its exact approval",
+          "approved rule % is immutable except through exact joe approval or retirement" in sql
+          and "before insert or update on rule" in sql
+          and "unreceipted_deactivation_refusal" in gate
+          and "approved_rule_noop_update_refusal" in gate
+          and "active_rule_approval_frozen" in tools)
+    check("approved admission and control rows are immutable",
+          "approved_rule_admission_immutable" in sql
+          and "approved_rule_enforcement_point_immutable" in sql
+          and "approved_rule_control_binding_immutable" in sql
+          and "active_approved_control_immutable" in sql)
+    check("policy compiler delivers only current receipt-bound enforcement",
+          "ar.rule_version=r.version" in sql
+          and "language sql stable security definer" in sql
+          and "grant execute on function ops.applicable_rules(text,text,text)" in sql
+          and "ar.normalized_contract->'applicability'=a.applicability" in sql
+          and "a.applicability->'workflows' ? '*'" in sql
+          and "a.applicability->'surfaces' ? '*'" in sql
+          and "a.applicability->'tiers' ? '*'" in sql
+          and "auth.contract_hash=ar.contract_hash" in sql
+          and "not exists (" in sql)
     check("callers name registered controls instead of implementation prose",
           "enforcement_control_catalog" in sql
           and "and c.control_key=any(v_requested)" in sql
@@ -45,12 +70,22 @@ def main() -> int:
     check("cost control is registered with implementation and tests",
           "platform_metering_pre_dispatch" in sql
           and "ops/platform-metering-gate-selftest.py" in sql)
-    check("Joe's existing cost rule is deployment-bound without re-teaching it",
+    check("Joe's existing governance and cost rules bind to distinct exact controls",
           "ae44e0c0-e773-456c-a85b-2dc4cf4dd49e" in sql
+          and "9e02f7eee01220fd604ba97d605830ea903d3266f95b626a5ca5d9a73567c8f9" in sql
           and "4a0e59ce-728a-49b5-a055-116156e9470e" in sql
+          and "human_authority_runtime" in sql
+          and "a57d981a-8f6d-4c18-95ee-0e63a5a90b89" in sql
+          and "c6fd62eb91d3f03b21a6098a6fd6b2848b902a45b8c0430b1717edf4e143f668" in sql
+          and "8b31938a-e2f2-4b8f-9c29-187efa5c1650" in sql
+          and "platform_metering_pre_dispatch" in sql
           and "function ops.sync_system_rule_control_bindings()" in sql
           and "select ops.sync_system_rule_control_bindings()" in sql
-          and "r.status='proposed'" in sql)
+          and "does not match Joe-approved preimage".lower() in sql
+          and "lacks its exact Joe decision evidence".lower() in sql
+          and "must retain exact shared system-wide scope" in sql
+          and "narrowed_system_rule_scope" in gate
+          and "personal_system_rule_audience" in gate)
     check("routine roles cannot approve rules",
           "from public,carr_reader,carr_writer,carr_jobs" in sql
           and "grant execute on function ops.approve_rule" in sql
@@ -59,13 +94,25 @@ def main() -> int:
           "is distinct from p_rule_id" in sql
           and "is distinct from v_requested" in sql
           and "idempotency key was reused with different input" in sql)
+    check("approval replay revalidates current policy and enforcement",
+          "current active rule no longer matches the immutable approval" in sql
+          and "exact installed enforcement or authority evidence is stale" in sql
+          and "v_rule.version+1" in sql)
+    check("the exact atomic activation is allowed through the preimage freeze",
+          "old.status='proposed' and new.status='active'" in sql
+          and "enforcement label does not match approval" in sql)
+    check("rule retirement is a separate Joe-authority receipt",
+          "function ops.retire_rule(" in sql
+          and "rule_retirement_receipt" in sql
+          and "cannot retire without an exact joe authority receipt" in sql
+          and "routine writer may retire rules" in sql)
     check("advisory prose cannot be approved as an unbreakable rule",
           "advisory guidance is not an unbreakable rule" in sql
           and "standing_context_runtime" in sql
           and "mislabeled as unbreakable enforcement" in sql)
     check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
 
-    print(f"\natomic-rule-approval-selftest: {13-len(failures)}/13 passed")
+    print(f"\natomic-rule-approval-selftest: {19-len(failures)}/19 passed")
     return 1 if failures else 0
 
 

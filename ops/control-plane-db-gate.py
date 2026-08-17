@@ -348,16 +348,35 @@ def main() -> int:
             # A new rule cannot activate on prose alone.
             cur.execute("select id from actor where slug='joe'")
             actor = fetchone_required(cur.fetchone(), "Joe actor")[0]
-            # The exact spending rule was captured before the atomic approval
-            # architecture existed.  Deployment must bind that same UUID to the
-            # installed mechanical gate; it must not teach a replacement or ask
-            # Joe to approve the substance again.
+            # The exact spending rule and decision were captured before the
+            # atomic approval architecture existed. Deployment must bind their
+            # pinned preimages to the cost gate; a familiar UUID with different
+            # words or governance decision must never be blessed.
             cur.execute("""
                 insert into rule(id,statement,human_quote,taught_by,status)
-                values ('ae44e0c0-e773-456c-a85b-2dc4cf4dd49e',
-                        'Disposable cost-conscious operation fixture',
+                values ('a57d981a-8f6d-4c18-95ee-0e63a5a90b89',
+                        'Every metered CARR execution must pass a machine-enforced pre-dispatch budget gate; prose or registry-only guidance does not count as enforcement, and Joe alone may approve exceeding a cap, buying usage credits, or enabling paid overage.',
                         'fixture',%s,'proposed')
             """, (actor,))
+            cur.execute("""
+                insert into event
+                  (id,occurred_at,actor_id,verb,subject_type,subject_id,new_value,
+                   cause,human_quote,agent_rationale,idempotency_key)
+                values
+                  ('f7ea060c-268b-47f1-8a17-7168841b77e0',now(),%s,
+                   'log-decision','decision','8b31938a-e2f2-4b8f-9c29-187efa5c1650',
+                   jsonb_build_object(
+                     'title','Make cost discipline permanent; expire only the temporary emergency restriction',
+                     'quote_absent',false,'provenance','rollback DB gate fixture'),
+                   'human_stated',
+                   'But also, we want a budget rule in affect going forward not just expiring in September. We need to operate the system with cost in mind. Not to the point where it limits the system but just to the point where excessive spending is avoided',
+                   'exact pinned decision fixture','db-gate-cost-decision')
+            """, (actor,))
+            cur.execute("""
+                insert into record_source(entity_type,entity_id,source_system,external_key)
+                values ('event','f7ea060c-268b-47f1-8a17-7168841b77e0',
+                        'decision-history','fixture#db-gate-cost-binding')
+            """)
             cur.execute("select ops.sync_system_rule_control_bindings()")
             if fetchone_required(cur.fetchone(), "system-rule binding sync")[0] != 1:
                 fail("existing spending rule did not receive its exact installed-control binding")
@@ -365,14 +384,44 @@ def main() -> int:
                 select count(*)
                   from ops.rule_control_binding b
                   join rule r on r.id=b.rule_id
-                 where b.rule_id='ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'
+                 where b.rule_id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'
                    and b.control_key='platform_metering_pre_dispatch'
                    and b.statement_hash=encode(digest(r.statement,'sha256'),'hex')
                    and b.binding_contract->>'durable_decision_ref'=
-                       '4a0e59ce-728a-49b5-a055-116156e9470e'
+                       '8b31938a-e2f2-4b8f-9c29-187efa5c1650'
+                   and b.binding_contract->>'decision_event_ref'=
+                       'f7ea060c-268b-47f1-8a17-7168841b77e0'
             """)
             if fetchone_required(cur.fetchone(), "system-rule binding readback")[0] != 1:
                 fail("spending rule binding does not match the exact statement and decision")
+            for savepoint, mutation, params, message in (
+                ("narrowed_system_rule_scope",
+                 "update rule set scope='{\"workflows\":[\"one-workflow\"]}'::jsonb "
+                 "where id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'",
+                 (), "system-rule sync accepted narrowed applicability"),
+                ("personal_system_rule_audience",
+                 "update rule set personal_to=%s "
+                 "where id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'",
+                 (actor,), "system-rule sync accepted a personal audience"),
+            ):
+                cur.execute(f"savepoint {savepoint}")
+                try:
+                    cur.execute(mutation, params)
+                    cur.execute("select ops.sync_system_rule_control_bindings()")
+                    fail(message)
+                except psycopg.Error:
+                    cur.execute(f"rollback to savepoint {savepoint}")
+            cur.execute("savepoint wrong_system_rule_preimage")
+            try:
+                cur.execute("""
+                    insert into rule(id,statement,human_quote,taught_by,status)
+                    values ('ae44e0c0-e773-456c-a85b-2dc4cf4dd49e',
+                            'wrong governance statement','fixture',%s,'proposed')
+                """, (actor,))
+                cur.execute("select ops.sync_system_rule_control_bindings()")
+                fail("system-rule sync accepted a known UUID with the wrong statement")
+            except psycopg.Error:
+                cur.execute("rollback to savepoint wrong_system_rule_preimage")
             grant_settable_runtime_roles(cur, "carr_writer")
             set_local_role(cur, "carr_writer")
             cur.execute("select has_function_privilege(current_user,%s,'execute')",
@@ -444,20 +493,35 @@ def main() -> int:
             cur.execute("""
                 with approved as (
                   select r.id,r.version,encode(digest(r.statement,'sha256'),'hex') statement_hash,
-                         jsonb_build_object('fixture','control-plane-db-gate') contract
+                         jsonb_build_object(
+                           'fixture','control-plane-db-gate',
+                           'binding_moment','before fixture action',
+                           'applicability','{"workflows":["db-gate"]}'::jsonb,
+                           'projection','{"targets":["db-gate"]}'::jsonb,
+                           'reachability','{"paths":["database"]}'::jsonb,
+                           'input_contract','{"type":"object"}'::jsonb) contract
                     from rule r where r.id=%s
                 )
                 insert into ops.rule_approval_receipt
                   (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,
                    enforcement_status,requested_control_keys,installed_control_keys,reason,
                    normalized_contract,contract_hash,evidence_refs)
-                select 'db-gate-approval:'||id::text,id,version,statement_hash,%s,
+                select 'db-gate-approval:'||id::text,id,version+1,statement_hash,%s,
                        'machine_enforceable','hard_enforced',array['db-gate-fixture'],
                        array['db-gate-fixture'],'rollback-only enforced activation fixture',
                        contract,encode(digest(contract::text,'sha256'),'hex'),
                        array['ops/control-plane-db-gate.py']
                   from approved
             """, (rule_id, actor))
+            cur.execute("""
+                insert into ops.authority_receipt
+                  (idempotency_key,kind,subject_type,subject_id,actor_id,decision,
+                   contract_hash,evidence_refs)
+                select 'approval:'||ar.idempotency_key,'activation','rule',ar.rule_id,
+                       ar.actor_id,'rollback-only exact approval fixture',
+                       ar.contract_hash,ar.evidence_refs
+                  from ops.rule_approval_receipt ar where ar.rule_id=%s
+            """, (rule_id,))
             # Exercise the trigger as its real firing role, not as owner. A
             # grant that exists only for the migration actor is not a control.
             # The Neon owner credential is intentionally not standing SET-role
@@ -466,12 +530,62 @@ def main() -> int:
             # the temporary membership option along with every fixture.
             grant_settable_runtime_roles(cur, "carr_writer", "carr_jobs")
             set_local_role(cur, "carr_writer")
-            cur.execute("update rule set status='active',activated_by=%s,activated_at=now() where id=%s",
+            cur.execute("update rule set status='active',activated_by=%s,activated_at=now(),enforcement='gate' where id=%s",
                         (actor, rule_id))
             cur.execute("reset role")
             cur.execute("select status from rule where id=%s", (rule_id,))
             if fetchone_required(cur.fetchone(), "activated fixture rule")[0] != "active":
                 fail("admitted rule did not activate")
+            cur.execute("savepoint active_rule_drift_refusal")
+            try:
+                set_local_role(cur, "carr_writer")
+                cur.execute("update rule set statement=statement||' drift' where id=%s", (rule_id,))
+                fail("active rule statement changed under an old approval receipt")
+            except psycopg.Error:
+                cur.execute("rollback to savepoint active_rule_drift_refusal")
+            finally:
+                cur.execute("reset role")
+            cur.execute("""
+                select r.version=ar.rule_version
+                  and encode(digest(r.statement,'sha256'),'hex')=ar.statement_hash
+                  from rule r join ops.rule_approval_receipt ar on ar.rule_id=r.id
+                 where r.id=%s
+            """, (rule_id,))
+            if fetchone_required(cur.fetchone(), "active rule immutable preimage")[0] is not True:
+                fail("active rule version/hash no longer matches its approval receipt")
+            cur.execute("select count(*) from ops.applicable_rules('db-gate',null,null) where rule_id=%s",
+                        (rule_id,))
+            if fetchone_required(cur.fetchone(), "receipt-bound applicable rule")[0] != 1:
+                fail("exact active enforced rule is absent from the policy compiler")
+            for savepoint, sql_text, message in (
+                ("active_admission_drift_refusal",
+                 "update ops.rule_admission set applicability='{}'::jsonb where rule_id=%s",
+                 "active rule admission changed under an old approval receipt"),
+                ("active_control_removal_refusal",
+                 "update ops.rule_enforcement_point set installed=false where rule_id=%s",
+                 "active rule enforcement point was removed under an old approval receipt"),
+                ("retirement_preimage_drift_refusal",
+                 "update rule set status='retired',statement=statement||' drift' where id=%s",
+                 "approved rule substance changed during retirement"),
+                ("unreceipted_retirement_refusal",
+                 "update rule set status='retired' where id=%s",
+                 "routine writer retired an approved rule without Joe authority"),
+                ("unreceipted_deactivation_refusal",
+                 "update rule set status='proposed' where id=%s",
+                 "routine writer deactivated an approved rule without Joe authority"),
+                ("approved_rule_noop_update_refusal",
+                 "update rule set statement=statement where id=%s",
+                 "routine writer invalidated an approved rule through a no-op version bump"),
+            ):
+                cur.execute(f"savepoint {savepoint}")
+                try:
+                    set_local_role(cur, "carr_writer")
+                    cur.execute(sql_text, (rule_id,))
+                    fail(message)
+                except psycopg.Error:
+                    cur.execute(f"rollback to savepoint {savepoint}")
+                finally:
+                    cur.execute("reset role")
 
             # Disabling a definition is a database-level dispatch fence.  It
             # cancels queued/retry work with immutable evidence, and both claim
