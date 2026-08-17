@@ -54,7 +54,7 @@ graph_system() { "$PY" "$REPO/pipelines/build-system-graph.py" "$VAULT"; }
 graph_health() { shift; "$PY" "$REPO/pipelines/graph-health.py" "$VAULT" "$@"; }
 sf_diff()      { shift; "$PY" "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }  # ORDER 29b flip: venv, records-mode read (parity byte-identical 2026-08-05)
 section_index(){ "$PY" "$REPO/pipelines/build-section-index.py" "$VAULT"; }
-registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" "$@"; }
+registry_audit(){ shift; "$PY" "$REPO/tools/registry-audit.py" "$@"; }
 # ORDER 16. Both are READ-ONLY surfaces: no database write, no send, no push.
 # They run on the repo venv because they speak to Neon through psycopg.
 review_queue() { shift; "$REPO/.venv/bin/python" "$REPO/pipelines/review_queue.py" "$@"; }
@@ -111,12 +111,13 @@ case "${1:-}" in
   # pass needs psycopg. Under a bare python3 it died mid-report, and the rows it
   # never reached were the nightly chain result and rules live — the two the
   # session-start brief tells sessions to go read when it reports a failure.
-  health)       CARR_VAULT="$VAULT" "$PY" "$REPO/tools/health-check.py" ;;
+  health)       shift; "$PY" "$REPO/tools/health-check.py" "$@" ;;
   config)       shift; python3 "$REPO/ops/config-as-code.py" "$@" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
-  check)        "$REPO/tools/check.sh" ;;
+  check)        shift; "$REPO/tools/check.sh" "$@" ;;
+  smoke)        shift; "$REPO/tools/smoke.sh" "$@" ;;
   # `next` (2026-08-09, loop #297): open loops ordered by how LITTLE is left,
   # which no other surface answers — bell/dated/decision all order by urgency.
   # Read-only over v_loop_proximity (migration 0084). Prints its own coverage
@@ -132,7 +133,7 @@ case "${1:-}" in
   # a human runs this, and the monthly audit runs this. Rule a8c55a47 — the
   # manual path and the automated path that do the same job must be the SAME
   # code, which under v1 they were not.
-  report-card)  shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/report-card.py" "$@" ;;
+  report-card)  shift; "$PY" "$REPO/tools/report-card.py" "$@" ;;
   # `worktree` (2026-08-10): an isolated checkout in one command. Two sessions
   # collided in the shared tree twice in one morning, and git-writer-gate's own
   # deny message already prescribes the fix — this makes it one step instead of
@@ -140,5 +141,5 @@ case "${1:-}" in
   # something breaks on a path that is simply not there.
   worktree)     shift; "$REPO/bin/worktree.sh" "$@" ;;
   local-db-ci)  shift; "$PY" "$REPO/ops/local-pg-ci.py" "$@" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet] [--recovery [--vault PATH]]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve [--recovery [--vault PATH]] <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|key-recovery-test|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|local-db-ci [--class migration|strict] [--port N]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose] [--recovery --reason WHY [--vault PATH]]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet] [--recovery [--vault PATH]]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve [--recovery [--vault PATH]] <question>|health [--recovery --reason WHY [--vault PATH]]|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|key-recovery-test|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check [--recovery --reason WHY [--vault PATH]]|smoke [--recovery --reason WHY [--vault PATH]]|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence] [--recovery --reason WHY [--vault PATH]]|local-db-ci [--class migration|strict] [--port N]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
 esac
