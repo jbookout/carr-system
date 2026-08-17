@@ -134,7 +134,9 @@ def bind_case_queries(suite: dict[str, Any], golden: dict[str, Any]) -> dict[str
         if not isinstance(case, dict) or not isinstance(case.get("id"), str):
             raise ValueError("situation suite has malformed case")
         source = golden_cases.get(case["id"])
-        doctrine = source.get("engines", {}).get("doctrine_postgres_fts") if source else None
+        if not isinstance(source, dict):
+            raise ValueError(f"{case['id']}: golden fixture case is missing")
+        doctrine = source.get("engines", {}).get("doctrine_postgres_fts")
         if not isinstance(doctrine, dict) or expectation(case) != expectation(doctrine):
             raise ValueError(f"{case['id']}: situation expectations do not exactly match golden fixture")
         query = source.get("query")

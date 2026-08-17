@@ -52,9 +52,11 @@ class FakeCursor:
                           "status": "active", "is_default": params[0] == "coequal-normalized-v1",
                           "golden_suite_digest": "b" * 64}]
         elif "from doctrine_section" in statement:
+            section_ids = params[0]
+            assert isinstance(section_ids, list)
             self.rows = [{"section_id": section_id, "status": self.source_status, "current_revision_id": "revision-1",
                           "revision_id": "revision-1", "document_slug": "runbook", "visibility": "shared"}
-                         for section_id in params[0]]
+                         for section_id in section_ids]
         else:
             assert "search_doctrine_situations" in statement
             self.rows = self.rows_by_policy[str(params[-1])]
@@ -154,7 +156,9 @@ check("collector invokes canonical ranker twice for every policy/case", len(sear
 check("collector binds each shipped policy explicitly", {params[-1] for _, params in search_calls} == set(collector.POLICIES))
 
 bad_rows = {policy: [row(policy)] for policy in collector.POLICIES}
-bad_rows["lexical-dominant-v1"][0]["provenance"]["complete"] = False
+bad_provenance = bad_rows["lexical-dominant-v1"][0]["provenance"]
+assert isinstance(bad_provenance, dict)
+bad_provenance["complete"] = False
 failed_connection = FakeConnection(bad_rows)
 try:
     collector.collect_rollback_only(
