@@ -57,15 +57,18 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_on: str | None = None) -> None:
         self.closed = False
         self.query_log: list[str] = []
+        self.fail_on = fail_on
     def cursor(self) -> FakeCursor:
         cursor = FakeCursor()
         original_execute = cursor.execute
         def record(query: str, params: object | None = None) -> None:
-            original_execute(query, params)
             self.query_log.append(query)
+            if self.fail_on and self.fail_on in query:
+                raise RuntimeError("bounded optional evidence failure")
+            original_execute(query, params)
         cursor.execute = record  # type: ignore[method-assign]
         return cursor
     def close(self) -> None:
@@ -103,6 +106,28 @@ def main() -> int:
         check("database evidence starts a read-only transaction before catalog reads", connection.query_log[0] == "begin transaction read only")
         check("unreadable device registry stays explicitly unobservable", report["device_evidence"]["principals"]["observable_by_jobs"] is False and report["jobs_runtime_identity_verified"] is True)
         check("provider presence needs both routes and both secrets", all(v["url_present"] and v["token_present"] for v in report["providers"]["routes"].values()))
+        optional_failure = module.collect_runtime(
+            config, db_env=db_env, provider_env=provider_env, age_key=age_key,
+            age_public_key=age_pub, environ={},
+            connect=lambda _: FakeConnection(fail_on="from ops.provider_route"))
+        check("optional provider evidence failure preserves verified jobs identity",
+              optional_failure["jobs_runtime_identity_verified"] is True
+              and optional_failure["jobs"]["database"]["evidence_probes"]["provider_routes"] == "unavailable_or_not_authorized"
+              and optional_failure["providers"]["registered_routes"] == {"primary": False, "secondary": False})
+        one_receipt_failure = module.collect_runtime(
+            config, db_env=db_env, provider_env=provider_env, age_key=age_key,
+            age_public_key=age_pub, environ={},
+            connect=lambda _: FakeConnection(fail_on="from ops.legacy_schedule_observation_receipt"))
+        receipt_counts = one_receipt_failure["device_evidence"]["immutable_receipt_counts"]
+        receipt_probes = one_receipt_failure["jobs"]["database"]["evidence_probes"]["receipt_counts"]
+        check("receipt evidence failures are isolated to the exact immutable table",
+              one_receipt_failure["jobs_runtime_identity_verified"] is True
+              and receipt_counts == {"device_evidence_receipt": 3,
+                                     "legacy_schedule_observation_receipt": None,
+                                     "npi_device_evidence_receipt": 3}
+              and receipt_probes["legacy_schedule_observation_receipt"] == "unavailable_or_not_authorized"
+              and receipt_probes["device_evidence_receipt"] == "verified"
+              and receipt_probes["npi_device_evidence_receipt"] == "verified")
         all_ready = copy.deepcopy(report)
         for actor in all_ready["authority"].values():
             actor["credential_present"] = True
