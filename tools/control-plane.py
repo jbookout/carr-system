@@ -86,15 +86,16 @@ def sync_scheduler_surface_registry(cur: Any, *, manifest: dict[str, Any], regis
     # so retiring a legacy surface cannot erase or strand its history.
     cur.execute("delete from ops.legacy_schedule_provider_contract")
     cur.execute("delete from ops.legacy_schedule_launchd_contract")
-    for workflow_key, workflow_version, surface_id, locator, scheduler_kind in rows:
+    for workflow_key, workflow_version, surface_id, locator, scheduler_kind, duplicate_group in rows:
         cur.execute(
             """insert into ops.legacy_schedule_surface_registry
-                 (workflow_key,workflow_version,surface_id,locator,scheduler_kind)
-               values (%s,%s,%s,%s,%s)
+                 (workflow_key,workflow_version,surface_id,locator,scheduler_kind,duplicate_group)
+               values (%s,%s,%s,%s,%s,%s)
                on conflict (surface_id) do update set
                  workflow_key=excluded.workflow_key,workflow_version=excluded.workflow_version,
-                 locator=excluded.locator,scheduler_kind=excluded.scheduler_kind""",
-            (workflow_key, workflow_version, surface_id, locator, scheduler_kind),
+                 locator=excluded.locator,scheduler_kind=excluded.scheduler_kind,
+                 duplicate_group=excluded.duplicate_group""",
+            (workflow_key, workflow_version, surface_id, locator, scheduler_kind, duplicate_group),
         )
     cur.execute(
         "delete from ops.legacy_schedule_surface_registry where not (surface_id = any(%s))",

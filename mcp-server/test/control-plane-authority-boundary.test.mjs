@@ -26,7 +26,7 @@ class AcceptanceAuthorityFake {
     if (text.includes("ops.disable_legacy_schedule")) {
       this.disableCalls.push(params);
       if (this.sessionSlug !== "joe") throw new Error("legacy schedule retirement requires Joe authority session");
-      return { rows: [{ receipt_ref: `legacy-disable:${params[6]}` }] };
+      return { rows: [{ receipt_ref: `legacy-disable:${params[10]}` }] };
     }
     if (text.includes("insert into tool_call")) {
       this.envelopeWrites += 1;
@@ -110,11 +110,36 @@ test("legacy disable emits a distinct Joe-bound surface receipt", async () => {
   });
   assert.equal(result.receipt_ref, "legacy-disable:disable-fixture");
   assert.deepEqual(c.disableCalls, [["cc-update-audit", "cc-update-audit.claude-code.v1",
-    "cc-update-audit", "accepted evidence", "native:enabled", "native:disabled", "disable-fixture"]]);
+    "cc-update-audit", "accepted evidence", "native:enabled", "native:disabled",
+    null, null, null, null, "disable-fixture"]]);
   const dellC = new AcceptanceAuthorityFake("dell");
   await assert.rejects(() => tool.handler(dellC, dell, {
     idempotency_key: "disable-dell", workflow_key: "cc-update-audit",
     surface_id: "cc-update-audit.claude-code.v1", locator: "cc-update-audit", reason: "no",
     pre_observation_ref: "native:enabled", post_observation_ref: "native:disabled",
   }), /requires Joe authority session/);
+});
+
+test("Notes duplicate disable binds both native scheduler pairs", async () => {
+  const tool = TOOLS["disable-legacy-schedule"];
+  const c = new AcceptanceAuthorityFake("joe");
+  const result = await tool.handler(c, joe, {
+    idempotency_key: "disable-notes-group", workflow_key: "notes-sweep-hourly",
+    surface_id: "notes-sweep-hourly.claude-code.v1", locator: "notes-sweep-hourly",
+    reason: "both native schedules disabled",
+    pre_observation_ref: "claude:enabled", post_observation_ref: "claude:disabled",
+    sibling_surface_id: "notes-sweep-hourly.launchd.v1", sibling_locator: "com.carr.notes-sweep",
+    sibling_pre_observation_ref: "launchd:enabled", sibling_post_observation_ref: "launchd:disabled",
+  });
+  assert.equal(result.receipt_ref, "legacy-disable:disable-notes-group");
+  assert.deepEqual(c.disableCalls[0], ["notes-sweep-hourly", "notes-sweep-hourly.claude-code.v1",
+    "notes-sweep-hourly", "both native schedules disabled", "claude:enabled", "claude:disabled",
+    "notes-sweep-hourly.launchd.v1", "com.carr.notes-sweep", "launchd:enabled", "launchd:disabled",
+    "disable-notes-group"]);
+  await assert.rejects(() => tool.handler(c, joe, {
+    idempotency_key: "disable-notes-incomplete", workflow_key: "notes-sweep-hourly",
+    surface_id: "notes-sweep-hourly.claude-code.v1", locator: "notes-sweep-hourly", reason: "incomplete",
+    pre_observation_ref: "claude:enabled", post_observation_ref: "claude:disabled",
+    sibling_surface_id: "notes-sweep-hourly.launchd.v1",
+  }), error => error instanceof ToolError && error.payload.error === "duplicate_scheduler_evidence_incomplete");
 });

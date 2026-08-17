@@ -47,7 +47,7 @@ REQUIRED_FUNCTIONS = [
     "ops.timeout_job(uuid,uuid,text)",
     "ops.reap_expired_jobs()",
     "ops.record_workflow_acceptance(text,text,text,text)",
-    "ops.disable_legacy_schedule(text,text,text,text,text,text,text,text)",
+    "ops.disable_legacy_schedule(text,text,text,text,text,text,text,text,text,text,text)",
     "ops.authority_actor_slug()",
     "ops.select_provider_routes(text[])",
     "ops.get_cognition_cache(text)",
@@ -87,7 +87,7 @@ def main() -> int:
         manifest = json.loads(WORKFLOW_MANIFEST_PATH.read_text(encoding="utf-8"))
         expected_surfaces = sorted(
             (str(surface["workflow_key"]), int(surface["workflow_version"]), str(surface["surface_id"]),
-             str(surface["locator"]), str(surface["scheduler_kind"]))
+             str(surface["locator"]), str(surface["scheduler_kind"]), surface.get("duplicate_group"))
             for surface in registry["surfaces"]
         )
         expected_provider = sorted(
@@ -113,7 +113,7 @@ def main() -> int:
                 cur.execute("select to_regprocedure(%s)", (function,))
                 if fetchone_required(cur.fetchone(), f"function {function}")[0] is None:
                     fail(f"missing function {function}")
-            cur.execute("""select workflow_key,workflow_version,surface_id,locator,scheduler_kind
+            cur.execute("""select workflow_key,workflow_version,surface_id,locator,scheduler_kind,duplicate_group
                              from ops.legacy_schedule_surface_registry
                              order by workflow_key,workflow_version,surface_id""")
             actual_surfaces = [tuple(row) for row in cur.fetchall()]
@@ -157,7 +157,7 @@ def main() -> int:
             if fetchone_required(cur.fetchone(), "writer workflow acceptance privilege")[0]:
                 fail("carr_writer can forge workflow acceptance")
             cur.execute("select has_function_privilege('carr_writer', "
-                        "'ops.disable_legacy_schedule(text,text,text,text,text,text,text,text)'::regprocedure, 'execute')")
+                        "'ops.disable_legacy_schedule(text,text,text,text,text,text,text,text,text,text,text)'::regprocedure, 'execute')")
             if fetchone_required(cur.fetchone(), "writer legacy-disable privilege")[0]:
                 fail("carr_writer can retire a legacy schedule")
             cur.execute("select pg_get_functiondef('ops.record_workflow_acceptance(text,text,text,text)'::regprocedure)")
@@ -751,7 +751,7 @@ def main() -> int:
             try:
                 cur.execute("set local role carr_writer")
                 cur.execute("select ops.disable_legacy_schedule(%s,'surface','locator','too early',"
-                            "'native:enabled','native:disabled',null,'db-gate')", (definition,))
+                            "'native:enabled','native:disabled',null,null,null,null,'db-gate')", (definition,))
                 fail("routine writer disabled a legacy schedule")
             except psycopg.Error:
                 cur.execute("rollback to savepoint early_cutover")

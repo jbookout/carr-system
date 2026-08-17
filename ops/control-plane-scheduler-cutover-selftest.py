@@ -260,7 +260,7 @@ def main() -> int:
     notes = observed("notes-sweep-hourly.launchd.v1", loaded={"com.carr.notes-sweep"})
     notes_replacement = healthy_replacement()
     notes_replacement.update({"workflow_key": "notes-sweep-hourly", "workflow_version": 3})
-    refuses("one of two Notes legacy schedules is refused as unresolved duplicate", lambda: prepare_disable(
+    refuses("one of two Notes legacy schedules is refused outside the coordinated contract", lambda: prepare_disable(
         REGISTRY, surface_id="notes-sweep-hourly.launchd.v1", observation=notes,
         replacement=notes_replacement, receipt_verifier=receipt_verifier, now=NOW))
     forged_notes_binding = {
@@ -276,7 +276,7 @@ def main() -> int:
         REGISTRY, prepared=forged_notes_prepare, pre_disable_observation=notes,
         post_disable_observation=notes_disabled, human_approval_ref="approval:joe", approval_verifier=approval_verifier,
         now=NOW + timedelta(minutes=1)))
-    refuses("unresolved provider/launchd Notes duplicate remains fail-closed", lambda: prepare_disable(
+    refuses("provider/launchd Notes duplicate remains fail-closed on the single-surface path", lambda: prepare_disable(
         REGISTRY, surface_id="notes-sweep-hourly.claude-code.v1", observation=notes,
         replacement=notes_replacement, receipt_verifier=receipt_verifier, now=NOW))
     refuses("verification refuses a missing human-only approval", lambda: verify_disabled(

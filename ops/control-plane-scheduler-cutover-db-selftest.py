@@ -75,7 +75,8 @@ class Connection:
         self.disable_rows = disable_rows if disable_rows is not None else [("disable:cc", "cc-update-audit", 1,
                                               "cc-update-audit.claude-code.v1", "cc-update-audit",
                                               "accepted after native readback", "joe",
-                                              "scheduler-observation:enabled", "scheduler-observation:disabled", None)]
+                                              "scheduler-observation:enabled", "scheduler-observation:disabled", None,
+                                              None, None, None, None)]
         self.observation_rows = observation_rows if observation_rows is not None else [(
             "scheduler-observation:fixture", "cc-update-audit.claude-code.v1", "cc-update-audit", 1,
             "cc-update-audit", "claude-code", "enabled", "45 9 * * 1", "America/Chicago", "a" * 64,
@@ -132,7 +133,7 @@ def main() -> int:
           and "existing.workflow_version <> v" not in MIGRATION
           and MIGRATION.count("idempotency key is bound to different legacy disable evidence") == 2)
     check("resolver authority query checks only the current observation-bound disable function",
-          "disable_legacy_schedule(text,text,text,text,text,text,text,text)" in AUTHORITY_SQL
+          "disable_legacy_schedule(text,text,text,text,text,text,text,text,text,text,text)" in AUTHORITY_SQL
           and "disable_legacy_schedule(text,text)'" not in AUTHORITY_SQL)
     check("owner rebuild gate never creates or impersonates Joe or Dell authority sessions",
           'cur.execute("set session authorization' not in DB_GATE
@@ -159,6 +160,21 @@ def main() -> int:
                                                    "post": "scheduler-observation:disabled", "sibling": None})
     check("disable authority uses a separate exact allowlisted receipt query",
           conn.calls[-1] == (DISABLE_RECEIPT_SQL, ("disable:cc",)))
+    notes_conn = Connection(disable_rows=[(
+        "legacy-disable:notes", "notes-sweep-hourly", 3,
+        "notes-sweep-hourly.claude-code.v1", "notes-sweep-hourly", "both disabled", "joe",
+        "claude:enabled", "claude:disabled", None,
+        "notes-sweep-hourly.launchd.v1", "com.carr.notes-sweep",
+        "launchd:enabled", "launchd:disabled",
+    )])
+    notes_resolver = ReceiptResolver(lambda _dsn: notes_conn, jobs_dsn(good))
+    notes_authority = notes_resolver.disable_authority_receipt("legacy-disable:notes")
+    check("duplicate authority receipt binds both exact surfaces and all four native refs",
+          notes_authority["subject"]["sibling_surface_id"] == "notes-sweep-hourly.launchd.v1"
+          and notes_authority["observation_refs"] == {
+              "pre": "claude:enabled", "post": "claude:disabled",
+              "sibling_pre": "launchd:enabled", "sibling_post": "launchd:disabled"})
+    notes_resolver.close()
     observation = resolver.provider_observation_receipt("scheduler-observation:fixture")
     check("provider observation resolves only an immutable device-bound native receipt",
           observation["kind"] == "provider_scheduler_observation_receipt"
@@ -190,11 +206,14 @@ def main() -> int:
     ).disable_authority_receipt("receipt:canary")))
     check("Dell native disable receipt is refused", refuses(lambda: ReceiptResolver(
         lambda _dsn: Connection(disable_rows=[("disable:dell", "cc-update-audit", 1,
-            "cc-update-audit.claude-code.v1", "cc-update-audit", "reason", "dell", "pre", "post", None)]), jobs_dsn(good)
+            "cc-update-audit.claude-code.v1", "cc-update-audit", "reason", "dell", "pre", "post", None,
+            None, None, None, None)]), jobs_dsn(good)
     ).disable_authority_receipt("disable:dell")))
     check("duplicate native disable receipt is refused", refuses(lambda: ReceiptResolver(
-        lambda _dsn: Connection(disable_rows=[("disable:a", "cc-update-audit", 1, "surface", "loc", "reason", "joe", "pre", "post", None),
-            ("disable:b", "cc-update-audit", 1, "surface", "loc", "reason", "joe", "pre", "post", None)]), jobs_dsn(good)
+        lambda _dsn: Connection(disable_rows=[("disable:a", "cc-update-audit", 1, "surface", "loc", "reason", "joe", "pre", "post", None,
+             None, None, None, None),
+            ("disable:b", "cc-update-audit", 1, "surface", "loc", "reason", "joe", "pre", "post", None,
+             None, None, None, None)]), jobs_dsn(good)
     ).disable_authority_receipt("disable:a")))
     print(f"control-plane scheduler cutover DB selftest — {len(FAILED)} failure(s)")
     return 1 if FAILED else 0
