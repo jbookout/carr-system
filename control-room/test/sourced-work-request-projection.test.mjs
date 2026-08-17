@@ -16,7 +16,7 @@ test("sourced captured-request projection is a closed, versioned read contract",
   assert.equal(contract.transport, "authenticated MCP-backed read, not implemented by this static prototype");
   assert.deepEqual(contract.lifecycle, {canonical_from: ["captured", "triaged", "ready"], projection_state: "queued"});
   assert.deepEqual(contract.output.required_fields, [
-    "human_ref", "title", "desired_outcome", "acceptance_criteria", "source", "triage", "plan", "shape", "state", "next_human_action", "actions"
+    "human_ref", "title", "desired_outcome", "acceptance_criteria", "source", "triage", "plan", "outcome_feedback", "outcome_feedback_history", "accepted_feedback_count", "shape", "state", "next_human_action", "actions"
   ]);
   assert.deepEqual(contract.output.actions, []);
   assert.deepEqual(contract.output.next_human_action.captured, {label: "Review and triage", effect: "none"});
@@ -30,8 +30,19 @@ test("triaged projection supplies only durable triage readback and another inert
   assert.deepEqual(contract.output.next_human_action, {
     captured: {label: "Review and triage", effect: "none"},
     triaged: {label: "Prepare scope and acceptance", effect: "none"},
-    ready: {label: "Plan accepted", effect: "none"}
+    ready: {label: "Plan accepted", effect: "none"},
+    ready_with_accepted_feedback: {label: "Outcome feedback accepted", effect: "none"}
   });
+});
+
+test("accepted outcome feedback is bounded history, never a completion or displacement claim", () => {
+  const contract = read("contracts/sourced-work-request-projection.v1.json");
+  assert.deepEqual(contract.output.outcome_feedback.outcome_values, ["criteria_met", "criteria_not_met", "inconclusive"]);
+  assert.match(contract.output.outcome_feedback.rule, /never execution, completion, release, approval, or a state transition/i);
+  assert.match(contract.output.outcome_feedback_history.rule, /last 20 human-accepted/i);
+  assert.match(contract.output.outcome_feedback_history.rule, /pending proposals never appear/i);
+  assert.match(contract.output.accepted_feedback_count, /not a completion count/i);
+  assert.equal(contract.prohibitions.includes("interpret accepted outcome feedback as success, displacement, execution, completion, or a state transition"), true);
 });
 
 test("the safe card names only durable human references and source evidence", () => {

@@ -23,6 +23,9 @@
       "source",
       "triage",
       "plan",
+      "outcome_feedback",
+      "outcome_feedback_history",
+      "accepted_feedback_count",
       "shape",
       "state",
       "next_human_action",
@@ -36,7 +39,8 @@
     "next_human_action": {
       "captured": {"label": "Review and triage", "effect": "none"},
       "triaged": {"label": "Prepare scope and acceptance", "effect": "none"},
-      "ready": {"label": "Plan accepted", "effect": "none"}
+      "ready": {"label": "Plan accepted", "effect": "none"},
+      "ready_with_accepted_feedback": {"label": "Outcome feedback accepted", "effect": "none"}
     },
     "triage": {
       "captured": null,
@@ -44,17 +48,30 @@
       "rule": "present only for canonical triaged rows; it is durable readback, never an action authority"
     },
     "plan": {"rule": "immutable plan hash, bounded scope summary, and persisted references only; never commands or caller-authored steps"},
+    "outcome_feedback": {
+      "rule": "null until a human authority accepts one exact immutable evidence proposal; then exposes only the durable safe outcome readback. It is observational feedback, never execution, completion, release, approval, or a state transition.",
+      "required_fields": ["feedback_ref", "feedback_hash", "outcome", "criterion_results", "evidence_refs", "blocker_code", "result_summary", "observed_minutes", "interaction_surface", "heavy_session_used", "manual_context_transfers", "accepted_by_actor_slug", "accepted_at"],
+      "outcome_values": ["criteria_met", "criteria_not_met", "inconclusive"],
+      "blocker_values": ["none", "evidence_missing", "criterion_not_met", "external_dependency", "system_error"],
+      "measurement_rule": "Observed minutes, interaction surface, heavy-session use, and manual context transfers are observations for later displacement comparison only. They do not claim displacement or retire an old ritual."
+    },
+    "outcome_feedback_history": {
+      "rule": "the deterministic oldest-to-newest last 20 human-accepted outcome feedback receipts; pending proposals never appear",
+      "item": "the same closed safe fields as outcome_feedback"
+    },
+    "accepted_feedback_count": "count of all human-accepted immutable outcome feedback receipts for this Work Request; it is not a completion count",
     "shape": {"rule": "durable derived shape disposition and fixed surface reference only; never caller-controlled"},
     "actions": []
   },
   "prohibitions": [
     "derive canonical state from a UI label",
     "claim completion before confirmed_closed",
+    "interpret accepted outcome feedback as success, displacement, execution, completion, or a state transition",
     "invent action controls",
     "accept a client-supplied tenant, actor, or source reference",
     "expose a raw database UUID as the human label",
     "copy business payload or raw question text into the projection",
     "add POST, dispatch, claim, approve, or execute routes"
   ],
-  "integration_boundary": "An authenticated server-side reader must validate tenant and actor scope, current source freshness, and provenance before returning this projection. Capture and transition ownership remain in the MCP/record-layer implementation."
+  "integration_boundary": "An authenticated server-side reader must validate tenant and actor scope, current source freshness, and provenance before returning this projection. Capture and transition ownership remain in the MCP/record-layer implementation. Outcome-feedback proposal and human acceptance remain separate record-layer writes; the reader returns accepted receipts only."
 }
