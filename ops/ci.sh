@@ -373,7 +373,8 @@ PYEOF
   # only, no machine state, no network, no database. Each carries its own
   # escape hatch for a genuinely mid-flight tree and names its own remedy in
   # its own output, so none is repeated here.
-  for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check; do
+  for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
+             drive-dependency-inventory drive-retirement-readiness-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
