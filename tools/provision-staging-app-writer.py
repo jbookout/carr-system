@@ -38,6 +38,7 @@ BUNDLE_ROLE = "carr_writer"
 READER_ROLE = "app_reader"
 READER_BUNDLE_ROLE = "carr_reader"
 LOCK_KEY = 7301961134306001
+BOOTSTRAP_SUPERUSER_OID = 10
 WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
 WRANGLER_CONFIG = REPO / "mcp-server/wrangler.toml"
 STAGING_WORKER_NAME = "carr-mcp-staging"
@@ -179,7 +180,7 @@ class LoginProfile:
 class ProfileClosure:
     login: RoleAuthority
     bundle: RoleAuthority
-    creator_edges: tuple[tuple[str, bool, bool, bool, str], ...]
+    creator_edges: tuple[tuple[str, bool, bool, bool, int], ...]
 
 
 PROFILES = (
@@ -646,9 +647,9 @@ def collect_role_authority(cur: Any, role: str) -> RoleAuthority:
 
 def collect_creator_edges(
     cur: Any, role: str
-) -> tuple[tuple[str, bool, bool, bool, str], ...]:
+) -> tuple[tuple[str, bool, bool, bool, int], ...]:
     cur.execute(
-        """select member.rolname,m.admin_option,m.inherit_option,m.set_option,grantor.rolname
+        """select member.rolname,m.admin_option,m.inherit_option,m.set_option,grantor.oid::bigint
              from pg_auth_members m
              join pg_roles granted on granted.oid=m.roleid
              join pg_roles member on member.oid=m.member
@@ -656,8 +657,8 @@ def collect_creator_edges(
             where granted.rolname=%s order by member.rolname""",
         (role,),
     )
-    return tuple((str(name), bool(admin), bool(inherit), bool(can_set), str(grantor))
-                 for name, admin, inherit, can_set, grantor in cur.fetchall())
+    return tuple((str(name), bool(admin), bool(inherit), bool(can_set), int(grantor_oid))
+                 for name, admin, inherit, can_set, grantor_oid in cur.fetchall())
 
 
 def role_exists(cur: Any, role: str) -> bool:
@@ -689,9 +690,12 @@ def validate_profile_closure(
         raise ProvisioningRefusal(f"{profile.login_role} has forbidden direct ACLs")
     if bundle.memberships or bundle.reachable_roles or bundle.role_config:
         raise ProvisioningRefusal(f"{profile.bundle_role} inherits or configures extra authority")
-    if closure.creator_edges != ((expected_creator, True, False, False, expected_creator),):
+    if closure.creator_edges != (
+        (expected_creator, True, False, False, BOOTSTRAP_SUPERUSER_OID),
+    ):
         raise ProvisioningRefusal(
-            f"{profile.login_role} creator ADMIN edge is not exactly bound to {expected_creator}"
+            f"{profile.login_role} creator ADMIN edge is not exactly bound to "
+            f"{expected_creator} and the bootstrap grantor"
         )
     allowed_config = tuple(sorted((
         "idle_in_transaction_session_timeout=120s", "statement_timeout=60s",
@@ -752,14 +756,18 @@ def apply_login_profile(
             expected_acl = set(snapshot_grants.acl_facts(grants))
             if set(bundle.direct_acl_facts) - expected_acl:
                 raise ProvisioningRefusal(f"{profile.bundle_role} has excess authority")
+            cur.execute("set local createrole_self_grant = ''")
+            cur.execute("select current_setting('createrole_self_grant')")
+            if cur.fetchone() != ("",):
+                raise ProvisioningRefusal("createrole_self_grant did not fail closed")
             cur.execute(sql.SQL(
                 "create role {} login inherit nosuperuser nocreatedb nocreaterole "
                 "noreplication nobypassrls password {}"
             ).format(sql.Identifier(profile.login_role), sql.Literal(password)))
-            for option in ("admin true", "inherit false", "set false"):
-                cur.execute(sql.SQL("grant {} to {} with " + option).format(
-                    sql.Identifier(profile.login_role), sql.Identifier(expected_creator)
-                ))
+            # PostgreSQL 17 automatically grants the newly-created role back to
+            # its CREATEROLE creator with ADMIN TRUE / INHERIT FALSE / SET FALSE.
+            # The exact edge (including its grantor) is proved below by the
+            # same fail-closed closure validation used for reused roles.
             created = True
         for statement in grants:
             cur.execute(statement)
@@ -866,11 +874,14 @@ def verify_worker_secret_binding(
 
 
 def require_direct_owner_identity(cur: Any) -> str:
-    cur.execute("select session_user,current_user")
+    cur.execute(
+        "select session_user,current_user,r.rolsuper,r.rolcreaterole "
+        "from pg_roles r where r.rolname=current_user"
+    )
     row = cur.fetchone()
-    if row is None or tuple(str(value) for value in row) != ("neondb_owner", "neondb_owner"):
+    if row != ("neondb_owner", "neondb_owner", False, True):
         raise ProvisioningRefusal(
-            "provisioning requires direct neondb_owner session and current identity"
+            "provisioning requires direct non-superuser neondb_owner with CREATEROLE"
         )
     return "neondb_owner"
 
