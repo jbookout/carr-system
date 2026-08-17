@@ -94,9 +94,62 @@ announce_session() {
     # (e.g. no GUI session attached, permission not granted yet) abort the
     # run — the audible announcement plus the transcript-header marker are
     # the actual consent mechanism; the notification is a courtesy.
-    "$OSASCRIPT_BIN" -e 'display notification "Recording started — announcement played. Ask-first applies on 1:1 calls." with title "CARR Dictation Rig"' >/dev/null 2>&1 || true
+    "$OSASCRIPT_BIN" -e 'display notification "Recording. To stop: open http://127.0.0.1:4682 and press Stop and process, or use Quill menu bar > Stop recording. Ask-first applies on 1:1 calls." with title "CARR Dictation Rig — RECORDING"' >/dev/null 2>&1 || true
 
     log_line "ANNOUNCED session=$session_name fired_at=$fired_at"
+    return 0
+}
+
+# --- still-recording reminder ------------------------------------------
+
+# REMINDER_INTERVAL_SECONDS — how often a hot session re-announces itself.
+# A recording that nobody stops is the failure this exists to catch: on
+# 2026-08-17 meeting mode ran 52 minutes past intent because the start
+# notification fired once, said nothing about how to stop, and nothing ever
+# spoke again. Every reminder therefore NAMES BOTH off switches in plain
+# words, because neither one is discoverable on its own — Quill's stop hides
+# behind an unlabeled menu-bar icon, and the Deal Room stop lives on a
+# localhost port with no surfaced entry point.
+REMINDER_INTERVAL_SECONDS="${CARR_RECORDING_REMINDER_SECONDS:-600}"
+
+file_mtime_epoch() {
+    # $1 = path. Echoes the mtime in epoch seconds, or nothing if unreadable.
+    stat -f '%m' "$1" 2>/dev/null || true
+}
+
+remind_hot_session() {
+    # $1 = full path to a session directory that is recording and announced.
+    local session_dir="$1"
+    local session_name
+    session_name="$(basename "$session_dir")"
+    local marker="$session_dir/announcement.json"
+    local nag="$session_dir/.reminder-last"
+    local now
+    now="$(date '+%s')"
+
+    # Rate-limit: stay quiet unless the last reminder is older than the
+    # interval. A WatchPaths-triggered run fires on every file write inside
+    # the session, and quill writes constantly while recording, so without
+    # this gate the reminder would fire many times per second.
+    local last
+    last="$(file_mtime_epoch "$nag")"
+    if [ -n "$last" ] && [ $((now - last)) -lt "$REMINDER_INTERVAL_SECONDS" ]; then
+        return 0
+    fi
+
+    # Elapsed minutes since the announcement fired, which is the closest
+    # timestamp we have to the true recording start.
+    local started
+    started="$(file_mtime_epoch "$marker")"
+    local minutes="?"
+    if [ -n "$started" ]; then
+        minutes="$(( (now - started) / 60 ))"
+    fi
+
+    "$OSASCRIPT_BIN" -e "display notification \"Still recording — ${minutes} min so far. To stop: open http://127.0.0.1:4682 and press Stop and process, or use Quill menu bar > Stop recording.\" with title \"CARR Dictation Rig — STILL RECORDING\"" >/dev/null 2>&1 || true
+
+    touch "$nag" 2>/dev/null || true
+    log_line "REMINDED session=$session_name elapsed_min=$minutes"
     return 0
 }
 
@@ -128,7 +181,11 @@ main() {
         if [ -f "$meta" ]; then
             continue
         fi
+        # Already announced and still recording: this is a HOT session that
+        # nobody has stopped. Nag it on the reminder interval instead of
+        # falling silent, which is what let a 52-minute run go unnoticed.
         if [ -f "$marker" ]; then
+            remind_hot_session "$dir"
             continue
         fi
 
