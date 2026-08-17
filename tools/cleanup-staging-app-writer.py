@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Mapping, Protocol, Sequence
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 try:
     import psycopg
@@ -98,6 +99,7 @@ class ProviderManagedFingerprint:
     shared_dependencies: tuple[tuple[str, str, str, str], ...]
     reader_role_exists: bool
     active_sessions: int
+    database_census: tuple[tuple[str, bool], ...]
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,7 @@ def exact_provider_role(payload: Any, scope: ProviderScopeLike) -> dict[str, Any
 
 
 def validate_provider_managed_fingerprint(value: ProviderManagedFingerprint) -> None:
+    validate_database_census(value.database_census)
     expected = ProviderManagedFingerprint(
         can_login=True,
         inherits_privileges=True,
@@ -173,6 +176,7 @@ def validate_provider_managed_fingerprint(value: ProviderManagedFingerprint) -> 
         shared_dependencies=(),
         reader_role_exists=False,
         active_sessions=0,
+        database_census=value.database_census,
     )
     if value != expected:
         raise CleanupRefusal(
@@ -290,14 +294,113 @@ def _memberships_with_grantor(cur: Any, role: str, *, inbound: bool) -> tuple[tu
                  for name, admin, inherit, can_set, grantor in cur.fetchall())
 
 
-def collect_provider_managed_fingerprint(cur: Any) -> ProviderManagedFingerprint:
+def validate_database_census(census: Sequence[tuple[str, bool]]) -> None:
+    exact = tuple(census)
+    names = tuple(name for name, _can_connect in exact)
+    if (
+        not exact
+        or exact != tuple(sorted(exact))
+        or len(names) != len(set(names))
+        or ("neondb", True) not in exact
+        or any(not isinstance(name, str) or not name for name, _can_connect in exact)
+        or any(not isinstance(can_connect, bool) or not can_connect
+               for _name, can_connect in exact)
+    ):
+        raise CleanupRefusal(
+            "staging database census must be unique, sorted, include neondb, and be fully connectable"
+        )
+
+
+def _owner_dsn_for_database(owner_dsn: str, database: str) -> str:
+    try:
+        parsed = urlsplit(owner_dsn)
+        username = unquote(parsed.username or "")
+        port = parsed.port or 5432
+    except ValueError as exc:
+        raise CleanupRefusal("pinned owner DSN cannot be safely derived; value suppressed") from exc
+    try:
+        provision.validate_provider_dsn_query(parsed.query)
+    except provision.ProvisioningRefusal as exc:
+        raise CleanupRefusal("pinned owner DSN cannot be safely derived; value suppressed") from exc
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or username != "neondb_owner"
+        or not parsed.hostname
+        or port != 5432
+        or unquote(parsed.path.lstrip("/")) != "neondb"
+        or not isinstance(database, str)
+        or not database
+        or parsed.fragment
+    ):
+        raise CleanupRefusal("pinned owner DSN cannot be safely derived; value suppressed")
+    return urlunsplit((parsed.scheme, parsed.netloc, "/" + quote(database, safe=""), parsed.query, ""))
+
+
+def collect_all_database_acl_closure(
+    census: Sequence[tuple[str, bool]], owner_dsn: str, *, connect: Callable[..., Any] = psycopg.connect,
+) -> tuple[str, ...]:
+    validate_database_census(census)
+    scanned: list[str] = []
+    for database, _can_connect in census:
+        derived_dsn = _owner_dsn_for_database(owner_dsn, database)
+        try:
+            conn = connect(derived_dsn, autocommit=True)
+        except Exception as exc:
+            raise CleanupRefusal(
+                "staging database authority connection failed; provider output suppressed"
+            ) from exc
+        operation_error: Exception | None = None
+        cleanup_error: Exception | None = None
+        try:
+            conn.execute("begin transaction read only")
+            cur = conn.cursor()
+            cur.execute("select session_user,current_user,current_database()")
+            if cur.fetchone() != ("neondb_owner", "neondb_owner", database):
+                raise CleanupRefusal(
+                    "staging database authority scan has the wrong database identity"
+                )
+            facts = provision.collect_role_acl_facts(cur, APP_ROLE)
+            if facts:
+                raise CleanupRefusal(
+                    "app_writer has forbidden direct ACL authority in a staging database"
+                )
+            scanned.append(database)
+        except Exception as exc:
+            operation_error = exc
+        try:
+            conn.rollback()
+        except Exception as exc:
+            cleanup_error = exc
+        try:
+            conn.close()
+        except Exception as exc:
+            cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            raise CleanupRefusal(
+                "staging database authority connection cleanup failed; output suppressed"
+            ) from cleanup_error
+        if operation_error is not None:
+            if isinstance(operation_error, CleanupRefusal):
+                raise operation_error
+            raise CleanupRefusal(
+                "staging database authority scan failed; output suppressed"
+            ) from operation_error
+    return tuple(scanned)
+
+
+def collect_provider_managed_fingerprint(
+    cur: Any, owner_dsn: str, *, connect: Callable[..., Any] = psycopg.connect,
+) -> ProviderManagedFingerprint:
     cur.execute(
-        "select datname from pg_database where not datistemplate order by datname"
+        "select datname,datallowconn from pg_database where not datistemplate order by datname"
     )
-    databases = tuple(str(row[0]) for row in cur.fetchall())
-    cur.execute("select current_database()")
-    if databases != (str(cur.fetchone()[0]),):
-        raise CleanupRefusal("cleanup requires exactly the one pinned connectable staging database")
+    database_census = tuple((str(name), can_connect) for name, can_connect in cur.fetchall())
+    validate_database_census(database_census)
+    cur.execute("select session_user,current_user,current_database()")
+    current_row = cur.fetchone()
+    if current_row != ("neondb_owner", "neondb_owner", "neondb"):
+        raise CleanupRefusal("cleanup owner connection has the wrong database identity")
+    collect_all_database_acl_closure(database_census, owner_dsn, connect=connect)
     authority = provision.collect_role_authority(cur, APP_ROLE)
     cur.execute(
         """select d.dbid::text,d.classid::regclass::text,d.objid::text,d.deptype::text
@@ -341,6 +444,7 @@ def collect_provider_managed_fingerprint(cur: Any) -> ProviderManagedFingerprint
         shared_dependencies,
         reader_role_exists,
         sessions,
+        database_census,
     )
 
 
@@ -385,6 +489,7 @@ def cleanup_fingerprint(
         "endpoint_host": scope.endpoint_host,
         "port": scope.port,
         "database": scope.database,
+        "database_census": database.database_census,
         "provider_role": dict(provider_row),
         "provider_role_sha256": hashlib.sha256(
             json.dumps(dict(provider_row), sort_keys=True, separators=(",", ":")).encode()
@@ -594,6 +699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         owner_dsn = provision.provider_dsn(
             scope, "neondb_owner", neonctl=db_tap.NEONCTL, environ=os.environ,
         )
+        pinned_owner_dsn = _owner_dsn_for_database(owner_dsn.value, "neondb")
         provision.verify_provider_scope(
             scope, neonctl=db_tap.NEONCTL, environ=os.environ,
         )
@@ -602,7 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         lock_path = writer.paths.final.parent / ".staging-role-operation.lock"
         state_path = writer.paths.final.parent / ".staging-app-writer-cleanup.json"
         with credential.exclusive_lock(lock_path):
-            conn = psycopg.connect(owner_dsn.value, autocommit=True)
+            conn = psycopg.connect(pinned_owner_dsn, autocommit=True)
             try:
                 cur = conn.cursor()
                 cur.execute("select pg_advisory_lock(%s)", (LOCK_KEY,))
@@ -622,7 +728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not provider_present:
                         raise CleanupRefusal("provider app_writer is absent without durable cleanup state")
                     provider_row = exact_provider_role(roles, scope)
-                    first = collect_provider_managed_fingerprint(cur)
+                    first = collect_provider_managed_fingerprint(cur, pinned_owner_dsn)
                     validate_provider_managed_fingerprint(first)
                     digest, receipt = cleanup_fingerprint(
                         scope, provider_row, first, credential_states
@@ -673,7 +779,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 0
 
                 provider_row = exact_provider_role(roles, scope)
-                first = collect_provider_managed_fingerprint(cur)
+                first = collect_provider_managed_fingerprint(cur, pinned_owner_dsn)
                 validate_provider_managed_fingerprint(first)
                 if state is None:
                     raise CleanupRefusal("durable cleanup state disappeared before target validation")
@@ -690,7 +796,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
                 def verify_original_target(rows_now: Sequence[dict[str, Any]]) -> None:
                     row_now = exact_provider_role(rows_now, scope)
-                    database_now = collect_provider_managed_fingerprint(cur)
+                    database_now = collect_provider_managed_fingerprint(cur, pinned_owner_dsn)
                     validate_provider_managed_fingerprint(database_now)
                     row_digest = hashlib.sha256(
                         json.dumps(row_now, sort_keys=True, separators=(",", ":")).encode()
@@ -763,7 +869,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             ),
                             scope,
                         )
-                        second = collect_provider_managed_fingerprint(cur)
+                        second = collect_provider_managed_fingerprint(cur, pinned_owner_dsn)
                         validate_provider_managed_fingerprint(second)
                         if provider_row_now != provider_row or second != first:
                             raise CleanupRefusal("cleanup target changed after quiescence")

@@ -19,7 +19,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 try:
     import psycopg
@@ -437,6 +437,19 @@ def verify_provider_scope(
         raise ProvisioningRefusal("staging endpoint changed after immutable scope resolution")
 
 
+def validate_provider_dsn_query(query_text: str) -> None:
+    try:
+        rows = parse_qsl(query_text, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise ProvisioningRefusal("provider DSN query is invalid; value suppressed") from exc
+    query = dict(rows)
+    if (
+        len(rows) != len(query)
+        or query != {"sslmode": "require", "channel_binding": "require"}
+    ):
+        raise ProvisioningRefusal("provider DSN query is outside the exact safe contract")
+
+
 def _dsn_parts(dsn: str) -> tuple[str, str, int, str]:
     try:
         parsed = urlsplit(dsn)
@@ -449,7 +462,11 @@ def _dsn_parts(dsn: str) -> tuple[str, str, int, str]:
     except ValueError as exc:
         raise ProvisioningRefusal("provider returned an invalid DSN port; value suppressed") from exc
     database = unquote(parsed.path.lstrip("/"))
-    if parsed.scheme not in {"postgres", "postgresql"} or not username or not host or not database:
+    validate_provider_dsn_query(parsed.query)
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or not username or not host or not database or parsed.fragment
+    ):
         raise ProvisioningRefusal("provider returned an incomplete DSN; value suppressed")
     return username, host, port, database
 
