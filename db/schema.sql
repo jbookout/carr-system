@@ -89,6 +89,287 @@ COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching
 
 
 --
+-- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: activate_guidance_registry(uuid, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare
+  authority_slug text;
+  authority_actor uuid;
+  registry_owner uuid;
+  receipt_id uuid;
+  event_id uuid;
+  constitution_count integer;
+  coverage_count integer;
+  existing record;
+begin
+  authority_slug := ops.authority_actor_slug();
+  select id into authority_actor from actor
+   where slug=authority_slug and kind='human';
+  if authority_actor is null then
+    raise exception 'guidance registry activation requires an admitted human authority actor';
+  end if;
+  if p_manifest_digest !~ '^[0-9a-f]{64}$' or coalesce(btrim(p_idempotency_key),'')=''
+     or coalesce(btrim(p_reason),'')='' then
+    raise exception 'activation requires a sha256 manifest digest, idempotency key and reason';
+  end if;
+  select created_by into registry_owner from ops.guidance_registry where id=p_registry_id;
+  if registry_owner is null then
+    raise exception 'unknown guidance registry %',p_registry_id;
+  end if;
+  if registry_owner <> authority_actor then
+    raise exception 'guidance registry activation requires its accountable human authority actor';
+  end if;
+
+  -- Serialize direct database callers as well as MCP callers.  Without this,
+  -- two first-use requests for one key can both miss the replay lookup and the
+  -- loser sees a unique-violation instead of the original activation event.
+  perform pg_advisory_xact_lock(
+    hashtextextended('guidance-registry-activation:' || p_idempotency_key,0));
+
+  -- Replays must name precisely the approval this authority session already
+  -- made.  A key cannot be rebound to another actor, registry, digest, or
+  -- incomplete event.
+  select ar.id,ar.kind,ar.subject_type,ar.subject_id,ar.actor_id,ar.decision,
+         ar.contract_hash,ge.id as event_id,ge.manifest_digest,ge.reason
+    into existing
+    from ops.authority_receipt ar
+    left join ops.guidance_registry_event ge on ge.authority_receipt_id=ar.id
+   where ar.idempotency_key=p_idempotency_key;
+  if existing.id is not null then
+    if existing.kind<>'activation' or existing.subject_type<>'guidance'
+       or existing.subject_id<>p_registry_id or existing.actor_id<>authority_actor
+       or existing.decision<>'approved' or existing.contract_hash<>p_manifest_digest
+       or existing.event_id is null or existing.manifest_digest<>p_manifest_digest
+       or existing.reason<>p_reason then
+      raise exception 'idempotency key already names a different or incomplete guidance registry activation';
+    end if;
+    return existing.event_id;
+  end if;
+
+  select count(*) into constitution_count
+    from ops.v_guidance_current where is_constitution;
+  -- Human-approved constitution must remain between 5 and 10 items.
+  if constitution_count not between 5 and 10 then
+    raise exception 'guidance constitution must contain between 5 and 10 active items';
+  end if;
+  select count(*) into coverage_count from ops.assert_guidance_registry_coverage();
+  if coverage_count <> 0 then
+    raise exception 'guidance registry has % coverage failure(s)',coverage_count;
+  end if;
+  insert into ops.authority_receipt
+    (idempotency_key,kind,subject_type,subject_id,actor_id,decision,
+     contract_hash,evidence_refs)
+  values
+    (p_idempotency_key,'activation','guidance',p_registry_id,authority_actor,
+     'approved',p_manifest_digest,array[p_registry_id::text])
+  returning id into receipt_id;
+  insert into ops.guidance_registry_event
+    (registry_id,state,authority_receipt_id,manifest_digest,reason)
+  values (p_registry_id,'active',receipt_id,p_manifest_digest,p_reason)
+  returning id into event_id;
+  return event_id;
+end $_$;
+
+
+--
+-- Name: activate_guidance_situation_mapping(uuid, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  authority_slug text;
+  authority_actor uuid;
+  mapping_id uuid;
+  proposal ops.guidance_situation_mapping%rowtype;
+begin
+  authority_slug := ops.authority_actor_slug();
+  select id into authority_actor from actor
+   where slug=authority_slug and kind='human';
+  if coalesce(btrim(p_reason),'')='' then
+    raise exception 'situation mapping activation requires a reason';
+  end if;
+  select * into proposal from ops.guidance_situation_mapping
+   where id=p_proposed_mapping_id and state='proposed';
+  if proposal.id is null then
+    raise exception 'unknown proposed situation mapping %',p_proposed_mapping_id;
+  end if;
+  if not exists (
+    select 1
+      from ops.guidance_authority_binding b
+      join ops.authority_receipt ar on ar.id=b.authority_receipt_id
+     where b.id=p_authority_binding_id
+       and b.guidance_revision_id=proposal.guidance_revision_id
+       and ar.actor_id=authority_actor
+       and ar.decision='approved') then
+    raise exception 'mapping activation requires this authority session approval for the exact doctrine revision';
+  end if;
+  if not exists (
+    select 1 from doctrine_concept_mapping
+     where concept_id=proposal.concept_id
+       and section_id=proposal.doctrine_section_id
+       and status='approved') then
+    raise exception 'mapping activation requires an approved WR-AI-006 doctrine bridge';
+  end if;
+  insert into ops.guidance_situation_mapping
+    (guidance_revision_id,concept_id,doctrine_section_id,state,
+     authority_binding_id,supersedes_mapping_id,reason)
+  values
+    (proposal.guidance_revision_id,proposal.concept_id,proposal.doctrine_section_id,
+     'active',p_authority_binding_id,proposal.id,p_reason)
+  returning id into mapping_id;
+  return mapping_id;
+end $$;
+
+
+--
+-- Name: admit_job_cost(uuid, uuid, text, numeric); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) RETURNS TABLE(admitted boolean, reservation_id uuid, refusal_id uuid, reason text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; route ops.provider_route%rowtype;
+        spent numeric; reserved numeric; rid uuid; refusal ops.cost_refusal%rowtype;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state<>'running' or j.lease_token<>p_lease_token or j.leased_until<now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  select * into route from ops.provider_route where route_key=p_route_key and enabled;
+  if not found then raise exception 'provider route % is not enabled',p_route_key; end if;
+  if p_estimated_cost_usd<0 then raise exception 'estimated cost must be non-negative'; end if;
+  select coalesce(sum(a.cost_usd),0) into spent from ops.job_attempt a
+   where a.provider_route=p_route_key and a.started_at>=date_trunc('month',now());
+  select coalesce(sum(r.estimated_cost_usd),0) into reserved from ops.cost_reservation r
+   where r.route_key=p_route_key and r.state='reserved'
+     and r.created_at>=date_trunc('month',now());
+  if route.monthly_budget_usd is not null
+     and spent+reserved+p_estimated_cost_usd>route.monthly_budget_usd then
+    insert into ops.cost_refusal
+      (job_id,attempt,route_key,estimated_cost_usd,monthly_budget_usd,spent_usd,reserved_usd,reason)
+    values
+      (j.id,j.attempt,p_route_key,p_estimated_cost_usd,route.monthly_budget_usd,spent,reserved,
+       'monthly_budget_exceeded')
+    on conflict (job_id,attempt,route_key) do nothing
+    returning * into refusal;
+    if refusal.id is null then
+      select * into refusal from ops.cost_refusal
+       where job_id=j.id and attempt=j.attempt and route_key=p_route_key;
+    end if;
+    return query select false,null::uuid,refusal.id,refusal.reason;
+    return;
+  end if;
+  insert into ops.cost_reservation(job_id,attempt,route_key,estimated_cost_usd)
+    values(j.id,j.attempt,p_route_key,p_estimated_cost_usd)
+  returning id into rid;
+  return query select true,rid,null::uuid,null::text;
+end $$;
+
+
+--
+-- Name: applicable_rules(text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.applicable_rules(p_workflow text DEFAULT NULL::text, p_surface text DEFAULT NULL::text, p_tier text DEFAULT NULL::text) RETURNS TABLE(rule_id uuid, statement text, enforcement_class text, binding_moment text, applicability jsonb)
+    LANGUAGE sql STABLE
+    AS $$
+  select r.id,r.statement,a.enforcement_class,a.binding_moment,a.applicability
+    from rule r join ops.rule_admission a on a.rule_id=r.id
+   where r.status='active' and a.state='admitted'
+     and (p_workflow is null or not(a.applicability?'workflows')
+          or a.applicability->'workflows'?'*' or a.applicability->'workflows'?p_workflow)
+     and (p_surface is null or not(a.applicability?'surfaces')
+          or a.applicability->'surfaces'?'*' or a.applicability->'surfaces'?p_surface)
+     and (p_tier is null or not(a.applicability?'tiers')
+          or a.applicability->'tiers'?'*' or a.applicability->'tiers'?p_tier)
+   order by r.created_at,r.id
+$$;
+
+
+--
+-- Name: FUNCTION applicable_rules(p_workflow text, p_surface text, p_tier text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.applicable_rules(p_workflow text, p_surface text, p_tier text) IS 'The deterministic policy compiler/applicability index: finite tags select admitted active rules; no model performs routing.';
+
+
+--
+-- Name: assert_guidance_registry_coverage(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.assert_guidance_registry_coverage() RETURNS TABLE(source_rule_id uuid, issue text)
+    LANGUAGE sql STABLE
+    AS $$
+  with active_rules as (
+    select id from rule where status='active'
+  ), primary_counts as (
+    select ar.id,
+           count(g.*) filter (where g.is_primary) as primary_count
+      from active_rules ar
+      left join ops.v_guidance_current g on g.source_rule_id=ar.id
+     group by ar.id
+  )
+  select id,
+         case when primary_count=0 then 'missing active primary guidance'
+              else 'multiple active primary guidance records' end
+    from primary_counts where primary_count <> 1
+  union all
+  select g.source_rule_id,'constraint lacks admitted installed enforcement projection'
+    from ops.v_guidance_current g
+   where g.is_primary and g.guidance_type='constraint'
+     and not exists (
+       select 1 from ops.v_guidance_constraint c
+        where c.guidance_revision_id=g.guidance_revision_id)
+  union all
+  select g.source_rule_id,'doctrine lacks active WR-AI-006 situation bridge'
+    from ops.v_guidance_current g
+   where g.is_primary and g.guidance_type='doctrine'
+     and not exists (
+       select 1 from ops.v_guidance_doctrine_retrieval d
+        where d.guidance_revision_id=g.guidance_revision_id)
+$$;
+
+
+--
+-- Name: authority_actor_slug(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.authority_actor_slug() RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  case session_user
+    when 'carr_authority_joe' then return 'joe';
+    when 'carr_authority_dell' then return 'dell';
+    else raise exception 'authority session user % is not an admitted human authority principal', session_user;
+  end case;
+end $$;
+
+
+--
 -- Name: capability_agent_session_guard(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -264,6 +545,119 @@ $$;
 
 
 --
+-- Name: claim_job(text, integer, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.claim_job(p_worker text, p_limit integer DEFAULT 1, p_lease_seconds integer DEFAULT 300) RETURNS TABLE(job_id uuid, lease_token uuid, definition_key text, definition_version integer, payload jsonb, execution_kind text, execution_contract jsonb, attempt integer, timeout_seconds integer, mode text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  if btrim(coalesce(p_worker,''))='' or p_limit < 1 or p_lease_seconds < 1 then
+    raise exception 'worker, positive limit and positive lease are required';
+  end if;
+  perform ops.reap_expired_jobs();
+  return query
+  with candidate as (
+    select j.id
+      from ops.job j
+      join ops.job_definition d
+        on d.key=j.definition_key and d.version=j.definition_version
+     where d.enabled and j.state in ('queued','retry_wait')
+       and j.next_attempt_at <= now()
+     order by j.scheduled_for,j.created_at
+     for update of j,d skip locked limit p_limit
+  ), claimed as (
+    update ops.job j set
+      state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),
+      leased_until=now()+make_interval(secs=>p_lease_seconds),
+      started_at=coalesce(j.started_at,now()),updated_at=now()
+    from candidate c where j.id=c.id
+    returning j.*
+  ), attempts(claimed_job_id) as (
+    insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
+    select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
+    returning ops.job_attempt.job_id
+  )
+  select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
+         d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
+    from claimed c
+    join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version
+    join attempts a on a.claimed_job_id=c.id;
+end $$;
+
+
+--
+-- Name: claim_job_mode(text, text, integer, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.claim_job_mode(p_worker text, p_mode text, p_limit integer DEFAULT 1, p_lease_seconds integer DEFAULT 300) RETURNS TABLE(job_id uuid, lease_token uuid, definition_key text, definition_version integer, payload jsonb, execution_kind text, execution_contract jsonb, attempt integer, timeout_seconds integer, mode text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  if btrim(coalesce(p_worker,''))='' or p_mode not in ('shadow','canary','live','replay')
+     or p_limit < 1 or p_lease_seconds < 1 then
+    raise exception 'worker, valid mode, positive limit and positive lease are required';
+  end if;
+  perform ops.reap_expired_jobs();
+  return query
+  with candidate as (
+    select j.id
+      from ops.job j
+      join ops.job_definition d
+        on d.key=j.definition_key and d.version=j.definition_version
+     where d.enabled and j.state in ('queued','retry_wait')
+       and j.next_attempt_at <= now() and j.mode=p_mode
+     order by j.scheduled_for,j.created_at
+     for update of j,d skip locked limit p_limit
+  ), claimed as (
+    update ops.job j set
+      state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),leased_until=now()+make_interval(secs=>p_lease_seconds),
+      started_at=coalesce(j.started_at,now()),updated_at=now()
+    from candidate c where j.id=c.id
+    returning j.*
+  ), attempts(claimed_job_id) as (
+    insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
+    select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
+    returning ops.job_attempt.job_id
+  )
+  select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
+         d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
+    from claimed c
+    join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version
+    join attempts a on a.claimed_job_id=c.id;
+end $$;
+
+
+--
+-- Name: complete_job(uuid, uuid, jsonb, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  update ops.job_attempt set state='succeeded',ended_at=now()
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state='succeeded',ended_at=now(),lease_owner=null,
+         lease_token=null,leased_until=null,updated_at=now() where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,'completion',p_receipt_ref,coalesce(p_evidence,'{}'::jsonb));
+  return true;
+end $$;
+
+
+--
 -- Name: deployment_requires_a_live_approval(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -281,8 +675,7 @@ begin
                     'because a deploy nobody can trace to an approved plan is the '
                     'exact gap P0-1 closes';
   end if;
-  select state, approval_expires_at, release_key, git_sha, environment,
-         provider, provider_version_id into r
+  select state, approval_expires_at, release_key into r
     from ops.release where id = new.release_id;
   if r.state not in ('approved','deploying','verifying','complete') then
     raise exception 'release % is %, not approved — promotion refused',
@@ -292,21 +685,230 @@ begin
     raise exception 'release % has an expired approval (%) — re-approve before '
                     'promoting', r.release_key, r.approval_expires_at;
   end if;
-  if r.environment is distinct from new.environment then
-    raise exception 'release % targets %, not deployment environment % — promotion refused',
-                    r.release_key, r.environment, new.environment;
+  return new;
+end $$;
+
+
+--
+-- Name: disable_legacy_schedule(text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.disable_legacy_schedule(p_workflow_key text, p_reason text) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare n integer;
+begin
+  if ops.authority_actor_slug() <> 'joe' then
+    raise exception 'legacy schedule retirement requires Joe authority session';
   end if;
-  if r.git_sha is distinct from new.git_sha then
-    raise exception 'release % binds git SHA %, not deployment SHA % — promotion refused',
-                    r.release_key, r.git_sha, new.git_sha;
+  if btrim(coalesce(p_reason,''))='' then raise exception 'cutover reason is required'; end if;
+  update ops.job_definition set legacy_disabled_at=now(),legacy_disable_reason=p_reason,updated_at=now()
+   where key=p_workflow_key
+     and version=(select max(version) from ops.job_definition where key=p_workflow_key)
+     and legacy_disabled_at is null;
+  get diagnostics n=row_count;
+  return n=1;
+end $$;
+
+
+--
+-- Name: disable_legacy_schedule(text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.disable_legacy_schedule(p_workflow_key text, p_reason text, p_actor text) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare n integer;
+begin
+  if btrim(coalesce(p_reason,''))='' then raise exception 'cutover reason is required'; end if;
+  if not exists(select 1 from actor where slug=p_actor and slug='joe' and kind='human' and active) then
+    raise exception 'legacy schedule retirement requires Joe approval';
   end if;
-  if r.provider is distinct from new.provider then
-    raise exception 'release % binds provider %, not deployment provider % — promotion refused',
-                    r.release_key, r.provider, new.provider;
+  update ops.job_definition set legacy_disabled_at=now(),legacy_disable_reason=p_reason,updated_at=now()
+   where key=p_workflow_key
+     and version=(select max(version) from ops.job_definition where key=p_workflow_key)
+     and legacy_disabled_at is null;
+  get diagnostics n=row_count;
+  return n=1;
+end $$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: job; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.job (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
+    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
+    correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    mode text DEFAULT 'live'::text NOT NULL,
+    state text DEFAULT 'queued'::text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    attempt integer DEFAULT 0 NOT NULL,
+    max_attempts integer NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_owner text,
+    lease_token uuid,
+    leased_until timestamp with time zone,
+    timeout_seconds integer NOT NULL,
+    last_failure_class text,
+    last_failure_detail text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone,
+    ended_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
+    CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
+    CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
+    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
+    CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
+    CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
+    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
+);
+
+
+--
+-- Name: enqueue_job(text, integer, timestamp with time zone, jsonb, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text DEFAULT 'live'::text) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  d ops.job_definition%rowtype;
+  j ops.job%rowtype;
+begin
+  select * into d from ops.job_definition
+   where key=p_definition_key and version=p_definition_version and enabled;
+  if not found then
+    raise exception 'job definition % v% is not enabled',p_definition_key,p_definition_version;
   end if;
-  if r.provider_version_id is distinct from new.provider_version_id then
-    raise exception 'release % binds provider version %, not deployment provider version % — promotion refused',
-                    r.release_key, r.provider_version_id, new.provider_version_id;
+  if p_mode not in ('shadow','canary','live','replay') then
+    raise exception 'invalid job mode %',p_mode;
+  end if;
+  insert into ops.job
+    (definition_key,definition_version,idempotency_key,scheduled_for,mode,payload,
+     max_attempts,timeout_seconds)
+  values
+    (d.key,d.version,p_idempotency_key,p_scheduled_for,p_mode,coalesce(p_payload,'{}'::jsonb),
+     (d.retry_policy->>'max_attempts')::integer,
+     (d.retry_policy->>'timeout_seconds')::integer)
+  on conflict do nothing
+  returning * into j;
+  if j.id is null then
+    select * into j from ops.job
+     where idempotency_key=p_idempotency_key
+        or (definition_key=p_definition_key
+            and definition_version=p_definition_version
+            and scheduled_for=p_scheduled_for)
+     order by (idempotency_key=p_idempotency_key) desc
+     limit 1;
+    if j.id is null
+       or j.definition_key <> p_definition_key
+       or j.definition_version <> p_definition_version
+       or j.scheduled_for <> p_scheduled_for
+       or j.payload <> coalesce(p_payload,'{}'::jsonb)
+       or j.mode <> p_mode then
+      raise exception 'duplicate delivery conflicts with the canonical scheduled job';
+    end if;
+  end if;
+  return j;
+end $$;
+
+
+--
+-- Name: fail_job(uuid, uuid, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; next_state text;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  next_state := case when j.attempt < j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+  update ops.job_attempt set state='failed',ended_at=now(),
+         failure_class=p_failure_class,detail=p_detail
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state=next_state,
+         next_attempt_at=case when next_state='retry_wait'
+                              then now()+make_interval(secs=>ops.retry_delay_seconds(j))
+                              else next_attempt_at end,
+         ended_at=case when next_state='dead_lettered' then now() else null end,
+         last_failure_class=p_failure_class,last_failure_detail=p_detail,
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+   where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,case when next_state='dead_lettered' then 'dead_letter' else 'failure' end,
+           concat('failure:',j.id,':',j.attempt),
+           jsonb_build_object('failure_class',p_failure_class,'detail',p_detail,'next_state',next_state));
+  return next_state;
+end $$;
+
+
+--
+-- Name: fence_definition_jobs(text, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.fence_definition_jobs(p_definition_key text, p_definition_version integer) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare n integer;
+begin
+  with transitioned as (
+    update ops.job j
+       set state='cancelled',ended_at=now(),
+           last_failure_class='definition_disabled',
+           last_failure_detail='definition version disabled before dispatch',
+           lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+     where j.definition_key=p_definition_key
+       and j.definition_version=p_definition_version
+       and j.state in ('queued','retry_wait')
+    returning j.id,j.attempt,j.definition_key,j.definition_version
+  ), receipts as (
+    insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    select t.id,t.attempt,'override',
+           concat('definition-disabled:',t.id,':v',t.definition_version),
+           jsonb_build_object(
+             'failure_class','definition_disabled',
+             'definition_key',t.definition_key,
+             'definition_version',t.definition_version,
+             'next_state','cancelled')
+      from transitioned t
+    returning id
+  )
+  select count(*) into n from receipts;
+  return n;
+end $$;
+
+
+--
+-- Name: fence_jobs_when_definition_disabled(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.fence_jobs_when_definition_disabled() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  if old.enabled and not new.enabled then
+    perform ops.fence_definition_jobs(new.key,new.version);
   end if;
   return new;
 end $$;
@@ -336,6 +938,531 @@ COMMENT ON FUNCTION ops.freshness(observed_at timestamp with time zone, expires_
 
 
 --
+-- Name: get_cognition_cache(text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.get_cognition_cache(p_cache_key text) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+  select proposal from ops.cognition_result_cache
+   where cache_key=p_cache_key and invalidated_at is null and expires_at>now()
+$$;
+
+
+--
+-- Name: guidance_revision_contract_hash(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guidance_revision_contract_hash(p_revision_id uuid) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  select encode(digest(jsonb_build_object(
+    'guidance_revision_id',r.id,
+    'guidance_item_id',r.guidance_item_id,
+    'version',r.version,
+    'guidance_type',r.guidance_type,
+    'scope',r.scope,
+    'activation',r.activation,
+    'consumer',r.consumer,
+    'verification',r.verification,
+    'provenance',r.provenance,
+    'delivery',r.delivery,
+    'is_constitution',r.is_constitution,
+    'supersedes_revision_id',r.supersedes_revision_id,
+    'reason',r.reason
+  )::text,'sha256'),'hex')
+    from ops.guidance_revision r where r.id=p_revision_id
+$$;
+
+
+--
+-- Name: heartbeat_job(uuid, uuid, integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer DEFAULT 300) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare n integer;
+begin
+  update ops.job set leased_until=now()+make_interval(secs=>p_lease_seconds),updated_at=now()
+   where id=p_job_id and state='running' and lease_token=p_lease_token
+     and leased_until >= now();
+  get diagnostics n=row_count;
+  return n=1;
+end $$;
+
+
+--
+-- Name: invalidate_cognition_cache(text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.invalidate_cognition_cache(p_dependency_ref text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare n integer;
+begin
+  update ops.cognition_result_cache set invalidated_at=now()
+   where invalidated_at is null and p_dependency_ref=any(dependency_refs);
+  get diagnostics n=row_count;
+  return n;
+end $$;
+
+
+--
+-- Name: propose_guidance_situation_mapping(uuid, uuid, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare mapping_id uuid;
+begin
+  if coalesce(btrim(p_reason),'')='' then
+    raise exception 'situation mapping proposal requires a reason';
+  end if;
+  if not exists (
+    select 1 from ops.guidance_revision
+     where id=p_revision_id and guidance_type='doctrine') then
+    raise exception 'situation mappings may be proposed only for doctrine revisions';
+  end if;
+  insert into ops.guidance_situation_mapping
+    (guidance_revision_id,concept_id,doctrine_section_id,state,reason)
+  values (p_revision_id,p_concept_id,p_doctrine_section_id,'proposed',p_reason)
+  returning id into mapping_id;
+  return mapping_id;
+end $$;
+
+
+--
+-- Name: put_cognition_cache(text, text, integer, integer, jsonb, text[], integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  if p_ttl_seconds < 1 then raise exception 'positive cache TTL is required'; end if;
+  insert into ops.cognition_result_cache
+    (cache_key,cognition_key,cognition_version,output_schema_version,proposal,
+     dependency_refs,validated_at,expires_at)
+  values(p_cache_key,p_cognition_key,p_cognition_version,p_output_schema_version,p_proposal,
+         coalesce(p_dependency_refs,'{}'),now(),now()+make_interval(secs=>p_ttl_seconds))
+  on conflict(cache_key) do update set
+    proposal=excluded.proposal,dependency_refs=excluded.dependency_refs,
+    validated_at=excluded.validated_at,expires_at=excluded.expires_at,invalidated_at=null;
+  return true;
+end $$;
+
+
+--
+-- Name: reap_expired_jobs(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.reap_expired_jobs() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare n integer;
+begin
+  with expired as materialized (
+    select j.id,j.attempt
+      from ops.job j
+     where j.state='running' and j.leased_until < now()
+     for update skip locked
+  ), attempts as (
+    update ops.job_attempt a
+       set state='timed_out',ended_at=now(),failure_class='lease_expired',detail='lease expired'
+      from expired e
+     where a.job_id=e.id and a.attempt=e.attempt and a.state='running'
+    returning a.job_id
+  ), transitioned as (
+    update ops.job j
+       set state=case when j.attempt < j.max_attempts then 'retry_wait' else 'dead_lettered' end,
+           next_attempt_at=case when j.attempt < j.max_attempts
+                                then now()+make_interval(secs=>ops.retry_delay_seconds(j))
+                                else j.next_attempt_at end,
+           ended_at=case when j.attempt < j.max_attempts then null else now() end,
+           last_failure_class='lease_expired',last_failure_detail='lease expired',
+           lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+      from expired e
+     where j.id=e.id
+    returning j.id,j.attempt,j.state
+  ), receipts as (
+    insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    select t.id,t.attempt,
+           case when t.state='dead_lettered' then 'dead_letter' else 'timeout' end,
+           concat('lease-expired:',t.id,':',t.attempt),
+           jsonb_build_object('failure_class','lease_expired','next_state',t.state)
+      from transitioned t
+    returning id
+  )
+  select count(*) into n from transitioned;
+  return n;
+end $$;
+
+
+--
+-- Name: record_device_evidence(uuid, text, timestamp with time zone, jsonb, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  principal ops.device_evidence_principal%rowtype;
+  j ops.job%rowtype;
+  existing ops.device_evidence_receipt%rowtype;
+  expected_workflow text;
+  expected_platform text;
+  posts jsonb;
+  post jsonb;
+  result_id uuid;
+begin
+  select * into principal from ops.device_evidence_principal
+   where login_role=session_user and active;
+  if not found then
+    raise exception 'device evidence session user is not an active provisioned principal';
+  end if;
+
+  select * into j from ops.job where id=p_job_id for share;
+  if not found then raise exception 'device evidence job does not exist'; end if;
+  if j.state not in ('queued','retry_wait','running') then
+    raise exception 'device evidence job is not open for collection';
+  end if;
+
+  case p_builder_key
+    when 'linkedin.source-posts' then
+      expected_workflow := 'linkedin-engagement-daily';
+      expected_platform := 'linkedin';
+    when 'x.source-posts' then
+      expected_workflow := 'x-reply-run-daily';
+      expected_platform := 'x';
+    else raise exception 'device evidence builder is not registered';
+  end case;
+  if j.definition_key <> expected_workflow then
+    raise exception 'device evidence builder does not match ledger workflow';
+  end if;
+  if p_observed_at > now() + interval '5 minutes'
+     or p_observed_at < j.scheduled_for - interval '24 hours'
+     or p_observed_at > j.scheduled_for + interval '24 hours' then
+    raise exception 'device evidence is outside the registered job freshness window';
+  end if;
+  if jsonb_typeof(p_values) <> 'object'
+     or (p_values - array['platform','collector_state','source_posts','voice_version']) <> '{}'::jsonb
+     or p_values->>'platform' <> expected_platform
+     or p_values->>'collector_state' <> 'available'
+     or jsonb_typeof(p_values->'voice_version') <> 'number'
+     or (p_values->>'voice_version')::integer <= 0
+     or jsonb_typeof(p_values->'source_posts') <> 'array' then
+    raise exception 'device evidence envelope does not match the registered schema';
+  end if;
+  posts := p_values->'source_posts';
+  if (p_builder_key='linkedin.source-posts' and jsonb_array_length(posts) not between 3 and 5)
+     or (p_builder_key='x.source-posts' and jsonb_array_length(posts) not between 1 and 20) then
+    raise exception 'device evidence post count is outside the registered range';
+  end if;
+  for post in select value from jsonb_array_elements(posts) loop
+    if jsonb_typeof(post) <> 'object'
+       or btrim(coalesce(post->>'url',''))='' then
+      raise exception 'device evidence post lacks its source URL';
+    end if;
+    if p_builder_key='linkedin.source-posts'
+       and jsonb_typeof(post->'network_priority') <> 'boolean' then
+      raise exception 'LinkedIn device evidence lacks network priority';
+    end if;
+    if p_builder_key='x.source-posts'
+       and btrim(coalesce(post->>'read_at',''))='' then
+      raise exception 'X device evidence lacks actual-read timestamp';
+    end if;
+  end loop;
+
+  select * into existing from ops.device_evidence_receipt
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if existing.job_id<>p_job_id or existing.builder_key<>p_builder_key
+       or existing.device_id<>principal.device_id
+       or existing.observed_at<>p_observed_at or existing.evidence<>p_values then
+      raise exception 'device evidence idempotency key was reused with different evidence';
+    end if;
+    return existing.id;
+  end if;
+
+  insert into ops.device_evidence_receipt
+    (job_id,builder_key,workflow_key,workflow_version,mode,scheduled_for,
+     device_id,observed_at,evidence,idempotency_key)
+  values
+    (j.id,p_builder_key,j.definition_key,j.definition_version,j.mode,j.scheduled_for,
+     principal.device_id,p_observed_at,p_values,p_idempotency_key)
+  returning id into result_id;
+  return result_id;
+end $$;
+
+
+--
+-- Name: record_guidance_decision(uuid, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  authority_slug text;
+  authority_actor uuid;
+  item_id uuid;
+  revision_hash text;
+  receipt_id uuid;
+  binding_id uuid;
+  event_id uuid;
+  receipt_kind text;
+  receipt_decision text;
+  existing record;
+begin
+  authority_slug := ops.authority_actor_slug();
+  select id into authority_actor from actor
+   where slug=authority_slug and kind='human';
+  if authority_actor is null then
+    raise exception 'guidance decision requires an admitted human authority actor';
+  end if;
+  if p_state not in ('active','retired','superseded') then
+    raise exception 'unsupported guidance lifecycle decision %',p_state;
+  end if;
+  if coalesce(btrim(p_idempotency_key),'')='' or coalesce(btrim(p_reason),'')='' then
+    raise exception 'guidance decision requires idempotency key and reason';
+  end if;
+  select guidance_item_id,ops.guidance_revision_contract_hash(id)
+    into item_id,revision_hash
+    from ops.guidance_revision where id=p_revision_id;
+  if item_id is null or revision_hash is null then
+    raise exception 'unknown guidance revision %',p_revision_id;
+  end if;
+  receipt_kind := case p_state
+    when 'active' then 'activation'
+    when 'retired' then 'rejection'
+    else 'amendment' end;
+  receipt_decision := case p_state
+    when 'active' then 'approved'
+    when 'retired' then 'retired'
+    else 'superseded' end;
+
+  select ar.id,ar.kind,ar.subject_type,ar.subject_id,ar.actor_id,ar.decision,
+         ar.contract_hash,le.id as event_id
+    into existing
+    from ops.authority_receipt ar
+    left join ops.guidance_authority_binding b on b.authority_receipt_id=ar.id
+    left join ops.guidance_lifecycle_event le
+      on le.authority_binding_id=b.id and le.state=p_state
+   where ar.idempotency_key=p_idempotency_key;
+  if existing.id is not null then
+    if existing.kind<>receipt_kind or existing.subject_type<>'guidance'
+       or existing.subject_id<>item_id or existing.actor_id<>authority_actor
+       or existing.decision<>receipt_decision
+       or existing.contract_hash is distinct from revision_hash
+       or existing.event_id is null then
+      raise exception 'idempotency key already names a different or incomplete guidance decision';
+    end if;
+    return existing.event_id;
+  end if;
+
+  insert into ops.authority_receipt
+    (idempotency_key,kind,subject_type,subject_id,actor_id,decision,
+     contract_hash,evidence_refs)
+  values
+    (p_idempotency_key,receipt_kind,'guidance',item_id,authority_actor,
+     receipt_decision,revision_hash,array[p_revision_id::text])
+  returning id into receipt_id;
+  insert into ops.guidance_authority_binding
+    (guidance_revision_id,authority_receipt_id,contract_hash)
+  values (p_revision_id,receipt_id,revision_hash)
+  returning id into binding_id;
+  insert into ops.guidance_lifecycle_event
+    (guidance_revision_id,state,authority_binding_id,reason)
+  values (p_revision_id,p_state,binding_id,p_reason)
+  returning id into event_id;
+  return event_id;
+end $$;
+
+
+--
+-- Name: record_npi_device_evidence(uuid, timestamp with time zone, text, text, jsonb, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare principal ops.device_evidence_principal%rowtype; j ops.job%rowtype;
+        existing ops.npi_device_evidence_receipt%rowtype; result jsonb; item jsonb; rid uuid;
+begin
+  select * into principal from ops.device_evidence_principal where login_role=session_user and active;
+  if not found then raise exception 'NPI evidence session user is not an active provisioned principal'; end if;
+  select * into j from ops.job where id=p_job_id for share;
+  if not found or j.definition_key<>'npi-sweep-weekly' or j.state not in ('queued','retry_wait','running') then
+    raise exception 'NPI evidence must bind an open npi-sweep-weekly ledger job'; end if;
+  if p_observed_at < j.scheduled_for-interval '24 hours' or p_observed_at > j.scheduled_for+interval '24 hours'
+     or p_observed_at > now()+interval '5 minutes' then raise exception 'NPI evidence is outside its ledger freshness window'; end if;
+  if btrim(coalesce(p_source_release,''))='' or coalesce(p_source_checksum,'') !~ '^[0-9a-f]{64}$'
+     or jsonb_typeof(p_results)<>'array' or jsonb_array_length(p_results)=0 then
+    raise exception 'NPI evidence requires release, SHA-256 checksum, and nonempty result array'; end if;
+  for item in select value from jsonb_array_elements(p_results) loop
+    if jsonb_typeof(item)<>'object' or (item - array['source_ref','npi','enumeration_type','last_updated','addresses','taxonomies'])<>'{}'::jsonb
+       or btrim(coalesce(item->>'source_ref',''))='' or coalesce(item->>'npi','') !~ '^[0-9]{10}$'
+       or btrim(coalesce(item->>'enumeration_type',''))='' or btrim(coalesce(item->>'last_updated',''))=''
+       or jsonb_typeof(item->'addresses')<>'array' or jsonb_typeof(item->'taxonomies')<>'array'
+       or jsonb_array_length(item->'taxonomies')=0
+       or exists (select 1 from jsonb_array_elements(item->'taxonomies') code where jsonb_typeof(code)<>'string')
+       or exists (select 1 from jsonb_array_elements(item->'addresses') address
+                   where jsonb_typeof(address)<>'object' or jsonb_typeof(address->'postal_code')<>'string') then
+      raise exception 'NPI result does not match the typed raw NPPES contract'; end if;
+  end loop;
+  select * into existing from ops.npi_device_evidence_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if existing.job_id<>p_job_id or existing.device_id<>principal.device_id or existing.observed_at<>p_observed_at
+       or existing.source_release<>p_source_release or existing.source_checksum<>p_source_checksum or existing.results<>p_results then
+      raise exception 'NPI evidence idempotency key was reused with different evidence'; end if;
+    return existing.id;
+  end if;
+  insert into ops.npi_device_evidence_receipt(job_id,builder_key,workflow_key,workflow_version,mode,scheduled_for,
+      device_id,observed_at,source_release,source_checksum,results,idempotency_key)
+    values(j.id,'npi.weekly-delta',j.definition_key,j.definition_version,j.mode,j.scheduled_for,
+      principal.device_id,p_observed_at,p_source_release,p_source_checksum,p_results,p_idempotency_key)
+    returning id into rid;
+  return rid;
+end $_$;
+
+
+--
+-- Name: record_provider_observation(text, text, integer, text, integer, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare rid uuid;
+begin
+  if p_ttl_seconds < 1 or btrim(coalesce(p_source_ref,''))='' then
+    raise exception 'positive observation TTL and source_ref are required';
+  end if;
+  insert into ops.provider_observation
+    (route_key,status,latency_ms,error_class,expires_at,source_ref)
+  values(p_route_key,p_status,p_latency_ms,p_error_class,
+         now()+make_interval(secs=>p_ttl_seconds),p_source_ref)
+  returning id into rid;
+  return rid;
+end $$;
+
+
+--
+-- Name: record_workflow_acceptance(text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare v integer; rid uuid; authority_actor text;
+begin
+  authority_actor := ops.authority_actor_slug();
+  select version into v from ops.job_definition
+   where key=p_workflow_key order by version desc limit 1;
+  if v is null then raise exception 'unknown workflow %',p_workflow_key; end if;
+  if p_status='accepted' and not exists (
+    select 1 from ops.job j join ops.job_receipt r on r.job_id=j.id
+     where j.definition_key=p_workflow_key and j.definition_version=v
+       and j.mode=p_mode and r.kind='completion' and r.receipt_ref=p_receipt_ref
+  ) then
+    raise exception 'accepted workflow evidence must name a completion receipt from the matching workflow and mode';
+  end if;
+  insert into ops.workflow_acceptance
+    (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
+  values(p_workflow_key,v,p_mode,p_status,p_receipt_ref,
+         case when p_status='accepted' then authority_actor else null end)
+  returning id into rid;
+  return rid;
+end $$;
+
+
+--
+-- Name: record_workflow_acceptance(text, text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text, p_actor text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare v integer; rid uuid; human_actor actor%rowtype;
+begin
+  select version into v from ops.job_definition
+   where key=p_workflow_key order by version desc limit 1;
+  if v is null then raise exception 'unknown workflow %',p_workflow_key; end if;
+  if p_status='accepted' then
+    select * into human_actor from actor
+     where slug=p_actor and kind='human' and active;
+    if not found then
+      raise exception 'accepted workflow evidence requires an active human actor';
+    end if;
+    if not exists (
+      select 1
+        from ops.job j join ops.job_receipt r on r.job_id=j.id
+       where j.definition_key=p_workflow_key and j.definition_version=v
+         and j.mode=p_mode and r.kind='completion' and r.receipt_ref=p_receipt_ref
+    ) then
+      raise exception 'accepted workflow evidence must name a completion receipt from the matching workflow and mode';
+    end if;
+  end if;
+  insert into ops.workflow_acceptance
+    (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
+  values(p_workflow_key,v,p_mode,p_status,p_receipt_ref,
+         case when p_status='accepted' then human_actor.slug else null end)
+  returning id into rid;
+  return rid;
+end $$;
+
+
+--
+-- Name: refuse_authority_receipt_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_authority_receipt_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'authority receipts are append-only';
+end $$;
+
+
+--
+-- Name: refuse_guidance_history_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_guidance_history_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'typed guidance identity, revisions, mappings and authority history are append-only';
+end $$;
+
+
+--
+-- Name: refuse_job_evidence_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_job_evidence_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception '% is append-only', tg_table_name;
+end $$;
+
+
+--
 -- Name: release_completion_requires_a_read_back(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -343,29 +1470,14 @@ CREATE FUNCTION ops.release_completion_requires_a_read_back() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 begin
-  if new.state = 'complete'
-     and (tg_op = 'INSERT' or old.state is distinct from 'complete') then
+  if new.state = 'complete' and old.state is distinct from 'complete' then
     if not exists (
       select 1 from ops.deployment d
-       where d.release_id = new.id
-         and d.service_id = new.service_id
-         and d.environment = 'production'
-         and d.state = 'complete'
-         and d.read_back_at is not null
-         and d.git_sha = new.git_sha
-         and d.provider = new.provider
-         and d.provider_version_id = new.provider_version_id
+       where d.release_id = new.id and d.read_back_at is not null
     ) then
-      raise exception 'release % cannot be complete: no attached Production deployment '
-                      'completed a read-back for its recorded provider version and git SHA. '
-                      'Shipped is not '
-                      'the same as serving.', new.release_key;
-    end if;
-    if not exists (select 1 from ops.run r where r.release_id = new.id and r.service_id = new.service_id and r.environment = 'production' and r.run_key like 'performance.%' and r.state = 'succeeded' and r.evidence_ref is not null and r.budget_ms = new.performance_budget_ms and r.duration_ms > 0 and r.duration_ms <= r.budget_ms and exists (select 1 from ops.deployment d where d.release_id = new.id and d.service_id = new.service_id and d.environment = 'production' and d.state = 'complete' and d.read_back_at is not null and d.git_sha = new.git_sha and d.provider = new.provider and d.provider_version_id = new.provider_version_id and d.correlation_id = r.correlation_id)) then
-      raise exception 'release % cannot be complete: no successful Production performance receipt within budget', new.release_key;
-    end if;
-    if not exists (select 1 from ops.run r where r.release_id = new.id and r.service_id = new.service_id and r.environment in ('staging','rehearsal') and r.run_key like 'recovery.rehearsal.%' and r.state = 'succeeded' and r.evidence_ref is not null and r.recovery_strategy = new.recovery_strategy and r.recovery_plan_ref = new.rollback_plan_ref) then
-      raise exception 'release % cannot be complete: no successful recovery rehearsal receipt', new.release_key;
+      raise exception 'release % cannot be complete: no deployment attached to it '
+                      'recorded a read-back. Shipped is not the same as serving.',
+                      new.release_key;
     end if;
   end if;
   return new;
@@ -373,166 +1485,24 @@ end $$;
 
 
 --
--- Name: deployment_provider_identity_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+-- Name: release_job_cost(uuid, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.deployment_provider_identity_is_immutable() RETURNS trigger
-    LANGUAGE plpgsql
+CREATE FUNCTION ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
+declare j ops.job%rowtype; n integer;
 begin
-  if old.environment = 'production'
-     and old.state in ('deploying', 'verifying', 'complete')
-     and (new.provider is distinct from old.provider
-          or new.provider_version_id is distinct from old.provider_version_id) then
-    raise exception 'Production deployment provider identity is immutable after promotion begins';
+  select * into j from ops.job where id=p_job_id;
+  if not found or j.state<>'running' or j.lease_token<>p_lease_token or j.leased_until<now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
   end if;
-  return new;
+  update ops.cost_reservation set state='released',settled_at=now()
+   where id=p_reservation_id and job_id=j.id and attempt=j.attempt and state='reserved';
+  get diagnostics n=row_count;
+  return n=1;
 end $$;
-
-
---
--- Name: release_provider_identity_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.release_provider_identity_is_immutable() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-begin
-  if old.environment = 'production'
-     and old.state in ('approved', 'deploying', 'verifying', 'complete')
-     and (new.provider is distinct from old.provider
-          or new.provider_version_id is distinct from old.provider_version_id) then
-    raise exception 'Production release provider identity is immutable after approval';
-  end if;
-  return new;
-end $$;
-
-
---
--- Name: FUNCTION release_completion_requires_a_read_back(); Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON FUNCTION ops.release_completion_requires_a_read_back() IS 'Program 5: completion requires an exact Production deployment read-back plus linked within-budget performance and recovery-plan-matched rehearsal receipts.';
-
-
---
--- Name: release_assurance_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.release_assurance_is_immutable() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-begin
-  if old.state in ('approved', 'deploying', 'verifying', 'complete')
-     and new.state <> 'candidate'
-     and new.plan_hash is not distinct from old.plan_hash
-     and (new.performance_budget_ref,
-          new.performance_budget_ms,
-          new.recovery_strategy,
-          new.rollback_ready,
-          new.rollback_plan_ref,
-          new.service_id,
-          new.environment,
-          new.git_sha,
-          new.artifact_digest,
-          new.dependency_lock_digest,
-          new.config_fingerprint,
-          new.schema_highest_migration,
-          new.migration_set) is distinct from
-         (old.performance_budget_ref,
-          old.performance_budget_ms,
-          old.recovery_strategy,
-          old.rollback_ready,
-          old.rollback_plan_ref,
-          old.service_id,
-          old.environment,
-          old.git_sha,
-          old.artifact_digest,
-          old.dependency_lock_digest,
-          old.config_fingerprint,
-          old.schema_highest_migration,
-          old.migration_set) then
-    raise exception 'Promoted release material is immutable until approval is invalidated';
-  end if;
-  return new;
-end $$;
-
-
---
--- Name: release_approval_requires_recovery_rehearsal(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.release_approval_requires_recovery_rehearsal() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-begin
-  if new.environment = 'production'
-     and new.state = 'approved'
-     and (tg_op = 'INSERT'
-          or old.environment is distinct from 'production'
-          or old.state is distinct from 'approved')
-     and not exists (
-       select 1
-         from ops.run r
-        where r.release_id = new.id
-          and r.service_id = new.service_id
-          and r.environment in ('staging', 'rehearsal')
-          and r.run_key like 'recovery.rehearsal.%'
-          and r.state = 'succeeded'
-          and r.evidence_ref is not null
-          and r.recovery_strategy = new.recovery_strategy
-          and r.recovery_plan_ref = new.rollback_plan_ref
-     ) then
-    raise exception 'Production release % cannot be approved: no successful recovery rehearsal receipt', new.release_key;
-  end if;
-  return new;
-end $$;
-
-
---
--- Name: FUNCTION release_assurance_is_immutable(); Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON FUNCTION ops.release_assurance_is_immutable() IS 'Program 5: promoted release material is immutable until a changed plan hash invalidates approval and returns it to candidate.';
-
-
---
--- Name: FUNCTION release_approval_requires_recovery_rehearsal(); Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON FUNCTION ops.release_approval_requires_recovery_rehearsal() IS 'Program 5: Production approval requires a successful linked staging or rehearsal recovery receipt.';
-
-
---
--- Name: performance_receipt_requires_read_back(); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.performance_receipt_requires_read_back() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-begin
-  if new.run_key like 'performance.%'
-     and not exists (
-       select 1
-         from ops.deployment d
-        where d.release_id = new.release_id
-          and d.service_id = new.service_id
-          and d.environment = 'production'
-          and d.correlation_id = new.correlation_id
-          and d.state in ('verifying', 'complete')
-          and d.read_back_at is not null
-     ) then
-    raise exception 'performance receipt % requires an already-read-back Production deployment for the same release and correlation', new.run_key;
-  end if;
-  return new;
-end $$;
-
-
---
--- Name: FUNCTION performance_receipt_requires_read_back(); Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON FUNCTION ops.performance_receipt_requires_read_back() IS 'Program 5: a performance receipt must follow the same-correlation Production deployment identity read-back.';
 
 
 --
@@ -553,6 +1523,431 @@ begin
                  'against the new plan hash.', old.release_key;
   end if;
   new.updated_at := now();
+  return new;
+end $$;
+
+
+--
+-- Name: require_cutover_evidence(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.require_cutover_evidence() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare modes integer;
+begin
+  if old.legacy_disabled_at is null and new.legacy_disabled_at is not null then
+    select count(distinct mode) into modes from ops.workflow_acceptance
+     where workflow_key=new.key and workflow_version=new.version
+       and status='accepted' and mode in ('shadow','canary');
+    if modes <> 2 then
+      raise exception 'workflow % v% cannot disable legacy schedule: accepted shadow and canary receipts are required',new.key,new.version;
+    end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: require_rule_admission(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.require_rule_admission() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare a ops.rule_admission%rowtype; n_controls integer;
+begin
+  if not (new.status='active' and
+          (tg_op='INSERT' or old.status is distinct from 'active')) then
+    return new;
+  end if;
+  select * into a from ops.rule_admission where rule_id=new.id;
+  if not found or a.state <> 'admitted' then
+    raise exception 'rule % cannot activate: admitted rule contract is missing',new.id;
+  end if;
+  if a.enforcement_class='machine_enforceable' then
+    select count(*) into n_controls from ops.rule_enforcement_point
+     where rule_id=new.id and installed;
+    if n_controls=0 then
+      raise exception 'rule % cannot activate: no installed enforcement point',new.id;
+    end if;
+  end if;
+  if new.activated_by is null then
+    raise exception 'rule % cannot activate without a human activator',new.id;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: reserve_job_cost(uuid, uuid, text, numeric); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; route ops.provider_route%rowtype; spent numeric; reserved numeric; rid uuid;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state<>'running' or j.lease_token<>p_lease_token or j.leased_until<now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  select * into route from ops.provider_route where route_key=p_route_key and enabled;
+  if not found then raise exception 'provider route % is not enabled',p_route_key; end if;
+  if p_estimated_cost_usd<0 then raise exception 'estimated cost must be non-negative'; end if;
+  select coalesce(sum(a.cost_usd),0) into spent from ops.job_attempt a
+   where a.provider_route=p_route_key and a.started_at>=date_trunc('month',now());
+  select coalesce(sum(r.estimated_cost_usd),0) into reserved from ops.cost_reservation r
+   where r.route_key=p_route_key and r.state='reserved'
+     and r.created_at>=date_trunc('month',now());
+  if route.monthly_budget_usd is not null
+     and spent+reserved+p_estimated_cost_usd>route.monthly_budget_usd then
+    raise exception 'provider route % monthly budget would be exceeded',p_route_key;
+  end if;
+  insert into ops.cost_reservation(job_id,attempt,route_key,estimated_cost_usd)
+    values(j.id,j.attempt,p_route_key,p_estimated_cost_usd)
+  returning id into rid;
+  return rid;
+end $$;
+
+
+--
+-- Name: retry_delay_seconds(ops.job); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.retry_delay_seconds(p_job ops.job) RETURNS integer
+    LANGUAGE sql STABLE
+    AS $$
+  select least(
+    (d.retry_policy->>'cap_seconds')::integer,
+    case d.retry_policy->>'backoff'
+      when 'constant' then (d.retry_policy->>'base_seconds')::integer
+      when 'linear' then (d.retry_policy->>'base_seconds')::integer * greatest(p_job.attempt,1)
+      else (d.retry_policy->>'base_seconds')::integer
+           * power(2,greatest(p_job.attempt-1,0))::integer
+    end)
+  from ops.job_definition d
+  where d.key=p_job.definition_key and d.version=p_job.definition_version
+$$;
+
+
+--
+-- Name: select_provider_routes(text[]); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.select_provider_routes(p_requested text[]) RETURNS TABLE(route_key text, priority integer, endpoint_ref text, health text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+  select v.route_key,v.priority,v.endpoint_ref,v.health
+    from ops.v_provider_route v
+   where v.route_key=any(p_requested) and v.enabled
+     and v.health not in ('disabled','unavailable','rate_limited')
+   order by array_position(p_requested,v.route_key),v.priority,v.route_key
+$$;
+
+
+--
+-- Name: settle_job_cost(uuid, uuid, uuid, integer, integer, numeric); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; r ops.cost_reservation%rowtype;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state<>'running' or j.lease_token<>p_lease_token or j.leased_until<now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  select * into r from ops.cost_reservation where id=p_reservation_id for update;
+  if not found or r.job_id<>j.id or r.attempt<>j.attempt or r.state<>'reserved' then
+    raise exception 'cost reservation does not belong to this live attempt';
+  end if;
+  if p_actual_cost_usd<0 or p_actual_cost_usd>r.estimated_cost_usd then
+    raise exception 'actual cost exceeds admitted reservation';
+  end if;
+  update ops.cost_reservation set state='settled',actual_cost_usd=p_actual_cost_usd,
+         settled_at=now() where id=r.id;
+  update ops.job_attempt set provider_route=r.route_key,input_tokens=p_input_tokens,
+         output_tokens=p_output_tokens,cost_usd=p_actual_cost_usd
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  return true;
+end $$;
+
+
+--
+-- Name: standing_guidance(text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.standing_guidance(p_actor text, p_workflow text DEFAULT NULL::text, p_surface text DEFAULT NULL::text, p_tier text DEFAULT NULL::text) RETURNS TABLE(source_rule_id uuid, statement text, human_quote text, taught_by text, personal_to text, scope jsonb, guidance_type text, is_constitution boolean)
+    LANGUAGE sql STABLE
+    AS $$
+  select r.id,r.statement,r.human_quote,teacher.display_name,owner.slug,g.scope,
+         g.guidance_type,g.is_constitution
+    from ops.v_guidance_current g
+    join rule r on r.id=g.source_rule_id and r.status='active'
+    join actor teacher on teacher.id=r.taught_by
+    left join actor owner on owner.id=r.personal_to
+   where exists (select 1 from ops.v_guidance_registry_state s where s.state='active')
+     and (r.personal_to is null or owner.slug=p_actor)
+     and (
+       g.is_constitution
+       or (g.guidance_type='constraint' and exists (
+         select 1 from ops.applicable_rules(p_workflow,p_surface,p_tier) ar
+          where ar.rule_id=r.id))
+     )
+   order by g.is_constitution desc,r.personal_to nulls first,r.created_at,r.id
+$$;
+
+
+--
+-- Name: timeout_job(uuid, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype; next_state text;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  next_state := case when j.attempt < j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+  update ops.job_attempt set state='timed_out',ended_at=now(),
+         failure_class='execution_timeout',detail=p_detail
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state=next_state,
+         next_attempt_at=case when next_state='retry_wait'
+                              then now()+make_interval(secs=>ops.retry_delay_seconds(j))
+                              else next_attempt_at end,
+         ended_at=case when next_state='dead_lettered' then now() else null end,
+         last_failure_class='execution_timeout',last_failure_detail=p_detail,
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+   where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,case when next_state='dead_lettered' then 'dead_letter' else 'timeout' end,
+           concat('timeout:',j.id,':',j.attempt),
+           jsonb_build_object('failure_class','execution_timeout','detail',p_detail,'next_state',next_state));
+  return next_state;
+end $$;
+
+
+--
+-- Name: validate_guidance_authority_binding(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.validate_guidance_authority_binding() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  receipt_subject uuid;
+  receipt_type text;
+  receipt_hash text;
+  receipt_decision text;
+  receipt_actor_kind text;
+  item_id uuid;
+begin
+  select ar.subject_id,ar.subject_type,ar.contract_hash,ar.decision,a.kind
+    into receipt_subject,receipt_type,receipt_hash,receipt_decision,receipt_actor_kind
+    from ops.authority_receipt ar join actor a on a.id=ar.actor_id
+   where ar.id=new.authority_receipt_id
+     and ar.kind in ('activation','amendment','rejection');
+  select guidance_item_id into item_id
+    from ops.guidance_revision where id=new.guidance_revision_id;
+  if receipt_type <> 'guidance' or receipt_subject <> item_id then
+    raise exception 'authority receipt must name the exact guidance item';
+  end if;
+  if receipt_actor_kind is distinct from 'human'
+     or receipt_decision not in ('approved','retired','superseded') then
+    raise exception 'guidance authority binding requires an explicit human decision';
+  end if;
+  if receipt_hash is distinct from new.contract_hash then
+    raise exception 'authority receipt hash does not match the exact guidance revision contract';
+  end if;
+  if new.contract_hash is distinct from
+       ops.guidance_revision_contract_hash(new.guidance_revision_id) then
+    raise exception 'authority binding hash does not match the exact stored guidance revision';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: validate_guidance_lifecycle_event(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.validate_guidance_lifecycle_event() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  bound_revision uuid;
+  receipt_decision text;
+begin
+  select b.guidance_revision_id,ar.decision
+    into bound_revision,receipt_decision
+    from ops.guidance_authority_binding b
+    join ops.authority_receipt ar on ar.id=b.authority_receipt_id
+   where b.id=new.authority_binding_id;
+  if bound_revision is distinct from new.guidance_revision_id then
+    raise exception 'lifecycle event authority must bind the exact guidance revision';
+  end if;
+  if (new.state='active' and receipt_decision <> 'approved')
+     or (new.state='retired' and receipt_decision <> 'retired')
+     or (new.state='superseded' and receipt_decision <> 'superseded') then
+    raise exception 'lifecycle state % does not match authority decision %',
+      new.state,receipt_decision;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: validate_guidance_revision(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.validate_guidance_revision() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  expected_projection text;
+  prior_item uuid;
+  prior_version integer;
+  installed_evidence boolean;
+begin
+  if jsonb_typeof(new.scope) <> 'object'
+     or coalesce(btrim(new.scope->>'tenant'),'') = ''
+     or coalesce(btrim(new.scope->>'actor'),'') = '' then
+    raise exception 'guidance revision requires tenant and actor scope';
+  end if;
+  if jsonb_typeof(new.activation) <> 'object'
+     or coalesce(btrim(new.activation->>'trigger'),'') = '' then
+    raise exception 'guidance revision requires an activation trigger';
+  end if;
+  if jsonb_typeof(new.verification) <> 'object'
+     or coalesce(btrim(new.verification->>'mechanism'),'') = '' then
+    raise exception 'guidance revision requires a verification mechanism';
+  end if;
+  if jsonb_typeof(new.provenance) <> 'object'
+     or new.provenance->>'preserve_source_record' <> 'true' then
+    raise exception 'guidance revision must preserve source provenance';
+  end if;
+  if jsonb_typeof(new.delivery) <> 'object' then
+    raise exception 'guidance revision requires a delivery contract';
+  end if;
+  -- Constitution feeds standing_guidance and precedent feeds the precedent
+  -- projection, both of which resolve the canonical rule record.  Intake-only
+  -- items remain useful for other typed guidance, but they must not be able to
+  -- enter either of these rule-backed read paths (or activation's constitution
+  -- count) and then disappear at retrieval time.
+  if new.is_constitution or new.guidance_type='precedent' then
+    if not exists (
+      select 1 from ops.guidance_item i
+       where i.id=new.guidance_item_id
+         and i.source_rule_id is not null
+    ) then
+      raise exception 'constitution and precedent revisions require a source_rule_id';
+    end if;
+  end if;
+  expected_projection := case new.guidance_type
+    when 'constraint' then 'constraint_enforcement'
+    when 'procedure' then 'procedure_workflow'
+    when 'doctrine' then 'doctrine_retrieval'
+    when 'rubric' then 'verification_rubric'
+    when 'preference' then 'scoped_preference'
+    when 'precedent' then 'precedent_search'
+    when 'example' then 'example_retrieval'
+  end;
+  if new.delivery->>'projection' is distinct from expected_projection then
+    raise exception 'guidance type % requires delivery projection %',
+      new.guidance_type, expected_projection;
+  end if;
+  if new.guidance_type='constraint' and (
+       coalesce(btrim(new.delivery->>'enforcement_control'),'') = ''
+       or jsonb_typeof(new.delivery->'evidence') <> 'array'
+       or jsonb_array_length(new.delivery->'evidence') = 0
+       or jsonb_typeof(new.delivery->'tests') <> 'array'
+       or jsonb_array_length(new.delivery->'tests') = 0) then
+    raise exception 'constraint requires installed enforcement evidence and tests';
+  elsif new.guidance_type='procedure' and (
+       coalesce(btrim(new.activation->>'entry_condition'),'') = ''
+       or coalesce(btrim(new.verification->>'completion_condition'),'') = '') then
+    raise exception 'procedure requires entry and completion conditions';
+  elsif new.guidance_type='doctrine' and (
+       jsonb_typeof(new.activation->'situation_mappings') <> 'array'
+       or jsonb_array_length(new.activation->'situation_mappings') = 0) then
+    raise exception 'doctrine requires situation mappings';
+  elsif new.guidance_type='rubric' and (
+       coalesce(btrim(new.verification->>'verifier'),'') = ''
+       or jsonb_typeof(new.verification->'acceptance_criteria') <> 'array'
+       or jsonb_array_length(new.verification->'acceptance_criteria') = 0) then
+    raise exception 'rubric requires verifier and acceptance criteria';
+  elsif new.guidance_type='preference'
+        and new.scope->>'actor' in ('','all') then
+    raise exception 'preference requires a scoped actor';
+  end if;
+  if new.guidance_type='constraint' then
+    select exists (
+      select 1
+        from ops.guidance_item i
+        join ops.rule_enforcement_point ep
+          on ep.rule_id=i.source_rule_id
+         and ep.control_key=new.delivery->>'enforcement_control'
+         and ep.installed
+       where i.id=new.guidance_item_id
+         and new.delivery->'evidence' ? ep.implementation_ref
+         and new.delivery->'tests' ? ep.test_ref
+    ) into installed_evidence;
+    if not installed_evidence then
+      raise exception 'constraint revision requires an installed enforcement point with exact implementation and test evidence';
+    end if;
+  end if;
+  select max(version) into prior_version
+    from ops.guidance_revision where guidance_item_id=new.guidance_item_id;
+  if new.version <> coalesce(prior_version,0)+1 then
+    raise exception 'guidance revision version must be the next append-only version';
+  end if;
+  if new.supersedes_revision_id is not null then
+    select guidance_item_id into prior_item
+      from ops.guidance_revision where id=new.supersedes_revision_id;
+    if prior_item is distinct from new.guidance_item_id then
+      raise exception 'a revision may supersede only a revision of the same guidance item';
+    end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: validate_guidance_situation_mapping(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.validate_guidance_situation_mapping() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  bound_revision uuid;
+  receipt_decision text;
+  revision_type text;
+begin
+  if new.state='active' then
+    select b.guidance_revision_id,ar.decision,r.guidance_type
+      into bound_revision,receipt_decision,revision_type
+      from ops.guidance_authority_binding b
+      join ops.authority_receipt ar on ar.id=b.authority_receipt_id
+      join ops.guidance_revision r on r.id=b.guidance_revision_id
+     where b.id=new.authority_binding_id;
+    if bound_revision is distinct from new.guidance_revision_id
+       or receipt_decision <> 'approved'
+       or revision_type <> 'doctrine' then
+      raise exception 'active situation mapping requires approved human authority for the exact doctrine revision';
+    end if;
+  end if;
   return new;
 end $$;
 
@@ -694,6 +2089,59 @@ COMMENT ON FUNCTION public.assert_no_orphaned_edges() IS 'Raises unless v_orphan
 
 
 --
+-- Name: assert_situation_retrieval_golden(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.assert_situation_retrieval_golden(p_suite_digest text) RETURNS TABLE(case_id text, status text, target_rank integer)
+    LANGUAGE plpgsql
+    AS $$
+declare c record; targets text[]; selected_policy text; required_ok boolean;
+        forbidden_ok boolean; empty_ok boolean;
+begin
+  select rp.policy_id into selected_policy from retrieval_ranking_policy rp
+   where rp.is_default and rp.status='active'
+     and rp.golden_suite_digest=p_suite_digest;
+  if selected_policy is null then
+    raise exception 'golden suite digest mismatch';
+  end if;
+  for c in select * from (values
+    ('RET-001','write acceptance tests first',array['carr-mature-software-end-state-bduf#s39-fresh-session-prompt']::text[],false,'{}'::text[],false),
+    ('RET-002','record layer outage diagnosis runbook',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
+    ('RET-003','playbook self improvement review cycle',array['playbook-review#preamble']::text[],false,'{}'::text[],false),
+    ('RET-004','document factory',array['document-factory-routing#preamble']::text[],false,'{}'::text[],false),
+    ('RET-005','weekly new provider detection',array['npi-sweep-sop#preamble']::text[],false,'{}'::text[],false),
+    ('RET-006','social publishing review approval',array['social-media-workflow#placement-the-entire-social-run-is-local-now-joe-july-18-2026']::text[],false,'{}'::text[],false),
+    ('RET-007','space search multi source',array['space-search-sop#preamble']::text[],false,'{}'::text[],false),
+    ('RET-008','lead system',array['lead-system-handoff#preamble']::text[],false,'{}'::text[],false),
+    ('RET-009','restore backup rehearsal',array['carr-control-room-bduf#s30-test-and-verification-strategy']::text[],false,'{}'::text[],false),
+    ('RET-010','single source of truth',array['deal-enrichment-sop#rules']::text[],false,'{}'::text[],false),
+    ('RET-ARCH-001','agent systems validation',array['2026-07-30-agent-systems-explainer-takeaways#preamble']::text[],false,'{}'::text[],false),
+    ('RET-TITLE-001','diagnosis checklist',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
+    ('RET-PHRASE-001','database service unavailable troubleshooting steps',array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false,'{}'::text[],false),
+    ('RET-PHRASE-002','how the operating playbook learns from mistakes',array['playbook-review#preamble']::text[],false,'{}'::text[],false),
+    ('RET-NEG-001','outage communication template','{}'::text[],false,array['runbook#diagnosis-checklist-in-order-2-minutes']::text[],false),
+    ('RET-LIFE-001','retired retrieval lifecycle fixture','{}'::text[],false,'{}'::text[],true),
+    ('RET-AMB-001','review cycle after a record layer outage',array['runbook#diagnosis-checklist-in-order-2-minutes','playbook-review#preamble']::text[],true,'{}'::text[],false)
+  ) q(case_id,query,required_targets,require_all,forbidden_targets,expect_no_hits)
+  loop
+    select array_agg(x.doc_slug||'#'||x.section_key order by x.final_score desc,
+                     x.concept_score desc,x.lexical_score desc,x.section_key)
+      into targets from search_doctrine_situations(c.query,null,null,3,selected_policy) x;
+    targets := coalesce(targets,'{}'); case_id := c.case_id;
+    required_ok := case when cardinality(c.required_targets)=0 then true
+                        when c.require_all then c.required_targets <@ targets
+                        else c.required_targets && targets end;
+    forbidden_ok := not (c.forbidden_targets && targets);
+    empty_ok := not c.expect_no_hits or cardinality(targets)=0;
+    target_rank := case when cardinality(c.required_targets)=0 then null
+                        else array_position(targets,c.required_targets[1]) end;
+    status := case when required_ok and forbidden_ok and empty_ok then 'pass' else 'fail' end;
+    return next;
+  end loop;
+end $$;
+
+
+--
 -- Name: assert_view_disjoint(text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -806,6 +2254,53 @@ COMMENT ON FUNCTION public.carr_business_days(a date, b date) IS 'Whole business
 
 
 --
+-- Name: current_retrievable_doctrine(uuid, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[]) RETURNS TABLE(section_id uuid, section_key text, section_title text, doc_slug text, doc_title text, content_class text, plain_text text, body_search_vector tsvector, section_title_vector tsvector, document_title_vector tsvector)
+    LANGUAGE sql STABLE
+    AS $$
+  select s.id, s.section_key, s.title, d.slug, d.title, d.content_class,
+         r.plain_text, r.search_vector, s.title_search_vector, d.title_search_vector
+    from doctrine_section s
+    join doctrine_document d on d.id = s.document_id
+    join doctrine_revision r on r.id = s.current_revision_id
+   where s.status = 'active'
+     and (d.visibility <> 'personal' or d.owner_actor_id = p_actor_id)
+     and (p_content_classes is null or d.content_class = any(p_content_classes))
+$$;
+
+
+--
+-- Name: mark_retrieval_mappings_for_repair(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mark_retrieval_mappings_for_repair() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if old.status = 'active' and new.status <> 'active' then
+    update doctrine_concept_mapping
+       set status = 'needs_repair', repair_reason = 'target section is no longer active',
+           version = version + 1, updated_at = now()
+     where section_id = new.id and status = 'approved';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: normalize_retrieval_phrase(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.normalize_retrieval_phrase(value text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+  select regexp_replace(lower(btrim(value)), '\s+', ' ', 'g')
+$$;
+
+
+--
 -- Name: org_identity_key(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -876,6 +2371,264 @@ $$;
 --
 
 COMMENT ON FUNCTION public.org_party_id(p_name text, p_actor uuid) IS 'Find-or-create an organisation party by normalised name, atomically (0059). Replaces the blind `insert into party ... values (''org'', $1, ...)` at mcp-server/src/tools.js:1156 (add-party) and :1281 (add-premises), which is what minted 17 Henry Schein rows. Race-safe against party_org_identity_uniq: the loser of a concurrent insert re-reads rather than failing. A placeholder name still mints a fresh row, on purpose.';
+
+
+--
+-- Name: promote_retrieval_proposal(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+declare p retrieval_proposal%rowtype; landed uuid; cid uuid; sid uuid;
+begin
+  if not exists (select 1 from actor where actor.id=p_approver_id and kind='human') then
+    raise exception 'human_only';
+  end if;
+  select * into p from retrieval_proposal where id=p_proposal_id for update;
+  if not found or p.status <> 'pending' then raise exception 'proposal is not pending'; end if;
+  if p.proposal_type = 'concept' then
+    insert into retrieval_concept
+      (concept_key,label,definition,status,review_after,proposer_id,approver_id,approved_at)
+    values (p.payload->>'concept_key',p.payload->>'label',p.payload->>'definition','approved',
+            (p.payload->>'review_after')::timestamptz,p.proposer_id,p_approver_id,now()) returning id into landed;
+  elsif p.proposal_type = 'phrase' then
+    select id into cid from retrieval_concept
+     where concept_key=p.payload->>'concept_key' and status='approved';
+    if cid is null then raise exception 'approved concept not found'; end if;
+    insert into retrieval_phrase
+      (concept_id,display_phrase,match_mode,min_similarity,weight,status,source,source_ref,
+       proposer_id,approver_id,approved_at)
+    values (cid,p.payload->>'phrase',p.payload->>'match_mode',
+            coalesce((p.payload->>'min_similarity')::numeric,.35),
+            (p.payload->>'weight')::numeric,'approved',p.payload->>'source',p.payload->>'source_ref',
+            p.proposer_id,p_approver_id,now()) returning id into landed;
+  elsif p.proposal_type = 'mapping' then
+    select id into cid from retrieval_concept
+     where concept_key=p.payload->>'concept_key' and status='approved';
+    select s.id into sid from doctrine_section s join doctrine_document d on d.id=s.document_id
+     where d.slug=split_part(p.payload->>'section_address','#',1)
+       and s.section_key=split_part(p.payload->>'section_address','#',2) and s.status='active';
+    if cid is null or sid is null then raise exception 'approved concept or current section not found'; end if;
+    insert into doctrine_concept_mapping
+      (concept_id,section_id,role,weight,rationale,status,proposer_id,approver_id,approved_at)
+    values (cid,sid,p.payload->>'role',(p.payload->>'weight')::numeric,p.payload->>'rationale',
+            'approved',p.proposer_id,p_approver_id,now()) returning id into landed;
+  elsif p.proposal_type = 'retire' then
+    select r.id into landed from retire_retrieval_curation(
+      p.payload->>'target_type',(p.payload->>'target_id')::uuid,
+      (p.payload->>'base_version')::bigint,p_approver_id,p.reason) r;
+    if landed is null then raise exception 'retirement version conflict'; end if;
+  end if;
+  update retrieval_proposal set status='approved', reviewer_id=p_approver_id,
+         resulting_row_ids=array[landed], reviewed_at=now(), version=version+1
+   where id=p.id;
+  return landed;
+end $$;
+
+
+--
+-- Name: retire_retrieval_curation(text, uuid, bigint, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) RETURNS TABLE(id uuid, version bigint, status text)
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if btrim(p_reason) = '' then raise exception 'retirement reason required'; end if;
+  if not exists (select 1 from actor where actor.id=p_actor_id and kind='human') then
+    raise exception 'human_only';
+  end if;
+  if p_target_type = 'concept' then
+    update retrieval_concept set status='retired', retired_at=now(), version=version+1, updated_at=now()
+     where retrieval_concept.id=p_target_id and retrieval_concept.version=p_base_version and status='approved'
+     returning retrieval_concept.id, retrieval_concept.version, retrieval_concept.status into id, version, status;
+    if id is not null then
+      update retrieval_phrase set status='retired', retired_at=now(), version=version+1, updated_at=now()
+       where concept_id=p_target_id and status='approved';
+      update doctrine_concept_mapping set status='retired', retired_at=now(), version=version+1, updated_at=now()
+       where concept_id=p_target_id and status in ('approved','needs_repair');
+    end if;
+  elsif p_target_type = 'phrase' then
+    update retrieval_phrase set status='retired', retired_at=now(), version=version+1, updated_at=now()
+     where retrieval_phrase.id=p_target_id and retrieval_phrase.version=p_base_version and status='approved'
+     returning retrieval_phrase.id, retrieval_phrase.version, retrieval_phrase.status into id, version, status;
+  elsif p_target_type = 'mapping' then
+    update doctrine_concept_mapping set status='retired', retired_at=now(), version=version+1, updated_at=now()
+     where doctrine_concept_mapping.id=p_target_id and doctrine_concept_mapping.version=p_base_version
+       and status in ('approved','needs_repair')
+     returning doctrine_concept_mapping.id, doctrine_concept_mapping.version,
+               doctrine_concept_mapping.status into id, version, status;
+  else raise exception 'unknown retrieval curation type %', p_target_type;
+  end if;
+  if id is not null then return next; end if;
+end $$;
+
+
+--
+-- Name: retrieval_proposal_guard(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.retrieval_proposal_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if tg_op = 'DELETE' then raise exception 'retrieval proposals are append-only'; end if;
+  if old.proposal_type is distinct from new.proposal_type
+     or old.payload is distinct from new.payload
+     or old.reason is distinct from new.reason
+     or old.proposer_id is distinct from new.proposer_id
+     or old.idempotency_key is distinct from new.idempotency_key
+     or old.created_at is distinct from new.created_at then
+    raise exception 'retrieval proposal evidence is immutable';
+  end if;
+  if old.status <> 'pending' or new.status not in ('approved','rejected','superseded') then
+    raise exception 'retrieval proposal review transition invalid';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: search_doctrine_situations(text, uuid, text[], integer, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[] DEFAULT NULL::text[], p_limit integer DEFAULT 20, p_policy_id text DEFAULT NULL::text) RETURNS TABLE(section_id uuid, section_key text, title text, doc_slug text, content_class text, rank double precision, snippet text, lexical_score double precision, concept_score double precision, final_score double precision, provenance jsonb)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+with
+  normalized as materialized (
+    select normalize_retrieval_phrase(p_query) as q
+  ),
+  policy as materialized (
+    select * from retrieval_ranking_policy
+     where policy_id = coalesce(
+       p_policy_id,
+       (select policy_id from retrieval_ranking_policy where is_default and status='active'))
+       and status in ('candidate','active')
+  ),
+  query_terms as materialized (
+    select websearch_to_tsquery('english', q) as tsq from normalized
+  ),
+  current_set as materialized (
+    select * from current_retrievable_doctrine(p_actor_id, p_content_classes)
+  ),
+  lexical_raw as (
+    select c.section_id,
+           ts_rank_cd(
+             setweight(c.section_title_vector, 'A') ||
+             setweight(c.document_title_vector, 'A') ||
+             setweight(c.body_search_vector, 'B'), q.tsq) as raw_score,
+           ts_headline('english', c.plain_text, q.tsq, 'MaxWords=25, MinWords=10') as snippet
+      from current_set c cross join query_terms q
+     where c.section_title_vector @@ q.tsq
+        or c.document_title_vector @@ q.tsq
+        or c.body_search_vector @@ q.tsq
+  ),
+  phrase_match as (
+    select p.id as phrase_id, p.concept_id, p.weight as phrase_weight,
+           case p.match_mode
+             when 'exact' then case when p.normalized_phrase = n.q then 1.0 else 0.0 end
+             when 'fts' then case
+               when to_tsvector('english', p.normalized_phrase) @@ websearch_to_tsquery('english', n.q)
+               then least(1.0, ts_rank_cd(to_tsvector('english', p.normalized_phrase),
+                                         websearch_to_tsquery('english', n.q))::double precision)
+               else 0.0 end
+             when 'trgm' then case when similarity(p.normalized_phrase, n.q) >= p.min_similarity
+               then similarity(p.normalized_phrase, n.q) else 0.0 end
+           end::double precision as phrase_strength
+      from retrieval_phrase p cross join normalized n
+     where p.status = 'approved'
+  ),
+  concept_evidence as (
+    select m.section_id, pm.phrase_id, pm.concept_id, m.id as mapping_id,
+           pm.phrase_strength, pm.phrase_weight::double precision,
+           m.weight::double precision as mapping_weight,
+           (pm.phrase_strength * pm.phrase_weight * m.weight)::double precision as contribution
+      from phrase_match pm
+      join retrieval_concept c on c.id = pm.concept_id and c.status = 'approved'
+      join doctrine_concept_mapping m on m.concept_id = c.id and m.status = 'approved'
+      join current_set visible on visible.section_id = m.section_id
+     where pm.phrase_strength > 0
+  ),
+  concept_by_section as (
+    select section_id, max(contribution)::double precision as concept_score,
+           array_agg(distinct phrase_id order by phrase_id) as phrase_ids,
+           array_agg(distinct concept_id order by concept_id) as concept_ids,
+           array_agg(distinct mapping_id order by mapping_id) as mapping_ids
+      from concept_evidence group by section_id
+  ),
+  unioned as (
+    select c.*, coalesce(least(1.0, l.raw_score), 0)::double precision as lexical_score,
+           coalesce(least(1.0, ce.concept_score), 0)::double precision as concept_score,
+           l.snippet, coalesce(ce.phrase_ids, '{}') as phrase_ids,
+           coalesce(ce.concept_ids, '{}') as concept_ids,
+           coalesce(ce.mapping_ids, '{}') as mapping_ids
+      from current_set c
+      left join lexical_raw l on l.section_id = c.section_id
+      left join concept_by_section ce on ce.section_id = c.section_id
+     where l.section_id is not null or ce.section_id is not null
+  ),
+  maxima as (
+    select greatest(max(lexical_score), 0) as max_lexical,
+           greatest(max(concept_score), 0) as max_concept from unioned
+  ),
+  scored as (
+    select u.*,
+           case p.formula
+             when 'weighted_sum' then
+               ((p.config->>'lexical_weight')::double precision * u.lexical_score +
+                (p.config->>'concept_weight')::double precision *
+                  case when coalesce((p.config->>'concept_enabled')::boolean,true)
+                       then u.concept_score else 0 end)
+             when 'coequal_normalized' then
+               (case when x.max_lexical > 0 then u.lexical_score / x.max_lexical else 0 end) +
+               (case when coalesce((p.config->>'concept_enabled')::boolean,true) and x.max_concept > 0
+                     then u.concept_score / x.max_concept else 0 end) +
+               (case when coalesce((p.config->>'concept_enabled')::boolean,true)
+                           and u.lexical_score > 0 and u.concept_score > 0
+                     then (p.config->>'dual_evidence_bonus')::double precision else 0 end)
+           end::double precision as final_score,
+           p.policy_id, p.version as policy_version
+      from unioned u cross join maxima x cross join policy p
+  ),
+  limited as materialized (
+    select * from scored
+     where final_score > 0
+     order by final_score desc, concept_score desc, lexical_score desc, section_key asc
+     limit greatest(1, least(coalesce(p_limit, 20), 100))
+  ),
+  log_write as (
+    insert into retrieval_query_log
+      (normalized_hash, result_count, score_bands, selected_row_ids,
+       policy_id, policy_version, explicit_hit, scope_ref)
+    select encode(digest(convert_to((select q from normalized), 'UTF8'), 'sha256'), 'hex'),
+           count(l.section_id)::integer,
+           jsonb_build_object(
+             'high', count(*) filter (where final_score >= .75),
+             'medium', count(*) filter (where final_score >= .25 and final_score < .75),
+             'low', count(*) filter (where final_score < .25)),
+           coalesce(array_agg(section_id order by final_score desc, concept_score desc,
+                              lexical_score desc, section_key asc)
+                    filter (where section_id is not null), '{}'),
+           p.policy_id, p.version, count(l.section_id) > 0, 'carr-internal'
+      from policy p left join limited l on true
+     group by p.policy_id, p.version
+    returning id
+  )
+select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class,
+       l.final_score as rank,
+       coalesce(l.snippet, left(l.plain_text, 240)) as snippet,
+       l.lexical_score, l.concept_score, l.final_score,
+       jsonb_build_object(
+         'complete', true, 'policy_id', l.policy_id, 'policy_version', l.policy_version,
+         'lexical_score', l.lexical_score, 'concept_score', l.concept_score,
+         'final_score', l.final_score, 'phrase_ids', to_jsonb(l.phrase_ids),
+         'concept_ids', to_jsonb(l.concept_ids), 'mapping_ids', to_jsonb(l.mapping_ids))
+  from limited l cross join (select count(*) from log_write) logged
+ order by l.final_score desc, l.concept_score desc, l.lexical_score desc, l.section_key asc
+$$;
 
 
 --
@@ -998,10 +2751,6 @@ begin
   return new;
 end $$;
 
-
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
 
 --
 -- Name: account; Type: TABLE; Schema: neon_auth; Owner: -
@@ -1152,6 +2901,26 @@ CREATE TABLE neon_auth.verification (
 
 
 --
+-- Name: authority_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.authority_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    kind text NOT NULL,
+    subject_type text NOT NULL,
+    subject_id uuid NOT NULL,
+    actor_id uuid NOT NULL,
+    decision text NOT NULL,
+    contract_hash text,
+    evidence_refs text[] DEFAULT '{}'::text[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT authority_receipt_kind_check CHECK ((kind = ANY (ARRAY['admission'::text, 'activation'::text, 'rejection'::text, 'override'::text, 'amendment'::text]))),
+    CONSTRAINT authority_receipt_subject_type_check CHECK ((subject_type = ANY (ARRAY['rule'::text, 'guidance'::text, 'policy'::text])))
+);
+
+
+--
 -- Name: capability_agent_session; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -1223,6 +2992,112 @@ COMMENT ON TABLE ops.capability_verification IS 'Independent pass/fail attestati
 
 
 --
+-- Name: cognition_job; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.cognition_job (
+    key text NOT NULL,
+    version integer NOT NULL,
+    input_schema_version integer NOT NULL,
+    output_schema_version integer NOT NULL,
+    input_schema jsonb NOT NULL,
+    output_schema jsonb NOT NULL,
+    max_tokens integer NOT NULL,
+    max_cost_usd numeric(12,4) NOT NULL,
+    timeout_seconds integer NOT NULL,
+    provider_routes text[] NOT NULL,
+    cache_ttl_seconds integer DEFAULT 0 NOT NULL,
+    canonical_write_authority boolean DEFAULT false NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    registered_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cognition_job_cache_ttl_seconds_check CHECK ((cache_ttl_seconds >= 0)),
+    CONSTRAINT cognition_job_canonical_write_authority_check CHECK ((canonical_write_authority = false)),
+    CONSTRAINT cognition_job_input_schema_check CHECK ((jsonb_typeof(input_schema) = 'object'::text)),
+    CONSTRAINT cognition_job_input_schema_version_check CHECK ((input_schema_version > 0)),
+    CONSTRAINT cognition_job_max_cost_usd_check CHECK ((max_cost_usd >= (0)::numeric)),
+    CONSTRAINT cognition_job_max_tokens_check CHECK ((max_tokens > 0)),
+    CONSTRAINT cognition_job_output_schema_check CHECK ((jsonb_typeof(output_schema) = 'object'::text)),
+    CONSTRAINT cognition_job_output_schema_version_check CHECK ((output_schema_version > 0)),
+    CONSTRAINT cognition_job_provider_routes_check CHECK ((cardinality(provider_routes) > 0)),
+    CONSTRAINT cognition_job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
+    CONSTRAINT cognition_job_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: TABLE cognition_job; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.cognition_job IS 'Finite model-neutral cognition contracts. Rows describe proposals only; the schema structurally refuses canonical-write authority.';
+
+
+--
+-- Name: cognition_result_cache; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.cognition_result_cache (
+    cache_key text NOT NULL,
+    cognition_key text NOT NULL,
+    cognition_version integer NOT NULL,
+    output_schema_version integer NOT NULL,
+    proposal jsonb NOT NULL,
+    evidence_refs text[] DEFAULT '{}'::text[] NOT NULL,
+    validated_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    invalidated_at timestamp with time zone,
+    dependency_refs text[] DEFAULT '{}'::text[] NOT NULL,
+    CONSTRAINT cache_expiry_after_creation CHECK ((expires_at >= created_at))
+);
+
+
+--
+-- Name: cost_refusal; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.cost_refusal (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    route_key text NOT NULL,
+    estimated_cost_usd numeric(12,6) NOT NULL,
+    monthly_budget_usd numeric(12,4) NOT NULL,
+    spent_usd numeric(12,6) NOT NULL,
+    reserved_usd numeric(12,6) NOT NULL,
+    reason text NOT NULL,
+    refused_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cost_refusal_attempt_check CHECK ((attempt > 0)),
+    CONSTRAINT cost_refusal_estimated_cost_usd_check CHECK ((estimated_cost_usd >= (0)::numeric)),
+    CONSTRAINT cost_refusal_monthly_budget_usd_check CHECK ((monthly_budget_usd >= (0)::numeric)),
+    CONSTRAINT cost_refusal_reason_check CHECK ((reason = 'monthly_budget_exceeded'::text)),
+    CONSTRAINT cost_refusal_reserved_usd_check CHECK ((reserved_usd >= (0)::numeric)),
+    CONSTRAINT cost_refusal_spent_usd_check CHECK ((spent_usd >= (0)::numeric))
+);
+
+
+--
+-- Name: cost_reservation; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.cost_reservation (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    route_key text NOT NULL,
+    estimated_cost_usd numeric(12,6) NOT NULL,
+    actual_cost_usd numeric(12,6),
+    state text DEFAULT 'reserved'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    settled_at timestamp with time zone,
+    CONSTRAINT cost_reservation_actual_cost_usd_check CHECK (((actual_cost_usd IS NULL) OR (actual_cost_usd >= (0)::numeric))),
+    CONSTRAINT cost_reservation_attempt_check CHECK ((attempt > 0)),
+    CONSTRAINT cost_reservation_estimated_cost_usd_check CHECK ((estimated_cost_usd >= (0)::numeric)),
+    CONSTRAINT cost_reservation_state_check CHECK ((state = ANY (ARRAY['reserved'::text, 'settled'::text, 'released'::text]))),
+    CONSTRAINT settled_reservation_has_actual CHECK (((state <> 'settled'::text) OR ((actual_cost_usd IS NOT NULL) AND (settled_at IS NOT NULL))))
+);
+
+
+--
 -- Name: deployment; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -1233,8 +3108,6 @@ CREATE TABLE ops.deployment (
     environment text NOT NULL,
     state text NOT NULL,
     git_sha text,
-    provider text,
-    provider_version_id text,
     release_ref text,
     deployed_by_actor text,
     verb_count integer,
@@ -1269,32 +3142,251 @@ COMMENT ON TABLE ops.deployment IS 'One attempt to place a release into one envi
 
 
 --
--- Name: deployment production_deployment_requires_provider_version; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.deployment
-    ADD CONSTRAINT production_deployment_requires_provider_version CHECK (((environment <> 'production'::text) OR ((provider = 'cloudflare-workers'::text) AND (provider_version_id IS NOT NULL) AND (provider_version_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)))) NOT VALID;
-
-
---
--- Name: COLUMN deployment.provider; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON COLUMN ops.deployment.provider IS 'Program 5 provider identity observed for this deployment receipt.';
-
-
---
--- Name: COLUMN deployment.provider_version_id; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON COLUMN ops.deployment.provider_version_id IS 'Program 5 immutable provider version identifier observed for this deployment receipt.';
-
-
---
 -- Name: COLUMN deployment.release_ref; Type: COMMENT; Schema: ops; Owner: -
 --
 
 COMMENT ON COLUMN ops.deployment.release_ref IS 'SUPERSEDED by release_id (0130). Kept because nothing silently rots (rule def3e84e); no new writer should set it.';
+
+
+--
+-- Name: device_evidence_principal; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.device_evidence_principal (
+    login_role name NOT NULL,
+    device_id text NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    provisioned_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT device_evidence_principal_device_id_check CHECK ((btrim(device_id) <> ''::text))
+);
+
+
+--
+-- Name: device_evidence_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.device_evidence_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    builder_key text NOT NULL,
+    workflow_key text NOT NULL,
+    workflow_version integer NOT NULL,
+    mode text NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    device_id text NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    evidence jsonb NOT NULL,
+    idempotency_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT device_evidence_receipt_builder_key_check CHECK ((builder_key = ANY (ARRAY['linkedin.source-posts'::text, 'x.source-posts'::text]))),
+    CONSTRAINT device_evidence_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT device_evidence_receipt_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text])))
+);
+
+
+--
+-- Name: guidance_authority_binding; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_authority_binding (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    guidance_revision_id uuid NOT NULL,
+    authority_receipt_id uuid NOT NULL,
+    contract_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT guidance_authority_binding_contract_hash_check CHECK ((contract_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: guidance_intake; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_intake (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    lane text NOT NULL,
+    source_kind text NOT NULL,
+    source_ref text NOT NULL,
+    statement text NOT NULL,
+    state text DEFAULT 'captured'::text NOT NULL,
+    normalized_contract jsonb,
+    captured_by uuid NOT NULL,
+    captured_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    CONSTRAINT guidance_intake_lane_check CHECK ((lane = ANY (ARRAY['rule'::text, 'constraint'::text, 'procedure'::text, 'doctrine'::text, 'rubric'::text, 'preference'::text, 'precedent'::text, 'example'::text, 'fact'::text, 'action'::text]))),
+    CONSTRAINT guidance_intake_source_kind_check CHECK ((source_kind = ANY (ARRAY['human'::text, 'source'::text, 'correction'::text, 'system'::text]))),
+    CONSTRAINT guidance_intake_state_check CHECK ((state = ANY (ARRAY['captured'::text, 'normalized'::text, 'proposed'::text, 'admitted'::text, 'rejected'::text, 'superseded'::text]))),
+    CONSTRAINT guidance_intake_statement_check CHECK ((btrim(statement) <> ''::text)),
+    CONSTRAINT guidance_intake_version_check CHECK ((version > 0)),
+    CONSTRAINT normalized_guidance_has_a_contract CHECK (((state <> ALL (ARRAY['normalized'::text, 'proposed'::text, 'admitted'::text])) OR (normalized_contract IS NOT NULL)))
+);
+
+
+--
+-- Name: TABLE guidance_intake; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.guidance_intake IS 'Phase 1 guidance-intake state machine. Capture is not authority: admission is a later state backed by ops.rule_admission and a human receipt.';
+
+
+--
+-- Name: guidance_item; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_item (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source_rule_id uuid,
+    guidance_intake_id uuid,
+    source_clause text NOT NULL,
+    is_primary boolean DEFAULT true NOT NULL,
+    split_group_id uuid,
+    created_by uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT guidance_item_source_clause_check CHECK ((btrim(source_clause) <> ''::text)),
+    CONSTRAINT guidance_source_is_traceable CHECK (((source_rule_id IS NOT NULL) OR (guidance_intake_id IS NOT NULL))),
+    CONSTRAINT split_child_names_group CHECK ((is_primary OR (split_group_id IS NOT NULL)))
+);
+
+
+--
+-- Name: guidance_lifecycle_event; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_lifecycle_event (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    event_seq bigint NOT NULL,
+    guidance_revision_id uuid NOT NULL,
+    state text NOT NULL,
+    authority_binding_id uuid NOT NULL,
+    supersedes_event_id uuid,
+    reason text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT guidance_lifecycle_event_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT guidance_lifecycle_event_state_check CHECK ((state = ANY (ARRAY['active'::text, 'retired'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: guidance_lifecycle_event_event_seq_seq; Type: SEQUENCE; Schema: ops; Owner: -
+--
+
+ALTER TABLE ops.guidance_lifecycle_event ALTER COLUMN event_seq ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME ops.guidance_lifecycle_event_event_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: guidance_registry; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_registry (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    singleton boolean DEFAULT true NOT NULL,
+    created_by uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT guidance_registry_singleton_check CHECK (singleton)
+);
+
+
+--
+-- Name: guidance_registry_event; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_registry_event (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    event_seq bigint NOT NULL,
+    registry_id uuid NOT NULL,
+    state text NOT NULL,
+    authority_receipt_id uuid NOT NULL,
+    manifest_digest text NOT NULL,
+    reason text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT guidance_registry_event_manifest_digest_check CHECK ((manifest_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT guidance_registry_event_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT guidance_registry_event_state_check CHECK ((state = ANY (ARRAY['active'::text, 'inactive'::text])))
+);
+
+
+--
+-- Name: guidance_registry_event_event_seq_seq; Type: SEQUENCE; Schema: ops; Owner: -
+--
+
+ALTER TABLE ops.guidance_registry_event ALTER COLUMN event_seq ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME ops.guidance_registry_event_event_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: guidance_revision; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_revision (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    guidance_item_id uuid NOT NULL,
+    version integer NOT NULL,
+    guidance_type text NOT NULL,
+    scope jsonb NOT NULL,
+    activation jsonb NOT NULL,
+    consumer text NOT NULL,
+    verification jsonb NOT NULL,
+    provenance jsonb NOT NULL,
+    delivery jsonb NOT NULL,
+    is_constitution boolean DEFAULT false NOT NULL,
+    supersedes_revision_id uuid,
+    classified_by uuid NOT NULL,
+    reason text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT guidance_revision_consumer_check CHECK ((btrim(consumer) <> ''::text)),
+    CONSTRAINT guidance_revision_guidance_type_check CHECK ((guidance_type = ANY (ARRAY['constraint'::text, 'procedure'::text, 'doctrine'::text, 'rubric'::text, 'preference'::text, 'precedent'::text, 'example'::text]))),
+    CONSTRAINT guidance_revision_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT guidance_revision_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: guidance_situation_mapping; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.guidance_situation_mapping (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    mapping_seq bigint NOT NULL,
+    guidance_revision_id uuid NOT NULL,
+    concept_id uuid NOT NULL,
+    doctrine_section_id uuid NOT NULL,
+    state text NOT NULL,
+    authority_binding_id uuid,
+    supersedes_mapping_id uuid,
+    reason text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT active_mapping_has_authority CHECK (((state <> 'active'::text) OR (authority_binding_id IS NOT NULL))),
+    CONSTRAINT guidance_situation_mapping_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT guidance_situation_mapping_state_check CHECK ((state = ANY (ARRAY['proposed'::text, 'active'::text, 'retired'::text])))
+);
+
+
+--
+-- Name: guidance_situation_mapping_mapping_seq_seq; Type: SEQUENCE; Schema: ops; Owner: -
+--
+
+ALTER TABLE ops.guidance_situation_mapping ALTER COLUMN mapping_seq ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME ops.guidance_situation_mapping_mapping_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
 
 
 --
@@ -1409,6 +3501,163 @@ CREATE TABLE ops.incident_service (
 
 
 --
+-- Name: job_attempt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.job_attempt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    lease_owner text NOT NULL,
+    lease_token uuid NOT NULL,
+    provider_route text,
+    state text NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    ended_at timestamp with time zone,
+    input_tokens integer,
+    output_tokens integer,
+    cost_usd numeric(12,6),
+    failure_class text,
+    detail text,
+    CONSTRAINT job_attempt_attempt_check CHECK ((attempt > 0)),
+    CONSTRAINT job_attempt_cost_usd_check CHECK (((cost_usd IS NULL) OR (cost_usd >= (0)::numeric))),
+    CONSTRAINT job_attempt_input_tokens_check CHECK (((input_tokens IS NULL) OR (input_tokens >= 0))),
+    CONSTRAINT job_attempt_output_tokens_check CHECK (((output_tokens IS NULL) OR (output_tokens >= 0))),
+    CONSTRAINT job_attempt_state_check CHECK ((state = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: job_definition; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.job_definition (
+    key text NOT NULL,
+    version integer NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    risk text NOT NULL,
+    owner_actor text DEFAULT 'system'::text NOT NULL,
+    execution_kind text NOT NULL,
+    execution_contract jsonb NOT NULL,
+    inventory_contract jsonb DEFAULT '{}'::jsonb NOT NULL,
+    recurrence jsonb NOT NULL,
+    state_contract jsonb DEFAULT '{}'::jsonb NOT NULL,
+    routing_contract jsonb DEFAULT '{}'::jsonb NOT NULL,
+    filtering_contract jsonb DEFAULT '{}'::jsonb NOT NULL,
+    validation_contract jsonb DEFAULT '{}'::jsonb NOT NULL,
+    retry_policy jsonb NOT NULL,
+    deduplication jsonb NOT NULL,
+    completion_contract jsonb NOT NULL,
+    legacy_schedule jsonb DEFAULT '{}'::jsonb NOT NULL,
+    legacy_disabled_at timestamp with time zone,
+    legacy_disable_reason text,
+    registered_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cognition_definition_names_job CHECK (((execution_kind <> 'cognition'::text) OR (execution_contract ? 'cognition_job'::text))),
+    CONSTRAINT deterministic_definition_names_entrypoint CHECK (((execution_kind <> 'deterministic'::text) OR (execution_contract ? 'entrypoint'::text))),
+    CONSTRAINT disabled_legacy_has_reason CHECK (((legacy_disabled_at IS NULL) OR (legacy_disable_reason IS NOT NULL))),
+    CONSTRAINT job_definition_completion_contract_check CHECK ((jsonb_typeof(completion_contract) = 'object'::text)),
+    CONSTRAINT job_definition_deduplication_check CHECK ((jsonb_typeof(deduplication) = 'object'::text)),
+    CONSTRAINT job_definition_execution_contract_check CHECK ((jsonb_typeof(execution_contract) = 'object'::text)),
+    CONSTRAINT job_definition_execution_kind_check CHECK ((execution_kind = ANY (ARRAY['deterministic'::text, 'cognition'::text]))),
+    CONSTRAINT job_definition_filtering_contract_check CHECK ((jsonb_typeof(filtering_contract) = 'object'::text)),
+    CONSTRAINT job_definition_inventory_contract_check CHECK ((jsonb_typeof(inventory_contract) = 'object'::text)),
+    CONSTRAINT job_definition_legacy_schedule_check CHECK ((jsonb_typeof(legacy_schedule) = 'object'::text)),
+    CONSTRAINT job_definition_recurrence_check CHECK ((jsonb_typeof(recurrence) = 'object'::text)),
+    CONSTRAINT job_definition_retry_policy_check CHECK ((jsonb_typeof(retry_policy) = 'object'::text)),
+    CONSTRAINT job_definition_risk_check CHECK ((risk = ANY (ARRAY['green'::text, 'yellow'::text, 'red'::text]))),
+    CONSTRAINT job_definition_routing_contract_check CHECK ((jsonb_typeof(routing_contract) = 'object'::text)),
+    CONSTRAINT job_definition_state_contract_check CHECK ((jsonb_typeof(state_contract) = 'object'::text)),
+    CONSTRAINT job_definition_validation_contract_check CHECK ((jsonb_typeof(validation_contract) = 'object'::text)),
+    CONSTRAINT job_definition_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: job_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.job_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    kind text NOT NULL,
+    receipt_ref text NOT NULL,
+    evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT job_receipt_kind_check CHECK ((kind = ANY (ARRAY['completion'::text, 'failure'::text, 'timeout'::text, 'dead_letter'::text, 'approval'::text, 'override'::text])))
+);
+
+
+--
+-- Name: npi_device_evidence_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.npi_device_evidence_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    job_id uuid NOT NULL,
+    builder_key text NOT NULL,
+    workflow_key text NOT NULL,
+    workflow_version integer NOT NULL,
+    mode text NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    device_id text NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    source_release text NOT NULL,
+    source_checksum text NOT NULL,
+    results jsonb NOT NULL,
+    idempotency_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT npi_device_evidence_receipt_builder_key_check CHECK ((builder_key = 'npi.weekly-delta'::text)),
+    CONSTRAINT npi_device_evidence_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT npi_device_evidence_receipt_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
+    CONSTRAINT npi_device_evidence_receipt_results_check CHECK (((jsonb_typeof(results) = 'array'::text) AND (jsonb_array_length(results) > 0))),
+    CONSTRAINT npi_device_evidence_receipt_source_checksum_check CHECK ((source_checksum ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT npi_device_evidence_receipt_source_release_check CHECK ((btrim(source_release) <> ''::text)),
+    CONSTRAINT npi_device_evidence_receipt_workflow_key_check CHECK ((workflow_key = 'npi-sweep-weekly'::text))
+);
+
+
+--
+-- Name: provider_observation; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.provider_observation (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    route_key text NOT NULL,
+    status text NOT NULL,
+    latency_ms integer,
+    error_class text,
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    source_ref text NOT NULL,
+    CONSTRAINT provider_observation_expiry_is_future CHECK ((expires_at > observed_at)),
+    CONSTRAINT provider_observation_latency_ms_check CHECK (((latency_ms IS NULL) OR (latency_ms >= 0))),
+    CONSTRAINT provider_observation_status_check CHECK ((status = ANY (ARRAY['healthy'::text, 'degraded'::text, 'unavailable'::text, 'rate_limited'::text])))
+);
+
+
+--
+-- Name: provider_route; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.provider_route (
+    route_key text NOT NULL,
+    priority integer NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    endpoint_ref text NOT NULL,
+    capability_tags text[] DEFAULT '{}'::text[] NOT NULL,
+    max_concurrency integer,
+    monthly_budget_usd numeric(12,4),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT provider_route_max_concurrency_check CHECK (((max_concurrency IS NULL) OR (max_concurrency > 0))),
+    CONSTRAINT provider_route_monthly_budget_usd_check CHECK (((monthly_budget_usd IS NULL) OR (monthly_budget_usd >= (0)::numeric))),
+    CONSTRAINT provider_route_priority_check CHECK ((priority > 0))
+);
+
+
+--
 -- Name: release; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -1420,11 +3669,6 @@ CREATE TABLE ops.release (
     environment text NOT NULL,
     state text DEFAULT 'draft'::text NOT NULL,
     git_sha text NOT NULL,
-    provider text,
-    provider_version_id text,
-    performance_budget_ref text,
-    performance_budget_ms integer,
-    recovery_strategy text,
     artifact_digest text,
     dependency_lock_digest text,
     sbom_ref text,
@@ -1474,32 +3718,6 @@ CREATE TABLE ops.release (
 
 
 --
--- Name: release promotion_release_requires_independent_attestation; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.release
-    ADD CONSTRAINT promotion_release_requires_independent_attestation CHECK (((state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR ((verifier_actor IS NOT NULL) AND (verifier_evidence_ref IS NOT NULL)))) NOT VALID;
-
-ALTER TABLE ONLY ops.release
-    ADD CONSTRAINT production_promotion_requires_assurance CHECK (((environment <> 'production'::text) OR (state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR ((performance_budget_ref IS NOT NULL) AND (performance_budget_ms IS NOT NULL) AND (performance_budget_ms > 0) AND (recovery_strategy IS NOT NULL) AND (recovery_strategy = ANY (ARRAY['rollback'::text, 'forward_fix'::text]))))) NOT VALID;
-
---
--- Name: release promotion_release_requires_rollback_readiness; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.release
-    ADD CONSTRAINT promotion_release_requires_rollback_readiness CHECK (((state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR (rollback_ready AND (rollback_plan_ref IS NOT NULL)))) NOT VALID;
-
-
---
--- Name: release production_promotion_requires_provider_version; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.release
-    ADD CONSTRAINT production_promotion_requires_provider_version CHECK (((environment <> 'production'::text) OR (state <> ALL (ARRAY['approved'::text, 'deploying'::text, 'verifying'::text, 'complete'::text])) OR ((provider = 'cloudflare-workers'::text) AND (provider_version_id IS NOT NULL) AND (provider_version_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)))) NOT VALID;
-
-
---
 -- Name: TABLE release; Type: COMMENT; Schema: ops; Owner: -
 --
 
@@ -1507,45 +3725,10 @@ COMMENT ON TABLE ops.release IS 'P0-1 canonical release truth: the ONE object jo
 
 
 --
--- Name: CONSTRAINT promotion_release_requires_independent_attestation on release; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON CONSTRAINT promotion_release_requires_independent_attestation ON ops.release IS 'Program 5: approved through complete releases carry a named independent verifier and evidence; drafts and candidates may still collect it.';
-
-
---
--- Name: CONSTRAINT promotion_release_requires_rollback_readiness on release; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON CONSTRAINT promotion_release_requires_rollback_readiness ON ops.release IS 'Program 5: approved through complete releases must name a ready rollback or forward-fix plan; a boolean alone is insufficient.';
-
-
---
--- Name: CONSTRAINT production_promotion_requires_provider_version on release; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON CONSTRAINT production_promotion_requires_provider_version ON ops.release IS 'Program 5: a promoted Production release records the Cloudflare Workers provider and immutable provider version; drafts/candidates and history may still collect it.';
-
-
---
 -- Name: COLUMN release.artifact_digest; Type: COMMENT; Schema: ops; Owner: -
 --
 
 COMMENT ON COLUMN ops.release.artifact_digest IS 'Digest of the built artifact, produced by tools/release-manifest.py from the recorded SHA. Recomputing it from that SHA and getting this value back IS the "identical artifact rebuild" half of P0-1 acceptance.';
-
-
---
--- Name: COLUMN release.provider; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON COLUMN ops.release.provider IS 'Program 5 provider identity. Production promoted states are Cloudflare Workers and are frozen with provider_version_id.';
-
-
---
--- Name: COLUMN release.provider_version_id; Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON COLUMN ops.release.provider_version_id IS 'Program 5 immutable Cloudflare Workers version identifier approved for a Production release.';
 
 
 --
@@ -1563,6 +3746,59 @@ COMMENT ON COLUMN ops.release.abandoned_reason IS 'Why a release ended without e
 
 
 --
+-- Name: rule_admission; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_admission (
+    rule_id uuid NOT NULL,
+    guidance_intake_id uuid,
+    enforcement_class text NOT NULL,
+    binding_moment text NOT NULL,
+    applicability jsonb DEFAULT '{}'::jsonb NOT NULL,
+    projection jsonb NOT NULL,
+    reachability jsonb NOT NULL,
+    input_contract jsonb NOT NULL,
+    fixture_refs text[] DEFAULT '{}'::text[] NOT NULL,
+    state text DEFAULT 'draft'::text NOT NULL,
+    admitted_by uuid,
+    admitted_at timestamp with time zone,
+    reason text,
+    version integer DEFAULT 1 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT admitted_contract_is_complete CHECK (((state <> 'admitted'::text) OR ((admitted_by IS NOT NULL) AND (admitted_at IS NOT NULL) AND (jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof(applicability) = 'object'::text) AND (jsonb_typeof(projection) = 'object'::text) AND (jsonb_typeof(reachability) = 'object'::text) AND ((enforcement_class <> 'machine_enforceable'::text) OR (cardinality(fixture_refs) > 0))))),
+    CONSTRAINT rule_admission_binding_moment_check CHECK ((btrim(binding_moment) <> ''::text)),
+    CONSTRAINT rule_admission_enforcement_class_check CHECK ((enforcement_class = ANY (ARRAY['machine_enforceable'::text, 'judgment_advisory'::text, 'human_only'::text]))),
+    CONSTRAINT rule_admission_state_check CHECK ((state = ANY (ARRAY['draft'::text, 'admitted'::text, 'rejected'::text, 'needs_revision'::text]))),
+    CONSTRAINT rule_admission_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: TABLE rule_admission; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.rule_admission IS 'Normalized authority contract for one rule. AI may propose this shape; only an admitted row plus the rule activation route can make it binding.';
+
+
+--
+-- Name: rule_enforcement_point; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_enforcement_point (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    rule_id uuid NOT NULL,
+    control_key text NOT NULL,
+    implementation_ref text NOT NULL,
+    test_ref text NOT NULL,
+    enforcement_class text NOT NULL,
+    installed boolean DEFAULT false NOT NULL,
+    verified_at timestamp with time zone,
+    CONSTRAINT installed_control_has_verification CHECK (((NOT installed) OR (btrim(test_ref) <> ''::text))),
+    CONSTRAINT rule_enforcement_point_enforcement_class_check CHECK ((enforcement_class = ANY (ARRAY['deny_gate'::text, 'stop_gate'::text, 'schema'::text, 'surfacing'::text, 'transactional_schema'::text, 'judgment_ambient'::text])))
+);
+
+
+--
 -- Name: run; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -1571,7 +3807,6 @@ CREATE TABLE ops.run (
     correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
     kind text NOT NULL,
     service_id uuid NOT NULL,
-    release_id uuid,
     environment text NOT NULL,
     run_key text NOT NULL,
     state text NOT NULL,
@@ -1585,15 +3820,12 @@ CASE
     WHEN ((started_at IS NOT NULL) AND (ended_at IS NOT NULL)) THEN ((EXTRACT(epoch FROM (ended_at - started_at)) * (1000)::numeric))::integer
     ELSE NULL::integer
 END) STORED,
-    budget_ms integer,
     source_kind text NOT NULL,
     source_ref text NOT NULL,
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone,
     evidence_ref text,
     detail text,
-    recovery_strategy text,
-    recovery_plan_ref text,
     CONSTRAINT a_failure_names_its_class CHECK (((state <> ALL (ARRAY['failed'::text, 'timed_out'::text])) OR (failure_class IS NOT NULL))),
     CONSTRAINT a_run_that_ended_also_started CHECK (((ended_at IS NULL) OR (started_at IS NOT NULL))),
     CONSTRAINT a_terminal_run_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text])) OR (ended_at IS NOT NULL))),
@@ -1603,20 +3835,6 @@ END) STORED,
     CONSTRAINT run_source_kind_check CHECK ((source_kind = ANY (ARRAY['collector'::text, 'registry'::text, 'wrapper'::text, 'operator'::text]))),
     CONSTRAINT run_state_check CHECK ((state = ANY (ARRAY['scheduled'::text, 'queued'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text, 'stale'::text, 'unknown'::text])))
 );
-
-
---
--- Name: run Program 5 assurance checks; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.run
-    ADD CONSTRAINT run_budget_ms_positive CHECK (((budget_ms IS NULL) OR (budget_ms > 0))) NOT VALID;
-
-ALTER TABLE ONLY ops.run
-    ADD CONSTRAINT performance_run_assurance CHECK (((run_key !~~ 'performance.%'::text) OR ((release_id IS NOT NULL) AND (environment = 'production'::text) AND (evidence_ref IS NOT NULL) AND (budget_ms IS NOT NULL) AND ((state <> 'succeeded'::text) OR ((duration_ms > 0) AND (duration_ms <= budget_ms)))))) NOT VALID;
-
-ALTER TABLE ONLY ops.run
-    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = ANY (ARRAY['staging'::text, 'rehearsal'::text])) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = ANY (ARRAY['rollback'::text, 'forward_fix'::text])) AND (recovery_plan_ref IS NOT NULL)))) NOT VALID;
 
 
 --
@@ -1897,119 +4115,361 @@ CREATE VIEW ops.v_check_run AS
 
 
 --
--- Name: v_job_run; Type: VIEW; Schema: ops; Owner: -
+-- Name: actor; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE VIEW ops.v_job_run AS
- SELECT id,
-    correlation_id,
-    kind,
-    service_id,
-    environment,
-    run_key,
-    state,
-    failure_class,
-    exit_code,
-    attempt,
-    started_at,
-    ended_at,
-    duration_ms,
-    source_kind,
-    source_ref,
-    observed_at,
-    expires_at,
-    evidence_ref,
-    detail
-   FROM ops.run
-  WHERE (kind = 'job'::text);
+CREATE TABLE public.actor (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug text NOT NULL,
+    kind text NOT NULL,
+    display_name text NOT NULL,
+    email text,
+    active boolean DEFAULT true NOT NULL,
+    phone text,
+    CONSTRAINT actor_kind_check CHECK ((kind = ANY (ARRAY['human'::text, 'automation'::text, 'system'::text])))
+);
 
 
 --
--- Name: v_release_manifest; Type: VIEW; Schema: ops; Owner: -
+-- Name: loop_block; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE VIEW ops.v_release_manifest AS
- SELECT r.id AS release_id,
-    r.release_key,
-    r.correlation_id,
-    s.key AS service_key,
-    r.environment,
-    r.state,
-    r.git_sha AS code_git_sha,
-    r.artifact_digest AS code_artifact_digest,
-    r.dependency_lock_digest AS code_dependency_lock_digest,
-    r.sbom_ref AS code_sbom_ref,
-    r.schema_highest_migration,
-    r.migration_set,
-    r.config_fingerprint,
-    r.declared_env_differences,
-    r.asset_versions,
-    r.test_evidence_ref,
-    r.security_evidence_ref,
-    r.maker_actor,
-    r.maker_verification_ref,
-    r.plan_hash AS approval_plan_hash,
-    r.approved_by_actor,
-    r.approved_at,
-    r.approval_expires_at,
-        CASE
-            WHEN (r.approved_at IS NULL) THEN 'unapproved'::text
-            WHEN (r.approval_expires_at <= now()) THEN 'expired'::text
-            ELSE 'live'::text
-        END AS approval_status,
-    d.id AS deployment_id,
-    d.state AS deploy_state,
-    d.read_back_at AS deploy_read_back_at,
-    d.verification_evidence_ref AS deploy_verification_evidence_ref,
-    r.verifier_actor,
-    r.verifier_evidence_ref,
-    r.rollback_ready,
-    r.rollback_plan_ref,
-    r.work_request_ref,
-    r.source_kind,
-    r.source_ref,
-    r.observed_at,
-    r.expires_at,
-    ops.freshness(r.observed_at, r.expires_at) AS freshness,
-    r.performance_budget_ref,
-    r.performance_budget_ms,
-    r.recovery_strategy
-   FROM ((ops.release r
-     JOIN ops.service s ON ((s.id = r.service_id)))
-     LEFT JOIN LATERAL ( SELECT d2.id,
-            d2.correlation_id,
-            d2.service_id,
-            d2.environment,
-            d2.state,
-            d2.git_sha,
-            d2.release_ref,
-            d2.deployed_by_actor,
-            d2.verb_count,
-            d2.schema_highest_migration,
-            d2.doctrine_generation,
-            d2.started_at,
-            d2.ended_at,
-            d2.read_back_at,
-            d2.verification_evidence_ref,
-            d2.failure_class,
-            d2.rollback_of,
-            d2.source_kind,
-            d2.source_ref,
-            d2.observed_at,
-            d2.expires_at,
-            d2.detail,
-            d2.release_id
-           FROM ops.deployment d2
-          WHERE (d2.release_id = r.id)
-          ORDER BY d2.observed_at DESC
-         LIMIT 1) d ON (true));
+CREATE TABLE public.loop_block (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    rel_path text NOT NULL,
+    kind text NOT NULL,
+    seq integer NOT NULL,
+    block_key text,
+    prose_md text DEFAULT ''::text NOT NULL,
+    header_cols text[],
+    col_order text[],
+    renders_closed boolean DEFAULT false NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
+    CONSTRAINT loop_block_header_needs_columns CHECK (((header_cols IS NULL) OR (col_order IS NOT NULL))),
+    CONSTRAINT loop_block_kind_check CHECK ((kind = ANY (ARRAY['open_loop'::text, 'team_loop'::text, 'action_required'::text, 'idea'::text]))),
+    CONSTRAINT loop_block_prose_has_no_columns CHECK (((block_key IS NULL) = (col_order IS NULL)))
+);
 
 
 --
--- Name: VIEW v_release_manifest; Type: COMMENT; Schema: ops; Owner: -
+-- Name: TABLE loop_block; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW ops.v_release_manifest IS 'P0-1 assertion 1: ONE query returns code, schema, config, tests, approval, deploy and verification for one release. Seven lookups was the fragmentation this replaces.';
+COMMENT ON TABLE public.loop_block IS 'File scaffolding for the generated loop renders: the prose, the section order and the table headers of open-loops.md, open-loops-backlog.md, action-required.md and team-loops.md, stored as data so the render reproduces the file and the doctrine prose stays editable by the human rather than by a code change.';
+
+
+--
+-- Name: COLUMN loop_block.col_order; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_block.col_order IS 'Positional semantic column names. Vocabulary: number, owner, title, body, since_text, unblocks, source_note, closed_text, outcome, and extra:<key> for a cell the canonical set has no home for. A row may override this with its own col_order when the source row''s width disagrees with the header.';
+
+
+--
+-- Name: loop_item; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.loop_item (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    kind text NOT NULL,
+    number text NOT NULL,
+    block_id uuid NOT NULL,
+    render_seq integer NOT NULL,
+    col_order text[],
+    title text,
+    body text,
+    owner text,
+    since_text text,
+    unblocks text,
+    source_note text,
+    closed_text text,
+    outcome text,
+    extra_cells jsonb DEFAULT '{}'::jsonb NOT NULL,
+    marker text DEFAULT 'none'::text NOT NULL,
+    marker_literal text,
+    due_on date,
+    drift_critical boolean DEFAULT false NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    close_outcome text,
+    closed_by uuid,
+    closed_at timestamp with time zone,
+    tier text NOT NULL,
+    personal_to uuid,
+    version integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by uuid NOT NULL,
+    domain text,
+    blocker_class text,
+    blocker_detail text,
+    CONSTRAINT loop_item_blocker_class_known CHECK (((blocker_class IS NULL) OR (blocker_class = ANY (ARRAY['human_only'::text, 'counterparty'::text, 'ruling'::text, 'external_event'::text, 'other_lane'::text, 'capability'::text])))),
+    CONSTRAINT loop_item_blocker_detail_present CHECK (((blocker_class IS NULL) OR ((blocker_detail IS NOT NULL) AND (length(btrim(blocker_detail)) >= 12)))),
+    CONSTRAINT loop_item_closed_has_outcome CHECK (((status = 'open'::text) OR (close_outcome IS NOT NULL))),
+    CONSTRAINT loop_item_closed_stamped CHECK (((status = 'open'::text) = (closed_at IS NULL))),
+    CONSTRAINT loop_item_kind_check CHECK ((kind = ANY (ARRAY['open_loop'::text, 'team_loop'::text, 'action_required'::text, 'idea'::text]))),
+    CONSTRAINT loop_item_marker_check CHECK ((marker = ANY (ARRAY['bell'::text, 'dated'::text, 'decision'::text, 'none'::text]))),
+    CONSTRAINT loop_item_owner_known CHECK (((owner IS NULL) OR (owner = ANY (ARRAY['joe'::text, 'dell'::text, 'claude'::text, 'joint'::text])))),
+    CONSTRAINT loop_item_personal_tier CHECK (((tier = 'personal'::text) = (personal_to IS NOT NULL))),
+    CONSTRAINT loop_item_status_check CHECK ((status = ANY (ARRAY['open'::text, 'done'::text, 'dropped'::text]))),
+    CONSTRAINT loop_item_tier_check CHECK ((tier = ANY (ARRAY['personal'::text, 'shared'::text])))
+);
+
+
+--
+-- Name: TABLE loop_item; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.loop_item IS 'The three markdown accumulators as records (one-writer Phase A). One row per item in open-loops.md, open-loops-backlog.md, action-required.md and team-loops.md. Items change via the loop verbs (add-loop, update-loop, close-loop); the four files are rendered views of this table. NO SESSION HAND-EDITS THOSE FOUR FILES after the live flip.';
+
+
+--
+-- Name: COLUMN loop_item.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_item.kind IS 'open_loop / team_loop / action_required (0024) plus idea (0031, ORDER 40): a candidate idea awaiting a decision to act, rendered into 00_Context/idea-bank.md. An idea is deliberately NOT an open_loop — the bank holds what has no owner and no commitment yet, which is the distinction the file was created to preserve.';
+
+
+--
+-- Name: COLUMN loop_item.number; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_item.number IS 'The visible ref, verbatim and NOT unique — the source files contain real collisions (#111 twice in open-loops.md; #103/#95/#88/#108 across hot and backlog; T34 across Open and Done). Renumbering is a content change nobody ruled, so the collisions are reported, not resolved here.';
+
+
+--
+-- Name: COLUMN loop_item.owner; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_item.owner IS 'An ownership LABEL as the file states it (Joe/Claude, Joe→Dell, Dell''s brain→Joe), not a foreign key. Resolving it to actor rows would drop what the label says.';
+
+
+--
+-- Name: COLUMN loop_item.close_outcome; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_item.close_outcome IS 'Required to leave open. A closed row with no outcome is how the asker stops finding out, which is the failure team-loops was built to end.';
+
+
+--
+-- Name: COLUMN loop_item.domain; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_item.domain IS 'deals | prospecting | networking | marketing | business | system (loop_domain, Joe''s vocabulary 2026-08-02). NULL = not yet classified, and that renders as its own unsorted section rather than defaulting into a domain — a guessed classification would bury exactly what this column exists to surface. BOUNDARY RULE: classify by WHAT THE WORK IS, not who appears in it. A vendor introducing a PROSPECT normally means real intent and goes straight to DEALS; it is PROSPECTING only while no deal has formed and it is still conversion work (the Renalus C-125 case). A vendor introducing a VENDOR is networking. Connecting a prospect to a vendor is networking (reciprocity). Connecting a client to a vendor on a LIVE deal is deals. Prospecting is drawn narrowly on purpose: it carries the most volume, so anything adjacent that lands there drowns the lead work it exists to hold.';
+
+
+--
+-- Name: COLUMN loop_item.blocker_class; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_item.blocker_class IS 'Why the session that opened this loop could not do the work itself, from a closed list of states of the world OUTSIDE the session: human_only, counterparty, ruling, external_event, other_lane, capability. NULL on rows opened before migration 0081 (2026-08-09) and on kinds the gate does not cover (team_loop, action_required, idea). There is deliberately no value meaning "later" — a session that cannot name one of these can do the work.';
+
+
+--
+-- Name: COLUMN loop_item.blocker_detail; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.loop_item.blocker_detail IS 'The specific thing named: which person, which ruling, which date, which credential. "the landlord" is not a counterparty; "Sanders, the listing broker on C-112" is. Required by add-loop whenever blocker_class is set.';
+
+
+--
+-- Name: CONSTRAINT loop_item_owner_known ON loop_item; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON CONSTRAINT loop_item_owner_known ON public.loop_item IS 'One spelling per owner. Added 0089 after Joe 31 / joe 22 and Claude 4 / claude 92 meant every owner filter returned a fraction of the pile — including the autonomous drain queue, which selects on owner=claude and had been silently omitting four rows it was entitled to work. NOT VALID on purpose: it binds every future write without failing the migration on any historical row a human still needs to look at.';
+
+
+--
+-- Name: v_loops; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_loops AS
+ SELECT li.id AS loop_id,
+    li.kind,
+    li.number,
+    lb.rel_path AS renders_into,
+    lb.block_key AS section,
+    li.render_seq,
+    li.title,
+    li.body,
+    li.owner,
+    li.since_text,
+    li.unblocks,
+    li.source_note,
+    li.closed_text,
+    li.outcome,
+    li.marker,
+    li.marker_literal,
+    li.due_on,
+    li.drift_critical,
+    li.status,
+    li.close_outcome,
+    li.closed_at,
+    li.tier,
+    a.slug AS personal_to,
+    li.created_at,
+    li.updated_at,
+    li.version
+   FROM ((public.loop_item li
+     JOIN public.loop_block lb ON ((lb.id = li.block_id)))
+     LEFT JOIN public.actor a ON ((a.id = li.personal_to)));
+
+
+--
+-- Name: VIEW v_loops; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_loops IS 'Reader surface for the loop accumulators. SAFE COLUMNS ONLY (v_ref_index precedent): no block internals, no extra_cells, no actor uuids. tier and personal_to are carried BECAUSE the boundary that matters here is the personal/shared split — open-loops.md is Joe-personal, action-required.md and team-loops.md are shared. The consumer filters; the reader never sees the base table. This column list is a security boundary.';
+
+
+--
+-- Name: v_control_plane_actionable_loops; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_control_plane_actionable_loops AS
+ SELECT loop_id AS id,
+    owner,
+    'actionable'::text AS state,
+    NULL::text AS counterparty_ref,
+    NULL::text AS event_blocker_ref
+   FROM public.v_loops l
+  WHERE ((status = 'open'::text) AND (lower(COALESCE(owner, ''::text)) = 'system'::text) AND (personal_to IS NULL) AND (due_on IS NULL));
+
+
+--
+-- Name: v_control_plane_capability_candidate; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_control_plane_capability_candidate AS
+ SELECT w.id,
+    w.state,
+    w.project_context,
+    s.id AS session_id,
+    s.state AS session_state,
+    w.program_ordinal
+   FROM (ops.v_capability_program_next w
+     JOIN LATERAL ( SELECT x.id,
+            x.state
+           FROM ops.capability_agent_session x
+          WHERE ((x.work_request_id = w.id) AND (x.state = 'verification'::text))
+          ORDER BY x.updated_at DESC
+         LIMIT 1) s ON (true));
+
+
+--
+-- Name: doctrine_document; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.doctrine_document (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug text NOT NULL,
+    title text NOT NULL,
+    content_class text NOT NULL,
+    visibility text DEFAULT 'shared'::text NOT NULL,
+    owner_actor_id uuid,
+    review_policy_id uuid,
+    created_by uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    title_search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, ((COALESCE(title, ''::text) || ' '::text) || replace(slug, '-'::text, ' '::text)))) STORED,
+    CONSTRAINT doctrine_document_content_class_check CHECK ((content_class = ANY (ARRAY['playbook'::text, 'sop'::text, 'index'::text, 'reference'::text, 'dossier_narrative'::text, 'distillation'::text, 'rule'::text]))),
+    CONSTRAINT doctrine_document_visibility_check CHECK ((visibility = ANY (ARRAY['shared'::text, 'personal'::text])))
+);
+
+
+--
+-- Name: TABLE doctrine_document; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.doctrine_document IS 'A prose document migrated out of vault markdown (0075, doctrine-store P1). content_class ''rule'' is RESERVED for the P7 rule-store study — nothing writes it before that ruling.';
+
+
+--
+-- Name: doctrine_section; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.doctrine_section (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    document_id uuid NOT NULL,
+    section_key text NOT NULL,
+    title text,
+    ordinal integer DEFAULT 0 NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    current_revision_id uuid,
+    current_version bigint DEFAULT 0 NOT NULL,
+    body_hash text,
+    review_after timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    title_search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, ((COALESCE(title, ''::text) || ' '::text) || replace(section_key, '-'::text, ' '::text)))) STORED,
+    CONSTRAINT doctrine_section_status_check CHECK ((status = ANY (ARRAY['active'::text, 'retired'::text])))
+);
+
+
+--
+-- Name: TABLE doctrine_section; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.doctrine_section IS 'Stable-address unit of doctrine. section_key never changes; reordering changes ordinal only. current_version is the optimistic-concurrency token every write verb must present (base_version), the same contract as the rest of the record layer.';
+
+
+--
+-- Name: v_control_plane_doctrine_due; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_control_plane_doctrine_due AS
+ SELECT s.id,
+    d.slug,
+    s.review_after
+   FROM (public.doctrine_section s
+     JOIN public.doctrine_document d ON ((d.id = s.document_id)))
+  WHERE ((s.status = 'active'::text) AND (s.review_after <= now()));
+
+
+--
+-- Name: doctrine_gate_finding; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.doctrine_gate_finding (
+    run_id uuid NOT NULL,
+    check_key text NOT NULL,
+    severity text NOT NULL,
+    passed boolean NOT NULL,
+    message text NOT NULL,
+    path text DEFAULT ''::text NOT NULL
+);
+
+
+--
+-- Name: doctrine_gate_run; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.doctrine_gate_run (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    change_set_id uuid,
+    dry_run boolean DEFAULT false NOT NULL,
+    actor_id uuid NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    finished_at timestamp with time zone,
+    result text,
+    report jsonb DEFAULT '[]'::jsonb NOT NULL,
+    CONSTRAINT doctrine_gate_run_result_check CHECK ((result = ANY (ARRAY['pass'::text, 'fail'::text])))
+);
+
+
+--
+-- Name: v_control_plane_doctrine_failures; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_control_plane_doctrine_failures AS
+ SELECT ((('doctrine-gate:'::text || (f.run_id)::text) || ':'::text) || f.check_key) AS source_ref,
+    r.started_at AS observed_at
+   FROM (public.doctrine_gate_finding f
+     JOIN public.doctrine_gate_run r ON ((r.id = f.run_id)))
+  WHERE ((NOT f.passed) AND (r.started_at >= date_trunc('month'::text, now())));
 
 
 --
@@ -2065,6 +4525,722 @@ CREATE VIEW ops.v_service_environment_health AS
 --
 
 COMMENT ON VIEW ops.v_service_environment_health IS 'THE ONLY PLACE HEALTH IS EXPRESSED, and it is derived. The premortem names false health from stale collectors as the second most likely catastrophe; a stored health column is that failure mechanism. A silent collector reads unknown here because no green was ever written down.';
+
+
+--
+-- Name: v_control_plane_health_evidence; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_control_plane_health_evidence AS
+ SELECT 'live'::text AS evidence_class,
+    ((('health:'::text || h.service_key) || ':'::text) || h.environment) AS source_ref,
+    h.observed_at
+   FROM ops.v_service_environment_health h
+  WHERE (h.health = 'healthy'::text)
+UNION ALL
+ SELECT 'registry'::text AS evidence_class,
+    ('service:'::text || s.key) AS source_ref,
+    s.updated_at AS observed_at
+   FROM ops.service s
+  WHERE (s.retired_at IS NULL)
+UNION ALL
+ SELECT 'artifact'::text AS evidence_class,
+    ((('release:'::text || r.release_key) || ':'::text) || r.artifact_digest) AS source_ref,
+    r.observed_at
+   FROM ops.release r
+  WHERE ((r.state = 'complete'::text) AND (r.artifact_digest IS NOT NULL));
+
+
+--
+-- Name: deprecation; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.deprecation (
+    object_name text NOT NULL,
+    object_kind text NOT NULL,
+    replaced_by text,
+    reason text NOT NULL,
+    deprecated_at date DEFAULT CURRENT_DATE NOT NULL,
+    safe_to_drop_after date,
+    dropped_at date
+);
+
+
+--
+-- Name: TABLE deprecation; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.deprecation IS 'Things kept alive only for compatibility. A row here is a debt with a payoff date. `run.sh health` reads it, greps the repo, and reports whether anything still references each object — so deleting is a decision made on evidence rather than nerve. Nothing here is dropped automatically: dropping is irreversible, detecting is free.';
+
+
+--
+-- Name: v_control_plane_system_prune_candidates; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_control_plane_system_prune_candidates AS
+ SELECT ((object_kind || ':'::text) || object_name) AS subject_ref,
+    'stale'::text AS measurement
+   FROM public.deprecation d
+  WHERE ((dropped_at IS NULL) AND (safe_to_drop_after IS NOT NULL) AND (safe_to_drop_after <= CURRENT_DATE));
+
+
+--
+-- Name: v_cost_refusal_metric; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_cost_refusal_metric AS
+ SELECT date_trunc('month'::text, refused_at) AS month,
+    route_key,
+    reason,
+    count(*) AS refusal_count,
+    sum(estimated_cost_usd) AS refused_estimated_cost_usd,
+    max(refused_at) AS last_refused_at
+   FROM ops.cost_refusal
+  GROUP BY (date_trunc('month'::text, refused_at)), route_key, reason;
+
+
+--
+-- Name: v_guidance_revision_state; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_revision_state AS
+ SELECT r.id,
+    r.guidance_item_id,
+    r.version,
+    r.guidance_type,
+    r.scope,
+    r.activation,
+    r.consumer,
+    r.verification,
+    r.provenance,
+    r.delivery,
+    r.is_constitution,
+    r.supersedes_revision_id,
+    r.classified_by,
+    r.reason,
+    r.created_at,
+    COALESCE(e.state, 'proposed'::text) AS lifecycle_status,
+    e.id AS lifecycle_event_id,
+    e.authority_binding_id,
+    e.created_at AS lifecycle_at
+   FROM (ops.guidance_revision r
+     LEFT JOIN LATERAL ( SELECT le.id,
+            le.event_seq,
+            le.guidance_revision_id,
+            le.state,
+            le.authority_binding_id,
+            le.supersedes_event_id,
+            le.reason,
+            le.created_at
+           FROM ops.guidance_lifecycle_event le
+          WHERE (le.guidance_revision_id = r.id)
+          ORDER BY le.event_seq DESC
+         LIMIT 1) e ON (true));
+
+
+--
+-- Name: v_guidance_current; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_current AS
+ SELECT DISTINCT ON (i.id) i.id AS guidance_item_id,
+    i.source_rule_id,
+    i.guidance_intake_id,
+    i.source_clause,
+    i.is_primary,
+    i.split_group_id,
+    r.id AS guidance_revision_id,
+    r.version,
+    r.guidance_type,
+    r.scope,
+    r.activation,
+    r.consumer,
+    r.verification,
+    r.provenance,
+    r.delivery,
+    r.is_constitution,
+    r.classified_by,
+    r.reason,
+    r.lifecycle_at
+   FROM (ops.guidance_item i
+     JOIN ops.v_guidance_revision_state r ON ((r.guidance_item_id = i.id)))
+  WHERE (r.lifecycle_status = 'active'::text)
+  ORDER BY i.id, r.version DESC, r.lifecycle_at DESC, r.id DESC;
+
+
+--
+-- Name: v_guidance_constraint; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_constraint AS
+ SELECT g.guidance_item_id,
+    g.source_rule_id,
+    g.guidance_intake_id,
+    g.source_clause,
+    g.is_primary,
+    g.split_group_id,
+    g.guidance_revision_id,
+    g.version,
+    g.guidance_type,
+    g.scope,
+    g.activation,
+    g.consumer,
+    g.verification,
+    g.provenance,
+    g.delivery,
+    g.is_constitution,
+    g.classified_by,
+    g.reason,
+    g.lifecycle_at,
+    a.enforcement_class,
+    a.binding_moment,
+    a.applicability,
+    ep.control_key,
+    ep.implementation_ref,
+    ep.test_ref,
+    ep.verified_at
+   FROM ((ops.v_guidance_current g
+     JOIN ops.rule_admission a ON (((a.rule_id = g.source_rule_id) AND (a.state = 'admitted'::text))))
+     JOIN ops.rule_enforcement_point ep ON (((ep.rule_id = g.source_rule_id) AND ep.installed)))
+  WHERE (g.guidance_type = 'constraint'::text);
+
+
+--
+-- Name: v_guidance_situation_mapping_current; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_situation_mapping_current AS
+ SELECT DISTINCT ON (guidance_revision_id, concept_id, doctrine_section_id) id,
+    mapping_seq,
+    guidance_revision_id,
+    concept_id,
+    doctrine_section_id,
+    state,
+    authority_binding_id,
+    supersedes_mapping_id,
+    reason,
+    created_at
+   FROM ops.guidance_situation_mapping m
+  ORDER BY guidance_revision_id, concept_id, doctrine_section_id, mapping_seq DESC;
+
+
+--
+-- Name: doctrine_concept_mapping; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.doctrine_concept_mapping (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    concept_id uuid NOT NULL,
+    section_id uuid NOT NULL,
+    role text NOT NULL,
+    weight numeric(5,4) DEFAULT 1 NOT NULL,
+    rationale text NOT NULL,
+    status text DEFAULT 'proposed'::text NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    review_after timestamp with time zone,
+    proposer_id uuid NOT NULL,
+    approver_id uuid,
+    approved_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    repair_reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT doctrine_concept_mapping_check CHECK ((((status = 'approved'::text) = ((approver_id IS NOT NULL) AND (approved_at IS NOT NULL))) OR (status = ANY (ARRAY['retired'::text, 'needs_repair'::text])))),
+    CONSTRAINT doctrine_concept_mapping_rationale_check CHECK ((btrim(rationale) <> ''::text)),
+    CONSTRAINT doctrine_concept_mapping_role_check CHECK ((role = ANY (ARRAY['governs'::text, 'supports'::text]))),
+    CONSTRAINT doctrine_concept_mapping_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'retired'::text, 'needs_repair'::text]))),
+    CONSTRAINT doctrine_concept_mapping_weight_check CHECK (((weight > (0)::numeric) AND (weight <= (1)::numeric)))
+);
+
+
+--
+-- Name: retrieval_concept; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.retrieval_concept (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    concept_key text NOT NULL,
+    label text NOT NULL,
+    definition text NOT NULL,
+    status text DEFAULT 'proposed'::text NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    review_after timestamp with time zone,
+    proposer_id uuid NOT NULL,
+    approver_id uuid,
+    approved_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT retrieval_concept_check CHECK ((((status = 'approved'::text) = ((approver_id IS NOT NULL) AND (approved_at IS NOT NULL))) OR (status = 'retired'::text))),
+    CONSTRAINT retrieval_concept_concept_key_check CHECK ((concept_key ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text)),
+    CONSTRAINT retrieval_concept_definition_check CHECK ((btrim(definition) <> ''::text)),
+    CONSTRAINT retrieval_concept_label_check CHECK ((btrim(label) <> ''::text)),
+    CONSTRAINT retrieval_concept_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'retired'::text])))
+);
+
+
+--
+-- Name: v_guidance_doctrine_retrieval; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_doctrine_retrieval AS
+ SELECT g.guidance_item_id,
+    g.source_rule_id,
+    g.guidance_intake_id,
+    g.source_clause,
+    g.is_primary,
+    g.split_group_id,
+    g.guidance_revision_id,
+    g.version,
+    g.guidance_type,
+    g.scope,
+    g.activation,
+    g.consumer,
+    g.verification,
+    g.provenance,
+    g.delivery,
+    g.is_constitution,
+    g.classified_by,
+    g.reason,
+    g.lifecycle_at,
+    c.concept_key,
+    s.document_id,
+    s.section_key,
+    m.id AS guidance_mapping_id,
+    dcm.id AS retrieval_mapping_id
+   FROM ((((ops.v_guidance_current g
+     JOIN ops.v_guidance_situation_mapping_current m ON (((m.guidance_revision_id = g.guidance_revision_id) AND (m.state = 'active'::text))))
+     JOIN public.retrieval_concept c ON (((c.id = m.concept_id) AND (c.status = 'approved'::text))))
+     JOIN public.doctrine_section s ON (((s.id = m.doctrine_section_id) AND (s.status = 'active'::text))))
+     JOIN public.doctrine_concept_mapping dcm ON (((dcm.concept_id = m.concept_id) AND (dcm.section_id = m.doctrine_section_id) AND (dcm.status = 'approved'::text))))
+  WHERE (g.guidance_type = 'doctrine'::text);
+
+
+--
+-- Name: v_guidance_example; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_example AS
+ SELECT guidance_item_id,
+    source_rule_id,
+    guidance_intake_id,
+    source_clause,
+    is_primary,
+    split_group_id,
+    guidance_revision_id,
+    version,
+    guidance_type,
+    scope,
+    activation,
+    consumer,
+    verification,
+    provenance,
+    delivery,
+    is_constitution,
+    classified_by,
+    reason,
+    lifecycle_at
+   FROM ops.v_guidance_current
+  WHERE (guidance_type = 'example'::text);
+
+
+--
+-- Name: rule; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rule (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    statement text NOT NULL,
+    human_quote text,
+    taught_by uuid NOT NULL,
+    scope jsonb DEFAULT '{}'::jsonb NOT NULL,
+    personal_to uuid,
+    status text DEFAULT 'proposed'::text NOT NULL,
+    activated_by uuid,
+    activated_at timestamp with time zone,
+    enforcement text DEFAULT 'prose'::text NOT NULL,
+    supersedes uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_check CHECK (((status <> 'active'::text) OR (activated_by IS NOT NULL))),
+    CONSTRAINT rule_enforcement_check CHECK ((enforcement = ANY (ARRAY['prose'::text, 'checklist'::text, 'gate'::text, 'constraint'::text, 'code'::text]))),
+    CONSTRAINT rule_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'active'::text, 'retired'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: COLUMN rule.human_quote; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.rule.human_quote IS 'verbatim words of the teacher. IMMUTABLE once non-empty — amend-rule may fill a NULL, never overwrite. NULL means imported doctrine, not a paraphrase passed off as a quote.';
+
+
+--
+-- Name: COLUMN rule.version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.rule.version IS '[A2] optimistic-concurrency token for amend-rule; bumped by trg_touch_row on every update';
+
+
+--
+-- Name: v_guidance_precedent; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_precedent AS
+ SELECT g.guidance_item_id AS decision_id,
+    (COALESCE(r.activated_at, r.created_at))::date AS entry_date,
+    "left"(r.statement, 240) AS title,
+    r.human_quote,
+    g.reason AS agent_rationale,
+    a.slug AS author,
+    jsonb_build_object('source', 'typed-guidance', 'source_rule_id', g.source_rule_id, 'guidance_revision_id', g.guidance_revision_id) AS provenance,
+    ((((COALESCE(r.statement, ''::text) || ' '::text) || COALESCE(r.human_quote, ''::text)) || ' '::text) || g.reason) AS haystack
+   FROM ((ops.v_guidance_current g
+     JOIN public.rule r ON ((r.id = g.source_rule_id)))
+     LEFT JOIN public.actor a ON ((a.id = r.taught_by)))
+  WHERE (g.guidance_type = 'precedent'::text);
+
+
+--
+-- Name: v_guidance_preference; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_preference AS
+ SELECT guidance_item_id,
+    source_rule_id,
+    guidance_intake_id,
+    source_clause,
+    is_primary,
+    split_group_id,
+    guidance_revision_id,
+    version,
+    guidance_type,
+    scope,
+    activation,
+    consumer,
+    verification,
+    provenance,
+    delivery,
+    is_constitution,
+    classified_by,
+    reason,
+    lifecycle_at
+   FROM ops.v_guidance_current
+  WHERE (guidance_type = 'preference'::text);
+
+
+--
+-- Name: v_guidance_procedure; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_procedure AS
+ SELECT guidance_item_id,
+    source_rule_id,
+    guidance_intake_id,
+    source_clause,
+    is_primary,
+    split_group_id,
+    guidance_revision_id,
+    version,
+    guidance_type,
+    scope,
+    activation,
+    consumer,
+    verification,
+    provenance,
+    delivery,
+    is_constitution,
+    classified_by,
+    reason,
+    lifecycle_at
+   FROM ops.v_guidance_current
+  WHERE (guidance_type = 'procedure'::text);
+
+
+--
+-- Name: v_guidance_projection_summary; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_projection_summary AS
+ SELECT guidance_type,
+    count(*) AS active_items,
+    encode(public.digest(string_agg((guidance_revision_id)::text, ','::text ORDER BY guidance_revision_id), 'sha256'::text), 'hex'::text) AS projection_digest
+   FROM ops.v_guidance_current
+  GROUP BY guidance_type;
+
+
+--
+-- Name: v_guidance_registry_state; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_registry_state AS
+ SELECT r.id AS registry_id,
+    COALESCE(e.state, 'inactive'::text) AS state,
+    e.authority_receipt_id,
+    e.manifest_digest,
+    e.created_at AS changed_at
+   FROM (ops.guidance_registry r
+     LEFT JOIN LATERAL ( SELECT ge.id,
+            ge.event_seq,
+            ge.registry_id,
+            ge.state,
+            ge.authority_receipt_id,
+            ge.manifest_digest,
+            ge.reason,
+            ge.created_at
+           FROM ops.guidance_registry_event ge
+          WHERE (ge.registry_id = r.id)
+          ORDER BY ge.event_seq DESC
+         LIMIT 1) e ON (true));
+
+
+--
+-- Name: v_guidance_rubric; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_guidance_rubric AS
+ SELECT guidance_item_id,
+    source_rule_id,
+    guidance_intake_id,
+    source_clause,
+    is_primary,
+    split_group_id,
+    guidance_revision_id,
+    version,
+    guidance_type,
+    scope,
+    activation,
+    consumer,
+    verification,
+    provenance,
+    delivery,
+    is_constitution,
+    classified_by,
+    reason,
+    lifecycle_at
+   FROM ops.v_guidance_current
+  WHERE (guidance_type = 'rubric'::text);
+
+
+--
+-- Name: v_job_control; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_job_control AS
+ SELECT j.id,
+    j.definition_key,
+    j.definition_version,
+    j.correlation_id,
+    j.state,
+    j.mode,
+    j.attempt,
+    j.max_attempts,
+    j.scheduled_for,
+    j.next_attempt_at,
+    j.lease_owner,
+    j.leased_until,
+    j.last_failure_class,
+    j.created_at,
+    j.started_at,
+    j.ended_at,
+    d.risk,
+    d.execution_kind,
+    d.owner_actor,
+    ( SELECT count(*) AS count
+           FROM ops.job_receipt r
+          WHERE (r.job_id = j.id)) AS receipt_count
+   FROM (ops.job j
+     JOIN ops.job_definition d ON (((d.key = j.definition_key) AND (d.version = j.definition_version))));
+
+
+--
+-- Name: v_job_cost; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_job_cost AS
+ SELECT date_trunc('month'::text, a.started_at) AS month,
+    j.definition_key,
+    a.provider_route,
+    sum(COALESCE(a.input_tokens, 0)) AS input_tokens,
+    sum(COALESCE(a.output_tokens, 0)) AS output_tokens,
+    sum(COALESCE(a.cost_usd, (0)::numeric)) AS cost_usd,
+    count(*) AS attempts
+   FROM (ops.job_attempt a
+     JOIN ops.job j ON ((j.id = a.job_id)))
+  GROUP BY (date_trunc('month'::text, a.started_at)), j.definition_key, a.provider_route;
+
+
+--
+-- Name: v_job_run; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_job_run AS
+ SELECT id,
+    correlation_id,
+    kind,
+    service_id,
+    environment,
+    run_key,
+    state,
+    failure_class,
+    exit_code,
+    attempt,
+    started_at,
+    ended_at,
+    duration_ms,
+    source_kind,
+    source_ref,
+    observed_at,
+    expires_at,
+    evidence_ref,
+    detail
+   FROM ops.run
+  WHERE (kind = 'job'::text);
+
+
+--
+-- Name: v_provider_route; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_provider_route AS
+ WITH latest AS (
+         SELECT DISTINCT ON (provider_observation.route_key) provider_observation.route_key,
+            provider_observation.status,
+            provider_observation.latency_ms,
+            provider_observation.error_class,
+            provider_observation.observed_at,
+            provider_observation.expires_at
+           FROM ops.provider_observation
+          ORDER BY provider_observation.route_key, provider_observation.observed_at DESC
+        )
+ SELECT r.route_key,
+    r.priority,
+    r.enabled,
+    r.endpoint_ref,
+    r.capability_tags,
+    r.max_concurrency,
+    r.monthly_budget_usd,
+    r.created_at,
+    r.updated_at,
+        CASE
+            WHEN (NOT r.enabled) THEN 'disabled'::text
+            WHEN (l.route_key IS NULL) THEN 'unknown'::text
+            WHEN (l.expires_at < now()) THEN 'stale'::text
+            ELSE l.status
+        END AS health,
+    l.latency_ms,
+    l.error_class,
+    l.observed_at
+   FROM (ops.provider_route r
+     LEFT JOIN latest l USING (route_key))
+  ORDER BY r.priority;
+
+
+--
+-- Name: v_release_manifest; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_release_manifest AS
+ SELECT r.id AS release_id,
+    r.release_key,
+    r.correlation_id,
+    s.key AS service_key,
+    r.environment,
+    r.state,
+    r.git_sha AS code_git_sha,
+    r.artifact_digest AS code_artifact_digest,
+    r.dependency_lock_digest AS code_dependency_lock_digest,
+    r.sbom_ref AS code_sbom_ref,
+    r.schema_highest_migration,
+    r.migration_set,
+    r.config_fingerprint,
+    r.declared_env_differences,
+    r.asset_versions,
+    r.test_evidence_ref,
+    r.security_evidence_ref,
+    r.maker_actor,
+    r.maker_verification_ref,
+    r.plan_hash AS approval_plan_hash,
+    r.approved_by_actor,
+    r.approved_at,
+    r.approval_expires_at,
+        CASE
+            WHEN (r.approved_at IS NULL) THEN 'unapproved'::text
+            WHEN (r.approval_expires_at <= now()) THEN 'expired'::text
+            ELSE 'live'::text
+        END AS approval_status,
+    d.id AS deployment_id,
+    d.state AS deploy_state,
+    d.read_back_at AS deploy_read_back_at,
+    d.verification_evidence_ref AS deploy_verification_evidence_ref,
+    r.verifier_actor,
+    r.verifier_evidence_ref,
+    r.rollback_ready,
+    r.rollback_plan_ref,
+    r.work_request_ref,
+    r.source_kind,
+    r.source_ref,
+    r.observed_at,
+    r.expires_at,
+    ops.freshness(r.observed_at, r.expires_at) AS freshness
+   FROM ((ops.release r
+     JOIN ops.service s ON ((s.id = r.service_id)))
+     LEFT JOIN LATERAL ( SELECT d2.id,
+            d2.correlation_id,
+            d2.service_id,
+            d2.environment,
+            d2.state,
+            d2.git_sha,
+            d2.release_ref,
+            d2.deployed_by_actor,
+            d2.verb_count,
+            d2.schema_highest_migration,
+            d2.doctrine_generation,
+            d2.started_at,
+            d2.ended_at,
+            d2.read_back_at,
+            d2.verification_evidence_ref,
+            d2.failure_class,
+            d2.rollback_of,
+            d2.source_kind,
+            d2.source_ref,
+            d2.observed_at,
+            d2.expires_at,
+            d2.detail,
+            d2.release_id
+           FROM ops.deployment d2
+          WHERE (d2.release_id = r.id)
+          ORDER BY d2.observed_at DESC
+         LIMIT 1) d ON (true));
+
+
+--
+-- Name: VIEW v_release_manifest; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON VIEW ops.v_release_manifest IS 'P0-1 assertion 1: ONE query returns code, schema, config, tests, approval, deploy and verification for one release. Seven lookups was the fragmentation this replaces.';
+
+
+--
+-- Name: v_rule_applicability; Type: VIEW; Schema: ops; Owner: -
+--
+
+CREATE VIEW ops.v_rule_applicability AS
+ SELECT r.id AS rule_id,
+    r.status,
+    a.enforcement_class,
+    a.binding_moment,
+    a.applicability,
+    a.projection,
+    a.reachability,
+    a.version AS admission_version,
+    a.state AS admission_state,
+    COALESCE(( SELECT count(*) AS count
+           FROM ops.rule_enforcement_point ep
+          WHERE ((ep.rule_id = r.id) AND ep.installed)), (0)::bigint) AS installed_controls
+   FROM (public.rule r
+     JOIN ops.rule_admission a ON ((a.rule_id = r.id)));
 
 
 --
@@ -2240,6 +5416,26 @@ CREATE VIEW ops.v_work_shape_current WITH (security_invoker='true') AS
 
 
 --
+-- Name: workflow_acceptance; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.workflow_acceptance (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workflow_key text NOT NULL,
+    workflow_version integer NOT NULL,
+    mode text NOT NULL,
+    status text NOT NULL,
+    receipt_ref text NOT NULL,
+    accepted_by text,
+    note text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT accepted_evidence_names_actor CHECK (((status <> 'accepted'::text) OR (accepted_by IS NOT NULL))),
+    CONSTRAINT workflow_acceptance_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text]))),
+    CONSTRAINT workflow_acceptance_status_check CHECK ((status = ANY (ARRAY['observed'::text, 'accepted'::text, 'rejected'::text])))
+);
+
+
+--
 -- Name: activity; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2287,22 +5483,6 @@ CREATE TABLE public.activity_kind (
 --
 
 COMMENT ON TABLE public.activity_kind IS 'Activity vocabulary. is_contact answers ONE question: does a row of this kind count as having TOUCHED the subject? v_last_touch aggregates only these. note and task are deliberately false — an internal annotation is not a touch (the 2026-07-30 freeze shipped 13 rulings as activity rows and stamped cold records warm; that is the defect this flag closes).';
-
-
---
--- Name: actor; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.actor (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    slug text NOT NULL,
-    kind text NOT NULL,
-    display_name text NOT NULL,
-    email text,
-    active boolean DEFAULT true NOT NULL,
-    phone text,
-    CONSTRAINT actor_kind_check CHECK ((kind = ANY (ARRAY['human'::text, 'automation'::text, 'system'::text])))
-);
 
 
 --
@@ -3297,28 +6477,6 @@ COMMENT ON TABLE public.defect IS 'The system''s memory of its own failures (010
 
 
 --
--- Name: deprecation; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.deprecation (
-    object_name text NOT NULL,
-    object_kind text NOT NULL,
-    replaced_by text,
-    reason text NOT NULL,
-    deprecated_at date DEFAULT CURRENT_DATE NOT NULL,
-    safe_to_drop_after date,
-    dropped_at date
-);
-
-
---
--- Name: TABLE deprecation; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.deprecation IS 'Things kept alive only for compatibility. A row here is a debt with a payoff date. `run.sh health` reads it, greps the repo, and reports whether anything still references each object — so deleting is a decision made on evidence rather than nerve. Nothing here is dropped automatically: dropping is irreversible, detecting is free.';
-
-
---
 -- Name: diagnostic_route; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3428,33 +6586,6 @@ COMMENT ON TABLE public.doctrine_claim IS 'Cooperative expiring claims (default 
 
 
 --
--- Name: doctrine_document; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.doctrine_document (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    slug text NOT NULL,
-    title text NOT NULL,
-    content_class text NOT NULL,
-    visibility text DEFAULT 'shared'::text NOT NULL,
-    owner_actor_id uuid,
-    review_policy_id uuid,
-    created_by uuid,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT doctrine_document_content_class_check CHECK ((content_class = ANY (ARRAY['playbook'::text, 'sop'::text, 'index'::text, 'reference'::text, 'dossier_narrative'::text, 'distillation'::text, 'rule'::text]))),
-    CONSTRAINT doctrine_document_visibility_check CHECK ((visibility = ANY (ARRAY['shared'::text, 'personal'::text])))
-);
-
-
---
--- Name: TABLE doctrine_document; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.doctrine_document IS 'A prose document migrated out of vault markdown (0075, doctrine-store P1). content_class ''rule'' is RESERVED for the P7 rule-store study — nothing writes it before that ruling.';
-
-
---
 -- Name: doctrine_edge; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3504,37 +6635,6 @@ CREATE TABLE public.doctrine_gate_check (
 --
 
 COMMENT ON TABLE public.doctrine_gate_check IS 'The validation registry: a check is a code function (impl_key, deployed with the connector) plus this row. A NEW GATE IS A FUNCTION AND A ROW, never a verb rewrite. Only deterministic synchronous checks may be severity=block; a block finding aborts the commit transaction.';
-
-
---
--- Name: doctrine_gate_finding; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.doctrine_gate_finding (
-    run_id uuid NOT NULL,
-    check_key text NOT NULL,
-    severity text NOT NULL,
-    passed boolean NOT NULL,
-    message text NOT NULL,
-    path text DEFAULT ''::text NOT NULL
-);
-
-
---
--- Name: doctrine_gate_run; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.doctrine_gate_run (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    change_set_id uuid,
-    dry_run boolean DEFAULT false NOT NULL,
-    actor_id uuid NOT NULL,
-    started_at timestamp with time zone DEFAULT now() NOT NULL,
-    finished_at timestamp with time zone,
-    result text,
-    report jsonb DEFAULT '[]'::jsonb NOT NULL,
-    CONSTRAINT doctrine_gate_run_result_check CHECK ((result = ANY (ARRAY['pass'::text, 'fail'::text])))
-);
 
 
 --
@@ -3645,33 +6745,6 @@ CREATE TABLE public.doctrine_revision (
 --
 
 COMMENT ON TABLE public.doctrine_revision IS 'Append-only. body is the structured form (JSON schema per content_class, enforced by the body_schema gate); plain_text is the searchable rendering of the same content. content_hash detects no-op writes and drift.';
-
-
---
--- Name: doctrine_section; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.doctrine_section (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    document_id uuid NOT NULL,
-    section_key text NOT NULL,
-    title text,
-    ordinal integer DEFAULT 0 NOT NULL,
-    status text DEFAULT 'active'::text NOT NULL,
-    current_revision_id uuid,
-    current_version bigint DEFAULT 0 NOT NULL,
-    body_hash text,
-    review_after timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT doctrine_section_status_check CHECK ((status = ANY (ARRAY['active'::text, 'retired'::text])))
-);
-
-
---
--- Name: TABLE doctrine_section; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.doctrine_section IS 'Stable-address unit of doctrine. section_key never changes; reordering changes ordinal only. current_version is the optimistic-concurrency token every write verb must present (base_version), the same contract as the rest of the record layer.';
 
 
 --
@@ -4084,45 +7157,6 @@ END) STORED,
 
 
 --
--- Name: loop_block; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.loop_block (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    rel_path text NOT NULL,
-    kind text NOT NULL,
-    seq integer NOT NULL,
-    block_key text,
-    prose_md text DEFAULT ''::text NOT NULL,
-    header_cols text[],
-    col_order text[],
-    renders_closed boolean DEFAULT false NOT NULL,
-    version integer DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_by uuid NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_by uuid NOT NULL,
-    CONSTRAINT loop_block_header_needs_columns CHECK (((header_cols IS NULL) OR (col_order IS NOT NULL))),
-    CONSTRAINT loop_block_kind_check CHECK ((kind = ANY (ARRAY['open_loop'::text, 'team_loop'::text, 'action_required'::text, 'idea'::text]))),
-    CONSTRAINT loop_block_prose_has_no_columns CHECK (((block_key IS NULL) = (col_order IS NULL)))
-);
-
-
---
--- Name: TABLE loop_block; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.loop_block IS 'File scaffolding for the generated loop renders: the prose, the section order and the table headers of open-loops.md, open-loops-backlog.md, action-required.md and team-loops.md, stored as data so the render reproduces the file and the doctrine prose stays editable by the human rather than by a code change.';
-
-
---
--- Name: COLUMN loop_block.col_order; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_block.col_order IS 'Positional semantic column names. Vocabulary: number, owner, title, body, since_text, unblocks, source_note, closed_text, outcome, and extra:<key> for a cell the canonical set has no home for. A row may override this with its own col_order when the source row''s width disagrees with the header.';
-
-
---
 -- Name: loop_domain; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4131,120 +7165,6 @@ CREATE TABLE public.loop_domain (
     label text NOT NULL,
     sort integer NOT NULL
 );
-
-
---
--- Name: loop_item; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.loop_item (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    kind text NOT NULL,
-    number text NOT NULL,
-    block_id uuid NOT NULL,
-    render_seq integer NOT NULL,
-    col_order text[],
-    title text,
-    body text,
-    owner text,
-    since_text text,
-    unblocks text,
-    source_note text,
-    closed_text text,
-    outcome text,
-    extra_cells jsonb DEFAULT '{}'::jsonb NOT NULL,
-    marker text DEFAULT 'none'::text NOT NULL,
-    marker_literal text,
-    due_on date,
-    drift_critical boolean DEFAULT false NOT NULL,
-    status text DEFAULT 'open'::text NOT NULL,
-    close_outcome text,
-    closed_by uuid,
-    closed_at timestamp with time zone,
-    tier text NOT NULL,
-    personal_to uuid,
-    version integer DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_by uuid NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_by uuid NOT NULL,
-    domain text,
-    blocker_class text,
-    blocker_detail text,
-    CONSTRAINT loop_item_blocker_class_known CHECK (((blocker_class IS NULL) OR (blocker_class = ANY (ARRAY['human_only'::text, 'counterparty'::text, 'ruling'::text, 'external_event'::text, 'other_lane'::text, 'capability'::text])))),
-    CONSTRAINT loop_item_blocker_detail_present CHECK (((blocker_class IS NULL) OR ((blocker_detail IS NOT NULL) AND (length(btrim(blocker_detail)) >= 12)))),
-    CONSTRAINT loop_item_closed_has_outcome CHECK (((status = 'open'::text) OR (close_outcome IS NOT NULL))),
-    CONSTRAINT loop_item_closed_stamped CHECK (((status = 'open'::text) = (closed_at IS NULL))),
-    CONSTRAINT loop_item_kind_check CHECK ((kind = ANY (ARRAY['open_loop'::text, 'team_loop'::text, 'action_required'::text, 'idea'::text]))),
-    CONSTRAINT loop_item_marker_check CHECK ((marker = ANY (ARRAY['bell'::text, 'dated'::text, 'decision'::text, 'none'::text]))),
-    CONSTRAINT loop_item_owner_known CHECK (((owner IS NULL) OR (owner = ANY (ARRAY['joe'::text, 'dell'::text, 'claude'::text, 'joint'::text])))),
-    CONSTRAINT loop_item_personal_tier CHECK (((tier = 'personal'::text) = (personal_to IS NOT NULL))),
-    CONSTRAINT loop_item_status_check CHECK ((status = ANY (ARRAY['open'::text, 'done'::text, 'dropped'::text]))),
-    CONSTRAINT loop_item_tier_check CHECK ((tier = ANY (ARRAY['personal'::text, 'shared'::text])))
-);
-
-
---
--- Name: TABLE loop_item; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.loop_item IS 'The three markdown accumulators as records (one-writer Phase A). One row per item in open-loops.md, open-loops-backlog.md, action-required.md and team-loops.md. Items change via the loop verbs (add-loop, update-loop, close-loop); the four files are rendered views of this table. NO SESSION HAND-EDITS THOSE FOUR FILES after the live flip.';
-
-
---
--- Name: COLUMN loop_item.kind; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_item.kind IS 'open_loop / team_loop / action_required (0024) plus idea (0031, ORDER 40): a candidate idea awaiting a decision to act, rendered into 00_Context/idea-bank.md. An idea is deliberately NOT an open_loop — the bank holds what has no owner and no commitment yet, which is the distinction the file was created to preserve.';
-
-
---
--- Name: COLUMN loop_item.number; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_item.number IS 'The visible ref, verbatim and NOT unique — the source files contain real collisions (#111 twice in open-loops.md; #103/#95/#88/#108 across hot and backlog; T34 across Open and Done). Renumbering is a content change nobody ruled, so the collisions are reported, not resolved here.';
-
-
---
--- Name: COLUMN loop_item.owner; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_item.owner IS 'An ownership LABEL as the file states it (Joe/Claude, Joe→Dell, Dell''s brain→Joe), not a foreign key. Resolving it to actor rows would drop what the label says.';
-
-
---
--- Name: COLUMN loop_item.close_outcome; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_item.close_outcome IS 'Required to leave open. A closed row with no outcome is how the asker stops finding out, which is the failure team-loops was built to end.';
-
-
---
--- Name: COLUMN loop_item.domain; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_item.domain IS 'deals | prospecting | networking | marketing | business | system (loop_domain, Joe''s vocabulary 2026-08-02). NULL = not yet classified, and that renders as its own unsorted section rather than defaulting into a domain — a guessed classification would bury exactly what this column exists to surface. BOUNDARY RULE: classify by WHAT THE WORK IS, not who appears in it. A vendor introducing a PROSPECT normally means real intent and goes straight to DEALS; it is PROSPECTING only while no deal has formed and it is still conversion work (the Renalus C-125 case). A vendor introducing a VENDOR is networking. Connecting a prospect to a vendor is networking (reciprocity). Connecting a client to a vendor on a LIVE deal is deals. Prospecting is drawn narrowly on purpose: it carries the most volume, so anything adjacent that lands there drowns the lead work it exists to hold.';
-
-
---
--- Name: COLUMN loop_item.blocker_class; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_item.blocker_class IS 'Why the session that opened this loop could not do the work itself, from a closed list of states of the world OUTSIDE the session: human_only, counterparty, ruling, external_event, other_lane, capability. NULL on rows opened before migration 0081 (2026-08-09) and on kinds the gate does not cover (team_loop, action_required, idea). There is deliberately no value meaning "later" — a session that cannot name one of these can do the work.';
-
-
---
--- Name: COLUMN loop_item.blocker_detail; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.loop_item.blocker_detail IS 'The specific thing named: which person, which ruling, which date, which credential. "the landlord" is not a counterparty; "Sanders, the listing broker on C-112" is. Required by add-loop whenever blocker_class is set.';
-
-
---
--- Name: CONSTRAINT loop_item_owner_known ON loop_item; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON CONSTRAINT loop_item_owner_known ON public.loop_item IS 'One spelling per owner. Added 0089 after Joe 31 / joe 22 and Claude 4 / claude 92 meant every owner filter returned a fraction of the pile — including the autonomous drain queue, which selects on owner=claude and had been silently omitting four rows it was entitled to work. NOT VALID on purpose: it binds every future write without failing the migration on any historical row a human still needs to look at.';
 
 
 --
@@ -4900,42 +7820,104 @@ CREATE TABLE public.registration (
 
 
 --
--- Name: rule; Type: TABLE; Schema: public; Owner: -
+-- Name: retrieval_phrase; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.rule (
+CREATE TABLE public.retrieval_phrase (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    statement text NOT NULL,
-    human_quote text,
-    taught_by uuid NOT NULL,
-    scope jsonb DEFAULT '{}'::jsonb NOT NULL,
-    personal_to uuid,
+    concept_id uuid NOT NULL,
+    display_phrase text NOT NULL,
+    normalized_phrase text GENERATED ALWAYS AS (public.normalize_retrieval_phrase(display_phrase)) STORED,
+    match_mode text NOT NULL,
+    min_similarity numeric(4,3) DEFAULT 0.350 NOT NULL,
+    weight numeric(5,4) DEFAULT 1 NOT NULL,
     status text DEFAULT 'proposed'::text NOT NULL,
-    activated_by uuid,
-    activated_at timestamp with time zone,
-    enforcement text DEFAULT 'prose'::text NOT NULL,
-    supersedes uuid,
+    version bigint DEFAULT 1 NOT NULL,
+    review_after timestamp with time zone,
+    source text NOT NULL,
+    source_ref text NOT NULL,
+    proposer_id uuid NOT NULL,
+    approver_id uuid,
+    approved_at timestamp with time zone,
+    retired_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT rule_check CHECK (((status <> 'active'::text) OR (activated_by IS NOT NULL))),
-    CONSTRAINT rule_enforcement_check CHECK ((enforcement = ANY (ARRAY['prose'::text, 'checklist'::text, 'gate'::text, 'constraint'::text, 'code'::text]))),
-    CONSTRAINT rule_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'active'::text, 'retired'::text, 'superseded'::text])))
+    CONSTRAINT retrieval_phrase_check CHECK ((((status = 'approved'::text) = ((approver_id IS NOT NULL) AND (approved_at IS NOT NULL))) OR (status = 'retired'::text))),
+    CONSTRAINT retrieval_phrase_display_phrase_check CHECK ((btrim(display_phrase) <> ''::text)),
+    CONSTRAINT retrieval_phrase_match_mode_check CHECK ((match_mode = ANY (ARRAY['exact'::text, 'fts'::text, 'trgm'::text]))),
+    CONSTRAINT retrieval_phrase_min_similarity_check CHECK (((min_similarity >= (0)::numeric) AND (min_similarity <= (1)::numeric))),
+    CONSTRAINT retrieval_phrase_normalized_phrase_check CHECK ((array_length(regexp_split_to_array(normalized_phrase, '\s+'::text), 1) >= 2)),
+    CONSTRAINT retrieval_phrase_source_check CHECK ((source = ANY (ARRAY['golden_miss'::text, 'no_hit_log'::text, 'session_proposal'::text, 'manual'::text]))),
+    CONSTRAINT retrieval_phrase_source_ref_check CHECK ((btrim(source_ref) <> ''::text)),
+    CONSTRAINT retrieval_phrase_status_check CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'retired'::text]))),
+    CONSTRAINT retrieval_phrase_weight_check CHECK (((weight > (0)::numeric) AND (weight <= (1)::numeric)))
 );
 
 
 --
--- Name: COLUMN rule.human_quote; Type: COMMENT; Schema: public; Owner: -
+-- Name: retrieval_proposal; Type: TABLE; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.rule.human_quote IS 'verbatim words of the teacher. IMMUTABLE once non-empty — amend-rule may fill a NULL, never overwrite. NULL means imported doctrine, not a paraphrase passed off as a quote.';
+CREATE TABLE public.retrieval_proposal (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    proposal_type text NOT NULL,
+    payload jsonb NOT NULL,
+    reason text NOT NULL,
+    proposer_id uuid NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    reviewer_id uuid,
+    resulting_row_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    idempotency_key uuid NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    reviewed_at timestamp with time zone,
+    CONSTRAINT retrieval_proposal_check CHECK (((status = 'pending'::text) = ((reviewer_id IS NULL) AND (reviewed_at IS NULL)))),
+    CONSTRAINT retrieval_proposal_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
+    CONSTRAINT retrieval_proposal_proposal_type_check CHECK ((proposal_type = ANY (ARRAY['concept'::text, 'phrase'::text, 'mapping'::text, 'retire'::text]))),
+    CONSTRAINT retrieval_proposal_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT retrieval_proposal_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'superseded'::text])))
+);
 
 
 --
--- Name: COLUMN rule.version; Type: COMMENT; Schema: public; Owner: -
+-- Name: retrieval_query_log; Type: TABLE; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.rule.version IS '[A2] optimistic-concurrency token for amend-rule; bumped by trg_touch_row on every update';
+CREATE TABLE public.retrieval_query_log (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    normalized_hash text NOT NULL,
+    result_count integer NOT NULL,
+    score_bands jsonb NOT NULL,
+    selected_row_ids uuid[] NOT NULL,
+    policy_id text NOT NULL,
+    policy_version bigint NOT NULL,
+    explicit_hit boolean NOT NULL,
+    scope_ref text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT retrieval_query_log_normalized_hash_check CHECK ((normalized_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT retrieval_query_log_result_count_check CHECK ((result_count >= 0))
+);
+
+
+--
+-- Name: retrieval_ranking_policy; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.retrieval_ranking_policy (
+    policy_id text NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    formula text NOT NULL,
+    config jsonb NOT NULL,
+    golden_suite_digest text NOT NULL,
+    status text DEFAULT 'candidate'::text NOT NULL,
+    is_default boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    approved_at timestamp with time zone,
+    CONSTRAINT retrieval_ranking_policy_config_check CHECK ((jsonb_typeof(config) = 'object'::text)),
+    CONSTRAINT retrieval_ranking_policy_formula_check CHECK ((formula = ANY (ARRAY['weighted_sum'::text, 'coequal_normalized'::text]))),
+    CONSTRAINT retrieval_ranking_policy_golden_suite_digest_check CHECK ((golden_suite_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT retrieval_ranking_policy_status_check CHECK ((status = ANY (ARRAY['candidate'::text, 'active'::text, 'retired'::text])))
+);
 
 
 --
@@ -5791,6 +8773,320 @@ CREATE VIEW public.v_contact AS
 --
 
 COMMENT ON VIEW public.v_contact IS 'One row per living party with contact type DERIVED from two independent axes (Joe, 2026-08-02): journey_stage from the role records, is_vendor from whether a vendor record exists. contact_type renders "Vendor + Client" etc. without anyone typing it, so it cannot drift. prospect_by_default implements "any past client is also a prospect for a future deal" as a DEFAULT, suppressed when contact_state is paused or do_not_contact — because "if a deal ended badly we may not handle them like a prospect due to the context".';
+
+
+--
+-- Name: v_control_plane_content_fuel_rotation; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_content_fuel_rotation AS
+ SELECT lane,
+    temperature,
+    NULL::text AS source_class,
+    'versioned_rotation_policy_only'::text AS evidence_state
+   FROM ( VALUES ('local-healthcare'::text,'local'::text), ('rotating-cold-lane'::text,'cold'::text)) policy(lane, temperature);
+
+
+--
+-- Name: v_control_plane_deal_history_queue; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_deal_history_queue AS
+ WITH thursday_enrichment AS (
+         SELECT j.id AS job_id,
+            j.scheduled_for,
+            j.mode,
+            ((r_1.evidence ->> 'subjects_processed'::text))::integer AS subjects_processed,
+            row_number() OVER (PARTITION BY j.mode, (date_trunc('week'::text, (j.scheduled_for AT TIME ZONE 'America/Chicago'::text))) ORDER BY j.scheduled_for DESC, r_1.created_at DESC) AS rn
+           FROM (ops.job_receipt r_1
+             JOIN ops.job j ON ((j.id = r_1.job_id)))
+          WHERE ((j.definition_key = 'contact-enrichment-weekly'::text) AND (r_1.kind = 'completion'::text) AND (EXTRACT(isodow FROM (j.scheduled_for AT TIME ZONE 'America/Chicago'::text)) = (4)::numeric) AND (jsonb_typeof((r_1.evidence -> 'subjects_processed'::text)) = 'number'::text) AND (((r_1.evidence ->> 'subjects_processed'::text))::integer >= 0))
+        ), weekly AS (
+         SELECT thursday_enrichment.job_id,
+            thursday_enrichment.scheduled_for,
+            thursday_enrichment.mode,
+            thursday_enrichment.subjects_processed,
+                CASE
+                    WHEN (thursday_enrichment.subjects_processed >= 30) THEN 15
+                    ELSE 25
+                END AS slice_limit
+           FROM thursday_enrichment
+          WHERE (thursday_enrichment.rn = 1)
+        ), raw AS (
+         SELECT 'client'::text AS subject_type,
+            c.id AS subject_id,
+            max(d.created_at) AS newest_deal_at
+           FROM ((public.client c
+             JOIN public.party p ON ((p.id = c.party_id)))
+             JOIN public.deal d ON ((d.client_id = c.id)))
+          WHERE ((d.salesforce_id IS NOT NULL) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.record_flag f
+                  WHERE ((f.subject_type = 'client'::text) AND (f.subject_id = c.id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
+          GROUP BY c.id
+        UNION ALL
+         SELECT 'party'::text AS text,
+            dp.party_id,
+            max(d.created_at) AS max
+           FROM ((public.deal_participant dp
+             JOIN public.deal d ON ((d.id = dp.deal_id)))
+             JOIN public.party p ON ((p.id = dp.party_id)))
+          WHERE ((d.salesforce_id IS NOT NULL) AND (dp.party_id IS NOT NULL) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.record_flag f
+                  WHERE ((f.subject_type = 'party'::text) AND (f.subject_id = dp.party_id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
+          GROUP BY dp.party_id
+        ), ranked AS (
+         SELECT r_1.subject_type,
+            r_1.subject_id,
+            r_1.newest_deal_at,
+            (row_number() OVER (ORDER BY r_1.newest_deal_at DESC NULLS LAST, r_1.subject_type, r_1.subject_id))::integer AS priority
+           FROM raw r_1
+        )
+ SELECT r.subject_type,
+    r.subject_id,
+    'unverified'::text AS verification,
+    r.priority,
+    'canonical_counterparty'::text AS source_class,
+    w.slice_limit,
+    w.subjects_processed AS enrichment_subject_count,
+    w.scheduled_for AS enrichment_scheduled_for,
+    w.mode AS enrichment_mode
+   FROM (ranked r
+     CROSS JOIN weekly w)
+  WHERE (r.priority <= w.slice_limit);
+
+
+--
+-- Name: v_expired_verification; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_expired_verification AS
+ WITH floor_cfg AS (
+         SELECT COALESCE(( SELECT ((system_config.value #>> '{}'::text[]))::integer AS int4
+                   FROM public.system_config
+                  WHERE (system_config.key = 'forgetting.age_floor_days'::text)), 30) AS days
+        ), touches AS (
+         SELECT COALESCE(a.vendor_id, a.client_id, a.lead_id, a.deal_id) AS subject_id,
+            count(*) AS touch_count
+           FROM public.activity a
+          GROUP BY COALESCE(a.vendor_id, a.client_id, a.lead_id, a.deal_id)
+        )
+ SELECT f.id AS flag_id,
+    f.subject_type,
+    f.subject_id,
+    f.kind,
+    f.observed_at,
+    f.expires_on,
+        CASE
+            WHEN ((f.expires_on IS NOT NULL) AND (f.expires_on < CURRENT_DATE)) THEN 'expired'::text
+            ELSE 'unstamped_volatile'::text
+        END AS reason,
+    COALESCE(t.touch_count, (0)::bigint) AS subject_touches,
+    ((f.expires_on IS NOT NULL) AND (f.expires_on < (CURRENT_DATE - ( SELECT floor_cfg.days
+           FROM floor_cfg)))) AS past_age_floor
+   FROM (public.record_flag f
+     LEFT JOIN touches t ON ((t.subject_id = f.subject_id)))
+  WHERE ((((f.expires_on IS NOT NULL) AND (f.expires_on < CURRENT_DATE)) OR ((f.kind = ANY (ARRAY['verified'::text, 'title'::text, 'email'::text, 'cell'::text, 'office_phone'::text])) AND (f.expires_on IS NULL) AND (f.observed_at < (now() - '180 days'::interval)))) AND (NOT (EXISTS ( SELECT 1
+           FROM public.record_flag g
+          WHERE ((g.subject_type = f.subject_type) AND (g.subject_id = f.subject_id) AND (g.id <> f.id) AND (g.observed_at > f.observed_at) AND ((g.kind = f.kind) OR (g.kind = 'verified'::text)) AND (g.expires_on IS NOT NULL) AND (g.expires_on >= CURRENT_DATE) AND ((g.value ->> 'found'::text) IS DISTINCT FROM 'false'::text))))))
+  ORDER BY ((f.expires_on IS NOT NULL) AND (f.expires_on < (CURRENT_DATE - ( SELECT floor_cfg.days
+           FROM floor_cfg)))) DESC, COALESCE(t.touch_count, (0)::bigint) DESC, f.observed_at;
+
+
+--
+-- Name: VIEW v_expired_verification; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_expired_verification IS 'The re-verify queue (0071, ordering 0073, supersession 0104). expired = the row said when it stops being trustworthy and that day passed; unstamped_volatile = a volatile-kind verification (title/contact facts age with promotions and job moves) never given an expiry and now older than 180 days. Either way the fact reads as UNVERIFIED for decisions until re-checked — nothing is deleted. 0104: a row leaves this queue once a NEWER flag on the same subject re-verifies it (same kind, or an umbrella ''verified'' pass) AND that newer flag is itself stamped and unexpired and is not a not-found row. Before 0104 the queue could never drain, because record-finding only adds rows — re-verifying a subject left the stale row in place forever.';
+
+
+--
+-- Name: v_control_plane_enrichment_queue; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_enrichment_queue AS
+ SELECT subject_type,
+    subject_id,
+    reason AS reverification_due,
+    'not_current'::text AS current_verification_status,
+    (row_number() OVER (ORDER BY past_age_floor DESC, subject_touches DESC, observed_at, subject_id))::integer AS priority,
+    COALESCE((expires_on)::timestamp with time zone, observed_at) AS expired_at
+   FROM public.v_expired_verification q;
+
+
+--
+-- Name: VIEW v_control_plane_enrichment_queue; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_control_plane_enrichment_queue IS 'Control-plane re-verification projection. Every row is expired or unstamped volatile evidence, so this view never calls a fact verified or current.';
+
+
+--
+-- Name: v_control_plane_idea_candidates; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_idea_candidates AS
+ SELECT (c.id)::text AS id,
+    COALESCE(NULLIF(c.topic, ''::text), c.kind) AS title,
+    max(COALESCE(p.live_at, p.scheduled_at)) AS last_surfaced
+   FROM (public.content_piece c
+     LEFT JOIN public.placement p ON ((p.piece_id = c.id)))
+  WHERE (c.status = ANY (ARRAY['idea'::text, 'drafted'::text, 'in_review'::text, 'approved'::text, 'edited_approved'::text]))
+  GROUP BY c.id, c.topic, c.kind;
+
+
+--
+-- Name: v_control_plane_npi_delta; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_npi_delta AS
+ SELECT source_key AS lane,
+    state AS source_state,
+    vertical AS source_entity_type,
+    NULL::boolean AS territory_match,
+    NULL::text AS entity_type,
+    'unprocessed'::text AS delta_state,
+    source AS source_lane,
+    created_at
+   FROM public.candidate_pool p
+  WHERE ((source = 'npi-sweep'::text) AND (status = 'pool'::text));
+
+
+--
+-- Name: v_control_plane_radar_candidates; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_radar_candidates AS
+ SELECT source AS lane,
+    score,
+    updated_at,
+    est_lease_event
+   FROM public.candidate_pool p
+  WHERE ((source = ANY (ARRAY['corp-filings'::text, 'upstream'::text, 'renewal-radar'::text])) AND (status = 'pool'::text) AND (score IS NOT NULL));
+
+
+--
+-- Name: v_control_plane_social_coverage; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_social_coverage AS
+ SELECT scheduled_at
+   FROM public.placement p
+  WHERE (scheduled_at IS NOT NULL);
+
+
+--
+-- Name: v_control_plane_social_metric_exports; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_social_metric_exports AS
+ SELECT m.placement_id,
+    p.external_id,
+    p.platform,
+    m.observed_at AS source_observed_at,
+    m.kind AS metric_kind,
+    m.value AS metric_value,
+    p.live_at,
+    p.scheduled_at,
+    NULL::boolean AS owned_account
+   FROM (public.v_placement_metric_latest m
+     JOIN public.placement p ON ((p.id = m.placement_id)))
+  WHERE (p.external_id IS NOT NULL);
+
+
+--
+-- Name: v_control_plane_social_sources; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_social_sources AS
+ SELECT ('content:'::text || (id)::text) AS source_ref
+   FROM public.content_piece c
+  WHERE (status = ANY (ARRAY['idea'::text, 'drafted'::text, 'in_review'::text, 'approved'::text, 'edited_approved'::text]))
+  ORDER BY updated_at DESC;
+
+
+--
+-- Name: v_decision_entry; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_decision_entry AS
+ SELECT rs.external_key,
+    split_part(rs.external_key, '#'::text, 1) AS source_file,
+    split_part(rs.external_key, '#'::text, 2) AS session_key,
+    (e.occurred_at)::date AS entry_date,
+    act.slug AS author,
+    (e.new_value ->> 'title'::text) AS title,
+    e.human_quote,
+    e.agent_rationale,
+    e.cause,
+    ((e.new_value ->> 'quote_absent'::text))::boolean AS quote_absent,
+    (e.new_value ->> 'provenance'::text) AS provenance,
+    e.subject_id AS decision_id,
+    e.id AS event_id,
+    (e.new_value ->> 'cost_delta'::text) AS cost_delta,
+    (e.new_value ->> 'quality_delta'::text) AS quality_delta,
+    (e.new_value ? 'cost_delta'::text) AS priced,
+    e.occurred_at
+   FROM ((public.record_source rs
+     JOIN public.event e ON (((e.id = rs.entity_id) AND (rs.entity_type = 'event'::text))))
+     JOIN public.actor act ON ((act.id = e.actor_id)))
+  WHERE (rs.source_system = 'decision-history'::text);
+
+
+--
+-- Name: VIEW v_decision_entry; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_decision_entry IS 'One row per logged decision, as decision-history.md renders it. 0085 added cost_delta / quality_delta / priced: what a build cost and what it bought, recorded at the moment it shipped. 0110 added occurred_at, the full timestamp behind entry_date: ORDER BY occurred_at DESC, never by entry_date alone, or entries logged on the same day sort arbitrarily and a byte-budgeted render drops whichever ones luck puts last. entry_date remains a date and remains what the render prints as a heading.';
+
+
+--
+-- Name: v_correction_sweep_decisions; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_correction_sweep_decisions AS
+ SELECT entry_date,
+    title,
+    human_quote
+   FROM public.v_decision_entry
+  WHERE ((human_quote IS NOT NULL) AND (btrim(human_quote) <> ''::text));
+
+
+--
+-- Name: v_defect_class; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_defect_class AS
+ SELECT defect_class,
+    (count(*))::integer AS occurrences,
+    min(occurred_on) AS first_seen,
+    max(occurred_on) AS last_seen,
+    (count(*) FILTER (WHERE (detected_by = 'human'::text)))::integer AS caught_by_human,
+    (array_agg(DISTINCT source_unread) FILTER (WHERE (source_unread IS NOT NULL)))[1:5] AS sources_unread,
+    (array_agg(DISTINCT rule_violated) FILTER (WHERE (rule_violated IS NOT NULL)))[1:5] AS rules_violated
+   FROM public.defect
+  GROUP BY defect_class;
+
+
+--
+-- Name: VIEW v_defect_class; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_defect_class IS 'One row per defect class: how many times, when first and last, how many the HUMAN had to catch, and the artifacts that keep going unread (0103, loop #185). This is what a session is handed at start instead of being handed the prose rules and trusted.';
+
+
+--
+-- Name: v_correction_sweep_defects; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_correction_sweep_defects AS
+ SELECT defect_class,
+    occurrences,
+    caught_by_human,
+    first_seen,
+    last_seen,
+    sources_unread,
+    rules_violated
+   FROM public.v_defect_class;
 
 
 --
@@ -7031,41 +10327,6 @@ SELECT
 
 
 --
--- Name: v_decision_entry; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_decision_entry AS
- SELECT rs.external_key,
-    split_part(rs.external_key, '#'::text, 1) AS source_file,
-    split_part(rs.external_key, '#'::text, 2) AS session_key,
-    (e.occurred_at)::date AS entry_date,
-    act.slug AS author,
-    (e.new_value ->> 'title'::text) AS title,
-    e.human_quote,
-    e.agent_rationale,
-    e.cause,
-    ((e.new_value ->> 'quote_absent'::text))::boolean AS quote_absent,
-    (e.new_value ->> 'provenance'::text) AS provenance,
-    e.subject_id AS decision_id,
-    e.id AS event_id,
-    (e.new_value ->> 'cost_delta'::text) AS cost_delta,
-    (e.new_value ->> 'quality_delta'::text) AS quality_delta,
-    (e.new_value ? 'cost_delta'::text) AS priced,
-    e.occurred_at
-   FROM ((public.record_source rs
-     JOIN public.event e ON (((e.id = rs.entity_id) AND (rs.entity_type = 'event'::text))))
-     JOIN public.actor act ON ((act.id = e.actor_id)))
-  WHERE (rs.source_system = 'decision-history'::text);
-
-
---
--- Name: VIEW v_decision_entry; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON VIEW public.v_decision_entry IS 'One row per logged decision, as decision-history.md renders it. 0085 added cost_delta / quality_delta / priced: what a build cost and what it bought, recorded at the moment it shipped. 0110 added occurred_at, the full timestamp behind entry_date: ORDER BY occurred_at DESC, never by entry_date alone, or entries logged on the same day sort arbitrarily and a byte-budgeted render drops whichever ones luck puts last. entry_date remains a date and remains what the render prints as a heading.';
-
-
---
 -- Name: v_defect; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -7093,29 +10354,6 @@ CREATE VIEW public.v_defect AS
 --
 
 COMMENT ON VIEW public.v_defect IS 'Every defect with its rule statement and author resolved (0103). carr_reader holds no grant on any base table, so this is the only way a read session sees the log at all.';
-
-
---
--- Name: v_defect_class; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_defect_class AS
- SELECT defect_class,
-    (count(*))::integer AS occurrences,
-    min(occurred_on) AS first_seen,
-    max(occurred_on) AS last_seen,
-    (count(*) FILTER (WHERE (detected_by = 'human'::text)))::integer AS caught_by_human,
-    (array_agg(DISTINCT source_unread) FILTER (WHERE (source_unread IS NOT NULL)))[1:5] AS sources_unread,
-    (array_agg(DISTINCT rule_violated) FILTER (WHERE (rule_violated IS NOT NULL)))[1:5] AS rules_violated
-   FROM public.defect
-  GROUP BY defect_class;
-
-
---
--- Name: VIEW v_defect_class; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON VIEW public.v_defect_class IS 'One row per defect class: how many times, when first and last, how many the HUMAN had to catch, and the artifacts that keep going unread (0103, loop #185). This is what a session is handed at start instead of being handed the prose rules and trusted.';
 
 
 --
@@ -7382,50 +10620,6 @@ CREATE VIEW public.v_drip_conflict AS
 --
 
 COMMENT ON VIEW public.v_drip_conflict IS 'Leads queued on a PROSPECTING drip whose linked client is live. Empty is the correct state. Added 0045 after four clients in active deals were found on the Monthly Newsletter — latent, since loop #47 (first send) has never fired, which is exactly why nothing caught it. "not ilike client care" rather than a list of prospecting campaigns: a list goes stale the first time someone adds a campaign and forgets this view exists.';
-
-
---
--- Name: v_expired_verification; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_expired_verification AS
- WITH floor_cfg AS (
-         SELECT COALESCE(( SELECT ((system_config.value #>> '{}'::text[]))::integer AS int4
-                   FROM public.system_config
-                  WHERE (system_config.key = 'forgetting.age_floor_days'::text)), 30) AS days
-        ), touches AS (
-         SELECT COALESCE(a.vendor_id, a.client_id, a.lead_id, a.deal_id) AS subject_id,
-            count(*) AS touch_count
-           FROM public.activity a
-          GROUP BY COALESCE(a.vendor_id, a.client_id, a.lead_id, a.deal_id)
-        )
- SELECT f.id AS flag_id,
-    f.subject_type,
-    f.subject_id,
-    f.kind,
-    f.observed_at,
-    f.expires_on,
-        CASE
-            WHEN ((f.expires_on IS NOT NULL) AND (f.expires_on < CURRENT_DATE)) THEN 'expired'::text
-            ELSE 'unstamped_volatile'::text
-        END AS reason,
-    COALESCE(t.touch_count, (0)::bigint) AS subject_touches,
-    ((f.expires_on IS NOT NULL) AND (f.expires_on < (CURRENT_DATE - ( SELECT floor_cfg.days
-           FROM floor_cfg)))) AS past_age_floor
-   FROM (public.record_flag f
-     LEFT JOIN touches t ON ((t.subject_id = f.subject_id)))
-  WHERE ((((f.expires_on IS NOT NULL) AND (f.expires_on < CURRENT_DATE)) OR ((f.kind = ANY (ARRAY['verified'::text, 'title'::text, 'email'::text, 'cell'::text, 'office_phone'::text])) AND (f.expires_on IS NULL) AND (f.observed_at < (now() - '180 days'::interval)))) AND (NOT (EXISTS ( SELECT 1
-           FROM public.record_flag g
-          WHERE ((g.subject_type = f.subject_type) AND (g.subject_id = f.subject_id) AND (g.id <> f.id) AND (g.observed_at > f.observed_at) AND ((g.kind = f.kind) OR (g.kind = 'verified'::text)) AND (g.expires_on IS NOT NULL) AND (g.expires_on >= CURRENT_DATE) AND ((g.value ->> 'found'::text) IS DISTINCT FROM 'false'::text))))))
-  ORDER BY ((f.expires_on IS NOT NULL) AND (f.expires_on < (CURRENT_DATE - ( SELECT floor_cfg.days
-           FROM floor_cfg)))) DESC, COALESCE(t.touch_count, (0)::bigint) DESC, f.observed_at;
-
-
---
--- Name: VIEW v_expired_verification; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON VIEW public.v_expired_verification IS 'The re-verify queue (0071, ordering 0073, supersession 0104). expired = the row said when it stops being trustworthy and that day passed; unstamped_volatile = a volatile-kind verification (title/contact facts age with promotions and job moves) never given an expiry and now older than 180 days. Either way the fact reads as UNVERIFIED for decisions until re-checked — nothing is deleted. 0104: a row leaves this queue once a NEWER flag on the same subject re-verifies it (same kind, or an umbrella ''verified'' pass) AND that newer flag is itself stamped and unexpired and is not a not-found row. Before 0104 the queue could never drain, because record-finding only adds rows — re-verifying a subject left the stale row in place forever.';
 
 
 --
@@ -8276,49 +11470,6 @@ COMMENT ON VIEW public.v_loop_proximity_coverage IS 'What share of the open back
 
 
 --
--- Name: v_loops; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_loops AS
- SELECT li.id AS loop_id,
-    li.kind,
-    li.number,
-    lb.rel_path AS renders_into,
-    lb.block_key AS section,
-    li.render_seq,
-    li.title,
-    li.body,
-    li.owner,
-    li.since_text,
-    li.unblocks,
-    li.source_note,
-    li.closed_text,
-    li.outcome,
-    li.marker,
-    li.marker_literal,
-    li.due_on,
-    li.drift_critical,
-    li.status,
-    li.close_outcome,
-    li.closed_at,
-    li.tier,
-    a.slug AS personal_to,
-    li.created_at,
-    li.updated_at,
-    li.version
-   FROM ((public.loop_item li
-     JOIN public.loop_block lb ON ((lb.id = li.block_id)))
-     LEFT JOIN public.actor a ON ((a.id = li.personal_to)));
-
-
---
--- Name: VIEW v_loops; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON VIEW public.v_loops IS 'Reader surface for the loop accumulators. SAFE COLUMNS ONLY (v_ref_index precedent): no block internals, no extra_cells, no actor uuids. tier and personal_to are carried BECAUSE the boundary that matters here is the personal/shared split — open-loops.md is Joe-personal, action-required.md and team-loops.md are shared. The consumer filters; the reader never sees the base table. This column list is a security boundary.';
-
-
---
 -- Name: v_marketing_measurement_coverage; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -8776,6 +11927,68 @@ COMMENT ON VIEW public.v_record_flag_subject IS 'Every record_flag with its subj
 
 
 --
+-- Name: v_retrieval_concepts_without_targets; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_retrieval_concepts_without_targets AS
+ SELECT id,
+    concept_key,
+    label,
+    review_after
+   FROM public.retrieval_concept c
+  WHERE ((status = 'approved'::text) AND (NOT (EXISTS ( SELECT 1
+           FROM (public.doctrine_concept_mapping m
+             JOIN public.doctrine_section s ON (((s.id = m.section_id) AND (s.status = 'active'::text) AND (s.current_revision_id IS NOT NULL))))
+          WHERE ((m.concept_id = c.id) AND (m.status = 'approved'::text))))));
+
+
+--
+-- Name: v_retrieval_mapping_repair; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_retrieval_mapping_repair AS
+ SELECT m.id,
+    m.concept_id,
+    m.section_id,
+    m.role,
+    m.weight,
+    m.rationale,
+    m.status,
+    m.version,
+    m.review_after,
+    m.proposer_id,
+    m.approver_id,
+    m.approved_at,
+    m.retired_at,
+    m.repair_reason,
+    m.created_at,
+    m.updated_at,
+    d.slug AS doc_slug,
+    s.section_key,
+    s.status AS section_status
+   FROM ((public.doctrine_concept_mapping m
+     JOIN public.doctrine_section s ON ((s.id = m.section_id)))
+     JOIN public.doctrine_document d ON ((d.id = s.document_id)))
+  WHERE ((m.status = 'needs_repair'::text) OR (s.status <> 'active'::text) OR (s.current_revision_id IS NULL));
+
+
+--
+-- Name: v_retrieval_health; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_retrieval_health AS
+ SELECT 'mapping_repair_queue'::text AS metric,
+    count(*) AS count,
+    'nonzero -> work v_retrieval_mapping_repair before approving more curation'::text AS bound_action
+   FROM public.v_retrieval_mapping_repair
+UNION ALL
+ SELECT 'concepts_without_active_targets'::text AS metric,
+    count(*) AS count,
+    'nonzero -> map or retire every row in v_retrieval_concepts_without_targets'::text AS bound_action
+   FROM public.v_retrieval_concepts_without_targets;
+
+
+--
 -- Name: v_role_timeouts; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -9184,6 +12397,22 @@ ALTER TABLE ONLY neon_auth.verification
 
 
 --
+-- Name: authority_receipt authority_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.authority_receipt
+    ADD CONSTRAINT authority_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: authority_receipt authority_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.authority_receipt
+    ADD CONSTRAINT authority_receipt_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: capability_agent_session capability_agent_session_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -9200,11 +12429,235 @@ ALTER TABLE ONLY ops.capability_verification
 
 
 --
+-- Name: cognition_job cognition_job_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cognition_job
+    ADD CONSTRAINT cognition_job_pkey PRIMARY KEY (key, version);
+
+
+--
+-- Name: cognition_result_cache cognition_result_cache_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cognition_result_cache
+    ADD CONSTRAINT cognition_result_cache_pkey PRIMARY KEY (cache_key);
+
+
+--
+-- Name: cost_refusal cost_refusal_job_id_attempt_route_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_refusal
+    ADD CONSTRAINT cost_refusal_job_id_attempt_route_key_key UNIQUE (job_id, attempt, route_key);
+
+
+--
+-- Name: cost_refusal cost_refusal_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_refusal
+    ADD CONSTRAINT cost_refusal_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cost_reservation cost_reservation_job_id_attempt_route_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_reservation
+    ADD CONSTRAINT cost_reservation_job_id_attempt_route_key_key UNIQUE (job_id, attempt, route_key);
+
+
+--
+-- Name: cost_reservation cost_reservation_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_reservation
+    ADD CONSTRAINT cost_reservation_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: deployment deployment_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
 ALTER TABLE ONLY ops.deployment
     ADD CONSTRAINT deployment_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: device_evidence_principal device_evidence_principal_device_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.device_evidence_principal
+    ADD CONSTRAINT device_evidence_principal_device_id_key UNIQUE (device_id);
+
+
+--
+-- Name: device_evidence_principal device_evidence_principal_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.device_evidence_principal
+    ADD CONSTRAINT device_evidence_principal_pkey PRIMARY KEY (login_role);
+
+
+--
+-- Name: device_evidence_receipt device_evidence_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.device_evidence_receipt
+    ADD CONSTRAINT device_evidence_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: device_evidence_receipt device_evidence_receipt_job_id_builder_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.device_evidence_receipt
+    ADD CONSTRAINT device_evidence_receipt_job_id_builder_key_key UNIQUE (job_id, builder_key);
+
+
+--
+-- Name: device_evidence_receipt device_evidence_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.device_evidence_receipt
+    ADD CONSTRAINT device_evidence_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_authority_binding guidance_authority_binding_authority_receipt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_authority_binding
+    ADD CONSTRAINT guidance_authority_binding_authority_receipt_id_key UNIQUE (authority_receipt_id);
+
+
+--
+-- Name: guidance_authority_binding guidance_authority_binding_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_authority_binding
+    ADD CONSTRAINT guidance_authority_binding_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_intake guidance_intake_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_intake
+    ADD CONSTRAINT guidance_intake_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_item guidance_item_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_item
+    ADD CONSTRAINT guidance_item_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_item guidance_item_source_rule_id_source_clause_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_item
+    ADD CONSTRAINT guidance_item_source_rule_id_source_clause_key UNIQUE (source_rule_id, source_clause);
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_event_seq_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_lifecycle_event
+    ADD CONSTRAINT guidance_lifecycle_event_event_seq_key UNIQUE (event_seq);
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_guidance_revision_id_authority_bin_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_lifecycle_event
+    ADD CONSTRAINT guidance_lifecycle_event_guidance_revision_id_authority_bin_key UNIQUE (guidance_revision_id, authority_binding_id, state);
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_lifecycle_event
+    ADD CONSTRAINT guidance_lifecycle_event_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_registry_event guidance_registry_event_event_seq_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry_event
+    ADD CONSTRAINT guidance_registry_event_event_seq_key UNIQUE (event_seq);
+
+
+--
+-- Name: guidance_registry_event guidance_registry_event_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry_event
+    ADD CONSTRAINT guidance_registry_event_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_registry_event guidance_registry_event_registry_id_authority_receipt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry_event
+    ADD CONSTRAINT guidance_registry_event_registry_id_authority_receipt_id_key UNIQUE (registry_id, authority_receipt_id);
+
+
+--
+-- Name: guidance_registry guidance_registry_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry
+    ADD CONSTRAINT guidance_registry_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_registry guidance_registry_singleton_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry
+    ADD CONSTRAINT guidance_registry_singleton_key UNIQUE (singleton);
+
+
+--
+-- Name: guidance_revision guidance_revision_guidance_item_id_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_revision
+    ADD CONSTRAINT guidance_revision_guidance_item_id_version_key UNIQUE (guidance_item_id, version);
+
+
+--
+-- Name: guidance_revision guidance_revision_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_revision
+    ADD CONSTRAINT guidance_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_mapping_seq_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_situation_mapping
+    ADD CONSTRAINT guidance_situation_mapping_mapping_seq_key UNIQUE (mapping_seq);
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_situation_mapping
+    ADD CONSTRAINT guidance_situation_mapping_pkey PRIMARY KEY (id);
 
 
 --
@@ -9256,6 +12709,110 @@ ALTER TABLE ONLY ops.incident_service
 
 
 --
+-- Name: job_attempt job_attempt_job_id_attempt_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job_attempt
+    ADD CONSTRAINT job_attempt_job_id_attempt_key UNIQUE (job_id, attempt);
+
+
+--
+-- Name: job_attempt job_attempt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job_attempt
+    ADD CONSTRAINT job_attempt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: job_definition job_definition_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job_definition
+    ADD CONSTRAINT job_definition_pkey PRIMARY KEY (key, version);
+
+
+--
+-- Name: job job_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job
+    ADD CONSTRAINT job_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: job job_one_schedule_per_mode; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job
+    ADD CONSTRAINT job_one_schedule_per_mode UNIQUE (definition_key, definition_version, scheduled_for, mode);
+
+
+--
+-- Name: job job_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job
+    ADD CONSTRAINT job_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: job_receipt job_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job_receipt
+    ADD CONSTRAINT job_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npi_device_evidence_receipt npi_device_evidence_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.npi_device_evidence_receipt
+    ADD CONSTRAINT npi_device_evidence_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: npi_device_evidence_receipt npi_device_evidence_receipt_job_id_builder_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.npi_device_evidence_receipt
+    ADD CONSTRAINT npi_device_evidence_receipt_job_id_builder_key_key UNIQUE (job_id, builder_key);
+
+
+--
+-- Name: npi_device_evidence_receipt npi_device_evidence_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.npi_device_evidence_receipt
+    ADD CONSTRAINT npi_device_evidence_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: provider_observation provider_observation_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.provider_observation
+    ADD CONSTRAINT provider_observation_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: provider_route provider_route_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.provider_route
+    ADD CONSTRAINT provider_route_pkey PRIMARY KEY (route_key);
+
+
+--
+-- Name: provider_route provider_route_priority_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.provider_route
+    ADD CONSTRAINT provider_route_priority_key UNIQUE (priority);
+
+
+--
 -- Name: release release_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -9269,6 +12826,30 @@ ALTER TABLE ONLY ops.release
 
 ALTER TABLE ONLY ops.release
     ADD CONSTRAINT release_release_key_key UNIQUE (release_key);
+
+
+--
+-- Name: rule_admission rule_admission_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission
+    ADD CONSTRAINT rule_admission_pkey PRIMARY KEY (rule_id);
+
+
+--
+-- Name: rule_enforcement_point rule_enforcement_point_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_enforcement_point
+    ADD CONSTRAINT rule_enforcement_point_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rule_enforcement_point rule_enforcement_point_rule_id_control_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_enforcement_point
+    ADD CONSTRAINT rule_enforcement_point_rule_id_control_key_key UNIQUE (rule_id, control_key);
 
 
 --
@@ -9349,6 +12930,22 @@ ALTER TABLE ONLY ops.work_shape_revision
 
 ALTER TABLE ONLY ops.work_shape_revision
     ADD CONSTRAINT work_shape_revision_work_request_id_version_key UNIQUE (work_request_id, version);
+
+
+--
+-- Name: workflow_acceptance workflow_acceptance_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.workflow_acceptance
+    ADD CONSTRAINT workflow_acceptance_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: workflow_acceptance workflow_acceptance_workflow_key_workflow_version_mode_rece_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.workflow_acceptance
+    ADD CONSTRAINT workflow_acceptance_workflow_key_workflow_version_mode_rece_key UNIQUE (workflow_key, workflow_version, mode, receipt_ref);
 
 
 --
@@ -9821,6 +13418,22 @@ ALTER TABLE ONLY public.doctrine_change_set
 
 ALTER TABLE ONLY public.doctrine_claim
     ADD CONSTRAINT doctrine_claim_pkey PRIMARY KEY (section_id);
+
+
+--
+-- Name: doctrine_concept_mapping doctrine_concept_mapping_concept_id_section_id_role_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.doctrine_concept_mapping
+    ADD CONSTRAINT doctrine_concept_mapping_concept_id_section_id_role_key UNIQUE (concept_id, section_id, role);
+
+
+--
+-- Name: doctrine_concept_mapping doctrine_concept_mapping_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.doctrine_concept_mapping
+    ADD CONSTRAINT doctrine_concept_mapping_pkey PRIMARY KEY (id);
 
 
 --
@@ -10384,6 +13997,70 @@ ALTER TABLE ONLY public.registration
 
 
 --
+-- Name: retrieval_concept retrieval_concept_concept_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_concept
+    ADD CONSTRAINT retrieval_concept_concept_key_key UNIQUE (concept_key);
+
+
+--
+-- Name: retrieval_concept retrieval_concept_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_concept
+    ADD CONSTRAINT retrieval_concept_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: retrieval_phrase retrieval_phrase_concept_id_normalized_phrase_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_phrase
+    ADD CONSTRAINT retrieval_phrase_concept_id_normalized_phrase_key UNIQUE (concept_id, normalized_phrase);
+
+
+--
+-- Name: retrieval_phrase retrieval_phrase_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_phrase
+    ADD CONSTRAINT retrieval_phrase_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: retrieval_proposal retrieval_proposal_idempotency_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_proposal
+    ADD CONSTRAINT retrieval_proposal_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: retrieval_proposal retrieval_proposal_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_proposal
+    ADD CONSTRAINT retrieval_proposal_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: retrieval_query_log retrieval_query_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_query_log
+    ADD CONSTRAINT retrieval_query_log_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: retrieval_ranking_policy retrieval_ranking_policy_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_ranking_policy
+    ADD CONSTRAINT retrieval_ranking_policy_pkey PRIMARY KEY (policy_id);
+
+
+--
 -- Name: rule rule_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10637,6 +14314,13 @@ CREATE UNIQUE INDEX capability_one_open_session_per_request ON ops.capability_ag
 
 
 --
+-- Name: cognition_cache_dependency_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX cognition_cache_dependency_idx ON ops.cognition_result_cache USING gin (dependency_refs);
+
+
+--
 -- Name: deployment_correlation_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -10655,6 +14339,20 @@ CREATE INDEX deployment_env_observed_idx ON ops.deployment USING btree (environm
 --
 
 CREATE INDEX deployment_release_idx ON ops.deployment USING btree (release_id);
+
+
+--
+-- Name: guidance_one_primary_per_rule; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX guidance_one_primary_per_rule ON ops.guidance_item USING btree (source_rule_id) WHERE ((source_rule_id IS NOT NULL) AND is_primary);
+
+
+--
+-- Name: guidance_rule_source_once; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX guidance_rule_source_once ON ops.guidance_intake USING btree (lane, source_ref) WHERE ((lane = 'rule'::text) AND (source_ref ~~ 'rule:%'::text));
 
 
 --
@@ -10686,6 +14384,34 @@ CREATE INDEX incident_open_idx ON ops.incident USING btree (state, detected_at D
 
 
 --
+-- Name: job_dispatch_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX job_dispatch_idx ON ops.job USING btree (state, next_attempt_at, scheduled_for) WHERE (state = ANY (ARRAY['queued'::text, 'retry_wait'::text, 'running'::text]));
+
+
+--
+-- Name: job_receipt_job_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX job_receipt_job_idx ON ops.job_receipt USING btree (job_id, created_at);
+
+
+--
+-- Name: one_enabled_job_definition_version; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX one_enabled_job_definition_version ON ops.job_definition USING btree (key) WHERE enabled;
+
+
+--
+-- Name: provider_observation_latest_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX provider_observation_latest_idx ON ops.provider_observation USING btree (route_key, observed_at DESC);
+
+
+--
 -- Name: release_correlation_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -10711,8 +14437,6 @@ CREATE INDEX release_sha_idx ON ops.release USING btree (git_sha);
 --
 
 CREATE INDEX run_correlation_idx ON ops.run USING btree (correlation_id);
-
-CREATE INDEX run_release_id_idx ON ops.run USING btree (release_id);
 
 
 --
@@ -10933,10 +14657,24 @@ CREATE INDEX doctrine_claim_expiry_idx ON public.doctrine_claim USING btree (exp
 
 
 --
+-- Name: doctrine_concept_mapping_active_section_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX doctrine_concept_mapping_active_section_idx ON public.doctrine_concept_mapping USING btree (section_id) WHERE (status = 'approved'::text);
+
+
+--
 -- Name: doctrine_document_class_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX doctrine_document_class_idx ON public.doctrine_document USING btree (content_class, updated_at DESC);
+
+
+--
+-- Name: doctrine_document_title_search_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX doctrine_document_title_search_idx ON public.doctrine_document USING gin (title_search_vector);
 
 
 --
@@ -11000,6 +14738,13 @@ CREATE INDEX doctrine_section_doc_idx ON public.doctrine_section USING btree (do
 --
 
 CREATE INDEX doctrine_section_review_idx ON public.doctrine_section USING btree (review_after) WHERE (review_after IS NOT NULL);
+
+
+--
+-- Name: doctrine_section_title_search_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX doctrine_section_title_search_idx ON public.doctrine_section USING gin (title_search_vector);
 
 
 --
@@ -11290,6 +15035,48 @@ CREATE INDEX record_source_entity_idx ON public.record_source USING btree (entit
 
 
 --
+-- Name: retrieval_phrase_fts_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX retrieval_phrase_fts_idx ON public.retrieval_phrase USING gin (to_tsvector('english'::regconfig, normalized_phrase)) WHERE (status = 'approved'::text);
+
+
+--
+-- Name: retrieval_phrase_global_active_uq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX retrieval_phrase_global_active_uq ON public.retrieval_phrase USING btree (normalized_phrase) WHERE (status = 'approved'::text);
+
+
+--
+-- Name: retrieval_phrase_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX retrieval_phrase_trgm_idx ON public.retrieval_phrase USING gin (normalized_phrase public.gin_trgm_ops) WHERE (status = 'approved'::text);
+
+
+--
+-- Name: retrieval_proposal_pending_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX retrieval_proposal_pending_idx ON public.retrieval_proposal USING btree (created_at) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: retrieval_query_log_miss_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX retrieval_query_log_miss_idx ON public.retrieval_query_log USING btree (created_at DESC) WHERE (NOT explicit_hit);
+
+
+--
+-- Name: retrieval_ranking_policy_one_default; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX retrieval_ranking_policy_one_default ON public.retrieval_ranking_policy USING btree (is_default) WHERE is_default;
+
+
+--
 -- Name: signal_event_queue_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11411,6 +15198,13 @@ CREATE OR REPLACE VIEW public.v_investigation AS
 
 
 --
+-- Name: authority_receipt authority_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER authority_receipt_append_only BEFORE DELETE OR UPDATE ON ops.authority_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_authority_receipt_rewrite();
+
+
+--
 -- Name: capability_agent_session capability_agent_session_guard_before_write; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -11453,6 +15247,20 @@ CREATE TRIGGER capability_verification_immutable_before_change BEFORE DELETE OR 
 
 
 --
+-- Name: cost_refusal cost_refusal_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER cost_refusal_append_only BEFORE DELETE OR UPDATE ON ops.cost_refusal FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: cost_reservation cost_reservation_no_delete; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER cost_reservation_no_delete BEFORE DELETE ON ops.cost_reservation FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
 -- Name: deployment deployment_requires_a_live_approval; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -11460,35 +15268,129 @@ CREATE TRIGGER deployment_requires_a_live_approval BEFORE INSERT OR UPDATE ON op
 
 
 --
--- Name: deployment deployment_provider_identity_immutable; Type: TRIGGER; Schema: ops; Owner: -
+-- Name: device_evidence_receipt device_evidence_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
-CREATE TRIGGER deployment_provider_identity_immutable BEFORE UPDATE OF provider, provider_version_id ON ops.deployment FOR EACH ROW EXECUTE FUNCTION ops.deployment_provider_identity_is_immutable();
+CREATE TRIGGER device_evidence_receipt_append_only BEFORE DELETE OR UPDATE ON ops.device_evidence_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
 
 
 --
--- Name: run performance_receipt_requires_read_back; Type: TRIGGER; Schema: ops; Owner: -
+-- Name: guidance_authority_binding guidance_authority_binding_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
-CREATE TRIGGER performance_receipt_requires_read_back BEFORE INSERT OR UPDATE OF release_id, service_id, environment, correlation_id, run_key, state ON ops.run FOR EACH ROW EXECUTE FUNCTION ops.performance_receipt_requires_read_back();
+CREATE TRIGGER guidance_authority_binding_append_only BEFORE DELETE OR UPDATE ON ops.guidance_authority_binding FOR EACH ROW EXECUTE FUNCTION ops.refuse_guidance_history_rewrite();
+
+
+--
+-- Name: guidance_authority_binding guidance_authority_binding_validate; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_authority_binding_validate BEFORE INSERT ON ops.guidance_authority_binding FOR EACH ROW EXECUTE FUNCTION ops.validate_guidance_authority_binding();
+
+
+--
+-- Name: guidance_item guidance_item_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_item_append_only BEFORE DELETE OR UPDATE ON ops.guidance_item FOR EACH ROW EXECUTE FUNCTION ops.refuse_guidance_history_rewrite();
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_lifecycle_event_append_only BEFORE DELETE OR UPDATE ON ops.guidance_lifecycle_event FOR EACH ROW EXECUTE FUNCTION ops.refuse_guidance_history_rewrite();
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_validate; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_lifecycle_event_validate BEFORE INSERT ON ops.guidance_lifecycle_event FOR EACH ROW EXECUTE FUNCTION ops.validate_guidance_lifecycle_event();
+
+
+--
+-- Name: guidance_registry_event guidance_registry_event_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_registry_event_append_only BEFORE DELETE OR UPDATE ON ops.guidance_registry_event FOR EACH ROW EXECUTE FUNCTION ops.refuse_guidance_history_rewrite();
+
+
+--
+-- Name: guidance_revision guidance_revision_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_revision_append_only BEFORE DELETE OR UPDATE ON ops.guidance_revision FOR EACH ROW EXECUTE FUNCTION ops.refuse_guidance_history_rewrite();
+
+
+--
+-- Name: guidance_revision guidance_revision_validate; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_revision_validate BEFORE INSERT ON ops.guidance_revision FOR EACH ROW EXECUTE FUNCTION ops.validate_guidance_revision();
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_situation_mapping_append_only BEFORE DELETE OR UPDATE ON ops.guidance_situation_mapping FOR EACH ROW EXECUTE FUNCTION ops.refuse_guidance_history_rewrite();
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_validate; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER guidance_situation_mapping_validate BEFORE INSERT ON ops.guidance_situation_mapping FOR EACH ROW EXECUTE FUNCTION ops.validate_guidance_situation_mapping();
+
+
+--
+-- Name: job_attempt job_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER job_attempt_append_only BEFORE DELETE ON ops.job_attempt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: job_definition job_definition_cutover_requires_evidence; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER job_definition_cutover_requires_evidence BEFORE UPDATE OF legacy_disabled_at ON ops.job_definition FOR EACH ROW EXECUTE FUNCTION ops.require_cutover_evidence();
+
+
+--
+-- Name: job_definition job_definition_fence_queued_jobs; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER job_definition_fence_queued_jobs AFTER UPDATE OF enabled ON ops.job_definition FOR EACH ROW EXECUTE FUNCTION ops.fence_jobs_when_definition_disabled();
+
+
+--
+-- Name: job_receipt job_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER job_receipt_append_only BEFORE DELETE OR UPDATE ON ops.job_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: npi_device_evidence_receipt npi_device_evidence_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER npi_device_evidence_append_only BEFORE DELETE OR UPDATE ON ops.npi_device_evidence_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
+
+
+--
+-- Name: provider_observation provider_observation_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER provider_observation_append_only BEFORE DELETE OR UPDATE ON ops.provider_observation FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
 
 
 --
 -- Name: release release_completion_requires_a_read_back; Type: TRIGGER; Schema: ops; Owner: -
 --
 
-CREATE TRIGGER release_completion_requires_a_read_back BEFORE INSERT OR UPDATE OF state ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_completion_requires_a_read_back();
-
-CREATE TRIGGER release_assurance_immutable BEFORE UPDATE OF performance_budget_ref, performance_budget_ms, recovery_strategy, rollback_ready, rollback_plan_ref, service_id, environment, git_sha, artifact_digest, dependency_lock_digest, config_fingerprint, schema_highest_migration, migration_set, plan_hash, state ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_assurance_is_immutable();
-
-CREATE TRIGGER release_approval_requires_recovery_rehearsal BEFORE INSERT OR UPDATE OF state, environment, recovery_strategy, rollback_plan_ref ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_approval_requires_recovery_rehearsal();
-
-
---
--- Name: release release_provider_identity_immutable; Type: TRIGGER; Schema: ops; Owner: -
---
-
-CREATE TRIGGER release_provider_identity_immutable BEFORE UPDATE OF provider, provider_version_id ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_provider_identity_is_immutable();
+CREATE TRIGGER release_completion_requires_a_read_back BEFORE UPDATE ON ops.release FOR EACH ROW EXECUTE FUNCTION ops.release_completion_requires_a_read_back();
 
 
 --
@@ -11510,6 +15412,13 @@ CREATE TRIGGER work_request_shape_gate BEFORE INSERT OR UPDATE ON ops.work_reque
 --
 
 CREATE TRIGGER work_shape_revision_immutable BEFORE DELETE OR UPDATE ON ops.work_shape_revision FOR EACH ROW EXECUTE FUNCTION ops.work_shape_revision_immutable();
+
+
+--
+-- Name: workflow_acceptance workflow_acceptance_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER workflow_acceptance_append_only BEFORE DELETE OR UPDATE ON ops.workflow_acceptance FOR EACH ROW EXECUTE FUNCTION ops.refuse_job_evidence_rewrite();
 
 
 --
@@ -11597,6 +15506,13 @@ CREATE TRIGGER deal_touch BEFORE UPDATE ON public.deal FOR EACH ROW EXECUTE FUNC
 
 
 --
+-- Name: doctrine_section doctrine_section_retrieval_repair_after_update; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER doctrine_section_retrieval_repair_after_update AFTER UPDATE OF status ON public.doctrine_section FOR EACH ROW EXECUTE FUNCTION public.mark_retrieval_mappings_for_repair();
+
+
+--
 -- Name: lead lead_touch; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -11650,6 +15566,27 @@ CREATE TRIGGER party_touch BEFORE UPDATE ON public.party FOR EACH ROW EXECUTE FU
 --
 
 CREATE TRIGGER prospect_pool_touch BEFORE UPDATE ON public.candidate_pool FOR EACH ROW EXECUTE FUNCTION public.trg_touch_row();
+
+
+--
+-- Name: retrieval_proposal retrieval_proposal_guard_before_delete; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER retrieval_proposal_guard_before_delete BEFORE DELETE ON public.retrieval_proposal FOR EACH ROW EXECUTE FUNCTION public.retrieval_proposal_guard();
+
+
+--
+-- Name: retrieval_proposal retrieval_proposal_guard_before_update; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER retrieval_proposal_guard_before_update BEFORE UPDATE ON public.retrieval_proposal FOR EACH ROW EXECUTE FUNCTION public.retrieval_proposal_guard();
+
+
+--
+-- Name: rule rule_activation_requires_admission; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER rule_activation_requires_admission BEFORE INSERT OR UPDATE OF status ON public.rule FOR EACH ROW EXECUTE FUNCTION ops.require_rule_admission();
 
 
 --
@@ -11729,6 +15666,14 @@ ALTER TABLE ONLY neon_auth.session
 
 
 --
+-- Name: authority_receipt authority_receipt_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.authority_receipt
+    ADD CONSTRAINT authority_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
 -- Name: capability_agent_session capability_agent_session_created_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -11777,6 +15722,46 @@ ALTER TABLE ONLY ops.capability_verification
 
 
 --
+-- Name: cognition_result_cache cognition_result_cache_cognition_key_cognition_version_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cognition_result_cache
+    ADD CONSTRAINT cognition_result_cache_cognition_key_cognition_version_fkey FOREIGN KEY (cognition_key, cognition_version) REFERENCES ops.cognition_job(key, version);
+
+
+--
+-- Name: cost_refusal cost_refusal_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_refusal
+    ADD CONSTRAINT cost_refusal_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: cost_refusal cost_refusal_route_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_refusal
+    ADD CONSTRAINT cost_refusal_route_key_fkey FOREIGN KEY (route_key) REFERENCES ops.provider_route(route_key);
+
+
+--
+-- Name: cost_reservation cost_reservation_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_reservation
+    ADD CONSTRAINT cost_reservation_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: cost_reservation cost_reservation_route_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.cost_reservation
+    ADD CONSTRAINT cost_reservation_route_key_fkey FOREIGN KEY (route_key) REFERENCES ops.provider_route(route_key);
+
+
+--
 -- Name: deployment deployment_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -11798,6 +15783,174 @@ ALTER TABLE ONLY ops.deployment
 
 ALTER TABLE ONLY ops.deployment
     ADD CONSTRAINT deployment_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id);
+
+
+--
+-- Name: device_evidence_receipt device_evidence_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.device_evidence_receipt
+    ADD CONSTRAINT device_evidence_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_authority_binding guidance_authority_binding_authority_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_authority_binding
+    ADD CONSTRAINT guidance_authority_binding_authority_receipt_id_fkey FOREIGN KEY (authority_receipt_id) REFERENCES ops.authority_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_authority_binding guidance_authority_binding_guidance_revision_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_authority_binding
+    ADD CONSTRAINT guidance_authority_binding_guidance_revision_id_fkey FOREIGN KEY (guidance_revision_id) REFERENCES ops.guidance_revision(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_intake guidance_intake_captured_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_intake
+    ADD CONSTRAINT guidance_intake_captured_by_fkey FOREIGN KEY (captured_by) REFERENCES public.actor(id);
+
+
+--
+-- Name: guidance_item guidance_item_created_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_item
+    ADD CONSTRAINT guidance_item_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.actor(id);
+
+
+--
+-- Name: guidance_item guidance_item_guidance_intake_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_item
+    ADD CONSTRAINT guidance_item_guidance_intake_id_fkey FOREIGN KEY (guidance_intake_id) REFERENCES ops.guidance_intake(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_item guidance_item_source_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_item
+    ADD CONSTRAINT guidance_item_source_rule_id_fkey FOREIGN KEY (source_rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_authority_binding_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_lifecycle_event
+    ADD CONSTRAINT guidance_lifecycle_event_authority_binding_id_fkey FOREIGN KEY (authority_binding_id) REFERENCES ops.guidance_authority_binding(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_guidance_revision_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_lifecycle_event
+    ADD CONSTRAINT guidance_lifecycle_event_guidance_revision_id_fkey FOREIGN KEY (guidance_revision_id) REFERENCES ops.guidance_revision(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_lifecycle_event guidance_lifecycle_event_supersedes_event_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_lifecycle_event
+    ADD CONSTRAINT guidance_lifecycle_event_supersedes_event_id_fkey FOREIGN KEY (supersedes_event_id) REFERENCES ops.guidance_lifecycle_event(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_registry guidance_registry_created_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry
+    ADD CONSTRAINT guidance_registry_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.actor(id);
+
+
+--
+-- Name: guidance_registry_event guidance_registry_event_authority_receipt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry_event
+    ADD CONSTRAINT guidance_registry_event_authority_receipt_id_fkey FOREIGN KEY (authority_receipt_id) REFERENCES ops.authority_receipt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_registry_event guidance_registry_event_registry_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_registry_event
+    ADD CONSTRAINT guidance_registry_event_registry_id_fkey FOREIGN KEY (registry_id) REFERENCES ops.guidance_registry(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_revision guidance_revision_classified_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_revision
+    ADD CONSTRAINT guidance_revision_classified_by_fkey FOREIGN KEY (classified_by) REFERENCES public.actor(id);
+
+
+--
+-- Name: guidance_revision guidance_revision_guidance_item_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_revision
+    ADD CONSTRAINT guidance_revision_guidance_item_id_fkey FOREIGN KEY (guidance_item_id) REFERENCES ops.guidance_item(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_revision guidance_revision_supersedes_revision_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_revision
+    ADD CONSTRAINT guidance_revision_supersedes_revision_id_fkey FOREIGN KEY (supersedes_revision_id) REFERENCES ops.guidance_revision(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_authority_binding_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_situation_mapping
+    ADD CONSTRAINT guidance_situation_mapping_authority_binding_id_fkey FOREIGN KEY (authority_binding_id) REFERENCES ops.guidance_authority_binding(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_concept_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_situation_mapping
+    ADD CONSTRAINT guidance_situation_mapping_concept_id_fkey FOREIGN KEY (concept_id) REFERENCES public.retrieval_concept(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_doctrine_section_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_situation_mapping
+    ADD CONSTRAINT guidance_situation_mapping_doctrine_section_id_fkey FOREIGN KEY (doctrine_section_id) REFERENCES public.doctrine_section(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_guidance_revision_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_situation_mapping
+    ADD CONSTRAINT guidance_situation_mapping_guidance_revision_id_fkey FOREIGN KEY (guidance_revision_id) REFERENCES ops.guidance_revision(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: guidance_situation_mapping guidance_situation_mapping_supersedes_mapping_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.guidance_situation_mapping
+    ADD CONSTRAINT guidance_situation_mapping_supersedes_mapping_id_fkey FOREIGN KEY (supersedes_mapping_id) REFERENCES ops.guidance_situation_mapping(id) ON DELETE RESTRICT;
 
 
 --
@@ -11841,6 +15994,46 @@ ALTER TABLE ONLY ops.incident_service
 
 
 --
+-- Name: job_attempt job_attempt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job_attempt
+    ADD CONSTRAINT job_attempt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: job job_definition_key_definition_version_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job
+    ADD CONSTRAINT job_definition_key_definition_version_fkey FOREIGN KEY (definition_key, definition_version) REFERENCES ops.job_definition(key, version);
+
+
+--
+-- Name: job_receipt job_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.job_receipt
+    ADD CONSTRAINT job_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: npi_device_evidence_receipt npi_device_evidence_receipt_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.npi_device_evidence_receipt
+    ADD CONSTRAINT npi_device_evidence_receipt_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: provider_observation provider_observation_route_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.provider_observation
+    ADD CONSTRAINT provider_observation_route_key_fkey FOREIGN KEY (route_key) REFERENCES ops.provider_route(route_key);
+
+
+--
 -- Name: release release_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -11857,14 +16050,43 @@ ALTER TABLE ONLY ops.release
 
 
 --
+-- Name: rule_admission rule_admission_admitted_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission
+    ADD CONSTRAINT rule_admission_admitted_by_fkey FOREIGN KEY (admitted_by) REFERENCES public.actor(id);
+
+
+--
+-- Name: rule_admission rule_admission_guidance_intake_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission
+    ADD CONSTRAINT rule_admission_guidance_intake_id_fkey FOREIGN KEY (guidance_intake_id) REFERENCES ops.guidance_intake(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_admission rule_admission_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission
+    ADD CONSTRAINT rule_admission_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_enforcement_point rule_enforcement_point_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_enforcement_point
+    ADD CONSTRAINT rule_enforcement_point_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: run run_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
 ALTER TABLE ONLY ops.run
     ADD CONSTRAINT run_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id);
-
-ALTER TABLE ONLY ops.run
-    ADD CONSTRAINT run_release_id_fkey FOREIGN KEY (release_id) REFERENCES ops.release(id);
 
 
 --
@@ -11921,6 +16143,14 @@ ALTER TABLE ONLY ops.work_shape_revision
 
 ALTER TABLE ONLY ops.work_shape_revision
     ADD CONSTRAINT work_shape_revision_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: workflow_acceptance workflow_acceptance_workflow_key_workflow_version_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.workflow_acceptance
+    ADD CONSTRAINT workflow_acceptance_workflow_key_workflow_version_fkey FOREIGN KEY (workflow_key, workflow_version) REFERENCES ops.job_definition(key, version);
 
 
 --
@@ -12737,6 +16967,38 @@ ALTER TABLE ONLY public.doctrine_claim
 
 ALTER TABLE ONLY public.doctrine_claim
     ADD CONSTRAINT doctrine_claim_section_id_fkey FOREIGN KEY (section_id) REFERENCES public.doctrine_section(id);
+
+
+--
+-- Name: doctrine_concept_mapping doctrine_concept_mapping_approver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.doctrine_concept_mapping
+    ADD CONSTRAINT doctrine_concept_mapping_approver_id_fkey FOREIGN KEY (approver_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: doctrine_concept_mapping doctrine_concept_mapping_concept_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.doctrine_concept_mapping
+    ADD CONSTRAINT doctrine_concept_mapping_concept_id_fkey FOREIGN KEY (concept_id) REFERENCES public.retrieval_concept(id);
+
+
+--
+-- Name: doctrine_concept_mapping doctrine_concept_mapping_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.doctrine_concept_mapping
+    ADD CONSTRAINT doctrine_concept_mapping_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: doctrine_concept_mapping doctrine_concept_mapping_section_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.doctrine_concept_mapping
+    ADD CONSTRAINT doctrine_concept_mapping_section_id_fkey FOREIGN KEY (section_id) REFERENCES public.doctrine_section(id);
 
 
 --
@@ -13580,6 +17842,70 @@ ALTER TABLE ONLY public.registration
 
 
 --
+-- Name: retrieval_concept retrieval_concept_approver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_concept
+    ADD CONSTRAINT retrieval_concept_approver_id_fkey FOREIGN KEY (approver_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: retrieval_concept retrieval_concept_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_concept
+    ADD CONSTRAINT retrieval_concept_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: retrieval_phrase retrieval_phrase_approver_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_phrase
+    ADD CONSTRAINT retrieval_phrase_approver_id_fkey FOREIGN KEY (approver_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: retrieval_phrase retrieval_phrase_concept_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_phrase
+    ADD CONSTRAINT retrieval_phrase_concept_id_fkey FOREIGN KEY (concept_id) REFERENCES public.retrieval_concept(id);
+
+
+--
+-- Name: retrieval_phrase retrieval_phrase_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_phrase
+    ADD CONSTRAINT retrieval_phrase_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: retrieval_proposal retrieval_proposal_proposer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_proposal
+    ADD CONSTRAINT retrieval_proposal_proposer_id_fkey FOREIGN KEY (proposer_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: retrieval_proposal retrieval_proposal_reviewer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_proposal
+    ADD CONSTRAINT retrieval_proposal_reviewer_id_fkey FOREIGN KEY (reviewer_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: retrieval_query_log retrieval_query_log_policy_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.retrieval_query_log
+    ADD CONSTRAINT retrieval_query_log_policy_id_fkey FOREIGN KEY (policy_id) REFERENCES public.retrieval_ranking_policy(policy_id);
+
+
+--
 -- Name: rule rule_activated_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13818,13 +18144,45 @@ grant usage on schema public to carr_exporter;
 grant usage on schema public to carr_jobs;
 grant usage on schema public to carr_reader;
 grant usage on schema public to carr_writer;
+grant select on table ops.authority_receipt to carr_reader;
+grant insert, select on table ops.authority_receipt to carr_writer;
 grant select on table ops.capability_agent_session to carr_reader;
 grant insert, select, update on table ops.capability_agent_session to carr_writer;
 grant select on table ops.capability_verification to carr_reader;
 grant insert, select on table ops.capability_verification to carr_writer;
+grant select on table ops.cognition_job to carr_jobs;
+grant select on table ops.cognition_job to carr_reader;
+grant insert, select, update on table ops.cognition_job to carr_writer;
+grant select on table ops.cognition_result_cache to carr_jobs;
+grant select on table ops.cognition_result_cache to carr_reader;
+grant insert, select, update on table ops.cognition_result_cache to carr_writer;
+grant select on table ops.cost_refusal to carr_jobs;
+grant select on table ops.cost_refusal to carr_reader;
+grant select on table ops.cost_refusal to carr_writer;
+grant select on table ops.cost_reservation to carr_jobs;
+grant select on table ops.cost_reservation to carr_reader;
+grant select on table ops.cost_reservation to carr_writer;
 grant insert, select on table ops.deployment to carr_jobs;
 grant select on table ops.deployment to carr_reader;
 grant insert, select, update on table ops.deployment to carr_writer;
+grant select on table ops.device_evidence_receipt to carr_jobs;
+grant select on table ops.guidance_authority_binding to carr_reader;
+grant select on table ops.guidance_authority_binding to carr_writer;
+grant select on table ops.guidance_intake to carr_jobs;
+grant select on table ops.guidance_intake to carr_reader;
+grant insert, select, update on table ops.guidance_intake to carr_writer;
+grant select on table ops.guidance_item to carr_reader;
+grant insert, select on table ops.guidance_item to carr_writer;
+grant select on table ops.guidance_lifecycle_event to carr_reader;
+grant select on table ops.guidance_lifecycle_event to carr_writer;
+grant select on table ops.guidance_registry to carr_reader;
+grant select on table ops.guidance_registry to carr_writer;
+grant select on table ops.guidance_registry_event to carr_reader;
+grant select on table ops.guidance_registry_event to carr_writer;
+grant select on table ops.guidance_revision to carr_reader;
+grant insert, select on table ops.guidance_revision to carr_writer;
+grant select on table ops.guidance_situation_mapping to carr_reader;
+grant select on table ops.guidance_situation_mapping to carr_writer;
 grant insert, select on table ops.incident to carr_jobs;
 grant select on table ops.incident to carr_reader;
 grant insert, select, update on table ops.incident to carr_writer;
@@ -13840,9 +18198,34 @@ grant insert, select, update on table ops.incident_link to carr_writer;
 grant select on table ops.incident_service to carr_jobs;
 grant select on table ops.incident_service to carr_reader;
 grant insert, select, update on table ops.incident_service to carr_writer;
+grant select on table ops.job to carr_jobs;
+grant select on table ops.job to carr_reader;
+grant select on table ops.job to carr_writer;
+grant select on table ops.job_attempt to carr_jobs;
+grant select on table ops.job_attempt to carr_reader;
+grant select on table ops.job_attempt to carr_writer;
+grant select on table ops.job_definition to carr_jobs;
+grant select on table ops.job_definition to carr_reader;
+grant insert, select, update on table ops.job_definition to carr_writer;
+grant select on table ops.job_receipt to carr_jobs;
+grant select on table ops.job_receipt to carr_reader;
+grant select on table ops.job_receipt to carr_writer;
+grant select on table ops.npi_device_evidence_receipt to carr_jobs;
+grant insert, select on table ops.provider_observation to carr_jobs;
+grant select on table ops.provider_observation to carr_reader;
+grant select on table ops.provider_observation to carr_writer;
+grant select on table ops.provider_route to carr_jobs;
+grant select on table ops.provider_route to carr_reader;
+grant insert, select, update on table ops.provider_route to carr_writer;
 grant insert, select, update on table ops.release to carr_jobs;
 grant select on table ops.release to carr_reader;
 grant insert, select, update on table ops.release to carr_writer;
+grant select on table ops.rule_admission to carr_jobs;
+grant select on table ops.rule_admission to carr_reader;
+grant insert, select, update on table ops.rule_admission to carr_writer;
+grant select on table ops.rule_enforcement_point to carr_jobs;
+grant select on table ops.rule_enforcement_point to carr_reader;
+grant insert, select, update on table ops.rule_enforcement_point to carr_writer;
 grant insert, select on table ops.run to carr_jobs;
 grant select on table ops.run to carr_reader;
 grant insert, select on table ops.run to carr_writer;
@@ -13865,10 +18248,54 @@ grant select on table ops.v_capability_program_next to carr_reader;
 grant select on table ops.v_capability_program_next to carr_writer;
 grant select on table ops.v_check_run to carr_reader;
 grant select on table ops.v_check_run to carr_writer;
+grant select on table ops.v_control_plane_actionable_loops to carr_jobs;
+grant select on table ops.v_control_plane_capability_candidate to carr_jobs;
+grant select on table ops.v_control_plane_doctrine_due to carr_jobs;
+grant select on table ops.v_control_plane_doctrine_failures to carr_jobs;
+grant select on table ops.v_control_plane_health_evidence to carr_jobs;
+grant select on table ops.v_control_plane_system_prune_candidates to carr_jobs;
+grant select on table ops.v_cost_refusal_metric to carr_jobs;
+grant select on table ops.v_cost_refusal_metric to carr_reader;
+grant select on table ops.v_cost_refusal_metric to carr_writer;
+grant select on table ops.v_guidance_constraint to carr_reader;
+grant select on table ops.v_guidance_constraint to carr_writer;
+grant select on table ops.v_guidance_current to carr_reader;
+grant select on table ops.v_guidance_current to carr_writer;
+grant select on table ops.v_guidance_doctrine_retrieval to carr_reader;
+grant select on table ops.v_guidance_doctrine_retrieval to carr_writer;
+grant select on table ops.v_guidance_example to carr_reader;
+grant select on table ops.v_guidance_example to carr_writer;
+grant select on table ops.v_guidance_precedent to carr_reader;
+grant select on table ops.v_guidance_precedent to carr_writer;
+grant select on table ops.v_guidance_preference to carr_reader;
+grant select on table ops.v_guidance_preference to carr_writer;
+grant select on table ops.v_guidance_procedure to carr_reader;
+grant select on table ops.v_guidance_procedure to carr_writer;
+grant select on table ops.v_guidance_projection_summary to carr_reader;
+grant select on table ops.v_guidance_projection_summary to carr_writer;
+grant select on table ops.v_guidance_registry_state to carr_reader;
+grant select on table ops.v_guidance_registry_state to carr_writer;
+grant select on table ops.v_guidance_revision_state to carr_reader;
+grant select on table ops.v_guidance_revision_state to carr_writer;
+grant select on table ops.v_guidance_rubric to carr_reader;
+grant select on table ops.v_guidance_rubric to carr_writer;
+grant select on table ops.v_job_control to carr_jobs;
+grant select on table ops.v_job_control to carr_reader;
+grant select on table ops.v_job_control to carr_writer;
+grant select on table ops.v_job_cost to carr_jobs;
+grant select on table ops.v_job_cost to carr_reader;
+grant select on table ops.v_job_cost to carr_writer;
 grant select on table ops.v_job_run to carr_reader;
 grant select on table ops.v_job_run to carr_writer;
+grant select on table ops.v_provider_route to carr_jobs;
+grant select on table ops.v_provider_route to carr_reader;
+grant select on table ops.v_provider_route to carr_writer;
+grant select on table ops.v_release_manifest to carr_jobs;
 grant select on table ops.v_release_manifest to carr_reader;
 grant select on table ops.v_release_manifest to carr_writer;
+grant select on table ops.v_rule_applicability to carr_jobs;
+grant select on table ops.v_rule_applicability to carr_reader;
+grant select on table ops.v_rule_applicability to carr_writer;
 grant select on table ops.v_service_environment_health to carr_reader;
 grant select on table ops.v_service_environment_health to carr_writer;
 grant select on table ops.v_trace to carr_reader;
@@ -13879,6 +18306,9 @@ grant select on table ops.work_request to carr_reader;
 grant insert, select, update on table ops.work_request to carr_writer;
 grant select on table ops.work_shape_revision to carr_reader;
 grant insert, select on table ops.work_shape_revision to carr_writer;
+grant select on table ops.workflow_acceptance to carr_jobs;
+grant select on table ops.workflow_acceptance to carr_reader;
+grant select on table ops.workflow_acceptance to carr_writer;
 grant insert, select, update on table public.activity to carr_writer;
 grant insert, select, update on table public.actor to carr_writer;
 grant insert, select, update on table public.actor_profile to carr_writer;
@@ -13892,7 +18322,7 @@ grant insert, select, update on table public.building_ownership to carr_writer;
 grant select on table public.cadence_rule to carr_jobs;
 grant insert, select, update on table public.cadence_rule to carr_writer;
 grant insert, select, update on table public.campaign to carr_writer;
-grant insert, select, update on table public.candidate_pool to carr_jobs;
+grant insert, update on table public.candidate_pool to carr_jobs;
 grant insert, select, update on table public.candidate_pool to carr_writer;
 grant insert, select, update on table public.capture_candidate to carr_writer;
 grant insert, select, update on table public.capture_post_call_action to carr_writer;
@@ -13908,7 +18338,7 @@ grant insert, select on table public.code_subject to carr_writer;
 grant insert, select, update on table public.commission to carr_writer;
 grant insert, select, update on table public.commission_allocation to carr_writer;
 grant insert, select, update on table public.comp to carr_writer;
-grant insert, select, update on table public.content_piece to carr_jobs;
+grant insert, update on table public.content_piece to carr_jobs;
 grant insert, select, update on table public.content_piece to carr_writer;
 grant insert, select, update on table public.critical_date to carr_writer;
 grant insert, select, update on table public.deal to carr_writer;
@@ -13929,6 +18359,8 @@ grant insert, select, update on table public.doc_template to carr_writer;
 grant insert, select, update on table public.doctrine_change_item to carr_writer;
 grant insert, select, update on table public.doctrine_change_set to carr_writer;
 grant delete, insert, select, update on table public.doctrine_claim to carr_writer;
+grant select on table public.doctrine_concept_mapping to carr_reader;
+grant insert, select, update on table public.doctrine_concept_mapping to carr_writer;
 grant select on table public.doctrine_document to carr_exporter;
 grant select on table public.doctrine_document to carr_reader;
 grant insert, select, update on table public.doctrine_document to carr_writer;
@@ -14012,7 +18444,7 @@ grant insert, select, update on table public.parcel to carr_writer;
 grant insert, select, update on table public.party to carr_writer;
 grant insert, select, update on table public.party_link to carr_writer;
 grant select on table public.party_link_kind to carr_writer;
-grant insert, select, update on table public.placement to carr_jobs;
+grant insert, update on table public.placement to carr_jobs;
 grant insert, select, update on table public.placement to carr_writer;
 grant select on table public.placement_measurement to carr_exporter;
 grant insert, select on table public.placement_measurement to carr_jobs;
@@ -14028,6 +18460,14 @@ grant select, usage on sequence public.ref_client_seq to carr_writer;
 grant select, usage on sequence public.ref_lead_seq to carr_writer;
 grant select, usage on sequence public.ref_vendor_seq to carr_writer;
 grant insert, select, update on table public.registration to carr_writer;
+grant select on table public.retrieval_concept to carr_reader;
+grant insert, select, update on table public.retrieval_concept to carr_writer;
+grant select on table public.retrieval_phrase to carr_reader;
+grant insert, select, update on table public.retrieval_phrase to carr_writer;
+grant insert, select, update on table public.retrieval_proposal to carr_writer;
+grant insert on table public.retrieval_query_log to carr_writer;
+grant select on table public.retrieval_ranking_policy to carr_reader;
+grant select on table public.retrieval_ranking_policy to carr_writer;
 grant insert, select, update on table public.rule to carr_writer;
 grant insert, select, update on table public.schema_migrations to carr_writer;
 grant insert, select, update on table public.search_candidate to carr_writer;
@@ -14059,6 +18499,17 @@ grant select on table public.v_code_finding to carr_reader;
 grant select on table public.v_code_finding to carr_writer;
 grant select on table public.v_compiled_rules to carr_jobs;
 grant select on table public.v_compiled_rules to carr_reader;
+grant select on table public.v_control_plane_content_fuel_rotation to carr_jobs;
+grant select on table public.v_control_plane_deal_history_queue to carr_jobs;
+grant select on table public.v_control_plane_enrichment_queue to carr_jobs;
+grant select on table public.v_control_plane_idea_candidates to carr_jobs;
+grant select on table public.v_control_plane_npi_delta to carr_jobs;
+grant select on table public.v_control_plane_radar_candidates to carr_jobs;
+grant select on table public.v_control_plane_social_coverage to carr_jobs;
+grant select on table public.v_control_plane_social_metric_exports to carr_jobs;
+grant select on table public.v_control_plane_social_sources to carr_jobs;
+grant select on table public.v_correction_sweep_decisions to carr_jobs;
+grant select on table public.v_correction_sweep_defects to carr_jobs;
 grant select on table public.v_counterparty_bluff to carr_reader;
 grant select on table public.v_counterparty_bluff to carr_writer;
 grant select on table public.v_counterparty_history to carr_reader;
@@ -14100,7 +18551,6 @@ grant select on table public.v_defect to carr_writer;
 grant select on table public.v_defect_class to carr_exporter;
 grant select on table public.v_defect_class to carr_reader;
 grant select on table public.v_defect_class to carr_writer;
-grant select on table public.v_expired_verification to carr_jobs;
 grant select on table public.v_expired_verification to carr_reader;
 grant select on table public.v_expired_verification to carr_writer;
 grant select on table public.v_export_clients to carr_jobs;
@@ -14175,6 +18625,12 @@ grant select on table public.v_record_flag_subject to carr_writer;
 grant select on table public.v_ref_index to carr_jobs;
 grant select on table public.v_ref_index to carr_reader;
 grant select on table public.v_ref_index to carr_writer;
+grant select on table public.v_retrieval_concepts_without_targets to carr_reader;
+grant select on table public.v_retrieval_concepts_without_targets to carr_writer;
+grant select on table public.v_retrieval_health to carr_reader;
+grant select on table public.v_retrieval_health to carr_writer;
+grant select on table public.v_retrieval_mapping_repair to carr_reader;
+grant select on table public.v_retrieval_mapping_repair to carr_writer;
 grant select on table public.v_role_timeouts to carr_reader;
 grant select on table public.v_schema_ledger to carr_exporter;
 grant select on table public.v_schema_ledger to carr_reader;
@@ -14205,8 +18661,44 @@ grant select (id, name) on table public.party to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
+grant execute on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_jobs;
+grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
+grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
+grant execute on function ops.assert_guidance_registry_coverage() to carr_reader;
+grant execute on function ops.assert_guidance_registry_coverage() to carr_writer;
+grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
+grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
+grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
+grant execute on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) to carr_jobs;
+grant execute on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) to carr_jobs;
+grant execute on function ops.get_cognition_cache(p_cache_key text) to carr_jobs;
+grant execute on function ops.guidance_revision_contract_hash(p_revision_id uuid) to carr_reader;
+grant execute on function ops.guidance_revision_contract_hash(p_revision_id uuid) to carr_writer;
+grant execute on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) to carr_jobs;
+grant execute on function ops.invalidate_cognition_cache(p_dependency_ref text) to carr_jobs;
+grant execute on function ops.invalidate_cognition_cache(p_dependency_ref text) to carr_writer;
+grant execute on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) to carr_writer;
+grant execute on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
+grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
+grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
+grant execute on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
+grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
+grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
+grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_writer;
+grant execute on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) to carr_jobs;
+grant execute on function public.assert_situation_retrieval_golden(p_suite_digest text) to carr_writer;
 grant execute on function public.capture_call_context(requested_deal_ids uuid[]) to carr_reader;
 grant execute on function public.capture_call_context(requested_deal_ids uuid[]) to carr_writer;
+grant execute on function public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[]) to carr_reader;
+grant execute on function public.current_retrievable_doctrine(p_actor_id uuid, p_content_classes text[]) to carr_writer;
+grant execute on function public.normalize_retrieval_phrase(value text) to carr_writer;
+grant execute on function public.promote_retrieval_proposal(p_proposal_id uuid, p_approver_id uuid) to carr_writer;
+grant execute on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) to carr_writer;
+grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_reader;
+grant execute on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) to carr_writer;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_exporter;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_reader;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_writer;
@@ -14382,6 +18874,31 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0132_work_shape_revision.sql	c08f63f665a84e31fde1317c79d5ce3addf36d30609abba39c040943f5b735c2	2026-08-15 18:19:28.649741+00
 0133_release_writer_grants.sql	85fce1968fa3598694113bd52c6729a98c7dfd3826f53daab072b541b2c6ef64	2026-08-16 00:33:51.969943+00
 0134_release_abandon_reason.sql	61c10b1eae104deb6a6f6719027946cf1fea82d6da9216c13d1c0e8895ea6289	2026-08-16 12:24:10.6226+00
+0135_situation_retrieval.sql	69a88f6b7553dc7ccf351c75ad0df96b03f01bd2adf67dc7ea9aa10914b25a3b	2026-08-16 14:49:59.579677+00
+0136_release_manifest_view_grant.sql	4c3bdabc57782b0a6b39cd69183b34479ef61da3e6a43f2b1ad160e78be4d401	2026-08-16 18:19:32.359021+00
+0148_control_plane_admission.sql	4038ab5279c1e7f3e057f3c4a4dc69e446773ea90910357f4eb5513bb61c8662	2026-08-16 18:19:32.627239+00
+0149_control_plane_jobs.sql	38ea0ce028b7e6dbf27d9ee51fbec8f26f6f27e4e843f49e307d0215cd6cc216	2026-08-16 18:19:32.989947+00
+0150_control_plane_job_fixes.sql	d3f3e9f0b053a0b14acc9876bc322ee643d4ea2f438a8e2da909985f9626076b	2026-08-16 18:19:33.19274+00
+0151_control_plane_admission_grants.sql	2b9d3133be9e8e84fbd0ecf22d6d9096696e29828da040ac10c91d77cb61a8d4	2026-08-16 18:19:33.488509+00
+0152_rule_writer_grants.sql	5bd11005d33da7bb523edd0137f548c23ae59de6dfe4ea451b2fcc830a2f3bf3	2026-08-16 18:19:33.758453+00
+0153_control_plane_resilience.sql	12b6558b6d2164f7c45caba254613fd4c3ef9bf20db9cc1b18e0f3fb10a66384	2026-08-16 18:19:34.120379+00
+0154_control_plane_cost_release.sql	50db3b2e6623f24d4c5bc70ba502f38a71d9c26f830de53e9be37e44fc8dcdfc	2026-08-16 18:19:34.416487+00
+0155_rule_applicability_wildcard.sql	80df630dcdd491db825e16f9e6ece4468df65fa2f4e4744531a605a012e5d2be	2026-08-16 18:19:34.625522+00
+0156_control_plane_input_grants.sql	7cafce43585512fd234c0d27032f13fc3d96fae46cd6036531d2b79e4dbf666c	2026-08-16 18:19:34.907795+00
+0157_control_plane_runtime_guards.sql	2a25fc4800d7bb995e995196a533e7821838ee0d4e800a1117bba12d99953392	2026-08-16 18:19:35.127222+00
+0158_job_timeout_receipts.sql	e26d19535dd647e48d39f87e73e371136bcf852853be7db0a3b633c281964485	2026-08-16 18:19:35.331802+00
+0159_control_plane_evidence_grants.sql	a4cde26b9f7ba67395d4dee97fcfb4a19d5241f80fba740fa29ef1a29b7df635	2026-08-16 18:19:35.710249+00
+0160_reap_expired_job_locking.sql	ed2da95090a21d31d2f6def789040924222337131e2b33fd25ba588d0ddb60b5	2026-08-16 18:19:36.018718+00
+0161_control_plane_authority_boundary.sql	ba712f824d5101382fc537378544ff74bbaaf3319748f1e3e29b31b1868c8956	2026-08-16 18:19:36.275971+00
+0162_control_plane_input_views.sql	f6695b371ed5fb1390507fc06cc3fa92b1e3d2211672a65998b63dd46c5121cb	2026-08-16 18:19:36.650669+00
+0163_control_plane_device_evidence.sql	613f4c125f98e18b3c1c678072f0a9dbdb86b43a673b9b09870338bc88206bd5	2026-08-16 18:19:36.890396+00
+0164_control_plane_ledger_retry_modes.sql	5ee51214c14c7523c0b21c253828ae1e874f777e49439166f2c979fafd043d33	2026-08-16 18:19:37.183964+00
+0165_control_plane_cost_refusals.sql	cb6c0959f39c7c032f277ecbd05d0754bcfb98ab0d89a2a39d3e5877d26207e4	2026-08-16 18:19:37.402741+00
+0166_correction_sweep_jobs_projection.sql	f4d25c1749206ca486a269a6f23b7e433de4dbf8c0ba61ad3520677cb9875b0c	2026-08-16 18:19:37.677495+00
+0167_control_plane_npi_device_evidence.sql	16bd62d1738afcdf7e40d2eceb02b63a7a1e5eee5a2e71fe2431dbe93373d753	2026-08-16 18:19:38.048509+00
+0168_guidance_registry.sql	72d6ac5cf33b13417c2f0b9fdee243ddc19711d4b3cb016c1d11716cf2c2337c	2026-08-16 18:19:38.398241+00
+0169_control_plane_canary_fencing.sql	dc1d3f6e0fd1e427e82c7da15c7457bfc5f7d4bde42f1c618bd8067fbd027b93	2026-08-16 18:20:49.94352+00
+0169_hermes_pilot_actor.sql	87e48e36d031c764617eb78a075fe9f47a2036678a4d3c060415da4737ed559b	2026-08-16 18:20:50.157956+00
 \.
 
 
@@ -14446,6 +18963,7 @@ eec6654d-4433-4a93-9b22-61decbd3aa4e	quill-joe-mac	automation	Quill capture rig 
 3118c9e4-82a4-45c9-bf36-b7ebaba0549d	grok	automation	Grok Build CLI (outside-model agent surface, loop #227)	\N	t	\N
 88c9d50d-1ed0-4cc1-a779-68de9bba4554	claude	automation	Claude Code (sponsored runtime agent, 0095)	\N	t	\N
 63923291-cea4-426f-8a78-d21512e15a45	joe-local	automation	Joe (local)	\N	t	\N
+e6d681d4-ceac-43ed-a830-d86749e64814	hermes-pilot	automation	Hermes Agent (R0 evaluation runtime, Joe-sponsored, additive write grant 2026-08-16)	\N	t	\N
 \.
 
 
@@ -14722,3 +19240,5 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
+
+
