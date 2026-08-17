@@ -50,6 +50,9 @@ def load_module(name: str, path: pathlib.Path):
 
 db_tap = load_module("staging_seed_db_tap", REPO / "tools" / "db-tap.py")
 doctrine_import = load_module("staging_seed_doctrine_import", REPO / "pipelines" / "doctrine_import.py")
+provision = load_module(
+    "staging_seed_role_authority", REPO / "tools" / "provision-staging-app-writer.py"
+)
 
 
 class SeedRefusal(RuntimeError):
@@ -232,11 +235,24 @@ def manifest(parsed: Sequence[ParsedTarget]) -> dict[str, Any]:
 
 
 def require_staging_app_writer(cur) -> str:
-    cur.execute("select current_user")
-    current_user = cur.fetchone()[0]
-    if current_user != "app_writer":
-        raise SeedRefusal(f"staging seed requires app_writer, not database role {current_user!r}")
-    return current_user
+    cur.execute("select session_user,current_user")
+    identity = cur.fetchone()
+    if identity != ("app_writer", "app_writer"):
+        raise SeedRefusal(
+            f"staging seed requires direct app_writer session/current identity, not {identity!r}"
+        )
+    profile = next(item for item in provision.PROFILES if item.label == "writer")
+    grants = provision.snapshot_grants.load_current_grants_to_role(
+        provision.SCHEMA, provision.MIGRATIONS, profile.bundle_role
+    )
+    try:
+        provision.validate_profile_closure(
+            provision.collect_profile_closure(cur, profile), profile, grants,
+            exact=True, expected_creator="neondb_owner",
+        )
+    except provision.ProvisioningRefusal as exc:
+        raise SeedRefusal("app_writer authority is not the exact reviewed least-authority closure") from exc
+    return "app_writer"
 
 
 def preflight_targets(cur, parsed: Sequence[ParsedTarget]) -> None:

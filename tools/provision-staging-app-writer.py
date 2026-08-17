@@ -16,12 +16,14 @@ import pathlib
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 try:
     import psycopg
+    from psycopg import sql
 except ImportError:
     sys.exit("staging app_writer provisioner requires the repo virtualenv (psycopg)")
 
@@ -33,17 +35,13 @@ STAGING_PROJECT_NAME = "carr-staging"
 STAGING_BRANCH_NAME = "main"
 APP_ROLE = "app_writer"
 BUNDLE_ROLE = "carr_writer"
+READER_ROLE = "app_reader"
+READER_BUNDLE_ROLE = "carr_reader"
+LOCK_KEY = 7301961134306001
+WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
+WRANGLER_CONFIG = REPO / "mcp-server/wrangler.toml"
+STAGING_WORKER_NAME = "carr-mcp-staging"
 EXPECTED_PROPOSAL_STATUS = (("pending", 10),)
-
-MEMBERSHIP_SQL = (
-    "grant carr_writer to app_writer with admin false",
-    "grant carr_writer to app_writer with inherit true",
-    "grant carr_writer to app_writer with set true",
-)
-STATEMENT_TIMEOUT_SQL = "alter role app_writer set statement_timeout = '60s'"
-IDLE_TIMEOUT_SQL = (
-    "alter role app_writer set idle_in_transaction_session_timeout = '120s'"
-)
 
 FORBIDDEN_ENV = (
     "CARR_BREAK_GLASS",
@@ -53,6 +51,8 @@ FORBIDDEN_ENV = (
     "CARR_DB_READER_URL",
     "CARR_DB_JOBS_URL",
     "CARR_DB_AUTHORITY_URL",
+    "CARR_DB_STAGING_WRITER_URL",
+    "CARR_DB_STAGING_READER_URL",
     "PGHOST",
     "PGPORT",
     "PGDATABASE",
@@ -106,10 +106,20 @@ if not PRODUCTION_PROJECT_ID:
 snapshot_grants = load_module(
     "staging_app_writer_snapshot_grants", REPO / "tools/schema_snapshot_grants.py"
 )
-seed = load_module(
-    "staging_app_writer_seed_contract",
-    REPO / "pipelines/staging_retrieval_doctrine_seed.py",
+credential = load_module(
+    "staging_database_credential", REPO / "tools/staging_database_credential.py"
 )
+
+
+def _wrangler_account_id() -> str:
+    with WRANGLER_CONFIG.open("rb") as handle:
+        value = tomllib.load(handle).get("account_id")
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value):
+        raise RuntimeError("wrangler.toml must pin one lowercase 32-hex Cloudflare account_id")
+    return value
+
+
+CLOUDFLARE_ACCOUNT_ID = _wrangler_account_id()
 
 
 class ProvisioningRefusal(RuntimeError):
@@ -120,6 +130,10 @@ class ProvisioningRefusal(RuntimeError):
 class ProviderScope:
     project_id: str
     branch_id: str
+    endpoint_id: str
+    endpoint_host: str
+    port: int
+    database: str
 
 
 @dataclass(frozen=True)
@@ -154,20 +168,24 @@ class RoleAuthority:
 
 
 @dataclass(frozen=True)
-class AuthorityClosure:
-    app_writer: RoleAuthority
-    carr_writer: RoleAuthority
+class LoginProfile:
+    label: str
+    login_role: str
+    bundle_role: str
+    secret_name: str
 
 
 @dataclass(frozen=True)
-class PostflightEvidence:
-    session_user: str
-    current_user: str
-    statement_timeout_seconds: int
-    idle_timeout_seconds: int
-    authority: AuthorityClosure
-    missing_privileges: tuple[str, ...]
-    seed_state: ExpectedSeedState
+class ProfileClosure:
+    login: RoleAuthority
+    bundle: RoleAuthority
+    creator_edges: tuple[tuple[str, bool, bool, bool, str], ...]
+
+
+PROFILES = (
+    LoginProfile("reader", READER_ROLE, READER_BUNDLE_ROLE, "DATABASE_URL_READER"),
+    LoginProfile("writer", APP_ROLE, BUNDLE_ROLE, "DATABASE_URL_WRITER"),
+)
 
 
 Run = Callable[..., subprocess.CompletedProcess]
@@ -290,8 +308,18 @@ def provider_environment(environ: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
+def worker_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    result = dict(environ)
+    ambient = result.get("CLOUDFLARE_ACCOUNT_ID")
+    if ambient and ambient != CLOUDFLARE_ACCOUNT_ID:
+        raise ProvisioningRefusal("ambient Cloudflare account differs from the pinned CARR account")
+    result["CLOUDFLARE_ACCOUNT_ID"] = CLOUDFLARE_ACCOUNT_ID
+    return result
+
+
 def validate_provider_scope(
-    projects: Sequence[dict[str, Any]], branches: Sequence[dict[str, Any]]
+    projects: Sequence[dict[str, Any]], branches: Sequence[dict[str, Any]],
+    endpoints: Sequence[dict[str, Any]],
 ) -> ProviderScope:
     matches = [row for row in projects if row.get("name") == STAGING_PROJECT_NAME]
     if len(matches) != 1:
@@ -310,7 +338,22 @@ def validate_provider_scope(
         raise ProvisioningRefusal(
             "staging main branch has no immutable id or belongs to another project"
         )
-    return ProviderScope(project_id, branch_id)
+    endpoint_matches = [
+        row for row in endpoints
+        if str(row.get("branch_id") or branch_id) == branch_id
+        and row.get("type") in {"read_write", "read-write", "rw"}
+    ]
+    if len(endpoint_matches) != 1:
+        raise ProvisioningRefusal("staging main must have exactly one read-write endpoint")
+    endpoint_id = str(endpoint_matches[0].get("id") or "")
+    endpoint_host = str(endpoint_matches[0].get("host") or "").lower().rstrip(".")
+    if (
+        not endpoint_id.startswith("ep-")
+        or not endpoint_host.startswith(endpoint_id + ".")
+        or not endpoint_host.endswith(".neon.tech")
+    ):
+        raise ProvisioningRefusal("staging read-write endpoint identity or host is invalid")
+    return ProviderScope(project_id, branch_id, endpoint_id, endpoint_host, 5432, "neondb")
 
 
 def resolve_provider_scope(
@@ -324,15 +367,27 @@ def resolve_provider_scope(
     projects = _rows(project_payload, "projects")
     matches = [row for row in projects if row.get("name") == STAGING_PROJECT_NAME]
     if len(matches) != 1:
-        return validate_provider_scope(projects, [])
+        return validate_provider_scope(projects, [], [])
     project_id = str(matches[0].get("id") or "")
     if not project_id or project_id == PRODUCTION_PROJECT_ID:
-        return validate_provider_scope(projects, [])
+        return validate_provider_scope(projects, [], [])
     branch_payload = _provider_json(
         [neonctl, "branches", "list", "--project-id", project_id, "--output", "json"],
         run=run, env=env,
     )
-    return validate_provider_scope(projects, _rows(branch_payload, "branches"))
+    branches = _rows(branch_payload, "branches")
+    branch_matches = [row for row in branches if row.get("name") == STAGING_BRANCH_NAME]
+    if len(branch_matches) != 1 or not str(branch_matches[0].get("id") or ""):
+        return validate_provider_scope(projects, branches, [])
+    branch_id = str(branch_matches[0]["id"])
+    endpoint_payload = _provider_json(
+        [neonctl, "api", f"/projects/{project_id}/branches/{branch_id}/endpoints",
+         "--output", "json"],
+        run=run, env=env,
+    )
+    return validate_provider_scope(
+        projects, branches, _rows(endpoint_payload, "endpoints")
+    )
 
 
 def verify_provider_scope(
@@ -370,38 +425,16 @@ def verify_provider_scope(
         [row for row in branches if row.get("name") == STAGING_BRANCH_NAME]
     ) != 1:
         raise ProvisioningRefusal("staging main branch changed after immutable scope resolution")
-
-
-def ensure_provider_role(
-    scope: ProviderScope, *, neonctl: str, run: Run = subprocess.run,
-    environ: Mapping[str, str] | None = None,
-) -> bool:
-    """Create app_writer if absent. Return True only when this call created it."""
-    if not scope.project_id or scope.project_id == PRODUCTION_PROJECT_ID or not scope.branch_id:
-        raise ProvisioningRefusal("provider role target is not isolated staging")
-    env = provider_environment(environ or os.environ)
-    payload = _provider_json(
-        [neonctl, "roles", "list", "--project-id", scope.project_id,
-         "--branch", scope.branch_id, "--output", "json"],
-        run=run, env=env,
+    endpoint_payload = _provider_json(
+        [neonctl, "api",
+         f"/projects/{scope.project_id}/branches/{scope.branch_id}/endpoints",
+         "--output", "json"], run=run, env=env,
     )
-    roles = _rows(payload, "roles")
-    matches = [row for row in roles if row.get("name") == APP_ROLE]
-    if len(matches) > 1:
-        raise ProvisioningRefusal("provider returned duplicate app_writer roles")
-    if matches:
-        return False
-    # capture_output remains mandatory. The provider may return the generated
-    # password in JSON; no caller receives or logs that payload.
-    created = _provider_json(
-        [neonctl, "roles", "create", "--project-id", scope.project_id,
-         "--branch", scope.branch_id, "--name", APP_ROLE, "--output", "json"],
-        run=run, env=env,
+    current = validate_provider_scope(
+        projects, branches, _rows(endpoint_payload, "endpoints")
     )
-    role = created.get("role") if isinstance(created, dict) else None
-    if not isinstance(role, dict) or role.get("name") != APP_ROLE:
-        raise ProvisioningRefusal("provider role-create response has the wrong shape")
-    return True
+    if current != scope:
+        raise ProvisioningRefusal("staging endpoint changed after immutable scope resolution")
 
 
 def _dsn_parts(dsn: str) -> tuple[str, str, int, str]:
@@ -430,20 +463,28 @@ def provider_dsn(
         not scope.project_id
         or scope.project_id == PRODUCTION_PROJECT_ID
         or not scope.branch_id
-        or role_name not in {"neondb_owner", APP_ROLE}
+        or not scope.endpoint_id
+        or not scope.endpoint_host
+        or scope.port != 5432
+        or scope.database != "neondb"
+        or role_name != "neondb_owner"
     ):
-        raise ProvisioningRefusal("provider DSN target is outside isolated staging")
+        raise ProvisioningRefusal("only the isolated-staging owner DSN may come from the provider")
     result = _provider_run(
         [neonctl, "connection-string", scope.branch_id,
-         "--project-id", scope.project_id, "--role-name", role_name],
+         "--project-id", scope.project_id, "--role-name", role_name,
+         "--database-name", scope.database, "--endpoint-type", "read_write"],
         run=run, env=provider_environment(environ),
     )
     value = result.stdout.strip()
     if not value or "\n" in value or "\r" in value:
         raise ProvisioningRefusal("provider DSN response has the wrong shape; output suppressed")
     username, endpoint, port, database = _dsn_parts(value)
-    if username != role_name:
-        raise ProvisioningRefusal("provider DSN returned a different role; value suppressed")
+    if (
+        username != role_name or endpoint != scope.endpoint_host
+        or port != scope.port or database != scope.database
+    ):
+        raise ProvisioningRefusal("provider DSN differs from the pinned endpoint target; value suppressed")
     return ScopedDsn(scope, role_name, endpoint, port, database, value)
 
 
@@ -463,10 +504,14 @@ def validate_connection_scope(owner: ScopedDsn, writer: ScopedDsn) -> None:
 
 
 def collect_seed_state(cur: Any) -> ExpectedSeedState:
+    seed_contract = load_module(
+        "staging_app_writer_seed_contract_runtime",
+        REPO / "pipelines/staging_retrieval_doctrine_seed.py",
+    )
     cur.execute("select status,count(*) from retrieval_proposal group by status order by status")
     proposal_status = tuple((str(status), int(count)) for status, count in cur.fetchall())
     target_count = 0
-    for target in seed.TARGETS:
+    for target in seed_contract.TARGETS:
         cur.execute(
             """select (select count(*) from doctrine_document where slug=%s)
                     + (select count(*) from doctrine_slug_alias where alias_slug=%s)
@@ -582,156 +627,264 @@ def collect_role_authority(cur: Any, role: str) -> RoleAuthority:
     )
 
 
-def collect_authority_closure(cur: Any) -> AuthorityClosure:
-    return AuthorityClosure(
-        collect_role_authority(cur, APP_ROLE),
-        collect_role_authority(cur, BUNDLE_ROLE),
+def collect_creator_edges(
+    cur: Any, role: str
+) -> tuple[tuple[str, bool, bool, bool, str], ...]:
+    cur.execute(
+        """select member.rolname,m.admin_option,m.inherit_option,m.set_option,grantor.rolname
+             from pg_auth_members m
+             join pg_roles granted on granted.oid=m.roleid
+             join pg_roles member on member.oid=m.member
+             join pg_roles grantor on grantor.oid=m.grantor
+            where granted.rolname=%s order by member.rolname""",
+        (role,),
+    )
+    return tuple((str(name), bool(admin), bool(inherit), bool(can_set), str(grantor))
+                 for name, admin, inherit, can_set, grantor in cur.fetchall())
+
+
+def role_exists(cur: Any, role: str) -> bool:
+    cur.execute("select exists(select 1 from pg_roles where rolname=%s)", (role,))
+    return cur.fetchone() == (True,)
+
+
+def collect_profile_closure(cur: Any, profile: LoginProfile) -> ProfileClosure:
+    return ProfileClosure(
+        collect_role_authority(cur, profile.login_role),
+        collect_role_authority(cur, profile.bundle_role),
+        collect_creator_edges(cur, profile.login_role),
     )
 
 
-def _role_config_keys(config: Sequence[str]) -> tuple[str, ...]:
-    keys: list[str] = []
-    for item in config:
-        if "=" not in item:
-            raise ProvisioningRefusal("role configuration has an invalid shape")
-        key = item.split("=", 1)[0]
-        if not re.fullmatch(r"[a-z_][a-z0-9_]*", key) or key in keys:
-            raise ProvisioningRefusal("role configuration has an invalid or duplicate key")
-        keys.append(key)
-    return tuple(sorted(keys))
-
-
-def validate_authority_closure(
-    authority: AuthorityClosure, canonical_grants: Sequence[str], *, exact: bool
+def validate_profile_closure(
+    closure: ProfileClosure, profile: LoginProfile, canonical_grants: Sequence[str],
+    *, exact: bool, expected_creator: str,
 ) -> None:
-    """Refuse every authority path outside the generated carr_writer ACLs."""
-    app = authority.app_writer
-    bundle = authority.carr_writer
-    if not app.can_login or not app.inherits_privileges or app.powerful_attributes:
-        raise ProvisioningRefusal("app_writer is not a plain inheriting LOGIN role")
+    login = closure.login
+    bundle = closure.bundle
+    if not login.can_login or not login.inherits_privileges or login.powerful_attributes:
+        raise ProvisioningRefusal(f"{profile.login_role} is not a plain inheriting LOGIN role")
     if bundle.can_login or not bundle.inherits_privileges or bundle.powerful_attributes:
-        raise ProvisioningRefusal("carr_writer is not a plain NOLOGIN privilege bundle")
-    if app.owned_objects or bundle.owned_objects:
-        raise ProvisioningRefusal("app_writer/carr_writer must not own database objects")
-    if app.direct_acl_facts:
-        raise ProvisioningRefusal("app_writer has forbidden direct object ACLs")
-    if bundle.memberships or bundle.reachable_roles:
-        raise ProvisioningRefusal("carr_writer inherits authority from another role")
-    if bundle.role_config:
-        raise ProvisioningRefusal("carr_writer has forbidden role configuration")
-
-    allowed_config_keys = (
-        "idle_in_transaction_session_timeout", "statement_timeout"
-    )
-    config_keys = _role_config_keys(app.role_config)
-    if any(key not in allowed_config_keys for key in config_keys):
-        raise ProvisioningRefusal("app_writer has role configuration outside the timeout allowlist")
-
+        raise ProvisioningRefusal(f"{profile.bundle_role} is not a plain NOLOGIN privilege bundle")
+    if login.owned_objects or bundle.owned_objects:
+        raise ProvisioningRefusal("staging login/bundle roles must not own objects")
+    if login.direct_acl_facts:
+        raise ProvisioningRefusal(f"{profile.login_role} has forbidden direct ACLs")
+    if bundle.memberships or bundle.reachable_roles or bundle.role_config:
+        raise ProvisioningRefusal(f"{profile.bundle_role} inherits or configures extra authority")
+    if closure.creator_edges != ((expected_creator, True, False, False, expected_creator),):
+        raise ProvisioningRefusal(
+            f"{profile.login_role} creator ADMIN edge is not exactly bound to {expected_creator}"
+        )
+    allowed_config = tuple(sorted((
+        "idle_in_transaction_session_timeout=120s", "statement_timeout=60s",
+    )))
     if exact:
-        if app.role_config != tuple(sorted((
-            "idle_in_transaction_session_timeout=120s",
-            "statement_timeout=60s",
-        ))):
-            raise ProvisioningRefusal("app_writer role configuration is not exactly the timeout allowlist")
-        if app.memberships != ((BUNDLE_ROLE, False, True, True),):
-            raise ProvisioningRefusal(
-                "app_writer membership must be exactly carr_writer ADMIN FALSE/INHERIT TRUE/SET TRUE"
-            )
-        if app.reachable_roles != (BUNDLE_ROLE,):
-            raise ProvisioningRefusal("app_writer has unexpected recursively reachable roles")
+        if login.role_config != allowed_config:
+            raise ProvisioningRefusal(f"{profile.login_role} timeouts/config are not exact")
+        if login.memberships != ((profile.bundle_role, False, True, True),):
+            raise ProvisioningRefusal(f"{profile.login_role} bundle membership is not exact")
+        if login.reachable_roles != (profile.bundle_role,):
+            raise ProvisioningRefusal(f"{profile.login_role} reaches an unexpected role")
     else:
-        if any(name != BUNDLE_ROLE for name, *_options in app.memberships):
-            raise ProvisioningRefusal("reused app_writer already belongs to another role")
-        if any(name != BUNDLE_ROLE for name in app.reachable_roles):
-            raise ProvisioningRefusal("reused app_writer already reaches another role")
-
+        if login.role_config and login.role_config != allowed_config:
+            raise ProvisioningRefusal(f"reused {profile.login_role} has unexpected configuration")
+        if any(name != profile.bundle_role for name, *_ in login.memberships):
+            raise ProvisioningRefusal(f"reused {profile.login_role} has an extra membership")
+        if any(name != profile.bundle_role for name in login.reachable_roles):
+            raise ProvisioningRefusal(f"reused {profile.login_role} reaches an extra role")
     expected_acl = set(snapshot_grants.acl_facts(canonical_grants))
     actual_acl = set(bundle.direct_acl_facts)
     if actual_acl - expected_acl:
-        raise ProvisioningRefusal(
-            "carr_writer has excess or grantable authority outside the canonical snapshot"
-        )
+        raise ProvisioningRefusal(f"{profile.bundle_role} has excess or grantable authority")
     if exact and expected_acl - actual_acl:
-        raise ProvisioningRefusal("carr_writer is missing canonical snapshot authority")
+        raise ProvisioningRefusal(f"{profile.bundle_role} is missing canonical authority")
 
 
-def apply_database_provisioning(
-    conn: Any, grants: Sequence[str], *, commit: bool = True
-) -> None:
-    """Apply all ACL/identity changes in one owner transaction."""
+def _profile_membership_sql(profile: LoginProfile) -> tuple[str, ...]:
+    return (
+        f"grant {profile.bundle_role} to {profile.login_role} with admin false",
+        f"grant {profile.bundle_role} to {profile.login_role} with inherit true",
+        f"grant {profile.bundle_role} to {profile.login_role} with set true",
+    )
+
+
+def apply_login_profile(
+    conn: Any, profile: LoginProfile, grants: Sequence[str], password: str,
+    *, expected_creator: str, commit: bool = True,
+) -> bool:
+    """Create/converge one login profile in one advisory-locked transaction."""
     cur = conn.cursor()
+    created = False
     try:
-        # A reused provider role may already be unsafe. Refuse all non-convergent
-        # authority before adding anything, then prove the exact closure again
-        # after repair and before the transaction is allowed to commit.
-        validate_authority_closure(
-            collect_authority_closure(cur), grants, exact=False
-        )
+        cur.execute("select pg_advisory_xact_lock(%s)", (LOCK_KEY,))
+        exists = role_exists(cur, profile.login_role)
+        if exists:
+            validate_profile_closure(
+                collect_profile_closure(cur, profile), profile, grants,
+                exact=True, expected_creator=expected_creator,
+            )
+        else:
+            bundle = collect_role_authority(cur, profile.bundle_role)
+            if (
+                bundle.can_login or not bundle.inherits_privileges
+                or bundle.powerful_attributes or bundle.owned_objects
+                or bundle.memberships or bundle.reachable_roles or bundle.role_config
+            ):
+                raise ProvisioningRefusal(f"{profile.bundle_role} is not a closed bundle role")
+            expected_acl = set(snapshot_grants.acl_facts(grants))
+            if set(bundle.direct_acl_facts) - expected_acl:
+                raise ProvisioningRefusal(f"{profile.bundle_role} has excess authority")
+            cur.execute(sql.SQL(
+                "create role {} login inherit nosuperuser nocreatedb nocreaterole "
+                "noreplication nobypassrls password {}"
+            ).format(sql.Identifier(profile.login_role), sql.Literal(password)))
+            for option in ("admin true", "inherit false", "set false"):
+                cur.execute(sql.SQL("grant {} to {} with " + option).format(
+                    sql.Identifier(profile.login_role), sql.Identifier(expected_creator)
+                ))
+            created = True
         for statement in grants:
             cur.execute(statement)
-        for statement in MEMBERSHIP_SQL:
+        for statement in _profile_membership_sql(profile):
             cur.execute(statement)
-        cur.execute(STATEMENT_TIMEOUT_SQL)
-        cur.execute(IDLE_TIMEOUT_SQL)
-        validate_authority_closure(
-            collect_authority_closure(cur), grants, exact=True
+        cur.execute(f"alter role {profile.login_role} set statement_timeout = '60s'")
+        cur.execute(
+            f"alter role {profile.login_role} set idle_in_transaction_session_timeout = '120s'"
+        )
+        validate_profile_closure(
+            collect_profile_closure(cur, profile), profile, grants,
+            exact=True, expected_creator=expected_creator,
         )
         if commit:
             conn.commit()
-    except Exception:
+        return created
+    except Exception as exc:
         conn.rollback()
+        if password and password in str(exc):
+            raise ProvisioningRefusal(
+                "database role provisioning failed; credential suppressed"
+            ) from exc
         raise
 
 
-def collect_postflight(
-    dsn: str, canonical_grants: Sequence[str], *, connect: Connect = psycopg.connect
-) -> PostflightEvidence:
+def validate_profile_login(
+    dsn: str, profile: LoginProfile, grants: Sequence[str], *, expected_creator: str,
+    connect: Connect = psycopg.connect,
+) -> None:
     conn = connect(dsn)
     try:
         cur = conn.cursor()
         cur.execute("begin transaction read only")
+        cur.execute("select session_user,current_user")
+        if cur.fetchone() != (profile.login_role, profile.login_role):
+            raise ProvisioningRefusal(f"postflight did not authenticate as {profile.login_role}")
+        closure = collect_profile_closure(cur, profile)
+        validate_profile_closure(
+            closure, profile, grants, exact=True, expected_creator=expected_creator,
+        )
         cur.execute(
-            """select session_user,current_user,
-                      extract(epoch from current_setting('statement_timeout')::interval)::integer,
-                      extract(epoch from current_setting('idle_in_transaction_session_timeout')::interval)::integer"""
+            "select extract(epoch from current_setting('statement_timeout')::interval)::integer,"
+            "extract(epoch from current_setting('idle_in_transaction_session_timeout')::interval)::integer"
         )
-        session_user, current_user, statement_seconds, idle_seconds = cur.fetchone()
-        authority = collect_authority_closure(cur)
-        validate_authority_closure(authority, canonical_grants, exact=True)
-        missing: list[str] = []
-        for relation, privilege in REQUIRED_IMPORTER_PRIVILEGES:
-            cur.execute(
-                "select has_table_privilege(current_user,%s,%s)",
-                (relation, privilege),
-            )
-            if cur.fetchone() != (True,):
-                missing.append(f"{relation}.{privilege}")
-        state = collect_seed_state(cur)
+        if cur.fetchone() != (60, 120):
+            raise ProvisioningRefusal(f"{profile.login_role} role timeouts are not 60s/120s")
+        if profile.label == "writer":
+            missing: list[str] = []
+            for relation, privilege in REQUIRED_IMPORTER_PRIVILEGES:
+                cur.execute("select has_table_privilege(current_user,%s,%s)", (relation, privilege))
+                if cur.fetchone() != (True,):
+                    missing.append(f"{relation}.{privilege}")
+            if missing:
+                raise ProvisioningRefusal("app_writer is missing importer privileges")
         conn.rollback()
-        return PostflightEvidence(
-            str(session_user), str(current_user), int(statement_seconds), int(idle_seconds),
-            authority, tuple(missing), state,
-        )
     finally:
         conn.close()
 
 
-def validate_postflight(
-    evidence: PostflightEvidence, before: ExpectedSeedState,
-    canonical_grants: Sequence[str],
+def put_worker_database_secret(
+    profile: LoginProfile, value: str, *, wrangler: str = str(WRANGLER),
+    run: Run = subprocess.run, environ: Mapping[str, str] | None = None,
 ) -> None:
-    if evidence.session_user != APP_ROLE or evidence.current_user != APP_ROLE:
-        raise ProvisioningRefusal("postflight did not authenticate as app_writer")
-    if evidence.statement_timeout_seconds != 60 or evidence.idle_timeout_seconds != 120:
-        raise ProvisioningRefusal("app_writer role timeouts are not exactly 60s/120s")
-    validate_authority_closure(evidence.authority, canonical_grants, exact=True)
-    if evidence.missing_privileges:
-        raise ProvisioningRefusal(
-            "app_writer is missing importer privileges: " + ", ".join(evidence.missing_privileges)
+    try:
+        result = run(
+            [wrangler, "secret", "put", profile.secret_name,
+             "--env", "staging", "--config", str(WRANGLER_CONFIG),
+             "--name", STAGING_WORKER_NAME],
+            input=value, capture_output=True, text=True, timeout=60,
+            env=worker_environment(environ if environ is not None else os.environ),
         )
-    validate_seed_state(evidence.seed_state)
-    if evidence.seed_state != before:
-        raise ProvisioningRefusal("provisioning changed proposals, doctrine targets, or batches")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisioningRefusal("Worker secret update outcome is uncertain; output suppressed") from exc
+    if result.returncode != 0:
+        raise ProvisioningRefusal(
+            f"Worker secret update failed (rc={result.returncode}); output suppressed"
+        )
+
+
+def verify_worker_secret_binding(
+    profile: LoginProfile, *, wrangler: str = str(WRANGLER),
+    run: Run = subprocess.run, environ: Mapping[str, str] | None = None,
+) -> None:
+    try:
+        result = run(
+            [wrangler, "secret", "list", "--env", "staging",
+             "--config", str(WRANGLER_CONFIG), "--name", STAGING_WORKER_NAME,
+             "--format", "json"],
+            capture_output=True, text=True, timeout=60,
+            env=worker_environment(environ if environ is not None else os.environ),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisioningRefusal("Worker secret readback did not complete; output suppressed") from exc
+    if result.returncode != 0:
+        raise ProvisioningRefusal("Worker secret readback failed; output suppressed")
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProvisioningRefusal("Worker secret readback was not JSON; output suppressed") from exc
+    if not isinstance(payload, list) or sum(
+        isinstance(row, dict) and row.get("name") == profile.secret_name for row in payload
+    ) != 1:
+        raise ProvisioningRefusal(f"Worker does not report exactly one {profile.secret_name} binding")
+
+
+def require_direct_owner_identity(cur: Any) -> str:
+    cur.execute("select session_user,current_user")
+    row = cur.fetchone()
+    if row is None or tuple(str(value) for value in row) != ("neondb_owner", "neondb_owner"):
+        raise ProvisioningRefusal(
+            "provisioning requires direct neondb_owner session and current identity"
+        )
+    return "neondb_owner"
+
+
+def decide_profile_action(*, role_exists_now: bool, credential_state: str) -> str:
+    matrix = {
+        (False, "absent"): "prepare_create",
+        (False, "pending"): "create",
+        (True, "pending"): "resume",
+        (True, "final"): "reuse",
+    }
+    action = matrix.get((role_exists_now, credential_state))
+    if action is None:
+        raise ProvisioningRefusal(
+            f"unsafe role/credential state: role_exists={role_exists_now}, credential={credential_state}"
+        )
+    return action
+
+
+def run_profile_sequence(
+    profiles: Sequence[LoginProfile],
+    converge: Callable[[LoginProfile], tuple[str, str]],
+    publish: Callable[[LoginProfile, str], None],
+) -> dict[str, str]:
+    """Reader first; each completed profile is recoverable if the next boundary fails."""
+    outcomes: dict[str, str] = {}
+    for profile in profiles:
+        value, outcome = converge(profile)
+        publish(profile, value)
+        outcomes[profile.label] = outcome
+    return outcomes
 
 
 def redact_error(exc: BaseException) -> str:
@@ -744,7 +897,7 @@ def redact_error(exc: BaseException) -> str:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true",
-                        help="create/reuse the staging role and apply canonical ACLs")
+                        help="create/reuse the staging login roles and apply canonical ACLs")
     return parser.parse_args(argv)
 
 
@@ -752,9 +905,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         reject_unsafe_environment(os.environ)
-        grants = snapshot_grants.load_current_grants_to_role(
-            SCHEMA, MIGRATIONS, BUNDLE_ROLE
-        )
+        plans = {
+            profile.label: snapshot_grants.load_current_grants_to_role(
+                SCHEMA, MIGRATIONS, profile.bundle_role
+            ) for profile in PROFILES
+        }
         scope = resolve_provider_scope(
             neonctl=db_tap.NEONCTL, environ=os.environ,
         )
@@ -767,40 +922,112 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({
                 "environment": "staging", "project": STAGING_PROJECT_NAME,
                 "branch": STAGING_BRANCH_NAME, "state": "dry_run",
-                "canonical_carr_writer_grants": len(grants),
+                "canonical_grants": {label: len(plan) for label, plan in plans.items()},
                 "proposal_status": dict(before.proposal_status),
                 "target_count": before.target_count, "batch_count": before.batch_count,
+                "reader_least_privilege_required": True,
             }, sort_keys=True))
             return 0
 
         verify_provider_scope(
             scope, neonctl=db_tap.NEONCTL, environ=os.environ,
         )
-        created = ensure_provider_role(
-            scope, neonctl=db_tap.NEONCTL, environ=os.environ,
-        )
-        writer_dsn = provider_dsn(
-            scope, APP_ROLE, neonctl=db_tap.NEONCTL, environ=os.environ,
-        )
-        verify_provider_scope(
-            scope, neonctl=db_tap.NEONCTL, environ=os.environ,
-        )
-        validate_connection_scope(owner_dsn, writer_dsn)
-        owner = psycopg.connect(owner_dsn.value)
-        try:
-            apply_database_provisioning(owner, grants)
-        finally:
-            owner.close()
-        evidence = collect_postflight(writer_dsn.value, grants)
-        validate_postflight(evidence, before, grants)
+        config_root = credential.profile("writer").paths.final.parent
+        lock_path = config_root / ".staging-role-operation.lock"
+        outcomes: dict[str, str] = {}
+        with credential.exclusive_lock(lock_path):
+            owner = psycopg.connect(owner_dsn.value)
+            try:
+                cur = owner.cursor()
+                expected_creator = require_direct_owner_identity(cur)
+                owner.commit()
+                owner.autocommit = True
+                cur.execute("select pg_advisory_lock(%s)", (LOCK_KEY,))
+                owner.autocommit = False
+                def converge(login_profile: LoginProfile) -> tuple[str, str]:
+                    file_profile = credential.profile(login_profile.label)
+                    cur.execute("select exists(select 1 from pg_roles where rolname=%s)",
+                                (login_profile.login_role,))
+                    exists = cur.fetchone() == (True,)
+                    try:
+                        stored = credential.load_existing(
+                            file_profile.paths, key=file_profile.key,
+                            role_name=file_profile.role_name,
+                            expected_endpoint=owner_dsn.endpoint,
+                            expected_port=owner_dsn.port,
+                            expected_database=owner_dsn.database,
+                        )
+                    except credential.CredentialRefusal as exc:
+                        if "is absent" not in str(exc):
+                            raise
+                        action = decide_profile_action(
+                            role_exists_now=exists, credential_state="absent"
+                        )
+                        stored = credential.prepare_pending(
+                            file_profile.paths, key=file_profile.key,
+                            role_name=file_profile.role_name,
+                            owner_uri=owner_dsn.value,
+                            expected_endpoint=owner_dsn.endpoint,
+                            expected_port=owner_dsn.port,
+                            expected_database=owner_dsn.database,
+                        )
+                    else:
+                        action = decide_profile_action(
+                            role_exists_now=exists, credential_state=stored.state
+                        )
+                    if action in {"resume", "reuse"}:
+                        validate_profile_login(
+                            stored.value, login_profile, plans[login_profile.label],
+                            expected_creator=expected_creator,
+                        )
+                        outcome = "resumed" if action == "resume" else "reused"
+                    else:
+                        apply_login_profile(
+                            owner, login_profile, plans[login_profile.label], stored.password,
+                            expected_creator=expected_creator,
+                        )
+                        validate_profile_login(
+                            stored.value, login_profile, plans[login_profile.label],
+                            expected_creator=expected_creator,
+                        )
+                        outcome = "created"
+                    if stored.state == "pending":
+                        credential.promote_pending(
+                            file_profile.paths, key=file_profile.key,
+                            expected_value=stored.value,
+                        )
+                    return stored.value, outcome
+
+                def publish(login_profile: LoginProfile, value: str) -> None:
+                    verify_provider_scope(
+                        scope, neonctl=db_tap.NEONCTL, environ=os.environ,
+                    )
+                    put_worker_database_secret(login_profile, value)
+                    verify_worker_secret_binding(login_profile)
+                    verify_provider_scope(
+                        scope, neonctl=db_tap.NEONCTL, environ=os.environ,
+                    )
+                outcomes = run_profile_sequence(PROFILES, converge, publish)
+            finally:
+                try:
+                    owner.rollback()
+                    owner.autocommit = True
+                    owner.execute("select pg_advisory_unlock(%s)", (LOCK_KEY,))
+                except (psycopg.Error, ValueError):
+                    pass
+                owner.close()
+        after = read_seed_state(owner_dsn.value)
+        validate_seed_state(after)
+        if after != before:
+            raise ProvisioningRefusal("provisioning changed proposals, doctrine targets, or batches")
         print(json.dumps({
             "environment": "staging", "project": STAGING_PROJECT_NAME,
             "branch": STAGING_BRANCH_NAME, "state": "provisioned",
-            "provider_role_created": created,
-            "canonical_carr_writer_grants": len(grants),
-            "identity": APP_ROLE, "statement_timeout_seconds": 60,
+            "role_outcomes": outcomes,
+            "canonical_grants": {label: len(plan) for label, plan in plans.items()},
+            "identities": [READER_ROLE, APP_ROLE], "statement_timeout_seconds": 60,
             "idle_timeout_seconds": 120,
-            "proposal_status": dict(evidence.seed_state.proposal_status),
+            "proposal_status": dict(after.proposal_status),
             "target_count": 0, "batch_count": 0,
         }, sort_keys=True))
         return 0
@@ -811,7 +1038,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     except (
-        OSError, ValueError, ProvisioningRefusal, psycopg.Error,
+        OSError, ValueError, ProvisioningRefusal, credential.CredentialRefusal, psycopg.Error,
         subprocess.TimeoutExpired,
     ) as exc:
         print("staging-app-writer-provision: REFUSED — " + redact_error(exc), file=sys.stderr)

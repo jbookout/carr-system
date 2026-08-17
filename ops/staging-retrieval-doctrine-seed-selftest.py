@@ -159,4 +159,41 @@ for forbidden in ("--project", "--branch", "--files", "--reason"):
     check(f"{forbidden} cannot redirect the staging-only seed", False)
 check("arbitrary project, branch, source, and break-glass arguments are rejected", True)
 
+class IdentityCursor:
+    def execute(self, statement, params=None):
+        self.statement = str(statement)
+
+    def fetchone(self):
+        return ("app_writer", "app_writer")
+
+
+authority_calls: list[tuple[bool, str]] = []
+original_collect = seed.provision.collect_profile_closure
+original_validate = seed.provision.validate_profile_closure
+original_plan = seed.provision.snapshot_grants.load_current_grants_to_role
+try:
+    seed.provision.collect_profile_closure = lambda _cur, profile: ("closure", profile.label)
+    seed.provision.validate_profile_closure = lambda _closure, _profile, _grants, **kwargs: authority_calls.append(
+        (kwargs["exact"], kwargs["expected_creator"])
+    )
+    seed.provision.snapshot_grants.load_current_grants_to_role = lambda *_args: ("grant",)
+    seed.require_staging_app_writer(IdentityCursor())
+finally:
+    seed.provision.collect_profile_closure = original_collect
+    seed.provision.validate_profile_closure = original_validate
+    seed.provision.snapshot_grants.load_current_grants_to_role = original_plan
+check("seeder binds exact app_writer closure to SQL owner before mutation",
+      authority_calls == [(True, "neondb_owner")])
+
+class SetRoleCursor(IdentityCursor):
+    def fetchone(self):
+        return ("neondb_owner", "app_writer")
+
+try:
+    seed.require_staging_app_writer(SetRoleCursor())
+except seed.SeedRefusal:
+    check("owner SET ROLE app_writer cannot satisfy the staging mutation identity", True)
+else:
+    check("owner SET ROLE app_writer cannot satisfy the staging mutation identity", False)
+
 print("PASS: staging retrieval doctrine seed self-test")

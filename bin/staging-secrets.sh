@@ -33,7 +33,6 @@ set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORKER_DIR="$REPO/mcp-server"
 WRANGLER="$WORKER_DIR/node_modules/.bin/wrangler"
-NEONCTL="$WORKER_DIR/node_modules/.bin/neonctl"
 OUT_ENV="$HOME/.config/carr/staging-tokens.env"
 
 [ -x "$WRANGLER" ] || { echo "staging-secrets: wrangler not found at $WRANGLER" >&2; exit 69; }
@@ -80,26 +79,13 @@ for spec in "AGENT_TOKENS:codex" "PROBE_TOKENS:smoke-probe" \
   unset tok
 done
 
-# ── database ────────────────────────────────────────────────────────────────
-# Derived from neonctl inside this process, exactly like bin/backup-dump.sh, so
-# the DSN never lands on a command line or in a transcript. Staging's project is
-# resolved BY NAME so a rebuild does not strand this script on a dead id.
-STAGING_ID="$("$NEONCTL" projects list --org-id org-dry-dew-75906281 --output json 2>/dev/null \
-  | "$REPO/.venv/bin/python" -c 'import json,sys; d=json.load(sys.stdin); rows=d if isinstance(d,list) else d.get("projects",[]); print(next(r["id"] for r in rows if r.get("name")=="carr-staging"))')"
-[ -n "$STAGING_ID" ] || { echo "staging-secrets: could not resolve the carr-staging project" >&2; exit 1; }
-
-STAGING_DSN="$("$NEONCTL" connection-string main --project-id "$STAGING_ID" --role-name neondb_owner 2>/dev/null)"
-[ -n "$STAGING_DSN" ] || { echo "staging-secrets: could not derive the staging connection string" >&2; exit 1; }
-
-# BOTH roles point at the same owner for now, and that is a KNOWN GAP rather than
-# an oversight. Production separates carr_reader from carr_writer; staging's
-# schema arrived through a --no-owner --no-acl dump, so those login roles do not
-# exist there yet. Staging is isolated, which is what G1 asks; least-privilege
-# WITHIN staging is a smaller, later job. Stated here so nobody reads this file
-# as a claim that staging models production's permission model. It does not.
-printf '%s' "$STAGING_DSN" | put "DATABASE_URL_READER"
-printf '%s' "$STAGING_DSN" | put "DATABASE_URL_WRITER"
-unset STAGING_DSN
+# ── database ownership boundary ────────────────────────────────────────────
+# This token rotator NEVER derives, reads, or overwrites database credentials.
+# tools/provision-staging-app-writer.py owns the two independently persisted,
+# SQL-created least-authority login credentials and installs each Worker secret
+# only after an authenticated authority postflight. Keeping the paths separate
+# means rotating machine tokens cannot silently widen either database door back
+# to neondb_owner.
 
 chmod 600 "$OUT_ENV"
 echo ""
