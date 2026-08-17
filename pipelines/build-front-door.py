@@ -204,9 +204,6 @@ HTML=f'''<!DOCTYPE html>
 </body>
 </html>'''
 
-import os as _os
-open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html'),'w',encoding='utf-8').write(HTML)
-
 # DELIVER IT. Added 2026-08-09. This script wrote the page beside itself inside
 # the repo and NOTHING copied it anywhere, so the front-door.html Joe actually
 # opens in the vault was last written 2026-07-14. Every change made to this
@@ -220,15 +217,19 @@ open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html
 # declares success when it CREATES an artifact, never when the consumer can
 # reach it. The generator that builds a surface is the right place to deliver
 # it, so the two cannot drift apart again.
+import os as _os
 _dest = _os.path.join(FOLDER, "DNA", "Team", "front-door.html")
-if _os.path.isdir(_os.path.dirname(_dest)):
-    open(_dest, "w", encoding="utf-8").write(HTML)
-    print("delivered ->", _dest)
-else:
-    # Loud, not silent. A vault that is not mounted is a real condition on a
-    # laptop, and the page simply not arriving is exactly the failure this block
-    # exists to end.
-    print("NOT DELIVERED: vault not mounted at", _os.path.dirname(_dest))
+_dest_dir = _os.path.dirname(_dest)
+if not _os.path.isdir(_dest_dir):
+    # Recovery was explicitly requested, so a missing destination is a failed
+    # delivery, never a successful local-only render.
+    print("NOT DELIVERED: requested recovery destination is unavailable at", _dest_dir,
+          file=sys.stderr)
+    raise SystemExit(2)
+
+open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html'),'w',encoding='utf-8').write(HTML)
+open(_dest, "w", encoding="utf-8").write(HTML)
+print("delivered ->", _dest)
 visible=' '.join(re.findall(r'>([^<>]+)<',HTML))
 assert '—' not in visible, "em-dash in visible copy"
 low=visible.lower()
