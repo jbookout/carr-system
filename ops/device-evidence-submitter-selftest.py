@@ -50,6 +50,14 @@ def scheduler() -> dict[str, Any]:
             "source_fingerprint": "b" * 64, "observed_at": "2026-08-16T12:00:00Z"}
 
 
+def launchd_scheduler() -> dict[str, Any]:
+    return {"schema_version": 1, "kind": "launchd_scheduler_observation",
+            "surface_id": "nightly-record-layer.launchd.v1", "label": "com.carr.nightly-record-layer",
+            "timezone": "America/Chicago", "enabled": True, "plist_sha256": "c" * 64,
+            "schedule_sha256": "d" * 64, "launchctl_revision": "e" * 64,
+            "source_fingerprint": "f" * 64, "observed_at": "2026-08-16T12:00:00Z"}
+
+
 def refused(value: Any) -> bool:
     try:
         validate_submission(value)
@@ -128,6 +136,16 @@ def main() -> int:
     check("scheduler receipt result is exact and device submitter never accepts caller SQL",
           scheduler_ref == "scheduler-observation:" + scheduler_submission.idempotency_key
           and scheduler_cursor.params[-1] == scheduler_submission.idempotency_key)
+    launchd_submission = validate_submission(launchd_scheduler())
+    check("launchd observation maps only to its fixed native stored function",
+          launchd_submission.function == "ops.record_launchd_scheduler_observation"
+          and cli.statement_for_submission(launchd_submission) ==
+          "select ops.record_launchd_scheduler_observation(%s,%s,%s,%s::boolean,%s,%s,%s,%s,%s::timestamptz,%s)")
+    launchd_cursor = FakeCursor("scheduler-observation:" + launchd_submission.idempotency_key)
+    check("launchd receipt result is exact and bound to canonical evidence",
+          cli.execute_submission("opaque-dsn", launchd_submission,
+                                 lambda _: FakeConnection(launchd_cursor)) ==
+          "scheduler-observation:" + launchd_submission.idempotency_key)
     malformed_scheduler = scheduler(); malformed_scheduler["source_fingerprint"] = "not-a-digest"
     check("scheduler observation refuses malformed provider provenance", refused(malformed_scheduler))
     with tempfile.TemporaryDirectory() as tmp:

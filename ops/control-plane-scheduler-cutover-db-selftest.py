@@ -19,6 +19,7 @@ from lib.control_plane_scheduler_cutover_db import (ACCEPTANCE_SQL, AUTHORITY_SQ
 
 MIGRATION = (REPO / "migrations" / "0176_legacy_schedule_disable_receipt.sql").read_text(encoding="utf-8").lower()
 OBSERVATION_MIGRATION = (REPO / "migrations" / "0180_claude_scheduler_observation_receipt.sql").read_text(encoding="utf-8").lower()
+LAUNCHD_MIGRATION = (REPO / "migrations" / "0182_launchd_scheduler_observation_receipt.sql").read_text(encoding="utf-8").lower()
 REGISTRY = json.loads((REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json").read_text(encoding="utf-8"))
 MANIFEST = json.loads((REPO / "ops" / "config" / "control-plane-workflows.v1.json").read_text(encoding="utf-8"))
 CONTROL_PLANE = load_module_from_path(
@@ -65,7 +66,7 @@ class Cursor:
 
 class Connection:
     def __init__(self, identity: tuple[str, str] = ("carr_jobs", "carr_jobs"),
-                 authority: tuple[bool, bool, bool] = (False, False, False),
+                 authority: tuple[bool, bool, bool, bool] = (False, False, False, False),
                  rows: list[tuple[Any, ...]] | None = None,
                  disable_rows: list[tuple[Any, ...]] | None = None,
                  observation_rows: list[tuple[Any, ...]] | None = None) -> None:
@@ -77,7 +78,7 @@ class Connection:
                                               "scheduler-observation:enabled", "scheduler-observation:disabled", None)]
         self.observation_rows = observation_rows if observation_rows is not None else [(
             "scheduler-observation:fixture", "cc-update-audit.claude-code.v1", "cc-update-audit", 1,
-            "cc-update-audit", "enabled", "45 9 * * 1", "America/Chicago", "a" * 64,
+            "cc-update-audit", "claude-code", "enabled", "45 9 * * 1", "America/Chicago", "a" * 64,
             "provider-revision-1", "b" * 64, datetime(2026, 8, 16, 18, 0, tzinfo=timezone.utc), "joe-mac",
         )]
         self.calls: list[tuple[str, tuple[str, ...] | None]] = []
@@ -104,6 +105,11 @@ def main() -> int:
           and "pre.observed_at>now()+interval '5 minutes'" in OBSERVATION_MIGRATION
           and "existing.pre_observation_ref is distinct from p_pre_observation_ref" in OBSERVATION_MIGRATION
           and "existing.post_observation_ref is distinct from p_post_observation_ref" in OBSERVATION_MIGRATION)
+    check("launchd retirement uses the same fresh immutable observation and Joe authority boundary",
+          "record_launchd_scheduler_observation" in LAUNCHD_MIGRATION
+          and "kind='launchd'" in LAUNCHD_MIGRATION
+          and "pre.scheduler_state<>'enabled'" in LAUNCHD_MIGRATION
+          and "post.scheduler_state<>'disabled'" in LAUNCHD_MIGRATION)
     rows = scheduler_surface_rows(REGISTRY, manifest=MANIFEST)
     check("database surface registry is populated only by complete exact sync parity",
           "insert into ops.legacy_schedule_surface_registry" not in MIGRATION
@@ -159,10 +165,21 @@ def main() -> int:
           and observation["device_principal_bound"] is True and observation["immutable"] is True)
     check("provider observation uses a separate exact allowlisted receipt query",
           conn.calls[-1] == (PROVIDER_OBSERVATION_SQL, ("scheduler-observation:fixture",)))
+    launchd_conn = Connection(observation_rows=[(
+        "scheduler-observation:launchd", "nightly-record-layer.launchd.v1", "nightly-record-layer", 2,
+        "com.carr.nightly-record-layer", "launchd", "disabled", "c" * 64, "America/Chicago",
+        "d" * 64, "e" * 64, "f" * 64, datetime(2026, 8, 16, 18, 1, tzinfo=timezone.utc), "joe-mac",
+    )])
+    launchd_resolver = ReceiptResolver(lambda _dsn: launchd_conn, jobs_dsn(good))
+    launchd_observation = launchd_resolver.scheduler_observation_receipt("scheduler-observation:launchd")
+    check("launchd observation resolves through the exact current contract join",
+          launchd_observation["scheduler_kind"] == "launchd"
+          and launchd_observation["scheduler_state"] == "disabled")
+    launchd_resolver.close()
     resolver.close()
 
     check("writer-capable reader connection is refused", refuses(lambda: ReceiptResolver(
-        lambda _dsn: Connection(authority=(True, False, False)), jobs_dsn(good))))
+        lambda _dsn: Connection(authority=(True, False, False, False)), jobs_dsn(good))))
     check("writer identity is refused", refuses(lambda: ReceiptResolver(
         lambda _dsn: Connection(identity=("carr_writer", "carr_jobs")), jobs_dsn(good))))
     check("ambiguous receipt reference is refused", refuses(lambda: ReceiptResolver(

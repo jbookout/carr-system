@@ -20,7 +20,7 @@ from psycopg import sql
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from lib.control_plane_scheduler_cutover import scheduler_provider_rows  # noqa: E402
+from lib.control_plane_scheduler_cutover import scheduler_launchd_rows, scheduler_provider_rows  # noqa: E402
 
 SCHEDULER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
 WORKFLOW_MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
@@ -29,7 +29,8 @@ WORKFLOW_MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.j
 REQUIRED_TABLES = [
     "ops.guidance_intake", "ops.rule_admission", "ops.rule_enforcement_point",
     "ops.authority_receipt", "ops.legacy_schedule_disable_receipt", "ops.legacy_schedule_surface_registry",
-    "ops.legacy_schedule_provider_contract", "ops.legacy_schedule_observation_receipt", "ops.job_definition", "ops.job",
+    "ops.legacy_schedule_provider_contract", "ops.legacy_schedule_launchd_contract",
+    "ops.legacy_schedule_observation_receipt", "ops.job_definition", "ops.job",
     "ops.job_attempt", "ops.job_receipt", "ops.cognition_job",
     "ops.cognition_result_cache", "ops.workflow_acceptance",
     "ops.provider_route", "ops.provider_observation",
@@ -57,6 +58,7 @@ REQUIRED_FUNCTIONS = [
     "ops.admit_job_cost(uuid,uuid,text,numeric)",
     "ops.record_npi_device_evidence(uuid,timestamp with time zone,text,text,jsonb,text)",
     "ops.record_claude_scheduler_observation(text,text,text,text,boolean,text,text,text,timestamp with time zone,text)",
+    "ops.record_launchd_scheduler_observation(text,text,text,boolean,text,text,text,text,timestamp with time zone,text)",
     "ops.settle_job_cost(uuid,uuid,uuid,integer,integer,numeric)",
     "ops.release_job_cost(uuid,uuid,uuid)",
 ]
@@ -92,6 +94,11 @@ def main() -> int:
             (row[2], row[0], row[1], row[3], row[4], row[5], row[6], row[7])
             for row in scheduler_provider_rows(registry, manifest=manifest, repo=REPO)
         )
+        expected_launchd = sorted(
+            (row[2], row[0], row[1], row[3], row[4], row[5], json.loads(row[6]),
+             row[7], row[8], row[9])
+            for row in scheduler_launchd_rows(registry, manifest=manifest, repo=REPO)
+        )
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         fail(f"could not load checked-in scheduler surface registry: {exc}")
         return 2
@@ -119,10 +126,21 @@ def main() -> int:
             actual_provider = [tuple(row) for row in cur.fetchall()]
             if actual_provider != expected_provider:
                 fail("Claude scheduler provider contract is empty, stale, or not derived from checked-in definitions")
+            cur.execute("""select surface_id,workflow_key,workflow_version,locator,repo_plist_relpath,
+                                  installed_plist_name,program_arguments,plist_sha256,schedule_sha256,timezone
+                             from ops.legacy_schedule_launchd_contract
+                             order by surface_id""")
+            actual_launchd = [tuple(row) for row in cur.fetchall()]
+            if actual_launchd != expected_launchd:
+                fail("launchd scheduler contract is empty, stale, or not derived from checked-in plists")
             cur.execute("select has_function_privilege('carr_jobs', "
                         "'ops.record_claude_scheduler_observation(text,text,text,text,boolean,text,text,text,timestamptz,text)'::regprocedure, 'execute')")
             if fetchone_required(cur.fetchone(), "jobs scheduler observation privilege")[0]:
                 fail("carr_jobs can mint native scheduler observations")
+            cur.execute("select has_function_privilege('carr_jobs', "
+                        "'ops.record_launchd_scheduler_observation(text,text,text,boolean,text,text,text,text,timestamptz,text)'::regprocedure, 'execute')")
+            if fetchone_required(cur.fetchone(), "jobs launchd observation privilege")[0]:
+                fail("carr_jobs can mint native launchd observations")
 
             # The reaper must lock a finite expired-job set before it changes
             # attempt evidence.  Otherwise a heartbeat can renew the lease

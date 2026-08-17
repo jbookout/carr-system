@@ -120,6 +120,7 @@ def validate(config: dict[str, Any]) -> list[str]:
     migration_device = text("migrations/0163_control_plane_device_evidence.sql")
     migration_npi = text("migrations/0167_control_plane_npi_device_evidence.sql")
     migration_scheduler = text("migrations/0180_claude_scheduler_observation_receipt.sql")
+    migration_launchd = text("migrations/0182_launchd_scheduler_observation_receipt.sql")
     tick = text("bin/control-plane-tick.sh")
     ledger = text("tools/control-plane.py")
     nightly = text("bin/nightly.sh")
@@ -139,6 +140,10 @@ def validate(config: dict[str, Any]) -> list[str]:
                ("ops.legacy_schedule_observation_receipt", "login_role=session_user",
                 "ops.record_claude_scheduler_observation")):
         errors.append("Claude scheduler observation receipt is not bound by migration 0180")
+    if not all(token in migration_launchd for token in
+               ("ops.legacy_schedule_launchd_contract", "login_role=session_user",
+                "ops.record_launchd_scheduler_observation")):
+        errors.append("launchd scheduler observation receipt is not bound by migration 0182")
     required_provider_tokens = ("CARR_CONTROL_PLANE_PROVIDER_ENV", "CARR_AI_ROUTE_PRIMARY_URL",
                                 "CARR_AI_ROUTE_PRIMARY_TOKEN", "CARR_AI_ROUTE_SECONDARY_URL",
                                 "CARR_AI_ROUTE_SECONDARY_TOKEN", "env -i")

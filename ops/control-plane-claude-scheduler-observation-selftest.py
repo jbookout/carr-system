@@ -60,8 +60,8 @@ def main() -> int:
           and "to carr_device_evidence" in MIGRATION
           and "grant select on ops.legacy_schedule_provider_contract, ops.legacy_schedule_observation_receipt" in MIGRATION)
     check("provider prepare and verification require DB-resolved receipt refs, never caller JSON",
-          "Claude prepare requires one immutable observation ref, never caller JSON" in CLI
-          and "Claude verification requires immutable pre/post observation refs" in CLI)
+          "scheduler prepare requires one immutable observation ref, never caller JSON" in CLI
+          and "scheduler verification requires immutable pre/post observation refs" in CLI)
     check("native adapter derives provider state before the fixed receipt submission",
           "read_native_task" in NATIVE_CLI and "submission_for_surface" in NATIVE_CLI
           and "validated_native_read" in NATIVE_CLI)
@@ -87,7 +87,7 @@ def main() -> int:
               "post.observed_at>now()+interval '5 minutes'",
               "existing.pre_observation_ref is distinct from p_pre_observation_ref",
               "existing.post_observation_ref is distinct from p_post_observation_ref")))
-    check("general legacy disable stays fail-closed for launchd until immutable launchd receipts exist",
+    check("Claude path remains exact while Notes duplicate stays separately fail-closed",
           "legacy schedule lacks a current native claude provider contract" in MIGRATION
           and "notes duplicate retirement requires two-surface native evidence" in MIGRATION)
     check("DB gate asserts exact provider-contract parity and jobs mint refusal",

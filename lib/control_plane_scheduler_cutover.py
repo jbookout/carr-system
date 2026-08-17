@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 from pathlib import Path
@@ -170,6 +171,44 @@ def scheduler_provider_rows(registry: Any, *, manifest: Any, repo: Path) -> list
     return sorted(rows, key=lambda row: (row[0], row[1], row[2]))
 
 
+def scheduler_launchd_rows(
+    registry: Any, *, manifest: Any, repo: Path
+) -> list[tuple[str, int, str, str, str, str, str, str, str, str]]:
+    """Return exact launchd contracts derived from tracked plist sources."""
+    errors = validate_registry(registry, manifest=manifest)
+    if errors:
+        raise CutoverRefusal("invalid scheduler cutover registry: " + "; ".join(errors))
+    workflows = {item["key"]: item for item in manifest["workflows"]}
+    rows: list[tuple[str, int, str, str, str, str, str, str, str, str]] = []
+    schedule_keys = ("StartCalendarInterval", "StartInterval", "StartOnMount", "KeepAlive")
+    for surface in registry["surfaces"]:
+        if surface["scheduler_kind"] != "launchd":
+            continue
+        relpath = surface["repo_plist_relpath"]
+        path = repo / relpath
+        try:
+            document = plistlib.loads(path.read_bytes())
+        except (OSError, plistlib.InvalidFileException) as exc:
+            raise CutoverRefusal(f"launchd definition is unreadable: {relpath}") from exc
+        if (not isinstance(document, dict) or document.get("Label") != surface["locator"]
+                or document.get("ProgramArguments") != surface["canonical_program_arguments"]
+                or _fingerprint(document) != surface["canonical_plist_fingerprint"]):
+            raise CutoverRefusal(f"launchd definition does not match registry: {surface['surface_id']}")
+        schedule = {key: document[key] for key in schedule_keys if key in document}
+        if not schedule:
+            raise CutoverRefusal(f"launchd surface lacks a native recurrence: {surface['surface_id']}")
+        timezone_name = workflows[surface["workflow_key"]]["recurrence"].get("timezone")
+        if not isinstance(timezone_name, str) or not timezone_name:
+            raise CutoverRefusal(f"launchd surface lacks a recurrence timezone: {surface['surface_id']}")
+        rows.append((
+            surface["workflow_key"], surface["workflow_version"], surface["surface_id"],
+            surface["locator"], relpath, surface["installed_plist_name"],
+            _canonical(surface["canonical_program_arguments"]),
+            surface["canonical_plist_fingerprint"], _fingerprint(schedule), timezone_name,
+        ))
+    return sorted(rows, key=lambda row: (row[0], row[1], row[2]))
+
+
 def _surface(registry: dict[str, Any], surface_id: str) -> dict[str, Any]:
     errors = validate_registry(registry)
     if errors:
@@ -273,6 +312,43 @@ def observe_claude_scheduler_receipt(surface: dict[str, Any], receipt: Any) -> d
     }
 
 
+def observe_launchd_scheduler_receipt(surface: dict[str, Any], receipt: Any) -> dict[str, Any]:
+    """Convert one immutable device-bound launchd readback into cutover evidence."""
+    if surface.get("scheduler_kind") != "launchd":
+        raise CutoverRefusal("launchd receipt can observe only launchd scheduler surfaces")
+    if not isinstance(receipt, dict) or receipt.get("kind") != "scheduler_observation_receipt":
+        raise CutoverRefusal("immutable launchd scheduler observation receipt is required")
+    expected = {
+        "surface_id": surface["surface_id"], "workflow_key": surface["workflow_key"],
+        "workflow_version": surface["workflow_version"], "locator": surface["locator"],
+        "scheduler_kind": "launchd",
+    }
+    if any(receipt.get(key) != value for key, value in expected.items()):
+        raise CutoverRefusal("launchd observation receipt does not bind the registered surface")
+    if receipt.get("immutable") is not True or receipt.get("device_principal_bound") is not True:
+        raise CutoverRefusal("launchd observation receipt is not immutable and device-bound")
+    if receipt.get("scheduler_state") not in {"enabled", "disabled"}:
+        raise CutoverRefusal("launchd observation receipt has no exact scheduler state")
+    _utc(receipt.get("observed_at"))
+    if not isinstance(receipt.get("source_fingerprint"), str) or len(receipt["source_fingerprint"]) != 64:
+        raise CutoverRefusal("launchd observation receipt lacks a source fingerprint")
+    material = {
+        "receipt_ref": receipt.get("receipt_ref"), "launchctl_revision": receipt.get("provider_revision"),
+        "source_fingerprint": receipt["source_fingerprint"], "state": receipt["scheduler_state"],
+    }
+    return {
+        "schema_version": SCHEMA_VERSION, "contract": CONTRACT, "kind": "scheduler_observation",
+        "surface_id": surface["surface_id"], "workflow_key": surface["workflow_key"],
+        "workflow_version": surface["workflow_version"], "scheduler_kind": "launchd",
+        "locator": surface["locator"], "scheduler_state": receipt["scheduler_state"],
+        "observed_at": receipt["observed_at"],
+        "sources": {"launchd_receipt_read": True, "device_principal_bound": True,
+                    "registered_contract_matches": True},
+        "source_fingerprint": _fingerprint(material),
+        "launchd_receipt_ref": receipt.get("receipt_ref"),
+    }
+
+
 def _require_observation(registry: dict[str, Any], surface: dict[str, Any], observation: Any,
                          *, expected_state: str, now: datetime | None) -> dict[str, Any]:
     if not isinstance(observation, dict):
@@ -289,7 +365,7 @@ def _require_observation(registry: dict[str, Any], surface: dict[str, Any], obse
         if observation.get(key) != value:
             raise CutoverRefusal(f"scheduler observation {key} does not match the registered surface")
     sources = observation.get("sources")
-    required_sources = (("repo_plist_matches", "installed_plist_matches", "launchctl_read")
+    required_sources = (("launchd_receipt_read", "device_principal_bound", "registered_contract_matches")
                         if surface["scheduler_kind"] == "launchd"
                         else ("provider_receipt_read", "device_principal_bound", "registered_contract_matches"))
     if not isinstance(sources, dict) or not all(sources.get(key) is True for key in required_sources):
@@ -396,13 +472,14 @@ def verify_disabled(registry: dict[str, Any], *, prepared: Any, pre_disable_obse
             or approval.get("authority_subject") != "joe" or approval.get("action") != "disable-legacy-schedule"
             or approval.get("subject") != expected_subject):
         raise CutoverRefusal("authority receipt does not bind Joe/action/exact scheduler subject")
-    if surface["scheduler_kind"] == "claude-code":
-        observation_refs = approval.get("observation_refs")
-        if (not isinstance(observation_refs, dict)
-                or observation_refs.get("pre") != pre.get("provider_receipt_ref")
-                or observation_refs.get("post") != post.get("provider_receipt_ref")
-                or observation_refs.get("sibling") is not None):
-            raise CutoverRefusal("authority receipt does not bind the verified native observations")
+    ref_field = ("provider_receipt_ref" if surface["scheduler_kind"] == "claude-code"
+                 else "launchd_receipt_ref")
+    observation_refs = approval.get("observation_refs")
+    if (not isinstance(observation_refs, dict)
+            or observation_refs.get("pre") != pre.get(ref_field)
+            or observation_refs.get("post") != post.get(ref_field)
+            or observation_refs.get("sibling") is not None):
+        raise CutoverRefusal("authority receipt does not bind the verified native observations")
     receipt = {
         "surface_id": surface["surface_id"], "workflow_key": surface["workflow_key"],
         "workflow_version": surface["workflow_version"], "scheduler_kind": surface["scheduler_kind"],

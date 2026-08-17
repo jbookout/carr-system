@@ -19,7 +19,8 @@ class SubmissionRefused(ValueError):
     pass
 
 
-Kind = Literal["social_device_evidence", "npi_device_evidence", "claude_scheduler_observation"]
+Kind = Literal["social_device_evidence", "npi_device_evidence", "claude_scheduler_observation",
+               "launchd_scheduler_observation"]
 SOCIAL_BUILDERS = frozenset({"linkedin.source-posts", "x.source-posts"})
 NPI_RESULT_KEYS = {"source_ref", "npi", "enumeration_type", "last_updated", "addresses", "taxonomies"}
 
@@ -184,6 +185,37 @@ def _scheduler(payload: dict[str, Any]) -> Submission:
     )
 
 
+def _launchd_scheduler(payload: dict[str, Any]) -> Submission:
+    source = _object(
+        payload,
+        {"schema_version", "kind", "surface_id", "label", "timezone", "enabled",
+         "plist_sha256", "schedule_sha256", "launchctl_revision", "source_fingerprint",
+         "observed_at"},
+        "submission",
+    )
+    if source["schema_version"] != 1 or source["kind"] != "launchd_scheduler_observation":
+        raise SubmissionRefused("launchd observation version or kind is unsupported")
+    surface_id = _text(source["surface_id"], "surface_id")
+    label = _text(source["label"], "label")
+    timezone_name = _text(source["timezone"], "timezone")
+    if type(source["enabled"]) is not bool:
+        raise SubmissionRefused("enabled must be boolean")
+    hashes = {name: _text(source[name], name) for name in
+              ("plist_sha256", "schedule_sha256", "launchctl_revision", "source_fingerprint")}
+    if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes.values()):
+        raise SubmissionRefused("launchd provenance must use lowercase SHA-256")
+    observed_at = _timestamp(source["observed_at"], "observed_at")
+    body = {"surface_id": surface_id, "label": label, "timezone": timezone_name,
+            "enabled": source["enabled"], **hashes, "observed_at": observed_at}
+    return Submission(
+        "launchd_scheduler_observation", "ops.record_launchd_scheduler_observation",
+        (surface_id, label, timezone_name, "true" if source["enabled"] else "false",
+         hashes["plist_sha256"], hashes["schedule_sha256"], hashes["launchctl_revision"],
+         hashes["source_fingerprint"], observed_at),
+        _idempotency("launchd_scheduler_observation", body),
+    )
+
+
 def validate_submission(payload: Any) -> Submission:
     if not isinstance(payload, dict):
         raise SubmissionRefused("submission must be an object")
@@ -194,4 +226,6 @@ def validate_submission(payload: Any) -> Submission:
         return _npi(payload)
     if kind == "claude_scheduler_observation":
         return _scheduler(payload)
+    if kind == "launchd_scheduler_observation":
+        return _launchd_scheduler(payload)
     raise SubmissionRefused("submission kind is unregistered")
