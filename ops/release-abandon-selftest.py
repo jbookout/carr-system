@@ -44,8 +44,13 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import psycopg
+from psycopg import sql
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -93,6 +98,45 @@ def record(dsn, *args):
         [sys.executable, str(REPO / "tools" / "ops-record.py"), *args],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "DATABASE_URL": dsn})
+
+
+@contextmanager
+def isolated_ci_database(base_dsn: str) -> Iterator[str]:
+    """Give this stateful fixture its own database on CI's loopback cluster.
+
+    The gates class and migration class intentionally share a PostgreSQL
+    server, but the migration class must receive a *fresh* database.  Loading
+    db/schema.sql directly into CARR_CI_DATABASE_URL contaminated that database
+    before the migration class ran.  A sibling database preserves the cheap
+    local/CI execution path without weakening either test.
+    """
+    params = psycopg.conninfo.conninfo_to_dict(base_dsn)
+    host = str(params.get("host") or "")
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("release-abandon isolation requires loopback PostgreSQL")
+    database = f"release_abandon_{os.getpid()}_{time.time_ns()}"[:63]
+    admin = psycopg.conninfo.make_conninfo(base_dsn, dbname="postgres")
+    with psycopg.connect(admin, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("create database {} template template0").format(
+                    sql.Identifier(database)
+                )
+            )
+    isolated = psycopg.conninfo.make_conninfo(base_dsn, dbname=database)
+    try:
+        yield isolated
+    finally:
+        with psycopg.connect(admin, autocommit=True) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select pg_terminate_backend(pid) from pg_stat_activity "
+                    "where datname=%s and pid <> pg_backend_pid()",
+                    (database,),
+                )
+                cursor.execute(
+                    sql.SQL("drop database {}").format(sql.Identifier(database))
+                )
 
 
 def _cases(dsn: str) -> None:
@@ -296,8 +340,14 @@ def main() -> int:
     # fixtures actually run on the surface that gates the merge.
     ci_dsn = os.environ.get("CARR_CI_DATABASE_URL")
     if ci_dsn:
-        print("release-abandon-selftest: using the CI throwaway Postgres")
-        run_cases(ci_dsn)
+        print("release-abandon-selftest: using an isolated database on CI Postgres")
+        try:
+            with isolated_ci_database(ci_dsn) as isolated_dsn:
+                run_cases(isolated_dsn)
+        except Exception:
+            print("release-abandon-selftest: isolated CI database unavailable",
+                  file=sys.stderr)
+            return 1
         print(f"\nrelease-abandon-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
         if FAILED:
             print("FAILURES: " + ", ".join(FAILED))
