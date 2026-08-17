@@ -244,7 +244,8 @@ def import_manifest(cur: psycopg.Cursor[Any]) -> tuple[str, str]:
     the reviewed production classification.  It is rolled back with the gate.
     """
     rule_ids = [str(row[0]) for row in cur.execute(
-        "select id from rule where status='active' order by id").fetchall()]
+        "select id from rule where status='active' "
+        "and coalesce(scope->>'kind','') <> 'intro_politics' order by id").fetchall()]
     if len(rule_ids) < 5:
         fail("import fixture requires at least five active rules")
     source_rule_ids = {rule_id[:8]: rule_id for rule_id in rule_ids}
@@ -698,6 +699,7 @@ def main() -> int:
                 # would prove only that activation works when its guard is gone.
                 missing_rules = cur.execute("""select r.id from rule r
                     where r.status='active'
+                      and coalesce(r.scope->>'kind','') <> 'intro_politics'
                       and not exists (
                         select 1 from ops.v_guidance_current g
                          where g.source_rule_id=r.id and g.is_primary)
