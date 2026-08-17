@@ -71,6 +71,27 @@ source "$REPO/bin/routine-credential-env.sh"
 carr_clear_routine_db_env
 carr_load_routine_db_env CARR_DB_JOBS_URL CARR_DB_EXPORTER_URL CARR_DB_BACKUP_URL || exit $?
 
+# A CAPABILITY THIS MACHINE DOES NOT HOLD IS A SKIP, NEVER A SILENT DEATH.
+# The loader exports only the names it FINDS in db.env, so an unprovisioned
+# capability leaves its variable unset — and under `set -u` (line 33) the first
+# "$CARR_DB_BACKUP_URL" below then kills the whole chain mid-run: no FAIL line,
+# no `chain FINISHED` line, nothing in out/nightly.log to find it by. Every step
+# after that point simply never happens.
+#
+# That is not hypothetical. On 2026-08-17 this Mac had no carr_backup DSN (the
+# hardening that replaced the neonctl owner-credential path landed in the code
+# without the credential being provisioned here), and the chain died between
+# `vendor level drift` and `encrypted backup`, skipping the backup, the
+# portability mirror, the calendar archive and the config mirror in total
+# silence. The 02:05 scheduled run escaped only because its checkout was 38
+# commits behind.
+#
+# bin/backup-dump.sh ALREADY handles the missing credential correctly — it
+# exits 78, which this chain reports as SKIP and steps past. Defaulting the
+# variable here is what lets that graceful path be reached at all: the callee's
+# fallback cannot run if dereferencing the variable kills the caller first.
+CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}"
+
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
 rc_total=0
@@ -445,7 +466,15 @@ step "vendor level drift (reports, never changes a level)" ./.venv/bin/python op
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
-step "portability mirror (md+csv, 2 locations)" env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
+# Guarded rather than defaulted: an empty DATABASE_URL makes doctrine_mirror.py
+# exit 2, which reads as FAIL, and a capability nobody provisioned is a SKIP.
+# The refusal helper is the same one the environment gates above use, so the
+# unconfigured case says WHICH capability is missing instead of a bare error.
+if [ -n "$CARR_DB_BACKUP_URL" ]; then
+  step "portability mirror (md+csv, 2 locations)" env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
+else
+  step "portability mirror (backup capability unavailable)" sh ./bin/routine-admin-refusal.sh "portability mirror needs the carr_backup DSN in ~/.config/carr/db.env"
+fi
 BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
