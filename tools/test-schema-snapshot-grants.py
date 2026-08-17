@@ -35,6 +35,13 @@ import os
 import re
 import sys
 
+from schema_snapshot_grants import (
+    SECTION_MARKER,
+    SnapshotGrantError,
+    carr_grants_section_lines,
+    grants_to_role,
+)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 
@@ -74,6 +81,29 @@ def main():
     grant_lines = [(i, ln.strip()) for i, ln in enumerate(lines)
                    if re.match(r"\s*grant\s", ln, re.I)
                    and not ln.lstrip().startswith("--")]
+
+    canonical_section = carr_grants_section_lines(sql)
+    raw_writer_grants = [ln for ln in canonical_section
+                         if ln.endswith(" to carr_writer;")]
+    check("the shared staging provisioner extractor equals the generated writer ACLs",
+          grants_to_role(sql, "carr_writer") == raw_writer_grants
+          and len(raw_writer_grants) >= 170)
+
+    destructive = sql.replace(
+        SECTION_MARKER,
+        SECTION_MARKER
+        + "\ngrant select on table public.actor to carr_writer; "
+          "drop table public.actor; -- to carr_writer;",
+        1,
+    )
+    try:
+        grants_to_role(destructive, "carr_writer")
+    except SnapshotGrantError:
+        destructive_refused = True
+    else:
+        destructive_refused = False
+    check("multi-statement/comment SQL disguised as a writer GRANT is refused",
+          destructive_refused)
 
     for role in APP_ROLES:
         check(f"at least one grant names {role}",
