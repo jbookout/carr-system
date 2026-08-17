@@ -19,6 +19,9 @@ def main() -> int:
 
     check("one authority function owns approval",
           "function ops.approve_rule(" in sql and "ops.authority_actor_slug()" in sql)
+    check("Joe is the sole required system-rule authority",
+          "if v_actor_slug <> 'joe' then" in sql
+          and "cannot replace Joe approval".lower() in sql)
     check("approval means active and enforced in one transaction",
           "'policy_status','active'" in sql
           and "'enforcement_status',v_status" in sql
@@ -56,7 +59,7 @@ def main() -> int:
           and "mislabeled as unbreakable enforcement" in sql)
     check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
 
-    print(f"\natomic-rule-approval-selftest: {11-len(failures)}/11 passed")
+    print(f"\natomic-rule-approval-selftest: {12-len(failures)}/12 passed")
     return 1 if failures else 0
 
 
