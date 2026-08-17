@@ -65,7 +65,7 @@ try:
     command = auth_call["command"]
     payload = json.loads(command[-1])
     check("canonical query uses the existing authenticated call-verb path",
-          command[-2] == "search-doctrine-situations" and command[1].endswith("tools/call-verb.py"))
+          command[-2] == "search-doctrine" and command[1].endswith("tools/call-verb.py"))
     check("canonical query sends no caller actor or sponsor",
           set(payload) == {"q", "limit"})
     check("authenticated personal doctrine survives the adapter",

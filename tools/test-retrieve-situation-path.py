@@ -16,7 +16,7 @@ def check(name, condition):
 
 
 check("store pass calls the authenticated shared situation-retrieval verb",
-      '"search-doctrine-situations", payload' in source
+      '"search-doctrine", payload' in source
       and 'tools" / "call-verb.py"' in source)
 check("store identity is server-derived rather than a caller actor field",
       '"actor"' not in source and '"sponsoring_human_slug"' not in source
