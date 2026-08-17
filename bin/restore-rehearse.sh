@@ -558,9 +558,16 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
 fi
 
 # Production reachability + the default branch id, which teardown checks against.
-PROD_DEFAULT_ID="$("$NEONCTL" branches list --project-id "$PROJECT_ID" --output json 2>/dev/null \
+BRANCH_LIST_JSON="$("$NEONCTL" branches list --project-id "$PROJECT_ID" --output json 2>/dev/null)"
+PROD_DEFAULT_ID="$(print -r -- "$BRANCH_LIST_JSON" \
   | python3 -c 'import json,sys; print(next((b["id"] for b in json.load(sys.stdin) if b.get("default")), ""))' 2>/dev/null)"
 [ -n "$PROD_DEFAULT_ID" ] || die "cannot list Neon branches — is neonctl authenticated? ($NEONCTL auth)"
+ACTIVE_NONDEFAULT_BRANCHES="$(print -r -- "$BRANCH_LIST_JSON" \
+  | python3 -c 'import json,sys; print(sum(1 for b in json.load(sys.stdin) if not b.get("default")))' 2>/dev/null)"
+"$PY" "$REPO/ops/platform-metering-gate.py" --gate neon-disposable-branch \
+  --requested-lifetime-minutes 120 --active-nondefault-branches "$ACTIVE_NONDEFAULT_BRANCHES" \
+  --cleanup-registered >/dev/null \
+  || die "neon-disposable-branch metering admission refused"
 say "  ok    Neon reachable; default branch is $PROD_DEFAULT_ID"
 
 # The production DSN, derived INSIDE this process. Same pattern as
