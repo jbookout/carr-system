@@ -44,6 +44,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -321,9 +322,16 @@ def main() -> int:
     stg_host = host_of(db_tap.dsn(project="staging"))
     branch_id = ""
     name = f"abandon-check-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+    # `finally` handles ordinary failures, but the process can be terminated by
+    # a CI cancellation or host shutdown before Python gets to run it. Give the
+    # provider its own cleanup deadline so an interrupted test cannot leave a
+    # metered branch behind indefinitely.
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat().replace(
+        "+00:00", "Z"
+    )
     try:
         out = neon(env, "branches", "create", "--project-id", project_id,
-                   "--name", name, "--output", "json")
+                   "--name", name, "--expires-at", expires_at, "--output", "json")
         if out.returncode != 0:
             sys.exit(f"could not create the branch: {out.stderr.strip()[:200]}")
         branch_id = (json.loads(out.stdout).get("branch") or json.loads(out.stdout)).get("id", "")
