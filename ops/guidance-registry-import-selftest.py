@@ -42,12 +42,75 @@ def main() -> int:
     refuses(lambda: mod.resolve_active_rules(rows + [{"source_id": "cccccccc", "id": "cccccccc-0000-4000-8000-000000000003"}], expected), "extra=cccccccc")
     assert mod.resolve_classifier_actor([{"id": "actor-codex"}], "codex") == "actor-codex"
     refuses(lambda: mod.resolve_classifier_actor([], "codex"), "exactly one")
+    original_assert_head_committed = mod.assert_head_committed
+    mod.assert_head_committed = lambda *_args: None
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "mapping.json"
-        path.write_text(json.dumps({"schema": mod.MAPPING_PLAN_SCHEMA, "doctrine_mappings": {}}), encoding="utf-8")
-        assert mod.load_mapping_plan(path) == {}
+        review = json.loads(mod.DEFAULT_CURATION_REVIEW.read_text(encoding="utf-8"))
+        doctrine_mappings = {}
+        for index, row in enumerate(review["doctrine_guidance"], start=1):
+            doctrine_mappings[row["guidance_id"]] = [
+                {
+                    "concept_key": row["concept_key"],
+                    "concept_id": f"{index:08x}-0000-4000-8000-{index:012x}",
+                    "doctrine_section_id": mapping["doctrine_section_id"],
+                    "reason": mapping["rationale"],
+                }
+                for mapping in row["mappings"]
+            ]
+        valid_plan = {
+            "schema": mod.MAPPING_PLAN_SCHEMA,
+            "review_provenance": {
+                "path": "audits/guidance-situation-curation-review.v1.json",
+                "sha256": mod.file_sha256(mod.DEFAULT_CURATION_REVIEW),
+            },
+            "doctrine_mappings": doctrine_mappings,
+        }
+        path.write_text(json.dumps(valid_plan), encoding="utf-8")
+        assert mod.load_mapping_plan(path) == doctrine_mappings
+        drifted = json.loads(json.dumps(valid_plan))
+        drifted["review_provenance"]["sha256"] = "0" * 64
+        path.write_text(json.dumps(drifted), encoding="utf-8")
+        refuses(lambda: mod.load_mapping_plan(path), "digest does not match")
         path.write_text("{}", encoding="utf-8")
         refuses(lambda: mod.load_mapping_plan(path), "must declare schema")
+    mod.assert_head_committed = original_assert_head_committed
+    sample_guidance_id = next(iter(doctrine_mappings))
+    sample_binding = doctrine_mappings[sample_guidance_id][0]
+    class MappingCursor:
+        def __init__(self, concept_key, bridge=True):
+            self.concept_key = concept_key
+            self.bridge = bridge
+            self.result = []
+        def execute(self, sql, _params):
+            if "from retrieval_concept" in sql:
+                self.result = [{
+                    "concept_id": sample_binding["concept_id"],
+                    "concept_key": self.concept_key,
+                    "status": "approved",
+                }]
+            else:
+                self.result = ([{
+                    "concept_id": sample_binding["concept_id"],
+                    "section_id": sample_binding["doctrine_section_id"],
+                }] if self.bridge else [])
+            return self
+        def fetchall(self): return self.result
+    one_mapping = {sample_guidance_id: [sample_binding]}
+    resolved_mapping = mod.resolve_mapping_plan(
+        MappingCursor(sample_binding["concept_key"]), one_mapping
+    )
+    assert "concept_key" not in resolved_mapping[sample_guidance_id][0]
+    refuses(
+        lambda: mod.resolve_mapping_plan(MappingCursor("wrong-concept"), one_mapping),
+        "concept identity is not exactly approved",
+    )
+    refuses(
+        lambda: mod.resolve_mapping_plan(
+            MappingCursor(sample_binding["concept_key"], bridge=False), one_mapping
+        ),
+        "exact doctrine bridge is not approved",
+    )
     class Args:
         apply = True
         stage_idempotency_key = "same"
@@ -116,7 +179,8 @@ def main() -> int:
     assert fake.calls[0][1] == ("d", "{}\\n", "actor-codex", "stage", "stage")
     assert "apply_guidance_import_batch" in fake.calls[1][0]
     source = (REPO / "ops" / "guidance-registry-import.py").read_text(encoding="utf-8")
-    assert "where status='active' order by id" in source
+    assert "where status='active' " in source
+    assert "coalesce(scope->>'kind','') <> 'intro_politics' order by id" in source
     assert "left(id::text,8) = any" not in source
     assert 'env.get("CARR_DB_WRITER_URL"' in source
     assert 'os.environ.get("DATABASE_URL")' in source
