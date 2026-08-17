@@ -4,8 +4,9 @@ build-open-items-dashboard.py — regenerate the CARR one-page open-items dashbo
 
 Reads v_export_loops (status='open' rows only, joined-to-block view over every
 loop kind: open_loop / team_loop / idea / action_required) via the read-only
-exporter credential, and writes ONE static, self-contained HTML file to the
-vault. No database writes; no other files touched.
+exporter credential. There is currently no canonical document destination for
+the static dashboard, so normal mode refuses before opening either the database
+or Drive. The legacy Drive render is recovery-only.
 
 Usage:
   cd ~/carr-system && ./.venv/bin/python generators/build-open-items-dashboard.py
@@ -16,11 +17,12 @@ Credential:
   it does not shell out to `. db.env` and does not import the repo's exporter
   machinery, by design (this is a self-contained, standalone build script).
 
-Writes:
+Recovery-only write:
   /Users/booko/My Drive/CARR AI/00_Context/open-items.html
 """
 
 import html
+import argparse
 import json
 import os
 import re
@@ -30,11 +32,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import psycopg
-from psycopg.rows import dict_row
-
 ENV_FILE = Path.home() / ".config" / "carr" / "db.env"
-OUT_PATH = Path("/Users/booko/My Drive/CARR AI/00_Context/open-items.html")
+RECOVERY_DEFAULT_VAULT = Path("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 REGEN_CMD = "cd ~/carr-system && ./.venv/bin/python generators/build-open-items-dashboard.py"
 
 BELL = "\U0001F514"       # 🔔
@@ -114,6 +113,11 @@ def get_dsn() -> str:
 
 
 def fetch_open_rows(dsn: str) -> list[dict[str, Any]]:
+    # Normal mode refuses before this import, so even an interpreter without
+    # psycopg cannot turn a missing dashboard destination into a Drive fallback.
+    import psycopg
+    from psycopg.rows import dict_row
+
     cols_sql = ", ".join(LOOP_COLUMNS)
     query = (
         f"select {cols_sql} from v_export_loops "
@@ -735,7 +739,31 @@ def build_html(cards: list[Card], generated_at: str) -> str:
 """
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build the open-items dashboard")
+    parser.add_argument("--recovery", action="store_true",
+                        help="write the legacy Drive projection (explicitly noncanonical)")
+    parser.add_argument("--reason", help="why the recovery projection is necessary")
+    parser.add_argument("--vault", type=Path, help="recovery Drive root; requires --recovery")
+    args = parser.parse_args()
+    if args.vault and not args.recovery:
+        parser.error("--vault is recovery-only; pass --recovery explicitly")
+    if args.recovery and not (args.reason and args.reason.strip()):
+        parser.error("--recovery requires a nonblank --reason")
+    return args
+
+
 def main() -> None:
+    args = parse_args()
+    if not args.recovery:
+        sys.exit(
+            "MISSING_CANONICAL_SEAM: open-items dashboard document destination; "
+            "normal mode refuses the retired Drive projection"
+        )
+
+    vault = args.vault or Path(os.environ.get("CARR_VAULT", str(RECOVERY_DEFAULT_VAULT)))
+    out_path = vault / "00_Context" / "open-items.html"
+    print(f"RECOVERY NONCANONICAL: Drive dashboard projection; reason={args.reason}", file=sys.stderr)
     dsn = get_dsn()
     rows = fetch_open_rows(dsn)
     today = date.today()
@@ -752,15 +780,15 @@ def main() -> None:
 
     out_html = build_html(cards, generated_at)
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = OUT_PATH.with_suffix(".html.tmp")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(".html.tmp")
     tmp_path.write_text(out_html, encoding="utf-8")
-    os.replace(tmp_path, OUT_PATH)
+    os.replace(tmp_path, out_path)
 
-    size = OUT_PATH.stat().st_size
+    size = out_path.stat().st_size
     breakdown = " | ".join(f"{GROUP_LABELS[g]}: {group_counts.get(g, 0)}" for g in HEADER_COUNT_ORDER)
     print(
-        f"Wrote {OUT_PATH} ({size:,} bytes) — {total} open total | {breakdown}"
+        f"Wrote {out_path} ({size:,} bytes) — {total} open total | {breakdown}"
     )
 
 

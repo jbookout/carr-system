@@ -35,6 +35,12 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin"
 
+# Drive projection is never part of the ordinary unattended path.  Recovery is
+# an operator act, not an environment default: it must name why noncanonical
+# Drive state is needed before any child can receive that route.
+RECOVERY=0
+RECOVERY_REASON=""
+
 # Control-plane shadow path. Validate the exact versioned chain's executable
 # surfaces without loading credentials, taking locks, writing logs, touching
 # Drive, or calling production. A canary uses the normal path under the same
@@ -48,7 +54,7 @@ if [ "${1:-}" = "--preflight" ]; then
     ops/vendor-level-drift-check.py bin/backup-dump.sh bin/archive-calendar.sh
     bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
     generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
-    bin/smoke-and-record.sh tools/ops-record.py
+    bin/smoke-and-record.sh tools/ops-record.py bin/routine-canonical-seam-refusal.sh
   )
   missing=0
   for path in "${required[@]}"; do
@@ -61,6 +67,15 @@ if [ "${1:-}" = "--preflight" ]; then
   /bin/zsh -n "$REPO/bin/nightly.sh" || exit 1
   print -r -- "nightly preflight: ${#required[@]} chain surfaces present; writes=0"
   exit 0
+fi
+if [ "$#" -eq 0 ]; then
+  unset CARR_VAULT CARR_EXPORT_LIVE
+elif [ "$#" -eq 3 ] && [ "$1" = "--recovery" ] && [ "$2" = "--reason" ] && [ -n "$3" ]; then
+  RECOVERY=1
+  RECOVERY_REASON="$3"
+else
+  print -ru2 -- "usage: bin/nightly.sh [--preflight|--recovery --reason WHY]"
+  exit 64
 fi
 LOG="$REPO/out/nightly.log"
 mkdir -p "$REPO/out"
@@ -157,7 +172,25 @@ step() {                        # step <label> <command...>
   fi
 }
 
+# Keep the exact old projection commands available only behind the recovery
+# envelope.  In normal scheduled operation each names the concrete canonical
+# seam that still has to exist before the work may resume; none falls back to a
+# Drive mount just because it happens to be present on this Mac.
+drive_projection() {            # drive_projection <label> <missing-seam> <command...>
+  local label="$1" seam="$2"; shift 2
+  if [ "$RECOVERY" -eq 1 ]; then
+    step "RECOVERY NONCANONICAL $label" "$@"
+  else
+    step "$label (missing canonical seam)" sh ./bin/routine-canonical-seam-refusal.sh \
+      "MISSING_CANONICAL_SEAM: $seam"
+  fi
+}
+
 say "===== nightly chain begin ====="
+if [ "$RECOVERY" -eq 1 ]; then
+  say "RECOVERY NONCANONICAL: Drive projections enabled; reason=$RECOVERY_REASON"
+  print -ru2 -- "RECOVERY NONCANONICAL: Drive projections enabled; reason=$RECOVERY_REASON"
+fi
 cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
 
 # ── ONE CHAIN AT A TIME (2026-08-14) ─────────────────────────────────────────
@@ -212,11 +245,11 @@ else
   say "code: branch $GIT_BRANCH @ $GIT_SHA (tree clean)"
 fi
 
-# Exported explicitly, NOT as a `VAR=1 step ...` prefix: a var-prefix on a
-# function call is not reliably scoped in zsh, and if it failed to propagate the
-# export would quietly write to draft and the vault would never update — the
-# precise silent failure this chain exists to prevent.
-export CARR_EXPORT_LIVE=1
+# Export live Drive projections only in the explicitly labeled recovery path.
+if [ "$RECOVERY" -eq 1 ]; then
+  export CARR_EXPORT_LIVE=1
+  export CARR_DRIVE_RECOVERY=1
+fi
 
 # ── PHASE 1 v2 (2026-08-13): vault drift watch --check, FIRST THING THIS CHAIN
 # DOES. "install that vault drift watch into the nightly rewrite. That way, the
@@ -266,7 +299,9 @@ else
   fi
 fi
 
-step "vault drift watch (check, first)"              env CARR_DRIFT_INGEST=1 ./.venv/bin/python ops/vault-drift-watch.py --check
+drive_projection "vault drift watch (check, first)" \
+  "Drive drift-baseline verifier" \
+  env CARR_DRIFT_INGEST=1 ./.venv/bin/python ops/vault-drift-watch.py --check
 
 # SCHEMA SNAPSHOT DRIFT, added 2026-08-13 with the snapshot itself. db/schema.sql
 # is now what builds staging AND what CI's migration check applies pending
@@ -344,7 +379,9 @@ step "availability matcher (digest, never sent)"     ./.venv/bin/python pipeline
 # nightly before: it existed only as a hand-run command, which is why
 # candidate_pool saw no renewal-radar/upstream writes between 2026-08-01 and
 # 2026-08-07.
-step "upstream corroborate (pre-entity-watch + pool mapping)" ./run.sh corroborate
+drive_projection "upstream corroborate (pre-entity-watch + pool mapping)" \
+  "record-backed pre-entity-watch document destination" \
+  ./run.sh corroborate
 
 # FETCH ALLOWLIST (2026-08-09): regenerate the record-derived practice domains
 # the egress guard unions with its KNOWN_HOSTS. Runs AFTER the writing steps so a
@@ -355,7 +392,9 @@ step "upstream corroborate (pre-entity-watch + pool mapping)" ./run.sh corrobora
 # missing, which tightens the gate rather than loosening it.
 step "fetch allowlist (client domains -> guard)"     ./.venv/bin/python ops/fetch-allowlist.py
 
-step "exports (7 targets -> vault)"                  ./run.sh export
+drive_projection "exports (7 targets -> vault)" \
+  "record/document projection destination for seven legacy exports" \
+  ./run.sh export
 EXPORTS_RC=$LAST_STEP_RC
 
 # CUTOVER READINESS (Phase 1, 2026-08-13, August 21 cutover). Right after the
@@ -368,7 +407,9 @@ EXPORTS_RC=$LAST_STEP_RC
 # cannot be proven from this machine on purpose (Phase 1 closed the caller-
 # supplied-identity hole in local-verb.mjs); this step correctly reports that
 # half PARTIAL rather than failing on it — see ops/cutover-readiness.py.
-step "cutover readiness (store-first boot predicate)" ./.venv/bin/python ops/cutover-readiness.py
+drive_projection "cutover readiness (store-first boot predicate)" \
+  "record-native compiled-rule render verifier" \
+  ./.venv/bin/python ops/cutover-readiness.py
 
 # CODEX HOOK SMOKE (2026-08-14). Live negative proof that Codex's PreToolUse
 # hooks — this repo's OWN gate code, including guard-unattended.py — actually
@@ -393,9 +434,13 @@ step "codex hook smoke (live negative PreToolUse proof)" ./ops/codex-hook-smoke.
 # (a CONFLICT, printed by name) rather than silently overwriting it, and exits 78 — SKIP,
 # not FAIL, same contract as the credential-gated steps above — when the Drive mount isn't
 # up, since that is not a broken night, just an unreachable render target.
-step "corpus push (git-canonical doctrine -> vault)" ./.venv/bin/python tools/corpus-sync.py --push
+drive_projection "corpus push (git-canonical doctrine -> vault)" \
+  "canonical doctrine document delivery destination" \
+  ./.venv/bin/python tools/corpus-sync.py --push
 
-step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
+drive_projection "consumers (renewal-feed, lead-board, deal-room)" \
+  "record-backed board document destinations" \
+  ./run.sh all
 
 # Added 2026-08-07 (loop #204, Joe's ruling): the promotion gate runs nightly so
 # the renewal T1 review shortlist is fresh each morning. READ-ONLY plus one
@@ -405,9 +450,13 @@ step "consumers (renewal-feed, lead-board, deal-room)" ./run.sh all
 # database — T1 candidates queue for Joe's review, and only his claim at the
 # board creates a lead. Runs after the consumers because the renewal feed it
 # reads is rebuilt by the step above.
-step "lead promote (review shortlist, writes no leads)" ./run.sh lead-promote
+drive_projection "lead promote (review shortlist, writes no leads)" \
+  "record-native renewal feed input" \
+  ./run.sh lead-promote
 
-step "graph (derived from the exported files)"       ./run.sh graph
+drive_projection "graph (derived from the exported files)" \
+  "record/document graph input" \
+  ./run.sh graph
 
 # Added 2026-08-13 (Phase 1): the retrieval index and the system graph were
 # invoked by NOTHING — not this chain, not any launchd plist, not brief_pack.py,
@@ -427,8 +476,12 @@ step "graph (derived from the exported files)"       ./run.sh graph
 # before backup" is. Same $PY venv convention as every other DB-touching step
 # (run.sh's own graph_system/section_index functions already use $PY, not
 # plain python3, for the same psycopg reason as ORDER 29a).
-step "section index (retrieval-as-code layer)"       ./run.sh section-index
-step "system graph (Graph-System/, derived)"         ./run.sh graph-system
+drive_projection "section index (retrieval-as-code layer)" \
+  "record-native section-index source" \
+  ./run.sh section-index
+drive_projection "system graph (Graph-System/, derived)" \
+  "record-native system-graph source" \
+  ./run.sh graph-system
 
 # Added 2026-08-15 (rule faf1b643). Joe defined the vendor relationship levels by
 # COUNTABLE EVENTS so they stop being impressions — "you can email fifty people
@@ -445,7 +498,17 @@ step "vendor level drift (reports, never changes a level)" ./.venv/bin/python op
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
-step "portability mirror (md+csv, 2 locations)" env DATABASE_URL="${CARR_DB_BACKUP_URL:-}" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
+# Guarded rather than defaulted: an empty DATABASE_URL makes doctrine_mirror.py
+# exit 2, which reads as FAIL, and a capability nobody provisioned is a SKIP.
+# The refusal helper is the same one the environment gates above use, so the
+# unconfigured case says WHICH capability is missing instead of a bare error.
+if [ -n "$CARR_DB_BACKUP_URL" ]; then
+  drive_projection "portability mirror (md+csv, 2 locations)" \
+    "canonical portability document destination" \
+    env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
+else
+  step "portability mirror (backup capability unavailable)" sh ./bin/routine-admin-refusal.sh "portability mirror needs the carr_backup DSN in ~/.config/carr/db.env"
+fi
 BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
@@ -467,7 +530,9 @@ step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 # failing the chain every time Joe approves a permission interactively. The
 # printed diff lands in nightly.log either way. Direction is Drive -> repo (the
 # opposite of sync-skills.sh) because Claude Code itself writes these files.
-step "settings mirror (permission surface -> git)"   ./bin/sync-settings.sh --apply
+drive_projection "settings mirror (permission surface -> git)" \
+  "repo-owned settings authority read route" \
+  ./bin/sync-settings.sh --apply
 
 # Added 2026-08-06 (Joe's go, the Python-native answer to the Rust question,
 # loop #218): mypy over the whole repo, lenient config in mypy.ini. The legacy
@@ -494,7 +559,9 @@ step "tool-call markup sweep (records)"              ./.venv/bin/python ops/stor
 # item on one filterable page, derived read-only from v_export_loops. Runs after
 # the exports so it reflects the same night's truth. Output:
 # 00_Context/open-items.html (GENERATED — never hand-edited).
-step "open-items dashboard (one-page view)"          ./.venv/bin/python generators/build-open-items-dashboard.py
+drive_projection "open-items dashboard (one-page view)" \
+  "open-items dashboard document destination" \
+  ./.venv/bin/python generators/build-open-items-dashboard.py --recovery --reason "$RECOVERY_REASON"
 
 # Added 2026-08-02 (cold-session audit): the smoke canary runs IN the chain and records
 # its own heartbeat. Before this it sat in the dead-man freshness list with NOTHING
@@ -553,7 +620,9 @@ step "golden workflow suite (read verbs, answer correctness)" ./bin/smoke-and-re
 # tamper would never be caught" gap this watch exists to close. Always exit 0
 # (it snapshots, it does not judge) unless the vault root itself is
 # unreachable.
-step "vault drift watch (rebaseline, last)"          ./.venv/bin/python ops/vault-drift-watch.py --rebaseline
+drive_projection "vault drift watch (rebaseline, last)" \
+  "Drive drift-baseline verifier" \
+  ./.venv/bin/python ops/vault-drift-watch.py --rebaseline
 
 # ── ORDER 5: dead-man pings LAST — a ping means the whole chain above ran ────
 #
