@@ -97,7 +97,7 @@ echo "== smoke: report-card rubric validates =="
 # promoting measurement_integrity off kind='gate', blanking its bound action, or
 # giving it a trend each exit 1.
 python3 "$REPO/tools/report-card.py" --validate > /dev/null || { echo "  FAIL: rubric validation"; exit 1; }
-echo "  OK  rubric-v2 validates"
+echo "  OK  report-card rubric validates"
 
 echo "== smoke: retrieval answers =="
 if (( RECOVERY )); then
