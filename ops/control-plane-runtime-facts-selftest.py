@@ -28,7 +28,7 @@ for key in ('calendar-fetch-daily','nightly-record-layer','notes-sweep-hourly','
 
 weekday_payload={'scheduled_for':'2026-08-17T13:00:00+00:00'} # Monday
 calendar=cp._workflow_fact_collector(by['calendar-fetch-daily'],weekday_payload,mode='shadow')
-check('calendar shadow derives weekday+credential routing without payload facts',evaluate_stage(by['calendar-fetch-daily'],'routing',calendar))
+check('calendar shadow derives weekday+registered EventKit bundle routing without payload facts',evaluate_stage(by['calendar-fetch-daily'],'routing',calendar))
 notes=cp._workflow_fact_collector(by['notes-sweep-hourly'],weekday_payload,execution={'entrypoint':'bin/notes-sweep-post.sh','mode':'shadow','args':['--dry-run'],'exit_code':0,'stdout_tail':'notes-sweep shadow: scanned=1 unposted=1 writes=0 posts=0'},mode='shadow')
 check('notes filtering derives from subprocess evidence',evaluate_stage(by['notes-sweep-hourly'],'filtering',notes))
 input_payload={'subjects':[{'reverification_due':'expired','current_verification_status':'not_current','priority':1,'expired_at':'2026-01-01T00:00:00Z'}],'source_policy':{}}
@@ -153,7 +153,7 @@ check('playbook refuses when the prerequisite sweep receipt is absent',
 # workflow marker.  Their immutable receipt must then contain the same evidence
 # verbatim; neither a receipt nor a successful process by itself is enough.
 command_fixtures={
- 'calendar-fetch-daily':{'entrypoint':'bin/pull-gmail-calendar.py','mode':'shadow','args':['--dry-run'],'exit_code':0,'stdout_tail':'calendar-pull: source=calendar window=now posted=1 duplicate=2 failed=0 unparseable=0'},
+ 'calendar-fetch-daily':{'entrypoint':'bin/calendar-eventkit-capture.sh','mode':'shadow','args':['--dry-run','--receipt-safe','--days','7'],'exit_code':0,'stdout_tail':'calendar-capture: source=eventkit mode=shadow scanned=81 exact=6 domain=2 unknown=3 writes=0 failed=0'},
  'nightly-record-layer':{'entrypoint':'bin/nightly.sh','mode':'shadow','args':['--preflight'],'exit_code':0,'stdout_tail':'nightly preflight: 8 chain surfaces present; writes=0'},
  'notes-sweep-hourly':{'entrypoint':'bin/notes-sweep-post.sh','mode':'shadow','args':['--dry-run'],'exit_code':0,'stdout_tail':'notes-sweep shadow: scanned=1 unposted=1 writes=0 posts=0'},
  'restore-rehearse-weekly':{'entrypoint':'run.sh','mode':'shadow','args':['restore-rehearse','--preflight'],'exit_code':0,'stdout_tail':'PREFLIGHT OK — every check that runs before anything is created has passed.\nNothing was created, decrypted or charged for. Drop --preflight for the real rehearsal.'},
@@ -174,11 +174,9 @@ for key,evidence in command_fixtures.items():
     altered={**evidence,'stdout_tail':str(evidence['stdout_tail'])+' altered'}
     check(f'{key} nonidentical receipt evidence refuses',not evaluate_stage(workflow,'completion',cp._workflow_fact_collector(workflow,weekday_payload,execution=evidence,receipt_ref='job:fixture:attempt:1',receipt_evidence=altered,mode='shadow')))
 
-# The two enabled deterministic canaries have a separate registered command
+# Every enabled deterministic canary has a separate registered command
 # and must attest their nonsecret destination in the receipt marker.
 canary_fixtures={
- 'calendar-fetch-daily': {'entrypoint':'bin/pull-gmail-calendar.py','mode':'canary','args':['--canary'],'exit_code':0,
-   'stdout_tail':'calendar-pull: source=calendar mode=canary destination=canary-destination window=now posted=1 duplicate=0 failed=0 unparseable=0'},
  'notes-sweep-hourly': {'entrypoint':'bin/notes-sweep-post.sh','mode':'canary','args':['--canary'],'exit_code':0,
    'stdout_tail':'notes-sweep: source=notes_sweep mode=canary destination=canary-destination posted=1 duplicate=0 failed=0 still_queued=0'},
 }

@@ -26,8 +26,13 @@ from datetime import datetime, timedelta
 from EventKit import EKEventStore, EKEntityTypeEvent
 from Foundation import NSDate
 
-OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                   "out", "calendar-attendees.json")
+OUT = os.path.join(
+    os.environ.get(
+        "CARR_CALENDAR_OUTPUT_ROOT",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out"),
+    ),
+    "calendar-attendees.json",
+)
 DAYS_BACK = 400
 DAYS_FWD = 120
 
