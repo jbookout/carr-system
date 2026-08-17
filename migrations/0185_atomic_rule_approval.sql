@@ -249,6 +249,10 @@ declare
   v_prior ops.rule_approval_receipt%rowtype;
 begin
   v_actor_slug := ops.authority_actor_slug();
+  if v_actor_slug <> 'joe' then
+    raise exception 'system rule approval requires Joe authority; % may teach and participate but cannot replace Joe approval',
+      v_actor_slug;
+  end if;
   select id into v_actor_id from actor
    where slug=v_actor_slug and kind='human' and active;
   if v_actor_id is null then
