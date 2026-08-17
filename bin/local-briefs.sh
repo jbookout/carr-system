@@ -25,14 +25,37 @@
 # stand-down: Sat/Sun are not workdays for Joe or Dell and Monday absorbs.
 #
 # SKIP-not-FAIL on missing env, per house convention.
+#
+# NORMAL MODE writes only repo-local document outputs. Drive projection is an
+# explicit recovery act: pass --recovery and set CARR_RECOVERY_REASON. The
+# scheduled launchd path passes neither, so it can never silently write Drive.
 REPO="$HOME/carr-system"
 LOG="$REPO/out/local-briefs.log"
 [ -f "$HOME/.config/carr/db.env" ] || { echo "$(date -u +%FT%TZ) SKIP no db.env" >> "$LOG"; exit 0; }
 cd "$REPO" || exit 1
 
+RECOVERY=0
+if [ "${1:-}" = "--recovery" ]; then
+  RECOVERY=1
+  [ -n "${CARR_RECOVERY_REASON:-}" ] || {
+    echo "local-briefs: --recovery requires CARR_RECOVERY_REASON" >&2
+    exit 2
+  }
+elif [ -n "${1:-}" ]; then
+  echo "usage: bin/local-briefs.sh [--recovery]" >&2
+  exit 2
+fi
+
 rc=0
-if ./run.sh brief-pack --quiet >> "$LOG" 2>&1; then
+brief_ok=0
+BRIEF_ARGS=(--quiet)
+if [ "$RECOVERY" -eq 1 ]; then
+  BRIEF_ARGS+=(--recovery)
+  echo "$(date -u +%FT%TZ) RECOVERY brief-pack reason=${CARR_RECOVERY_REASON}" >> "$LOG"
+fi
+if ./run.sh brief-pack "${BRIEF_ARGS[@]}" >> "$LOG" 2>&1; then
   echo "$(date -u +%FT%TZ) OK brief-pack" >> "$LOG"
+  brief_ok=1
 else
   echo "$(date -u +%FT%TZ) FAIL brief-pack rc=$?" >> "$LOG"; rc=1
 fi
@@ -53,11 +76,12 @@ fi
 # "est window already past, verify before outreach" footnote. The file recorded
 # the opportunity it was losing.
 #
-# Vault, not email: this deliberately does NOT depend on the handover channel,
-# which cannot run (~/.config/carr/gmail.env is absent) and is a separate fix.
-# 00_Context/ is a folder Joe already opens, so this needs no new habit.
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
-if [ -d "$VAULT/00_Context" ]; then
+# The canonical document output is repo-local. It is not projected to Drive in
+# normal mode. Do not build it from stale component files after brief-pack has
+# refused: that would convert a loud missing-calendar failure into a plausible
+# but degraded daily brief.
+TODAY="$REPO/out/brief-pack/today.md"
+if [ "$brief_ok" -eq 1 ]; then
   { echo "# Today, generated $(date -u +%FT%TZ). Do not hand-edit."
     echo
     cat "$REPO/out/brief-pack/one-thing.md" 2>/dev/null
@@ -65,11 +89,28 @@ if [ -d "$VAULT/00_Context" ]; then
     cat "$REPO/out/brief-pack/claim-card.md" 2>/dev/null
     echo
     cat "$REPO/out/brief-pack/renewal-shortlist.md" 2>/dev/null
-  } > "$VAULT/00_Context/today.md" \
-    && echo "$(date -u +%FT%TZ) OK today.md -> vault" >> "$LOG" \
-    || { echo "$(date -u +%FT%TZ) FAIL today.md -> vault" >> "$LOG"; rc=1; }
+  } > "$TODAY.tmp" \
+    && mv "$TODAY.tmp" "$TODAY" \
+    && echo "$(date -u +%FT%TZ) OK today.md -> canonical document output" >> "$LOG" \
+    || { echo "$(date -u +%FT%TZ) FAIL canonical today.md" >> "$LOG"; rc=1; }
 else
-  echo "$(date -u +%FT%TZ) SKIP today.md — vault not mounted" >> "$LOG"
+  echo "$(date -u +%FT%TZ) REFUSED today.md because brief-pack was incomplete" >> "$LOG"
+fi
+
+# The retired delivery behavior survives only as explicit, labeled recovery.
+# It projects the already-built document; it is never the source of truth.
+if [ "$RECOVERY" -eq 1 ] && [ "$brief_ok" -eq 1 ]; then
+  VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
+  if [ -d "$VAULT/00_Context" ]; then
+    { echo "# RECOVERY NONCANONICAL PROJECTION. Source: $TODAY"
+      cat "$TODAY"
+    } > "$VAULT/00_Context/today.md" \
+      && echo "$(date -u +%FT%TZ) RECOVERY today.md -> Drive" >> "$LOG" \
+      || { echo "$(date -u +%FT%TZ) FAIL recovery Drive projection" >> "$LOG"; rc=1; }
+  else
+    echo "$(date -u +%FT%TZ) FAIL recovery Drive projection: vault not mounted" >> "$LOG"
+    rc=1
+  fi
 fi
 
 # Known defect, tracked as loop #182: review-queue's touches lane reports 0 while

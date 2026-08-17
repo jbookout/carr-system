@@ -14,7 +14,9 @@ unavailable result, not permission to return an old export as current truth.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -52,22 +54,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def query_store(words: list[str], top: int) -> list[Any]:
-    """Use the exact database retrieval function shared with search-doctrine."""
+    """Use the authenticated local-token verb path; no actor is caller data."""
     repo = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(repo))
-    from lib.record_sources import _connect
-
-    with _connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            select doc_slug, section_key, title, rank, snippet
-              from search_doctrine_situations(%s, null, null, %s, null)
-             order by final_score desc, concept_score desc,
-                      lexical_score desc, section_key asc
-            """,
-            (" ".join(words), top),
-        )
-        return list(cur.fetchall())
+    payload = json.dumps({"q": " ".join(words), "limit": top}, separators=(",", ":"))
+    proc = subprocess.run(
+        [sys.executable, str(repo / "tools" / "call-verb.py"),
+         "search-doctrine-situations", payload],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        timeout=45,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "authenticated doctrine read failed")
+    try:
+        result = json.loads(proc.stdout)
+    except ValueError as exc:
+        raise RuntimeError("authenticated doctrine read returned non-JSON output") from exc
+    hits = result.get("hits") if isinstance(result, dict) else None
+    if not isinstance(hits, list) or not all(isinstance(hit, dict) for hit in hits):
+        raise RuntimeError("authenticated doctrine read returned an invalid hit envelope")
+    return hits
 
 
 def recovery_vault(explicit: str | None) -> Path:
@@ -79,7 +86,14 @@ def print_store_hits(store_hits: list[Any]) -> None:
     if not store_hits:
         return
     print("retrieve: STORE hits (live canonical copies):")
-    for slug, key, title, _rank, snippet in store_hits:
+    for hit in store_hits:
+        if isinstance(hit, dict):
+            slug = hit.get("doc_slug")
+            key = hit.get("section_key")
+            title = hit.get("title")
+            snippet = hit.get("snippet") or ""
+        else:  # compatibility for focused test fixtures
+            slug, key, title, _rank, snippet = hit
         label = f"{slug} § {key}" + (f" - {title}" if title else "")
         print(f"  [store]  {label}")
         print(f"           read-doctrine {{\"document\":\"{slug}\"}} · {snippet}")

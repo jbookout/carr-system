@@ -61,6 +61,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.local_principal import LocalPrincipalError, local_partner_principal
+
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out" / "brief-pack"
 DEFAULT_RECOVERY_VAULT = Path(
@@ -68,6 +71,7 @@ DEFAULT_RECOVERY_VAULT = Path(
 )
 RECOVERY_MODE = False
 RECOVERY_VAULT: Path | None = None
+CURRENT_PRINCIPAL: str | None = None
 PARTNERS = ("joe", "dell")
 
 # Phase is the value proxy. Later phase = nearer a fee, which is the only
@@ -425,6 +429,8 @@ def section_capacity(cur, today) -> str:
 
 def read_decisions(cur):
     """Read pending decisions from the canonical safe-column loop view."""
+    if CURRENT_PRINCIPAL is None:
+        raise LocalPrincipalError("brief-pack has no established personal-scope principal")
     items = []
     rows = q(cur, """select owner, title, body, unblocks
                        from v_loops
@@ -433,7 +439,9 @@ def read_decisions(cur):
                         and renders_into in
                             ('00_Context/open-loops.md',
                              '00_Context/open-loops-backlog.md')
-                      order by renders_into, render_seq""")
+                        and ((tier = 'shared' and personal_to is null)
+                             or (tier = 'personal' and personal_to = %s))
+                      order by renders_into, render_seq""", (CURRENT_PRINCIPAL,))
     for row in rows:
         head = plain(row.get("title") or row.get("body") or "")
         question = head.split(". ")[0].rstrip(" .")
@@ -693,7 +701,7 @@ def lint(text: str):
 
 
 def main() -> int:
-    global RECOVERY_MODE, RECOVERY_VAULT
+    global RECOVERY_MODE, RECOVERY_VAULT, CURRENT_PRINCIPAL
     ap = argparse.ArgumentParser(description="Build the brief pack sections.")
     ap.add_argument("--section", default="all",
                     choices=["all"] + list(SECTIONS), help="which unit to run")
@@ -713,6 +721,22 @@ def main() -> int:
         print(f"brief_pack: RECOVERY MODE - Drive calendar exports at {RECOVERY_VAULT}",
               file=sys.stderr)
 
+    try:
+        CURRENT_PRINCIPAL = local_partner_principal()
+    except LocalPrincipalError as exc:
+        print(f"brief_pack: REFUSED - {exc}", file=sys.stderr)
+        return 78
+
+    wanted = list(SECTIONS) if a.section == "all" else [a.section]
+    if "prebriefs" in wanted and not a.recovery:
+        print(
+            "brief_pack: REFUSED - prebriefs have no canonical calendar receipt/source; "
+            "normal mode will not produce a degraded brief. Use --recovery only for an "
+            "acknowledged outage.",
+            file=sys.stderr,
+        )
+        return 69
+
     today = date.fromisoformat(a.date) if a.date else date.today()
     url = db_url()
     if not url:
@@ -722,7 +746,6 @@ def main() -> int:
 
     import psycopg
     OUT.mkdir(parents=True, exist_ok=True)
-    wanted = list(SECTIONS) if a.section == "all" else [a.section]
     written, findings = [], []
 
     with psycopg.connect(url) as conn, conn.cursor() as cur:

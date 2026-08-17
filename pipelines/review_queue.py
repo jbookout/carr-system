@@ -76,6 +76,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.local_principal import LocalPrincipalError, local_partner_principal
+
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out"
 STORE = OUT / "review-queue"
@@ -424,7 +427,7 @@ def read_documents():
 # social lane — a pointer, not a rebuild
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_social(url):
+def read_social(url, principal):
     """Read scheduled-post review pointers from canonical v_loops."""
     if not url:
         return [], "not configured: no canonical database credential"
@@ -435,7 +438,9 @@ def read_social(url):
                                   due_on, source_note
                              from v_loops
                             where status = 'open' and unblocks = %s
-                            order by render_seq""", (SOCIAL_UNBLOCKS,))
+                              and ((tier = 'shared' and personal_to is null)
+                                   or (tier = 'personal' and personal_to = %s))
+                            order by render_seq""", (SOCIAL_UNBLOCKS, principal))
             cols = [d.name for d in cur.description]
             rows = [dict(zip(cols, row)) for row in cur.fetchall()]
     except Exception as exc:
@@ -719,6 +724,12 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="print the store to stdout")
     a = ap.parse_args()
 
+    try:
+        principal = local_partner_principal()
+    except LocalPrincipalError as exc:
+        print(f"review_queue: REFUSED - {exc}", file=sys.stderr)
+        return 78
+
     store = STORE / "fixture" if a.fixture else STORE
     store.mkdir(parents=True, exist_ok=True)
 
@@ -739,7 +750,7 @@ def main() -> int:
     pruned = write_drafts(drafts, store / "drafts")
 
     doc_items, doc_status = read_documents()
-    soc_items, soc_status = read_social(url)
+    soc_items, soc_status = read_social(url, principal)
 
     now = datetime.now(timezone.utc)
     queue: dict[str, Any] = {
