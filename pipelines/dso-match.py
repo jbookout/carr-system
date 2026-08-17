@@ -39,19 +39,29 @@ path (the historical `python3 dso-match.py <path>` override) is itself a
 file-mode request — there is no records equivalent of "read THIS xlsx" — so it
 forces file mode too.
 """
+import argparse
 import openpyxl, glob, os, re, json, sys
 from collections import Counter, defaultdict
-
-# ROOT is the VAULT, not the script's parent. The vault copy of this script sits in
-# Automation/ so "parent" happened to be right there; the repo copy sits in pipelines/
-# and that assumption made it unrunnable from the repo. CARR_VAULT is how every other
-# repo pipeline resolves this.
-ROOT = os.environ.get("CARR_VAULT") or os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # lib/record_sources.py lives one level up from pipelines/ in the repo; the vault
 # copy of this script has no lib/ beside it (manifest.tsv), so the import is
 # guarded exactly like every other repointed consumer.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.drive_recovery import add_recovery_arguments, require_recovery
+
+# The corporate reference and all file outputs are legacy projections.  Consume
+# recovery flags before the historical source-mode parser sees them, so a normal
+# records request cannot quietly borrow the Drive reference to complete itself.
+_recovery_parser = argparse.ArgumentParser(add_help=False)
+add_recovery_arguments(_recovery_parser)
+_recovery_args, _remaining_argv = _recovery_parser.parse_known_args(sys.argv[1:])
+try:
+    ROOT = str(require_recovery(
+        _recovery_args, "canonical corporate-location reference and DSO-match artifact API"))
+except ValueError as _exc:
+    _recovery_parser.error(str(_exc))
+sys.argv = [sys.argv[0], *_remaining_argv]
+
 try:
     from lib.record_sources import (MODE_FILES, MODE_RECORDS, ROUTER_SOURCE, load_pool,
                                      pool_reach, resolve_mode, source_note)
