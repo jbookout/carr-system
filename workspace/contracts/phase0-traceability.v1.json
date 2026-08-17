@@ -1,6 +1,6 @@
 {
   "contract": "carr-workspace-phase0-traceability",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "status": "phase0_candidate_reconciled_to_integrated_planning_set",
   "source_doctrine_document_id": "c7f31740-7f4b-47e9-ab93-c7f2854bacc6",
   "source_doctrine_generation": 344,
@@ -682,7 +682,7 @@
       ],
       "authority": [
         "integration owner",
-        "Joe/Dell cutover approval"
+        "Joe cutover approval; Dell may validate or comment without gating"
       ],
       "event": [
         "workspace.route.viewed",
@@ -1187,7 +1187,7 @@
       "api_or_action": ["future tenant-scoped whole-market read model", "future exact-record deep link", "no Phase 0 production mutation"],
       "authority": ["server-derived tenant and active business workspace", "Team Book or National Accounts exact scope", "map is not a writer"],
       "event": ["workspace.market_map.viewed", "workspace.market_map.selection_changed", "workspace.market_map.redaction_applied", "workspace.authorization.refused"],
-      "evidence": ["located/current/stale/Unknown/unlocated component counts", "record-versus-location cluster parity", "source/version/freshness/precision/redaction/deep link", "sterile-mode denial", "Joe and Dell uncoached visual adoption"],
+      "evidence": ["located/current/stale/Unknown/unlocated component counts", "record-versus-location cluster parity", "source/version/freshness/precision/redaction/deep link", "sterile-mode denial", "Joe uncoached visual adoption with optional nonblocking Dell validation"],
       "rollback": ["disable map read-model flag", "retain canonical business records and manual owning-module access"],
       "tests": ["FLOW-WS-06", "MAP-COVERAGE-001", "MAP-TRUTH-001", "MAP-PARITY-001", "MAP-A11Y-001", "MAP-TENANT-001", "MAP-PRIVACY-001", "MAP-ADOPTION-001"],
       "open_decisions": ["OPEN-MARKET-MAP-001"]
