@@ -11,6 +11,8 @@ Run exactly this:
 
 **There are TWO Claude Code binaries on this Mac and they are usually on different versions.** The PATH binary (`/opt/homebrew/bin/claude`, npm-global, self-updating) is what `claude --version` reports. The desktop app ships and updates its OWN runtime under `~/Library/Application Support/Claude/claude-code/<version>/`, and THAT is what actually executes Joe's sessions. On 2026-08-09 they were 2.1.226 and 2.1.222 respectively. Watching only the PATH binary blinds this audit to the runtime that matters, so the gate tracks both and fires when EITHER moves.
 
+**AND THE SCHEDULED TASKS RUN ON THE DESKTOP RUNTIME TOO, so `app=` is nearly the whole system, not just Joe's interactive sessions.** Claude Code's own scheduler runs them inside the desktop app. Verified 2026-08-17: no launchd job and no crontab entry invokes the CLI, no live process runs `/opt/homebrew/bin/claude`, and all 28 live Claude Code processes were the desktop runtime. The only consumer of the PATH binary on this Mac is `tools/doc-convo`, which calls `claude` by name. Say this back in the report rather than assuming the headless lane is large: an audit run on 2026-08-17 opened by telling its own IT lane that "most of the scheduled tasks" were headless, and had to be corrected before any finding could be weighed.
+
 Run exactly this:
 
 ```

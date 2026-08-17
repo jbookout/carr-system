@@ -107,6 +107,13 @@ class BrainProcess:
                 process = self._ensure(system_prompt)
             except OSError as exc:
                 return subprocess.CompletedProcess([], 1, "", str(exc))
+            # A silent or noise-only capture transcribes to whitespace, and the API
+            # rejects a whitespace-only message with a 400 that costs the whole turn.
+            # Claude Code 2.1.229 handles this, but this rig calls `claude` by name and
+            # so runs the PATH binary, which is the last thing on the Mac still behind.
+            # Guarding here fixes it at any version and keeps the rig version-agnostic.
+            if not text or not text.strip():
+                return subprocess.CompletedProcess([], 0, "", "")
             payload = {
                 "type": "user",
                 "message": {

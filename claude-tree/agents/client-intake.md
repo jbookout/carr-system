@@ -124,7 +124,13 @@ used to say they were "ordinary files you write directly", which contradicted li
 same file. Line 143 was right.
 
 What you DO write by hand is the saved intake itself: `DNA/Clients/prospects/<name>-intake.md`.
-That one is not generated and is not blocked. Everything that belongs on the record — identity
+That one is not generated and is not blocked. **When a file for this name is already on disk, open
+it and merge your new material into what is there.** Re-running intake on the same person is
+ordinary — the questionnaire often comes back after the discovery call — and replacing the file
+wholesale throws away whatever the earlier pass captured, with nothing reporting the loss. The tool
+layer used to make that impossible by refusing to replace a file this session had not opened;
+Claude Code 2.1.228 lifted that restriction for newer models, so this paragraph is now the only
+thing standing in the way. Everything that belongs on the record — identity
 fields, the search brief, findings, next actions — goes through the verbs and renders into the
 dossier on its own.
 

@@ -95,6 +95,25 @@ fi
 
 say "CHANGE current[$CUR] last_audited[$LAST]"
 
+# LATCH: NOTIFY ONCE PER CHANGE, NOT ONCE PER HOUR. This runs hourly and deliberately
+# does not advance the ledger, so a TRUE alarm repeats until an audit is run. Between
+# 2026-08-14 and 2026-08-17 that was 89 identical notifications for one change — which
+# trains exactly the reflex the header above warns about: a sentinel you learn to
+# ignore. So the marker is the latch. If it already names this same pair, Joe has been
+# told about this change and nothing new has happened; log it and stay quiet. The
+# marker keeps its ORIGINAL detected_at, which is the honest answer to "how long has
+# this audit been owed" and is lost if every run restamps it. Nothing else changes:
+# the first notification still fires, the audit still reads the marker at boot, and
+# only a completed audit may still advance last-audited-version.txt.
+if [ -f "$PENDING" ]; then
+  PENDING_CUR="$(awk -F': ' '/^current: /{print $2; exit}' "$PENDING")"
+  PENDING_LAST="$(awk -F': ' '/^last_audited: /{print $2; exit}' "$PENDING")"
+  if [ "$PENDING_CUR" = "$CUR" ] && [ "$PENDING_LAST" = "$LAST" ]; then
+    say "OK already notified for this change (marker since $(awk -F': ' '/^detected_at: /{print $2; exit}' "$PENDING")) — staying quiet"
+    exit 0
+  fi
+fi
+
 if [ "$DRY" -eq 1 ]; then
   print -r -- "would notify: Claude Code changed — $CUR (last audited: $LAST)"
   exit 0
