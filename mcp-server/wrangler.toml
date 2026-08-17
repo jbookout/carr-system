@@ -89,6 +89,7 @@ routes = [
 # that one.
 [vars]
 CARR_ENV = "production"
+DEALROOM_HOST = "dealroom.doctorcre.com"
 # A reviewed, public deployment setting. Keep Program 6 browser mutations dark
 # until an approved release deliberately changes this exact config value.
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "false"
@@ -175,6 +176,7 @@ routes = []
 # so a var added there must be repeated here.
 [env.staging.vars]
 CARR_ENV = "staging"
+DEALROOM_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "false"
 
 # Environment configuration is explicit: staging's separate Worker needs the

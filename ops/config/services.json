@@ -81,7 +81,7 @@
       "runtime": "cloudflare-worker",
       "environments": [
         { "environment": "production", "endpoint": "api.practicecre.com", "deploy_mechanism": "bin/deploy-worker.sh" },
-        { "environment": "staging", "endpoint": "carr-mcp-staging.workers.dev", "deploy_mechanism": "bin/deploy-worker.sh --env staging" }
+        { "environment": "staging", "endpoint": "carr-mcp-staging.joe-bookout-carr-us.workers.dev", "deploy_mechanism": "bin/deploy-worker.sh --env staging" }
       ]
     },
     {
