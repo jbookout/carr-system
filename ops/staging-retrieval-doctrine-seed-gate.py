@@ -79,6 +79,13 @@ def main() -> int:
         seed.VAULT = old_vault
 
         with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            # db/schema.sql models the historical doctrine_meta table but not
+            # the singleton row inserted by already-ledgered migration 0075.
+            # The importer rightly requires that generation counter in a real
+            # environment. Restore it only in this outer-rolled-back fixture;
+            # never broaden the two-target production seeder to repair schema
+            # state by inference.
+            cur.execute("insert into doctrine_meta (id) values (1) on conflict (id) do nothing")
             # Core success.  The outer rollback makes this gate replayable.
             batch_no = -int(uuid.uuid4().int % 2_000_000_000)
             receipt = seed.apply_parsed_seed(cur, batch_no, parsed)
