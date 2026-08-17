@@ -195,11 +195,20 @@ def connect(*, routine: bool = True, read_only: bool = False):
     except ImportError as exc:
         raise SystemExit("psycopg is required") from exc
     conn = psycopg.connect(database_url(routine=routine))
-    if routine:
-        _assert_jobs_identity(conn)
-        if read_only:
+    try:
+        if routine and read_only:
+            # BEGIN must be the first SQL statement.  With psycopg's default
+            # transactional mode, an identity SELECT already opens a
+            # read-write transaction; issuing BEGIN READ ONLY afterward does
+            # not retrofit that transaction.  Collector reads therefore
+            # establish the database boundary before even inspecting identity.
             with conn.cursor() as cur:
                 cur.execute("begin transaction read only")
+        if routine:
+            _assert_jobs_identity(conn)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 

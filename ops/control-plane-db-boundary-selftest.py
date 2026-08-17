@@ -52,9 +52,13 @@ class Connection:
     def __init__(self, identity: tuple[str, str]) -> None:
         self.identity: tuple[str, str] = identity
         self.sql: list[str] = []
+        self.closed = False
 
     def cursor(self) -> Cursor:
         return Cursor(self)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def install_fake_psycopg(connect: Callable[[str], Connection]) -> None:
@@ -95,18 +99,23 @@ def main() -> int:
             return conn
         install_fake_psycopg(connect_good)
         cp.connect(read_only=True)
-        check("routine connection verifies session_user and current_user",
-              bool(made) and made[-1].sql[:2] == ["select session_user, current_user", "begin transaction read only"])
+        check("read-only transaction starts before identity or collector SQL",
+              bool(made) and made[-1].sql[:2] == ["begin transaction read only", "select session_user, current_user"])
 
+        wrong_connections: list[Connection] = []
         def connect_wrong(_dsn: str) -> Connection:
-            return Connection(("carr_writer", "carr_jobs"))
+            conn = Connection(("carr_writer", "carr_jobs"))
+            wrong_connections.append(conn)
+            return conn
         install_fake_psycopg(connect_wrong)
         try:
-            cp.connect()
+            cp.connect(read_only=True)
             wrong_identity = False
         except RuntimeError:
             wrong_identity = True
         check("routine connection refuses a writer session even after role switch", wrong_identity)
+        check("identity refusal closes the untrusted connection",
+              bool(wrong_connections) and wrong_connections[-1].closed)
 
         os.environ["CARR_DB_JOBS_ROLE"] = "carr_writer"
         def connect_env_override(_dsn: str) -> Connection:
