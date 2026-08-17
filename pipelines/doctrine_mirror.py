@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import tempfile
+import traceback
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -40,6 +41,21 @@ def snapshot_banner(timestamp: str) -> str:
     )
 
 
+def _json_default(value: Any) -> str:
+    """Render a value json.dumps refuses, the way a scalar cell is rendered.
+
+    A container cell is only as portable as the values inside it. Until
+    2026-08-17 the container branch below called json.dumps with no default,
+    so every type the scalar branches handle by hand — UUID, datetime, bytes —
+    raised TypeError the moment it appeared INSIDE a list or dict rather than
+    on its own. A uuid[] column did exactly that and took the whole mirror
+    down: no CSV, no markdown, nothing written to either location. Routing
+    back through serialize_cell keeps one rendering for each type wherever it
+    sits, so a nested value can never be less serializable than a bare one.
+    """
+    return serialize_cell(value)
+
+
 def serialize_cell(value: Any) -> str:
     """Serialize one database value for the dependency-free CSV mirror."""
     if value is None:
@@ -47,7 +63,7 @@ def serialize_cell(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, sort_keys=True)
+        return json.dumps(value, sort_keys=True, default=_json_default)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, memoryview):
@@ -406,7 +422,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.also is not None:
             copy_and_swap(args.out, args.also)
     except Exception as error:
-        print(f"mirror failed: {type(error).__name__}", file=sys.stderr)
+        # The type name alone is not a diagnosis. "mirror failed: TypeError"
+        # is what the 2026-08-17 nightly chain printed, and finding the actual
+        # cause meant re-running the pipeline by hand under a traceback
+        # wrapper. The message names the value; the traceback names the row.
+        print(f"mirror failed: {type(error).__name__}: {error}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return 1
 
     print(
