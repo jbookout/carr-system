@@ -1922,6 +1922,11 @@
       "binding_moment": "before an outgoing assistant reply justifies denying a model, provider, or agent access to CARR material because it is confidential, private, or sensitive",
       "control": "chat_lint",
       "exceptions": "explicit corrections that confidentiality is not the boundary, historical or quoted rule text, and real credential/autonomous-execution boundary explanations"
+    },
+    "937252fb": {
+      "category": "judgment_advisory",
+      "enforcement_class": "unbuilt",
+      "planned_control": "Extend hooks/completion-evidence-gate.py to demand the END-TO-END action for a capability claim, not merely fresh evidence of some artifact: name the first thing the partner would do, then show that action's real result. Blocked on the guidance-registry clause contract that landed 2026-08-16; tracked as loop 424."
     }
   },
   "active_rule_ids": {
@@ -2094,7 +2099,8 @@
       "5cd8d0f6",
       "1c42d80c",
       "c8ebeb5b",
-      "d7f74c93"
+      "d7f74c93",
+      "937252fb"
     ],
     "joe": [
       "6330bec8",
