@@ -35,9 +35,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
 from fill_document import colored_runs  # noqa: E402
+from lib.drive_recovery import add_recovery_arguments, require_recovery  # noqa: E402
 
-VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
 MAPS = os.path.join(HERE, "field-maps")
 
 TEMPLATES = {
@@ -106,8 +107,8 @@ def control_addresses(path: str) -> dict[str, str]:
     return hits
 
 
-def audit(slug: str, rel: str) -> dict:
-    path = os.path.join(VAULT, rel)
+def audit(slug: str, rel: str, vault: str) -> dict:
+    path = os.path.join(vault, rel)
     runs = colored_runs(path)
     controls = control_addresses(path)
     with open(os.path.join(MAPS, f"{slug}.json")) as fh:
@@ -138,10 +139,17 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--write", action="store_true",
                     help="append the finding to each map's review_note (adds no slot)")
+    add_recovery_arguments(ap)
     a = ap.parse_args()
+    try:
+        vault = str(require_recovery(
+            a, "document-template API for color audit"))
+    except ValueError as exc:
+        print(f"audit-template-colors: STOP: {exc}", file=sys.stderr)
+        return 2
 
     for slug, rel in TEMPLATES.items():
-        r = audit(slug, rel)
+        r = audit(slug, rel, vault)
         print(f"\n=== {slug} — {os.path.basename(rel)}")
         print(f"    {r['colored_runs']} coloured runs across {r['colored_addresses']} addresses · "
               f"{r['mapped_slots']} mapped slot addresses")

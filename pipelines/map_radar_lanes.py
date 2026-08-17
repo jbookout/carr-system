@@ -69,8 +69,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import psycopg
-
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
@@ -78,8 +76,11 @@ sys.path.insert(0, str(REPO))
 from pipelines.import_candidate_pool import (          # noqa: E402
     jsonable, load_known, match_known, val,
 )
+from lib.drive_recovery import add_recovery_arguments, require_recovery  # noqa: E402
 
-VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+# Kept importable for in-memory writer handoff tests.  It is never resolved to
+# Drive until main has passed the explicit recovery gate.
+VAULT = REPO / "__canonical-seam-required__"
 
 
 def _key(x):
@@ -191,16 +192,19 @@ NO_SCORE = ("unscored at map time: the {lane} lane's output carries no score col
 
 LANES = {
     "corp-filings": {
+        "relative_path": "Automation/entity-formation-leads.json",
         "path": VAULT / "Automation/entity-formation-leads.json",
         "what": "new territory business filings (FL Sunbiz + AL SOS)",
         "fields": _lane_entity_formation,
     },
     "upstream": {
+        "relative_path": "Automation/pre-entity-watch.json",
         "path": VAULT / "Automation/pre-entity-watch.json",
         "what": "corroborated pre-entity signals (PECOS/NPPES/licences/deeds)",
         "fields": _lane_pre_entity,
     },
     "renewal-radar": {
+        "relative_path": "Automation/renewal-radar.json",
         "path": VAULT / "Automation/renewal-radar.json",
         "what": "CoStar lease-event / owner-occupier / institutional rows",
         "fields": _lane_renewal,
@@ -361,6 +365,7 @@ def run_lane(slug, dry_run=False, refresh=False, strict=False, url=None, quiet=F
     """
     if slug not in LANES:
         raise ValueError(f"unknown lane {slug!r} — choices: {sorted(LANES)}")
+    import psycopg
     # [ORDER 19a] CARR_DB_JOBS_URL is THE name: one nightly-jobs role for every
     # unattended pipeline, not one credential per script. The older names stay
     # as fallbacks so nothing that already works stops working.
@@ -422,7 +427,18 @@ def main():
     ap.add_argument("--strict-suppression", action="store_true",
                     help="ORDER 25's flag, on the same shared function: run the "
                          "renewal-radar suppressor's semantics verbatim.")
+    add_recovery_arguments(ap)
     a = ap.parse_args()
+    try:
+        vault = require_recovery(
+            a, "canonical radar-lane source and ingest-event API")
+    except ValueError as exc:
+        print(f"map-radar-lanes: STOP: {exc}", file=sys.stderr)
+        return 2
+    global VAULT
+    VAULT = vault
+    for spec in LANES.values():
+        spec["path"] = VAULT / spec["relative_path"]
     lanes = a.lane or (sorted(LANES) if a.all else None)
     if not lanes:
         raise SystemExit("nothing to do: pass --all or --lane <slug>")
@@ -435,6 +451,7 @@ def main():
            or os.environ.get("DATABASE_URL"))
     if not url:
         raise SystemExit("CARR_DB_JOBS_URL / CARR_IMPORT_DB_URL / DATABASE_URL not set")
+    import psycopg
 
     rep = {}
     with psycopg.connect(url) as conn, conn.cursor() as cur:
@@ -505,4 +522,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

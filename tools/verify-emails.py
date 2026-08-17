@@ -38,21 +38,30 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 import openpyxl
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from lib.drive_recovery import add_recovery_arguments, require_recovery
+
 ap = argparse.ArgumentParser()
-ap.add_argument("--vault", default=os.environ.get("CARR_VAULT"))
 ap.add_argument("--source", default="all",
                 choices=["all", "registry", "vendors", "roster", "csv"])
 ap.add_argument("--csv")
 ap.add_argument("--column", default="Email")
 ap.add_argument("--segment", help="only rows containing this string in any field")
 ap.add_argument("--out", help="write the per-address report to this CSV")
+add_recovery_arguments(ap)
 a = ap.parse_args()
 
-if not a.vault:
-    raise SystemExit("verify-emails: pass --vault or set CARR_VAULT.")
+try:
+    vault = require_recovery(
+        a, "canonical contact-email verification query API")
+except ValueError as exc:
+    print(f"verify-emails: STOP: {exc}", file=sys.stderr)
+    raise SystemExit(2) from exc
 
 # Deliberately strict but not RFC-pedantic: this catches the shapes that actually
 # appear in hand-entered CRM data, which is where the bad rows come from.
@@ -122,7 +131,7 @@ else:
     for key, (rel, sheet, idc, namec, mailc) in SOURCES.items():
         if a.source not in ("all", key):
             continue
-        for r in sheet_rows(os.path.join(a.vault, rel), sheet):
+        for r in sheet_rows(os.path.join(vault, rel), sheet):
             records.append((key, str(r.get(idc) or ""), str(r.get(namec) or ""),
                             str(r.get(mailc) or ""), r))
 
