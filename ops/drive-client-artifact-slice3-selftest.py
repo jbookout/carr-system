@@ -53,4 +53,11 @@ with tempfile.TemporaryDirectory(prefix="drive-client-artifact-slice3-") as td:
         f"recovery was not visibly noncanonical: {proc.stdout}{proc.stderr}")
     assert marker.read_text() == "unchanged", "recovery verifier unexpectedly wrote Drive"
 
-print("drive client artifact slice3 selftest: 44/44 passed")
+    missing_delivery = Path(td) / "missing-front-door-root"
+    proc = run(str(PY), "pipelines/build-front-door.py", "--recovery", "--reason",
+               "fixture recovery", "--vault", str(missing_delivery), env=env)
+    assert proc.returncode == 2 and "NOT DELIVERED" in proc.stderr, (
+        f"missing Front Door recovery destination reported success: {proc.stdout}{proc.stderr}")
+    assert not missing_delivery.exists(), "failed Front Door delivery created a recovery root"
+
+print("drive client artifact slice3 selftest: 46/46 passed")
