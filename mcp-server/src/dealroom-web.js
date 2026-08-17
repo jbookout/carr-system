@@ -13,6 +13,7 @@ import {
 } from "./google-oidc.js";
 import { actorFromProps, propsForSlug, slugForEmail } from "./identity.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
+import { program6ActionsEnabled } from "./program6-feature-flag.js";
 
 export const DEALROOM_HOST = "dealroom.doctorcre.com";
 export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
@@ -298,10 +299,6 @@ async function signOut(request, env) {
   return redirect(`https://${DEALROOM_HOST}/`, [clearCookie(SESSION_COOKIE), clearCookie(PENDING_COOKIE)]);
 }
 
-function systemWorkEnabled(env) {
-  return env.DEALROOM_PROGRAM6_ACTIONS_ENABLED === "true";
-}
-
 function sameOrigin(request) {
   return request.headers.get("origin") === `https://${DEALROOM_HOST}`;
 }
@@ -502,7 +499,7 @@ async function handleRequest(request, env, ctx, dependencies) {
 
       let response;
       if (url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
-        if (!systemWorkEnabled(env)) return json({ error: "program6_actions_disabled" }, 404);
+        if (!program6ActionsEnabled(env)) return json({ error: "program6_actions_disabled" }, 404);
         if (url.pathname === `${SYSTEM_WORK_PREFIX}/session` && request.method === "GET") response = await systemWorkSession(session, dependencies);
         else if (url.pathname === `${SYSTEM_WORK_PREFIX}/challenge` && request.method === "POST") response = await createActionChallenge(request, env, session, dependencies);
         else if (typeof dependencies.program6Handler === "function") {
