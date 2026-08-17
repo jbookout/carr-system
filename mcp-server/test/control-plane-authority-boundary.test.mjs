@@ -26,7 +26,7 @@ class AcceptanceAuthorityFake {
     if (text.includes("ops.disable_legacy_schedule")) {
       this.disableCalls.push(params);
       if (this.sessionSlug !== "joe") throw new Error("legacy schedule retirement requires Joe authority session");
-      return { rows: [{ receipt_ref: `legacy-disable:${params[4]}` }] };
+      return { rows: [{ receipt_ref: `legacy-disable:${params[6]}` }] };
     }
     if (text.includes("insert into tool_call")) {
       this.envelopeWrites += 1;
@@ -101,18 +101,20 @@ test("workflow acceptance leaves canary Joe-only in DB while shadow remains part
 
 test("legacy disable emits a distinct Joe-bound surface receipt", async () => {
   const tool = TOOLS["disable-legacy-schedule"];
-  assert.deepEqual(tool.inputSchema.required, ["idempotency_key", "workflow_key", "surface_id", "locator", "reason"]);
+  assert.deepEqual(tool.inputSchema.required, ["idempotency_key", "workflow_key", "surface_id", "locator", "reason", "pre_observation_ref", "post_observation_ref"]);
   const c = new AcceptanceAuthorityFake("joe");
   const result = await tool.handler(c, joe, {
-    idempotency_key: "disable-fixture", workflow_key: "nightly-record-layer",
-    surface_id: "nightly-record-layer.launchd.v1", locator: "com.carr.nightly-record-layer", reason: "accepted evidence",
+    idempotency_key: "disable-fixture", workflow_key: "cc-update-audit",
+    surface_id: "cc-update-audit.claude-code.v1", locator: "cc-update-audit", reason: "accepted evidence",
+    pre_observation_ref: "native:enabled", post_observation_ref: "native:disabled",
   });
   assert.equal(result.receipt_ref, "legacy-disable:disable-fixture");
-  assert.deepEqual(c.disableCalls, [["nightly-record-layer", "nightly-record-layer.launchd.v1",
-    "com.carr.nightly-record-layer", "accepted evidence", "disable-fixture"]]);
+  assert.deepEqual(c.disableCalls, [["cc-update-audit", "cc-update-audit.claude-code.v1",
+    "cc-update-audit", "accepted evidence", "native:enabled", "native:disabled", "disable-fixture"]]);
   const dellC = new AcceptanceAuthorityFake("dell");
   await assert.rejects(() => tool.handler(dellC, dell, {
-    idempotency_key: "disable-dell", workflow_key: "nightly-record-layer",
-    surface_id: "nightly-record-layer.launchd.v1", locator: "com.carr.nightly-record-layer", reason: "no",
+    idempotency_key: "disable-dell", workflow_key: "cc-update-audit",
+    surface_id: "cc-update-audit.claude-code.v1", locator: "cc-update-audit", reason: "no",
+    pre_observation_ref: "native:enabled", post_observation_ref: "native:disabled",
   }), /requires Joe authority session/);
 });

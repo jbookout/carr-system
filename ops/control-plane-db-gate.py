@@ -19,12 +19,17 @@ import psycopg
 from psycopg import sql
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib.control_plane_scheduler_cutover import scheduler_provider_rows  # noqa: E402
+
 SCHEDULER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
+WORKFLOW_MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
 
 
 REQUIRED_TABLES = [
     "ops.guidance_intake", "ops.rule_admission", "ops.rule_enforcement_point",
-    "ops.authority_receipt", "ops.legacy_schedule_disable_receipt", "ops.legacy_schedule_surface_registry", "ops.job_definition", "ops.job",
+    "ops.authority_receipt", "ops.legacy_schedule_disable_receipt", "ops.legacy_schedule_surface_registry",
+    "ops.legacy_schedule_provider_contract", "ops.legacy_schedule_observation_receipt", "ops.job_definition", "ops.job",
     "ops.job_attempt", "ops.job_receipt", "ops.cognition_job",
     "ops.cognition_result_cache", "ops.workflow_acceptance",
     "ops.provider_route", "ops.provider_observation",
@@ -41,7 +46,7 @@ REQUIRED_FUNCTIONS = [
     "ops.timeout_job(uuid,uuid,text)",
     "ops.reap_expired_jobs()",
     "ops.record_workflow_acceptance(text,text,text,text)",
-    "ops.disable_legacy_schedule(text,text,text,text,text)",
+    "ops.disable_legacy_schedule(text,text,text,text,text,text,text,text)",
     "ops.authority_actor_slug()",
     "ops.select_provider_routes(text[])",
     "ops.get_cognition_cache(text)",
@@ -51,6 +56,7 @@ REQUIRED_FUNCTIONS = [
     "ops.reserve_job_cost(uuid,uuid,text,numeric)",
     "ops.admit_job_cost(uuid,uuid,text,numeric)",
     "ops.record_npi_device_evidence(uuid,timestamp with time zone,text,text,jsonb,text)",
+    "ops.record_claude_scheduler_observation(text,text,text,text,boolean,text,text,text,timestamp with time zone,text)",
     "ops.settle_job_cost(uuid,uuid,uuid,integer,integer,numeric)",
     "ops.release_job_cost(uuid,uuid,uuid)",
 ]
@@ -76,10 +82,15 @@ def main() -> int:
         return 2
     try:
         registry = json.loads(SCHEDULER_REGISTRY_PATH.read_text(encoding="utf-8"))
+        manifest = json.loads(WORKFLOW_MANIFEST_PATH.read_text(encoding="utf-8"))
         expected_surfaces = sorted(
             (str(surface["workflow_key"]), int(surface["workflow_version"]), str(surface["surface_id"]),
              str(surface["locator"]), str(surface["scheduler_kind"]))
             for surface in registry["surfaces"]
+        )
+        expected_provider = sorted(
+            (row[2], row[0], row[1], row[3], row[4], row[5], row[6], row[7])
+            for row in scheduler_provider_rows(registry, manifest=manifest, repo=REPO)
         )
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         fail(f"could not load checked-in scheduler surface registry: {exc}")
@@ -101,6 +112,17 @@ def main() -> int:
             actual_surfaces = [tuple(row) for row in cur.fetchall()]
             if actual_surfaces != expected_surfaces:
                 fail("scheduler surface registry is empty, stale, or does not exactly match checked-in sync inventory")
+            cur.execute("""select surface_id,workflow_key,workflow_version,locator,cron_expression,
+                                  timezone,definition_relpath,definition_sha256
+                             from ops.legacy_schedule_provider_contract
+                             order by surface_id""")
+            actual_provider = [tuple(row) for row in cur.fetchall()]
+            if actual_provider != expected_provider:
+                fail("Claude scheduler provider contract is empty, stale, or not derived from checked-in definitions")
+            cur.execute("select has_function_privilege('carr_jobs', "
+                        "'ops.record_claude_scheduler_observation(text,text,text,text,boolean,text,text,text,timestamptz,text)'::regprocedure, 'execute')")
+            if fetchone_required(cur.fetchone(), "jobs scheduler observation privilege")[0]:
+                fail("carr_jobs can mint native scheduler observations")
 
             # The reaper must lock a finite expired-job set before it changes
             # attempt evidence.  Otherwise a heartbeat can renew the lease
@@ -117,7 +139,7 @@ def main() -> int:
             if fetchone_required(cur.fetchone(), "writer workflow acceptance privilege")[0]:
                 fail("carr_writer can forge workflow acceptance")
             cur.execute("select has_function_privilege('carr_writer', "
-                        "'ops.disable_legacy_schedule(text,text,text,text,text)'::regprocedure, 'execute')")
+                        "'ops.disable_legacy_schedule(text,text,text,text,text,text,text,text)'::regprocedure, 'execute')")
             if fetchone_required(cur.fetchone(), "writer legacy-disable privilege")[0]:
                 fail("carr_writer can retire a legacy schedule")
             cur.execute("select pg_get_functiondef('ops.record_workflow_acceptance(text,text,text,text)'::regprocedure)")
@@ -710,7 +732,8 @@ def main() -> int:
             cur.execute("savepoint early_cutover")
             try:
                 cur.execute("set local role carr_writer")
-                cur.execute("select ops.disable_legacy_schedule(%s,'surface','locator','too early','db-gate')", (definition,))
+                cur.execute("select ops.disable_legacy_schedule(%s,'surface','locator','too early',"
+                            "'native:enabled','native:disabled',null,'db-gate')", (definition,))
                 fail("routine writer disabled a legacy schedule")
             except psycopg.Error:
                 cur.execute("rollback to savepoint early_cutover")

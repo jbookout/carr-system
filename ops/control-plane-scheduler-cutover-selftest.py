@@ -12,7 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from lib.control_plane_scheduler_cutover import (CutoverRefusal, observe_launchd,
+from lib.control_plane_scheduler_cutover import (CutoverRefusal, observe_claude_scheduler_receipt, observe_launchd,
                                                   prepare_disable, validate_registry,
                                                   verify_disabled)
 
@@ -91,6 +91,33 @@ def prepared() -> tuple[dict, dict]:
                            replacement=healthy_replacement(), receipt_verifier=receipt_verifier, now=NOW), pre
 
 
+def provider_receipt(state: str, ref: str, at: str) -> dict:
+    return {"kind": "provider_scheduler_observation_receipt", "receipt_ref": ref,
+            "surface_id": "cc-update-audit.claude-code.v1", "workflow_key": "cc-update-audit",
+            "workflow_version": 1, "locator": "cc-update-audit", "scheduler_state": state,
+            "observed_at": at, "provider_revision": hashlib.sha256(("revision:" + ref).encode()).hexdigest(),
+            "source_fingerprint": hashlib.sha256(("source:" + ref).encode()).hexdigest(),
+            "device_principal_bound": True, "immutable": True}
+
+
+def cc_receipt_verifier(ref: str) -> dict | None:
+    mode = {"cc:shadow": "shadow", "cc:canary": "canary"}.get(ref)
+    if mode is None:
+        return None
+    return {"kind": "workflow_acceptance_receipt", "receipt_ref": ref, "workflow_key": "cc-update-audit",
+            "workflow_version": 1, "mode": mode, "status": "accepted", "immutable": True}
+
+
+def cc_approval_verifier(ref: str) -> dict | None:
+    if ref != "approval:cc":
+        return None
+    return {"kind": "human_authority_receipt", "receipt_ref": ref, "immutable": True,
+            "authority_subject": "joe", "action": "disable-legacy-schedule",
+            "subject": {"workflow_key": "cc-update-audit", "workflow_version": 1,
+                        "surface_id": "cc-update-audit.claude-code.v1", "locator": "cc-update-audit"},
+            "observation_refs": {"pre": "provider:enabled", "post": "provider:disabled", "sibling": None}}
+
+
 def main() -> int:
     check("registry validates and inventories every non-disabled legacy workflow",
           validate_registry(REGISTRY, manifest=MANIFEST) == [])
@@ -119,6 +146,35 @@ def main() -> int:
           enabled["scheduler_state"] == "enabled" and all(enabled["sources"].values()))
     check("local readback reports disabled only from exact local sources",
           disabled["scheduler_state"] == "disabled")
+    provider_surface = surface("cc-update-audit.claude-code.v1")
+    provider_enabled = observe_claude_scheduler_receipt(
+        provider_surface, provider_receipt("enabled", "provider:enabled", NOW_TEXT))
+    provider_replacement = {"workflow_key": "cc-update-audit", "workflow_version": 1, "healthy": True,
+                            "accepted_receipt_refs": ["cc:shadow", "cc:canary"]}
+    provider_prepare = prepare_disable(
+        REGISTRY, surface_id=provider_surface["surface_id"], observation=provider_enabled,
+        replacement=provider_replacement, receipt_verifier=cc_receipt_verifier, now=NOW)
+    check("Claude provider surface prepares only from an immutable device-bound receipt",
+          provider_prepare["binding"]["surface_id"] == provider_surface["surface_id"]
+          and provider_enabled["sources"]["provider_receipt_read"] is True)
+    provider_disabled = observe_claude_scheduler_receipt(
+        provider_surface, provider_receipt("disabled", "provider:disabled", LATER_TEXT))
+    provider_verified = verify_disabled(
+        REGISTRY, prepared=provider_prepare, pre_disable_observation=provider_enabled,
+        post_disable_observation=provider_disabled, human_approval_ref="approval:cc",
+        approval_verifier=cc_approval_verifier, now=NOW + timedelta(minutes=1))
+    check("Claude verification requires the Joe receipt to bind the exact native pre/post refs",
+          provider_verified["scheduler_state"] == "disabled")
+    wrong_provider_approval = lambda ref: {**(cc_approval_verifier(ref) or {}),
+                                            "observation_refs": {"pre": "wrong", "post": "provider:disabled", "sibling": None}}
+    refuses("Claude verification refuses a Joe receipt bound to different native observations", lambda: verify_disabled(
+        REGISTRY, prepared=provider_prepare, pre_disable_observation=provider_enabled,
+        post_disable_observation=provider_disabled, human_approval_ref="approval:cc",
+        approval_verifier=wrong_provider_approval, now=NOW + timedelta(minutes=1)))
+    mutable_provider = provider_receipt("enabled", "provider:mutable", NOW_TEXT)
+    mutable_provider["immutable"] = False
+    refuses("mutable caller provider observation is refused", lambda: observe_claude_scheduler_receipt(
+        provider_surface, mutable_provider))
     item = deepcopy(surface("nightly-record-layer.launchd.v1"))
     plist = {"Label": item["locator"], "ProgramArguments": item["canonical_program_arguments"]}
     item["canonical_plist_fingerprint"] = hashlib.sha256(json.dumps(plist, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
@@ -201,7 +257,7 @@ def main() -> int:
         REGISTRY, prepared=forged_notes_prepare, pre_disable_observation=notes,
         post_disable_observation=notes_disabled, human_approval_ref="approval:joe", approval_verifier=approval_verifier,
         now=NOW + timedelta(minutes=1)))
-    refuses("provider surface has no local launchd retirement adapter", lambda: prepare_disable(
+    refuses("unresolved provider/launchd Notes duplicate remains fail-closed", lambda: prepare_disable(
         REGISTRY, surface_id="notes-sweep-hourly.claude-code.v1", observation=notes,
         replacement=notes_replacement, receipt_verifier=receipt_verifier, now=NOW))
     refuses("verification refuses a missing human-only approval", lambda: verify_disabled(

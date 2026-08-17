@@ -10,6 +10,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 CONTRACT = "control-plane-scheduler-cutover"
@@ -139,6 +140,36 @@ def scheduler_surface_rows(registry: Any, *, manifest: Any) -> list[tuple[str, i
     return sorted(rows, key=lambda row: (row[0], row[1], row[2]))
 
 
+def scheduler_provider_rows(registry: Any, *, manifest: Any, repo: Path) -> list[tuple[str, int, str, str, str, str, str, str]]:
+    """Return exact Claude scheduler contracts derived from tracked sources.
+
+    The provider contract is not hand-copied into SQL.  It is derived during
+    the same authority sync that installs job definitions: manifest recurrence
+    plus the byte fingerprint of the registered portable SKILL definition.
+    """
+    errors = validate_registry(registry, manifest=manifest)
+    if errors:
+        raise CutoverRefusal("invalid scheduler cutover registry: " + "; ".join(errors))
+    workflows = {item["key"]: item for item in manifest["workflows"]}
+    rows: list[tuple[str, int, str, str, str, str, str, str]] = []
+    for surface in registry["surfaces"]:
+        if surface["scheduler_kind"] != "claude-code":
+            continue
+        workflow = workflows[surface["workflow_key"]]
+        cron = workflow["recurrence"].get("cron")
+        zone = workflow["recurrence"].get("timezone")
+        if not isinstance(cron, str) or not cron or not isinstance(zone, str) or not zone:
+            raise CutoverRefusal(f"Claude scheduler surface {surface['surface_id']} lacks recurrence")
+        relpath = f"ops/scheduled-tasks/{surface['locator']}.SKILL.md"
+        path = repo / relpath
+        if not path.is_file():
+            raise CutoverRefusal(f"Claude scheduler definition is missing: {relpath}")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        rows.append((surface["workflow_key"], surface["workflow_version"], surface["surface_id"],
+                     surface["locator"], cron, zone, relpath, digest))
+    return sorted(rows, key=lambda row: (row[0], row[1], row[2]))
+
+
 def _surface(registry: dict[str, Any], surface_id: str) -> dict[str, Any]:
     errors = validate_registry(registry)
     if errors:
@@ -206,6 +237,42 @@ def observe_launchd(surface: dict[str, Any], *, repo_plist: Any, installed_plist
     }
 
 
+def observe_claude_scheduler_receipt(surface: dict[str, Any], receipt: Any) -> dict[str, Any]:
+    """Convert one immutable, device-bound provider readback into cutover evidence."""
+    if surface.get("scheduler_kind") != "claude-code":
+        raise CutoverRefusal("provider receipt can observe only Claude scheduler surfaces")
+    if not isinstance(receipt, dict) or receipt.get("kind") != "provider_scheduler_observation_receipt":
+        raise CutoverRefusal("immutable provider scheduler observation receipt is required")
+    expected = {
+        "surface_id": surface["surface_id"], "workflow_key": surface["workflow_key"],
+        "workflow_version": surface["workflow_version"], "locator": surface["locator"],
+    }
+    if any(receipt.get(key) != value for key, value in expected.items()):
+        raise CutoverRefusal("provider observation receipt does not bind the registered surface")
+    if receipt.get("immutable") is not True or receipt.get("device_principal_bound") is not True:
+        raise CutoverRefusal("provider observation receipt is not immutable and device-bound")
+    if receipt.get("scheduler_state") not in {"enabled", "disabled"}:
+        raise CutoverRefusal("provider observation receipt has no exact scheduler state")
+    _utc(receipt.get("observed_at"))
+    if not isinstance(receipt.get("source_fingerprint"), str) or len(receipt["source_fingerprint"]) != 64:
+        raise CutoverRefusal("provider observation receipt lacks a source fingerprint")
+    material = {
+        "receipt_ref": receipt.get("receipt_ref"), "provider_revision": receipt.get("provider_revision"),
+        "source_fingerprint": receipt["source_fingerprint"], "state": receipt["scheduler_state"],
+    }
+    return {
+        "schema_version": SCHEMA_VERSION, "contract": CONTRACT, "kind": "scheduler_observation",
+        "surface_id": surface["surface_id"], "workflow_key": surface["workflow_key"],
+        "workflow_version": surface["workflow_version"], "scheduler_kind": "claude-code",
+        "locator": surface["locator"], "scheduler_state": receipt["scheduler_state"],
+        "observed_at": receipt["observed_at"],
+        "sources": {"provider_receipt_read": True, "device_principal_bound": True,
+                    "registered_contract_matches": True},
+        "source_fingerprint": _fingerprint(material),
+        "provider_receipt_ref": receipt.get("receipt_ref"),
+    }
+
+
 def _require_observation(registry: dict[str, Any], surface: dict[str, Any], observation: Any,
                          *, expected_state: str, now: datetime | None) -> dict[str, Any]:
     if not isinstance(observation, dict):
@@ -222,9 +289,11 @@ def _require_observation(registry: dict[str, Any], surface: dict[str, Any], obse
         if observation.get(key) != value:
             raise CutoverRefusal(f"scheduler observation {key} does not match the registered surface")
     sources = observation.get("sources")
-    if not isinstance(sources, dict) or not all(sources.get(key) is True for key in
-                                                ("repo_plist_matches", "installed_plist_matches", "launchctl_read")):
-        raise CutoverRefusal("scheduler observation lacks all local readback sources")
+    required_sources = (("repo_plist_matches", "installed_plist_matches", "launchctl_read")
+                        if surface["scheduler_kind"] == "launchd"
+                        else ("provider_receipt_read", "device_principal_bound", "registered_contract_matches"))
+    if not isinstance(sources, dict) or not all(sources.get(key) is True for key in required_sources):
+        raise CutoverRefusal("scheduler observation lacks all native readback sources")
     if not isinstance(observation.get("source_fingerprint"), str) or len(observation["source_fingerprint"]) != 64:
         raise CutoverRefusal("scheduler observation lacks a source fingerprint")
     at = _utc(observation.get("observed_at"))
@@ -271,10 +340,8 @@ def prepare_disable(registry: dict[str, Any], *, surface_id: str, observation: A
                     now: datetime | None = None) -> dict[str, Any]:
     """Create non-mutating, human-reviewable disable preparation evidence."""
     surface = _surface(registry, surface_id)
-    if surface["scheduler_kind"] != "launchd":
-        raise CutoverRefusal("provider scheduler cutover is outside the local launchd adapter")
     if surface.get("duplicate_group"):
-        raise CutoverRefusal("duplicate scheduler group is unresolved; local launchd evidence cannot retire one of two Notes schedules")
+        raise CutoverRefusal("duplicate scheduler group is unresolved; one observation cannot retire one of two Notes schedules")
     observed = _require_observation(registry, surface, observation, expected_state="enabled", now=now)
     accepted_refs = _require_replacement(surface, replacement, receipt_verifier)
     binding = {
@@ -329,9 +396,16 @@ def verify_disabled(registry: dict[str, Any], *, prepared: Any, pre_disable_obse
             or approval.get("authority_subject") != "joe" or approval.get("action") != "disable-legacy-schedule"
             or approval.get("subject") != expected_subject):
         raise CutoverRefusal("authority receipt does not bind Joe/action/exact scheduler subject")
+    if surface["scheduler_kind"] == "claude-code":
+        observation_refs = approval.get("observation_refs")
+        if (not isinstance(observation_refs, dict)
+                or observation_refs.get("pre") != pre.get("provider_receipt_ref")
+                or observation_refs.get("post") != post.get("provider_receipt_ref")
+                or observation_refs.get("sibling") is not None):
+            raise CutoverRefusal("authority receipt does not bind the verified native observations")
     receipt = {
         "surface_id": surface["surface_id"], "workflow_key": surface["workflow_key"],
-        "workflow_version": surface["workflow_version"], "scheduler_kind": "launchd",
+        "workflow_version": surface["workflow_version"], "scheduler_kind": surface["scheduler_kind"],
         "locator": surface["locator"], "pre_observation_fingerprint": pre["source_fingerprint"],
         "post_observation_fingerprint": post["source_fingerprint"],
         "approval_ref": human_approval_ref,

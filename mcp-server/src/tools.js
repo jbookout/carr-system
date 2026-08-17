@@ -4987,19 +4987,23 @@ export const TOOLS = {
 
   "disable-legacy-schedule": {
     write: true, humanOnly: true, authorityOnly: true,
-    description: "Joe-only authority operation to retire one legacy schedule after accepted shadow and canary completion receipts exist. Uses the authority connection; a routine writer credential cannot invoke it.",
+    description: "Joe-only authority readback after a native Claude schedule is disabled. Requires accepted shadow/canary evidence plus immutable enabled and disabled provider observations; it never performs the native disable.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, workflow_key: { type: "string" }, reason: { type: "string" },
       surface_id: { type: "string" }, locator: { type: "string" },
-    }, required: ["idempotency_key", "workflow_key", "surface_id", "locator", "reason"] },
+      pre_observation_ref: { type: "string" }, post_observation_ref: { type: "string" },
+    }, required: ["idempotency_key", "workflow_key", "surface_id", "locator", "reason", "pre_observation_ref", "post_observation_ref"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "disable-legacy-schedule", args, async () => {
-      const retired = await c.query("select ops.disable_legacy_schedule($1,$2,$3,$4,$5) as receipt_ref",
-        [args.workflow_key, args.surface_id, args.locator, args.reason, args.idempotency_key]);
+      const retired = await c.query("select ops.disable_legacy_schedule($1,$2,$3,$4,$5,$6,null,$7) as receipt_ref",
+        [args.workflow_key, args.surface_id, args.locator, args.reason,
+         args.pre_observation_ref, args.post_observation_ref, args.idempotency_key]);
       if (!retired.rows[0].receipt_ref)
         throw new ToolError({ error: "legacy_schedule_not_disabled", workflow_key: args.workflow_key });
       await writeEvent(c, actor, "disable-legacy-schedule", "system", args.workflow_key,
         { new: { workflow_key: args.workflow_key, surface_id: args.surface_id, locator: args.locator,
-                 reason: args.reason, receipt_ref: retired.rows[0].receipt_ref }, idempotency_key: args.idempotency_key });
+                 reason: args.reason, pre_observation_ref: args.pre_observation_ref,
+                 post_observation_ref: args.post_observation_ref,
+                 receipt_ref: retired.rows[0].receipt_ref }, idempotency_key: args.idempotency_key });
       return { ok: true, workflow_key: args.workflow_key, disabled: true, receipt_ref: retired.rows[0].receipt_ref };
     }),
   },

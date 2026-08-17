@@ -43,7 +43,8 @@ from lib.control_plane_proposal_contracts import (ProposalContractError,
                                                   validate_proposal_contract)  # noqa: E402
 from lib.control_plane_runner import BudgetExceeded, CognitionDispatcher, due_workflows  # noqa: E402
 from lib.control_plane_runtime_collectors import RuntimeCanonicalEvidenceCollector  # noqa: E402
-from lib.control_plane_scheduler_cutover import CutoverRefusal, scheduler_surface_rows  # noqa: E402
+from lib.control_plane_scheduler_cutover import (CutoverRefusal, scheduler_provider_rows,
+                                                  scheduler_surface_rows)  # noqa: E402
 
 MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
 SCHEDULER_CUTOVER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
@@ -75,6 +76,14 @@ def sync_scheduler_surface_registry(cur: Any, *, manifest: dict[str, Any], regis
         rows = scheduler_surface_rows(registry, manifest=manifest)
     except CutoverRefusal as exc:
         raise RuntimeError(str(exc)) from exc
+    # Provider contracts depend on the full parent workflow/version tuple.
+    # Remove the mutable current projection before a same-surface version
+    # evolution, then rebuild it below. Historical observation receipts retain
+    # their immutable subject fields and become ineligible through the
+    # resolver's current-contract equality join rather than being deleted or
+    # reinterpreted. They intentionally do not FK to this mutable projection,
+    # so retiring a legacy surface cannot erase or strand its history.
+    cur.execute("delete from ops.legacy_schedule_provider_contract")
     for workflow_key, workflow_version, surface_id, locator, scheduler_kind in rows:
         cur.execute(
             """insert into ops.legacy_schedule_surface_registry
@@ -88,6 +97,26 @@ def sync_scheduler_surface_registry(cur: Any, *, manifest: dict[str, Any], regis
     cur.execute(
         "delete from ops.legacy_schedule_surface_registry where not (surface_id = any(%s))",
         ([row[2] for row in rows],),
+    )
+    provider_rows = scheduler_provider_rows(registry, manifest=manifest, repo=REPO)
+    for (workflow_key, workflow_version, surface_id, locator, cron_expression,
+         timezone_name, definition_relpath, definition_sha256) in provider_rows:
+        cur.execute(
+            """insert into ops.legacy_schedule_provider_contract
+                 (surface_id,workflow_key,workflow_version,locator,cron_expression,timezone,
+                  definition_relpath,definition_sha256)
+               values (%s,%s,%s,%s,%s,%s,%s,%s)
+               on conflict (surface_id) do update set
+                 workflow_key=excluded.workflow_key,workflow_version=excluded.workflow_version,
+                 locator=excluded.locator,cron_expression=excluded.cron_expression,
+                 timezone=excluded.timezone,definition_relpath=excluded.definition_relpath,
+                 definition_sha256=excluded.definition_sha256""",
+            (surface_id, workflow_key, workflow_version, locator, cron_expression,
+             timezone_name, definition_relpath, definition_sha256),
+        )
+    cur.execute(
+        "delete from ops.legacy_schedule_provider_contract where not (surface_id = any(%s))",
+        ([row[2] for row in provider_rows],),
     )
     return len(rows)
 
