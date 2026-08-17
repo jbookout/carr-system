@@ -5009,7 +5009,7 @@ export const TOOLS = {
 
   "approve-rule": {
     write: true, humanOnly: true, authorityOnly: true,
-    description: "Approve one captured rule in a single human act. Approval means the server atomically verifies exact registered enforcement, records the immutable authority receipt, and activates the rule in the same transaction. There is no approved-but-inactive or active-but-pending state. If enforcement is missing, approval refuses so the system must build and verify the control before asking the human to approve. Advisory guidance is not mislabeled as an unbreakable rule.",
+    description: "Approve one captured system rule in a single Joe-authority act. Approval means the server atomically verifies exact registered enforcement, records the immutable authority receipt, and activates the rule in the same transaction. There is no approved-but-inactive or active-but-pending state. If enforcement is missing, approval refuses so the system must build and verify the control before carrying Joe's already-recorded approval. Dell retains teaching, review and optional participation capability but cannot replace Joe as the required system authority. Advisory guidance is not mislabeled as an unbreakable rule.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string", description: "Full UUID or the short id printed by standing-context." },

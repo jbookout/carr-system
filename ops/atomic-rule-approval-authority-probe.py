@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 import psycopg
+from psycopg import sql
 
 
 def one(cur: psycopg.Cursor[Any], query: str, params: tuple[object, ...] = ()) -> Any:
@@ -27,6 +28,14 @@ def main() -> int:
         with conn.cursor() as cur:
             if one(cur, "select rolsuper from pg_roles where rolname=current_user") is not True:
                 raise RuntimeError("disposable fixture setup requires the local cluster superuser")
+            # These principals are external provisioning in retained databases
+            # and migrations deliberately do not mint them.  This probe is the
+            # narrow exception: it is superuser-only, explicitly disposable,
+            # and the enclosing transaction rolls the fixture roles back.
+            for role in ("carr_authority_joe", "carr_authority_dell"):
+                if one(cur, "select count(*) from pg_roles where rolname=%s", (role,)) == 0:
+                    cur.execute(sql.SQL("create role {} nologin").format(sql.Identifier(role)))
+                cur.execute(sql.SQL("grant carr_authority to {}").format(sql.Identifier(role)))
             actor = one(cur, "select id from actor where slug='joe' and active")
             missing_rule = one(cur, """insert into rule
                 (statement,human_quote,taught_by,status)
@@ -40,12 +49,32 @@ def main() -> int:
                 (statement,human_quote,taught_by,status)
                 values (%s,'fixture',%s,'proposed') returning id""",
                 (f"metered execution fixture {uuid.uuid4()}", actor))
+            dell_rule = one(cur, """insert into rule
+                (statement,human_quote,taught_by,status)
+                values (%s,'fixture',%s,'proposed') returning id""",
+                (f"Dell nonblocking authority fixture {uuid.uuid4()}", actor))
             cur.execute("""insert into ops.rule_control_binding
                 (rule_id,control_key,statement_hash,binding_contract)
                 select id,'platform_metering_pre_dispatch',
                        encode(digest(statement,'sha256'),'hex'),
                        '{"fixture":"atomic-rule-approval-authority-probe"}'::jsonb
-                  from rule where id=%s""", (cost_rule,))
+                  from rule where id=any(%s)""", ([cost_rule, dell_rule],))
+            cur.execute("set session authorization carr_authority_dell")
+            cur.execute("savepoint dell_authority_refusal")
+            try:
+                cur.execute("select ops.approve_rule(%s,%s,%s,%s,%s)",
+                            (dell_rule, "machine_enforceable",
+                             ["platform_metering_pre_dispatch"],
+                             f"dell-{uuid.uuid4()}", "Dell participation is nonblocking"))
+            except psycopg.Error as exc:
+                if "system rule approval requires Joe authority" not in str(exc):
+                    raise
+                cur.execute("rollback to savepoint dell_authority_refusal")
+            else:
+                raise RuntimeError("Dell authority unexpectedly replaced Joe approval")
+            if one(cur, "select status from rule where id=%s", (dell_rule,)) != "proposed":
+                raise RuntimeError("Dell refusal changed the proposed rule")
+            cur.execute("reset session authorization")
             cur.execute("set session authorization carr_authority_joe")
             identity = one(cur, "select session_user||'/'||current_user")
             if identity != "carr_authority_joe/carr_authority_joe":
@@ -102,7 +131,7 @@ def main() -> int:
                 raise RuntimeError("approved rule lacks its exact installed control")
             cur.execute("reset session authorization")
         conn.rollback()
-    print("PASS: approval is atomic with enforcement; missing and direct paths refuse")
+    print("PASS: Joe approval is atomic with enforcement; Dell, missing, and direct paths refuse")
     return 0
 
 
