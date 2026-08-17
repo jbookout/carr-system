@@ -368,8 +368,16 @@ def main():
     for item in reviewed_registry.get("items", []):
         if not item.get("is_primary"):
             actual_split_types.setdefault(item["source_id"], []).append(item["guidance_type"])
+    # These counts follow the ACTIVE rule set and have to move with it. A rule
+    # absent from audits/guidance-migration-manifest.v1.tsv compiles as a
+    # constraint, so activating one changes exactly one number here.
+    # constraint 74 -> 75 on 2026-08-16, when rule 937252fb was activated: a
+    # capability is not reported working until the first action a partner would
+    # take has been performed against the real target. It is a constraint by
+    # construction — it binds at a named moment and prohibits a claim — so it
+    # needs no manifest row of its own, only this total following the store.
     reviewed_counts = {
-        "constraint": 74, "procedure": 76, "doctrine": 14, "rubric": 37,
+        "constraint": 75, "procedure": 76, "doctrine": 14, "rubric": 37,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -424,7 +432,10 @@ def main():
         and activation_manifest["constitution_source_rule_ids"] == sorted(
             source_rule_ids[item["source_id"]]
             for item in reviewed_registry["items"] if item["guidance_id"] in constitution)
-        and len(activation_manifest["entries"]) == 216
+        # 216 -> 217 on 2026-08-16 with rule 937252fb. One entry per compiled
+        # guidance item, so this total follows the same activation the counts
+        # above follow.
+        and len(activation_manifest["entries"]) == 217
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)

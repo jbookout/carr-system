@@ -1922,6 +1922,13 @@
       "binding_moment": "before an outgoing assistant reply justifies denying a model, provider, or agent access to CARR material because it is confidential, private, or sensitive",
       "control": "chat_lint",
       "exceptions": "explicit corrections that confidentiality is not the boundary, historical or quoted rule text, and real credential/autonomous-execution boundary explanations"
+    },
+    "937252fb": {
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "before reporting a capability as working, live, deployed, or done",
+      "control": "completion_evidence",
+      "exceptions": "the first real action is a human gate the session cannot perform — a release approval, a browser login, a credential — and the claim says so in the same message"
     }
   },
   "active_rule_ids": {
@@ -2094,7 +2101,8 @@
       "5cd8d0f6",
       "1c42d80c",
       "c8ebeb5b",
-      "d7f74c93"
+      "d7f74c93",
+      "937252fb"
     ],
     "joe": [
       "6330bec8",
@@ -2211,7 +2219,8 @@
       "4402973a",
       "1d50a3bb",
       "d7f74c93",
-      "dcf98880"
+      "dcf98880",
+      "937252fb"
     ],
     "session_task_rail": [
       "25fcddee",
