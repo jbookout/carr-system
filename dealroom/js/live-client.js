@@ -2,8 +2,8 @@
  * Live client: same interface as fixture, against the deployed Worker.
  * Verbs travel as MCP JSON-RPC tools/call over the cookie-authenticated /mcp
  * mount; the event cursor is plain GET /pipeline/changes. Both are same-origin
- * on dealroom.doctorcre.com, so no baseUrl is needed in production; one may be
- * passed for wrangler-dev testing.
+ * on each reviewed Deal Room host, so no baseUrl is needed in production or
+ * staging; one may be passed directly for isolated client tests.
  */
 import { uuidv4 } from './uuid.js';
 

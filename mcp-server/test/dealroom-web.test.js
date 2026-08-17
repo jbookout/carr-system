@@ -2,9 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { createDealroomHandler } from "../src/dealroom-web.js";
+import { createDealroomHandler, isDealroomRequest } from "../src/dealroom-web.js";
 
 const SHELL_ROOT = fileURLToPath(new URL("../../dealroom/public-shell/", import.meta.url));
+const WRANGLER_PATH = fileURLToPath(new URL("../wrangler.toml", import.meta.url));
+const INDEX_PATH = fileURLToPath(new URL("../src/index.js", import.meta.url));
+const PRODUCTION_HOST = "dealroom.doctorcre.com";
+const STAGING_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev";
 
 class MemoryKv {
   constructor() { this.values = new Map(); }
@@ -29,8 +33,9 @@ class ShellAssets {
   }
 }
 
-function env() {
+function env(host = PRODUCTION_HOST) {
   return {
+    DEALROOM_HOST: host,
     GOOGLE_CLIENT_ID: "google-client.test",
     GOOGLE_CLIENT_SECRET: "not-a-real-secret",
     OAUTH_KV: new MemoryKv(),
@@ -50,15 +55,18 @@ function namedCookie(response, name) {
   return header.split(";", 1)[0];
 }
 
-async function login(handler, environment, email) {
-  const start = await handler.fetch(new Request("https://dealroom.doctorcre.com/auth/login?return_to=%2F"), environment, {});
+async function login(handler, environment, email, { host = environment.DEALROOM_HOST, returnTo = "/" } = {}) {
+  const start = await handler.fetch(new Request(
+    `https://${host}/auth/login?return_to=${encodeURIComponent(returnTo)}`,
+  ), environment, {});
   assert.equal(start.status, 302);
   const google = new URL(start.headers.get("location"));
   assert.equal(google.hostname, "accounts.google.com");
+  assert.equal(google.searchParams.get("redirect_uri"), `https://${host}/auth/callback`);
   const state = google.searchParams.get("state");
   const pendingCookie = namedCookie(start, "__Host-dealroom_oauth");
   const callback = await handler.fetch(new Request(
-    `https://dealroom.doctorcre.com/auth/callback?state=${state}&code=stub-code`,
+    `https://${host}/auth/callback?state=${state}&code=stub-code`,
     { headers: { cookie: pendingCookie, "x-test-email": email } },
   ), environment, {});
   return callback;
@@ -79,6 +87,113 @@ function identityOverrides(email, clock) {
 function identityHandler(email, clock) {
   return createDealroomHandler(identityOverrides(email, clock));
 }
+
+test("Deal Room host is explicit per environment and request matching fails closed", async () => {
+  const wrangler = await readFile(WRANGLER_PATH, "utf8");
+  assert.match(wrangler, /\[vars\]\nCARR_ENV = "production"\nDEALROOM_HOST = "dealroom\.doctorcre\.com"/);
+  assert.match(wrangler,
+    /\[env\.staging\.vars\]\nCARR_ENV = "staging"\nDEALROOM_HOST = "carr-mcp-staging\.joe-bookout-carr-us\.workers\.dev"/);
+
+  assert.equal(isDealroomRequest(new Request(`https://${PRODUCTION_HOST}/`), { DEALROOM_HOST: PRODUCTION_HOST }), true);
+  assert.equal(isDealroomRequest(new Request(`https://${STAGING_HOST}/`), { DEALROOM_HOST: STAGING_HOST }), true);
+  assert.equal(isDealroomRequest(new Request(`https://${STAGING_HOST}/`), { DEALROOM_HOST: PRODUCTION_HOST }), false);
+  assert.equal(isDealroomRequest(new Request(`https://${PRODUCTION_HOST}/`), {}), false);
+  assert.equal(isDealroomRequest(new Request(`https://${PRODUCTION_HOST}/`), { DEALROOM_HOST: "https://bad.example" }), false);
+
+  const handler = identityHandler("joe.bookout.carr.us@gmail.com");
+  const mismatch = await handler.fetch(new Request(`https://${STAGING_HOST}/auth/login`), env(PRODUCTION_HOST), {});
+  assert.equal(mismatch.status, 404);
+  const missing = await handler.fetch(new Request(`https://${PRODUCTION_HOST}/auth/login`), {
+    ...env(), DEALROOM_HOST: undefined,
+  }, {});
+  assert.equal(missing.status, 404);
+});
+
+test("shared staging origin routes only exact Deal Room surfaces", () => {
+  const environment = { DEALROOM_HOST: STAGING_HOST };
+  const request = (path, headers = {}) => new Request(`https://${STAGING_HOST}${path}`, { headers });
+
+  for (const path of ["/", "/index.html", "/system-work.html", "/auth/login", "/auth/callback",
+    "/api/system-work/session", "/css/app.css", "/js/app.js", "/data/board-seed.json",
+    "/manifest.webmanifest", "/sw.js", "/offline.html", "/icons/dealroom.svg"]) {
+    assert.equal(isDealroomRequest(request(path), environment), true, path);
+  }
+  for (const path of ["/release", "/health", "/authorize", "/token", "/register", "/callback",
+    "/.well-known/oauth-authorization-server", "/unknown"]) {
+    assert.equal(isDealroomRequest(request(path), environment), false, path);
+  }
+
+  for (const path of ["/mcp", "/pipeline/changes"]) {
+    assert.equal(isDealroomRequest(request(path), environment), false, `${path} without browser session`);
+    assert.equal(isDealroomRequest(request(path, { authorization: "Bearer provider-token" }), environment), false,
+      `${path} OAuth bearer`);
+    assert.equal(isDealroomRequest(request(path, { cookie: "__Host-dealroom_session=browser-session" }), environment), true,
+      `${path} browser cookie`);
+    assert.equal(isDealroomRequest(request(path, {
+      cookie: "__Host-dealroom_session=browser-session", authorization: "Bearer provider-token",
+    }), environment), false, `${path} bearer wins over browser cookie`);
+  }
+});
+
+test("machine-token MCP dispatch precedes browser routing on the shared host", async () => {
+  const index = await readFile(INDEX_PATH, "utf8");
+  const machineDoors = index.indexOf('if (url.pathname === "/mcp")');
+  const browserDoor = index.indexOf("if (isDealroomRequest(request, env))");
+  assert.ok(machineDoors >= 0 && browserDoor > machineDoors,
+    "probe/review/Hermes/agent/local MCP doors must run before the Deal Room browser door");
+});
+
+test("staging host controls OAuth callback, safe return, reauth, signout, and CSRF origin", async () => {
+  const environment = env(STAGING_HOST);
+  environment.DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true";
+  const handler = identityHandler("joe.bookout.carr.us@gmail.com");
+
+  const unauthenticatedReauth = await handler.fetch(new Request(
+    `https://${STAGING_HOST}/auth/reauth?return_to=%2Fsystem-work`,
+  ), environment, {});
+  assert.equal(unauthenticatedReauth.status, 302);
+  assert.match(unauthenticatedReauth.headers.get("location"),
+    new RegExp(`^https://${STAGING_HOST}/auth/login\\?`));
+
+  const callback = await login(handler, environment, "joe.bookout.carr.us@gmail.com", {
+    host: STAGING_HOST,
+    returnTo: `https://${PRODUCTION_HOST}/not-on-staging`,
+  });
+  assert.equal(callback.status, 302);
+  assert.equal(callback.headers.get("location"), `https://${STAGING_HOST}/`);
+  const session = namedCookie(callback, "__Host-dealroom_session");
+
+  const reauth = await handler.fetch(new Request(
+    `https://${STAGING_HOST}/auth/reauth?return_to=%2Fsystem-work`, { headers: { cookie: session } },
+  ), environment, {});
+  assert.equal(reauth.status, 302);
+  assert.equal(new URL(reauth.headers.get("location")).searchParams.get("redirect_uri"),
+    `https://${STAGING_HOST}/auth/callback`);
+
+  const bootstrap = await (await handler.fetch(new Request(
+    `https://${STAGING_HOST}/api/system-work/session`, { headers: { cookie: session } },
+  ), environment, {})).json();
+  const target = { action: "accept-ready-plan", human_ref: "WR-41", base_version: 3,
+    idempotency_key: "30000000-0000-0000-0000-000000000041", plan_hash: `sha256:${"a".repeat(64)}` };
+  const headers = { cookie: session, "content-type": "application/json", "x-carr-csrf": bootstrap.csrf_token,
+    "sec-fetch-site": "same-origin" };
+  let response = await handler.fetch(new Request(`https://${STAGING_HOST}/api/system-work/challenge`, {
+    method: "POST", headers: { ...headers, origin: `https://${PRODUCTION_HOST}` }, body: JSON.stringify(target),
+  }), environment, {});
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).reason, "origin_mismatch");
+  response = await handler.fetch(new Request(`https://${STAGING_HOST}/api/system-work/challenge`, {
+    method: "POST", headers: { ...headers, origin: `https://${STAGING_HOST}` }, body: JSON.stringify(target),
+  }), environment, {});
+  assert.equal(response.status, 200);
+
+  const signedOut = await handler.fetch(new Request(`https://${STAGING_HOST}/auth/signout`, {
+    method: "POST", headers: { cookie: session, origin: `https://${STAGING_HOST}`,
+      "sec-fetch-site": "same-origin", "x-carr-csrf": bootstrap.csrf_token },
+  }), environment, {});
+  assert.equal(signedOut.status, 302);
+  assert.equal(signedOut.headers.get("location"), `https://${STAGING_HOST}/`);
+});
 
 test("Deal Room gate refuses a verified non-partner without returning deal data", async () => {
   const environment = env();

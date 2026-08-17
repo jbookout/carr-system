@@ -1,4 +1,4 @@
-// Browser entrypoint for dealroom.doctorcre.com.
+// Browser entrypoint for the configured production or staging Deal Room host.
 //
 // Google proves identity; identity.js reduces it to one of the two partner
 // actors; an opaque, server-side session lets the installed PWA reuse that
@@ -15,7 +15,6 @@ import { actorFromProps, propsForSlug, slugForEmail } from "./identity.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
 
-export const DEALROOM_HOST = "dealroom.doctorcre.com";
 export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
 
 const SESSION_COOKIE = "__Host-dealroom_session";
@@ -42,6 +41,12 @@ const PUBLIC_SHELL = new Map([
   ["/sw.js", "/public-shell/sw.js"],
   ["/offline.html", "/public-shell/offline.html"],
 ]);
+const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const DEALROOM_EXACT_PATHS = new Set([
+  "/", "/index.html", "/system-work.html",
+  "/manifest.webmanifest", "/sw.js", "/offline.html",
+]);
+const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/css/", "/js/", "/data/", "/icons/"];
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -81,14 +86,31 @@ async function sha256(value) {
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function callbackUri() {
-  return `https://${DEALROOM_HOST}/auth/callback`;
+// The host is a reviewed Worker environment setting, never a request Host
+// header.  This keeps OAuth callbacks, browser redirects, and CSRF checks on
+// the exact deployment that owns the session.  A missing or malformed setting
+// deliberately closes the Deal Room route rather than falling back to prod.
+function dealroomOrigin(env) {
+  const host = env?.DEALROOM_HOST;
+  if (typeof host !== "string" || !DEALROOM_HOST_PATTERN.test(host)) return null;
+  return `https://${host}`;
 }
 
-function safeReturnTo(value) {
+function requestMatchesDealroomOrigin(request, origin) {
+  try {
+    return Boolean(origin) && new URL(request.url).origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+function callbackUri(origin) {
+  return `${origin}/auth/callback`;
+}
+
+function safeReturnTo(value, origin) {
   if (!value) return "/";
   try {
-    const origin = `https://${DEALROOM_HOST}`;
     const parsed = new URL(value, origin);
     if (parsed.origin !== origin) return "/";
     return parsed.pathname + parsed.search + parsed.hash;
@@ -167,20 +189,24 @@ async function startLogin(request, env, pending = {}) {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.OAUTH_KV) {
     return new Response("Sign-in is not configured.", { status: 503, headers: { "cache-control": "no-store" } });
   }
+  const origin = dealroomOrigin(env);
+  if (!origin) return json({ error: "not_found" }, 404);
   const url = new URL(request.url);
   const state = randomString(24);
   const verifier = randomString(48);
   await env.OAUTH_KV.put(PENDING_PREFIX + state, JSON.stringify({
     verifier,
-    returnTo: safeReturnTo(url.searchParams.get("return_to")),
+    returnTo: safeReturnTo(url.searchParams.get("return_to"), origin),
     ...pending,
   }), { expirationTtl: PENDING_TTL });
   const google = await googleAuthorizationUrl({ clientId: env.GOOGLE_CLIENT_ID,
-    redirectUri: callbackUri(), state, verifier });
+    redirectUri: callbackUri(origin), state, verifier });
   return redirect(google.toString(), [pendingCookie(state)]);
 }
 
 async function completeLogin(request, env, dependencies) {
+  const origin = dealroomOrigin(env);
+  if (!origin) return json({ error: "not_found" }, 404);
   const url = new URL(request.url);
   const state = url.searchParams.get("state");
   const code = url.searchParams.get("code");
@@ -208,7 +234,7 @@ async function completeLogin(request, env, dependencies) {
   try {
     tokenResponse = await dependencies.exchangeGoogleCodeFn({ code,
       clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET,
-      redirectUri: callbackUri(), verifier: pending.verifier });
+      redirectUri: callbackUri(origin), verifier: pending.verifier });
     claims = await dependencies.verifyGoogleIdTokenFn(tokenResponse.id_token, env.GOOGLE_CLIENT_ID, env);
   } catch {
     return finish(new Response("Google identity could not be verified.",
@@ -234,7 +260,7 @@ async function completeLogin(request, env, dependencies) {
     await env.OAUTH_KV.put(current.key, JSON.stringify(current.session), {
       expirationTtl: Math.max(1, Math.floor((current.session.expiresAt - now) / 1000)),
     });
-    return finish(redirect(`https://${DEALROOM_HOST}${safeReturnTo(pending.returnTo)}`));
+    return finish(redirect(`${origin}${safeReturnTo(pending.returnTo, origin)}`));
   }
 
   await env.OAUTH_KV.put(sessionKey, JSON.stringify({
@@ -245,7 +271,7 @@ async function completeLogin(request, env, dependencies) {
     reauthAt: now,
   }),
     { expirationTtl: SESSION_IDLE_TTL });
-  return finish(redirect(`https://${DEALROOM_HOST}${safeReturnTo(pending.returnTo)}`,
+  return finish(redirect(`${origin}${safeReturnTo(pending.returnTo, origin)}`,
     [sessionCookie(opaque, SESSION_IDLE_TTL)]));
 }
 
@@ -293,14 +319,14 @@ function attachRefresh(response, cookie) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-async function signOut(request, env) {
+async function signOut(request, env, origin) {
   const opaque = cookieValue(request, SESSION_COOKIE);
   if (opaque && env.OAUTH_KV) await env.OAUTH_KV.delete(SESSION_PREFIX + await sha256(opaque));
-  return redirect(`https://${DEALROOM_HOST}/`, [clearCookie(SESSION_COOKIE), clearCookie(PENDING_COOKIE)]);
+  return redirect(`${origin}/`, [clearCookie(SESSION_COOKIE), clearCookie(PENDING_COOKIE)]);
 }
 
-function sameOrigin(request) {
-  return request.headers.get("origin") === `https://${DEALROOM_HOST}`;
+function sameOrigin(request, env) {
+  return request.headers.get("origin") === dealroomOrigin(env);
 }
 
 function equalStrings(left, right) {
@@ -319,10 +345,10 @@ async function systemWorkBody(request) {
   catch { return { error: json({ error: "invalid_json" }, 400) }; }
 }
 
-async function guardSystemWorkPost(request, session, { readBody = false } = {}) {
+async function guardSystemWorkPost(request, env, session, { readBody = false } = {}) {
   const contentType = request.headers.get("content-type") || "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) return { error: json({ error: "unsupported_media_type" }, 415) };
-  if (!sameOrigin(request)) return { error: json({ error: "forbidden", reason: "origin_mismatch" }, 403) };
+  if (!sameOrigin(request, env)) return { error: json({ error: "forbidden", reason: "origin_mismatch" }, 403) };
   if (request.headers.get("sec-fetch-site") !== "same-origin") return { error: json({ error: "forbidden", reason: "fetch_metadata_mismatch" }, 403) };
   if (!equalStrings(request.headers.get("x-carr-csrf"), session.csrfToken)) return { error: json({ error: "forbidden", reason: "csrf_mismatch" }, 403) };
   const length = Number(request.headers.get("content-length"));
@@ -360,7 +386,7 @@ export async function actionDigestFor(action, args) {
  */
 export async function authorizeProgram6Action({ request, env, actor, session, action, args,
   now = Date.now(), redeemChallenge = redeemProgram6BrowserChallenge }) {
-  const guard = await guardSystemWorkPost(request, session);
+  const guard = await guardSystemWorkPost(request, env, session);
   if (guard.error) return guard.error;
   if (!APPROVAL_ACTIONS.has(action)) return null;
   if (!session.reauthAt || now - session.reauthAt > REAUTH_TTL * 1000) {
@@ -396,7 +422,7 @@ async function systemWorkSession(session, dependencies) {
 }
 
 async function createActionChallenge(request, env, session, dependencies) {
-  const guard = await guardSystemWorkPost(request, session, { readBody: true });
+  const guard = await guardSystemWorkPost(request, env, session, { readBody: true });
   if (guard.error) return guard.error;
   const target = approvalTarget(guard.value?.action, guard.value);
   if (!target || Object.keys(guard.value).sort().join(",") !== Object.keys(target).sort().join(",")) {
@@ -417,9 +443,9 @@ async function createActionChallenge(request, env, session, dependencies) {
   return json({ challenge: token, expires_at: new Date(expiresAt).toISOString() });
 }
 
-async function prepareSystemWorkControllerRequest(request, session) {
+async function prepareSystemWorkControllerRequest(request, env, session) {
   if (request.method !== "POST") return { request };
-  const guard = await guardSystemWorkPost(request, session, { readBody: true });
+  const guard = await guardSystemWorkPost(request, env, session, { readBody: true });
   if (guard.error) return { error: guard.error };
   const headers = new Headers(request.headers);
   headers.delete("content-length");
@@ -428,8 +454,10 @@ async function prepareSystemWorkControllerRequest(request, session) {
 }
 
 async function startReauth(request, env, dependencies) {
+  const origin = dealroomOrigin(env);
+  if (!origin) return json({ error: "not_found" }, 404);
   const session = await sessionFor(request, env, dependencies);
-  if (!session) return redirect(`https://${DEALROOM_HOST}/auth/login?return_to=${encodeURIComponent(safeReturnTo(new URL(request.url).searchParams.get("return_to")))}`);
+  if (!session) return redirect(`${origin}/auth/login?return_to=${encodeURIComponent(safeReturnTo(new URL(request.url).searchParams.get("return_to"), origin))}`);
   const response = await startLogin(request, env, { purpose: "reauth", sessionKey: session.key });
   return attachRefresh(response, session.refreshCookie);
 }
@@ -471,6 +499,8 @@ export function createDealroomHandler(overrides = {}) {
 }
 
 async function handleRequest(request, env, ctx, dependencies) {
+      const origin = dealroomOrigin(env);
+      if (!origin || !requestMatchesDealroomOrigin(request, origin)) return json({ error: "not_found" }, 404);
       const url = new URL(request.url);
       const publicResponse = await publicShellAsset(env, request, url.pathname);
       if (publicResponse) return publicResponse;
@@ -482,11 +512,11 @@ async function handleRequest(request, env, ctx, dependencies) {
         if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
         const signOutSession = await sessionFor(request, env, dependencies);
         if (!signOutSession) return json({ error: "unauthorized", state: "sign_in_required" }, 401);
-        if (!sameOrigin(request) || request.headers.get("sec-fetch-site") !== "same-origin" ||
+        if (!sameOrigin(request, env) || request.headers.get("sec-fetch-site") !== "same-origin" ||
             !equalStrings(request.headers.get("x-carr-csrf"), signOutSession.csrfToken)) {
           return json({ error: "forbidden", reason: "csrf_mismatch" }, 403);
         }
-        return attachRefresh(await signOut(request, env), signOutSession.refreshCookie);
+        return attachRefresh(await signOut(request, env, origin), signOutSession.refreshCookie);
       }
 
       const session = await sessionFor(request, env, dependencies);
@@ -494,7 +524,7 @@ async function handleRequest(request, env, ctx, dependencies) {
         if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" || url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
         }
-        return redirect(`https://${DEALROOM_HOST}/auth/login?return_to=${encodeURIComponent(url.pathname + url.search)}`);
+        return redirect(`${origin}/auth/login?return_to=${encodeURIComponent(url.pathname + url.search)}`);
       }
 
       let response;
@@ -506,14 +536,14 @@ async function handleRequest(request, env, ctx, dependencies) {
           // The injected controller receives a server-derived actor and opaque
           // session metadata.  It never receives a caller-selected verb or
           // tenant and must use authorizeProgram6Action for its typed posts.
-          const prepared = await prepareSystemWorkControllerRequest(request, session);
+          const prepared = await prepareSystemWorkControllerRequest(request, env, session);
           response = prepared.error || await dependencies.program6Handler(prepared.request, env, ctx, session.actor, session);
         } else response = json({ error: "not_found" }, 404);
       } else if (url.pathname === "/mcp") {
         // SameSite limits cross-site cookies, but sibling subdomains are still
         // the same site. Origin equality closes that remaining CSRF door for
         // every verb POST authenticated by the browser cookie.
-        if (request.headers.get("origin") !== `https://${DEALROOM_HOST}`) {
+        if (!sameOrigin(request, env)) {
           return json({ error: "forbidden", reason: "origin_mismatch" }, 403);
         }
         response = await dependencies.mcpHandler(request, env, ctx, session.actor);
@@ -523,6 +553,19 @@ async function handleRequest(request, env, ctx, dependencies) {
       return attachRefresh(response, session.refreshCookie);
 }
 
-export function isDealroomRequest(request) {
-  return new URL(request.url).hostname.toLowerCase() === DEALROOM_HOST;
+export function isDealroomRequest(request, env) {
+  const origin = dealroomOrigin(env);
+  if (!requestMatchesDealroomOrigin(request, origin)) return false;
+  const pathname = new URL(request.url).pathname;
+  if (pathname === SYSTEM_WORK_PREFIX || DEALROOM_EXACT_PATHS.has(pathname) ||
+      DEALROOM_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return true;
+
+  // The staging workers.dev origin also carries the machine/OAuth API. Only an
+  // opaque Deal Room session cookie selects the browser adapter for these two
+  // shared paths; any Authorization header remains owned by the machine doors
+  // or OAuthProvider, even if a browser cookie is present too.
+  if (pathname === "/mcp" || pathname === "/pipeline/changes") {
+    return !request.headers.get("authorization") && Boolean(cookieValue(request, SESSION_COOKIE));
+  }
+  return false;
 }

@@ -562,15 +562,17 @@ const dealroomHandler = createDealroomHandler({
     program6RoutineController.fetch(request, env, ctx, actor, session),
 });
 
-// Everything not /mcp-with-a-matching-probe-or-review-token flows into the
-// OAuthProvider exactly as it always has — this wrapper adds two narrow
-// short-circuits and changes nothing else about the fetch surface.
+// The staging workers.dev origin carries both the browser and provider API.
+// Narrow machine-token MCP doors therefore run before the Deal Room predicate;
+// browser-cookie MCP/pipeline and exact browser assets run next; everything
+// else (/release, /health, OAuth endpoints and provider bearer calls) remains
+// owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
-  if (new URL(request.url).pathname.startsWith("/capture/")) {
+  const url = new URL(request.url);
+  if (url.pathname.startsWith("/capture/")) {
     return captureHandler(env).fetch(request, env, ctx);
   }
-  if (isDealroomRequest(request)) return dealroomHandler.fetch(request, env, ctx);
-  if (new URL(request.url).pathname === "/mcp") {
+  if (url.pathname === "/mcp") {
     const probeActor = probeActorFor(request, env);
     if (probeActor) return dispatch(request, env, ctx, probeActor);
     const reviewActor = reviewActorFor(request, env);
@@ -582,6 +584,7 @@ async function routeRequest(request, env, ctx) {
     const localActor = localActorFor(request, env);
     if (localActor) return dispatch(request, env, ctx, localActor);
   }
+  if (isDealroomRequest(request, env)) return dealroomHandler.fetch(request, env, ctx);
   return oauthProvider.fetch(request, env, ctx);
 }
 

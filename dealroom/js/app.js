@@ -1,4 +1,5 @@
 import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
+import { resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
 import { createPostCallClient } from './post-call-client.js';
 
@@ -971,12 +972,8 @@ async function boot() {
     $('#colorAssistButton').setAttribute('aria-pressed', 'true');
     $('#colorAssistButton').setAttribute('aria-label', 'Turn off color-blind-friendly view');
   }
-  const params = new URLSearchParams(location.search);
-  const requested = params.get('mode');
-  const mode = requested === 'fixture' ? 'fixture' : requested === 'live' ? 'live'
-    : location.hostname === 'dealroom.doctorcre.com' ? 'live' : 'fixture';
-  state.client = await createClient(mode, { baseUrl:params.get('api') || undefined,
-    selfActor:params.get('actor') || undefined });
+  const bootConfig = resolveDealroomBoot(location);
+  state.client = await createClient(bootConfig.mode, bootConfig.options);
   state.postCallClient = createPostCallClient({ loopbackUrl:CALL_MODE_URL,
     postHeaders:CALL_MODE_HEADER });
   wireEvents();
