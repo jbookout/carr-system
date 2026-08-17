@@ -114,6 +114,22 @@ def _rows_by_name(rows: list[tuple[Any, ...]]) -> dict[str, bool]:
     return {str(name): bool(login) for name, login in rows if isinstance(name, str)}
 
 
+def _optional_probe(cursor: Cursor, operation: Callable[[], Any]) -> tuple[bool, Any]:
+    """Run one bounded read behind a savepoint so its failure stays local."""
+    cursor.execute("savepoint runtime_evidence_probe")
+    try:
+        value = operation()
+    except Exception:
+        # PostgreSQL aborts the transaction after a failed statement.  Roll
+        # back only this optional read so a missing view/grant cannot erase an
+        # already verified jobs connection identity.
+        cursor.execute("rollback to savepoint runtime_evidence_probe")
+        cursor.execute("release savepoint runtime_evidence_probe")
+        return False, None
+    cursor.execute("release savepoint runtime_evidence_probe")
+    return True, value
+
+
 def _database_evidence(connect: Connect, jobs_dsn: str, config: dict[str, Any]) -> dict[str, Any]:
     """Collect bounded aggregate evidence under the jobs login only."""
     expected_jobs = config["routine_jobs"]["login_role"]
@@ -129,20 +145,45 @@ def _database_evidence(connect: Connect, jobs_dsn: str, config: dict[str, Any]) 
         cursor.execute("begin transaction read only")
         cursor.execute("select session_user, current_user")
         identity = cursor.fetchone() or (None, None)
-        cursor.execute("select rolname, rolcanlogin from pg_roles where rolname = any(%s) order by rolname", (expected_roles,))
-        roles = _rows_by_name(cursor.fetchall())
-        cursor.execute("select has_table_privilege(current_user, %s, 'select')", (config["device_evidence"]["principal_registry"]["table"],))
-        registry_readable = bool((cursor.fetchone() or (False,))[0])
-        principal: dict[str, Any] = {"observable_by_jobs": registry_readable, "active_count": None}
-        if registry_readable:
-            cursor.execute("select count(*) from ops.device_evidence_principal where active")
-            principal["active_count"] = int((cursor.fetchone() or (0,))[0])
+
+        def read_roles() -> dict[str, bool]:
+            cursor.execute("select rolname, rolcanlogin from pg_roles where rolname = any(%s) order by rolname", (expected_roles,))
+            return _rows_by_name(cursor.fetchall())
+
+        roles_ok, roles_value = _optional_probe(cursor, read_roles)
+        roles = roles_value if roles_ok else {}
+
+        def read_device_principals() -> dict[str, Any]:
+            cursor.execute("select has_table_privilege(current_user, %s, 'select')", (config["device_evidence"]["principal_registry"]["table"],))
+            readable = bool((cursor.fetchone() or (False,))[0])
+            value: dict[str, Any] = {"observable_by_jobs": readable, "active_count": None}
+            if readable:
+                cursor.execute("select count(*) from ops.device_evidence_principal where active")
+                value["active_count"] = int((cursor.fetchone() or (0,))[0])
+            return value
+
+        principal_ok, principal_value = _optional_probe(cursor, read_device_principals)
+        principal = principal_value if principal_ok else {"observable_by_jobs": False, "active_count": None}
+
         receipt_counts: dict[str, int | None] = {}
+        receipt_probes: dict[str, str] = {}
         for table in config["device_evidence"]["receipt_tables"]:
-            cursor.execute(f"select count(*) from {table}")
-            receipt_counts[table.rsplit(".", 1)[-1]] = int((cursor.fetchone() or (0,))[0])
-        cursor.execute("select route_key, enabled from ops.provider_route where route_key in ('primary','secondary') order by route_key")
-        routes = {str(key): bool(enabled) for key, enabled in cursor.fetchall()}
+            short_name = table.rsplit(".", 1)[-1]
+
+            def read_receipt_count(table_name: str = table) -> int:
+                cursor.execute(f"select count(*) from {table_name}")
+                return int((cursor.fetchone() or (0,))[0])
+
+            receipt_ok, receipt_value = _optional_probe(cursor, read_receipt_count)
+            receipt_counts[short_name] = receipt_value if receipt_ok else None
+            receipt_probes[short_name] = "verified" if receipt_ok else "unavailable_or_not_authorized"
+
+        def read_provider_routes() -> dict[str, bool]:
+            cursor.execute("select route_key, enabled from ops.provider_route where route_key in ('primary','secondary') order by route_key")
+            return {str(key): bool(enabled) for key, enabled in cursor.fetchall()}
+
+        routes_ok, routes_value = _optional_probe(cursor, read_provider_routes)
+        routes = routes_value if routes_ok else {}
         return {
             "reachable": True,
             "session_role": str(identity[0]) if identity[0] is not None else None,
@@ -152,6 +193,12 @@ def _database_evidence(connect: Connect, jobs_dsn: str, config: dict[str, Any]) 
             "device_principals": principal,
             "immutable_receipt_counts": receipt_counts,
             "provider_routes": {route: routes.get(route, False) for route in ("primary", "secondary")},
+            "evidence_probes": {
+                "login_roles": "verified" if roles_ok else "unavailable_or_not_authorized",
+                "device_principals": "verified" if principal_ok else "unavailable_or_not_authorized",
+                "receipt_counts": receipt_probes,
+                "provider_routes": "verified" if routes_ok else "unavailable_or_not_authorized",
+            },
         }
     finally:
         connection.close()
