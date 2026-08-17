@@ -75,6 +75,9 @@ class FakeConnection:
 def main() -> int:
     print("control-plane-runtime-provisioning-preflight-selftest — opt-in and secret-safe\n")
     module = load()
+    check("default backup public key is the documented canonical repository key",
+          module.DEFAULT_AGE_PUBLIC_KEY == REPO / "backups-public-key.txt"
+          and module.file_state(module.DEFAULT_AGE_PUBLIC_KEY, required_mode=0o644)["secure"] is True)
     no_opt_in = subprocess.run([sys.executable, str(SCRIPT)], text=True, capture_output=True, check=False)
     check("default invocation does not read runtime state", no_opt_in.returncode == 2 and "runtime_opt_in_required" in no_opt_in.stdout)
 

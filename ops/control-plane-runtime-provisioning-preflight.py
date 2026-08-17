@@ -27,7 +27,7 @@ DEFAULT_CONFIG = REPO / "ops" / "config" / "control-plane-provisioning.v1.json"
 DEFAULT_DB_ENV = Path.home() / ".config" / "carr" / "db.env"
 DEFAULT_PROVIDER_ENV = Path.home() / ".config" / "carr" / "control-plane.env"
 DEFAULT_AGE_KEY = Path.home() / ".config" / "carr" / "age-key.txt"
-DEFAULT_AGE_PUBLIC_KEY = REPO / "ops" / "keys" / "backup.age.pub"
+DEFAULT_AGE_PUBLIC_KEY = REPO / "backups-public-key.txt"
 
 
 class Cursor(Protocol):
