@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 try:
@@ -114,18 +115,47 @@ CLEANUP_STATE_PHASES = (
 )
 
 
-def exact_provider_role(payload: Any) -> dict[str, Any]:
-    """Pin neonctl 2.38.5: role list JSON is a bare array of role objects."""
+def _provider_timestamp(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)", value
+    ):
+        raise CleanupRefusal(f"provider app_writer {field} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CleanupRefusal(f"provider app_writer {field} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CleanupRefusal(f"provider app_writer {field} must be timezone-aware")
+    return parsed
+
+
+def exact_provider_role(payload: Any, scope: ProviderScopeLike) -> dict[str, Any]:
+    """Pin neonctl 2.38.5's exact six-field bare role-list contract."""
     if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
         raise CleanupRefusal("provider role list must be its official bare array")
     matches = [row for row in payload if row.get("name") == APP_ROLE]
     if len(matches) != 1:
         raise CleanupRefusal("provider must contain exactly one app_writer")
     row = matches[0]
-    if set(row) != {"name", "created_at"} or not isinstance(row.get("created_at"), str):
+    expected_fields = {
+        "authentication_method", "branch_id", "created_at",
+        "name", "protected", "updated_at",
+    }
+    if set(row) != expected_fields:
         raise CleanupRefusal("provider app_writer row differs from the official list contract")
-    if not re.fullmatch(r"\d{4}-\d\d-\d\dT[^\s]+", row["created_at"]):
-        raise CleanupRefusal("provider app_writer created_at is invalid")
+    if not isinstance(row["name"], str) or row["name"] != APP_ROLE:
+        raise CleanupRefusal("provider role name is invalid")
+    if not isinstance(row["branch_id"], str) or row["branch_id"] != scope.branch_id:
+        raise CleanupRefusal("provider app_writer belongs to another branch")
+    if (
+        not isinstance(row["authentication_method"], str)
+        or row["authentication_method"] != "password"
+    ):
+        raise CleanupRefusal("provider app_writer is not password-authenticated")
+    if not isinstance(row["protected"], bool) or row["protected"] is not False:
+        raise CleanupRefusal("provider app_writer is protected or has an invalid protection flag")
+    _provider_timestamp(row["created_at"], "created_at")
+    _provider_timestamp(row["updated_at"], "updated_at")
     return row
 
 
@@ -591,7 +621,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if state is None:
                     if not provider_present:
                         raise CleanupRefusal("provider app_writer is absent without durable cleanup state")
-                    provider_row = exact_provider_role(roles)
+                    provider_row = exact_provider_role(roles, scope)
                     first = collect_provider_managed_fingerprint(cur)
                     validate_provider_managed_fingerprint(first)
                     digest, receipt = cleanup_fingerprint(
@@ -642,7 +672,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(json.dumps({"environment": "staging", "state": "deleted", "role": APP_ROLE}))
                     return 0
 
-                provider_row = exact_provider_role(roles)
+                provider_row = exact_provider_role(roles, scope)
                 first = collect_provider_managed_fingerprint(cur)
                 validate_provider_managed_fingerprint(first)
                 if state is None:
@@ -659,7 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise CleanupRefusal("cleanup target differs from its durable authorized fingerprint")
 
                 def verify_original_target(rows_now: Sequence[dict[str, Any]]) -> None:
-                    row_now = exact_provider_role(rows_now)
+                    row_now = exact_provider_role(rows_now, scope)
                     database_now = collect_provider_managed_fingerprint(cur)
                     validate_provider_managed_fingerprint(database_now)
                     row_digest = hashlib.sha256(
@@ -726,9 +756,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         provision.verify_provider_scope(
                             scope, neonctl=db_tap.NEONCTL, environ=os.environ,
                         )
-                        provider_row_now = exact_provider_role(provider_roles(
-                            scope, neonctl=db_tap.NEONCTL, run=subprocess.run, environ=os.environ,
-                        ))
+                        provider_row_now = exact_provider_role(
+                            provider_roles(
+                                scope, neonctl=db_tap.NEONCTL,
+                                run=subprocess.run, environ=os.environ,
+                            ),
+                            scope,
+                        )
                         second = collect_provider_managed_fingerprint(cur)
                         validate_provider_managed_fingerprint(second)
                         if provider_row_now != provider_row or second != first:

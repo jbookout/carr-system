@@ -38,23 +38,51 @@ def main() -> int:
             raise AssertionError(label)
         print(f"  ok  {label}")
 
-    row = {"name": "app_writer", "created_at": "2026-08-17T00:00:00Z"}
-    check("official neonctl 2.38.5 bare role-list object is the only admitted row shape",
-          cleanup.exact_provider_role([row]) == row)
+    scope = cleanup.provision.ProviderScope(
+        "staging-project", "staging-main", "ep-fixture",
+        "ep-fixture.c-10.us-east-1.aws.neon.tech", 5432, "neondb",
+    )
+    row = {
+        "authentication_method": "password",
+        "branch_id": scope.branch_id,
+        "created_at": "2026-08-17T00:00:00Z",
+        "name": "app_writer",
+        "protected": False,
+        "updated_at": "2026-08-17T00:00:01Z",
+    }
+    check("official neonctl six-field bare role-list object is the only admitted row shape",
+          cleanup.exact_provider_role([row], scope) == row)
+    missing_rows = [{key: value for key, value in row.items() if key != missing} for missing in row]
+    wrong_types = [
+        {**row, "authentication_method": 1},
+        {**row, "branch_id": 1},
+        {**row, "created_at": 1},
+        {**row, "name": 1},
+        {**row, "protected": 0},
+        {**row, "updated_at": 1},
+    ]
     for bad in (
         {"roles": [row]},
-        [{"name": "app_writer"}],
-        [{"name": "app_writer", "created_at": row["created_at"], "id": "invented"}],
-        [{"name": "app_reader", "created_at": row["created_at"]}],
+        *([candidate] for candidate in missing_rows),
+        *([candidate] for candidate in wrong_types),
+        [{**row, "id": "invented"}],
+        [{**row, "name": "app_reader"}],
+        [{**row, "branch_id": "another-branch"}],
+        [{**row, "authentication_method": "scram-sha-256"}],
+        [{**row, "protected": True}],
+        [{**row, "created_at": "not-a-timestamp"}],
+        [{**row, "created_at": "2026-08-17T00:00:00"}],
+        [{**row, "updated_at": "2026-02-30T00:00:00Z"}],
+        [row, row],
         [],
     ):
         try:
-            cleanup.exact_provider_role(bad)
+            cleanup.exact_provider_role(bad, scope)
         except cleanup.CleanupRefusal:
             pass
         else:
             raise AssertionError(f"unsafe provider role shape accepted: {bad!r}")
-    check("wrapped, partial, extended, wrong-name and absent provider rows refuse", True)
+    check("wrong/missing/extra/branch/auth/protected/type/timestamp rows refuse", True)
 
     good = cleanup.ProviderManagedFingerprint(
         can_login=True,
@@ -156,10 +184,6 @@ def main() -> int:
               "--name", "carr-mcp-staging", "--format", "json",
           ])
 
-    scope = cleanup.provision.ProviderScope(
-        "staging-project", "staging-main", "ep-fixture",
-        "ep-fixture.c-10.us-east-1.aws.neon.tech", 5432, "neondb",
-    )
     delete_runner = Runner()
     cleanup.delete_provider_role_once(scope, neonctl="neonctl", run=delete_runner, environ={})
     check("provider deletion names exact project, branch and app_writer once",
@@ -171,11 +195,15 @@ def main() -> int:
     states = {"reader": "absent", "writer": "absent"}
     digest, receipt = cleanup.cleanup_fingerprint(scope, row, good, states)
     digest_again, _ = cleanup.cleanup_fingerprint(scope, row, good, states)
+    changed_provider_digest, _ = cleanup.cleanup_fingerprint(
+        scope, {**row, "updated_at": "2026-08-17T00:00:02Z"}, good, states
+    )
     changed, _ = cleanup.cleanup_fingerprint(
         scope, row, good, {"reader": "pending", "writer": "pending"}
     )
     check("dry-run fingerprint binds full scope/provider/database/both credential states",
-          len(digest) == 64 and digest == digest_again and digest != changed
+          len(digest) == 64 and digest == digest_again
+          and digest != changed and digest != changed_provider_digest
           and receipt["project_id"] == scope.project_id
           and receipt["endpoint_id"] == scope.endpoint_id
           and receipt["endpoint_host"] == scope.endpoint_host
@@ -246,7 +274,7 @@ def main() -> int:
         intent_runner = Runner()
         called = cleanup.issue_provider_delete_from_intent(
             scope, state_path, intent, neonctl="neonctl", run=intent_runner, environ={},
-            verify_present=lambda rows: cleanup.exact_provider_role(rows),
+            verify_present=lambda rows: cleanup.exact_provider_role(rows, scope),
         )
         check("crash after durable delete intent resumes with one fresh-state-authorized call",
               called.phase == "delete_called"
@@ -274,7 +302,7 @@ def main() -> int:
         called = cleanup.issue_provider_delete_from_intent(
             scope, state_path, intent, neonctl="neonctl", run=retry_runner, environ={},
             verify_present=lambda rows: (
-                cleanup.exact_provider_role(rows) == row
+                cleanup.exact_provider_role(rows, scope) == row
                 or (_ for _ in ()).throw(cleanup.CleanupRefusal("changed row"))
             ),
             sleep=lambda _seconds: None,
@@ -287,7 +315,7 @@ def main() -> int:
             cleanup.issue_provider_delete_from_intent(
                 scope, state_path, intent, neonctl="neonctl", run=changed_runner, environ={},
                 verify_present=lambda rows: (
-                    cleanup.exact_provider_role(rows) == row
+                    cleanup.exact_provider_role(rows, scope) == row
                     or (_ for _ in ()).throw(cleanup.CleanupRefusal("changed row"))
                 ), sleep=lambda _seconds: None,
             )
