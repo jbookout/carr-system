@@ -48,6 +48,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+from lib.platform_metering import MeteringRefusal, authorize_metered_execution
 ABANDON_DB = "abandon_check"
 PROVIDER = "cloudflare-workers"
 PROVIDER_VERSION = "11111111-2222-4333-8444-555555555555"
@@ -330,6 +332,18 @@ def main() -> int:
         "+00:00", "Z"
     )
     try:
+        metering_rows = neon(env, "branches", "list", "--project-id", project_id, "--output", "json")
+        if metering_rows.returncode != 0:
+            sys.exit("release-abandon-selftest: cannot read branch count for metering admission")
+        try:
+            authorize_metered_execution(
+                json.loads((REPO / "ops/config/platform-metering.v1.json").read_text()),
+                "neon-disposable-branch",
+                {"requested_lifetime_minutes": 120, "cleanup_registered": True,
+                 "active_nondefault_branches": sum(
+                     1 for row in json.loads(metering_rows.stdout) if not row.get("default"))})
+        except (MeteringRefusal, ValueError, TypeError) as exc:
+            sys.exit(f"release-abandon-selftest: metered branch refused: {exc}")
         out = neon(env, "branches", "create", "--project-id", project_id,
                    "--name", name, "--expires-at", expires_at, "--output", "json")
         if out.returncode != 0:

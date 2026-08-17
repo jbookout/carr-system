@@ -50,6 +50,19 @@ def main() -> int:
     check("every known system platform is registered", required <= set(keys),
           f"missing={sorted(required - set(keys))}")
 
+    control_scope = registry.get("control_scope", {})
+    controlled = [
+        str(key)
+        for class_keys in control_scope.values()
+        if isinstance(class_keys, list)
+        for key in class_keys
+    ] if isinstance(control_scope, dict) else []
+    check("every platform has exactly one cost-control class",
+          sorted(controlled) == sorted(keys) and len(controlled) == len(set(controlled)))
+    check("repo-controlled paid dispatch platforms are pre-dispatch gated",
+          set(control_scope.get("pre_dispatch_gated", [])) ==
+          {"github", "neon", "cloudflare-workers", "anthropic-claude"})
+
     covered_runtimes: set[str] = {
         runtime
         for entry in platform_entries

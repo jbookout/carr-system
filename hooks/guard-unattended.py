@@ -979,12 +979,39 @@ def delegation_control_plane_write(cmd):
     return None
 
 
+def direct_metered_dispatch(cmd):
+    """Refuse paid dispatches that bypass their reviewed budget wrapper.
+
+    The wrapper itself is not an escape flag.  The guard sees only the command
+    issued by the session; reviewed scripts perform their own in-process
+    admission before reaching the vendor.  Inert PR bodies and documentation
+    are stripped so describing a command is never mistaken for running it.
+    """
+    executable = strip_inert_text(cmd)
+    patterns = (
+        (re.compile(r"\b(?:npx\s+)?wrangler\s+(?:deploy|versions\s+(?:upload|deploy))\b", re.I),
+         "direct Cloudflare release bypasses bin/deploy-worker.sh"),
+        (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
+         "direct Neon branch create bypasses neon-disposable-branch admission"),
+        (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
+         "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
+    )
+    for pattern, reason in patterns:
+        if pattern.search(executable):
+            return reason + " — blocked by the CARR metering gate"
+    return None
+
+
 def check(cmd):
     """Return a reason string to block, or None to allow."""
     if cmd.strip() in ALLOW_EXACT:
         return None
 
     reason = delegation_control_plane_write(cmd)
+    if reason:
+        return reason
+
+    reason = direct_metered_dispatch(cmd)
     if reason:
         return reason
 
