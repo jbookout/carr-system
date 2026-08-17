@@ -334,7 +334,10 @@ def write_observations(output_dir: pathlib.Path, observations: dict[str, dict[st
         sha = str(observation["collector_git_sha"])
         if not SHA1.fullmatch(sha):
             raise CollectorRefusal("observation collector_git_sha must be an exact 40-character lowercase SHA")
-        path = output_dir / f"situation-retrieval.{policy}.measured.{timestamp}.{sha}.json"
+        # Repository path hygiene rejects version-token filenames. The payload
+        # retains the exact policy_id; the human filename uses its stable label.
+        policy_label = policy.removesuffix("-v1")
+        path = output_dir / f"situation-retrieval.{policy_label}.measured.{timestamp}.{sha}.json"
         if path.exists():
             raise FileExistsError(f"refusing to overwrite evidence artifact: {path}")
         planned.append((path, observation))

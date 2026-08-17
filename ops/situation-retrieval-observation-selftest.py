@@ -216,6 +216,8 @@ with tempfile.TemporaryDirectory() as tmp:
     paths = collector.write_observations(pathlib.Path(tmp), observations)
     check("writer emits immutable timestamped SHA-bound observation artifacts",
           len(paths) == 2 and all(path.exists() and ".20260816T000000Z." in path.name and ("c" * 40) in path.name for path in paths))
+    check("writer keeps version identity in payload, not forbidden filename tokens",
+          all("-v1.measured" not in path.name for path in paths))
     try:
         collector.write_observations(pathlib.Path(tmp), observations)
         overwrite_refused = False
