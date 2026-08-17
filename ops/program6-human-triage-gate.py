@@ -11,6 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -73,7 +74,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             joe = cur.execute("select id from actor where slug='joe' and active and kind='human'").fetchone()
             dell = cur.execute("select id from actor where slug='dell' and active and kind='human'").fetchone()
             if not joe or not dell:
@@ -84,12 +85,12 @@ def main() -> int:
               if not exists (select 1 from pg_roles where rolname='carr_authority_dell') then create role carr_authority_dell login; end if;
             end $$""")
             cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
-            cur.execute("""do $$ begin
-              execute format('grant carr_authority_joe,carr_authority_dell,carr_writer,carr_reader,carr_jobs to %I', current_user);
-            end $$""")
+            grant_settable_runtime_roles(
+                cur, "carr_authority_joe", "carr_authority_dell", "carr_writer", "carr_reader", "carr_jobs"
+            )
 
             section_id, revision_id, origin_ref = doctrine_fixture(cur, joe_id)
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             request_id, ref, state, version = capture(cur, section_id, revision_id, origin_ref)
             expect_refusal(cur, "select * from ops.triage_sourced_work_request(%s,%s,%s,%s)",
                            (ref, version, "operational", uuid.uuid4()), "generic writer triage")
@@ -108,7 +109,7 @@ def main() -> int:
             if receipt_privileges != (False, False, False):
                 return fail(f"a non-owner role can forge a triage receipt: {receipt_privileges}")
             for role in ("carr_reader", "carr_jobs"):
-                cur.execute(f"set local role {role}")
+                set_local_role(cur, role)
                 expect_refusal(cur, "select * from ops.triage_sourced_work_request(%s,%s,%s,%s)",
                                (ref, version, "operational", uuid.uuid4()), f"{role} triage")
                 cur.execute("reset role")
@@ -124,7 +125,7 @@ def main() -> int:
             cur.execute("reset session authorization")
             if replay[:7] != triaged[:7] or replay[7] is not True:
                 return fail("exact authority replay did not return the persisted receipt")
-            cur.execute("set local role carr_reader")
+            set_local_role(cur, "carr_reader")
             dell_card = cur.execute("select * from ops.work_request_card(%s,%s)", (ref, "carr-internal")).fetchone()
             cur.execute("reset role")
             if not dell_card or dell_card[0] != ref or dell_card[2] != "triaged" or dell_card[11:14] != ("operational", "dell", triaged[6]):
@@ -136,7 +137,7 @@ def main() -> int:
 
             # Both admitted partners can review a shared sourced request, but
             # the persisted reviewer remains session-derived, never caller data.
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             joe_request_id, joe_ref, joe_state, joe_version = capture(cur, section_id, revision_id, origin_ref)
             cur.execute("reset role")
             cur.execute("set session authorization carr_authority_joe")
@@ -144,7 +145,7 @@ def main() -> int:
             cur.execute("reset session authorization")
             if not joe_triaged or joe_triaged[:6] != (joe_request_id, joe_ref, "triaged", joe_version + 1, "needs_judgment", "joe"):
                 return fail(f"Joe authority did not receive an independently attributed shared triage: {joe_triaged}")
-            cur.execute("set local role carr_reader")
+            set_local_role(cur, "carr_reader")
             joe_card = cur.execute("select * from ops.work_request_card(%s,%s)", (joe_ref, "carr-internal")).fetchone()
             cur.execute("reset role")
             if not joe_card or joe_card[11:14] != ("needs_judgment", "joe", joe_triaged[6]):
@@ -168,7 +169,6 @@ def main() -> int:
             ).fetchone()
             if stored != ("triaged", None, None, "operational", dell[0]):
                 return fail(f"triage widened sourced Work Request state or attribution: {stored}")
-            conn.rollback()
         print("PASS: Program 6 triage is authority-bound, idempotent, and captured-to-triaged only")
         return 0
     except Exception as exc:

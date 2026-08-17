@@ -11,6 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -46,9 +47,9 @@ def authority_roles(cur) -> None:
       end if;
     end $$""")
     cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
-    cur.execute("""do $$ begin
-      execute format('grant carr_authority_joe,carr_authority_dell,carr_writer,carr_reader,carr_jobs to %I', current_user);
-    end $$""")
+    grant_settable_runtime_roles(
+        cur, "carr_authority_joe", "carr_authority_dell", "carr_writer", "carr_reader", "carr_jobs"
+    )
 
 
 def fixture(cur, actor_id: uuid.UUID):
@@ -121,11 +122,11 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             authority_roles(cur)
             joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
             source_section, source_rev, origin_ref, runbook_ref = fixture(cur, joe_id)
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             request_id, ref, _, captured_version, *_ = one(cur, """select * from ops.capture_sourced_work_request(
               %s,%s,%s,%s,%s,%s,%s)""", (origin_ref, "Outcome feedback", "Observe one result",
               Jsonb([{"id": "OBSERVED", "text": "The stated outcome has an evidence reference"}]),
@@ -133,7 +134,7 @@ def main() -> int:
             cur.execute("reset role")
             triaged = as_authority(cur, "dell", "select * from ops.triage_sourced_work_request(%s,%s,'operational',%s)", (ref, captured_version, uuid.uuid4()))
             triaged_version = triaged[3]
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             plan = one(cur, """select * from ops.propose_sourced_work_request_plan(
               %s,%s,%s,%s,%s,%s,%s,%s,%s)""", (ref, triaged_version, "Observe one bounded result",
               runbook_ref, Jsonb([]), "safe:recovery:stop", "safe:observability:record",
@@ -147,7 +148,7 @@ def main() -> int:
 
             # Routine writer may append a proposal but cannot write private rows or move work.
             proposal_a_key = uuid.uuid4()
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             proposal_a = propose(cur, ref, ready_version, plan_hash, proposal_a_key)
             replay_a = propose(cur, ref, ready_version, plan_hash, proposal_a_key)
             refusal(cur, "insert into ops.sourced_work_request_outcome_feedback default values", label="raw writer feedback proposal insert")
@@ -194,7 +195,7 @@ def main() -> int:
             refusal(cur, "select * from ops.accept_sourced_work_request_outcome_feedback(%s,%s,%s,%s)",
               (ref, ready_version, proposal_a[2], accepted_a_key), "cross-human acceptance replay")
 
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             proposal_b = propose(cur, ref, ready_version, plan_hash, uuid.uuid4(), summary="A later observed trial")
             cur.execute("reset role")
             card_pending_b = one(cur, "select * from ops.work_request_card(%s,'carr-internal')", (ref,))
@@ -213,7 +214,7 @@ def main() -> int:
 
             # A reload must recover the newest of more than one still-pending
             # proposal, while the card remains exclusively about accepted facts.
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             proposal_c = propose(cur, ref, ready_version, plan_hash, uuid.uuid4(), summary="An earlier pending observation")
             proposal_d = propose(cur, ref, ready_version, plan_hash, uuid.uuid4(), summary="The latest pending observation")
             cur.execute("reset role")
@@ -247,7 +248,6 @@ def main() -> int:
             if historical_proposal[5:7] != ("ready", ready_version) or historical_acceptance[2:4] != ("ready", ready_version):
                 raise RuntimeError("historical replay did not preserve the original ready version")
             cur.execute("rollback to savepoint historical_replay")
-            conn.rollback()
     except Exception as exc:
         return fail(str(exc))
     print("program6-outcome-feedback-gate: PASS")

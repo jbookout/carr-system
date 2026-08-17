@@ -9,6 +9,7 @@ import sys
 import uuid
 
 import psycopg
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -40,7 +41,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             cur.execute("""do $$ begin
               if not exists (select 1 from pg_roles where rolname='carr_authority_joe') then
                 create role carr_authority_joe login;
@@ -50,9 +51,9 @@ def main() -> int:
               end if;
             end $$""")
             cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
-            cur.execute("""do $$ begin
-              execute format('grant carr_authority_joe,carr_authority_dell,carr_writer,carr_reader,carr_jobs to %I', current_user);
-            end $$""")
+            grant_settable_runtime_roles(
+                cur, "carr_authority_joe", "carr_authority_dell", "carr_writer", "carr_reader", "carr_jobs"
+            )
 
             function = "ops.redeem_program6_browser_action_challenge(%s,%s,%s,%s,%s)"
             token_a = "a" * 64
@@ -60,7 +61,7 @@ def main() -> int:
             material_a = "c" * 64
             key_a = uuid.uuid4()
 
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             refusal(cur, f"select {function}", (token_a, session_a, "accept-ready-plan", material_a, key_a),
                     "routine writer challenge redemption")
             refusal(cur, """insert into ops.program6_browser_action_challenge_redemption
@@ -112,7 +113,6 @@ def main() -> int:
             """).fetchone()
             if privileges != (False, False, False, False, False):
                 raise RuntimeError(f"browser challenge ledger grant leaked: {privileges}")
-            conn.rollback()
     except Exception as exc:
         return fail(str(exc))
     print("program6-browser-action-challenge-gate: PASS")

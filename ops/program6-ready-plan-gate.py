@@ -11,6 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -48,10 +49,8 @@ def ensure_authority_roles(cur) -> None:
         end $$"""
     )
     cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
-    cur.execute(
-        """do $$ begin
-          execute format('grant carr_authority_joe,carr_authority_dell,carr_writer,carr_reader,carr_jobs to %I', current_user);
-        end $$"""
+    grant_settable_runtime_roles(
+        cur, "carr_authority_joe", "carr_authority_dell", "carr_writer", "carr_reader", "carr_jobs"
     )
 
 
@@ -165,7 +164,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             ensure_authority_roles(cur)
             joe_id = one(cur,
                 "select id from actor where slug='joe' and active and kind='human'"
@@ -176,7 +175,7 @@ def main() -> int:
             source_section, source_revision, origin_ref, runbook_section, runbook_revision, runbook_ref = doctrine_fixture(cur, joe_id)
 
             # 0177 must preserve the 0175 captured -> triaged path.
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             request_id, ref, state, captured_version = capture(
                 cur, source_section, source_revision, origin_ref, "Dell"
             )
@@ -193,7 +192,7 @@ def main() -> int:
                 (request_id,),
             ).fetchone()
             proposal_key = uuid.uuid4()
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             proposal = propose(cur, ref, triaged_version, runbook_ref, proposal_key)
             replay = propose(cur, ref, triaged_version, runbook_ref, proposal_key)
             refusal(
@@ -213,7 +212,7 @@ def main() -> int:
                 raise RuntimeError("proposal replay did not return the exact immutable plan")
             # A later proposal is allowed, but accepting the first plan must
             # keep every ready readback bound to the accepted one.
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             later_proposal = propose(
                 cur, ref, triaged_version, runbook_ref, uuid.uuid4(),
                 "A later alternative scope that remains unaccepted",
@@ -234,7 +233,7 @@ def main() -> int:
                 raise RuntimeError(f"proposal did not return exact triaged plan readback: {proposal}")
 
             # A correct-looking direct update is still refused without the private receipt.
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             refusal(
                 cur,
                 """update ops.work_request set state='ready',version=version+1,
@@ -258,7 +257,7 @@ def main() -> int:
                 raise RuntimeError(f"accepted plan lost human or shape readback: {accepted}")
             if accepted_replay[:-1] != accepted[:-1] or accepted_replay[-1] is not True:
                 raise RuntimeError("exact acceptance replay did not return the persisted receipt")
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             proposal_after_accept = propose(cur, ref, triaged_version, runbook_ref, proposal_key)
             cur.execute("reset role")
             if proposal_after_accept[5] != "triaged" or proposal_after_accept[6] != triaged_version or proposal_after_accept[-1] is not True:
@@ -280,7 +279,7 @@ def main() -> int:
             )[0] != 1:
                 raise RuntimeError("acceptance created more than one receipt")
 
-            cur.execute("set local role carr_reader")
+            set_local_role(cur, "carr_reader")
             card = cur.execute("select * from ops.work_request_card(%s,'carr-internal')", (ref,)).fetchone()
             cur.execute("reset role")
             if not card or card[2] != "ready" or card[11:14] != ("operational", "dell", triaged[6]):
@@ -291,20 +290,20 @@ def main() -> int:
                 raise RuntimeError(f"ready card is not bound to the accepting human/receipt: {card}")
             if card[26] != "not_required" or card[27] != accepted[10]:
                 raise RuntimeError(f"ready card lost fixed-surface readback: {card}")
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             refusal(cur, "update ops.work_request set title='changed' where id=%s", (request_id,), "post-ready mutation")
             cur.execute("reset role")
             refusal(cur, "update ops.sourced_work_request_plan set scope_summary='changed' where id=%s", (plan_id,), "plan mutation")
             refusal(cur, "delete from ops.sourced_work_request_plan_acceptance_receipt where work_request_id=%s", (request_id,), "receipt deletion")
 
             # A changed runbook revision invalidates the proposal and demands a new one.
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             stale_id, stale_ref, _, stale_captured_version = capture(
                 cur, source_section, source_revision, origin_ref, "stale runbook"
             )
             cur.execute("reset role")
             stale_triaged = triage(cur, stale_ref, stale_captured_version, "joe")
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             stale_plan = propose(cur, stale_ref, stale_triaged[3], runbook_ref, uuid.uuid4())
             cur.execute("reset role")
             cur.execute("savepoint stale_runbook")
@@ -331,7 +330,7 @@ def main() -> int:
             # A direct writer mutation cannot preserve an old trusted hash by
             # changing the revision payload while leaving content_hash alone.
             cur.execute("savepoint mutated_runbook_payload")
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             cur.execute(
                 "update doctrine_revision set body=%s,plain_text=%s where id=%s",
                 (Jsonb({"text": "mutated without hash"}), "mutated without hash", runbook_revision),
@@ -371,7 +370,7 @@ def main() -> int:
             cur.execute("rollback to savepoint stale_source")
 
             # A prior shape decision or revision cannot be silently overwritten.
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             shaped_id, shaped_ref, _, shaped_captured_version = capture(
                 cur, source_section, source_revision, origin_ref, "pre-shaped"
             )
@@ -385,7 +384,7 @@ def main() -> int:
                 (dell_id, shaped_id),
             )
             cur.execute("alter table ops.work_request enable trigger sourced_work_request_is_immutable")
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             refusal(
                 cur, """select * from ops.propose_sourced_work_request_plan(
                      %s,%s,%s,%s,%s,%s,%s,%s,%s)""",
@@ -396,7 +395,7 @@ def main() -> int:
             )
             cur.execute("reset role")
 
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             revision_id, revision_ref, _, revision_captured_version = capture(
                 cur, source_section, source_revision, origin_ref, "shape revision"
             )
@@ -411,7 +410,7 @@ def main() -> int:
                 (revision_id, revision_triaged[3], Jsonb({}), Jsonb([]), Jsonb([]),
                  Jsonb([]), Jsonb({}), joe_id),
             )
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             refusal(
                 cur, """select * from ops.propose_sourced_work_request_plan(
                      %s,%s,%s,%s,%s,%s,%s,%s,%s)""",
@@ -432,7 +431,6 @@ def main() -> int:
             if privileges != (False, False, False, False):
                 raise RuntimeError(f"raw plan/acceptance authority leaked: {privileges}")
 
-            conn.rollback()
         print("PASS: Program 6 plan proposal is immutable and human acceptance alone reaches ready")
         return 0
     except Exception as exc:

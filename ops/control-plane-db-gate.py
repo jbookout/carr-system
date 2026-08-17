@@ -18,6 +18,8 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
+
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from lib.control_plane_scheduler_cutover import scheduler_launchd_rows, scheduler_provider_rows  # noqa: E402
@@ -103,7 +105,7 @@ def main() -> int:
         fail(f"could not load checked-in scheduler surface registry: {exc}")
         return 2
 
-    with psycopg.connect(dsn) as conn:
+    with rollback_only_connection(dsn) as conn:
         with conn.cursor() as cur:
             for table in REQUIRED_TABLES:
                 cur.execute("select to_regclass(%s)", (table,))
@@ -392,15 +394,12 @@ def main() -> int:
             """, (rule_id,))
             # Exercise the trigger as its real firing role, not as owner. A
             # grant that exists only for the migration actor is not a control.
-            # The Neon owner credential is intentionally not a standing member
-            # of runtime roles. Grant membership inside this transaction only,
-            # switch to the firing role, then the final rollback erases the
-            # temporary membership along with every fixture.
-            cur.execute("select current_user")
-            database_actor = fetchone_required(cur.fetchone(), "database actor")[0]
-            cur.execute(sql.SQL("grant carr_writer to {}").format(sql.Identifier(database_actor)))
-            cur.execute(sql.SQL("grant carr_jobs to {}").format(sql.Identifier(database_actor)))
-            cur.execute("set local role carr_writer")
+            # The Neon owner credential is intentionally not standing SET-role
+            # enabled for runtime bundles. Enable it inside this transaction
+            # only, switch to the firing role, then the final rollback erases
+            # the temporary membership option along with every fixture.
+            grant_settable_runtime_roles(cur, "carr_writer", "carr_jobs")
+            set_local_role(cur, "carr_writer")
             cur.execute("update rule set status='active',activated_by=%s,activated_at=now() where id=%s",
                         (actor, rule_id))
             cur.execute("reset role")
@@ -425,7 +424,7 @@ def main() -> int:
                         '{"predicate":"fixture","receipt_kind":"fixture"}',
                         '{"status":"enabled"}')
             """, (fenced_definition,))
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'canary')).id",
                         (fenced_definition, "2026-08-15T11:59:00Z",
                          '{"fixture":"must-not-run"}', f"fixture-fenced-{uuid.uuid4()}"))
@@ -443,7 +442,7 @@ def main() -> int:
                         (fenced_job,))
             if fetchone_required(cur.fetchone(), "definition fence receipt")[0] != 1:
                 fail("definition disable did not persist one immutable fencing receipt")
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select * from ops.claim_job_mode('db-gate-old-worker','canary',1,30)")
             if cur.fetchone() is not None:
                 fail("old worker claimed a job for a disabled definition")
@@ -465,7 +464,7 @@ def main() -> int:
             """, (definition,))
             scheduled = "2026-08-15T12:00:00Z"
             args = (definition, 1, scheduled, '{"fixture":true}', "fixture-idem", "shadow")
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,%s,%s,%s,%s,%s)).id", args)
             first = fetchone_required(cur.fetchone(), "first enqueue")[0]
             cur.execute("select (ops.enqueue_job(%s,%s,%s,%s,%s,%s)).id", args)
@@ -492,7 +491,7 @@ def main() -> int:
                        values ('gate-primary',9001,'env:GATE_PRIMARY',0.05),
                               ('gate-secondary',9002,'env:GATE_SECONDARY',1.00),
                               ('gate-third',9003,'env:GATE_THIRD',1.00)""")
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select ops.record_provider_observation('gate-primary','unavailable',null,'synthetic',300,'db-gate')")
             cur.execute("select ops.record_provider_observation('gate-secondary','healthy',10,null,300,'db-gate')")
             cur.execute("select route_key from ops.select_provider_routes(array['gate-primary','gate-secondary'])")
@@ -507,7 +506,7 @@ def main() -> int:
                           output_schema,max_tokens,max_cost_usd,timeout_seconds,provider_routes)
                        values ('db-gate-cognition',1,1,1,'{"type":"object"}',
                                '{"type":"object"}',100,1.0,30,array['gate-secondary'])""")
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select ops.put_cognition_cache('gate-cache','db-gate-cognition',1,1,%s,array['party:P-1'],300)",
                         ('{"route":"gate-secondary","proposal":{}}',))
             cur.execute("select ops.get_cognition_cache('gate-cache')")
@@ -579,7 +578,7 @@ def main() -> int:
             # Shadow, canary, and live replacements at one scheduled instant
             # are distinct ledger identities.  Per-mode scheduler idempotency
             # must not collapse the evidence required for cutover.
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             mode_jobs = []
             for mode in ("shadow", "canary", "live"):
                 cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,%s)).id",
@@ -596,7 +595,7 @@ def main() -> int:
             # the same ledger job is reclaimed under a fresh lease and can
             # complete.  It must never become a second scheduler delivery.
             retry_key = f"fixture-retry-{uuid.uuid4()}"
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
                         (definition, "2026-08-15T12:00:20Z", '{"fixture":"retry"}', retry_key))
             retry_job = fetchone_required(cur.fetchone(), "retry fixture enqueue")[0]
@@ -617,7 +616,7 @@ def main() -> int:
             if fetchone_required(cur.fetchone(), "retry failure receipt")[0] != 1:
                 fail("ordinary failure did not create one immutable failure receipt")
             cur.execute("update ops.job set next_attempt_at=now()-interval '1 second' where id=%s", (retry_job,))
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select * from ops.claim_job_mode('db-gate-retry-b','shadow',1,30)")
             retry_second = fetchone_required(cur.fetchone(), "retry reclaim")
             if retry_second[0] != retry_job or retry_second[1] == retry_claim[1]:
@@ -637,7 +636,7 @@ def main() -> int:
             # name this evidence, but arbitrary receipt strings must not open
             # a legacy cutover.
             canary_key = f"fixture-canary-{uuid.uuid4()}"
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'canary')).id",
                         (definition, "2026-08-15T12:00:30Z", '{"fixture":"canary"}', canary_key))
             canary_job = fetchone_required(cur.fetchone(), "canary fixture enqueue")[0]
@@ -668,7 +667,7 @@ def main() -> int:
             # An abandoned final lease is terminal evidence, not a silent state
             # flip. Reaping it must produce an immutable dead-letter receipt.
             expired_key = f"fixture-expired-{uuid.uuid4()}"
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
                         (definition, "2026-08-15T12:01:00Z", '{"fixture":"expired"}', expired_key))
             expired_job = fetchone_required(cur.fetchone(), "expired fixture enqueue")[0]
@@ -679,7 +678,7 @@ def main() -> int:
             cur.execute("reset role")
             cur.execute("update ops.job set attempt=max_attempts,leased_until=now()-interval '1 second' where id=%s",
                         (expired_job,))
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("savepoint expired_worker_refusal")
             try:
                 cur.execute("select ops.fail_job(%s,%s,'late','late worker')",
@@ -702,7 +701,7 @@ def main() -> int:
             # A retryable expired lease is also durable evidence.  It must
             # retain a timeout receipt before it returns to retry_wait.
             reaper_retry_key = f"fixture-reaper-retry-{uuid.uuid4()}"
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
                         (definition, "2026-08-15T12:01:30Z", '{"fixture":"reaper-retry"}', reaper_retry_key))
             reaper_retry_job = fetchone_required(cur.fetchone(), "reaper retry enqueue")[0]
@@ -712,7 +711,7 @@ def main() -> int:
                 fail("dispatcher did not claim retryable-expiry fixture")
             cur.execute("reset role")
             cur.execute("update ops.job set leased_until=now()-interval '1 second' where id=%s", (reaper_retry_job,))
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select ops.reap_expired_jobs()")
             if fetchone_required(cur.fetchone(), "retryable lease reap")[0] != 1:
                 fail("retryable expired lease was not reaped")
@@ -728,7 +727,7 @@ def main() -> int:
             # A subprocess/provider deadline is distinct from a generic
             # failure and remains visible on the immutable attempt.
             timeout_key = f"fixture-timeout-{uuid.uuid4()}"
-            cur.execute("set local role carr_jobs")
+            set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
                         (definition,"2026-08-15T12:02:00Z",'{"fixture":"timeout"}',timeout_key))
             timeout_job = fetchone_required(cur.fetchone(), "timeout fixture enqueue")[0]
@@ -749,13 +748,13 @@ def main() -> int:
             # Retirement remains shut until accepted shadow AND canary receipts.
             cur.execute("savepoint early_cutover")
             try:
-                cur.execute("set local role carr_writer")
+                set_local_role(cur, "carr_writer")
                 cur.execute("select ops.disable_legacy_schedule(%s,'surface','locator','too early',"
                             "'native:enabled','native:disabled',null,null,null,null,'db-gate')", (definition,))
                 fail("routine writer disabled a legacy schedule")
             except psycopg.Error:
                 cur.execute("rollback to savepoint early_cutover")
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             cur.execute("savepoint machine_acceptance_refusal")
             try:
                 cur.execute("select ops.record_workflow_acceptance(%s,'shadow','accepted','fixture:bad')",
@@ -789,7 +788,6 @@ def main() -> int:
             # requires an externally provisioned real authority-DSN probe;
             # this disposable owner gate does not perform one.
 
-        conn.rollback()
     print("control-plane-db-gate passed: admission, leases, idempotency, receipts and owner cutover refusal exercised")
     return 0
 

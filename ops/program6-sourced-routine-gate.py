@@ -11,6 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -68,14 +69,15 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             joe = cur.execute("select id from actor where slug='joe' and active and kind='human'").fetchone()
             dell = cur.execute("select id from actor where slug='dell' and active and kind='human'").fetchone()
             if not joe or not dell:
                 return fail("seeded active human actors joe and dell are required")
             joe_id, dell_id = joe[0], dell[0]
+            grant_settable_runtime_roles(cur, "carr_writer")
             section_id, revision_id, origin_ref = doctrine_fixture(cur, joe_id)
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             created = capture(cur, section_id, revision_id, origin_ref, uuid.uuid4())
             cur.execute("reset role")
             if not created:
@@ -91,7 +93,7 @@ def main() -> int:
             ).fetchone()
             if stored != (None, None, "captured", origin_ref):
                 return fail(f"capture changed program semantics or source reference: {stored}")
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             expect_refusal(cur,
                 """insert into ops.work_request
                    (ref,state,title,requester_actor,capture_idempotency_key,organization_tenant_id,
@@ -111,7 +113,7 @@ def main() -> int:
                 return fail(f"writer privileges do not preserve legacy update while closing raw insert: {privileges}")
 
             replay_key = uuid.uuid4()
-            cur.execute("set local role carr_writer")
+            set_local_role(cur, "carr_writer")
             first = capture(cur, section_id, revision_id, origin_ref, replay_key)
             second = capture(cur, section_id, revision_id, origin_ref, replay_key)
             cur.execute("reset role")
@@ -151,7 +153,6 @@ def main() -> int:
             if cur.execute("select * from ops.work_request_card(%s,%s)", (ref, "carr-internal")).fetchone():
                 return fail("later-state Work Request returned a card")
             cur.execute("rollback to savepoint program6_later_state_card")
-            conn.rollback()
         print("PASS: Program 6 sourced Work Request capture is current, scoped, idempotent, and captured-only")
         return 0
     except Exception as exc:
