@@ -6,24 +6,16 @@
     <meta name="theme-color" content="#002F6C" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icons/dealroom-192.png" />
+    <link rel="stylesheet" href="/public-shell/shell.css" />
     <title>The Deal Room</title>
-    <style>
-      :root { color: #fff; background: #002f6c; font: 16px/1.5 system-ui, sans-serif; }
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
-      main { max-width: 32rem; padding: 2rem; text-align: center; }
-      .mark { width: 5rem; height: 5rem; border-radius: 1.25rem; }
-      h1 { margin: 1rem 0 .5rem; }
-      p { color: #dce8f5; }
-      a { color: #fff; text-decoration-color: #f57f29; text-decoration-thickness: .2rem; }
-    </style>
   </head>
-  <body>
+  <body class="shell-home">
     <main>
       <img class="mark" src="/icons/dealroom-192.png" alt="" />
       <h1>The Deal Room</h1>
       <p>The application bundle is not present in this worktree yet. Authentication and the installable shell are ready for local verification.</p>
-      <p><a href="/auth/signout">Sign out</a></p>
+      <p>Sign-out requests require the active application session.</p>
     </main>
-    <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");</script>
+    <script src="/public-shell/bootstrap.js"></script>
   </body>
 </html>

@@ -64,8 +64,8 @@ async function login(handler, environment, email) {
   return callback;
 }
 
-function identityHandler(email, clock) {
-  return createDealroomHandler({
+function identityOverrides(email, clock) {
+  return {
     exchangeGoogleCodeFn: async () => ({ id_token: "stub-id-token" }),
     verifyGoogleIdTokenFn: async () => ({ email, email_verified: true, sub: `sub:${email}` }),
     now: () => clock?.now ?? 1_800_000_000_000,
@@ -73,7 +73,11 @@ function identityHandler(email, clock) {
       new Response(JSON.stringify({ surface: "mcp", actor }), { headers: { "content-type": "application/json" } }),
     pipelineHandler: async (_request, _env, _ctx, actor) =>
       new Response(JSON.stringify({ surface: "pipeline", actor }), { headers: { "content-type": "application/json" } }),
-  });
+  };
+}
+
+function identityHandler(email, clock) {
+  return createDealroomHandler(identityOverrides(email, clock));
 }
 
 test("Deal Room gate refuses a verified non-partner without returning deal data", async () => {
@@ -122,6 +126,11 @@ test("opaque cookie session round-trips, refreshes, expires, and signs out", asy
   const session = namedCookie(callback, "__Host-dealroom_session");
   assert.doesNotMatch(session, /joe|gmail/i);
 
+  environment.DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true";
+  const bootstrap = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/session",
+    { headers: { cookie: session } }), environment, {});
+  const { csrf_token: csrfToken } = await bootstrap.json();
+
   let api = await handler.fetch(new Request("https://dealroom.doctorcre.com/pipeline/changes",
     { headers: { cookie: session } }), environment, {});
   assert.equal(api.status, 200);
@@ -134,7 +143,8 @@ test("opaque cookie session round-trips, refreshes, expires, and signs out", asy
   assert.ok(setCookies(api).some((cookie) => cookie.startsWith("__Host-dealroom_session=")));
 
   const signedOut = await handler.fetch(new Request("https://dealroom.doctorcre.com/auth/signout",
-    { method: "POST", headers: { cookie: session } }), environment, {});
+    { method: "POST", headers: { cookie: session, origin: "https://dealroom.doctorcre.com",
+      "sec-fetch-site": "same-origin", "x-carr-csrf": csrfToken } }), environment, {});
   assert.equal(signedOut.status, 302);
   api = await handler.fetch(new Request("https://dealroom.doctorcre.com/pipeline/changes",
     { headers: { cookie: session } }), environment, {});
@@ -149,6 +159,115 @@ test("opaque cookie session round-trips, refreshes, expires, and signs out", asy
   api = await expiryHandler.fetch(new Request("https://dealroom.doctorcre.com/pipeline/changes",
     { headers: { cookie: expiringSession } }), expiryEnv, {});
   assert.equal(api.status, 401);
+});
+
+test("Program 6 browser bootstrap is feature-gated and its typed boundary refuses cross-site or unbound writes", async () => {
+  const environment = env();
+  const handler = identityHandler("joe.bookout.carr.us@gmail.com");
+  const callback = await login(handler, environment, "joe.bookout.carr.us@gmail.com");
+  const session = namedCookie(callback, "__Host-dealroom_session");
+  let response = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/session",
+    { headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error, "program6_actions_disabled");
+
+  environment.DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true";
+  response = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/session",
+    { headers: { cookie: session } }), environment, {});
+  assert.equal(response.status, 200);
+  const bootstrap = await response.json();
+  assert.equal(bootstrap.actor.slug, "joe");
+  assert.match(bootstrap.csrf_token, /^[0-9a-f]{64}$/);
+  assert.equal(bootstrap.reauth_required, false);
+  assert.equal(bootstrap.challenge_ttl_seconds, 300);
+
+  const challengeBody = JSON.stringify({ action: "accept-ready-plan", human_ref: "WR-41", base_version: 3,
+    plan_hash: `sha256:${"a".repeat(64)}` });
+  const headers = { cookie: session, "content-type": "application/json", "x-carr-csrf": bootstrap.csrf_token };
+  response = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/challenge", {
+    method: "POST", headers, body: challengeBody,
+  }), environment, {});
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).reason, "origin_mismatch");
+
+  response = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/challenge", {
+    method: "POST", headers: { ...headers, origin: "https://dealroom.doctorcre.com", "sec-fetch-site": "same-site" }, body: challengeBody,
+  }), environment, {});
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).reason, "fetch_metadata_mismatch");
+
+  response = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/challenge", {
+    method: "POST", headers: { ...headers, origin: "https://dealroom.doctorcre.com", "sec-fetch-site": "same-origin" }, body: challengeBody,
+  }), environment, {});
+  assert.equal(response.status, 200);
+  assert.match((await response.json()).challenge, /^[0-9a-f]{64}$/);
+});
+
+test("reauthentication is session-bound, and approval challenges are one-time and exact", async () => {
+  const clock = { now: 1_800_000_000_000 };
+  const environment = env();
+  environment.DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true";
+  const handler = identityHandler("joe.bookout.carr.us@gmail.com", clock);
+  const callback = await login(handler, environment, "joe.bookout.carr.us@gmail.com");
+  const session = namedCookie(callback, "__Host-dealroom_session");
+  const bootstrap = await (await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/session",
+    { headers: { cookie: session } }), environment, {})).json();
+  const target = { action: "accept-outcome-feedback", human_ref: "WR-41", base_version: 3,
+    feedback_hash: `sha256:${"b".repeat(64)}` };
+  const csrfHeaders = { cookie: session, origin: "https://dealroom.doctorcre.com", "sec-fetch-site": "same-origin",
+    "content-type": "application/json", "x-carr-csrf": bootstrap.csrf_token };
+  let response = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/challenge", {
+    method: "POST", headers: csrfHeaders, body: JSON.stringify(target),
+  }), environment, {});
+  const { challenge } = await response.json();
+
+  // The injected typed controller has no workflow implementation in this test;
+  // it exercises the reusable boundary by asking it to authorize a supplied target.
+  const controller = createDealroomHandler({
+    ...identityOverrides("joe.bookout.carr.us@gmail.com", clock),
+    program6Handler: async (request, envArg, _ctx, _actor, sessionState) => {
+      // The concrete controller must parse first to route/validate the typed
+      // body. The header-only browser guard remains valid after that consume.
+      const parsed = await request.json();
+      const { authorizeProgram6Action } = await import("../src/dealroom-web.js");
+      const refusal = await authorizeProgram6Action({ request, env: envArg, session: sessionState,
+        action: "accept-outcome-feedback", args: parsed, now: clock.now });
+      return refusal || new Response(JSON.stringify({ ok: true }));
+    },
+  });
+  const approvalHeaders = { ...csrfHeaders, "x-carr-action-challenge": challenge };
+  response = await controller.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/accept-outcome-feedback", {
+    method: "POST", headers: approvalHeaders, body: JSON.stringify(target),
+  }), environment, {});
+  assert.equal(response.status, 200);
+  response = await controller.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/accept-outcome-feedback", {
+    method: "POST", headers: approvalHeaders, body: JSON.stringify(target),
+  }), environment, {});
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).error, "invalid_action_challenge");
+
+  clock.now += 10 * 60 * 1000 + 1;
+  response = await controller.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/accept-outcome-feedback", {
+    method: "POST", headers: { ...csrfHeaders, "x-carr-action-challenge": "not-used" }, body: JSON.stringify(target),
+  }), environment, {});
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error, "reauth_required");
+
+  const reauth = await handler.fetch(new Request("https://dealroom.doctorcre.com/auth/reauth?return_to=%2Fsystem-work",
+    { headers: { cookie: session } }), environment, {});
+  assert.equal(reauth.status, 302);
+  const reauthGoogle = new URL(reauth.headers.get("location"));
+  const reauthState = reauthGoogle.searchParams.get("state");
+  const reauthPending = namedCookie(reauth, "__Host-dealroom_oauth");
+  const reauthCallback = await handler.fetch(new Request(
+    `https://dealroom.doctorcre.com/auth/callback?state=${reauthState}&code=reauth-code`,
+    { headers: { cookie: `${session}; ${reauthPending}` } },
+  ), environment, {});
+  assert.equal(reauthCallback.status, 302);
+  assert.equal(reauthCallback.headers.get("location"), "https://dealroom.doctorcre.com/system-work");
+  const refreshed = await (await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/session",
+    { headers: { cookie: session } }), environment, {})).json();
+  assert.equal(refreshed.reauth_required, false);
 });
 
 test("manifest and service worker are public with PWA-safe headers and offline truthfulness", async () => {
@@ -167,6 +286,10 @@ test("manifest and service worker are public with PWA-safe headers and offline t
   assert.equal(swResponse.status, 200);
   assert.match(swResponse.headers.get("content-type"), /^application\/javascript/);
   assert.equal(swResponse.headers.get("service-worker-allowed"), "/");
+  assert.match(swResponse.headers.get("content-security-policy"), /script-src 'self'/);
+  assert.doesNotMatch(swResponse.headers.get("content-security-policy"), /unsafe-inline/);
+  assert.equal(swResponse.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(swResponse.headers.get("x-frame-options"), "DENY");
   const sw = await swResponse.text();
   assert.match(sw, /DATA_PATHS/);
   assert.match(sw, /state: "reconnecting"/);

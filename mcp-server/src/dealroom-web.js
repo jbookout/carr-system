@@ -20,10 +20,19 @@ const SESSION_COOKIE = "__Host-dealroom_session";
 const PENDING_COOKIE = "__Host-dealroom_oauth";
 const PENDING_PREFIX = "dealroom_pending:";
 const SESSION_PREFIX = "dealroom_session:";
+const ACTION_CHALLENGE_PREFIX = "dealroom_action_challenge:";
 const PENDING_TTL = 600;
 const SESSION_IDLE_TTL = 12 * 60 * 60;
 const SESSION_ABSOLUTE_TTL = 7 * 24 * 60 * 60;
 const SESSION_REFRESH_WINDOW = 60 * 60;
+const REAUTH_TTL = 10 * 60;
+const ACTION_CHALLENGE_TTL = 5 * 60;
+const SYSTEM_WORK_MAX_BODY = 16 * 1024;
+const SYSTEM_WORK_PREFIX = "/api/system-work";
+const APPROVAL_ACTIONS = new Map([
+  ["accept-ready-plan", "plan_hash"],
+  ["accept-outcome-feedback", "feedback_hash"],
+]);
 
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store" };
 const PUBLIC_SHELL = new Map([
@@ -92,6 +101,33 @@ function withHeaders(response, additions, status = response.status) {
   return new Response(response.body, { status, statusText: response.statusText, headers });
 }
 
+function withSecurityHeaders(response) {
+  const headers = new Headers(response.headers);
+  // Deal Room is a static asset bundle.  The public shell uses external CSS
+  // and JavaScript too, so neither scripts nor styles need unsafe-inline.
+  headers.set("content-security-policy", [
+    "default-src 'self'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "script-src 'self'",
+    "style-src 'self' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data:",
+    "connect-src 'self' http://127.0.0.1:4682",
+    "worker-src 'self'",
+    "manifest-src 'self'",
+  ].join("; "));
+  headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("x-frame-options", "DENY");
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("permissions-policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()");
+  headers.set("cross-origin-opener-policy", "same-origin");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 async function asset(env, request, pathname) {
   if (!env.ASSETS?.fetch) return null;
   const url = new URL(request.url);
@@ -125,7 +161,7 @@ async function refusal(env, request) {
     { status: 403, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 }
 
-async function startLogin(request, env) {
+async function startLogin(request, env, pending = {}) {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.OAUTH_KV) {
     return new Response("Sign-in is not configured.", { status: 503, headers: { "cache-control": "no-store" } });
   }
@@ -135,6 +171,7 @@ async function startLogin(request, env) {
   await env.OAUTH_KV.put(PENDING_PREFIX + state, JSON.stringify({
     verifier,
     returnTo: safeReturnTo(url.searchParams.get("return_to")),
+    ...pending,
   }), { expirationTtl: PENDING_TTL });
   const google = await googleAuthorizationUrl({ clientId: env.GOOGLE_CLIENT_ID,
     redirectUri: callbackUri(), state, verifier });
@@ -185,7 +222,26 @@ async function completeLogin(request, env, dependencies) {
   const sessionKey = SESSION_PREFIX + await sha256(opaque);
   const props = dependencies.propsForSlugFn(slug, { email: claims.email, sub: claims.sub,
     via: "dealroom-cookie", client_id: "dealroom-pwa" });
-  await env.OAUTH_KV.put(sessionKey, JSON.stringify({ props, createdAt: now, expiresAt: now + SESSION_IDLE_TTL * 1000 }),
+  if (pending.purpose === "reauth") {
+    const current = await sessionFor(request, env, dependencies);
+    if (!current || current.key !== pending.sessionKey || current.actor?.slug !== slug) {
+      return finish(new Response("That reauthentication request is invalid or expired.",
+        { status: 400, headers: { "cache-control": "no-store" } }));
+    }
+    current.session.reauthAt = now;
+    await env.OAUTH_KV.put(current.key, JSON.stringify(current.session), {
+      expirationTtl: Math.max(1, Math.floor((current.session.expiresAt - now) / 1000)),
+    });
+    return finish(redirect(`https://${DEALROOM_HOST}${safeReturnTo(pending.returnTo)}`));
+  }
+
+  await env.OAUTH_KV.put(sessionKey, JSON.stringify({
+    props,
+    createdAt: now,
+    expiresAt: now + SESSION_IDLE_TTL * 1000,
+    csrfToken: randomString(32),
+    reauthAt: now,
+  }),
     { expirationTtl: SESSION_IDLE_TTL });
   return finish(redirect(`https://${DEALROOM_HOST}${safeReturnTo(pending.returnTo)}`,
     [sessionCookie(opaque, SESSION_IDLE_TTL)]));
@@ -205,14 +261,27 @@ async function sessionFor(request, env, dependencies) {
     return null;
   }
 
+  let changed = false;
+  // Sessions issued before the browser-action boundary was introduced have no
+  // synchronizer token.  Mint it server-side on first use; it never enters the
+  // cookie and a legacy session is not magically treated as freshly reauthed.
+  if (!session.csrfToken) {
+    session.csrfToken = randomString(32);
+    changed = true;
+  }
+
   let refreshCookie = null;
   if (session.expiresAt - now <= SESSION_REFRESH_WINDOW * 1000) {
     const seconds = Math.min(SESSION_IDLE_TTL, Math.floor((absoluteEnd - now) / 1000));
     session.expiresAt = now + seconds * 1000;
-    await env.OAUTH_KV.put(key, JSON.stringify(session), { expirationTtl: seconds });
+    changed = true;
     refreshCookie = sessionCookie(opaque, seconds);
   }
-  return { actor, key, refreshCookie };
+  if (changed) {
+    const seconds = Math.max(1, Math.min(SESSION_IDLE_TTL, Math.floor((session.expiresAt - now) / 1000)));
+    await env.OAUTH_KV.put(key, JSON.stringify(session), { expirationTtl: seconds });
+  }
+  return { actor, key, session, csrfToken: session.csrfToken, reauthAt: Number(session.reauthAt) || null, refreshCookie };
 }
 
 function attachRefresh(response, cookie) {
@@ -226,6 +295,128 @@ async function signOut(request, env) {
   const opaque = cookieValue(request, SESSION_COOKIE);
   if (opaque && env.OAUTH_KV) await env.OAUTH_KV.delete(SESSION_PREFIX + await sha256(opaque));
   return redirect(`https://${DEALROOM_HOST}/`, [clearCookie(SESSION_COOKIE), clearCookie(PENDING_COOKIE)]);
+}
+
+function systemWorkEnabled(env) {
+  return env.DEALROOM_PROGRAM6_ACTIONS_ENABLED === "true";
+}
+
+function sameOrigin(request) {
+  return request.headers.get("origin") === `https://${DEALROOM_HOST}`;
+}
+
+function equalStrings(left, right) {
+  if (typeof left !== "string" || typeof right !== "string" || left.length !== right.length) return false;
+  let mismatch = 0;
+  for (let index = 0; index < left.length; index += 1) mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return mismatch === 0;
+}
+
+async function systemWorkBody(request) {
+  const length = Number(request.headers.get("content-length"));
+  if (Number.isFinite(length) && (length < 0 || length > SYSTEM_WORK_MAX_BODY)) return { error: json({ error: "payload_too_large" }, 413) };
+  const raw = await request.clone().text();
+  if (new TextEncoder().encode(raw).byteLength > SYSTEM_WORK_MAX_BODY) return { error: json({ error: "payload_too_large" }, 413) };
+  try { return { value: JSON.parse(raw) }; }
+  catch { return { error: json({ error: "invalid_json" }, 400) }; }
+}
+
+async function guardSystemWorkPost(request, session, { readBody = false } = {}) {
+  const contentType = request.headers.get("content-type") || "";
+  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) return { error: json({ error: "unsupported_media_type" }, 415) };
+  if (!sameOrigin(request)) return { error: json({ error: "forbidden", reason: "origin_mismatch" }, 403) };
+  if (request.headers.get("sec-fetch-site") !== "same-origin") return { error: json({ error: "forbidden", reason: "fetch_metadata_mismatch" }, 403) };
+  if (!equalStrings(request.headers.get("x-carr-csrf"), session.csrfToken)) return { error: json({ error: "forbidden", reason: "csrf_mismatch" }, 403) };
+  const length = Number(request.headers.get("content-length"));
+  if (Number.isFinite(length) && (length < 0 || length > SYSTEM_WORK_MAX_BODY)) return { error: json({ error: "payload_too_large" }, 413) };
+  // Typed controllers parse their own request body.  Do not clone/read here:
+  // cloning after request.json() is a Worker error and would make the security
+  // guard depend on handler order.  The challenge endpoint is the one route
+  // that owns its body, so it opts into the exact byte-length check below.
+  return readBody ? systemWorkBody(request) : { value: null };
+}
+
+function approvalTarget(action, args) {
+  const hashKey = APPROVAL_ACTIONS.get(action);
+  if (!hashKey || !args || typeof args !== "object") return null;
+  const humanRef = args.human_ref;
+  const baseVersion = args.base_version;
+  const proposalHash = args[hashKey];
+  if (!/^WR-[0-9]{1,12}$/.test(humanRef || "") || !Number.isInteger(baseVersion) || baseVersion < 1 ||
+      !/^sha256:[0-9a-f]{64}$/.test(proposalHash || "")) return null;
+  return { action, human_ref: humanRef, base_version: baseVersion, [hashKey]: proposalHash };
+}
+
+/** A challenge binds the exact immutable approval target, not a mutable UI label. */
+export async function actionDigestFor(action, args) {
+  const target = approvalTarget(action, args);
+  return target ? sha256(JSON.stringify(target)) : null;
+}
+
+/**
+ * Reusable authorization seam for the exact typed Program 6 controller.
+ * It returns a refusal Response, or null when the action may proceed.
+ */
+export async function authorizeProgram6Action({ request, env, session, action, args, now = Date.now() }) {
+  const guard = await guardSystemWorkPost(request, session);
+  if (guard.error) return guard.error;
+  if (!APPROVAL_ACTIONS.has(action)) return null;
+  if (!session.reauthAt || now - session.reauthAt > REAUTH_TTL * 1000) {
+    return json({ error: "reauth_required", reauth_url: "/auth/reauth?return_to=/" }, 401);
+  }
+  const token = request.headers.get("x-carr-action-challenge");
+  if (!token || token.length > 256) return json({ error: "action_challenge_required" }, 401);
+  const key = ACTION_CHALLENGE_PREFIX + token;
+  const challenge = await env.OAUTH_KV.get(key, { type: "json" });
+  // Consume before comparing: a racing second request never inherits the
+  // authority of the first, even if both reached the Worker simultaneously.
+  await env.OAUTH_KV.delete(key);
+  const digest = await actionDigestFor(action, args);
+  if (!challenge || challenge.expiresAt <= now || challenge.sessionKey !== session.key ||
+      challenge.action !== action || !digest || !equalStrings(challenge.digest, digest)) {
+    return json({ error: "invalid_action_challenge" }, 403);
+  }
+  return null;
+}
+
+async function systemWorkSession(session, dependencies) {
+  const now = dependencies.now();
+  return json({
+    actor: { slug: session.actor.slug, display: session.actor.display },
+    csrf_token: session.csrfToken,
+    reauth_required: !session.reauthAt || now - session.reauthAt > REAUTH_TTL * 1000,
+    reauth_url: "/auth/reauth?return_to=/",
+    challenge_ttl_seconds: ACTION_CHALLENGE_TTL,
+  });
+}
+
+async function createActionChallenge(request, env, session, dependencies) {
+  const guard = await guardSystemWorkPost(request, session, { readBody: true });
+  if (guard.error) return guard.error;
+  const target = approvalTarget(guard.value?.action, guard.value);
+  if (!target || Object.keys(guard.value).sort().join(",") !== Object.keys(target).sort().join(",")) {
+    return json({ error: "invalid_action_challenge_target" }, 400);
+  }
+  const now = dependencies.now();
+  if (!session.reauthAt || now - session.reauthAt > REAUTH_TTL * 1000) {
+    return json({ error: "reauth_required", reauth_url: "/auth/reauth?return_to=/" }, 401);
+  }
+  const token = randomString(32);
+  const expiresAt = now + ACTION_CHALLENGE_TTL * 1000;
+  await env.OAUTH_KV.put(ACTION_CHALLENGE_PREFIX + token, JSON.stringify({
+    sessionKey: session.key,
+    action: target.action,
+    digest: await actionDigestFor(target.action, target),
+    expiresAt,
+  }), { expirationTtl: ACTION_CHALLENGE_TTL });
+  return json({ challenge: token, expires_at: new Date(expiresAt).toISOString() });
+}
+
+async function startReauth(request, env, dependencies) {
+  const session = await sessionFor(request, env, dependencies);
+  if (!session) return redirect(`https://${DEALROOM_HOST}/auth/login?return_to=${encodeURIComponent(safeReturnTo(new URL(request.url).searchParams.get("return_to")))}`);
+  const response = await startLogin(request, env, { purpose: "reauth", sessionKey: session.key });
+  return attachRefresh(response, session.refreshCookie);
 }
 
 async function bundleAsset(env, request) {
@@ -258,23 +449,51 @@ export function createDealroomHandler(overrides = {}) {
 
   return {
     async fetch(request, env, ctx) {
+      const response = await handleRequest(request, env, ctx, dependencies);
+      return withSecurityHeaders(response);
+    },
+  };
+}
+
+async function handleRequest(request, env, ctx, dependencies) {
       const url = new URL(request.url);
       const publicResponse = await publicShellAsset(env, request, url.pathname);
       if (publicResponse) return publicResponse;
       if (url.pathname === "/auth/login" && request.method === "GET") return startLogin(request, env);
       if (url.pathname === "/auth/callback" && request.method === "GET") return completeLogin(request, env, dependencies);
-      if (url.pathname === "/auth/signout" && (request.method === "GET" || request.method === "POST")) return signOut(request, env);
+      if (url.pathname === "/auth/reauth" && request.method === "GET") return startReauth(request, env, dependencies);
+
+      if (url.pathname === "/auth/signout") {
+        if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+        const signOutSession = await sessionFor(request, env, dependencies);
+        if (!signOutSession) return json({ error: "unauthorized", state: "sign_in_required" }, 401);
+        if (!sameOrigin(request) || request.headers.get("sec-fetch-site") !== "same-origin" ||
+            !equalStrings(request.headers.get("x-carr-csrf"), signOutSession.csrfToken)) {
+          return json({ error: "forbidden", reason: "csrf_mismatch" }, 403);
+        }
+        return attachRefresh(await signOut(request, env), signOutSession.refreshCookie);
+      }
 
       const session = await sessionFor(request, env, dependencies);
       if (!session) {
-        if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes") {
+        if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" || url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
         }
         return redirect(`https://${DEALROOM_HOST}/auth/login?return_to=${encodeURIComponent(url.pathname + url.search)}`);
       }
 
       let response;
-      if (url.pathname === "/mcp") {
+      if (url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
+        if (!systemWorkEnabled(env)) return json({ error: "program6_actions_disabled" }, 404);
+        if (url.pathname === `${SYSTEM_WORK_PREFIX}/session` && request.method === "GET") response = await systemWorkSession(session, dependencies);
+        else if (url.pathname === `${SYSTEM_WORK_PREFIX}/challenge` && request.method === "POST") response = await createActionChallenge(request, env, session, dependencies);
+        else if (typeof dependencies.program6Handler === "function") {
+          // The injected controller receives a server-derived actor and opaque
+          // session metadata.  It never receives a caller-selected verb or
+          // tenant and must use authorizeProgram6Action for its typed posts.
+          response = await dependencies.program6Handler(request, env, ctx, session.actor, session);
+        } else response = json({ error: "not_found" }, 404);
+      } else if (url.pathname === "/mcp") {
         // SameSite limits cross-site cookies, but sibling subdomains are still
         // the same site. Origin equality closes that remaining CSRF door for
         // every verb POST authenticated by the browser cookie.
@@ -286,8 +505,6 @@ export function createDealroomHandler(overrides = {}) {
       else if (url.pathname === "/pipeline/changes") response = await dependencies.pipelineHandler(request, env, ctx, session.actor);
       else response = await bundleAsset(env, request);
       return attachRefresh(response, session.refreshCookie);
-    },
-  };
 }
 
 export function isDealroomRequest(request) {
