@@ -1,121 +1,174 @@
 #!/usr/bin/env python3
-"""
-retrieve.py — retrieval-as-code for the CARR AI vault (graph-engineering
-build, 2026-07-25). Scores every file/section from Automation/section-index.tsv
-WITHOUT opening a single knowledge file, then prints the handful of reads that
-answer the question. Sessions run this FIRST, then read only what it returns.
+"""Canonical doctrine retrieval with an explicit Drive recovery path.
 
-The ladder this implements (T0 — zero model tokens):
-  1. strip the question to keywords
-  2. score every section from the index alone
-  3. print the top sections as exact path + line-range reads
+Normal use queries ``search_doctrine_situations`` in the record layer and never
+opens CARR_VAULT, Google Drive, or the generated section index.  The old TSV
+reader remains available only as a loud, operator-selected recovery mode:
 
-Usage:
   ./run.sh retrieve "which lenders do we intro for dental startups"
-  python3 tools/retrieve.py [-n TOP] [--vault PATH] <question words...>
+  ./run.sh retrieve --recovery "record-layer outage procedure"
 
-If the index is missing or stale, rebuild with: ./run.sh section-index
-(health-check watches staleness). No hits is a real answer: fall back to the
-INDEX.md router — never guess paths.
+``--vault`` is accepted only with ``--recovery``.  A normal store failure is an
+unavailable result, not permission to return an old export as current truth.
 """
-import sys, os
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Any
 
 from retrieval_lexical import rank_index, toks
 
-def main():
-    args = sys.argv[1:]
-    top = 8
-    vault = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
-    words = []
-    i = 0
-    while i < len(args):
-        if args[i] == "-n":
-            top = int(args[i + 1]); i += 2
-        elif args[i] == "--vault":
-            vault = args[i + 1]; i += 2
-        else:
-            words.append(args[i]); i += 1
-    if not words:
-        print(__doc__); sys.exit(2)
-    words = " ".join(words).split()   # a quoted question is one argv entry; re-split
+DEFAULT_RECOVERY_VAULT = Path(
+    "/Users/booko/Library/CloudStorage/"
+    "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+)
+EX_UNAVAILABLE = 69
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Search canonical doctrine; Drive is explicit recovery only."
+    )
+    parser.add_argument("-n", type=int, default=8, dest="top")
+    parser.add_argument(
+        "--recovery",
+        action="store_true",
+        help="also use the generated Drive section index as outage recovery",
+    )
+    parser.add_argument(
+        "--vault",
+        help="recovery vault root; refused unless --recovery is also present",
+    )
+    parser.add_argument("words", nargs="+")
+    args = parser.parse_args(argv)
+    if args.top < 1:
+        parser.error("-n must be at least 1")
+    if args.vault and not args.recovery:
+        parser.error("--vault is a recovery source; pass --recovery explicitly")
+    return args
+
+
+def query_store(words: list[str], top: int) -> list[Any]:
+    """Use the exact database retrieval function shared with search-doctrine."""
+    repo = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(repo))
+    from lib.record_sources import _connect
+
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select doc_slug, section_key, title, rank, snippet
+              from search_doctrine_situations(%s, null, null, %s, null)
+             order by final_score desc, concept_score desc,
+                      lexical_score desc, section_key asc
+            """,
+            (" ".join(words), top),
+        )
+        return list(cur.fetchall())
+
+
+def recovery_vault(explicit: str | None) -> Path:
+    """Resolve Drive only after the caller has selected recovery mode."""
+    return Path(explicit or os.environ.get("CARR_VAULT") or DEFAULT_RECOVERY_VAULT)
+
+
+def print_store_hits(store_hits: list[Any]) -> None:
+    if not store_hits:
+        return
+    print("retrieve: STORE hits (live canonical copies):")
+    for slug, key, title, _rank, snippet in store_hits:
+        label = f"{slug} § {key}" + (f" - {title}" if title else "")
+        print(f"  [store]  {label}")
+        print(f"           read-doctrine {{\"document\":\"{slug}\"}} · {snippet}")
+
+
+def recovery_hits(vault: Path, query: str, top: int, store_available: bool) -> list[Any]:
+    """Read the generated TSV only inside the explicit recovery boundary."""
+    migrated_rel: set[str] = set()
+    if store_available:
+        try:
+            from lib.record_sources import doctrine_migrated_paths
+            migrated_rel = set(doctrine_migrated_paths(str(vault)))
+        except Exception as exc:
+            print(
+                "retrieve: RECOVERY could not classify migrated file copies "
+                f"({type(exc).__name__}); refusing the Drive index",
+                file=sys.stderr,
+            )
+            raise RuntimeError("recovery classification unavailable") from exc
+
+    index = vault / "Automation" / "section-index.tsv"
+    if not index.exists():
+        raise FileNotFoundError(
+            f"RECOVERY index missing: {index}; recovery does not rebuild or mutate it"
+        )
+    return rank_index(str(index), query, top=None, migrated_paths=migrated_rel)[:top]
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(list(sys.argv[1:] if argv is None else argv))
+    words = " ".join(args.words).split()
     query = " ".join(words).lower()
-    q = set(toks(query))
-    if not q:
-        print("retrieve: query reduced to nothing after stopwords; be more specific"); sys.exit(1)
+    keywords = set(toks(query))
+    if not keywords:
+        print("retrieve: query reduced to nothing after stopwords; be more specific")
+        return 1
 
-    # ---- DUAL-READ, store pass first (doctrine-store build P4, 2026-08-08;
-    # decisions 82a2fb62 + the import-door entry). Migrated doctrine lives in
-    # the record layer; its vault .md copies are frozen dual-read fallbacks
-    # until the cutoff. The store pass runs the SAME database retrieval function
-    # as search-doctrine; a store hit prints as a verb pointer, never a file path.
-    # FAIL-SOFT: any error prints one line and the file pass still answers —
-    # a dead store must never make retrieval blind (record_sources doctrine).
-    #
-    # PHASE 1 (2026-08-13): migrated_rel now comes from lib.record_sources.
-    # doctrine_migrated_paths — the SAME function build-section-index.py and
-    # build-system-graph.py call, so all three systemic readers agree on
-    # exactly which paths are store-held. It used to be computed inline here
-    # (three copies drifting was the risk rule 73381d78 names).
-    migrated_rel = set()
-    store_hits = []
+    store_available = True
     try:
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-        from lib.record_sources import _connect, doctrine_migrated_paths
-        migrated_rel = doctrine_migrated_paths(vault)
-        with _connect() as conn, conn.cursor() as cur:
-            # The database function is the one production ranker for both MCP
-            # and this CLI.  It retains the raw question for its lexical lane,
-            # applies scope before rank, and adds only approved concept evidence.
-            cur.execute("""
-                select doc_slug, section_key, title, rank, snippet
-                  from search_doctrine_situations(
-                    %s, null, null, %s, null)
-                 order by final_score desc, concept_score desc,
-                          lexical_score desc, section_key asc
-            """, (" ".join(words), top))
-            store_hits = cur.fetchall()
+        store_hits = query_store(words, args.top)
     except Exception as exc:
-        print(f"retrieve: store pass skipped ({type(exc).__name__}) — file index only")
+        store_available = False
+        store_hits = []
+        if not args.recovery:
+            print(
+                "retrieve: canonical store unavailable "
+                f"({type(exc).__name__}); normal mode refuses Drive fallback. "
+                "Use --recovery only for an acknowledged outage.",
+                file=sys.stderr,
+            )
+            return EX_UNAVAILABLE
+        print(
+            "retrieve: RECOVERY MODE - canonical store unavailable "
+            f"({type(exc).__name__}); reading the generated Drive index",
+            file=sys.stderr,
+        )
 
-    index = os.path.join(vault, "Automation", "section-index.tsv")
-    if not os.path.exists(index):
-        print(f"retrieve: {index} missing — run ./run.sh section-index first"); sys.exit(1)
+    print_store_hits(store_hits)
+    if not args.recovery:
+        if not store_hits:
+            print("retrieve: no canonical doctrine hits")
+        return 0
 
-    # PHASE 1 (2026-08-13): the index carries an 8th column now — source,
-    # 'file' or 'store' (build-section-index.py). A 'store' row's path is
-    # `doctrine:<slug>`, never a real file, so it prints as a read-doctrine
-    # pointer below instead of a file-open. Rows with only 7 columns (a stale
-    # TSV from before this build) default to 'file' — same behaviour as ever.
-    ranked_all = rank_index(index, query, top=None, migrated_paths=migrated_rel)
+    vault = recovery_vault(args.vault)
+    print(f"retrieve: RECOVERY MODE - Drive index at {vault}", file=sys.stderr)
+    try:
+        ranked = recovery_hits(vault, query, args.top, store_available)
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"retrieve: {exc}", file=sys.stderr)
+        return EX_UNAVAILABLE
 
-    if store_hits:
-        print(f"retrieve: STORE hits (read via verbs, these are the live copies):")
-        for slug, key, title, rank, snippet in store_hits:
-            label = f"{slug} § {key}" + (f" — {title}" if title else "")
-            print(f"  [store]  {label}")
-            print(f"           read-doctrine {{\"document\":\"{slug}\"}} · {snippet}")
-
-    if not ranked_all and not store_hits:
-        print("retrieve: no keyword hits — fall back to the INDEX.md router (do not guess paths)")
-        sys.exit(0)
-    if not ranked_all:
-        sys.exit(0)
-    ranked = ranked_all[:top]
-
-    print(f"retrieve: top {len(ranked)} of {len(ranked_all)} matching files for: {' '.join(sorted(q))}")
+    if not ranked and not store_hits:
+        print("retrieve: no recovery index hits")
+        return 0
+    if ranked:
+        print(f"retrieve: RECOVERY file hits for: {' '.join(sorted(keywords))}")
     for item in ranked:
-        score = item.score
-        path, start, end, level = item.row.path, item.row.start, item.row.end, item.row.level
-        header, parents, source = item.row.header, item.row.parents, item.row.source
-        crumb = f"{parents} > {header}" if parents else header
-        if source == "store":
-            slug = path.split("doctrine:", 1)[1]
-            print(f"  {score:5.1f}  [store]  {crumb}")
-            print(f"           read-doctrine {{\"document\": \"{slug}\"}}")
+        row = item.row
+        crumb = f"{row.parents} > {row.header}" if row.parents else row.header
+        if row.source == "store":
+            slug = row.path.split("doctrine:", 1)[1]
+            print(f"  {item.score:5.1f}  [store export]  {crumb}")
+            print(f"           read-doctrine {{\"document\":\"{slug}\"}}")
         else:
-            span = f"lines {start}-{end}" if level else f"whole file (1-{end})"
-            print(f"  {score:5.1f}  {path}  [{span}]  {crumb}")
-    print("open the top hit only; follow one link out if it points elsewhere (the one-edge rule)")
+            span = f"lines {row.start}-{row.end}" if row.level else f"whole file (1-{row.end})"
+            print(f"  {item.score:5.1f}  {row.path}  [{span}]  {crumb}")
+    print("RECOVERY output is an export, not current canonical truth")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

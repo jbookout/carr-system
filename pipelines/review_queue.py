@@ -80,7 +80,6 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out"
 STORE = OUT / "review-queue"
 DOCUMENTS = OUT / "documents"
-VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
 # The standing enforcement rule's own words, from social-media-workflow.md step 4.
 # Every scheduled batch writes an open-loops row carrying this in its
@@ -425,30 +424,39 @@ def read_documents():
 # social lane — a pointer, not a rebuild
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_social():
-    f = VAULT / "00_Context/open-loops.md"
-    if not f.exists():
-        return [], "the open items file is not reachable from here"
+def read_social(url):
+    """Read scheduled-post review pointers from canonical v_loops."""
+    if not url:
+        return [], "not configured: no canonical database credential"
+    try:
+        import psycopg
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute("""select loop_id, number, owner, title, body, marker,
+                                  due_on, source_note
+                             from v_loops
+                            where status = 'open' and unblocks = %s
+                            order by render_seq""", (SOCIAL_UNBLOCKS,))
+            cols = [d.name for d in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception as exc:
+        return [], f"canonical loop read unavailable ({type(exc).__name__})"
+
     items = []
     not_due = 0
-    today = datetime.now().date().isoformat()
-    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.startswith("|") or SOCIAL_UNBLOCKS not in line:
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) < 6:
-            continue
-        body = cells[2]
+    today = datetime.now().date()
+    for row in rows:
+        body = str(row.get("body") or row.get("title") or "")
         # The marker convention in the open-loops header is the authority on what
-        # is live, and this reads it rather than judging the prose: a future-dated
+        # is live, and the typed columns carry it directly: a future-dated
         # row is silent until its day. Skipping it is not hiding it, which is why
         # the count comes back in the lane status.
-        dated = re.match(r"🗓(\d{4}-\d{2}-\d{2})", body)
-        if dated and dated.group(1) > today:
+        due_on = row.get("due_on")
+        if due_on and due_on > today:
             not_due += 1
             continue
-        marker = "due now" if body.startswith("🔔") else (
-            "now due" if dated else "open")
+        marker_kind = row.get("marker")
+        marker = "due now" if marker_kind == "bell" else (
+            "now due" if marker_kind == "dated" else "open")
         headline = re.sub(r"\*\*(.+?)\*\*", r"\1", body)
         headline = re.sub(r"[🔔🗓✅⚠️⏳]", "", headline).strip()
         headline = re.sub(r"^\d{4}-\d{2}-\d{2}\s*", "", headline)
@@ -459,12 +467,12 @@ def read_social():
             count = int(m.group(1))
         first = headline.split(". ")[0][:200].rstrip(" .") + "."
         items.append({
-            "item_id": f"social-{cells[0]}",
-            "owner": cells[1],
+            "item_id": f"social-{row.get('number') or row['loop_id']}",
+            "owner": row.get("owner") or "",
             "state": marker,
             "headline": first,
             "posts": count,
-            "where": cells[5],
+            "where": row.get("source_note") or "canonical loop record",
         })
     if not items:
         return [], ("nothing is scheduled and waiting"
@@ -731,7 +739,7 @@ def main() -> int:
     pruned = write_drafts(drafts, store / "drafts")
 
     doc_items, doc_status = read_documents()
-    soc_items, soc_status = read_social()
+    soc_items, soc_status = read_social(url)
 
     now = datetime.now(timezone.utc)
     queue: dict[str, Any] = {
