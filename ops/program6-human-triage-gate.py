@@ -11,7 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
-from gate_runtime_role import grant_settable_runtime_roles, set_local_role
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -74,7 +74,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             joe = cur.execute("select id from actor where slug='joe' and active and kind='human'").fetchone()
             dell = cur.execute("select id from actor where slug='dell' and active and kind='human'").fetchone()
             if not joe or not dell:
@@ -169,7 +169,6 @@ def main() -> int:
             ).fetchone()
             if stored != ("triaged", None, None, "operational", dell[0]):
                 return fail(f"triage widened sourced Work Request state or attribution: {stored}")
-            conn.rollback()
         print("PASS: Program 6 triage is authority-bound, idempotent, and captured-to-triaged only")
         return 0
     except Exception as exc:

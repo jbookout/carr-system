@@ -8,8 +8,10 @@ the gate's final rollback removes them along with its fixtures.
 
 from __future__ import annotations
 
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
+import psycopg
 from psycopg import sql
 
 
@@ -47,3 +49,18 @@ def set_local_role(cur: Any, role: str) -> None:
     actual = _one_text(cur, "select current_user", "runtime role identity")
     if actual != role:
         raise RuntimeError(f"expected current_user {role!r} after SET LOCAL ROLE, got {actual!r}")
+
+
+@contextmanager
+def rollback_only_connection(dsn: str) -> Iterator[Any]:
+    """Yield one acceptance-gate transaction and roll it back on every exit.
+
+    A gate's ``return fail(...)`` is a normal context-manager exit, which would
+    otherwise commit fixture rows, temporary role options, or DDL.  The finally
+    block therefore rolls back both assertion failures and normal early returns.
+    """
+    with psycopg.connect(dsn, autocommit=False) as conn:
+        try:
+            yield conn
+        finally:
+            conn.rollback()

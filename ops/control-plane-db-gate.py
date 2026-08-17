@@ -18,7 +18,7 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
-from gate_runtime_role import grant_settable_runtime_roles, set_local_role
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -105,7 +105,7 @@ def main() -> int:
         fail(f"could not load checked-in scheduler surface registry: {exc}")
         return 2
 
-    with psycopg.connect(dsn) as conn:
+    with rollback_only_connection(dsn) as conn:
         with conn.cursor() as cur:
             for table in REQUIRED_TABLES:
                 cur.execute("select to_regclass(%s)", (table,))
@@ -788,7 +788,6 @@ def main() -> int:
             # requires an externally provisioned real authority-DSN probe;
             # this disposable owner gate does not perform one.
 
-        conn.rollback()
     print("control-plane-db-gate passed: admission, leases, idempotency, receipts and owner cutover refusal exercised")
     return 0
 

@@ -11,7 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
-from gate_runtime_role import grant_settable_runtime_roles, set_local_role
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -69,7 +69,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             joe = cur.execute("select id from actor where slug='joe' and active and kind='human'").fetchone()
             dell = cur.execute("select id from actor where slug='dell' and active and kind='human'").fetchone()
             if not joe or not dell:
@@ -153,7 +153,6 @@ def main() -> int:
             if cur.execute("select * from ops.work_request_card(%s,%s)", (ref, "carr-internal")).fetchone():
                 return fail("later-state Work Request returned a card")
             cur.execute("rollback to savepoint program6_later_state_card")
-            conn.rollback()
         print("PASS: Program 6 sourced Work Request capture is current, scoped, idempotent, and captured-only")
         return 0
     except Exception as exc:

@@ -9,7 +9,7 @@ import sys
 import uuid
 
 import psycopg
-from gate_runtime_role import grant_settable_runtime_roles, set_local_role
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -41,7 +41,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             cur.execute("""do $$ begin
               if not exists (select 1 from pg_roles where rolname='carr_authority_joe') then
                 create role carr_authority_joe login;
@@ -113,7 +113,6 @@ def main() -> int:
             """).fetchone()
             if privileges != (False, False, False, False, False):
                 raise RuntimeError(f"browser challenge ledger grant leaked: {privileges}")
-            conn.rollback()
     except Exception as exc:
         return fail(str(exc))
     print("program6-browser-action-challenge-gate: PASS")

@@ -11,7 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
-from gate_runtime_role import grant_settable_runtime_roles, set_local_role
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -122,7 +122,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             authority_roles(cur)
             joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
             source_section, source_rev, origin_ref, runbook_ref = fixture(cur, joe_id)
@@ -248,7 +248,6 @@ def main() -> int:
             if historical_proposal[5:7] != ("ready", ready_version) or historical_acceptance[2:4] != ("ready", ready_version):
                 raise RuntimeError("historical replay did not preserve the original ready version")
             cur.execute("rollback to savepoint historical_replay")
-            conn.rollback()
     except Exception as exc:
         return fail(str(exc))
     print("program6-outcome-feedback-gate: PASS")

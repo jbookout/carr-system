@@ -11,7 +11,7 @@ import uuid
 
 import psycopg
 from psycopg.types.json import Jsonb
-from gate_runtime_role import grant_settable_runtime_roles, set_local_role
+from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 
 def fail(message: str) -> int:
@@ -164,7 +164,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     try:
-        with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             ensure_authority_roles(cur)
             joe_id = one(cur,
                 "select id from actor where slug='joe' and active and kind='human'"
@@ -431,7 +431,6 @@ def main() -> int:
             if privileges != (False, False, False, False):
                 raise RuntimeError(f"raw plan/acceptance authority leaked: {privileges}")
 
-            conn.rollback()
         print("PASS: Program 6 plan proposal is immutable and human acceptance alone reaches ready")
         return 0
     except Exception as exc:
