@@ -2,6 +2,7 @@ import hashlib
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -34,6 +35,24 @@ STAMP = "2026-08-08T12:34:56Z"
         (False, "false"),
         (b"\x00\xaf\xff", "00afff"),
         (memoryview(b"\x01\x10"), "0110"),
+        # A uuid[] column arrives as a list of UUID objects, which json.dumps
+        # refuses by default. On 2026-08-17 that TypeError took the whole
+        # portability mirror down — the readable escape hatch stopped
+        # refreshing because three tables (experiment.piece_ids,
+        # retrieval_proposal.resulting_row_ids, retrieval_query_log
+        # .selected_row_ids) now carry uuid arrays. Every scalar branch above
+        # already stringifies its type; the container branch must do the same
+        # for whatever it holds.
+        (
+            [UUID("00000000-0000-4000-8000-000000000001")],
+            '["00000000-0000-4000-8000-000000000001"]',
+        ),
+        (
+            {"at": datetime(2026, 8, 8, 7, 6, 5, tzinfo=timezone.utc)},
+            '{"at": "2026-08-08T07:06:05+00:00"}',
+        ),
+        (UUID("00000000-0000-4000-8000-000000000002"),
+         "00000000-0000-4000-8000-000000000002"),
     ],
 )
 def test_serialize_cell(value, expected):
