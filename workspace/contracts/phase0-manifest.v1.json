@@ -1,6 +1,6 @@
 {
   "contract": "carr-workspace-phase0-manifest",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "status": "phase0_artifacts_reconciled_and_independently_verified_pending_human_acceptance_council_joe_approval_and_ordinal_capability",
   "source": {
     "path": "/Users/booko/Desktop/System Road Maps/CARR Workspace - BDUF and Implementation Roadmap.docx",
@@ -220,7 +220,7 @@
     "artifact_preparation": "tenant/workflow/maintenance and sponsor/runtime identity planning contracts passed fresh-context independent verification with P0/P1/P2 all zero; the separately authorized narrow connector repair also passed live verification",
     "sponsor_runtime_identity": "machine gate passed: the repair was verified at 144 shared and 30 Joe-personal; the council-packet preflight on 2026-08-12 returned 146 shared and 31 Joe-personal with distinct tenant, sponsor, runtime, brain scope, and capability metadata; counts are dated evidence; caller-selected partner=dell is refused before rule arrays; runtime tests passed 75/75 and loop 319 is done",
     "interactive_visual_accessibility": "runtime entry verified; full visual, keyboard, and screen-reader review remains unverified",
-    "joe_and_dell_uncoached_six_workspace_journeys": "not performed",
+    "joe_uncoached_six_workspace_journeys": "Joe's evidence gates system exit; Dell may independently perform the same journeys, but his participation is optional and nonblocking",
     "baseline_measurement": "all five values remain unknown pending instrumentation or interview",
     "roadmap_final_approval": "Joe's approval is required after the Wednesday council recommends integrated versions across all three roadmaps and the governing production baseline",
     "integrated_program_reconciliation": "amended tenant/workflow package passed cold-context independent verification against the three roadmaps and governing production baseline"
