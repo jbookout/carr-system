@@ -181,6 +181,61 @@ test("the registry exposes a read context and only human-governed lifecycle writ
       `${name} must reject cross-program writes`);
 });
 
+test("capability-program exposes only the current open session identity", async () => {
+  const current = {
+    id: "wr-current", ref: "WR-AI-006", program_ordinal: 1, version: 3, state: "in_progress",
+    disposition: "extend", title: "RAG pipeline", project_context: {},
+  };
+  const later = {
+    ...current, id: "wr-later", ref: "WR-AI-007", program_ordinal: 2, state: "ready",
+  };
+  const session = {
+    id: "11111111-1111-4111-8111-111111111111", state: "in_progress",
+    candidate_evidence: { artifact_ref: "must-not-leak" }, candidate_fingerprint: "a".repeat(32),
+  };
+  const db = { query: async (sql, params = []) => {
+    if (sql.includes("from ops.work_request")) return { rows: [current, later] };
+    if (sql.includes("from ops.capability_agent_session")) {
+      assert.deepEqual(params, [current.id], "session lookup binds only the current Work Request");
+      assert.match(sql, /state not in \('completed','cancelled'\)/i,
+        "terminal and historical sessions are excluded in SQL");
+      return { rows: [session] };
+    }
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM, sequence: 2, include_all: true });
+
+  assert.deepEqual(result.capability_session, { id: session.id, state: session.state });
+  assert.deepEqual(result.current.ref, "WR-AI-006");
+  assert.deepEqual(result.requested.ref, "WR-AI-007");
+  assert.equal("candidate_evidence" in result.capability_session, false);
+  assert.equal("candidate_fingerprint" in result.capability_session, false);
+  assert.equal("capability_session" in result.projects[0], false);
+  assert.equal("capability_session" in result.projects[1], false);
+});
+
+test("capability-program returns no session when the current Work Request has none", async () => {
+  const current = {
+    id: "wr-current", ref: "WR-AI-006", program_ordinal: 1, version: 1, state: "ready",
+    disposition: "extend", title: "RAG pipeline", project_context: {},
+  };
+  const db = { query: async (sql, params = []) => {
+    if (sql.includes("from ops.work_request")) return { rows: [current] };
+    if (sql.includes("from ops.capability_agent_session")) {
+      assert.deepEqual(params, [current.id]);
+      return { rows: [] };
+    }
+    throw new Error(`unexpected query: ${sql}`);
+  }};
+  const tools = capabilityProgramTools({ withEnvelope: async (_c, _a, _v, _args, fn) => fn(), writeEvent: async () => {}, ToolError });
+
+  const result = await tools["capability-program"].handler(db, actor, { program_key: PROGRAM });
+
+  assert.equal(result.capability_session, null);
+});
+
 class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
 }
