@@ -1,6 +1,6 @@
 {
   "contract": "carr-integrated-phase0-program",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "status": "phase0_complete_amended_roadmap_signed_off_by_joe_2026_08_15_phase1_foundation_authorized_at_p0_1",
   "roadmap_signoff": {
     "signed_off_on": "2026-08-15",
@@ -151,7 +151,7 @@
       "doctrine_generation": 344,
       "doctrine_sections": 35,
       "hardware_section": "s33-carr-local-edge-node-and-mac-hardware-requirements",
-      "phase0_exit": "artifact preparation plus Joe and Dell uncoached acceptance evidence"
+      "phase0_exit": "artifact preparation plus Joe's uncoached acceptance evidence; Dell may independently validate but does not gate exit"
     },
     {
       "product": "CARR Control Room",
@@ -208,7 +208,7 @@
     "objectives": 8,
     "baseline_measures": 5,
     "baseline_values": "unknown until instrumented or interviewed",
-    "adoption_rule": "A routine is not adopted until Joe or Dell can complete and understand it without a heavy Claude Code or Codex session and the old session-driven ritual has an explicit retirement or cutover path.",
+    "adoption_rule": "A routine is not adopted until Joe can complete and understand it without a heavy Claude Code or Codex session and the old session-driven ritual has an explicit retirement or cutover path. Dell may independently validate the routine, but his participation does not gate adoption or retirement.",
     "council_criterion": "The Wednesday council must reject a slice that cannot trace the objective and baseline through requirements, screens, canonical data/actions, tests, post-launch comparison, and cutover."
   },
   "tenant_readiness_and_workflow_governance": {
