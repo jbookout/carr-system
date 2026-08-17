@@ -633,7 +633,6 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         limit: { type: "integer" } },
         required: ["q"] },
       handler: async (c, actor, args) => {
-        await actorId(c, actor);
         return searchDoctrineSituations(c, actor, args);
       },
     },

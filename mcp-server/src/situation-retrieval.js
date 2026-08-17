@@ -4,6 +4,8 @@
 // below mirrors its open arithmetic for property tests and offline scorecard
 // inspection; it never rewrites a query or generates answer text.
 
+import { personalScopeForActor } from "./identity.js";
+
 const POLICIES = new Set(["lexical-dominant-v1", "coequal-normalized-v1"]);
 
 
@@ -108,13 +110,28 @@ async function insertProposal(c, actor, args, proposalType, payload) {
 }
 
 
+export async function retrievalVisibilityActorId(c, actor) {
+  const scope = personalScopeForActor(actor);
+  if (scope.status === "error")
+    throw new Error(`retrieval_scope_refused:${scope.error}`);
+  if (scope.status === "none") return null;
+
+  // The runtime actor and the human whose personal brain it may read are
+  // separate identities. joe-local/codex/hermes UUIDs must never become the
+  // visibility selector. The sponsor was derived by the authenticated server
+  // door; resolve that exact human row here and nowhere from tool arguments.
+  const found = await c.query(
+    `select id from actor where slug=$1 and kind='human' and active=true`,
+    [scope.sponsor],
+  );
+  if (found.rows.length !== 1)
+    throw new Error("retrieval_scope_refused:sponsor_not_active_human");
+  return found.rows[0].id;
+}
+
+
 export async function searchDoctrineSituations(c, actor, args) {
-  let actorId = actor.id || null;
-  if (!actorId && actor.slug) {
-    const found = await c.query(`select id from actor where slug=$1`, [actor.slug]);
-    actorId = found.rows[0]?.id || null;
-    actor.id = actorId;
-  }
+  const actorId = await retrievalVisibilityActorId(c, actor);
   const policy = args.policy_id || null;
   if (policy && !POLICIES.has(policy)) throw new Error(`unknown retrieval policy: ${policy}`);
   const result = await c.query(
