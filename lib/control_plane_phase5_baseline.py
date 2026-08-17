@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -13,8 +14,15 @@ class BaselineRefusal(ValueError):
 
 
 class Cursor(Protocol):
-    def execute(self, query: str, params: tuple[object, ...]) -> None: ...
-    def fetchall(self) -> list[tuple[object, ...]]: ...
+    def execute(
+        self,
+        query: str,
+        params: Sequence[Any] | Mapping[str, Any] | None = None,
+        *,
+        prepare: bool | None = None,
+        binary: bool | None = None,
+    ) -> Any: ...
+    def fetchall(self) -> list[tuple[Any, ...]]: ...
 
 
 # This is deliberately the only database query the baseline resolver issues.
