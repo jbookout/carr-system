@@ -27,8 +27,12 @@ def main() -> int:
     restore = RESTORE.read_text(encoding="utf-8")
     check("nightly never sources db.env", '. "$HOME/.config/carr/db.env"' not in nightly)
     check("nightly uses a clean child environment", "carr_routine_exec \"$@\"" in nightly)
+    # Five admin-capability refusals (schema snapshot, the three environment
+    # gates, corpus push) plus, since 2026-08-17, the portability mirror's own
+    # refusal when the carr_backup DSN is absent — an unprovisioned capability
+    # is a SKIP, and routing it through this helper is what makes it one.
     check("admin nightly steps refuse through evidence-producing step calls",
-          nightly.count("routine-admin-refusal.sh") == 5)
+          nightly.count("routine-admin-refusal.sh") == 6)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
     check("portability mirror uses only the backup capability",
           'step "portability mirror' in nightly and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
