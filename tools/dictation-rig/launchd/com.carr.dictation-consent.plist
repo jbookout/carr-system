@@ -39,6 +39,20 @@
     <key>ThrottleInterval</key>
     <integer>1</integer>
 
+    <!--
+        StartInterval exists for the STILL-RECORDING reminder, and WatchPaths
+        cannot serve it: WatchPaths fires on changes to ~/Recordings' own
+        directory entries, so a session directory appearing or being renamed
+        wakes us, but mic.caf growing INSIDE that subdirectory does not. A
+        recording therefore produces exactly one event at start and one at
+        stop. On 2026-08-17 that silence let meeting mode run 52 minutes past
+        intent. This tick is what lets consent-watch.sh speak again while a
+        session is still hot; the run is a cheap directory scan that exits 0
+        when nothing is recording.
+    -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
     <key>StandardOutPath</key>
     <string>/Users/booko/carr-system/out/dictation-consent.log</string>
 
