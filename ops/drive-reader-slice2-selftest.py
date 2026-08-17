@@ -115,6 +115,68 @@ with tempfile.TemporaryDirectory(prefix="drive-reader-slice2-") as td:
     check("an exact live scheduled execution satisfies its due window",
           p.returncode == 0 and "MISSING DUE" not in p.stdout, p.stdout + p.stderr)
 
+    # A collapsed monthly cadence permits one of its eligible cron instants,
+    # not merely any live row in the same month.  These fixtures pin the P1
+    # regressions that used to make all three cases falsely green.
+    monthly_definition = {"key": "monthly", "version": 1,
+                          "recurrence": {"cron": "0 7 6-10 * *",
+                                         "timezone": "America/Chicago",
+                                         "source": "collapses window"},
+                          "registered_at": "2026-07-01T00:00:00+00:00"}
+
+    cancelled_monthly = tmp / "cancelled-monthly.json"
+    cancelled_monthly.write_text(json.dumps({
+        "observed_at": fixed_now, "errors": [],
+        "job_definitions": [monthly_definition],
+        "jobs": [{"id": "cancelled-monthly", "definition_key": "monthly",
+                  "definition_version": 1, "state": "cancelled", "mode": "live",
+                  "attempt": 1, "max_attempts": 2,
+                  "scheduled_for": "2026-08-06T12:00:00+00:00",
+                  "created_at": "2026-08-06T12:00:00+00:00",
+                  "completion_receipt_count": 0}],
+    }))
+    p = run(str(PY), "tools/health-check.py", "--section", "jobs",
+            "--fixture", str(cancelled_monthly))
+    check("cancelled eligible monthly execution is non-success, never green",
+          p.returncode == 1 and "monthly window 2026-08 NON-SUCCESS execution (cancelled)" in p.stdout and
+          "CANONICAL_FINDING job_due_non_success" in p.stdout, p.stdout + p.stderr)
+
+    old_failed_monthly = tmp / "old-failed-monthly.json"
+    old_failed_monthly.write_text(json.dumps({
+        "observed_at": fixed_now, "errors": [],
+        "job_definitions": [monthly_definition],
+        "jobs": [{"id": "old-failed-monthly", "definition_key": "monthly",
+                  "definition_version": 1, "state": "failed", "mode": "live",
+                  "attempt": 1, "max_attempts": 1,
+                  "scheduled_for": "2026-08-06T12:00:00+00:00",
+                  "created_at": "2026-08-06T12:00:00+00:00",
+                  "completion_receipt_count": 0}],
+    }))
+    p = run(str(PY), "tools/health-check.py", "--section", "jobs",
+            "--fixture", str(old_failed_monthly))
+    check("failed monthly execution older than terminal-failure lookback is still non-success",
+          p.returncode == 1 and "monthly window 2026-08 NON-SUCCESS execution (failed)" in p.stdout,
+          p.stdout + p.stderr)
+
+    for label, scheduled_for in (("off-window", "2026-08-05T12:00:00+00:00"),
+                                 ("future", "2026-08-20T12:00:00+00:00")):
+        invalid_monthly = tmp / f"{label}-monthly.json"
+        invalid_monthly.write_text(json.dumps({
+            "observed_at": fixed_now, "errors": [],
+            "job_definitions": [monthly_definition],
+            "jobs": [{"id": f"{label}-monthly", "definition_key": "monthly",
+                      "definition_version": 1, "state": "succeeded", "mode": "live",
+                      "attempt": 1, "max_attempts": 1,
+                      "scheduled_for": scheduled_for,
+                      "created_at": "2026-08-05T12:00:00+00:00",
+                      "completion_receipt_count": 1}],
+        }))
+        p = run(str(PY), "tools/health-check.py", "--section", "jobs",
+                "--fixture", str(invalid_monthly))
+        check(f"{label} same-month monthly row cannot satisfy the due window",
+              p.returncode == 1 and "monthly MISSING DUE execution for monthly window 2026-08" in p.stdout,
+              p.stdout + p.stderr)
+
     stuck = tmp / "stuck.json"
     stuck.write_text(json.dumps({
         "observed_at": fixed_now, "errors": [], "job_definitions": [],

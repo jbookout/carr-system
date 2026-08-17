@@ -390,7 +390,14 @@ def _live_jobs(snap):
 
 
 def _missing_due_executions(snap):
-    """Cron windows that passed without a matching live ledger job."""
+    """Due cron windows without a successful, exact ledger completion.
+
+    A ledger row is evidence only when its ``scheduled_for`` is one of the
+    cron's eligible instants (not merely in the same calendar month), it is
+    already due, and that exact attempt succeeded with its completion receipt.
+    This matters most for collapsed monthly windows: a cancelled run, an old
+    failure, or a future/off-window row must not make the month look healthy.
+    """
     now_utc = _canonical_now(snap)
     jobs = _live_jobs(snap)
     findings = []
@@ -419,6 +426,7 @@ def _missing_due_executions(snap):
         except (ValueError, IndexError) as exc:
             findings.append((str(definition.get("key")), f"invalid cron: {exc}"))
             continue
+        eligible = set(windows)
         scheduled = []
         for job in jobs:
             try:
@@ -430,20 +438,50 @@ def _missing_due_executions(snap):
                 continue
             stamp = _iso(job.get("scheduled_for"))
             if stamp:
-                scheduled.append(stamp.astimezone(zone).replace(tzinfo=None))
+                local_stamp = stamp.astimezone(zone).replace(tzinfo=None)
+                # An exact scheduled instant is the ledger identity.  Do not
+                # give a row a five-minute grace here: the scheduler itself
+                # creates the exact instant, and a nearby/manual row is not a
+                # receipt for this due window.
+                if local_stamp in eligible:
+                    scheduled.append((local_stamp, job))
+
+        def is_successful(job):
+            return (job.get("state") == "succeeded" and
+                    int(job.get("completion_receipt_count", 0)) >= 1)
+
+        def non_success_detail(scope, candidates):
+            states = sorted({str(job.get("state") or "unknown") for _, job in candidates})
+            if any(job.get("state") == "succeeded" for _, job in candidates):
+                states.append("succeeded without exact completion receipt")
+            return f"{scope} NON-SUCCESS execution ({', '.join(states)})"
         if collapsed:
             # A monthly window cron intentionally exposes several eligible days;
-            # its ledger contract admits one job in that month, not one per day.
+            # its ledger contract admits one *successful exact eligible* job in
+            # that month, not one arbitrary row or one per eligible day.
             months = sorted({(w.year, w.month) for w in windows})
             for year, month in months:
-                if not any(s.year == year and s.month == month for s in scheduled):
+                candidates = [(s, job) for s, job in scheduled
+                              if s.year == year and s.month == month]
+                if any(is_successful(job) for _, job in candidates):
+                    continue
+                scope = f"monthly window {year:04d}-{month:02d}"
+                if candidates:
                     findings.append((str(definition.get("key")),
-                                     f"monthly window {year:04d}-{month:02d}"))
+                                     non_success_detail(scope, candidates)))
+                else:
+                    findings.append((str(definition.get("key")), scope))
         else:
             for window in windows:
-                if not any(abs((s - window).total_seconds()) <= 300 for s in scheduled):
+                candidates = [(s, job) for s, job in scheduled if s == window]
+                if any(is_successful(job) for _, job in candidates):
+                    continue
+                scope = window.strftime("%Y-%m-%d %H:%M") + f" {zone_name}"
+                if candidates:
                     findings.append((str(definition.get("key")),
-                                     window.strftime("%Y-%m-%d %H:%M") + f" {zone_name}"))
+                                     non_success_detail(scope, candidates)))
+                else:
+                    findings.append((str(definition.get("key")), scope))
     return findings
 
 
@@ -563,9 +601,14 @@ def _canonical_health():
                 print(f"  ⚠︎ {detail}")
                 _canonical_finding("job_completion_receipt", detail)
             for key, window in missing:
-                detail = f"{key} MISSING DUE execution for {window}"
+                if " NON-SUCCESS execution" in window:
+                    detail = f"{key} {window}"
+                    finding = "job_due_non_success"
+                else:
+                    detail = f"{key} MISSING DUE execution for {window}"
+                    finding = "job_missing_due"
                 print(f"  ⚠︎ {detail}")
-                _canonical_finding("job_missing_due", detail)
+                _canonical_finding(finding, detail)
             for job, why in stuck:
                 detail = f"{job.get('definition_key')} job={job.get('id')} {why}"
                 print(f"  ⚠︎ {detail}")
