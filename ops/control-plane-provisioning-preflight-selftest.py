@@ -57,6 +57,11 @@ def main() -> int:
     check("the standard CI gate class discovers this selftest",
           "for t in ops/*-selftest.py tools/test-*.py" in ci)
 
+    static_preflight = PREFLIGHT.read_text(encoding="utf-8")
+    check("static provisioning binds the positive authority-runtime probe",
+          "control-plane-authority-runtime-preflight.py" in static_preflight
+          and "authority runtime identity probe" in static_preflight)
+
     missing_authority = json.loads(json.dumps(config))
     del missing_authority["authority"]["environment_variables"]["dell"]
     rejected = run(missing_authority)
