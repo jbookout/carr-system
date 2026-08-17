@@ -12,6 +12,7 @@ import {
   verifyGoogleIdToken,
 } from "./google-oidc.js";
 import { actorFromProps, propsForSlug, slugForEmail } from "./identity.js";
+import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 
 export const DEALROOM_HOST = "dealroom.doctorcre.com";
 export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
@@ -342,9 +343,12 @@ function approvalTarget(action, args) {
   const humanRef = args.human_ref;
   const baseVersion = args.base_version;
   const proposalHash = args[hashKey];
+  const idempotencyKey = args.idempotency_key;
   if (!/^WR-[0-9]{1,12}$/.test(humanRef || "") || !Number.isInteger(baseVersion) || baseVersion < 1 ||
+      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(idempotencyKey || "") ||
       !/^sha256:[0-9a-f]{64}$/.test(proposalHash || "")) return null;
-  return { action, human_ref: humanRef, base_version: baseVersion, [hashKey]: proposalHash };
+  return { action, human_ref: humanRef, base_version: baseVersion,
+    idempotency_key: idempotencyKey, [hashKey]: proposalHash };
 }
 
 /** A challenge binds the exact immutable approval target, not a mutable UI label. */
@@ -357,7 +361,8 @@ export async function actionDigestFor(action, args) {
  * Reusable authorization seam for the exact typed Program 6 controller.
  * It returns a refusal Response, or null when the action may proceed.
  */
-export async function authorizeProgram6Action({ request, env, session, action, args, now = Date.now() }) {
+export async function authorizeProgram6Action({ request, env, actor, session, action, args,
+  now = Date.now(), redeemChallenge = redeemProgram6BrowserChallenge }) {
   const guard = await guardSystemWorkPost(request, session);
   if (guard.error) return guard.error;
   if (!APPROVAL_ACTIONS.has(action)) return null;
@@ -368,14 +373,17 @@ export async function authorizeProgram6Action({ request, env, session, action, a
   if (!token || token.length > 256) return json({ error: "action_challenge_required" }, 401);
   const key = ACTION_CHALLENGE_PREFIX + token;
   const challenge = await env.OAUTH_KV.get(key, { type: "json" });
-  // Consume before comparing: a racing second request never inherits the
-  // authority of the first, even if both reached the Worker simultaneously.
-  await env.OAUTH_KV.delete(key);
   const digest = await actionDigestFor(action, args);
   if (!challenge || challenge.expiresAt <= now || challenge.sessionKey !== session.key ||
       challenge.action !== action || !digest || !equalStrings(challenge.digest, digest)) {
     return json({ error: "invalid_action_challenge" }, 403);
   }
+  const redemption = await redeemChallenge({ env, actor,
+    tokenDigest: await sha256(token), sessionDigest: await sha256(session.key),
+    action, materialDigest: digest, idempotencyKey: args.idempotency_key });
+  if (!redemption?.ok) return json({ error: redemption?.error || "invalid_action_challenge" },
+    redemption?.error === "authority_connection_unavailable" ? 503 : 403);
+  await env.OAUTH_KV.delete(key);
   return null;
 }
 
@@ -410,6 +418,16 @@ async function createActionChallenge(request, env, session, dependencies) {
     expiresAt,
   }), { expirationTtl: ACTION_CHALLENGE_TTL });
   return json({ challenge: token, expires_at: new Date(expiresAt).toISOString() });
+}
+
+async function prepareSystemWorkControllerRequest(request, session) {
+  if (request.method !== "POST") return { request };
+  const guard = await guardSystemWorkPost(request, session, { readBody: true });
+  if (guard.error) return { error: guard.error };
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  return { request: new Request(request.url, { method: "POST", headers,
+    body: JSON.stringify(guard.value) }) };
 }
 
 async function startReauth(request, env, dependencies) {
@@ -491,7 +509,8 @@ async function handleRequest(request, env, ctx, dependencies) {
           // The injected controller receives a server-derived actor and opaque
           // session metadata.  It never receives a caller-selected verb or
           // tenant and must use authorizeProgram6Action for its typed posts.
-          response = await dependencies.program6Handler(request, env, ctx, session.actor, session);
+          const prepared = await prepareSystemWorkControllerRequest(request, session);
+          response = prepared.error || await dependencies.program6Handler(prepared.request, env, ctx, session.actor, session);
         } else response = json({ error: "not_found" }, 404);
       } else if (url.pathname === "/mcp") {
         // SameSite limits cross-site cookies, but sibling subdomains are still

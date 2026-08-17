@@ -1,5 +1,5 @@
 // The Deal Room's exact Program 6 browser boundary. This module deliberately
-// knows eight fixed routes and eight fixed registered verbs; it never accepts a
+// knows seven fixed routes and seven fixed registered verbs; it never accepts a
 // browser-selected verb, actor, tenant, state, database id, or plan internals.
 // The actual database/authority choice stays in mcp.js's callTool(), so this is
 // a route adapter rather than a second mutation implementation.
@@ -8,13 +8,15 @@ import { ToolError } from "./tools.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 const HUMAN_REF = /^WR-[0-9]{1,12}$/;
-const FEEDBACK_REF = /^FEEDBACK-[0-9]{1,12}$/;
+// 0179's durable human reference. Do not substitute the synthetic FEEDBACK-*
+// values used by older unit fakes: the browser route must accept the reference
+// PostgreSQL actually persists and reads back.
 
 // The browser can describe the bounded human-facing scope. It cannot choose
 // what operational runbook to run, what dependency permits it, or how far it
 // may go. This fixed, reviewed template is the only plan the typed route makes.
 export const SAFE_READY_PLAN = Object.freeze({
-  runbook_ref: "doctrine:runbook#safe-plan",
+  runbook_ref: "doctrine:runbook#diagnosis-checklist-in-order-2-minutes",
   dependency_refs: Object.freeze([]),
   recovery_ref: "safe:recovery:rollback",
   observability_ref: "safe:observe:logs",
@@ -28,7 +30,7 @@ const ROUTES = Object.freeze([
   { method: "POST", pattern: /^\/api\/system-work\/(WR-[0-9]{1,12})\/plan$/, tool: "propose-ready-plan", fields: ["idempotency_key", "base_version", "scope_summary"], fixedPlan: true },
   { method: "POST", pattern: /^\/api\/system-work\/(WR-[0-9]{1,12})\/plan\/accept$/, tool: "accept-ready-plan", fields: ["idempotency_key", "base_version", "plan_hash"] },
   { method: "POST", pattern: /^\/api\/system-work\/(WR-[0-9]{1,12})\/outcomes$/, tool: "propose-outcome-feedback", fields: ["idempotency_key", "base_version", "plan_hash", "criterion_results", "evidence_refs", "blocker_code", "result_summary", "observed_minutes", "interaction_surface", "heavy_session_used", "manual_context_transfers"] },
-  { method: "POST", pattern: /^\/api\/system-work\/(WR-[0-9]{1,12})\/outcomes\/(FEEDBACK-[0-9]{1,12})\/accept$/, tool: "accept-outcome-feedback", fields: ["idempotency_key", "base_version", "feedback_hash"] },
+  { method: "POST", pattern: /^\/api\/system-work\/(WR-[0-9]{1,12})\/outcomes\/accept$/, tool: "accept-outcome-feedback", fields: ["idempotency_key", "base_version", "feedback_hash"] },
 ]);
 
 function json(body, status = 200) { return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS }); }
@@ -43,7 +45,8 @@ function routeFor(method, pathname) {
 
 function hasExactFields(value, fields) {
   return value && typeof value === "object" && !Array.isArray(value) &&
-    Object.keys(value).every((key) => fields.includes(key));
+    Object.keys(value).length === fields.length &&
+    fields.every((key) => Object.hasOwn(value, key));
 }
 
 async function bodyFor(request, fields) {
@@ -101,11 +104,6 @@ export function createProgram6RoutineController(overrides = {}) {
       const body = parsed.body;
       const human_ref = route.tool === "report-problem" ? null : match[1];
       if (human_ref && !HUMAN_REF.test(human_ref)) return json({ error: "not_found" }, 404);
-      // feedback_ref is intentionally path-only: acceptance is selected by the
-      // immutable feedback hash, and its canonical human ref is read back from
-      // the registered tool response. An opaque DB id is never accepted here.
-      if (route.tool === "accept-outcome-feedback" && !FEEDBACK_REF.test(match[2])) return json({ error: "not_found" }, 404);
-
       const args = { ...body, ...(human_ref ? { human_ref } : {}), ...(route.fixedPlan ? SAFE_READY_PLAN : {}) };
       const authorization = await dependencies.authorizeAction({ request, env, ctx, actor, session, action: route.tool, args });
       if (authorization instanceof Response) return authorization;

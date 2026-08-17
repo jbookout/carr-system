@@ -50,10 +50,16 @@ test("report route admits only the capture material and never a caller-selected 
   const refused = await controller.fetch(request("/api/system-work/report", "POST", { ...body, actor: "joe" }), {}, {}, ACTOR, SESSION);
   assert.equal(refused.status, 400);
   assert.equal((await refused.json()).error, "invalid_request_fields");
+  const incomplete = await controller.fetch(request("/api/system-work/report", "POST", {
+    idempotency_key: body.idempotency_key, situation: body.situation,
+  }), {}, {}, ACTOR, SESSION);
+  assert.equal(incomplete.status, 400);
+  assert.equal((await incomplete.json()).error, "invalid_request_fields");
   assert.equal(calls.length, 1);
 });
 
 test("fixed ready-plan route derives every operational control server-side", async () => {
+  assert.equal(SAFE_READY_PLAN.runbook_ref, "doctrine:runbook#diagnosis-checklist-in-order-2-minutes");
   const { controller, calls, authorizations } = subject();
   const body = { idempotency_key: "10000000-0000-0000-0000-000000000002", base_version: 2, scope_summary: "Make this review routine usable." };
   const response = await controller.fetch(request(`/api/system-work/${REF}/plan`, "POST", body), {}, {}, ACTOR, SESSION);
@@ -77,13 +83,13 @@ test("human state changes use the path ref, route-selected tool, and authorizati
   assert.equal(authorizations[0].session, SESSION);
 });
 
-test("outcome acceptance is hash-selected and returns the registered readback; feedback path is never a database id", async () => {
+test("outcome acceptance is hash-selected and returns registered readback without a cosmetic feedback path", async () => {
   const { controller, calls } = subject();
   const body = { idempotency_key: "10000000-0000-0000-0000-000000000004", base_version: 3, feedback_hash: HASH_B };
-  const response = await controller.fetch(request(`/api/system-work/${REF}/outcomes/FEEDBACK-123/accept`, "POST", body), {}, {}, ACTOR, SESSION);
+  const response = await controller.fetch(request(`/api/system-work/${REF}/outcomes/accept`, "POST", body), {}, {}, ACTOR, SESSION);
   assert.equal(response.status, 200);
   assert.deepEqual(calls[0], { actor: ACTOR, name: "accept-outcome-feedback", args: { ...body, human_ref: REF }, profile: "full" });
-  const invalid = await controller.fetch(request(`/api/system-work/${REF}/outcomes/30000000-0000-0000-0000-000000000000/accept`, "POST", body), {}, {}, ACTOR, SESSION);
+  const invalid = await controller.fetch(request(`/api/system-work/${REF}/outcomes/OUTCOME-a1b2c3d4e5f6-v1/accept`, "POST", body), {}, {}, ACTOR, SESSION);
   assert.equal(invalid.status, 404);
 });
 

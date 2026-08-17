@@ -73,6 +73,7 @@ test("report-problem retrieves deterministically then captures exactly the top c
   const result = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
   assert.equal(result.human_ref, "WR-0001");
   assert.equal(result.state, "captured");
+  assert.equal(result.version, 1);
   const retrieval = db.calls.find(call => call.sql.includes("search_doctrine_situations"));
   const capture = db.calls.find(call => call.sql.includes("capture_sourced_work_request"));
   assert.ok(retrieval);
@@ -210,15 +211,18 @@ test("work-request-card keeps a triaged request queued and returns only durable 
 
 test("work-request-card retains triage readback when a ready request remains queued", async () => {
   const db = new IntakeFake(); const original = db.query.bind(db);
-  db.query = async (sql, params) => { const result = await original(sql, params); if (String(sql).includes("work_request_card")) Object.assign(result.rows[0], {
+  db.query = async (sql, params) => { if (String(sql).includes("pending_sourced_work_request_outcome_feedback")) return { rows: [] }; const result = await original(sql, params); if (String(sql).includes("work_request_card")) Object.assign(result.rows[0], {
     state: "ready", triage_classification: "operational", triaged_by_actor_slug: "joe", triaged_at: "2026-08-16T00:00:00Z",
     plan_ref: "PLAN-000001", plan_hash: "sha256:" + "a".repeat(64),
     scope_summary: "Inspect evidence and record a bounded result",
-    runbook_ref: "doctrine:runbook#safe-plan"
+    runbook_ref: "doctrine:runbook#safe-plan", accepted_by_actor_slug: "joe",
+    accepted_at: "2026-08-16T01:00:00Z"
   }); return result; };
   const card = await executeRegisteredTool(db, { ...ACTOR }, "work-request-card", { work_request: "WR-0001" });
   assert.equal(card.projection_state, "queued"); assert.equal(card.triage.classification, "operational");
   assert.equal(card.plan.plan_ref, "PLAN-000001");
   assert.equal(card.plan.scope_summary, "Inspect evidence and record a bounded result");
+  assert.equal(card.plan.accepted_by_actor_slug, "joe");
+  assert.equal(card.plan.accepted_at, "2026-08-16T01:00:00Z");
   assert.deepEqual(card.next_human_action, { label: "Plan accepted", effect: "none" }); assert.deepEqual(card.actions, []);
 });

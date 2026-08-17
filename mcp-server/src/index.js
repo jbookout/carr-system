@@ -81,7 +81,8 @@ import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 import { actorFromProps, agentActorForToken, hermesActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
-import { createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
+import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest } from "./dealroom-web.js";
+import { createProgram6RoutineController } from "./program6-routine-controller.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
@@ -553,9 +554,12 @@ const oauthProvider = new OAuthProvider({
 // Same verb and cursor implementations as the bearer-token surface; only the
 // authentication adapter differs. The cookie session already resolved to the
 // exact actor shape dispatch() and pipelineChanges() accept.
+const program6RoutineController = createProgram6RoutineController({ authorizeAction: authorizeProgram6Action });
 const dealroomHandler = createDealroomHandler({
   mcpHandler: (request, env, ctx, actor) => dispatch(request, env, ctx, actor),
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
+  program6Handler: (request, env, ctx, actor, session) =>
+    program6RoutineController.fetch(request, env, ctx, actor, session),
 });
 
 // Everything not /mcp-with-a-matching-probe-or-review-token flows into the

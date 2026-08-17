@@ -182,6 +182,7 @@ test("Program 6 browser bootstrap is feature-gated and its typed boundary refuse
   assert.equal(bootstrap.challenge_ttl_seconds, 300);
 
   const challengeBody = JSON.stringify({ action: "accept-ready-plan", human_ref: "WR-41", base_version: 3,
+    idempotency_key: "10000000-0000-0000-0000-000000000041",
     plan_hash: `sha256:${"a".repeat(64)}` });
   const headers = { cookie: session, "content-type": "application/json", "x-carr-csrf": bootstrap.csrf_token };
   response = await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/challenge", {
@@ -213,6 +214,7 @@ test("reauthentication is session-bound, and approval challenges are one-time an
   const bootstrap = await (await handler.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/session",
     { headers: { cookie: session } }), environment, {})).json();
   const target = { action: "accept-outcome-feedback", human_ref: "WR-41", base_version: 3,
+    idempotency_key: "20000000-0000-0000-0000-000000000041",
     feedback_hash: `sha256:${"b".repeat(64)}` };
   const csrfHeaders = { cookie: session, origin: "https://dealroom.doctorcre.com", "sec-fetch-site": "same-origin",
     "content-type": "application/json", "x-carr-csrf": bootstrap.csrf_token };
@@ -221,17 +223,30 @@ test("reauthentication is session-bound, and approval challenges are one-time an
   }), environment, {});
   const { challenge } = await response.json();
 
+  // Model Cloudflare KV's non-atomic visibility: both concurrent-looking
+  // requests may still read the same challenge even after delete. The atomic
+  // redemption seam below, not KV, must permit exactly one.
+  const kvDelete = environment.OAUTH_KV.delete.bind(environment.OAUTH_KV);
+  environment.OAUTH_KV.delete = async (key) => {
+    if (!String(key).startsWith("dealroom_action_challenge:")) await kvDelete(key);
+  };
+
   // The injected typed controller has no workflow implementation in this test;
   // it exercises the reusable boundary by asking it to authorize a supplied target.
+  const redeemed = new Set();
   const controller = createDealroomHandler({
     ...identityOverrides("joe.bookout.carr.us@gmail.com", clock),
-    program6Handler: async (request, envArg, _ctx, _actor, sessionState) => {
+    program6Handler: async (request, envArg, _ctx, actor, sessionState) => {
       // The concrete controller must parse first to route/validate the typed
       // body. The header-only browser guard remains valid after that consume.
       const parsed = await request.json();
       const { authorizeProgram6Action } = await import("../src/dealroom-web.js");
-      const refusal = await authorizeProgram6Action({ request, env: envArg, session: sessionState,
-        action: "accept-outcome-feedback", args: parsed, now: clock.now });
+      const refusal = await authorizeProgram6Action({ request, env: envArg, actor, session: sessionState,
+        action: "accept-outcome-feedback", args: parsed, now: clock.now,
+        redeemChallenge: async ({ tokenDigest }) => {
+          if (redeemed.has(tokenDigest)) return { ok: false };
+          redeemed.add(tokenDigest); return { ok: true };
+        } });
       return refusal || new Response(JSON.stringify({ ok: true }));
     },
   });
@@ -245,6 +260,7 @@ test("reauthentication is session-bound, and approval challenges are one-time an
   }), environment, {});
   assert.equal(response.status, 403);
   assert.equal((await response.json()).error, "invalid_action_challenge");
+  assert.equal(redeemed.size, 1);
 
   clock.now += 10 * 60 * 1000 + 1;
   response = await controller.fetch(new Request("https://dealroom.doctorcre.com/api/system-work/accept-outcome-feedback", {
