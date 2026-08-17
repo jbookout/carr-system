@@ -31,9 +31,59 @@
       "effective_at": "2026-08-17",
       "ends_after_verified_allowance_reset": "2026-09-01",
       "repository_actions_enabled": false,
+      "verified_allowance_reset": false,
       "paid_overage_budget_usd": 0,
       "reason": "2,995 of 3,000 included minutes were consumed by repeated CI fanout."
     }
+  },
+  "execution_gates": {
+    "github-actions-remote-ci": {
+      "platform": "github",
+      "installed": true,
+      "installed_enforcement_ref": "GitHub repository Actions disabled plus account Actions paid-usage budget $0",
+      "temporary_control": "github_actions_pause",
+      "required_true": ["local_checks_green"],
+      "required_nonempty": ["candidate_sha"],
+      "maximums": {}
+    },
+    "neon-disposable-branch": {
+      "platform": "neon",
+      "installed": true,
+      "installed_enforcement_ref": "lib/platform_metering.py authorize_metered_execution before every registered branch create",
+      "required_true": ["cleanup_registered"],
+      "required_nonempty": [],
+      "maximums": {
+        "requested_lifetime_minutes": 120,
+        "active_nondefault_branches": 2
+      }
+    },
+    "cloudflare-worker-release": {
+      "platform": "cloudflare-workers",
+      "installed": true,
+      "installed_enforcement_ref": "bin/deploy-worker.sh before Wrangler upload/deploy/promotion",
+      "required_true": ["release_preflight_green"],
+      "required_nonempty": ["performance_budget_ref"],
+      "maximums": {"release_candidate_count": 1}
+    },
+    "cognition-provider": {
+      "platform": "anthropic-claude",
+      "installed": true,
+      "installed_enforcement_ref": "tools/control-plane.py:_reserve->ops.admit_job_cost",
+      "required_true": [],
+      "required_nonempty": [],
+      "maximums": {}
+    }
+  },
+  "control_scope": {
+    "pre_dispatch_gated": [
+      "github", "neon", "cloudflare-workers", "anthropic-claude"
+    ],
+    "usage_and_alert_gated": [
+      "cloudflare-kv", "cloudflare-r2", "openai-codex", "google-workspace",
+      "healthchecks", "blotato", "make"
+    ],
+    "human_contract_only": ["salesforce", "market-data-licenses"],
+    "unmetered_local": ["local-mac"]
   },
   "platforms": [
     {

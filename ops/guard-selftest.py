@@ -171,6 +171,16 @@ case("git force push", bash("git push --force origin main"), DENY)
 case("scratch rm is fine", bash("rm -rf /private/tmp/claude-501/x"), ALLOW)
 case("delegation state shell write", bash("echo '{}' > /Users/booko/carr-system/out/delegation-gate-state.json"), DENY)
 case("delegation state read is fine", bash("cat /Users/booko/carr-system/out/delegation-gate-state.json"), ALLOW)
+case("direct Cloudflare deploy is metering-refused", bash("npx wrangler deploy"), DENY)
+case("direct Cloudflare version upload is metering-refused", bash("wrangler versions upload"), DENY)
+case("sanctioned Worker release wrapper is allowed", bash("./bin/deploy-worker.sh --check"), ALLOW)
+case("direct Neon branch create is metering-refused",
+     bash("neonctl branches create --project-id p --name x"), DENY)
+case("reviewed Neon rebuild wrapper is allowed", bash("python3 ops/p1-rebuild-gate.py"), ALLOW)
+case("direct GitHub workflow dispatch is metering-refused",
+     bash("gh workflow run ci.yml"), DENY)
+case("prose describing a metered dispatch remains inert",
+     bash('gh pr create --body "npx wrangler deploy is refused"'), ALLOW)
 
 # ── 9. Codex local-function alias: CARR only, no Life AI spillover ──────────
 case("Codex CARR destructive shell", codex_exec(
