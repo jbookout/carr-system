@@ -116,6 +116,7 @@ def validate(config: dict[str, Any]) -> list[str]:
     equals(canaries.get("scope"), "isolated calendar and Notes canary destinations only; no live URL or local state root", "deterministic_canaries.scope", errors)
 
     mcp = text("mcp-server/src/mcp.js")
+    authority_runtime_probe = text("ops/control-plane-authority-runtime-preflight.py")
     migration_authority = text("migrations/0161_control_plane_authority_boundary.sql")
     migration_device = text("migrations/0163_control_plane_device_evidence.sql")
     migration_npi = text("migrations/0167_control_plane_npi_device_evidence.sql")
@@ -130,6 +131,13 @@ def validate(config: dict[str, Any]) -> list[str]:
     notes = text("bin/notes-sweep-post.sh")
     if "CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL" not in mcp or "CARR_DB_AUTHORITY_URL" not in mcp:
         errors.append("authority declarations are not bound by mcp-server/src/mcp.js")
+    required_authority_probe_tokens = (
+        "CARR_DB_AUTHORITY_JOE_URL", "CARR_DB_AUTHORITY_DELL_URL",
+        "begin transaction read only", "ops.authority_actor_slug()",
+        "FORBIDDEN_MEMBERSHIPS", "phase_exit_authorized",
+    )
+    if not all(token in authority_runtime_probe for token in required_authority_probe_tokens):
+        errors.append("authority runtime identity probe is not bound to both partner logins and the read-only least-privilege contract")
     if not all(role in migration_authority for role in ("carr_authority_joe", "carr_authority_dell", "carr_authority")):
         errors.append("authority login-role mapping is not bound by migration 0161")
     if not all(token in migration_device for token in ("carr_device_evidence", "ops.device_evidence_principal", "login_role=session_user")):
