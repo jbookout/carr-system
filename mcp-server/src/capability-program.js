@@ -121,6 +121,17 @@ async function readCurrent(c, lock = false) {
   return r.rows[0] || null;
 }
 
+async function readCurrentSession(c, workRequest) {
+  if (!workRequest) return null;
+  const r = await c.query(
+    `select id, state from ops.capability_agent_session
+      where work_request_id=$1 and state not in ('completed','cancelled')`,
+    [workRequest.id],
+  );
+  const session = r.rows[0];
+  return session ? { id: session.id, state: session.state } : null;
+}
+
 async function requireCurrent(c, ToolError, sequence, baseVersion) {
   const row = await readCurrent(c, true);
   if (!row) throw new ToolError({ error: "capability_program_complete", program_key: DEFAULT_PROGRAM });
@@ -177,7 +188,8 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         const current = rows.rows.find(row => row.state !== "confirmed_closed") || null;
         const requested = args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence));
         if (args.sequence !== undefined && !requested) throw new ToolError({ error: "capability_project_not_found", program_key: DEFAULT_PROGRAM, sequence: args.sequence });
-        return { program_key: DEFAULT_PROGRAM, total: rows.rows.length, completed: rows.rows.filter(row => row.state === "confirmed_closed").length, program_complete: !current, current: programRow(current), requested: programRow(requested), session_brief: sessionBrief(requested), projects: args.include_all ? rows.rows.map(programRow) : undefined };
+        const capability_session = await readCurrentSession(c, current);
+        return { program_key: DEFAULT_PROGRAM, total: rows.rows.length, completed: rows.rows.filter(row => row.state === "confirmed_closed").length, program_complete: !current, current: programRow(current), requested: programRow(requested), capability_session, session_brief: sessionBrief(requested), projects: args.include_all ? rows.rows.map(programRow) : undefined };
       },
     },
     "start-capability-project": {
