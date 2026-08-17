@@ -1924,9 +1924,11 @@
       "exceptions": "explicit corrections that confidentiality is not the boundary, historical or quoted rule text, and real credential/autonomous-execution boundary explanations"
     },
     "937252fb": {
-      "category": "judgment_advisory",
-      "enforcement_class": "unbuilt",
-      "planned_control": "Extend hooks/completion-evidence-gate.py to demand the END-TO-END action for a capability claim, not merely fresh evidence of some artifact: name the first thing the partner would do, then show that action's real result. Blocked on the guidance-registry clause contract that landed 2026-08-16; tracked as loop 424."
+      "category": "post_action_verification",
+      "enforcement_class": "stop_gate",
+      "binding_moment": "before reporting a capability as working, live, deployed, or done",
+      "control": "completion_evidence",
+      "exceptions": "the first real action is a human gate the session cannot perform — a release approval, a browser login, a credential — and the claim says so in the same message"
     }
   },
   "active_rule_ids": {
@@ -2217,7 +2219,8 @@
       "4402973a",
       "1d50a3bb",
       "d7f74c93",
-      "dcf98880"
+      "dcf98880",
+      "937252fb"
     ],
     "session_task_rail": [
       "25fcddee",
