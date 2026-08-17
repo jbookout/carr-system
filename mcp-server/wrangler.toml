@@ -52,6 +52,7 @@
 #   GOOGLE_CLIENT_ID    — Google Cloud OAuth 2.0 web client (upstream sign-in)
 #   GOOGLE_CLIENT_SECRET— ditto. Joe sets both himself; Claude never holds them.
 name = "carr-mcp"
+account_id = "12ccca77eb49142a6be8eb84c0d6a3a0"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 

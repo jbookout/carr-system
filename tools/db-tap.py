@@ -39,9 +39,13 @@ receipt to out/break-glass-receipts.log before the target ever runs.
 Never prints the DSN. ON_ERROR_STOP is always set for sql mode.
 """
 import json
+import importlib.util
 import os
+import pathlib
+import re
 import subprocess
 import sys
+import tomllib
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -54,6 +58,34 @@ PSQL_CANDIDATES = [
 ]
 LOCAL_ACTOR_FILE = os.path.join(os.path.expanduser("~"), ".config", "carr", "local-actor.json")
 RECEIPT_LOG = os.path.join(REPO, "out", "break-glass-receipts.log")
+
+
+def _cloudflare_account_id() -> str:
+    try:
+        with open(os.path.join(REPO, "mcp-server", "wrangler.toml"), "rb") as handle:
+            value = tomllib.load(handle).get("account_id")
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        sys.exit(f"db-tap: could not load the pinned Wrangler account: {type(exc).__name__}")
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value):
+        sys.exit("db-tap: wrangler.toml account_id must be lowercase 32-hex")
+    return value
+
+
+CLOUDFLARE_ACCOUNT_ID = _cloudflare_account_id()
+
+
+def _load_credential_module():
+    path = pathlib.Path(REPO) / "tools/staging_database_credential.py"
+    spec = importlib.util.spec_from_file_location("db_tap_staging_credential", path)
+    if spec is None or spec.loader is None:
+        sys.exit("db-tap: staging credential helper is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+staging_credential = _load_credential_module()
 
 
 def _neon_api_key() -> str:
@@ -122,16 +154,10 @@ NEON_ORG = "org-dry-dew-75906281"
 def _project_id_by_name(name: str, env: dict) -> str:
     """Resolve a Neon project id from its name. Never prints a connection string;
     the projects list carries ids and names only."""
-    out = subprocess.run(
+    payload = _json_command(
         [NEONCTL, "projects", "list", "--org-id", NEON_ORG, "--output", "json"],
-        capture_output=True, text=True, timeout=60, env=env,
+        env, "staging project lookup",
     )
-    if out.returncode != 0:
-        sys.exit(f"db-tap: could not list Neon projects (rc={out.returncode}): {out.stderr.strip()[:200]}")
-    try:
-        payload = json.loads(out.stdout)
-    except json.JSONDecodeError:
-        sys.exit("db-tap: Neon project list was not valid JSON")
     rows = payload if isinstance(payload, list) else payload.get("projects", [])
     matches = [r["id"] for r in rows if r.get("name") == name]
     if not matches:
@@ -139,6 +165,72 @@ def _project_id_by_name(name: str, env: dict) -> str:
     if len(matches) > 1:
         sys.exit(f"db-tap: {len(matches)} Neon projects named '{name}' — refusing to guess which.")
     return matches[0]
+
+
+def _json_command(args: list[str], env: dict, label: str):
+    try:
+        out = subprocess.run(args, capture_output=True, text=True, timeout=60, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        sys.exit(f"db-tap: {label} did not complete; provider output suppressed")
+    if out.returncode != 0:
+        sys.exit(f"db-tap: {label} failed (rc={out.returncode}); provider output suppressed")
+    try:
+        return json.loads(out.stdout)
+    except json.JSONDecodeError:
+        sys.exit(f"db-tap: {label} returned invalid JSON; provider output suppressed")
+
+
+def _staging_runtime_target(env: dict) -> tuple[str, str, str, str]:
+    """Resolve exact staging project/main/read-write endpoint without a DSN reveal."""
+    project_id = _project_id_by_name(PROJECTS["staging"]["name"], env)
+    if project_id == PROJECTS["production"]["id"]:
+        sys.exit("db-tap: staging resolved to the canonical Production project id")
+    branch_payload = _json_command(
+        [NEONCTL, "branches", "list", "--project-id", project_id, "--output", "json"],
+        env, "staging branch lookup",
+    )
+    branches = branch_payload if isinstance(branch_payload, list) else branch_payload.get("branches", [])
+    matches = [row for row in branches if row.get("name") == "main" and row.get("default") is True]
+    if len(matches) != 1 or str(matches[0].get("project_id") or project_id) != project_id:
+        sys.exit("db-tap: staging must have exactly one default main branch")
+    branch_id = str(matches[0].get("id") or "")
+    if not branch_id:
+        sys.exit("db-tap: staging main branch has no immutable id")
+    endpoint_payload = _json_command(
+        [NEONCTL, "api", f"/projects/{project_id}/branches/{branch_id}/endpoints", "--output", "json"],
+        env, "staging endpoint lookup",
+    )
+    endpoints = endpoint_payload if isinstance(endpoint_payload, list) else endpoint_payload.get("endpoints", [])
+    endpoints = [row for row in endpoints if isinstance(row, dict)
+                 and str(row.get("branch_id") or branch_id) == branch_id
+                 and row.get("type") in {"read_write", "read-write", "rw"}]
+    endpoint_id = str(endpoints[0].get("id") or "") if len(endpoints) == 1 else ""
+    endpoint_host = str(endpoints[0].get("host") or "").lower().rstrip(".") \
+        if len(endpoints) == 1 else ""
+    if (
+        len(endpoints) != 1 or not endpoint_id.startswith("ep-")
+        or not endpoint_host.startswith(endpoint_id + ".")
+        or not endpoint_host.endswith(".neon.tech")
+    ):
+        sys.exit("db-tap: staging main must have exactly one read-write endpoint")
+    return project_id, branch_id, endpoint_id, endpoint_host
+
+
+def _staging_file_dsn(role_name: str, branch: str | None, env: dict) -> str:
+    if branch not in (None, "main"):
+        sys.exit("db-tap: staging runtime credentials are pinned to default main")
+    _project_id, _branch_id, _endpoint_id, endpoint_host = _staging_runtime_target(env)
+    profile_label = {"app_writer": "writer", "app_reader": "reader"}.get(role_name)
+    if profile_label is None:
+        sys.exit("db-tap: staging file credential role must be app_writer or app_reader")
+    profile = staging_credential.profile(profile_label)
+    stored = staging_credential.load_existing(
+        profile.paths, key=profile.key, role_name=profile.role_name,
+        expected_endpoint=endpoint_host, expected_port=5432, expected_database="neondb",
+    )
+    if stored.state != "final":
+        sys.exit(f"db-tap: staging {role_name} credential is not verified/final")
+    return stored.value
 
 
 def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner") -> str:
@@ -154,13 +246,15 @@ def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner
     spec = PROJECTS.get(project)
     if spec is None:
         sys.exit(f"db-tap: unknown project '{project}' (known: {', '.join(PROJECTS)})")
-    if role_name not in ("neondb_owner", "app_writer"):
-        sys.exit("db-tap: role_name must be one of neondb_owner or app_writer")
+    if role_name not in ("neondb_owner", "app_writer", "app_reader"):
+        sys.exit("db-tap: role_name must be neondb_owner, app_writer, or app_reader")
     key = _neon_api_key()
     env = {**os.environ,
            "PATH": "/usr/local/opt/node@22/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")}
     if key:
         env["NEON_API_KEY"] = key
+    if project == "staging" and role_name in {"app_writer", "app_reader"}:
+        return _staging_file_dsn(role_name, branch, env)
     project_id = spec.get("id") or _project_id_by_name(spec["name"], env)
     if branch is None:
         branch = spec["default_branch"]
@@ -324,7 +418,9 @@ def main() -> None:
         env["DATABASE_URL"] = url
         # Cloudflare ACCOUNT ID (an identifier, not a credential) — needed by
         # R2 wrangler calls in pipeline scripts; verbatim from ORDER 20's taps.
-        env.setdefault("CLOUDFLARE_ACCOUNT_ID", "12ccca77eb49142a6be8eb84c0d6a3a0")
+        if env.get("CLOUDFLARE_ACCOUNT_ID") not in (None, "", CLOUDFLARE_ACCOUNT_ID):
+            sys.exit("db-tap: ambient Cloudflare account differs from wrangler.toml")
+        env["CLOUDFLARE_ACCOUNT_ID"] = CLOUDFLARE_ACCOUNT_ID
         rc = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"), target_abs, *extra], env=env).returncode
 
     if not writable and rc != 0:
