@@ -348,6 +348,38 @@ def main() -> int:
             # A new rule cannot activate on prose alone.
             cur.execute("select id from actor where slug='joe'")
             actor = fetchone_required(cur.fetchone(), "Joe actor")[0]
+            # The exact spending rule was captured before the atomic approval
+            # architecture existed.  Deployment must bind that same UUID to the
+            # installed mechanical gate; it must not teach a replacement or ask
+            # Joe to approve the substance again.
+            cur.execute("""
+                insert into rule(id,statement,human_quote,taught_by,status)
+                values ('ae44e0c0-e773-456c-a85b-2dc4cf4dd49e',
+                        'Disposable cost-conscious operation fixture',
+                        'fixture',%s,'proposed')
+            """, (actor,))
+            cur.execute("select ops.sync_system_rule_control_bindings()")
+            if fetchone_required(cur.fetchone(), "system-rule binding sync")[0] != 1:
+                fail("existing spending rule did not receive its exact installed-control binding")
+            cur.execute("""
+                select count(*)
+                  from ops.rule_control_binding b
+                  join rule r on r.id=b.rule_id
+                 where b.rule_id='ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'
+                   and b.control_key='platform_metering_pre_dispatch'
+                   and b.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+                   and b.binding_contract->>'durable_decision_ref'=
+                       '4a0e59ce-728a-49b5-a055-116156e9470e'
+            """)
+            if fetchone_required(cur.fetchone(), "system-rule binding readback")[0] != 1:
+                fail("spending rule binding does not match the exact statement and decision")
+            grant_settable_runtime_roles(cur, "carr_writer")
+            set_local_role(cur, "carr_writer")
+            cur.execute("select has_function_privilege(current_user,%s,'execute')",
+                        ("ops.sync_system_rule_control_bindings()",))
+            if fetchone_required(cur.fetchone(), "system-rule binding ACL")[0] is not False:
+                fail("routine writer can install semantic rule bindings")
+            cur.execute("reset role")
             cur.execute("""
                 insert into rule(statement,human_quote,taught_by,status)
                 values ('control-plane fixture','fixture',%s,'proposed') returning id

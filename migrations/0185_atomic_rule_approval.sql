@@ -79,6 +79,47 @@ select ep.rule_id,ep.control_key,encode(digest(r.statement,'sha256'),'hex'),
  where ep.installed and c.installed
 on conflict (rule_id,control_key) do nothing;
 
+-- Joe already approved the substance of the permanent cost-conscious operation
+-- rule before this enforcement architecture existed.  The live capture is
+-- deliberately retained under its original identity; deployment binds that
+-- exact row to the installed pre-dispatch control instead of teaching a second
+-- rule or asking Joe to approve the same decision again.  Fresh/disposable
+-- databases simply have no matching row and therefore insert nothing.  The
+-- owner-only sync function also gives the rollback DB gate a way to exercise
+-- the exact live-ID binding after it creates a disposable fixture row.
+create or replace function ops.sync_system_rule_control_bindings()
+returns integer
+language plpgsql security definer set search_path=ops,public,pg_temp
+as $$
+declare
+  v_inserted integer;
+begin
+  insert into ops.rule_control_binding
+    (rule_id,control_key,statement_hash,binding_contract)
+  select r.id,'platform_metering_pre_dispatch',
+         encode(digest(r.statement,'sha256'),'hex'),
+         jsonb_build_object(
+           'source','Joe-approved platform cost policy',
+           'durable_decision_ref','4a0e59ce-728a-49b5-a055-116156e9470e',
+           'rule_id',r.id,
+           'rule_version',r.version,
+           'implementation_ref',c.implementation_ref,
+           'test_ref',c.test_ref)
+    from rule r
+    join ops.enforcement_control_catalog c
+      on c.control_key='platform_metering_pre_dispatch'
+   where r.id='ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'::uuid
+     and r.status='proposed'
+     and c.installed and c.verified_at is not null
+  on conflict (rule_id,control_key) do nothing;
+  get diagnostics v_inserted = row_count;
+  return v_inserted;
+end $$;
+
+revoke all on function ops.sync_system_rule_control_bindings()
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+select ops.sync_system_rule_control_bindings();
+
 alter table ops.rule_admission
   add column enforcement_status text,
   add column coverage_detail jsonb not null default '{}'::jsonb;
@@ -435,6 +476,10 @@ begin
   if has_function_privilege('carr_writer',
        'ops.approve_rule(uuid,text,text[],text,text)'::regprocedure,'execute') then
     raise exception '0185 FAILED: routine writer may approve rules';
+  end if;
+  if has_function_privilege('carr_writer',
+       'ops.sync_system_rule_control_bindings()'::regprocedure,'execute') then
+    raise exception '0185 FAILED: routine writer may install semantic rule bindings';
   end if;
   if exists (select 1 from ops.enforcement_control_catalog
               where control_key='standing_context_runtime') then

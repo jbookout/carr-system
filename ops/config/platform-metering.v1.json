@@ -3,6 +3,14 @@
   "reviewed_at": "2026-08-17T08:08:30Z",
   "owner": "joe",
   "objective": "Keep CARR reliable without using paid cloud execution as an iteration loop.",
+  "standing_rule_binding": {
+    "rule_id": "ae44e0c0-e773-456c-a85b-2dc4cf4dd49e",
+    "durable_decision_ref": "4a0e59ce-728a-49b5-a055-116156e9470e",
+    "control_key": "platform_metering_pre_dispatch",
+    "approval_substance_already_recorded": true,
+    "required_post_deploy_state": "active_hard_enforced",
+    "instruction": "Bind and approve the existing rule; do not create a replacement or ask Joe to approve its substance again."
+  },
   "global_policy": {
     "default": "deny_new_metered_execution_until_registered",
     "iteration": "local focused tests first",

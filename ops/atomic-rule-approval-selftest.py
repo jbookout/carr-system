@@ -45,6 +45,12 @@ def main() -> int:
     check("cost control is registered with implementation and tests",
           "platform_metering_pre_dispatch" in sql
           and "ops/platform-metering-gate-selftest.py" in sql)
+    check("Joe's existing cost rule is deployment-bound without re-teaching it",
+          "ae44e0c0-e773-456c-a85b-2dc4cf4dd49e" in sql
+          and "4a0e59ce-728a-49b5-a055-116156e9470e" in sql
+          and "function ops.sync_system_rule_control_bindings()" in sql
+          and "select ops.sync_system_rule_control_bindings()" in sql
+          and "r.status='proposed'" in sql)
     check("routine roles cannot approve rules",
           "from public,carr_reader,carr_writer,carr_jobs" in sql
           and "grant execute on function ops.approve_rule" in sql
@@ -59,7 +65,7 @@ def main() -> int:
           and "mislabeled as unbreakable enforcement" in sql)
     check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
 
-    print(f"\natomic-rule-approval-selftest: {12-len(failures)}/12 passed")
+    print(f"\natomic-rule-approval-selftest: {13-len(failures)}/13 passed")
     return 1 if failures else 0
 
 
