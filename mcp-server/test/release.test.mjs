@@ -228,6 +228,25 @@ test("buildRelease: reports the environment it IS, from CARR_ENV", async () => {
   }
 });
 
+test("buildRelease: reports the exact fail-closed Program 6 action posture", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", [{ applied_count: 120, highest_applied_migration: "0114_x.sql" }]],
+    ["doctrine_meta", [{ generation: 359 }]],
+  ]);
+  for (const [value, expected] of [
+    ["false", { enabled: false, posture: "disabled", reason: null }],
+    ["true", { enabled: true, posture: "enabled", reason: null }],
+    [undefined, { enabled: false, posture: "misconfigured", reason: "DEALROOM_PROGRAM6_ACTIONS_ENABLED must be exactly true or false" }],
+    ["TRUE", { enabled: false, posture: "misconfigured", reason: "DEALROOM_PROGRAM6_ACTIONS_ENABLED must be exactly true or false" }],
+  ]) {
+    const out = await buildRelease({
+      env: { GIT_SHA: "a".repeat(40), CARR_ENV: "staging", DEALROOM_PROGRAM6_ACTIONS_ENABLED: value },
+      sql, verbCount: 105, now: FIXED_NOW,
+    });
+    assert.deepEqual(out.program6_actions, expected);
+  }
+});
+
 test("buildRelease: an unlabelled Worker reports unknown, and NEVER defaults to production", async () => {
   const sql = fakeSql([
     ["v_schema_ledger", [{ applied_count: 120, highest_applied_migration: "0114_x.sql" }]],

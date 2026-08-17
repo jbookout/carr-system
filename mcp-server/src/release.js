@@ -11,7 +11,7 @@
 // node --test can exercise the actual payload-building logic with a fake
 // env and a fake `sql` tag function — no live database, no deploy required.
 //
-// FIVE FIELDS, EACH HONEST ON ITS OWN:
+// SIX FIELDS, EACH HONEST ON ITS OWN:
 //   verb_count          — Object.keys(TOOLS).length, computed from the code
 //                          bundled INTO THIS DEPLOY. Never a written marker
 //                          (mcp-server/.last-deployed-verb-count is exactly
@@ -53,11 +53,16 @@
 //                          already runs (`select generation from
 //                          doctrine_meta where id = 1`), reused rather than
 //                          reinvented.
+//   program6_actions      — exact public posture of the reviewed browser
+//                          mutation flag. It is derived by the same parser as
+//                          the Deal Room gate and never echoes arbitrary env.
 //
 // A field that cannot be read returns { value: null, reason: "<why>" } (or
 // the schema-shaped equivalent) — never omitted, never a guess. A stale or
 // absent value must be visibly absent, per the honesty requirement this was
 // built against.
+
+import { program6ActionPosture } from "./program6-feature-flag.js";
 
 export async function buildRelease({ env, sql, verbCount, now = () => new Date() }) {
   const sha = (env && env.GIT_SHA) || null;
@@ -157,5 +162,9 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
           + "applied to production",
     },
     doctrine_generation: doctrineGeneration,
+    // This is intentionally a public boolean posture, not a secret value. The
+    // checked-in Wrangler configuration is fingerprinted in each release plan,
+    // so changing false→true requires a reviewed immutable version promotion.
+    program6_actions: program6ActionPosture(env),
   };
 }
