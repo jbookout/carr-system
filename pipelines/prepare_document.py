@@ -94,10 +94,8 @@ from fill_document import (fill, to_pdf, FillError, colored_runs, scrub_docx,  #
                            finish_colors, resolve_unresolved_options, document_pipes,
                            drop_rows, parse_row_address, table_row_texts)
 import r2_archive as r2  # noqa: E402
+from drive_recovery import add_recovery_arguments, require_recovery  # noqa: E402
 
-VAULT = os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 ONEDRIVE_DEALS = os.environ.get(
     "CARR_ONEDRIVE_DEALS",
     "/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/Deals/Active Deals")
@@ -448,11 +446,18 @@ def main() -> int:
                     help="skip the CLIENT-COPY artifact even when the field map declares "
                          "audience drops (ORDER 23(c)); the client copy is produced by default "
                          "for any docx whose map names a client-audience drop")
+    add_recovery_arguments(ap)
     a = ap.parse_args()
+    try:
+        vault = str(require_recovery(
+            a, "document-template API for prepare-document"))
+    except ValueError as exc:
+        print(f"prepare-document: STOP: {exc}", file=sys.stderr)
+        return 2
 
     plan = json.load(sys.stdin if a.plan == "-" else open(a.plan))
     tmpl_rel = plan["template"]["source_path"]
-    tmpl = os.path.join(VAULT, tmpl_rel)
+    tmpl = os.path.join(vault, tmpl_rel)
     if not os.path.exists(tmpl):
         print(f"STOP: template not found at {tmpl}", file=sys.stderr)
         return 2

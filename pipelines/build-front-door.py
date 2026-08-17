@@ -2,12 +2,25 @@
 # Regenerate: python3 build-front-door.py  (writes front-door.html beside it). Edit the GROUPS list to change tiles.
 # Mirrors the lead board's build-lead-board.py pattern so the Front Door is regenerable, not hand-edited.
 
+import argparse
 import urllib.parse, html, json, re, os, sys
 
-# CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant,
-# which structurally blocked any non-Joe machine (Dell's clone) from running this.
-FOLDER = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.drive_recovery import add_recovery_arguments, require_recovery
+
+_ap = argparse.ArgumentParser(description="Build the legacy Drive Front Door projection.")
+_ap.add_argument("folder", nargs="?", help="Drive root (recovery only; defaults to --vault)")
+add_recovery_arguments(_ap)
+_args = _ap.parse_args()
+if _args.folder and _args.vault:
+    _ap.error("pass either the recovery folder positional argument or --vault, not both")
+if _args.folder:
+    _args.vault = _args.folder
+try:
+    FOLDER = str(require_recovery(
+        _args, "record-native Front Door launcher and document destination API"))
+except ValueError as _exc:
+    _ap.error(str(_exc))
 REMINDER = "Reminder before we start: this session needs the CARR AI folder connected to read and write (this launcher link should connect it automatically; if it is not connected, connect it before sending)."
 DOCTRINE = "Run this as a guided flow per DNA/Team/guided-entry-doctrine.md: tell me up front how many questions it will be, ask one at a time with multiple choice wherever possible and fill-in-the-blank otherwise, and if this creates a record, capture the core first, save it, then offer to fill in the rest later so a couple of minutes is enough (the daily heartbeat or Monday brief will chase the missing pieces)."
 
@@ -207,10 +220,7 @@ open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html
 # declares success when it CREATES an artifact, never when the consumer can
 # reach it. The generator that builds a surface is the right place to deliver
 # it, so the two cannot drift apart again.
-_vault = _os.environ.get(
-    "CARR_VAULT",
-    _os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
-_dest = _os.path.join(_vault, "DNA", "Team", "front-door.html")
+_dest = _os.path.join(FOLDER, "DNA", "Team", "front-door.html")
 if _os.path.isdir(_os.path.dirname(_dest)):
     open(_dest, "w", encoding="utf-8").write(HTML)
     print("delivered ->", _dest)
