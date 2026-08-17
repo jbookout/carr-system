@@ -59,7 +59,7 @@ def query_store(words: list[str], top: int) -> list[Any]:
     payload = json.dumps({"q": " ".join(words), "limit": top}, separators=(",", ":"))
     proc = subprocess.run(
         [sys.executable, str(repo / "tools" / "call-verb.py"),
-         "search-doctrine-situations", payload],
+         "search-doctrine", payload],
         cwd=repo,
         text=True,
         capture_output=True,
