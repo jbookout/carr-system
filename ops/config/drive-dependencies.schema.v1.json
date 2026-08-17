@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CARR Drive dependency inventory",
+  "type": "object",
+  "required": ["schema_version", "contract", "binary_exclusions", "entries"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "contract": {"const": "drive-dependencies"},
+    "binary_exclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "reason"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "class", "sources", "path_pattern", "producer", "consumers", "canonicality", "replacement"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "class": {"enum": ["normal_runtime", "scheduled", "projection", "recovery", "migration_backfill", "policy_guard", "inventory_tooling", "test_fixture", "prose_only"]},
+          "sources": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "path_pattern": {"type": "string", "minLength": 1},
+          "reference_selectors": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["source", "alias"],
+              "properties": {
+                "source": {"type": "string", "minLength": 1},
+                "alias": {"type": "string", "minLength": 1},
+                "excerpt": {"type": "string", "minLength": 1},
+                "line": {"type": "integer", "minimum": 1}
+              },
+              "additionalProperties": false
+            }
+          },
+          "producer": {"type": "string", "minLength": 1},
+          "consumers": {"type": ["array", "string"], "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "canonicality": {"enum": ["canonical", "projection", "recovery_only"]},
+          "replacement": {"type": ["object", "string"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
