@@ -26,7 +26,62 @@ from datetime import datetime, timedelta
 # would have left the render-tamper check dead on any clone outside $HOME.
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+DEFAULT_RECOVERY_VAULT = (
+    "/Users/booko/Library/CloudStorage/"
+    "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+)
+
+
+def _reader_args(argv):
+    """Return the Drive boundary without letting normal mode inherit a vault."""
+    recovery = False
+    reason = ""
+    vault = None
+    section = "all"
+    fixture = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--recovery":
+            recovery = True
+        elif arg in ("--reason", "--vault", "--section", "--fixture"):
+            if i + 1 >= len(argv):
+                raise SystemExit(f"health-check: {arg} requires a value")
+            value = argv[i + 1]
+            i += 1
+            if arg == "--reason":
+                reason = value
+            elif arg == "--vault":
+                vault = value
+            elif arg == "--section":
+                section = value
+            else:
+                fixture = value
+        else:
+            rest.append(arg)
+        i += 1
+    if vault and not recovery:
+        raise SystemExit("health-check: --vault is recovery-only; pass --recovery")
+    if recovery:
+        reason = (reason or os.environ.get("CARR_RECOVERY_REASON", "")).strip()
+        if not reason:
+            raise SystemExit("health-check: --recovery requires a nonblank --reason")
+        vault = vault or os.environ.get("CARR_VAULT") or DEFAULT_RECOVERY_VAULT
+    else:
+        # A parent shell may carry this old ambient variable.  Normal health must
+        # not pass it to any child or let a child silently choose a Drive reader.
+        os.environ.pop("CARR_VAULT", None)
+    if section not in ("all", "exports", "jobs", "registry"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry")
+    if fixture and recovery:
+        raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
+    return recovery, reason, vault, section, fixture, rest
+
+
+RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, _READER_REST = \
+    _reader_args(sys.argv[1:])
+sys.argv[1:] = _READER_REST
 
 # ── scheduler register (added 2026-08-02) ────────────────────────────────────
 # A TASK THAT HAS NEVER REACHED ITS FIRST WINDOW LOOKS EXACTLY LIKE A TASK THAT IS
@@ -176,6 +231,244 @@ if "--tasks" in sys.argv:
     if _i + 1 >= len(sys.argv):
         sys.exit("usage: health-check.py --tasks <list_scheduled_tasks.json>")
     sys.exit(classify_tasks(sys.argv[_i + 1]))
+
+
+def _canonical_snapshot():
+    """Read canonical database/control-plane evidence, never a Drive render."""
+    if CANONICAL_FIXTURE:
+        with open(CANONICAL_FIXTURE, encoding="utf-8") as fh:
+            value = json.load(fh)
+        if not isinstance(value, dict):
+            raise ValueError("canonical health fixture must be an object")
+        return value
+
+    snapshot = {"exports": None, "jobs": None, "controls": None, "errors": []}
+    if CANONICAL_SECTION in ("all", "exports"):
+        probe = r'''
+import json
+from exporters.targets import TARGETS
+from exporters.common import connect
+with connect() as c, c.cursor() as cur:
+    cur.execute("""select target,
+                          max(ran_at) filter (where status='ok'),
+                          (array_agg(status order by ran_at desc))[1]
+                     from export_run group by target""")
+    rows = [{"target": t, "last_ok": x.isoformat() if x else None,
+             "latest_status": s} for t, x, s in cur.fetchall()]
+print(json.dumps({"registered": sorted(TARGETS), "rows": rows}))
+'''
+        _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
+        _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
+        p = subprocess.run(
+            [_query_python, "-c", probe],
+            cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.returncode:
+            snapshot["errors"].append("exports: " + ((p.stderr or "").strip() or "query failed"))
+        else:
+            try:
+                snapshot["exports"] = json.loads(p.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError) as exc:
+                snapshot["errors"].append(f"exports: unparseable result ({exc})")
+
+    if CANONICAL_SECTION in ("all", "jobs"):
+        # v_job_control is the durable provider-independent job ledger.  The
+        # SQL is intentionally here (rather than a projection parser) so a test
+        # can prove exactly which authority surface health reads.
+        sql = """select v.definition_key,v.state,v.mode,v.attempt,v.max_attempts,
+                        v.scheduled_for,v.started_at,v.ended_at,
+                        (select count(*) from ops.job_receipt r
+                          where r.job_id=v.id and r.kind='completion') as completion_receipt_count
+                   from ops.v_job_control v
+                  where v.created_at > now() - interval '8 days' and v.mode='live'
+                  order by v.created_at desc"""
+        _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
+        _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
+        p = subprocess.run(
+            [_query_python,
+             os.path.join(REPO_ROOT, "tools/db-tap.py"), "sql", "/dev/stdin"],
+            input=sql, cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.returncode:
+            snapshot["errors"].append("jobs: " + ((p.stderr or "").strip() or "query failed"))
+        else:
+            rows = []
+            for line in p.stdout.splitlines():
+                cols = [c.strip() for c in line.split("|")]
+                if len(cols) == 9 and cols[1] in {
+                    "queued", "running", "retry_wait", "waiting_approval", "succeeded",
+                    "failed", "timed_out", "dead_lettered", "cancelled",
+                }:
+                    rows.append({
+                        "definition_key": cols[0], "state": cols[1], "mode": cols[2],
+                        "attempt": int(cols[3]), "max_attempts": int(cols[4]),
+                        "scheduled_for": cols[5], "started_at": cols[6],
+                        "ended_at": cols[7], "completion_receipt_count": int(cols[8]),
+                    })
+            snapshot["jobs"] = rows
+    if CANONICAL_SECTION == "all":
+        sql = """select
+          (select count(*) from doctrine_gate_run
+            where result='fail' and dry_run=false
+              and started_at > now() - interval '24 hours'),
+          (select count(*) from doctrine_section s join doctrine_document d
+             on d.id=s.document_id join doctrine_review_policy p
+             on p.id=d.review_policy_id
+            where s.status='active' and p.max_age_days is not null
+              and s.review_after is null),
+          (select count(*) from doctrine_section
+            where status='active' and review_after < now()),
+          (select count(*) from ops.v_rule_enforcement_status
+            where policy_status='active' and enforcement_status <> 'hard_enforced')"""
+        _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
+        _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
+        p = subprocess.run(
+            [_query_python, os.path.join(REPO_ROOT, "tools/db-tap.py"),
+             "sql", "/dev/stdin"],
+            input=sql, cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.returncode:
+            snapshot["errors"].append("controls: " +
+                                      ((p.stderr or "").strip() or "query failed"))
+        else:
+            for line in p.stdout.splitlines():
+                cols = [c.strip() for c in line.split("|")]
+                if len(cols) == 4 and all(c.isdigit() for c in cols):
+                    snapshot["controls"] = {
+                        "doctrine_gate_failures_24h": int(cols[0]),
+                        "doctrine_never_reviewed": int(cols[1]),
+                        "doctrine_stale_sections": int(cols[2]),
+                        "active_rules_not_hard_enforced": int(cols[3]),
+                    }
+                    break
+    return snapshot
+
+
+def _canonical_health():
+    """The normal health surface: record/control-plane/local truth only."""
+    rc = 0
+    try:
+        snap = _canonical_snapshot()
+    except Exception as exc:
+        print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
+        return 1
+
+    print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
+    for error in snap.get("errors", []):
+        print(f"  ⚠︎ canonical source UNREADABLE — {error}")
+        rc = 1
+
+    if CANONICAL_SECTION in ("all", "exports"):
+        exports = snap.get("exports")
+        print("Export register — canonical export_run receipts")
+        if not isinstance(exports, dict):
+            print("  ⚠︎ export receipts UNREADABLE")
+            rc = 1
+        else:
+            registered = set(exports.get("registered") or [])
+            rows = {r.get("target"): r for r in exports.get("rows") or [] if isinstance(r, dict)}
+            bad = []
+            for target in sorted(registered):
+                row = rows.get(target)
+                if not row:
+                    bad.append(f"NEVER RAN {target}")
+                    continue
+                last_ok = row.get("last_ok")
+                if not last_ok:
+                    bad.append(f"NEVER OK {target}")
+                    continue
+                try:
+                    stamp = datetime.fromisoformat(str(last_ok).replace("Z", "+00:00"))
+                    now = datetime.now(stamp.tzinfo) if stamp.tzinfo else datetime.now()
+                    if now - stamp > timedelta(hours=26):
+                        bad.append(f"STALE {target} (last ok {str(last_ok)[:16]})")
+                except ValueError:
+                    bad.append(f"UNPARSEABLE {target} last_ok={last_ok}")
+            for finding in bad:
+                print(f"  ⚠︎ {finding}")
+            if bad:
+                rc = 1
+            else:
+                print(f"  OK {len(registered)} registered target(s), all receipted inside 26h")
+
+    if CANONICAL_SECTION in ("all", "jobs"):
+        print("Schedule drift — durable Control Plane job state")
+        jobs = snap.get("jobs")
+        if not isinstance(jobs, list):
+            print("  ⚠︎ job ledger UNREADABLE")
+            rc = 1
+        else:
+            bad = [j for j in jobs if j.get("state") in
+                   ("failed", "timed_out", "dead_lettered")]
+            unreceipted = [j for j in jobs if j.get("state") == "succeeded" and
+                           int(j.get("completion_receipt_count", 0)) < 1]
+            for job in bad:
+                print(f"  ⚠︎ {job.get('definition_key')} {job.get('state')} "
+                      f"attempt {job.get('attempt')}/{job.get('max_attempts')}")
+            for job in unreceipted:
+                print(f"  ⚠︎ {job.get('definition_key')} succeeded without immutable receipt")
+            if bad or unreceipted:
+                rc = 1
+            else:
+                print(f"  OK {len(jobs)} recent job(s), no terminal failure or unreceipted success")
+
+    if CANONICAL_SECTION in ("all", "registry"):
+        print("Registry integrity — canonical v_export_leads")
+        p = subprocess.run(
+            [sys.executable, os.path.join(REPO_ROOT, "tools/registry-audit.py")],
+            cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.stdout:
+            print(p.stdout.rstrip())
+        if p.returncode:
+            print("  ⚠︎ canonical registry audit failed")
+            rc = 1
+    if CANONICAL_SECTION == "all":
+        print("Doctrine and rule controls — canonical database state")
+        controls = snap.get("controls")
+        if not isinstance(controls, dict):
+            print("  ⚠︎ doctrine/rule controls UNREADABLE")
+            rc = 1
+        else:
+            gate_failures = int(controls.get("doctrine_gate_failures_24h", 0))
+            never_reviewed = int(controls.get("doctrine_never_reviewed", 0))
+            stale = int(controls.get("doctrine_stale_sections", 0))
+            rule_gaps = int(controls.get("active_rules_not_hard_enforced", 0))
+            print(f"  {'OK' if not gate_failures else '⚠︎'} gate-blocks-24h      "
+                  f"{gate_failures}")
+            print(f"  {'OK' if not never_reviewed else '⚠︎'} never-reviewed       "
+                  f"{never_reviewed} policy-bearing sections")
+            print(f"  {'OK' if not stale else '⚠︎'} stale-sections       "
+                  f"{stale} past review_after")
+            print(f"  {'OK' if not rule_gaps else '⚠︎'} active-rule-gaps      "
+                  f"{rule_gaps} active admitted rules not hard-enforced")
+            if gate_failures or never_reviewed or stale or rule_gaps:
+                rc = 1
+
+        p = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                           text=True, capture_output=True, timeout=30)
+        if p.returncode:
+            print("  ⚠︎ repository worktree status UNREADABLE")
+            rc = 1
+        else:
+            loose = [line for line in p.stdout.splitlines() if line.strip()]
+            print(f"  {'OK' if not loose else '⚠︎'} loose-work            "
+                  f"{len(loose)} path(s) outside committed canonical history")
+            if loose:
+                rc = 1
+    print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
+    return rc
+
+
+if not RECOVERY_MODE:
+    sys.exit(_canonical_health())
+
+print(f"HEALTH RECOVERY MODE — NONCANONICAL Drive projections — reason: {RECOVERY_REASON}", file=sys.stderr)
+print(f"HEALTH RECOVERY MODE — vault: {VAULT}", file=sys.stderr)
 
 # name, output (glob ok — newest match wins), max_age_days (None = no cadence),
 # input globs (any newer than output => BEHIND), note shown on failure
