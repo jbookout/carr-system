@@ -1,6 +1,6 @@
 {
   "contract": "carr-workspace-notification-event-taxonomy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "status": "phase0_candidate",
   "notification_policy": {
     "authoritative_inbox": "in_app_notification_center",
@@ -12,7 +12,7 @@
     "excluded_topic": "Named lead outreach reminders remain exclusively on the Lead Board."
   },
   "notification_matrix": [
-    {"class": "urgent", "topics": ["critical_deal_date", "recording_failure", "call_processing_failure", "imminent_tour_schedule_break"], "default_channels": ["in_app", "web_push", "apns"], "requires": ["why_interrupted", "exact_object_deep_link", "accountable_owner", "dedupe_key"], "weekend": "only safety or truly imminent deadlines after Joe/Dell approval of urgent matrix"},
+    {"class": "urgent", "topics": ["critical_deal_date", "recording_failure", "call_processing_failure", "imminent_tour_schedule_break"], "default_channels": ["in_app", "web_push", "apns"], "requires": ["why_interrupted", "exact_object_deep_link", "accountable_owner", "dedupe_key"], "weekend": "only safety or truly imminent deadlines after Joe approves the urgent matrix; Dell may comment or validate without gating"},
     {"class": "review_needed", "topics": ["call_pack_ready", "draft_approval", "action_confirmation", "engineering_request_needs_answer", "engineering_request_completed", "sync_conflict"], "default_channels": ["in_app"], "optional_channels": ["web_push", "apns"], "requires": ["exact decision", "owner module", "deep link", "deadline if real"]},
     {"class": "digest", "topics": ["weekday_summary", "calm_change_summary", "nonurgent_failures"], "default_channels": ["in_app", "weekday_digest"], "requires": ["deduplicated owner-module groups"], "weekend": "suppressed"}
   ],

@@ -582,7 +582,7 @@
     "keyboard": "All markers are reachable through the synchronized list; selection, filtering, trip inclusion, and record opening require no pointer gesture.",
     "screen_reader": "The map has a concise summary and change announcements; the equivalent list exposes every item, filter, route order, exclusion, and warning.",
     "zoom_and_motion": "Supports 200 percent zoom, 44-pixel targets, reduced motion, high contrast, and no essential animated-only explanation.",
-    "adoption_gate": "Joe and Dell each complete whole-market scan, exact-record retrieval, filter, trip assembly, route comparison, and owning-record handoff uncoached, with map/list parity and no heavy AI session."
+    "adoption_gate": "Joe completes whole-market scan, exact-record retrieval, filter, trip assembly, route comparison, and owning-record handoff uncoached, with map/list parity and no heavy AI session. Dell may independently validate the same journey, but his participation does not gate adoption."
   },
   "privacy_and_security": {
     "sensitive_fields": [

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "required_system_authority": "joe",
+  "scope": [
+    "system_architecture",
+    "system_development",
+    "release_and_rollout",
+    "high_level_system_function"
+  ],
+  "dell": {
+    "approval_required": false,
+    "participation": "permitted_optional_nonblocking",
+    "compatibility_evidence": {
+      "required_when": "a change could strand Dell's authorized login or workflow",
+      "meaning": "capability and continuity evidence only; never Dell approval or a system-change veto"
+    },
+    "preserved_capabilities": [
+      "use_authorized_system",
+      "read_write_and_operate_authorized_business_records",
+      "teach_workflows_and_rules",
+      "review_and_comment",
+      "participate_in_decisions_voluntarily"
+    ]
+  },
+  "reopen_only_if": "Joe explicitly changes the system-governance model"
+}
