@@ -42,8 +42,8 @@ def main() -> int:
     refuses(lambda: mod.resolve_active_rules(rows + [{"source_id": "cccccccc", "id": "cccccccc-0000-4000-8000-000000000003"}], expected), "extra=cccccccc")
     assert mod.resolve_classifier_actor([{"id": "actor-codex"}], "codex") == "actor-codex"
     refuses(lambda: mod.resolve_classifier_actor([], "codex"), "exactly one")
-    original_assert_head_committed = mod.assert_head_committed
-    mod.assert_head_committed = lambda *_args: None
+    original_assert_head_committed = getattr(mod, "assert_head_committed")
+    setattr(mod, "assert_head_committed", lambda *_args: None)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "mapping.json"
         review = json.loads(mod.DEFAULT_CURATION_REVIEW.read_text(encoding="utf-8"))
@@ -74,7 +74,7 @@ def main() -> int:
         refuses(lambda: mod.load_mapping_plan(path), "digest does not match")
         path.write_text("{}", encoding="utf-8")
         refuses(lambda: mod.load_mapping_plan(path), "must declare schema")
-    mod.assert_head_committed = original_assert_head_committed
+    setattr(mod, "assert_head_committed", original_assert_head_committed)
     sample_guidance_id = next(iter(doctrine_mappings))
     sample_binding = doctrine_mappings[sample_guidance_id][0]
     class MappingCursor:
