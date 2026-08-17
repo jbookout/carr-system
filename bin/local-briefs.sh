@@ -48,16 +48,28 @@ fi
 
 rc=0
 brief_ok=0
-BRIEF_ARGS=(--quiet)
 if [ "$RECOVERY" -eq 1 ]; then
-  BRIEF_ARGS+=(--recovery)
   echo "$(date -u +%FT%TZ) RECOVERY brief-pack reason=${CARR_RECOVERY_REASON}" >> "$LOG"
-fi
-if ./run.sh brief-pack "${BRIEF_ARGS[@]}" >> "$LOG" 2>&1; then
-  echo "$(date -u +%FT%TZ) OK brief-pack" >> "$LOG"
-  brief_ok=1
+  if ./run.sh brief-pack --quiet --recovery >> "$LOG" 2>&1; then
+    echo "$(date -u +%FT%TZ) OK brief-pack recovery" >> "$LOG"
+    brief_ok=1
+  else
+    echo "$(date -u +%FT%TZ) FAIL brief-pack recovery rc=$?" >> "$LOG"; rc=1
+  fi
 else
-  echo "$(date -u +%FT%TZ) FAIL brief-pack rc=$?" >> "$LOG"; rc=1
+  # The weekday artifact consumes exactly these three canonical-safe sections.
+  # Do not ask for `all`: that includes prebriefs, whose only current source is
+  # the explicitly-recovery Drive ICS path and must keep refusing normal use.
+  brief_ok=1
+  for section in one-thing claim-card renewal-shortlist; do
+    if ./run.sh brief-pack --quiet --section "$section" >> "$LOG" 2>&1; then
+      echo "$(date -u +%FT%TZ) OK brief-pack section=$section" >> "$LOG"
+    else
+      echo "$(date -u +%FT%TZ) FAIL brief-pack section=$section rc=$?" >> "$LOG"
+      brief_ok=0
+      rc=1
+    fi
+  done
 fi
 
 if ./run.sh review-queue >> "$LOG" 2>&1; then

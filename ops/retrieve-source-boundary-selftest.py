@@ -158,6 +158,20 @@ try:
           and "tier = 'personal' and personal_to = %s" in brief_sql)
     check("Monday query returns the in-scope decision", decisions[0]["question"] == "Approve the plan.")
 
+    original_principal_reader = brief.local_partner_principal
+    original_argv = sys.argv
+    brief.local_partner_principal = lambda: "joe"
+    sys.argv = ["brief_pack.py", "--section", "prebriefs"]
+    refused_out, refused_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(refused_out), contextlib.redirect_stderr(refused_err):
+            refused_prebrief = brief.main()
+    finally:
+        brief.local_partner_principal = original_principal_reader
+        sys.argv = original_argv
+    check("direct normal prebrief still refuses before producing output",
+          refused_prebrief == 69 and "will not produce a degraded brief" in refused_err.getvalue())
+
     review_spec = importlib.util.spec_from_file_location("review_boundary", ROOT / "pipelines/review_queue.py")
     assert review_spec and review_spec.loader
     review: Any = importlib.util.module_from_spec(review_spec)
@@ -203,6 +217,7 @@ try:
         script.write_text((ROOT / "bin/local-briefs.sh").read_text())
         fake_run = repo / "run.sh"
         fake_run.write_text("""#!/bin/zsh
+print -r -- \"$*\" >> \"$HOME/carr-system/out/fake-run-calls.log\"
 if [ \"$1\" = \"brief-pack\" ]; then
   [ \"${FAKE_BRIEF_FAIL:-0}\" = \"1\" ] && exit 69
   mkdir -p \"$HOME/carr-system/out/brief-pack\"
@@ -229,6 +244,12 @@ exit 0
               and (repo / "out/brief-pack/today.md").exists())
         check("normal scheduled success never projects to Drive",
               not (vault / "00_Context/today.md").exists())
+        normal_calls = (repo / "out/fake-run-calls.log").read_text()
+        check("normal scheduler requests only the three consumed canonical-safe sections",
+              all(f"brief-pack --quiet --section {section}" in normal_calls
+                  for section in ("one-thing", "claim-card", "renewal-shortlist"))
+              and "brief-pack --quiet\n" not in normal_calls
+              and "--recovery" not in normal_calls)
 
         recovery = subprocess.run(
             ["/bin/zsh", str(script), "--recovery"],
