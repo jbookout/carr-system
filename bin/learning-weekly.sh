@@ -21,9 +21,8 @@
 # convention as bin/nightly.sh, and for the same reason: an alarm that fires
 # every week until a credential lands trains people to stop reading alarms.
 #
-# Appends to out/learning.log. Verified by OUTPUT — the four report files under
-# Automation/Learning/ and their first lines — never by this script existing and
-# never by its own claim of success (protocol rule 28).
+# Appends to out/learning.log.  Reports live only in the repo-local canonical
+# document output, out/Learning/; Drive projections are not part of this route.
 #
 # Run by hand any time: ./bin/learning-weekly.sh
 set -u
@@ -31,9 +30,9 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin"
 LOG="$REPO/out/learning.log"
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
-LEARN_DIR="$VAULT/Automation/Learning"
-mkdir -p "$REPO/out" "$LEARN_DIR"
+LEARN_DIR="$REPO/out/Learning"
+mkdir -p "$LEARN_DIR"
+unset CARR_VAULT
 
 # Credentials, both from files on disk, never inlined here.
 #  · db.env carries the least-privilege exporter URL the read-only jobs ride.
@@ -88,7 +87,7 @@ step "placements + metrics (Blotato -> records)" \
 
 step "weekly learning + correction miner" \
   ./.venv/bin/python pipelines/learning_jobs.py weekly-chain \
-    --report-dir "$LEARN_DIR" --report-dir "$REPO/out/Learning"
+    --report-dir "$LEARN_DIR"
 
 if [ "$rc_total" -eq 0 ]; then
   say "===== learning weekly chain OK ====="

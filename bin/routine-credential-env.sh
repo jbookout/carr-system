@@ -62,14 +62,19 @@ carr_load_routine_db_env() {
 # credentials must be loaded by that child's own narrow adapter, never inherited
 # from a broad db.env source.
 carr_routine_exec() {
-  env -i HOME="$HOME" PATH="$PATH" LANG="${LANG:-C}" TMPDIR="${TMPDIR:-/tmp}" \
+  local -a routine_env
+  routine_env=(HOME="$HOME" PATH="$PATH" LANG="${LANG:-C}" TMPDIR="${TMPDIR:-/tmp}" \
     CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-}" \
-    CARR_VAULT="${CARR_VAULT:-}" \
     CARR_EXPORT_LIVE="${CARR_EXPORT_LIVE:-}" \
     HC_EXPORTS_RC="${HC_EXPORTS_RC:-}" \
     HC_BACKUP_RC="${HC_BACKUP_RC:-}" \
     HC_CHAIN_RC="${HC_CHAIN_RC:-}" \
     CARR_DB_JOBS_URL="${CARR_DB_JOBS_URL:-}" \
-    CARR_DB_EXPORTER_URL="${CARR_DB_EXPORTER_URL:-}" \
-    "$@"
+    CARR_DB_EXPORTER_URL="${CARR_DB_EXPORTER_URL:-}")
+  # A Drive root is not routine ambient state.  It crosses this boundary only
+  # after the caller has explicitly opened its recovery envelope.
+  if [ "${CARR_DRIVE_RECOVERY:-0}" = "1" ]; then
+    routine_env+=(CARR_VAULT="${CARR_VAULT:-}")
+  fi
+  env -i "${routine_env[@]}" "$@"
 }

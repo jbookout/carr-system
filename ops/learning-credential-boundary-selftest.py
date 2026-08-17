@@ -61,7 +61,7 @@ def main() -> int:
         check("jobs-configured weekly workflow invokes both established programs", completed.returncode == 0 and len(rows) == 2,
               f"rc={completed.returncode} stderr={completed.stderr.strip()!r}")
         check("metrics program retains its registered --apply invocation",
-              bool(rows) and rows[0]["args"] == ["pipelines/pull_placement_metrics.py", "--apply", "--report-dir", str(root / "vault" / "Automation" / "Learning")])
+              bool(rows) and rows[0]["args"] == ["pipelines/pull_placement_metrics.py", "--apply", "--report-dir", str(root / "out" / "Learning")])
         check("children receive only the jobs database credential",
               bool(rows) and all(r["env"].get("CARR_DB_JOBS_URL") == "postgresql://carr_jobs:file-only@db/carr"  # ci-secret-scan: allow — selftest fixture
               and not any(key in r["env"] for key in ("DATABASE_URL", "CARR_DB_WRITER_URL", "CARR_DB_OWNER_URL", "CARR_DB_CADENCE_URL", "CARR_IMPORT_DB_URL")) for r in rows))
