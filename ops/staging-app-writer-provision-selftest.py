@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import importlib.util
 import contextlib
 import dataclasses
+import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -48,6 +49,63 @@ def main() -> int:
           extracted == raw_writer and len(extracted) >= 170)
     check("the extracted ACL set names no second grantee",
           all(line.endswith(" to carr_writer;") for line in extracted))
+
+    current_grants = snapshot.load_current_grants_to_role(
+        REPO / "db/schema.sql", REPO / "migrations", "carr_writer"
+    )
+    current_facts = set(snapshot.acl_facts(current_grants))
+    check("the current grant plan composes every post-snapshot migration",
+          ("table", "ops.work_request", "insert", False) not in current_facts
+          and ("table", "ops.work_request", "update", False) in current_facts
+          and ("function",
+               "ops.capture_sourced_work_request(text, text, text, jsonb, uuid, uuid, uuid)",
+               "execute", False) in current_facts
+          and len(current_facts) > len(snapshot.acl_facts(extracted)))
+
+    synthetic_applied = "begin; commit;\n"
+    synthetic_pending = """begin;
+do $$ begin
+  grant execute on function ops.capture(text,uuid) to carr_writer;
+end $$;
+revoke insert on ops.work_request from carr_writer;
+commit;
+"""
+    synthetic_later = """begin;
+revoke all on function ops.capture(text,uuid) from carr_writer;
+grant execute on function ops.capture_v2(text,uuid) to carr_writer;
+commit;
+"""
+    synthetic_schema = f"""COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
+0001_base.sql\t{hashlib.sha256(synthetic_applied.encode()).hexdigest()}\t2026-08-16 00:00:00+00
+\\.
+{snapshot.SECTION_MARKER}
+grant insert, select on table ops.work_request to carr_writer;
+{snapshot.SECTION_END}
+"""
+    synthetic_plan = snapshot.compose_grants_to_role(
+        synthetic_schema,
+        (("0001_base.sql", synthetic_applied),
+         ("0002_pending.sql", synthetic_pending),
+         ("0003_later.sql", synthetic_later)),
+        "carr_writer",
+    )
+    check("pending GRANT and REVOKE operations compose in migrate filename order",
+          set(snapshot.acl_facts(synthetic_plan)) == {
+              ("table", "ops.work_request", "select", False),
+              ("function", "ops.capture_v2(text, uuid)", "execute", False),
+          })
+    try:
+        snapshot.compose_grants_to_role(
+            synthetic_schema,
+            (("0001_base.sql", synthetic_applied),
+             ("0002_grantable.sql",
+              "grant select on table public.actor to carr_writer with grant option;")),
+            "carr_writer",
+        )
+    except snapshot.SnapshotGrantError:
+        check("a pending migration cannot make grantable authority canonical", True)
+    else:
+        raise AssertionError("grantable pending authority was accepted")
     try:
         snapshot.grants_to_role(schema_text.replace(snapshot.SECTION_MARKER, "missing"), "carr_writer")
     except snapshot.SnapshotGrantError:

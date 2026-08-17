@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import pathlib
@@ -47,16 +48,45 @@ def assert_precommit_refusal(conn, provision, grants, setup: tuple[str, ...], la
             raise RuntimeError(f"{label} refusal did not restore carr_writer authority")
 
 
+def grants_for_rebuild_state(cur, provision):
+    """Select only the two database shapes this gate is designed to prove."""
+    cur.execute("select filename,sha256 from public.schema_migrations")
+    actual_ledger = dict(cur.fetchall())
+    schema_text = provision.SCHEMA.read_text(encoding="utf-8")
+    snapshot_ledger = provision.snapshot_grants.snapshot_applied_migrations(schema_text)
+    migration_sql = [
+        (path.name, path.read_text(encoding="utf-8"))
+        for path in sorted(provision.MIGRATIONS.iterdir()) if path.suffix == ".sql"
+    ]
+    full_ledger = dict(snapshot_ledger)
+    full_ledger.update(
+        (name, hashlib.sha256(sql.encode()).hexdigest())
+        for name, sql in migration_sql
+    )
+    if actual_ledger == snapshot_ledger:
+        return provision.snapshot_grants.load_grants_to_role(
+            provision.SCHEMA, provision.BUNDLE_ROLE
+        ), "snapshot-only"
+    if actual_ledger == full_ledger:
+        return provision.snapshot_grants.load_current_grants_to_role(
+            provision.SCHEMA, provision.MIGRATIONS, provision.BUNDLE_ROLE
+        ), "full-rebuild"
+    missing = sorted(set(full_ledger) - set(actual_ledger))
+    extra = sorted(set(actual_ledger) - set(full_ledger))
+    raise RuntimeError(
+        "database is neither exact snapshot-only nor full-rebuild state "
+        f"(missing={missing[:3]}, extra={extra[:3]})"
+    )
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         print("staging-app-writer-provision-db-gate: DATABASE_URL is required", file=sys.stderr)
         return 1
     provision = load_provisioner()
-    grants = provision.snapshot_grants.load_grants_to_role(
-        provision.SCHEMA, provision.BUNDLE_ROLE
-    )
     with psycopg.connect(dsn, autocommit=False) as conn, conn.cursor() as cur:
+        grants, rebuild_state = grants_for_rebuild_state(cur, provision)
         baseline_bundle = provision.collect_role_authority(cur, provision.BUNDLE_ROLE)
         refusal_fixtures = (
             (("create table public.app_writer_owned_fixture(id integer)",
@@ -205,7 +235,8 @@ def main() -> int:
             raise RuntimeError("rollback left app_writer membership residue")
         conn.rollback()
 
-    print("PASS: staging app_writer ACLs, membership, and timeouts converge atomically and roll back cleanly")
+    print("PASS: staging app_writer ACLs, membership, and timeouts converge "
+          f"atomically and roll back cleanly ({rebuild_state})")
     return 0
 
 

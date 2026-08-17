@@ -28,6 +28,7 @@ except ImportError:
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SCHEMA = REPO / "db/schema.sql"
+MIGRATIONS = REPO / "migrations"
 STAGING_PROJECT_NAME = "carr-staging"
 STAGING_BRANCH_NAME = "main"
 APP_ROLE = "app_writer"
@@ -194,7 +195,7 @@ select 'column',n.nspname||'.'||c.relname||'('||att.attname||')',lower(a.privile
   cross join lateral aclexplode(att.attacl) a join target on target.oid=a.grantee
  where not att.attisdropped
 union all
-select 'function',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',
+select 'function',n.nspname||'.'||p.proname||'('||oidvectortypes(p.proargtypes)||')',
        lower(a.privilege_type),a.is_grantable
   from pg_proc p join pg_namespace n on n.oid=p.pronamespace
   cross join lateral aclexplode(p.proacl) a join target on target.oid=a.grantee
@@ -751,7 +752,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         reject_unsafe_environment(os.environ)
-        grants = snapshot_grants.load_grants_to_role(SCHEMA, BUNDLE_ROLE)
+        grants = snapshot_grants.load_current_grants_to_role(
+            SCHEMA, MIGRATIONS, BUNDLE_ROLE
+        )
         scope = resolve_provider_scope(
             neonctl=db_tap.NEONCTL, environ=os.environ,
         )
