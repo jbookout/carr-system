@@ -3,6 +3,8 @@
 from __future__ import annotations
 import json, sys
 import importlib.util
+from collections.abc import Mapping, Sequence
+from typing import Any
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]; sys.path.insert(0,str(ROOT))
 from lib.control_plane_phase5_baseline import BaselineRefusal, CACHE_BASELINE_QUERY, build_cache_baseline, resolve_cache_baseline_rows  # noqa: E402
@@ -16,7 +18,7 @@ def refuses(rows: list[dict[str,object]]) -> bool:
 
 class FakeCursor:
     def __init__(self, rows: list[tuple[object,...]]): self.rows=rows; self.query=""
-    def execute(self, query: str, params: tuple[object,...]) -> None: self.query=query
+    def execute(self, query: str, params: Sequence[Any] | Mapping[str,Any] | None = None, *, prepare: bool | None = None, binary: bool | None = None) -> None: self.query=query
     def fetchall(self) -> list[tuple[object,...]]: return self.rows
 
 class BoundaryCursor:
