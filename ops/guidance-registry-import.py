@@ -26,8 +26,10 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 from lib import guidance_registry as registry
+from lib.reviewed_artifact import ReviewedArtifactError, assert_head_committed
 DEFAULT_MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
 DEFAULT_MANIFEST = REPO / "audits" / "guidance-migration-manifest.v1.tsv"
+DEFAULT_CURATION_REVIEW = REPO / "audits" / "guidance-situation-curation-review.v1.json"
 MAPPING_PLAN_SCHEMA = "guidance-situation-mapping-plan/v1"
 WRITER_ROLE = "carr_writer"
 
@@ -42,6 +44,16 @@ def file_sha256(path: Path) -> str:
 
 def load_mapping_plan(path: Path) -> dict[str, list[dict[str, str]]]:
     try:
+        for artifact, relative in (
+            (DEFAULT_CURATION_REVIEW,
+             "audits/guidance-situation-curation-review.v1.json"),
+            (DEFAULT_MANIFEST, "audits/guidance-migration-manifest.v1.tsv"),
+            (DEFAULT_MAP, "ops/config/rule-enforcement-map.json"),
+        ):
+            assert_head_committed(REPO, artifact, relative)
+    except ReviewedArtifactError as exc:
+        raise ImportRefusal(str(exc)) from exc
+    try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ImportRefusal(f"mapping plan does not exist: {path}") from exc
@@ -49,18 +61,116 @@ def load_mapping_plan(path: Path) -> dict[str, list[dict[str, str]]]:
         raise ImportRefusal(f"mapping plan is not JSON: {path}: {exc.msg}") from exc
     if not isinstance(raw, dict) or raw.get("schema") != MAPPING_PLAN_SCHEMA:
         raise ImportRefusal(f"mapping plan must declare schema {MAPPING_PLAN_SCHEMA}")
+    provenance = raw.get("review_provenance")
+    expected_review_path = "audits/guidance-situation-curation-review.v1.json"
+    if not isinstance(provenance, dict) or provenance.get("path") != expected_review_path:
+        raise ImportRefusal("mapping plan must bind the checked-in v1 curation review path")
+    if provenance.get("sha256") != file_sha256(DEFAULT_CURATION_REVIEW):
+        raise ImportRefusal("mapping plan curation-review digest does not match the checked-in review")
     bindings = raw.get("doctrine_mappings")
     if not isinstance(bindings, dict):
         raise ImportRefusal("mapping plan requires doctrine_mappings object")
+    review = json.loads(DEFAULT_CURATION_REVIEW.read_text(encoding="utf-8"))
+    if (review.get("schema") != "guidance-situation-curation-review/v1"
+            or review.get("review_state") != "proposed"):
+        raise ImportRefusal("checked-in curation review schema/state is not the governed v1 proposal")
+    for field, artifact, relative in (
+        ("reviewed_source_manifest", DEFAULT_MANIFEST,
+         "audits/guidance-migration-manifest.v1.tsv"),
+        ("reviewed_base_inventory", DEFAULT_MAP,
+         "ops/config/rule-enforcement-map.json"),
+    ):
+        item = review.get(field)
+        if (not isinstance(item, dict) or item.get("path") != relative
+                or item.get("sha256") != file_sha256(artifact)):
+            raise ImportRefusal(f"checked-in curation review {field} provenance drifted")
+    review_rows = review.get("doctrine_guidance")
+    if not isinstance(review_rows, list):
+        raise ImportRefusal("checked-in curation review has no doctrine_guidance array")
+    expected = {row.get("guidance_id"): row for row in review_rows if isinstance(row, dict)}
+    if len(expected) != len(review_rows) or set(bindings) != set(expected):
+        raise ImportRefusal("mapping plan does not exactly cover the checked-in curation review")
+    for guidance_id, planned in bindings.items():
+        if not isinstance(planned, list):
+            raise ImportRefusal(f"mapping plan bindings for {guidance_id} must be an array")
+        review_row = expected[guidance_id]
+        expected_mappings = review_row.get("mappings")
+        if not isinstance(expected_mappings, list) or len(planned) != len(expected_mappings):
+            raise ImportRefusal(f"mapping plan binding count differs from review for {guidance_id}")
+        expected_shapes = sorted(
+            (
+                review_row.get("concept_key"),
+                mapping.get("doctrine_section_id"),
+                mapping.get("rationale"),
+            )
+            for mapping in expected_mappings if isinstance(mapping, dict)
+        )
+        actual_shapes = sorted(
+            (
+                binding.get("concept_key"),
+                binding.get("doctrine_section_id"),
+                binding.get("reason"),
+            )
+            for binding in planned if isinstance(binding, dict)
+        )
+        if len(actual_shapes) != len(planned) or actual_shapes != expected_shapes:
+            raise ImportRefusal(f"mapping plan content differs from review for {guidance_id}")
+        if any(not isinstance(binding.get("concept_id"), str) for binding in planned):
+            raise ImportRefusal(f"mapping plan concept id is missing for {guidance_id}")
     return bindings
 
 
-def resolve_active_rules(rows: Iterable[Mapping[str, Any]], expected_source_ids: set[str]) -> dict[str, str]:
-    """Resolve all reviewed short IDs against the active source of truth.
+def resolve_mapping_plan(cur: Any, mappings: dict[str, list[dict[str, str]]]
+                         ) -> dict[str, list[dict[str, str]]]:
+    """Verify reviewed concept identities and approved exact bridges, then strip labels."""
+    all_bindings = [binding for rows in mappings.values() for binding in rows]
+    concept_ids = sorted({binding["concept_id"] for binding in all_bindings})
+    section_ids = sorted({binding["doctrine_section_id"] for binding in all_bindings})
+    concepts = cur.execute(
+        "select id::text as concept_id,concept_key,status from retrieval_concept "
+        "where id=any(%s::uuid[])", (concept_ids,)
+    ).fetchall()
+    concept_by_id = {row["concept_id"]: row for row in concepts}
+    bridges = cur.execute(
+        "select concept_id::text as concept_id,section_id::text as section_id "
+        "from doctrine_concept_mapping where status='approved' "
+        "and concept_id=any(%s::uuid[]) and section_id=any(%s::uuid[])",
+        (concept_ids, section_ids),
+    ).fetchall()
+    approved = {(row["concept_id"], row["section_id"]) for row in bridges}
+    canonical: dict[str, list[dict[str, str]]] = {}
+    for guidance_id, rows in mappings.items():
+        canonical[guidance_id] = []
+        for binding in rows:
+            concept_id = binding["concept_id"]
+            concept = concept_by_id.get(concept_id)
+            if (concept is None or concept.get("status") != "approved"
+                    or concept.get("concept_key") != binding["concept_key"]):
+                raise ImportRefusal(
+                    f"mapping plan concept identity is not exactly approved for {guidance_id}"
+                )
+            pair = (concept_id, binding["doctrine_section_id"])
+            if pair not in approved:
+                raise ImportRefusal(
+                    f"mapping plan exact doctrine bridge is not approved for {guidance_id}"
+                )
+            canonical[guidance_id].append({
+                "concept_id": concept_id,
+                "doctrine_section_id": binding["doctrine_section_id"],
+                "reason": binding["reason"],
+            })
+    return canonical
 
-    Refuse ambiguity, malformed UUIDs, inactive/missing sources, and active
-    extras.  The exact-set comparison prevents an apparently harmless new rule
-    from entering a reviewed batch under an old manifest.
+
+def resolve_active_rules(rows: Iterable[Mapping[str, Any]], expected_source_ids: set[str]) -> dict[str, str]:
+    """Resolve reviewed short IDs against the standing-context source of truth.
+
+    The caller excludes intro_politics rules because they intentionally render
+    to a separate introduction surface and are not part of standing-context's
+    recited corpus. Refuse ambiguity, malformed UUIDs, inactive/missing sources,
+    and eligible active extras. The exact-set comparison prevents an apparently
+    harmless new standing rule from entering a reviewed batch under an old
+    manifest.
     """
     by_short: dict[str, list[str]] = {}
     seen_full: set[str] = set()
@@ -250,20 +360,26 @@ def main(argv: list[str] | None = None) -> int:
         if not dsn:
             raise ImportRefusal("DATABASE_URL is required; this CLI never accepts a DSN argument")
         writer_dsn = require_writer_dsn(os.environ) if args.apply else None
+        if args.enforcement_map.resolve() != DEFAULT_MAP.resolve():
+            raise ImportRefusal("--enforcement-map must use the checked-in reviewed v1 path")
+        if args.manifest.resolve() != DEFAULT_MANIFEST.resolve():
+            raise ImportRefusal("--manifest must use the checked-in reviewed v1 path")
         source_map = json.loads(args.enforcement_map.read_text(encoding="utf-8"))
         manifest, errors = registry.load_migration_manifest(str(args.manifest))
         if errors:
             raise ImportRefusal("reviewed migration manifest refused: " + "; ".join(errors))
-        mappings = load_mapping_plan(args.mapping_plan)
+        reviewed_mappings = load_mapping_plan(args.mapping_plan)
         with psycopg.connect(dsn) as read_conn:
             with read_conn.cursor(row_factory=psycopg.rows.dict_row) as read_cur:
                 begin_read_only(read_cur)
                 preview, preview_errors = registry.build_registry(source_map, manifest)
                 if preview_errors:
                     raise ImportRefusal("compiled registry refused: " + "; ".join(preview_errors))
+                mappings = resolve_mapping_plan(read_cur, reviewed_mappings)
                 active_rows = read_cur.execute(
                     "select id::text as id, left(id::text,8) as source_id from rule "
-                    "where status='active' order by id").fetchall()
+                    "where status='active' "
+                    "and coalesce(scope->>'kind','') <> 'intro_politics' order by id").fetchall()
                 artifact, canonical, digest = build_review_artifact(
                     source_map, manifest, active_rows, mappings, args.constitution_guidance_id,
                     map_digest=file_sha256(args.enforcement_map), manifest_digest=file_sha256(args.manifest))

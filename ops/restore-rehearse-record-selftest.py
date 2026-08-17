@@ -143,6 +143,25 @@ def tier1() -> None:
           os.access(SCRIPT, os.X_OK), SCRIPT)
     if not os.access(SCRIPT, os.X_OK):
         return
+    source = Path(SCRIPT).read_text(encoding="utf-8")
+    restore_filter = re.search(r"^RESTORE_FILTER='([^']+)'$", source, re.MULTILINE)
+    check("restore portability filter removes only the pre-created public schema",
+          restore_filter is not None
+          and "CREATE SCHEMA public;" in restore_filter.group(1)
+          and restore_filter.group(1).count("CREATE SCHEMA") == 1,
+          "the fresh target already has public; ops and every other schema must still restore")
+    extension_names = set(re.findall(
+        r"create extension if not exists ([a-z0-9_]+)", source.lower()
+    ))
+    migration_extensions = set()
+    for migration in (Path(REPO) / "migrations").glob("*.sql"):
+        migration_extensions.update(re.findall(
+            r"create extension if not exists ([a-z0-9_]+)",
+            migration.read_text(encoding="utf-8").lower(),
+        ))
+    check("restore bootstraps every extension prerequisite declared by migrations",
+          extension_names == migration_extensions == {"pg_trgm", "pgcrypto"},
+          f"restore={sorted(extension_names)} migrations={sorted(migration_extensions)}")
 
     # ── a good run: state=succeeded, no invented failure_class ──────────────
     proc = drive({
