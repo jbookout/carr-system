@@ -714,7 +714,7 @@
           "deploy_mechanism": "ops/launchd/com.carr.keepalive-probe.plist",
           "expected_cadence_seconds": 1800,
           "cadence_grace_seconds": 900,
-          "notes": "Wakes every 10 min; cadence declared at 30 min so one missed pass is not an alarm. It is itself wrapped by bin/run-scheduled.sh, because a watcher whose own failure is invisible is the one thing nothing watches. It returns EX_CONFIG (78) rather than a failure when NOTHING could be recorded at all, since three records failing on one pass is an unreachable ledger rather than three simultaneous outages — and a probe that alarmed every 10 minutes on a Mac whose credential had not loaded would be the smoke-suite mistake again."
+          "notes": "Wakes every 30 min, matching the declared cadence so liveness evidence does not wake the metered record-layer database more often than the health contract requires. It is itself wrapped by bin/run-scheduled.sh, because a watcher whose own failure is invisible is the one thing nothing watches. It returns EX_CONFIG (78) rather than a failure when NOTHING could be recorded at all, since three records failing on one pass is an unreachable ledger rather than three simultaneous outages."
         }
       ]
     }
