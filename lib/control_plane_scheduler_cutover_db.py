@@ -12,7 +12,7 @@ IDENTITY_SQL = "select session_user, current_user"
 AUTHORITY_SQL = (
     "select has_function_privilege(current_user, "
     "'ops.record_workflow_acceptance(text,text,text,text)'::regprocedure, 'execute'), "
-    "has_function_privilege(current_user, 'ops.disable_legacy_schedule(text,text,text,text,text,text,text,text)'::regprocedure, 'execute'), "
+    "has_function_privilege(current_user, 'ops.disable_legacy_schedule(text,text,text,text,text,text,text,text,text,text,text)'::regprocedure, 'execute'), "
     "has_function_privilege(current_user, "
     "'ops.record_claude_scheduler_observation(text,text,text,text,boolean,text,text,text,timestamptz,text)'::regprocedure, 'execute'), "
     "has_function_privilege(current_user, "
@@ -30,7 +30,8 @@ select wa.workflow_key,wa.workflow_version,wa.mode,wa.status,wa.receipt_ref,wa.a
 """
 DISABLE_RECEIPT_SQL = """
 select receipt_ref,workflow_key,workflow_version,surface_id,locator,reason,approved_by,
-       pre_observation_ref,post_observation_ref,sibling_observation_ref
+       pre_observation_ref,post_observation_ref,sibling_observation_ref,
+       sibling_surface_id,sibling_locator,sibling_pre_observation_ref,sibling_post_observation_ref
   from ops.legacy_schedule_disable_receipt
  where receipt_ref=%s
 """
@@ -119,15 +120,27 @@ class ReceiptResolver:
         if len(rows) != 1:
             raise CutoverRefusal("disable authority receipt does not resolve exactly once")
         (ref, workflow_key, version, surface_id, locator, reason, approved_by,
-         pre_observation_ref, post_observation_ref, sibling_observation_ref) = rows[0]
+         pre_observation_ref, post_observation_ref, sibling_observation_ref,
+         sibling_surface_id, sibling_locator, sibling_pre_observation_ref,
+         sibling_post_observation_ref) = rows[0]
         if str(approved_by) != "joe" or not str(reason).strip():
             raise CutoverRefusal("disable authority receipt is not Joe-bound")
+        subject = {"workflow_key": str(workflow_key), "workflow_version": int(version),
+                   "surface_id": str(surface_id), "locator": str(locator)}
+        if sibling_surface_id is not None:
+            subject.update({"sibling_surface_id": str(sibling_surface_id),
+                            "sibling_locator": str(sibling_locator)})
+            observation_refs: dict[str, Any] = {
+                "pre": str(pre_observation_ref), "post": str(post_observation_ref),
+                "sibling_pre": str(sibling_pre_observation_ref),
+                "sibling_post": str(sibling_post_observation_ref),
+            }
+        else:
+            observation_refs = {"pre": str(pre_observation_ref), "post": str(post_observation_ref),
+                                "sibling": None if sibling_observation_ref is None else str(sibling_observation_ref)}
         return {"kind": "human_authority_receipt", "receipt_ref": str(ref), "immutable": True,
                 "authority_subject": "joe", "action": "disable-legacy-schedule",
-                "subject": {"workflow_key": str(workflow_key), "workflow_version": int(version),
-                            "surface_id": str(surface_id), "locator": str(locator)},
-                "observation_refs": {"pre": str(pre_observation_ref), "post": str(post_observation_ref),
-                                     "sibling": None if sibling_observation_ref is None else str(sibling_observation_ref)}}
+                "subject": subject, "observation_refs": observation_refs}
 
     def scheduler_observation_receipt(self, receipt_ref: str) -> dict[str, Any]:
         if not isinstance(receipt_ref, str) or not receipt_ref:

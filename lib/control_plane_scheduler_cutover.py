@@ -83,6 +83,9 @@ def validate_registry(registry: Any, *, manifest: Any = None) -> list[str]:
             args = surface.get("canonical_program_arguments")
             if not isinstance(args, list) or not args or not all(isinstance(arg, str) for arg in args):
                 errors.append(f"{prefix}.canonical_program_arguments must be a non-empty string array")
+        duplicate_group = surface.get("duplicate_group")
+        if duplicate_group is not None and (not isinstance(duplicate_group, str) or not duplicate_group):
+            errors.append(f"{prefix}.duplicate_group must be a non-empty string when present")
     if manifest is not None:
         workflows = manifest.get("workflows") if isinstance(manifest, dict) else None
         if not isinstance(workflows, list):
@@ -119,10 +122,16 @@ def validate_registry(registry: Any, *, manifest: Any = None) -> list[str]:
                     errors.append(f"workflow {workflow_key} surface version does not match manifest")
                 if len(matching) != len(expected_kinds):
                     errors.append(f"workflow {workflow_key} has duplicate or stale scheduler surfaces")
+                groups = {s.get("duplicate_group") for s in matching}
+                if provider == "duplicate:claude-code+launchd":
+                    if len(groups) != 1 or None in groups:
+                        errors.append(f"workflow {workflow_key} duplicate surfaces must share one duplicate_group")
+                elif groups != {None}:
+                    errors.append(f"workflow {workflow_key} single surface must not declare duplicate_group")
     return errors
 
 
-def scheduler_surface_rows(registry: Any, *, manifest: Any) -> list[tuple[str, int, str, str, str]]:
+def scheduler_surface_rows(registry: Any, *, manifest: Any) -> list[tuple[str, int, str, str, str, str | None]]:
     """Return the complete, manifest-bound DB projection in a stable order.
 
     The SQL registry is intentionally populated by the authority ``sync``
@@ -135,7 +144,7 @@ def scheduler_surface_rows(registry: Any, *, manifest: Any) -> list[tuple[str, i
         raise CutoverRefusal("invalid scheduler cutover registry: " + "; ".join(errors))
     rows = [
         (surface["workflow_key"], surface["workflow_version"], surface["surface_id"],
-         surface["locator"], surface["scheduler_kind"])
+         surface["locator"], surface["scheduler_kind"], surface.get("duplicate_group"))
         for surface in registry["surfaces"]
     ]
     return sorted(rows, key=lambda row: (row[0], row[1], row[2]))
@@ -411,13 +420,156 @@ def _require_replacement(surface: dict[str, Any], replacement: Any,
     return sorted(accepted_refs)
 
 
+def _duplicate_surfaces(registry: dict[str, Any], duplicate_group: str) -> list[dict[str, Any]]:
+    errors = validate_registry(registry)
+    if errors:
+        raise CutoverRefusal("invalid scheduler cutover registry: " + "; ".join(errors))
+    if not isinstance(duplicate_group, str) or not duplicate_group:
+        raise CutoverRefusal("duplicate scheduler group is required")
+    surfaces = [surface for surface in registry["surfaces"]
+                if surface.get("duplicate_group") == duplicate_group]
+    if len(surfaces) != 2:
+        raise CutoverRefusal("duplicate scheduler group must resolve to exactly two registered surfaces")
+    workflow_subjects = {(surface["workflow_key"], surface["workflow_version"]) for surface in surfaces}
+    if len(workflow_subjects) != 1 or {surface["scheduler_kind"] for surface in surfaces} != {"claude-code", "launchd"}:
+        raise CutoverRefusal("duplicate scheduler group does not bind one workflow to Claude and launchd")
+    return sorted(surfaces, key=lambda surface: surface["surface_id"])
+
+
+def _observation_ref(surface: dict[str, Any], observation: dict[str, Any]) -> str:
+    key = "provider_receipt_ref" if surface["scheduler_kind"] == "claude-code" else "launchd_receipt_ref"
+    value = observation.get(key)
+    if not isinstance(value, str) or not value:
+        raise CutoverRefusal("scheduler observation lacks its immutable native receipt reference")
+    return value
+
+
+def _observations_by_surface(observations: Any, surfaces: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    if not isinstance(observations, list) or len(observations) != len(surfaces):
+        raise CutoverRefusal("duplicate retirement requires one observation for every registered scheduler surface")
+    if not all(isinstance(observation, dict) for observation in observations):
+        raise CutoverRefusal("duplicate scheduler observations must be typed objects")
+    mapped = {observation.get("surface_id"): observation for observation in observations}
+    expected = {surface["surface_id"] for surface in surfaces}
+    if len(mapped) != len(surfaces) or set(mapped) != expected:
+        raise CutoverRefusal("duplicate retirement observations do not bind both exact scheduler surfaces")
+    return {str(key): value for key, value in mapped.items() if isinstance(key, str)}
+
+
+def prepare_duplicate_disable(
+    registry: dict[str, Any], *, duplicate_group: str, observations: Any,
+    replacement: Any, receipt_verifier: Callable[[str], Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Prepare one atomic retirement packet for the two native Notes schedules."""
+    surfaces = _duplicate_surfaces(registry, duplicate_group)
+    mapped = _observations_by_surface(observations, surfaces)
+    prepared_surfaces: list[dict[str, Any]] = []
+    for surface in surfaces:
+        observed = _require_observation(
+            registry, surface, mapped[surface["surface_id"]], expected_state="enabled", now=now)
+        prepared_surfaces.append({
+            "surface_id": surface["surface_id"], "scheduler_kind": surface["scheduler_kind"],
+            "locator": surface["locator"],
+            "pre_disable_observation_fingerprint": observed["source_fingerprint"],
+            "pre_observation_ref": _observation_ref(surface, observed),
+        })
+    accepted_refs = _require_replacement(surfaces[0], replacement, receipt_verifier)
+    binding = {
+        "duplicate_group": duplicate_group,
+        "workflow_key": surfaces[0]["workflow_key"],
+        "workflow_version": surfaces[0]["workflow_version"],
+        "surfaces": prepared_surfaces,
+        "replacement_receipts": accepted_refs,
+    }
+    return {
+        "schema_version": SCHEMA_VERSION, "contract": CONTRACT,
+        "kind": "scheduler_duplicate_disable_prepare", "action": "human_approval_required",
+        "binding": binding, "prepare_fingerprint": _fingerprint(binding),
+    }
+
+
+def verify_duplicate_disabled(
+    registry: dict[str, Any], *, prepared: Any, pre_disable_observations: Any,
+    post_disable_observations: Any, human_approval_ref: str,
+    approval_verifier: Callable[[str], Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Verify both legacy Notes schedulers are disabled under one Joe receipt."""
+    if not isinstance(prepared, dict) or prepared.get("kind") != "scheduler_duplicate_disable_prepare":
+        raise CutoverRefusal("matching duplicate scheduler preparation evidence is required")
+    binding = prepared.get("binding")
+    if not isinstance(binding, dict) or prepared.get("prepare_fingerprint") != _fingerprint(binding):
+        raise CutoverRefusal("duplicate scheduler preparation evidence is malformed or tampered")
+    duplicate_group = binding.get("duplicate_group")
+    if not isinstance(duplicate_group, str):
+        raise CutoverRefusal("duplicate scheduler preparation lacks its registered group")
+    surfaces = _duplicate_surfaces(registry, duplicate_group)
+    pre_mapped = _observations_by_surface(pre_disable_observations, surfaces)
+    post_mapped = _observations_by_surface(post_disable_observations, surfaces)
+    bound_surfaces = binding.get("surfaces")
+    if not isinstance(bound_surfaces, list):
+        raise CutoverRefusal("duplicate scheduler preparation lacks bound surfaces")
+    bound_by_id = {item.get("surface_id"): item for item in bound_surfaces if isinstance(item, dict)}
+    if set(bound_by_id) != {surface["surface_id"] for surface in surfaces}:
+        raise CutoverRefusal("duplicate scheduler preparation does not bind both surfaces")
+    verified_surfaces: list[dict[str, Any]] = []
+    refs: list[tuple[str, str]] = []
+    for surface in surfaces:
+        pre = _require_observation(
+            registry, surface, pre_mapped[surface["surface_id"]], expected_state="enabled", now=now)
+        post = _require_observation(
+            registry, surface, post_mapped[surface["surface_id"]], expected_state="disabled", now=now)
+        if (pre["source_fingerprint"] != bound_by_id[surface["surface_id"]].get("pre_disable_observation_fingerprint")
+                or _observation_ref(surface, pre) != bound_by_id[surface["surface_id"]].get("pre_observation_ref")):
+            raise CutoverRefusal("pre-disable observation does not match duplicate preparation evidence")
+        if _utc(post["observed_at"]) < _utc(pre["observed_at"]):
+            raise CutoverRefusal("post-disable observation predates its pre-disable observation")
+        if post["source_fingerprint"] == pre["source_fingerprint"]:
+            raise CutoverRefusal("post-disable readback is not a distinct native observation")
+        pre_ref, post_ref = _observation_ref(surface, pre), _observation_ref(surface, post)
+        refs.append((pre_ref, post_ref))
+        verified_surfaces.append({
+            "surface_id": surface["surface_id"], "scheduler_kind": surface["scheduler_kind"],
+            "locator": surface["locator"], "pre_observation_ref": pre_ref,
+            "post_observation_ref": post_ref,
+            "pre_observation_fingerprint": pre["source_fingerprint"],
+            "post_observation_fingerprint": post["source_fingerprint"],
+        })
+    if approval_verifier is None or not isinstance(human_approval_ref, str) or not human_approval_ref:
+        raise CutoverRefusal("Joe-only duplicate authority receipt verifier is required")
+    approval = approval_verifier(human_approval_ref)
+    expected_subject = {
+        "workflow_key": surfaces[0]["workflow_key"], "workflow_version": surfaces[0]["workflow_version"],
+        "surface_id": surfaces[0]["surface_id"], "locator": surfaces[0]["locator"],
+        "sibling_surface_id": surfaces[1]["surface_id"], "sibling_locator": surfaces[1]["locator"],
+    }
+    expected_refs = {"pre": refs[0][0], "post": refs[0][1],
+                     "sibling_pre": refs[1][0], "sibling_post": refs[1][1]}
+    if (not isinstance(approval, dict) or approval.get("kind") != "human_authority_receipt"
+            or approval.get("receipt_ref") != human_approval_ref or approval.get("immutable") is not True
+            or approval.get("authority_subject") != "joe" or approval.get("action") != "disable-legacy-schedule"
+            or approval.get("subject") != expected_subject or approval.get("observation_refs") != expected_refs):
+        raise CutoverRefusal("authority receipt does not bind Joe and all duplicate scheduler evidence")
+    receipt = {
+        "duplicate_group": duplicate_group, "workflow_key": surfaces[0]["workflow_key"],
+        "workflow_version": surfaces[0]["workflow_version"], "surfaces": verified_surfaces,
+        "approval_ref": human_approval_ref,
+    }
+    return {
+        "schema_version": SCHEMA_VERSION, "contract": CONTRACT,
+        "kind": "scheduler_duplicate_disable_readback", "scheduler_state": "disabled",
+        "receipt": receipt, "receipt_fingerprint": _fingerprint(receipt),
+    }
+
+
 def prepare_disable(registry: dict[str, Any], *, surface_id: str, observation: Any,
                     replacement: Any, receipt_verifier: Callable[[str], Any] | None = None,
                     now: datetime | None = None) -> dict[str, Any]:
     """Create non-mutating, human-reviewable disable preparation evidence."""
     surface = _surface(registry, surface_id)
     if surface.get("duplicate_group"):
-        raise CutoverRefusal("duplicate scheduler group is unresolved; one observation cannot retire one of two Notes schedules")
+        raise CutoverRefusal("duplicate scheduler group requires the coordinated two-surface preparation contract")
     observed = _require_observation(registry, surface, observation, expected_state="enabled", now=now)
     accepted_refs = _require_replacement(surface, replacement, receipt_verifier)
     binding = {
@@ -453,7 +605,7 @@ def verify_disabled(registry: dict[str, Any], *, prepared: Any, pre_disable_obse
         raise CutoverRefusal("prepared disable evidence has no surface id")
     surface = _surface(registry, surface_id)
     if surface.get("duplicate_group"):
-        raise CutoverRefusal("duplicate scheduler group is unresolved; a forged prepared receipt cannot retire one of two Notes schedules")
+        raise CutoverRefusal("duplicate scheduler group requires the coordinated two-surface verification contract")
     pre = _require_observation(registry, surface, pre_disable_observation, expected_state="enabled", now=now)
     post = _require_observation(registry, surface, post_disable_observation, expected_state="disabled", now=now)
     if pre["source_fingerprint"] != binding.get("pre_disable_observation_fingerprint"):
