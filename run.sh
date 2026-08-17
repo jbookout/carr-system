@@ -11,7 +11,7 @@
 #   ./run.sh key-recovery-test — prove the OFFLINE PAPER key copy alone can recover a backup
 #   ./run.sh call-mode     — inspect or operate the local Quill Call Mode bridge
 #   ./run.sh local-db-ci   — run migration or strict CI on disposable local PG
-# CARR_VAULT overrides the vault path (default: Joe's Drive mount).
+# CARR_VAULT overrides explicit file/recovery paths (default: Joe's Drive mount).
 
 set -eu
 REPO="$(cd "$(dirname "$0")" && pwd)"
@@ -57,8 +57,8 @@ section_index(){ "$PY" "$REPO/pipelines/build-section-index.py" "$VAULT"; }
 registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" "$@"; }
 # ORDER 16. Both are READ-ONLY surfaces: no database write, no send, no push.
 # They run on the repo venv because they speak to Neon through psycopg.
-review_queue() { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/review_queue.py" "$@"; }
-brief_pack()   { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/brief_pack.py" "$@"; }
+review_queue() { shift; "$REPO/.venv/bin/python" "$REPO/pipelines/review_queue.py" "$@"; }
+brief_pack()   { shift; "$REPO/.venv/bin/python" "$REPO/pipelines/brief_pack.py" "$@"; }
 verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" "$@"; }
 # The restore rehearsal (2026-08-02). Proves backups/*.sql.age can come BACK:
 # throwaway Neon branch, decrypt, load, reconcile row counts, delete the branch.
@@ -103,9 +103,10 @@ case "${1:-}" in
   key-recovery-test) shift; key_recovery_test "$@" ;;
   call)         call_verb "$@" ;;
   call-mode)    shift; python3 "$REPO/tools/dictation-rig/bin/call-mode.py" "$@" ;;
-  # retrieve runs on the repo venv since the store pass (P4 dual-read) needs psycopg;
-  # fails soft to file-index-only on any machine without it.
-  retrieve)     shift; CARR_VAULT="$VAULT" "$PY" "$REPO/tools/retrieve.py" "$@" ;;
+  # Normal retrieval is canonical-store only and fail-closed. The reader itself
+  # resolves CARR_VAULT only after an operator passes --recovery; do not export a
+  # Drive path into the ordinary user-session command.
+  retrieve)     shift; "$PY" "$REPO/tools/retrieve.py" "$@" ;;
   # health runs on the repo venv for the same reason retrieve does: its ops-record
   # pass needs psycopg. Under a bare python3 it died mid-report, and the rows it
   # never reached were the nightly chain result and rules live — the two the
@@ -139,5 +140,5 @@ case "${1:-}" in
   # something breaks on a path that is simply not there.
   worktree)     shift; "$REPO/bin/worktree.sh" "$@" ;;
   local-db-ci)  shift; "$PY" "$REPO/ops/local-pg-ci.py" "$@" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|key-recovery-test|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|local-db-ci [--class migration|strict] [--port N]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
+  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve [--recovery [--vault PATH]] <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|key-recovery-test|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|local-db-ci [--class migration|strict] [--port N]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
 esac
