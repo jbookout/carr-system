@@ -369,15 +369,51 @@ def cmd_run(args) -> int:
                     print("ops-record: recovery rehearsal requires the release's "
                           "exact strategy and recovery plan", file=sys.stderr)
                     return 2
+            # THE INSERT NAMES ONLY THE COLUMNS IT ACTUALLY HAS A VALUE FOR,
+            # and that is a compatibility contract, not a micro-optimisation.
+            #
+            # FOUND 2026-08-18 by the weekly restore rehearsal, whose result
+            # could not be recorded at all:
+            #   column "release_id" of relation "run" does not exist
+            # release_id, budget_ms, recovery_strategy and recovery_plan_ref all
+            # arrive in migration 0172_program5_release_assurance.sql. Production
+            # is deliberately at release fac1c73e / schema 0169 — an ancestor of
+            # local HEAD, exactly as the release gate intends. The scheduled jobs,
+            # though, run from the LOCAL working tree and write into PRODUCTION,
+            # so a collector carrying 0172's column names met a 0169 table and
+            # every ops.run write failed. Not drift: version skew, in the
+            # direction nobody checks, because the code is normally the thing
+            # that lags.
+            #
+            # Naming a column only when its value is not None is exactly
+            # equivalent to inserting NULL into it, so nothing about a
+            # post-promotion write changes. What it buys is that a routine
+            # collector run — which has none of these four — stops depending on
+            # a migration it never needed. A run that DOES carry a release keeps
+            # naming release_id and still fails loudly against an older schema,
+            # which is correct: that skew is real and must not be papered over.
+            cols = ["kind", "correlation_id", "service_id", "environment",
+                    "run_key", "state", "failure_class", "exit_code", "attempt",
+                    "started_at", "ended_at", "source_kind", "source_ref"]
+            vals = [args.kind, corr, sid, args.environment, args.key, args.state,
+                    args.failure_class, args.exit_code, args.attempt,
+                    started, ended, args.source_kind, args.source_ref]
+            for col, val in (("release_id", release_id),
+                             ("budget_ms", budget_ms),
+                             ("recovery_strategy",
+                              recovery_strategy if is_recovery else None),
+                             ("recovery_plan_ref",
+                              recovery_plan_ref if is_recovery else None)):
+                if val is not None:
+                    cols.append(col)
+                    vals.append(val)
+            col_sql = ", ".join(cols)
+            val_sql = ",".join(["%s"] * len(cols))
             cur.execute(
-                """insert into ops.run
-                       (kind, correlation_id, service_id, release_id, environment,
-                        run_key, state,
-                        failure_class, exit_code, attempt, started_at, ended_at,
-                        budget_ms, recovery_strategy, recovery_plan_ref,
-                        source_kind, source_ref, observed_at, expires_at,
+                f"""insert into ops.run
+                       ({col_sql}, observed_at, expires_at,
                         evidence_ref, detail)
-                   select %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(),
+                   select {val_sql}, now(),
                           -- THE OBSERVATION DECLARES ITS OWN EXPIRY, taken from
                           -- the registry at write time when the caller does not
                           -- name one. Without this the row reads `unknown`
@@ -398,11 +434,7 @@ def cmd_run(args) -> int:
                      left join ops.service_environment se
                        on se.service_id = %s and se.environment = %s
                    returning id""",
-                (args.kind, corr, sid, release_id, args.environment, args.key, args.state,
-                 args.failure_class, args.exit_code, args.attempt, started, ended,
-                 budget_ms, recovery_strategy if is_recovery else None,
-                 recovery_plan_ref if is_recovery else None,
-                 args.source_kind, args.source_ref,
+                (*vals,
                  args.expires_in, args.expires_in,
                  args.evidence_ref, (args.detail or None),
                  sid, args.environment))
