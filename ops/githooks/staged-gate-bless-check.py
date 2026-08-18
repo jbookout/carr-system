@@ -33,6 +33,13 @@ warning if git itself cannot be read — an accident-stopper that crashes must
 never become the thing that blocks every commit.
 """
 
+# PEP 604 annotations (`bytes | None`) below are evaluated at def time before
+# Python 3.10 and raise TypeError there, which crashes this hook rather than
+# failing the check it performs — so a commit is refused for a reason that has
+# nothing to do with gates. Hit on Dell's Mac 2026-08-18, whose python3 is the
+# macOS system 3.9.6. This makes the annotations lazy so the hook runs on both.
+from __future__ import annotations
+
 import hashlib
 import json
 import subprocess
