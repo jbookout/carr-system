@@ -11,6 +11,34 @@ QUILL_DIR="$(cd "$(dirname "$0")/../vendor/quill" && pwd)"
 CPLUS_INCLUDE_PATH="$(xcrun --show-sdk-path)/usr/include/c++/v1"
 export CPLUS_INCLUDE_PATH
 
+# --- carry our patches onto the vendored upstream --------------------------
+#
+# vendor/quill is a SUBMODULE of the third-party upstream github.com/digimata/quill
+# (MIT), checked out detached. Any edit made directly in that tree is invisible to
+# this repo and a `git submodule update` erases it without a word. Our changes
+# therefore live as patch files here and get re-applied on every build, so the
+# build is reproducible from a clean submodule checkout and nothing depends on
+# pushing to a repo we do not own.
+#
+# Each patch is applied only if it is not already present, so repeated builds and
+# a dirty submodule tree are both fine.
+PATCH_DIR="$(cd "$(dirname "$0")/../patches" && pwd)"
+if [ -d "$PATCH_DIR" ]; then
+    for patch in "$PATCH_DIR"/*.patch; do
+        [ -f "$patch" ] || continue
+        patch_name="$(basename "$patch")"
+        if git -C "$QUILL_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+            echo "build-quill.sh: $patch_name already applied"
+        elif git -C "$QUILL_DIR" apply "$patch" >/dev/null 2>&1; then
+            echo "build-quill.sh: applied $patch_name"
+        else
+            echo "build-quill.sh: ERROR $patch_name does not apply to this quill checkout" >&2
+            echo "build-quill.sh: the upstream submodule probably moved; rebase the patch before building" >&2
+            exit 1
+        fi
+    done
+fi
+
 cd "$QUILL_DIR"
 swift build -c release
 ls -la .build/release/quill
