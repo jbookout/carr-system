@@ -48,8 +48,16 @@ TWO TIERS, matching ops/scheduled-run-record-selftest.py:
   `tools/db-tap.py --project staging run ops/run-scheduled-selftest.py`, never
   bare). Registers a throwaway probe service, runs a deliberately failing job
   through the real wrapper, reads the row back out of ops.run, and DELETES it
-  before exiting. Never runs against production: it activates only when
-  DATABASE_URL is already present, which is what db-tap --project staging sets.
+  before exiting. It never runs against production, and since 2026-08-18 that is
+  CHECKED rather than assumed: tools/staging_jobs_dsn.py proves the DSN
+  addresses the isolated staging endpoint before the tier touches anything.
+
+  The wrapper's child gets CARR_DB_JOBS_URL and no broader credential, which is
+  the shape bin/routine-credential-env.sh hands it in production. It has to:
+  since PR #288 `ops-record.py run` is connect("routine") and does not look at
+  DATABASE_URL at all. Passing the ambient environment instead let
+  ops-record.py's own db.env setdefault supply the PRODUCTION jobs DSN, which is
+  exactly what broke this tier between 2026-08-16 and 2026-08-18.
 
 RUN IT:
     python3 ops/run-scheduled-selftest.py
@@ -65,8 +73,15 @@ import uuid
 from typing import Any, Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+
+from lib.loadpy import load_module_from_path  # noqa: E402
+
 WRAPPER = os.path.join(REPO, "bin", "run-scheduled.sh")
 LOG = os.path.join(REPO, "out", "run-scheduled.log")
+OPS_RECORD = load_module_from_path("run_scheduled_ops_record",
+                                    os.path.join(REPO, "tools", "ops-record.py"))
+DEAD_DSN = "postgresql://carr_jobs:probe@127.0.0.1:1/nonexistent"
 
 FAILED: list[str] = []
 
@@ -87,10 +102,29 @@ def unreachable_env() -> dict[str, str]:
 
     Port 1 on loopback refuses instantly rather than hanging, so a suite that
     runs on every push does not pay a connect timeout nine times over.
+
+    EVERY name the recorder reads is SET to that dead port rather than deleted,
+    and the list comes from ops-record.py's own credential_names() so it cannot
+    drift. Deleting was the bug. This helper used to point DATABASE_URL at a
+    dead port and unset CARR_DB_JOBS_URL, which blinded the recorder completely
+    while `run` was connect("write") — DATABASE_URL was that mode's first
+    choice. PR #288 made `run` connect("routine"), which reads CARR_DB_JOBS_URL
+    and nothing else, so ops-record.py's _load_db_env() quietly re-supplied the
+    PRODUCTION jobs DSN by setdefault and every "unreachable database" check
+    below spent 2026-08-16 to 2026-08-18 authenticating against production. It
+    wrote nothing here — every service key in tier 1 is a carr-selftest-* key
+    production has never registered, so the recorder refused EX_CONFIG — but
+    ops/scheduled-run-record-selftest.py, whose fixtures name REAL services, was
+    landing two fabricated rows in production's ledger per run.
+
+    The username stays carr_jobs so routine mode's own credential-shape check
+    passes and the tier proves what it claims to: the CONNECTION fails, not the
+    credential's spelling.
     """
     env = dict(os.environ)
-    env["DATABASE_URL"] = "postgresql://nobody@127.0.0.1:1/nothing"
-    for leak in ("CARR_DB_JOBS_URL", "CARR_DB_URL", "PGSERVICE"):
+    for name in OPS_RECORD.credential_names():
+        env[name] = DEAD_DSN
+    for leak in ("CARR_DB_URL", "PGSERVICE"):
         env.pop(leak, None)
     return env
 
@@ -612,8 +646,8 @@ def tier1_refresh_rules() -> None:
 # ── tier 2 ───────────────────────────────────────────────────────────────────
 
 def tier2() -> None:
-    dsn = os.environ.get("DATABASE_URL", "")
-    if not dsn:
+    owner = os.environ.get("DATABASE_URL", "")
+    if not owner:
         print("\nTIER 2 — skipped (no DATABASE_URL; run through "
               "tools/db-tap.py --project staging to include it)")
         return
@@ -625,12 +659,44 @@ def tier2() -> None:
         print("  (psycopg unavailable — tier 2 skipped)")
         return
 
+    # THE RECORDER STOPPED READING DATABASE_URL, and for a while nothing here
+    # noticed. PR #288 (cd3d7386, 2026-08-16) moved `ops-record.py run` to
+    # connect("routine"), which reads CARR_DB_JOBS_URL and only that. db-tap
+    # exports DATABASE_URL and only that, so ops-record.py's _load_db_env()
+    # fell through to ~/.config/carr/db.env and its setdefault handed the
+    # wrapper the PRODUCTION jobs credential. Every row this tier believed it
+    # was writing to staging was aimed at production's registry instead,
+    # refused EX_CONFIG because the probe service is registered only here, and
+    # all three read-backs below failed (measured 2026-08-18).
+    #
+    # So mint the identity the recorder now demands. tools/staging_jobs_dsn.py
+    # proves the target is the isolated staging endpoint BEFORE it alters
+    # anything, which also makes "tier 2 never runs against production" a
+    # checked property rather than the convention it was.
+    staging_jobs = load_module_from_path(
+        "staging_jobs_dsn", os.path.join(REPO, "tools", "staging_jobs_dsn.py"))
+    try:
+        jobs_dsn = staging_jobs.mint(owner)
+    except staging_jobs.StagingJobsRefusal as exc:
+        check("tier 2 runs against isolated staging, with a usable carr_jobs identity",
+              False, str(exc))
+        return
+    routine = staging_jobs.routine_env(os.environ, jobs_dsn)
+    check("the wrapped child gets the jobs credential and no broader one — the "
+          "same shape bin/routine-credential-env.sh gives it in production",
+          "DATABASE_URL" not in routine
+          and routine.get("CARR_DB_JOBS_URL") == jobs_dsn,
+          f"DATABASE_URL present={'DATABASE_URL' in routine}")
+
     probe_key = "carr-run-scheduled-probe"
     run_key = "selftest.forced-failure"
     corr = "9f9f9f9f-1111-4222-8333-444444444444"
     corrs_to_clean = [corr]
 
-    conn = psycopg.connect(dsn, autocommit=True)
+    # The suite's own connection stays the OWNER's: carr_jobs may not insert a
+    # service, and may not delete anything at all, so registering and cleaning
+    # up the probe is not work the routine identity can or should do.
+    conn = psycopg.connect(owner, autocommit=True)
     cur = conn.cursor()
     try:
         cur.execute(
@@ -648,7 +714,7 @@ def tier2() -> None:
             """insert into ops.service_environment (service_id, environment)
                values (%s, 'production') on conflict do nothing""", (service_id,))
 
-        env = dict(os.environ)
+        env = dict(routine)
         env["CARR_CORRELATION_ID"] = corr
         proc = subprocess.run(
             [WRAPPER, probe_key, run_key, "/bin/sh", "-c", "exit 9"],
@@ -693,7 +759,7 @@ def tier2() -> None:
         corr_throttled = str(uuid.uuid4())
         corrs_to_clean += [corr_land, corr_throttled]
 
-        env_land = dict(os.environ)
+        env_land = dict(routine)
         env_land["CARR_CORRELATION_ID"] = corr_land
         env_land["CARR_RUN_SCHEDULED_STATE_DIR"] = throttle_state_dir
         proc_land = subprocess.run(
@@ -714,7 +780,7 @@ def tier2() -> None:
         check("tier 2 throttle: a REAL landed row stamps the state file",
               os.path.exists(stamp), f"exists={os.path.exists(stamp)}")
 
-        env_throttled = dict(os.environ)
+        env_throttled = dict(routine)
         env_throttled["CARR_CORRELATION_ID"] = corr_throttled
         env_throttled["CARR_RUN_SCHEDULED_STATE_DIR"] = throttle_state_dir
         proc_throttled = subprocess.run(
