@@ -737,13 +737,55 @@ def main():
             )
 
     claude_state = claude_configuration_state()
+    adapter_problems = []
     if claude_state == "configured":
         wiring_errors, err = settings_matches_repo()
         if err:
-            problems.append(f"CLAUDE ADAPTER WIRING: {err}")
+            adapter_problems.append(f"CLAUDE ADAPTER WIRING: {err}")
         elif wiring_errors:
-            problems.append("CLAUDE ADAPTER WIRING: "
+            adapter_problems.append("CLAUDE ADAPTER WIRING: "
                             + "; ".join(sorted(set(wiring_errors))))
+
+    # SELF-HEAL, ENVIRONMENT CLASS ONLY (added 2026-08-18 after a Dell-machine
+    # incident: A15/A17 closed his migration 2026-08-11 with wiring exact, then
+    # ops/config/hooks.json grew new gates — map-architecture-gate.py,
+    # costar-lane-gate.py and others — and his install was simply never
+    # re-rendered. Same repo, same baseline, nothing tampered: the live adapter
+    # just lagged the source it renders from. That is not the case this script
+    # exists to catch, and the fix (`config-as-code.py install --apply`) is the
+    # same idempotent render migrate-dell.sh already trusts. It touches ONLY
+    # the CLAUDE ADAPTER WIRING class below, and ONLY when content_problems is
+    # empty — a hash mismatch or a missing/unblessed gate is tampering-adjacent
+    # and must still stop here and reach a human, exactly as before. This
+    # closes the class, not just this one report: a gate added to the template
+    # now self-installs at the next SessionStart on every machine, with nobody
+    # running a command by hand.
+    healed = []
+    if adapter_problems and not content_problems:
+        try:
+            heal = subprocess.run(
+                ["/usr/bin/env", "python3",
+                 os.path.join(INSTALL_REPO, "ops", "config-as-code.py"),
+                 "install", "--apply"],
+                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            heal = None
+            healed.append(f"self-heal did not run: {e}")
+        if heal is not None:
+            claude_state = claude_configuration_state()
+            wiring_errors, err = ((None, None) if claude_state != "configured"
+                                   else settings_matches_repo())
+            still_broken = bool(err or wiring_errors)
+            if heal.returncode == 0 and not still_broken:
+                healed.append("CLAUDE ADAPTER WIRING re-rendered from "
+                               "ops/config-as-code.py install --apply and now matches")
+                adapter_problems = []
+            else:
+                healed.append(
+                    "self-heal attempted (config-as-code.py install --apply) but "
+                    f"wiring still does not match (exit {heal.returncode})")
+    problems.extend(adapter_problems)
 
     project_adapter = project_settings_path()
     project_adapter_state = "available" if os.path.isfile(project_adapter) else "absent"
@@ -774,6 +816,8 @@ def main():
               "finding: something disabled a gate. On 2026-08-08 a plugin "
               "install silently deleted the entire hooks block and all five "
               "gates were off for a day, found by accident.")
+        for h in healed:
+            print(f"  SELF-HEAL: {h}")
         if strict and content_problems:
             print()
             print("--strict: FAILING on the repository-content findings above. "
@@ -824,6 +868,8 @@ def main():
     print(f"CLIENT ADAPTERS: Claude={claude_state}; Codex={codex_state}; "
           f"Claude-project={project_adapter_state}. CARR core is client-independent; "
           "adapter equality does not prove runtime invocation.")
+    for h in healed:
+        print(f"SELF-HEAL: {h}")
     return 0
 
 
