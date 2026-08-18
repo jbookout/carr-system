@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""machine-converge.py — SessionStart converge for a SECONDARY machine.
+
+JOE'S DIRECTIVE (2026-08-18): Dell's machine must pull and re-apply config
+automatically at session start, so it converges to the repo state with no
+manual updating. Before this hook, nothing at session start moved a stale
+checkout: gate-integrity.py detects drift against the LOCAL repo and its
+self-heal reinstalls from the LOCAL repo, so a machine whose CHECKOUT was the
+stale thing faithfully reinstalled stale gates and reported success. Dell's
+Mac did exactly that for a week after the 2026-08-11 migration.
+
+WHAT IT DOES, on a secondary machine only:
+  1. Fast-forwards the CANONICAL checkout's main from origin — ff-only, so a
+     diverged tree fails LOUDLY in the session brief instead of merging.
+     The refusals mirror bin/fleet-sync.sh (PR #333): never over local
+     tracked changes, never off main, never a merge/rebase/reset.
+  2. Re-applies machine config with `ops/config-as-code.py install --apply`,
+     but only when the pull moved HEAD or `check` reports drift — so an
+     already-converged machine boots silently and its launchd jobs are not
+     reloaded on every session start.
+
+NEVER `pull`, AND THAT IS THE LOAD-BEARING VERB CHOICE (decision #442,
+00_Context/decision-history.md 2026-08-17). config-as-code's `pull` captures
+whatever the machine has INTO the repo; run against a drifted live plist it
+would have deleted the four bin/run-scheduled.sh wrapper lines that commit
+4fb58a8a put in com.carr.dictation-consent.plist deliberately — criticality
+HIGH, the wrapper is part of what keeps the recording announcement durable,
+Florida is all-party-consent, a failure is legal exposure. `install` goes the
+other way: it renders the TRACKED template (which carries the wrapper and the
+still-recording StartInterval, PR #328) onto the machine, so a converge can
+only ever restore the wrapper, never strip it. ops/machine-converge-selftest.py
+proves that end-to-end: a live plist seeded WITHOUT the wrapper comes out of a
+converge WITH it.
+
+The worktree/canonical catch-22 from the same decision does not bite here:
+this hook is always invoked by its canonical path ("${HOME}/carr-system/..."
+in .claude/settings.json, same convention as worktree-self-plumb.py), so it
+runs the canonical checkout's config-as-code against the canonical templates
+— the exact arrangement config-as-code's own {{REPO}} resolution assumes.
+
+MACHINE GATING — the sponsor mechanism, not a hostname. Which human a machine
+belongs to is recorded in ~/.config/carr/local-actor.json (written once per
+machine by bin/set-local-actor.sh; it is what local-verb.mjs trusts, and the
+machine door in mcp-server/src/identity.js maps the same partners server-side,
+PR #334). slug "joe" → this is the primary machine and the hook is a NO-OP:
+Joe's canonical tree is a shared work surface for live sessions, an unbidden
+pull at session start can interleave with another session's push/reconcile,
+and the scheduled fleet-sync job covers his staleness case. Any other slug →
+converge. When the file is absent (Dell's door provisioning was still owed in
+PR #334), fall back to the determinant config-as-code itself uses for
+per-machine ownership: git user.email against OWNER_EMAIL in
+ops/githooks/pre-push — parsed from that one home, never re-declared. Not
+primary → converge, the same fail-closed direction as IS_PRIMARY=false.
+
+CLAUDE-ONLY MACHINES STAY CLAUDE-ONLY. The converge delegates every write to
+config-as-code, whose install path treats an absent ~/.codex as a supported
+state and skips Codex without creating it (CLAUDE.md, Dell migration
+contract). The selftest asserts no ~/.codex appears.
+
+FAIL-SOFT, ALWAYS — same discipline as worktree-self-plumb.py: a boot-time
+convenience must never fail or block a session. Refusals and failures are one
+loud LINE in the brief, never a blocked boot.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+# __file__ resolves through the absolute canonical path this hook is invoked
+# by, so REPO is the canonical tree regardless of which worktree's session
+# triggered it (same reasoning as worktree-self-plumb.py).
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOME = os.path.expanduser("~")
+ACTOR_FILE = os.path.join(HOME, ".config", "carr", "local-actor.json")
+
+# git location variables outrank -C; scrub them the same way every other
+# CARR git caller does (ops/git_env.py, consolidated by loop #371).
+sys.path.insert(0, os.path.join(REPO, "ops"))
+from git_env import scrubbed_env  # noqa: E402
+
+
+def git(*args, timeout=20):
+    return subprocess.run(["git", "-C", REPO, *args], capture_output=True,
+                          text=True, timeout=timeout, env=scrubbed_env())
+
+
+def local_actor_slug():
+    try:
+        with open(ACTOR_FILE, encoding="utf-8") as fh:
+            return (json.load(fh).get("actor_slug") or "").strip()
+    except Exception:
+        return ""
+
+
+def is_primary():
+    """Same determinant as ops/config-as-code.py's IS_PRIMARY: the owner's
+    identity is read from the ONE place it is written, ops/githooks/pre-push.
+    Unreadable returns False, and False is the safe direction here too — an
+    unidentified machine converges to the repo, it does not sit stale."""
+    try:
+        with open(os.path.join(REPO, "ops", "githooks", "pre-push"),
+                  encoding="utf-8") as fh:
+            m = re.search(r'^OWNER_EMAIL="([^"]+)"', fh.read(), re.M)
+        owner = m.group(1) if m else ""
+    except OSError:
+        owner = ""
+    if not owner:
+        return False
+    me = git("config", "user.email").stdout.strip()
+    return me == owner
+
+
+def python_bin():
+    venv = os.path.join(REPO, ".venv", "bin", "python")
+    return venv if os.access(venv, os.X_OK) else sys.executable
+
+
+def config_as_code(*args, timeout=120):
+    """config-as-code is stdlib-only; stdin is closed so nothing can wait on
+    a terminal (the migrate-dell contract's `</dev/null` discipline)."""
+    return subprocess.run(
+        [python_bin(), os.path.join(REPO, "ops", "config-as-code.py"), *args],
+        capture_output=True, text=True, timeout=timeout,
+        stdin=subprocess.DEVNULL)
+
+
+def say(line):
+    print(f"machine-converge: {line}")
+
+
+def converge():
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch != "main":
+        say(f"SKIP — canonical checkout is on '{branch}', not main; leaving it alone")
+        return
+
+    moved = False
+    fetch = git("fetch", "--quiet", "origin", "main", timeout=30)
+    if fetch.returncode != 0:
+        # Offline is ordinary; the LOCAL repo can still be re-applied below.
+        say("fetch of origin/main failed (offline, or no credential) — "
+            "converging from the local checkout only")
+    else:
+        head = git("rev-parse", "HEAD").stdout.strip()
+        remote = git("rev-parse", "origin/main").stdout.strip()
+        if head and remote and head != remote:
+            # The three fleet-sync refusals, in its order. Tracked changes
+            # only: untracked scratch is a session's business.
+            dirty = git("status", "--porcelain", "--untracked-files=no").stdout.strip()
+            if dirty:
+                say("SKIP pull — local changes present, refusing to fast-forward "
+                    "over them: " + ", ".join(
+                        ln.split(None, 1)[-1] for ln in dirty.splitlines()[:5]))
+            elif git("merge-base", "--is-ancestor", "HEAD", "origin/main").returncode != 0:
+                say("DIVERGED — main and origin/main have both moved; a human "
+                    "decides this one, nothing was merged")
+            else:
+                ff = git("merge", "--ff-only", "origin/main", timeout=60)
+                if ff.returncode == 0:
+                    moved = True
+                    say(f"fast-forwarded {head[:8]} -> {remote[:8]}")
+                else:
+                    say("fast-forward FAILED: "
+                        + (ff.stderr or ff.stdout).strip()[:120])
+
+    drift = config_as_code("check", timeout=60).returncode != 0
+    if not (moved or drift):
+        return  # converged already — silent, like most session starts
+
+    # `install --apply`, never `pull` — see the docstring for decision #442.
+    r = config_as_code("install", "--apply")
+    if r.returncode == 0:
+        rev = git("rev-parse", "--short", "HEAD").stdout.strip()
+        say(f"machine config re-applied from {rev or 'local checkout'}")
+    else:
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        say("config-as-code install FAILED: " + (tail[-1] if tail else "(no output)"))
+
+
+def main():
+    try:
+        slug = local_actor_slug()
+        if slug == "joe" or (not slug and is_primary()):
+            return 0  # the primary machine — deliberate no-op, see docstring
+        converge()
+    except Exception:
+        pass  # fail-soft: this must never block or fail a session
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)
