@@ -57,6 +57,7 @@ RUN IT:
 """
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,26 @@ from typing import Any, Optional
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WRAPPER = os.path.join(REPO, "bin", "run-scheduled.sh")
 LOG = os.path.join(REPO, "out", "run-scheduled.log")
+
+# One throwaway spool per suite run. The wrapper's recorder is tools/ops-spool.py
+# (2026-08-18), and its default spool file lives under out/ — which is shared
+# with production state, the exact hazard CARR_RUN_SCHEDULED_STATE_DIR already
+# guards against for throttle stamps. Every drive below overrides it here.
+TMP_SPOOL = os.path.join(
+    tempfile.mkdtemp(prefix="carr-selftest-spool-"), "spool.sqlite3")
+
+
+def spool_rows(run_key: str, db: str = TMP_SPOOL) -> list:
+    """Rows queued in the throwaway spool for one run key."""
+    if not os.path.exists(db):
+        return []
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute(
+            "select service, run_key, state, argv from spool where run_key = ?",
+            (run_key,)).fetchall()
+    finally:
+        conn.close()
 
 FAILED: list[str] = []
 
@@ -86,12 +107,27 @@ def unreachable_env() -> dict[str, str]:
     """The environment a Mac has before its DB credential loads.
 
     Port 1 on loopback refuses instantly rather than hanging, so a suite that
-    runs on every push does not pay a connect timeout nine times over.
+    runs on every push does not pay a connect timeout nine times over. Since
+    the 2026-08-18 spool this state no longer makes recording fail: rows
+    queue locally in TMP_SPOOL (never the shared out/ spool) and recorder_exit
+    is 0, because the row is durable there whatever the network is doing.
     """
     env = dict(os.environ)
     env["DATABASE_URL"] = "postgresql://nobody@127.0.0.1:1/nothing"
+    env["CARR_RUN_SPOOL_DB"] = TMP_SPOOL
     for leak in ("CARR_DB_JOBS_URL", "CARR_DB_URL", "PGSERVICE"):
         env.pop(leak, None)
+    return env
+
+
+def broken_recording_env() -> dict[str, str]:
+    """The state in which recording GENUINELY fails now: the database is
+    unreachable AND the local spool cannot be written either (its path sits
+    under a file, which mkdir cannot create a directory inside). This is what
+    recorder_exit=nonzero means since the spool: not 'the network wobbled'
+    but 'this row is durable nowhere'."""
+    env = unreachable_env()
+    env["CARR_RUN_SPOOL_DB"] = os.path.join(os.path.devnull, "spool.sqlite3")
     return env
 
 
@@ -166,14 +202,29 @@ def tier1() -> None:
           field(line, "state") == "cancelled", line)
 
     # ── the recorder is never in the job's failure path ──────────────────────
-    # Every tier-1 run above used an unreachable database. If the wrapper let
-    # that surface, every check above would already have failed — assert it
-    # explicitly anyway, because this is the property, not a side effect.
+    # Every tier-1 run above used an unreachable database. Since the
+    # 2026-08-18 spool that is no longer a recording failure: the row queues
+    # locally and recorder_exit is 0, because "recorded" now means durable —
+    # landed or queued with a scheduled path to ops.run. Assert both halves:
+    # the DB-less success, and the row actually sitting in the spool.
     proc, line = drive("selftest.recorder-down", "exit 0")
-    check("the recorder genuinely could not reach the database",
-          field(line, "recorder_exit") not in ("0", ""), line)
+    check("with the database unreachable, recording still succeeds — the row "
+          "queues in the local spool (recorder_exit=0)",
+          field(line, "recorder_exit") == "0", line)
     check("...and the job still reports success",
           proc.returncode == 0, f"got {proc.returncode}")
+    check("...and the row is REALLY in the spool, not merely claimed durable",
+          len(spool_rows("selftest.recorder-down")) >= 1,
+          f"spool rows: {spool_rows('selftest.recorder-down')!r}")
+
+    # The state in which recording DOES fail now: spool unwritable too. The
+    # transparency property is unchanged — the job must not notice even that.
+    proc, line = drive("selftest.recorder-broken", "exit 0",
+                       env=broken_recording_env())
+    check("with the spool ALSO unwritable, the recorder genuinely fails",
+          field(line, "recorder_exit") not in ("0", ""), line)
+    check("...and the job STILL reports success — recording is never in the "
+          "job's failure path", proc.returncode == 0, f"got {proc.returncode}")
     check("...and the failure is logged rather than hidden",
           "recorder_exit=" in line, line)
 
@@ -186,7 +237,8 @@ def tier1() -> None:
     check("child stderr reaches the caller untouched",
           "CHILD_ERR" in proc.stderr, repr(proc.stderr[:200]))
     check("the recorder's own chatter stays OUT of the job's stdout",
-          "ops-record" not in proc.stdout, repr(proc.stdout[:200]))
+          "ops-record" not in proc.stdout and "ops-spool" not in proc.stdout,
+          repr(proc.stdout[:200]))
 
     # ── the child's world is the child's ─────────────────────────────────────
     # None of the seven plists sets WorkingDirectory, so each script currently
@@ -304,18 +356,21 @@ def tier1() -> None:
 # recorder_exit -eq 0.
 #
 # WHAT THAT MEANS FOR THESE TESTS, and why they no longer test "does a second
-# fire throttle" by driving two fires back to back with an unreachable
-# recorder: under unreachable_env() recorder_exit is ALWAYS 1, so nothing
+# fire throttle" by driving two fires back to back with a broken recorder:
+# under broken_recording_env() recorder_exit is always nonzero, so nothing
 # ever stamps, and a test built on "fire twice, expect throttled" would now
 # correctly get "recorded" both times — which is not a bug, it is the WRITE
-# side of the fix, tested in (a) below. The THROTTLE's READ side (given a
-# stamp, does a fresh one skip and a stale one not) still needs proving, and
-# is proven in (b) by pre-seeding the state file directly — no mock, no
-# injected recorder: a real file, in the real format the wrapper itself
-# writes (`date -u +%s`), read by the real wrapper. Every scenario below sets
-# CARR_RUN_SCHEDULED_STATE_DIR to a per-test mkdtemp via drive_flags()'s
-# state_dir parameter, so nothing here can ever touch the shared
-# out/run-scheduled-state again — the exact mechanism of the live incident.
+# side of the fix, tested in (a) below. (Since the 2026-08-18 spool, plain
+# unreachable_env() is NOT that state: the row queues locally, that IS
+# durable, and stamping on it is correct — also asserted in (a).) The
+# THROTTLE's READ side (given a stamp, does a fresh one skip and a stale one
+# not) still needs proving, and is proven in (b) by pre-seeding the state
+# file directly — no mock, no injected recorder: a real file, in the real
+# format the wrapper itself writes (`date -u +%s`), read by the real wrapper.
+# Every scenario below sets CARR_RUN_SCHEDULED_STATE_DIR to a per-test
+# mkdtemp via drive_flags()'s state_dir parameter, so nothing here can ever
+# touch the shared out/run-scheduled-state again — the exact mechanism of
+# the live incident.
 
 def drive_flags(flags: list, service: str, run_key: str, script: str,
                  env: Optional[dict[str, str]] = None,
@@ -383,11 +438,13 @@ def tier1_throttle() -> None:
           tail_line(rk0))
 
     # ── (a) a failed recording never arms the throttle ───────────────────────
-    # Every check in this block uses unreachable_env() — the recorder can
-    # never land a row, so recorder_exit is always nonzero and, under the
-    # fix, the state file must never appear no matter how many times this
-    # fires. This is the WRITE side of the fix: the live incident happened
-    # exactly here.
+    # Every check in this block uses broken_recording_env() — since the
+    # 2026-08-18 spool, an unreachable database alone no longer fails a
+    # recording (the row queues locally and THAT is durable, so stamping is
+    # then correct); genuine failure means the spool is unwritable too. In
+    # that state recorder_exit is nonzero and, under the fix, the state file
+    # must never appear no matter how many times this fires. This is the
+    # WRITE side of the fix: the live incident happened exactly here.
     print("\n  (a) a failed recording never arms the throttle")
     dir_a = tempfile.mkdtemp(prefix="carr-selftest-throttle-a-")
     svc_a = "carr-selftest-probe"
@@ -395,10 +452,10 @@ def tier1_throttle() -> None:
     file_a = stamp_path(dir_a, svc_a, rk_a)
 
     p1 = drive_flags(["--heartbeat-interval", "1800"], svc_a, rk_a, "exit 0",
-                      state_dir=dir_a)
+                      env=broken_recording_env(), state_dir=dir_a)
     check("first success still records the attempt (state=succeeded)",
           field(tail_line(rk_a), "state") == "succeeded", tail_line(rk_a))
-    check("...but the recorder genuinely could not reach the database",
+    check("...but the recorder genuinely could not capture the row anywhere",
           field(tail_line(rk_a), "recorder_exit") not in ("0", ""), tail_line(rk_a))
     check("...and exit code passes through untouched", p1.returncode == 0,
           f"got {p1.returncode}")
@@ -406,7 +463,7 @@ def tier1_throttle() -> None:
           not os.path.exists(file_a), f"exists={os.path.exists(file_a)}")
 
     p2 = drive_flags(["--heartbeat-interval", "1800"], svc_a, rk_a, "exit 0",
-                      state_dir=dir_a)
+                      env=broken_recording_env(), state_dir=dir_a)
     check("with no state file armed, the SECOND success ALSO records — it "
           "is not, and must not be, throttled by a recording that never "
           "landed", field(tail_line(rk_a), "record_action") == "recorded",
@@ -415,6 +472,16 @@ def tier1_throttle() -> None:
           f"got {p2.returncode}")
     check("...and still no state file afterward", not os.path.exists(file_a),
           f"exists={os.path.exists(file_a)}")
+
+    # The other half of the same property, new with the spool: a DB-less but
+    # spool-writable recording IS durable, so it DOES arm the throttle now.
+    rk_a2 = "selftest.throttle.spoolarms." + uuid.uuid4().hex[:8]
+    file_a2 = stamp_path(dir_a, svc_a, rk_a2)
+    drive_flags(["--heartbeat-interval", "1800"], svc_a, rk_a2, "exit 0",
+                state_dir=dir_a)
+    check("a spooled (DB-less) success DOES arm the throttle — queued is "
+          "durable, so silence for the interval is honest",
+          os.path.exists(file_a2), f"exists={os.path.exists(file_a2)}")
 
     # ── (b) the throttle's READ side, proven by pre-seeding — no mock ───────
     print("\n  (b) the throttle's read side, proven by pre-seeding the state "
@@ -464,16 +531,19 @@ def tier1_throttle() -> None:
     print("\n  (d) --also-heartbeat: the same stamp-only-on-a-landed-row "
           "rules apply to the edge-node signal too")
 
-    # (d-a) a failed heartbeat recording never arms its own throttle.
+    # (d-a) a failed heartbeat recording never arms its own throttle. Same
+    # broken_recording_env() as tier 1b(a): with the spool, only "durable
+    # nowhere" counts as a failed recording.
     dir_da = tempfile.mkdtemp(prefix="carr-selftest-hb-a-")
     hb_da = "carr-selftest-edge-" + uuid.uuid4().hex[:8]
     file_da = stamp_path(dir_da, hb_da, "launchd.heartbeat")
     rk_da1 = "selftest.hb.nofile1." + uuid.uuid4().hex[:8]
     drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_da],
-                "carr-selftest-probe", rk_da1, "exit 0", state_dir=dir_da)
+                "carr-selftest-probe", rk_da1, "exit 0",
+                env=broken_recording_env(), state_dir=dir_da)
     hb_line_da1 = last_line_for("launchd.heartbeat", hb_da)
     check("the heartbeat's own first attempt records (state=succeeded) even "
-          "though the recorder is unreachable",
+          "though the recorder is broken",
           field(hb_line_da1, "state") == "succeeded", hb_line_da1)
     check("...recorder_exit shows the real failure",
           field(hb_line_da1, "recorder_exit") not in ("0", ""), hb_line_da1)
@@ -482,7 +552,8 @@ def tier1_throttle() -> None:
 
     rk_da2 = "selftest.hb.nofile2." + uuid.uuid4().hex[:8]
     drive_flags(["--heartbeat-interval", "1800", "--also-heartbeat", hb_da],
-                "carr-selftest-probe", rk_da2, "exit 0", state_dir=dir_da)
+                "carr-selftest-probe", rk_da2, "exit 0",
+                env=broken_recording_env(), state_dir=dir_da)
     hb_line_da2 = last_line_for("launchd.heartbeat", hb_da)
     check("with no state file armed, the heartbeat records on the NEXT wake "
           "too, instead of wrongly throttling",
@@ -648,8 +719,18 @@ def tier2() -> None:
             """insert into ops.service_environment (service_id, environment)
                values (%s, 'production') on conflict do nothing""", (service_id,))
 
+        # A throwaway spool for tier 2 as well: the wrapper records through
+        # tools/ops-spool.py now, and its default spool file lives under the
+        # shared out/. A FAILED child goes to the ledger DIRECT (the spool
+        # tries failure states against ops-record first), so this forced
+        # failure must land with NO flush step — that immediacy is itself
+        # part of the contract and is what this block now proves.
+        tier2_spool = os.path.join(
+            tempfile.mkdtemp(prefix="carr-selftest-tier2-spool-"), "spool.sqlite3")
+
         env = dict(os.environ)
         env["CARR_CORRELATION_ID"] = corr
+        env["CARR_RUN_SPOOL_DB"] = tier2_spool
         proc = subprocess.run(
             [WRAPPER, probe_key, run_key, "/bin/sh", "-c", "exit 9"],
             capture_output=True, text=True, env=env, cwd=REPO, timeout=120)
@@ -661,7 +742,8 @@ def tier2() -> None:
                       source_ref, started_at, ended_at
                  from ops.run where correlation_id = %s""", (corr,))
         row = cur.fetchone()
-        check("exactly one row landed in ops.run", row is not None)
+        check("exactly one row landed in ops.run — DIRECT, no flush ran: a "
+              "failure does not wait for the spool", row is not None)
         if row:
             key, state, code, fclass, skind, sref, started, ended = row
             check("run_key is verbatim", key == run_key, str(key))
@@ -696,6 +778,7 @@ def tier2() -> None:
         env_land = dict(os.environ)
         env_land["CARR_CORRELATION_ID"] = corr_land
         env_land["CARR_RUN_SCHEDULED_STATE_DIR"] = throttle_state_dir
+        env_land["CARR_RUN_SPOOL_DB"] = tier2_spool
         proc_land = subprocess.run(
             [WRAPPER, "--heartbeat-interval", "1800", probe_key, throttle_run_key,
              "/bin/sh", "-c", "exit 0"],
@@ -703,20 +786,40 @@ def tier2() -> None:
         check("tier 2 throttle: the first real success exits 0",
               proc_land.returncode == 0, f"got {proc_land.returncode}")
 
+        stamp = os.path.join(throttle_state_dir,
+                              f"{probe_key}.{throttle_run_key}.last-success")
+        check("tier 2 throttle: a durably QUEUED row stamps the state file — "
+              "the stamp means 'this row has a path to the ledger', which "
+              "since the spool is true at enqueue time",
+              os.path.exists(stamp), f"exists={os.path.exists(stamp)}")
+
+        cur.execute("select count(*) from ops.run where correlation_id = %s",
+                    (corr_land,))
+        pre_flush = cur.fetchone()
+        check("tier 2 throttle: before any flush, the succeeded row is NOT in "
+              "ops.run — it is waiting in the spool, which is the whole "
+              "autosuspend point", pre_flush is not None and pre_flush[0] == 0,
+              str(pre_flush))
+
+        # The flusher is the other half of the new path; run it for real.
+        flush = subprocess.run(
+            [sys.executable, os.path.join(REPO, "tools", "ops-spool.py"), "flush"],
+            capture_output=True, text=True, env=env_land, cwd=REPO, timeout=300)
+        check("tier 2 throttle: a real flush over a live database exits 0",
+              flush.returncode == 0,
+              f"rc={flush.returncode} out={flush.stdout[-300:]!r} "
+              f"err={flush.stderr[-300:]!r}")
+
         cur.execute("select count(*) from ops.run where correlation_id = %s",
                     (corr_land,))
         landed = cur.fetchone()
-        check("tier 2 throttle: that first fire's row actually landed in ops.run",
-              landed is not None and landed[0] == 1, str(landed))
-
-        stamp = os.path.join(throttle_state_dir,
-                              f"{probe_key}.{throttle_run_key}.last-success")
-        check("tier 2 throttle: a REAL landed row stamps the state file",
-              os.path.exists(stamp), f"exists={os.path.exists(stamp)}")
+        check("tier 2 throttle: after the flush, that fire's row landed in "
+              "ops.run", landed is not None and landed[0] == 1, str(landed))
 
         env_throttled = dict(os.environ)
         env_throttled["CARR_CORRELATION_ID"] = corr_throttled
         env_throttled["CARR_RUN_SCHEDULED_STATE_DIR"] = throttle_state_dir
+        env_throttled["CARR_RUN_SPOOL_DB"] = tier2_spool
         proc_throttled = subprocess.run(
             [WRAPPER, "--heartbeat-interval", "1800", probe_key, throttle_run_key,
              "/bin/sh", "-c", "exit 0"],
@@ -732,6 +835,9 @@ def tier2() -> None:
               "row at all — the stamp from the first fire worked",
               throttled_count is not None and throttled_count[0] == 0,
               str(throttled_count))
+        check("tier 2 throttle: ...and it queued nothing in the spool either",
+              len(spool_rows(throttle_run_key, db=tier2_spool)) == 0,
+              repr(spool_rows(throttle_run_key, db=tier2_spool)))
     finally:
         # Autocommit, same as tools/ops-record.py's own connections: there is no
         # transaction to roll back, so deleting what we inserted IS the isolation.

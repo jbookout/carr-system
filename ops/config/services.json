@@ -169,7 +169,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.notes-sweep.plist",
           "expected_cadence_seconds": 3600,
-          "cadence_grace_seconds": 1800
+          "cadence_grace_seconds": 3600,
+          "notes": "Grace widened 1800→3600 on 2026-08-18: run rows now ride the local spool (tools/ops-spool.py) and land at the next run-spool-flush, so a row can be inserted up to 1800s after its fire; the old grace put the worst honest gap exactly at the window edge."
         }
       ]
     },
@@ -187,8 +188,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.partner-ping.plist",
           "expected_cadence_seconds": 1800,
-          "cadence_grace_seconds": 900,
-          "notes": "Wakes every two minutes, but bin/run-scheduled.sh's --heartbeat-interval (Program 4 follow-up) throttles a SUCCEEDED row to at most one per 1800s — recording all ~720 fires/day as rows would be pure noise from a healthy channel. Every FAILURE is still recorded immediately regardless of the throttle, so cadence here reflects the succeeded heartbeat, not the wake. This job once logged 382 consecutive identical 'nothing new' lines to a local log with a broken query, because a channel with nothing to say and a channel that cannot ask produce byte-identical output — a run row (even throttled) still distinguishes them, since a genuinely broken query fails loud and is recorded on the spot."
+          "cadence_grace_seconds": 2700,
+          "notes": "Wakes every two minutes, but bin/run-scheduled.sh's --heartbeat-interval (Program 4 follow-up) throttles a SUCCEEDED row to at most one per 1800s — recording all ~720 fires/day as rows would be pure noise from a healthy channel. Every FAILURE is still recorded immediately regardless of the throttle, so cadence here reflects the succeeded heartbeat, not the wake. Grace widened 900→2700 on 2026-08-18: the succeeded row now rides the local spool (tools/ops-spool.py) and is inserted at the next run-spool-flush, up to 1800s after the throttle emitted it, so the honest worst-case gap between inserts is throttle+flush (3600s) against a window of cadence+grace (4500s). This job once logged 382 consecutive identical 'nothing new' lines to a local log with a broken query, because a channel with nothing to say and a channel that cannot ask produce byte-identical output — a run row (even throttled) still distinguishes them, since a genuinely broken query fails loud and goes to the ledger direct, ahead of the spool."
         }
       ]
     },
@@ -205,8 +206,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.capture-poll.plist",
           "expected_cadence_seconds": 1800,
-          "cadence_grace_seconds": 900,
-          "notes": "Wakes every 5 min, but bin/run-scheduled.sh's --heartbeat-interval (Program 4 follow-up) throttles a SUCCEEDED row to at most one per 1800s (30 min) — recording all ~288 fires/day would be noise from a quiet inbox. Every FAILURE is still recorded immediately regardless of the throttle."
+          "cadence_grace_seconds": 2700,
+          "notes": "Wakes every 5 min, but bin/run-scheduled.sh's --heartbeat-interval (Program 4 follow-up) throttles a SUCCEEDED row to at most one per 1800s (30 min) — recording all ~288 fires/day would be noise from a quiet inbox. Every FAILURE is still recorded immediately regardless of the throttle. Grace widened 900→2700 on 2026-08-18 for the spool delay (tools/ops-spool.py): a succeeded row is inserted at the next run-spool-flush, up to 1800s after it was emitted."
         }
       ]
     },
@@ -243,8 +244,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.partner-ping.plist",
           "expected_cadence_seconds": 1800,
-          "cadence_grace_seconds": 900,
-          "notes": "Recorded by bin/run-scheduled.sh's --also-heartbeat flag, riding partner-ping's own 2-minute launchd wake as an independent second provenance line (key=launchd.heartbeat), throttled to at most one succeeded row per 1800s by the SAME --heartbeat-interval — regardless of whether the partner-ping buzz query itself succeeds. A Mac that is asleep or logged out stops waking the LaunchAgent at all, so this service goes stale within 2700s (45 min) of the last real wake rather than reading healthy on a stopped clock."
+          "cadence_grace_seconds": 2700,
+          "notes": "Recorded by bin/run-scheduled.sh's --also-heartbeat flag, riding partner-ping's own 2-minute launchd wake as an independent second provenance line (key=launchd.heartbeat), throttled to at most one succeeded row per 1800s by the SAME --heartbeat-interval — regardless of whether the partner-ping buzz query itself succeeds. Grace widened 900→2700 on 2026-08-18 for the spool delay (tools/ops-spool.py): the row is inserted at the next run-spool-flush. A Mac that is asleep or logged out stops waking the LaunchAgent at all, so this service goes stale within 4500s (75 min) of the last real wake rather than reading healthy on a stopped clock — the price of letting Neon autosuspend between flushes, accepted in the 2026-08-18 cloud-usage decision."
         }
       ]
     },
@@ -279,7 +280,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.cc-version-sentinel.plist",
           "expected_cadence_seconds": 3600,
-          "cadence_grace_seconds": 1800
+          "cadence_grace_seconds": 3600,
+          "notes": "Grace widened 1800→3600 on 2026-08-18: run rows now ride the local spool (tools/ops-spool.py) and land at the next run-spool-flush, so a row can be inserted up to 1800s after its fire; the old grace put the worst honest gap exactly at the window edge."
         }
       ]
     },
@@ -297,6 +299,25 @@
           "deploy_mechanism": "ops/launchd/com.carr.recordings-purge.plist",
           "expected_cadence_seconds": 86400,
           "cadence_grace_seconds": 7200
+        }
+      ]
+    },
+    {
+      "key": "run-spool-flush",
+      "name": "Run-row spool flusher",
+      "purpose": "The one scheduled door between the local run-row spool (tools/ops-spool.py) and the Neon ledger. Replays queued heartbeat rows through tools/ops-record.py in one batch every 30 minutes, which is what lets the database autosuspend between batches instead of being held awake by a recording every few minutes (2026-08-18 cloud-usage audit).",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "tools/ops-spool.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.run-spool-flush.plist",
+          "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 2700,
+          "notes": "Criticality HIGH although the job is small: every wrapper-recorded service's freshness now depends on this one draining the queue, so a silently stopped flusher would age every heartbeat at once. Its OWN succeeded row rides the spool it just drained and lands on the NEXT flush — hence a grace wider than its cadence: the steady-state gap between its inserts is one full flush interval plus the next flush's delay. A genuinely failed flush is state=failed and goes to the ledger direct (the spool tries failures direct first), so a broken flusher does not have to wait for itself to be reported."
         }
       ]
     },
@@ -605,8 +626,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.call-mode.plist",
                     "expected_cadence_seconds": 1800,
-          "cadence_grace_seconds": 900,
-          "notes": "KeepAlive server, so the health question is 'is it up' and never 'did it fire recently'. bin/probe-keepalive.py answers it every 10 min by opening a TCP connection to 127.0.0.1:4682 — a connect proves it is ACCEPTING, which is a real answer rather than a PID sighting. Still exempt from bin/run-scheduled.sh: the wrapper records on child exit, and a KeepAlive child exiting means launchd restarted it. The 30-minute cadence means one missed probe pass is not an alarm."
+          "cadence_grace_seconds": 2700,
+          "notes": "KeepAlive server, so the health question is 'is it up' and never 'did it fire recently'. bin/probe-keepalive.py answers it every 10 min by opening a TCP connection to 127.0.0.1:4682 — a connect proves it is ACCEPTING, which is a real answer rather than a PID sighting. Still exempt from bin/run-scheduled.sh: the wrapper records on child exit, and a KeepAlive child exiting means launchd restarted it. Grace widened 900→2700 on 2026-08-18: an UP row rides the local spool (tools/ops-spool.py) and is inserted at the next run-spool-flush, up to 1800s after the probe saw it; a DOWN row still goes to the ledger direct and becomes an incident on the spot."
         }
       ]
     },
@@ -624,8 +645,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.doc-engine.plist",
                     "expected_cadence_seconds": 1800,
-          "cadence_grace_seconds": 900,
-          "notes": "KeepAlive server. Probed every 10 min by a TCP connect to 127.0.0.1:4680, which proves it is ACCEPTING rather than merely running. Same wrapper exemption and the same reason as call-mode. Proven end to end on 2026-08-14: stopping the agent produced SEV-3 INC-20260814-08 within one probe pass, and restarting it moved the incident to monitoring."
+          "cadence_grace_seconds": 2700,
+          "notes": "KeepAlive server. Probed every 10 min by a TCP connect to 127.0.0.1:4680, which proves it is ACCEPTING rather than merely running. Same wrapper exemption and the same reason as call-mode; same 2026-08-18 grace widening (900→2700) for the spool delay — an UP row lands at the next run-spool-flush, a DOWN row still lands direct. Proven end to end on 2026-08-14: stopping the agent produced SEV-3 INC-20260814-08 within one probe pass, and restarting it moved the incident to monitoring."
         }
       ]
     },
@@ -643,8 +664,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.quill-dictate.plist",
                     "expected_cadence_seconds": 1800,
-          "cadence_grace_seconds": 900,
-          "notes": "KeepAlive server with NO PORT TO KNOCK ON, so its probe is process liveness only — a weaker claim than the other two, and the run detail says which signal was used so the row is never read as more than it is. A wedged process and a healthy one both have a PID. Same wrapper exemption and reason as call-mode."
+          "cadence_grace_seconds": 2700,
+          "notes": "KeepAlive server with NO PORT TO KNOCK ON, so its probe is process liveness only — a weaker claim than the other two, and the run detail says which signal was used so the row is never read as more than it is. A wedged process and a healthy one both have a PID. Same wrapper exemption and reason as call-mode; same 2026-08-18 grace widening (900→2700) for the spool delay."
         }
       ]
     },
@@ -713,8 +734,8 @@
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.keepalive-probe.plist",
           "expected_cadence_seconds": 1800,
-          "cadence_grace_seconds": 900,
-          "notes": "Wakes every 10 min; cadence declared at 30 min so one missed pass is not an alarm. It is itself wrapped by bin/run-scheduled.sh, because a watcher whose own failure is invisible is the one thing nothing watches. It returns EX_CONFIG (78) rather than a failure when NOTHING could be recorded at all, since three records failing on one pass is an unreachable ledger rather than three simultaneous outages — and a probe that alarmed every 10 minutes on a Mac whose credential had not loaded would be the smoke-suite mistake again."
+          "cadence_grace_seconds": 2700,
+          "notes": "Wakes every 10 min; cadence declared at 30 min so one missed pass is not an alarm. It is itself wrapped by bin/run-scheduled.sh, because a watcher whose own failure is invisible is the one thing nothing watches. Grace widened 900→2700 on 2026-08-18 for the spool delay (tools/ops-spool.py). It returns EX_CONFIG (78) rather than a failure when NOTHING could be recorded at all — since the spool, that means the local recording path itself is broken (not even the SQLite queue writable), not merely an unreachable database — and a probe that alarmed every 10 minutes on a Mac in that state would be the smoke-suite mistake again."
         }
       ]
     }
