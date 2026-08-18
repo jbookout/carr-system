@@ -613,6 +613,41 @@ PROD_ROWS=$(awk -F'|' '{s+=$2} END {print s+0}' "$PROD_COUNTS")
 [ "$PROD_TABLES" -gt 0 ] || die "production reported zero tables — refusing to rehearse against nothing"
 say "  ok    $PROD_TABLES tables, $PROD_ROWS rows in production right now"
 
+# EXTENSIONS, ADDED 2026-08-18 — the third statement class, and the one that
+# proved the dump is not self-sufficient.
+#
+# FOUND BY THE WEEKLY REHEARSAL on carr-20260817, once the CREATE SCHEMA fix
+# below let the load get deep enough to reach it:
+#   ERROR: function public.digest(text, text) does not exist
+# CAUSE: bin/backup-dump.sh runs `pg_dump --schema=public --schema=ops`, and a
+# SCHEMA-SCOPED pg_dump emits no CREATE EXTENSION at all — an extension belongs
+# to the database, not to a schema. So every nightly dump carries objects that
+# call pgcrypto's digest() and index with pg_trgm, and carries nothing that
+# creates either one. A restore into a fresh database therefore cannot work, and
+# a human doing a real recovery at 3am hits this exact wall.
+#
+# WHY THE FIX IS HERE AND NOT IN backup-dump.sh. The same argument the ACL
+# filter makes below: fixing the dumper helps dumps we do not have yet, and the
+# dumps we already hold are the only backups that exist. Dropping --schema is
+# also not available — that scoping is the carr_backup role's least-privilege
+# boundary (backup-dump.sh, 2026-08-14). The recovery path is what has to stand
+# the artifact up, so it provisions the container the artifact assumes.
+#
+# THE LIST IS READ, NEVER MAINTAINED. Hardcoding "pgcrypto, pg_trgm" would be a
+# list to forget: the next extension anyone installs would fail a rehearsal
+# months later for a reason nobody remembers. This asks production what it has,
+# in the same read-only session as the counts, so the rehearsal tracks reality.
+PROD_EXTS="$WORKDIR/prod-extensions.txt"
+if ! PGOPTIONS="-c default_transaction_read_only=on" \
+     psql "$PROD_URL" -v ON_ERROR_STOP=1 -At \
+       -c "select extname from pg_extension where extname <> 'plpgsql' order by extname" \
+       > "$PROD_EXTS" 2>"$WORKDIR/prodext.err"; then
+  say "$(cat "$WORKDIR/prodext.err")" >&2
+  die "could not read production's installed extensions"
+fi
+PROD_EXT_COUNT=$(wc -l < "$PROD_EXTS" | tr -d ' ')
+say "  ok    $PROD_EXT_COUNT extension(s) production depends on: $(paste -sd' ' "$PROD_EXTS")"
+
 # ── PHASE 2: the throwaway branch.
 step "phase 2: throwaway branch"
 BRANCH_NAME="restore-rehearse-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -655,6 +690,23 @@ RESTORE_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_
 [ -n "$RESTORE_URL" ] || die "could not obtain the $RESTORE_DB connection string"
 say "  ok    empty database $RESTORE_DB created on the branch"
 
+# The container the dump assumes. See the phase-1 comment for why this exists.
+# IF NOT EXISTS so a Neon-preinstalled extension is not an error, and a FAILURE
+# HERE IS FATAL on purpose: an extension production depends on that cannot be
+# created on the restore target means the backup cannot be stood up, which is
+# exactly the finding this drill exists to produce.
+while IFS= read -r ext; do
+  [ -n "$ext" ] || continue
+  if ! psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -q \
+       -c "create extension if not exists \"$ext\"" >/dev/null 2>>"$WORKDIR/ext.err"; then
+    say "$(cat "$WORKDIR/ext.err")" >&2
+    die "could not create extension '$ext' on the restore target — production depends on it, so this dump cannot be stood up"
+  fi
+done < "$PROD_EXTS"
+if [ "$PROD_EXT_COUNT" -gt 0 ]; then
+  say "  ok    $PROD_EXT_COUNT extension(s) provisioned on the restore target"
+fi
+
 # THE DECRYPT. Piped straight into psql: the plaintext dump exists only in a
 # pipe, never as a file, so there is nothing to forget to delete.
 #
@@ -693,7 +745,25 @@ say "  ok    empty database $RESTORE_DB created on the branch"
 # The count assertion in phase 4 is what proves the filter did not eat data: ACL
 # statements move no rows, so if stripping them changed a single count, the
 # comparison fails.
-ACL_FILTER='/^(ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMENT ON EXTENSION )/d'
+#
+# SECOND CLASS FOUND 2026-08-18, by the weekly rehearsal, on carr-20260817:
+#   ERROR: schema "public" already exists
+# Same shape as the 2026-08-02 finding and the same cause — a statement about
+# the CONTAINER rather than the data, aborting the load under ON_ERROR_STOP=1.
+# Since PostgreSQL 15 the public schema is no longer owned by the bootstrap
+# superuser, so pg_dump emits an explicit `CREATE SCHEMA public;` for a Neon
+# database owned by neondb_owner. Phase 3 restores into a database created one
+# step earlier, which already has a public schema, so that statement can only
+# ever error here.
+#
+# ONLY `CREATE SCHEMA public;` is dropped, never `CREATE SCHEMA` generally: any
+# other schema in a dump has to be created or the objects inside it have nowhere
+# to land, and that failure MUST stay fatal. COMMENT ON SCHEMA goes with it for
+# the same reason COMMENT ON EXTENSION already did — we do not own the object
+# being commented on. Both move zero rows, so phase 4 still proves nothing was
+# eaten. The dump was never the problem either time; this drill's own reading of
+# it was, and that is worth more than a green light would have been.
+ACL_FILTER='/^(ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMENT ON EXTENSION |COMMENT ON SCHEMA |CREATE SCHEMA public;)/d'
 
 # EVIDENCE (Program 4): the RTO clock for "how long does restore take" starts
 # HERE — right before the actual decrypt+load — not at branch-create above, so
