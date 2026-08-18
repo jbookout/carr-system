@@ -251,7 +251,31 @@ DEFINITION_ONLY = {
 #     renders the tracked definitions it owns.
 # The actual scheduler registration is outside this config reconciler, so
 # copying a SKILL.md would be both insufficient and unsafe.
-SECONDARY_SCHEDULED_TASKS: set[str] = set()
+#
+# 2026-08-18: the allow-list stops being empty, and these three are the narrow
+# auditable path above rather than an erosion of it. All three are DELL'S OWN
+# tasks — they were authored for his machine, they have only ever run there, and
+# none is a render of Joe's catalogue. They became visible to this reconciler
+# only when their source-of-truth copies landed in ops/scheduled-tasks/ the same
+# day; before that they sat in Claude's user-owned directory and were correctly
+# treated as personal configuration. Listing them here keeps the repo as the
+# ownership registry without making CARR health falsely red for tasks that are
+# legitimately present, which is the failure this file's own comment warns about.
+#
+# The safety case, per task:
+#   dell-social-batch-weekly — schedules review-drafts to Blotato and never
+#     publishes; its own prompt carries a hard gate saying so. Dell reviews in
+#     Blotato before anything goes out.
+#   dell-daily-heartbeat, dell-monday-brief — read-only reporting plus record
+#     writes through the verbs; both draft and neither sends. They are registered
+#     in the Claude desktop app's scheduler at ~/Claude/Scheduled rather than in
+#     TASKS_SRC, so they do not trip this check today; they are listed so that
+#     moving them does not silently become drift.
+SECONDARY_SCHEDULED_TASKS: set[str] = {
+    "dell-social-batch-weekly",
+    "dell-daily-heartbeat",
+    "dell-monday-brief",
+}
 
 
 def scheduled_task_allowed(name):

@@ -60,6 +60,15 @@ LOCAL_VERB = os.path.join(REPO, "mcp-server", "local-verb.mjs")
 NODE_CANDIDATES = [
     "/opt/homebrew/bin/node",
     "/usr/local/opt/node@22/bin/node",
+    # A user-local prefix, listed BEFORE the bare "node" because a launchd agent
+    # does not inherit a login shell's PATH — the calendar plist, for one, sets
+    # PATH to /opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin and nothing else, so
+    # a node reachable only through PATH is invisible to every unattended run.
+    # Dell's Mac has no Homebrew and no sudo to make one, so this is where node
+    # lives there (installed 2026-08-18, v24.19.0 LTS, checksum-verified against
+    # nodejs.org's SHASUMS256.txt). Absent on a machine that has Homebrew, in
+    # which case the first candidate already won.
+    os.path.expanduser("~/.local/bin/node"),
     "node",
 ]
 
