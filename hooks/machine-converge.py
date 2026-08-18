@@ -74,10 +74,23 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOME = os.path.expanduser("~")
 ACTOR_FILE = os.path.join(HOME, ".config", "carr", "local-actor.json")
 
-# git location variables outrank -C; scrub them the same way every other
-# CARR git caller does (ops/git_env.py, consolidated by loop #371).
+# git location variables outrank -C, and git EXPORTS several of them to every
+# hook it runs — so a git call from here can land in whatever repository the
+# inherited variable names rather than in REPO (the 2026-08-14 incident, see
+# ops/config-as-code.py's header). Scrubbed the one way every CARR git caller
+# scrubs, ops/git_env.py (consolidated by loop #371), never re-declared here.
+#
+# The import is guarded because this file's contract is FAIL-SOFT AT BOOT: an
+# ImportError at module scope would print a traceback into every single session
+# start. Losing the scrub is not a reason to proceed unscrubbed — a converge
+# that cannot pin which repository its git commands hit must not run them at
+# all — so the fallback is to do nothing, which is also the direction that
+# leaves the machine exactly as it was.
 sys.path.insert(0, os.path.join(REPO, "ops"))
-from git_env import scrubbed_env  # noqa: E402
+try:
+    from git_env import scrubbed_env
+except Exception:
+    scrubbed_env = None
 
 
 def git(*args, timeout=20):
@@ -180,6 +193,8 @@ def converge():
 
 def main():
     try:
+        if scrubbed_env is None:
+            return 0  # cannot pin which repository git would hit — see above
         slug = local_actor_slug()
         if slug == "joe" or (not slug and is_primary()):
             return 0  # the primary machine — deliberate no-op, see docstring
