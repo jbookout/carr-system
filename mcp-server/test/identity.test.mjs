@@ -19,6 +19,7 @@ import {
   propsForSlug,
   actorFromProps,
   isKnownActor,
+  isKnownPartner,
   agentActorForToken,
 } from "../src/identity.js";
 
@@ -275,6 +276,47 @@ test("codex/grok remain unsponsored even when resolved through the extended func
   // presented on the LOCAL_TOKENS map by mistake — must stay shared-only.
   assert.equal(agentActorForToken("Bearer codex-secret-fixture",
     JSON.stringify({ codex: "codex-secret-fixture" }), "local-token").sponsoring_human_slug, null);
+});
+
+// dell-local (2026-08-18). Dell's Mac gets its own machine door so his
+// unattended runs reach the verbs. TWO gates had to open, and the tests below
+// pin both: DISPLAY, or isKnownActor refuses the slug and the token is dead on
+// arrival; and LOCAL_SPONSOR, or it authenticates but resolves shared-only with
+// no personal brain. The second failure is the dangerous one — it looks like it
+// works until something reads the wrong scope.
+
+const DELL_LOCAL_TOKENS = JSON.stringify({ "dell-local": "dell-local-secret-fixture" });
+
+test("dell-local resolves to Dell's personal scope, human:false", () => {
+  const actor = agentActorForToken("Bearer dell-local-secret-fixture", DELL_LOCAL_TOKENS, "local-token");
+  assert.deepEqual(actor, {
+    slug: "dell-local", display: "Agent (dell-local)", human: false, agent: true,
+    via: "local-token", client_id: null, sponsoring_human_slug: "dell",
+    human_slug: "dell", sponsor_required: false,
+  });
+  assert.equal(actor.human, false);
+});
+
+test("dell-local is a known actor, so the slug survives the isKnownActor stop", () => {
+  assert.equal(isKnownActor("dell-local"), true);
+});
+
+test("the two machine doors sponsor different humans and never cross", () => {
+  // The whole point of a separate slug: Dell's machine must not write as Joe.
+  const both = JSON.stringify({
+    "joe-local": "local-secret-fixture",
+    "dell-local": "dell-local-secret-fixture",
+  });
+  assert.equal(agentActorForToken("Bearer local-secret-fixture", both, "local-token").sponsoring_human_slug, "joe");
+  assert.equal(agentActorForToken("Bearer dell-local-secret-fixture", both, "local-token").sponsoring_human_slug, "dell");
+});
+
+test("a machine door is not a partner: dell-local never passes the humanOnly gate", () => {
+  // isKnownPartner backs the humanOnly refusal. 'dell' is a partner; the
+  // machine credential carrying his scope is not, and must never become one.
+  assert.equal(isKnownPartner("dell-local"), false);
+  assert.equal(agentActorForToken("Bearer dell-local-secret-fixture",
+    DELL_LOCAL_TOKENS, "local-token").human, false);
 });
 
 test("local token is per-slug like every other agent token: a stray key does not widen it", () => {
