@@ -252,30 +252,24 @@ DEFINITION_ONLY = {
 # The actual scheduler registration is outside this config reconciler, so
 # copying a SKILL.md would be both insufficient and unsafe.
 #
-# 2026-08-18: the allow-list stops being empty, and these three are the narrow
-# auditable path above rather than an erosion of it. All three are DELL'S OWN
-# tasks — they were authored for his machine, they have only ever run there, and
-# none is a render of Joe's catalogue. They became visible to this reconciler
-# only when their source-of-truth copies landed in ops/scheduled-tasks/ the same
-# day; before that they sat in Claude's user-owned directory and were correctly
-# treated as personal configuration. Listing them here keeps the repo as the
-# ownership registry without making CARR health falsely red for tasks that are
-# legitimately present, which is the failure this file's own comment warns about.
+# STILL EMPTY, deliberately, and here is the near-miss that tried to change it.
+# On 2026-08-18 source-of-truth copies of Dell's three personal tasks were added
+# to ops/scheduled-tasks/, which made them CARR-owned by this file's own rule —
+# "the repository is the ownership registry" — and dell-social-batch-weekly
+# immediately reported as a secondary scope violation. The first fix was to list
+# the three here. That was the wrong lever: it widens the machine-scope policy to
+# paper over a filing mistake, and it also left ops/control-plane-selftest.py
+# failing, because that selftest requires every *.SKILL.md directly under
+# ops/scheduled-tasks/ to be a registered control-plane workflow, which personal
+# tasks are not and should not be.
 #
-# The safety case, per task:
-#   dell-social-batch-weekly — schedules review-drafts to Blotato and never
-#     publishes; its own prompt carries a hard gate saying so. Dell reviews in
-#     Blotato before anything goes out.
-#   dell-daily-heartbeat, dell-monday-brief — read-only reporting plus record
-#     writes through the verbs; both draft and neither sends. They are registered
-#     in the Claude desktop app's scheduler at ~/Claude/Scheduled rather than in
-#     TASKS_SRC, so they do not trip this check today; they are listed so that
-#     moving them does not silently become drift.
-SECONDARY_SCHEDULED_TASKS: set[str] = {
-    "dell-social-batch-weekly",
-    "dell-daily-heartbeat",
-    "dell-monday-brief",
-}
+# The copies now live in ops/scheduled-tasks/dell/. Both this reconciler and the
+# control-plane selftest read only the top level, so the subdirectory keeps the
+# repo copies Dell asked for while leaving his tasks classified as what they are:
+# personal configuration this tool does not claim, move, or count. Anything added
+# to the TOP level is a CARR-managed primary task and must be registered as a
+# control-plane workflow.
+SECONDARY_SCHEDULED_TASKS: set[str] = set()
 
 
 def scheduled_task_allowed(name):
