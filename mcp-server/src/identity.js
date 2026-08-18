@@ -26,7 +26,7 @@ export const ALLOW_LIST = Object.freeze({
 
 /** The only actor slugs this Worker will ever hand to a verb. */
 const DISPLAY = Object.freeze({ joe: "Joe", dell: "Dell", codex: "Codex", claude: "Claude", grok: "Grok",
-  "joe-local": "Joe (local)" });
+  "joe-local": "Joe (local)", "dell-local": "Dell (local)" });
 const PARTNER_SLUGS = new Set(["joe", "dell"]);
 const SERVER_MACHINE_IDENTITIES = Object.freeze({
   "smoke-probe": { marker: "probe", via: "probe-token" },
@@ -236,7 +236,17 @@ export function authorizationClassForActor(actor) {
 // file's header for the full design. Adding an entry here is a design
 // decision (a credential sitting in a 600 file gaining a personal brain), the
 // same weight as adding to DISPLAY, never a routine config edit.
-const LOCAL_SPONSOR = Object.freeze({ "joe-local": "joe" });
+// 'dell-local' added 2026-08-18. Dell's Mac needs the same machine door Joe's
+// has, and it needs TWO entries rather than one: without a DISPLAY row above,
+// isKnownActor refuses the slug and the bearer is dead on arrival; without a
+// row here, it authenticates and then resolves shared-only, so his unattended
+// runs would read and write against no personal brain while looking healthy.
+// The second failure is the one worth naming, because it is silent.
+// A SEPARATE SLUG, never a second key sharing 'joe-local', for the reason this
+// map exists at all: the sponsor is what decides whose personal scope a run
+// carries, so one shared machine credential would make Dell's automation write
+// as Joe. Same design weight as a DISPLAY entry, per the note above.
+const LOCAL_SPONSOR = Object.freeze({ "joe-local": "joe", "dell-local": "dell" });
 
 /**
  * AGENT_TOKENS (or a same-shape sibling map, e.g. LOCAL_TOKENS) bearer ->
