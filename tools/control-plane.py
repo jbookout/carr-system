@@ -637,8 +637,27 @@ class RuntimeWorkflowFactCollector:
         if fact == 'notes.business_hour_weekday':
             return local.weekday() < 5 and 8 <= local.hour < 18
         if fact == 'calendar.eventkit_bundle_registered':
-            executable = REPO / 'tools' / 'CARR Calendar Access.app' / 'Contents' / 'MacOS' / 'carr-calendar-access'
-            return executable.is_file() and os.access(executable, os.X_OK)
+            # REGISTERED means the bundle's tracked SOURCES are in the repo, not
+            # that a compiled artifact is sitting in the working tree. Until
+            # 2026-08-18 this checked Contents/MacOS/carr-calendar-access, which
+            # worked only because a per-machine build product was committed --
+            # and that commit was itself the defect: an ad-hoc signature verifies
+            # solely on the Mac that produced it, so the bundle arrived broken on
+            # the second Mac ("code or signature have been modified") and macOS
+            # refused to launch it. The binary and signature are now built per
+            # machine by bin/build-calendar-access.sh and gitignored, which left
+            # this fact false on any clean checkout -- caught by CI, not locally,
+            # because a developer machine has the build product lying around.
+            #
+            # The three paths below are what the repo genuinely registers, and
+            # they are sufficient: bin/calendar-eventkit-capture.sh rebuilds the
+            # executable from them whenever it is missing or its signature does
+            # not verify, so their presence is what makes the routing runnable.
+            bundle = REPO / 'tools' / 'CARR Calendar Access.app'
+            required = (bundle / 'Contents' / 'Info.plist',
+                        bundle / 'Contents' / 'Resources' / 'run.zsh',
+                        REPO / 'tools' / 'calendar-access-stub.c')
+            return all(path.is_file() for path in required)
         if fact == 'restore.non_interactive_credential':
             return bool(os.environ.get('NEON_API_KEY') or os.environ.get('CARR_AGE_IDENTITY'))
         if fact == 'restore.encrypted_dump_exists':
