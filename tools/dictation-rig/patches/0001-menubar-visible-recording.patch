@@ -1,0 +1,31 @@
+diff --git a/Sources/quill/UI/MenuBarController.swift b/Sources/quill/UI/MenuBarController.swift
+index 30676b6..2792cc2 100644
+--- a/Sources/quill/UI/MenuBarController.swift
++++ b/Sources/quill/UI/MenuBarController.swift
+@@ -68,14 +68,22 @@ final class MenuBarController {
+         }
+     }
+ 
+-    /// Reflect recording state in the icon tint and menu item titles. The
+-    /// menu bar shows only the feather (red while recording); the elapsed
+-    /// counter lives in the menu's state label. Call once a second while
+-    /// recording.
++    /// Reflect recording state in the icon tint, the menu bar title, and the
++    /// menu item titles. Call once a second while recording.
++    ///
++    /// While recording, the menu bar carries VISIBLE TEXT — "● REC 12:34" —
++    /// not just a red-tinted feather. On 2026-08-17 a session ran 52 minutes
++    /// past intent because the operator could not find any way to stop it:
++    /// a lone unlabeled feather is indistinguishable from the other icons in
++    /// a crowded menu bar, a template image's red tint is subtle, and nothing
++    /// on screen said the word "recording" at all. An off switch nobody can
++    /// locate is not an off switch. The elapsed counter stays in the menu's
++    /// state label too, for when the menu is already open.
+     func update(recording: Bool, elapsed: String?) {
+         stateLabel.title = recording ? "● recording · \(elapsed ?? "0:00")" : "idle"
+         toggleItem.title = recording ? "Stop recording" : "Start recording"
+         statusItem.button?.contentTintColor = recording ? .systemRed : nil
++        statusItem.button?.title = recording ? " ● REC \(elapsed ?? "0:00")" : ""
+     }
+ 
+     /// Show transcription progress/failure as a second status line in the
