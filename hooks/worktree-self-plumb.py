@@ -26,17 +26,30 @@ The task that produced this file named session-brief.py as the natural
 extension point, on the reasonable assumption that it is the general
 SessionStart entry point every local session runs, and that "cwd is not a
 carr-system worktree" would just be the common case it skips. That assumption
-does not hold: session-brief.py is wired ONLY into the two VAULT project
-settings files (claude-tree/settings/my-drive-root.settings.json and
-carr-ai-project.settings.json, deployed by bin/sync-settings.sh to the
-"My Drive" and "My Drive/CARR AI" trees). It is never wired into any
-carr-system checkout's own settings — this repo's tracked .claude/settings.json
-carries no SessionStart hook at all today, and neither ~/.claude/settings.json
-(user-level; SessionStart there is gate-integrity.py only) reaches it for a
-session rooted in a carr-system worktree specifically. Concretely: 100% of
-session-brief.py's actual invocations are vault-rooted sessions, 0% are
-carr-system-worktree sessions — extending it would be correct code that
-never runs for the failure this file exists to fix.
+did not hold WHEN THIS FILE WAS WRITTEN: session-brief.py was wired only into
+the two VAULT project settings files (claude-tree/settings/my-drive-root.settings.json
+and carr-ai-project.settings.json, deployed by bin/sync-settings.sh to the
+"My Drive" and "My Drive/CARR AI" trees), never into any carr-system checkout's
+own settings, and ~/.claude/settings.json (user-level) ran gate-integrity.py
+alone. So 100% of session-brief.py's invocations were vault-rooted sessions and
+0% were carr-system-worktree sessions — extending it would have been correct
+code that never ran for the failure this file exists to fix.
+
+THAT PREMISE EXPIRED 2026-08-18, at Dell's request: session-brief.py is now the
+first SessionStart entry in this repo's own .claude/settings.json, right beside
+this hook, so it does run in carr-system-rooted sessions. The two-hook split
+stands anyway, on a reason that does not depend on the wiring:
+
+  - The two files answer to different owners. session-brief.py is ALSO deployed
+    to the two vault trees, where no carr-system worktree exists and worktree
+    plumbing is meaningless; this hook is repo-tracked and worthless outside a
+    checkout. Merging them would ship each one's dead half to the other's home.
+  - Fail-soft has to be per-concern. Both swallow every error and print nothing,
+    which is right — but in one file a swallowed error takes the identity rail
+    down with the plumbing report, and the boot loses the thing it least
+    affords to lose.
+
+The wiring is the mutable fact here. Do not re-derive the split from it.
 
 The fix that actually reaches the failure has to live somewhere every
 carr-system worktree carries BY CONSTRUCTION, regardless of which door

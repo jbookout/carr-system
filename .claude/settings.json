@@ -17,6 +17,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${HOME}/carr-system/.venv/bin/python\" \"${HOME}/carr-system/hooks/session-brief.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "/usr/bin/env python3 \"${HOME}/carr-system/hooks/worktree-self-plumb.py\"",
             "timeout": 20
           }

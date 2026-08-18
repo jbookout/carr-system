@@ -18,6 +18,12 @@ FAIL-SOFT IS A STOP RAIL, NOT SILENCE: if the store is unreachable the hook
 still injects the identity line and the stop-and-say-so instruction — a blank
 session that improvises files is the failure this whole build exists to end.
 """
+# PEP 604 annotations (`str | None`) are evaluated at def time before
+# 3.10, so this module raised TypeError on import under the 3.9 that
+# Dell's machine ships — the hook printed nothing at all. Deferring
+# annotation evaluation keeps one source running on both machines.
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -41,8 +47,17 @@ STATIC_RAIL = (
 )
 
 
+# THE DSN IS JOE'S, BY DESIGN — so its ABSENCE is a supported machine state,
+# not a fault. ~/.config/carr/db.env is chmod 600, written by Joe's own hand,
+# and no agent has ever held the value (secrets-inventory.md, migration 0021).
+# A connector-only machine like Dell's therefore has no local counts and never
+# will, which is the same shape as the migration's ruling on a missing ~/.codex:
+# expected absence is reported as expected, a PARTIAL state still fails loudly.
+DB_ENV = os.path.expanduser("~/.config/carr/db.env")
+
+
 def dynamic_counts():
-    env = os.path.expanduser("~/.config/carr/db.env")
+    env = DB_ENV
     url = None
     with open(env) as fh:
         for line in fh:
@@ -216,8 +231,21 @@ def main():
         sys.path.insert(0, os.path.expanduser("~/carr-system/.venv/lib"))
         extra = dynamic_counts()
     except Exception:
-        extra = (" (store unreachable at session start — STOP AND SAY SO "
-                 "before doing anything that would normally need it)")
+        # NO db.env AT ALL is the expected connector-only machine, and saying
+        # "store unreachable — STOP" there is a false alarm on every single
+        # boot. This file already argues why that is the worst outcome: a line
+        # that prints every session is a line nobody reads by the end of the
+        # week, and naming a failure that is not real costs the same trust as
+        # printing on a green night. The alarm is kept for the case it was
+        # written for — the DSN is configured and the store did not answer.
+        if os.path.exists(DB_ENV):
+            extra = (" (store unreachable at session start — STOP AND SAY SO "
+                     "before doing anything that would normally need it)")
+        else:
+            extra = (" (no local DSN on this machine — expected on a "
+                     "connector-only machine, NOT a store outage: take the "
+                     "rule counts from standing-context, which the opening act "
+                     "already requires, and do not report an outage from this)")
     try:
         extra += nightly_verdict()
     except Exception:
