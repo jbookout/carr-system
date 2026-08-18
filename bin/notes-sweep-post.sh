@@ -39,7 +39,11 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# $HOME/.local/bin is appended, not prepended: a Homebrew machine keeps resolving
+# exactly as before, and a machine without Homebrew still finds a toolchain.
+# Dell's Mac has no /opt/homebrew at all — his node lives in the user-local
+# prefix because installing Homebrew needs sudo, which his session cannot invoke.
+export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
 
 DIR="$REPO/out/notes-sweep"
 PENDING="$DIR/pending"
