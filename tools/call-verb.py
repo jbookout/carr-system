@@ -65,9 +65,11 @@ NODE_CANDIDATES = [
     # PATH to /opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin and nothing else, so
     # a node reachable only through PATH is invisible to every unattended run.
     # Dell's Mac has no Homebrew and no sudo to make one, so this is where node
-    # lives there (installed 2026-08-18, v24.19.0 LTS, checksum-verified against
-    # nodejs.org's SHASUMS256.txt). Absent on a machine that has Homebrew, in
-    # which case the first candidate already won.
+    # lives there (installed 2026-08-18, v26.5.1 to match .nvmrc, checksum-verified
+    # against nodejs.org's SHASUMS256.txt). The version is taken from .nvmrc rather
+    # than from whatever nodejs.org calls current LTS: the first install here was
+    # 24.19.0 chosen that way, which is a major version below what CI runs.
+    # Absent on a machine that has Homebrew, in which case the first candidate won.
     os.path.expanduser("~/.local/bin/node"),
     "node",
 ]
