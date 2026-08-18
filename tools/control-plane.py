@@ -654,10 +654,10 @@ class RuntimeWorkflowFactCollector:
             # executable from them whenever it is missing or its signature does
             # not verify, so their presence is what makes the routing runnable.
             bundle = REPO / 'tools' / 'CARR Calendar Access.app'
-            required = (bundle / 'Contents' / 'Info.plist',
-                        bundle / 'Contents' / 'Resources' / 'run.zsh',
-                        REPO / 'tools' / 'calendar-access-stub.c')
-            return all(path.is_file() for path in required)
+            registered_sources = (bundle / 'Contents' / 'Info.plist',
+                                  bundle / 'Contents' / 'Resources' / 'run.zsh',
+                                  REPO / 'tools' / 'calendar-access-stub.c')
+            return all(path.is_file() for path in registered_sources)
         if fact == 'restore.non_interactive_credential':
             return bool(os.environ.get('NEON_API_KEY') or os.environ.get('CARR_AGE_IDENTITY'))
         if fact == 'restore.encrypted_dump_exists':
