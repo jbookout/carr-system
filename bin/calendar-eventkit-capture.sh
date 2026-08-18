@@ -88,8 +88,32 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
+# THE BUNDLE IS BUILT PER MACHINE, NOT SHIPPED WHOLE. Two things about it are
+# machine-specific and neither used to be, which is why this job could not run on
+# a second Mac at all:
+#   - an ad-hoc SIGNATURE verifies only on the machine that made it; checked out
+#     elsewhere it reads as "code or signature have been modified" and macOS
+#     refuses the launch;
+#   - macOS 26 refuses to launch a bundle whose main executable is a SCRIPT,
+#     answering -10669 without running it (measured 2026-08-18, macOS 26.5.2).
+# So build when the compiled stub is missing or the signature does not verify.
+# On a machine where both already hold this is a no-op.
+# Guarded on the builder AND its source both being present. The selftest points
+# CARR_REPO at a temp root holding a stub bundle and no build tooling; without
+# this guard the rebuild fires there, fails, and aborts the run before the
+# behavior under test is ever reached.
+if [ -x "$REPO/bin/build-calendar-access.sh" ] && [ -f "$REPO/tools/calendar-access-stub.c" ] \
+   && { [ ! -x "$APP/Contents/MacOS/carr-calendar-access" ] || ! codesign -v "$APP" 2>/dev/null; }; then
+  echo "calendar-capture: bundle needs building for this machine — running bin/build-calendar-access.sh"
+  "$REPO/bin/build-calendar-access.sh" || {
+    echo "calendar-capture: FAIL could not build the access bundle" >&2; exit 1; }
+fi
+
 open -a "$APP" --args dump "$OUTPUT_ROOT" || {
-  echo "calendar-capture: FAIL could not launch the access bundle" >&2; exit 1; }
+  echo "calendar-capture: FAIL could not launch the access bundle" >&2
+  echo "  If this is -10669 the bundle's executable is not a Mach-O binary;" >&2
+  echo "  bin/build-calendar-access.sh rebuilds it." >&2
+  exit 1; }
 
 # `open` returns as soon as the app is launched, so wait for the bundle's own
 # exit line to appear after our marker rather than assuming it finished.

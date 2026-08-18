@@ -32,6 +32,29 @@ def load_json(path: Path, label: str):
         raise ValueError(f"{label} is invalid JSON: {path} ({exc.msg})")
 
 
+def load_evidence(path: Path):
+    """The evidence ledger, where ABSENT means "nothing evidenced yet" — not an error.
+
+    A missing file used to refuse the whole capture, which made a clean calendar
+    indistinguishable from a broken one: on a Mac that had never recorded an
+    intake, a run with ZERO unmatched attendees still exited 78 with "evidence is
+    missing", and there was no first write to create the ledger because the only
+    thing that writes it is the intake worker that unmatched attendees trigger.
+    Found 2026-08-18 on Dell's Mac, first live fire: 63 events scanned, unknown
+    list empty, refused anyway.
+
+    Returning empty candidates does NOT weaken the gate. Every unmatched attendee
+    is still looked up in this mapping and still refuses when its receipts are
+    absent — an empty ledger simply means every one of them is missing evidence,
+    which is exactly the fail-closed answer. Only the vacuous case changes, where
+    there is nothing to evidence at all. An UNREADABLE or malformed file is still
+    a hard refusal, because that is a damaged ledger rather than an empty one.
+    """
+    if not path.exists():
+        return {"candidates": {}}
+    return load_json(path, "calendar intake evidence")
+
+
 def complete(entry: object) -> tuple[bool, list[str]]:
     """Return the missing evidence dimensions for one attendee.
 
@@ -82,7 +105,7 @@ def main() -> int:
     args = ap.parse_args()
     try:
         gaps = unresolved(load_json(args.proposals, "calendar proposals"),
-                          load_json(args.evidence, "calendar intake evidence"))
+                          load_evidence(args.evidence))
     except ValueError as exc:
         print(f"calendar-intake-gate: REFUSE {exc}", file=sys.stderr)
         return 78
