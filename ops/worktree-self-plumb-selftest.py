@@ -93,9 +93,17 @@ with tempfile.TemporaryDirectory() as tmp:
     wt_det_anc = add_wt("det-ancestor", "--detach", at=first_sha)
     wt_det_no = add_wt("det-unpublished", "--detach", at=side_sha)
     wt_mine = add_wt("mine", "-b", "mine-branch")
+    # an old checkout whose .gitignore predates the plumbing names: the
+    # untracked .venv SYMLINK shows as `??` but is this system's own
+    # handiwork, which --remove drops before its dirty test — so it must
+    # read clean here too (found live 2026-08-18: ~20 worktrees kept for it)
+    wt_plumbed = add_wt("plumbed-orphan", "-b", "plumbed-orphan")
+    os.symlink(os.path.join(canon, ".venv"), os.path.join(wt_plumbed, ".venv"))
 
     # everything except wt_fresh has sat idle 7h; wt_fresh stays warm
-    for wt in (wt_orphan, wt_dirty, wt_locked, wt_det_anc, wt_det_no, wt_mine):
+    ALL_IDLE = (wt_orphan, wt_dirty, wt_locked, wt_det_anc, wt_det_no,
+                wt_mine, wt_plumbed)
+    for wt in ALL_IDLE:
         age_index(canon, wt, 7)
 
     # ── classification, entry by entry ────────────────────────────────────
@@ -114,6 +122,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "locked": "keep",
         "det-ancestor": "reap",     # detached, already on origin/main
         "det-unpublished": "keep",  # detached, commit not upstream
+        "plumbed-orphan": "reap",   # untracked plumbing symlink is not work
     }
     for name, want in expect.items():
         got = verdicts.get(name, "MISSING")
@@ -141,7 +150,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # `git status` during the dry run refreshed every candidate's index, which
     # correctly re-marks them "possibly live" for 6h — so back-date them again
     # before the live pass, as a night of real idleness would.
-    for wt in (wt_orphan, wt_dirty, wt_locked, wt_det_anc, wt_det_no, wt_mine):
+    for wt in ALL_IDLE:
         age_index(canon, wt, 7)
     if shutil.which("zsh"):
         os.makedirs(os.path.join(canon, "bin"))
@@ -151,7 +160,8 @@ with tempfile.TemporaryDirectory() as tmp:
         with contextlib.redirect_stdout(buf):
             mod.reap_main(["--reap", "--repo", canon, "--skip", wt_mine])
         out = buf.getvalue()
-        gone = [("orphan-branch", wt_orphan), ("det-ancestor", wt_det_anc)]
+        gone = [("orphan-branch", wt_orphan), ("det-ancestor", wt_det_anc),
+                ("plumbed-orphan", wt_plumbed)]
         kept = [("dirty", wt_dirty), ("fresh", wt_fresh), ("locked", wt_locked),
                 ("det-unpublished", wt_det_no), ("mine", wt_mine)]
         for name, wt in gone:

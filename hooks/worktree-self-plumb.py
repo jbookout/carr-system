@@ -73,8 +73,10 @@ sweep proved safe, for each REGISTERED worktree (git worktree list --porcelain):
   skip  a .git index touched under 6h ago — a possibly-live session; this
         hook also TOUCHES its own worktree's index at every boot, so a
         resumed session re-marks itself live the moment it starts
-  skip  any tree where `git status --porcelain` is non-empty or errors —
-        uncommitted work is never judged, same refusal --remove enforces
+  skip  any tree where `git status --porcelain` shows real work or errors —
+        uncommitted work is never judged, same refusal --remove enforces;
+        "real" excludes this system's own untracked plumbing symlinks,
+        because --remove drops those before ITS dirty test (see classify)
   reap  a named branch — via bin/worktree.sh --remove, NEVER raw
         `git worktree remove` (rule a8c55a47: the automated path and the
         manual path must be the same code — that path carries the
@@ -268,8 +270,22 @@ def classify(canon, entry, skip_paths):
     status = run_git(["status", "--porcelain"], wt, timeout=30)
     if status is None:
         return ("keep", "git status failed — not judging it")
-    if status:
-        return ("keep", f"uncommitted work ({len(status.splitlines())} paths)")
+    # Judge dirtiness the way bin/worktree.sh --remove will: its drop_plumbing
+    # deletes this script's own untracked .venv/out/node_modules symlinks
+    # BEFORE the dirty test, so an untracked plumbing symlink is not work.
+    # Older checkouts whose .gitignore predates mcp-server/node_modules show
+    # exactly that as `??` — found live 2026-08-18, ~20 worktrees kept for a
+    # symlink the removal door would have dropped. Anything else stays a keep,
+    # and remove_one re-judges after actually dropping, so a mismatch here
+    # can only under-reap, never over-reap.
+    def is_plumbing(line):
+        if not line.startswith("?? "):
+            return False
+        rel = line[3:].strip().strip('"').rstrip("/")
+        return rel in PLUMB_LINKS and os.path.islink(os.path.join(wt, rel))
+    work = [ln for ln in status.splitlines() if ln.strip() and not is_plumbing(ln)]
+    if work:
+        return ("keep", f"uncommitted work ({len(work)} paths)")
     if entry.get("branch"):
         return ("reap", f"clean, idle {age / 3600:.0f}h, branch "
                         f"{entry['branch']} survives in the main repo")
