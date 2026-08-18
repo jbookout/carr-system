@@ -12,6 +12,25 @@
         and that is the path launchd must run from, since the worktree is
         temporary and disappears once the branch merges.
     -->
+    <!--
+        WRAPPED DELIBERATELY, AND IT MUST STAY WRAPPED (commit 4fb58a8a).
+        dictation-consent is registered criticality HIGH despite being a small
+        watcher: it is what makes the rig announce recording aloud, Florida is
+        an all-party-consent state, and a failure here is legal exposure rather
+        than inconvenience. Each firing is a discrete run worth recording, so
+        the wrapper is what makes a failure durable instead of leaving it in a
+        launchd log on one Mac. bin/run-scheduled.sh is transparent by
+        construction — verbatim child exit code, untouched stdout and stderr,
+        the caller's cwd, arguments passed through unsplit, and recorder
+        failures that never reach the job's log or exit code; each of those is
+        a check in ops/run-scheduled-selftest.py.
+
+        WATCH OUT: `ops/config-as-code.py pull` will try to delete these four
+        wrapper lines any time the LIVE copy is installed unwrapped, because it
+        faithfully captures whatever the machine has. That is drift being
+        recorded, not a correction. Re-install from this file instead of
+        pulling the wrapper away.
+    -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>
@@ -42,6 +61,20 @@
     -->
     <key>ThrottleInterval</key>
     <integer>1</integer>
+
+    <!--
+        StartInterval exists for the STILL-RECORDING reminder, and WatchPaths
+        cannot serve it: WatchPaths fires on changes to ~/Recordings' own
+        directory entries, so a session directory appearing or being renamed
+        wakes us, but mic.caf growing INSIDE that subdirectory does not. A
+        recording therefore produces exactly one event at start and one at
+        stop. On 2026-08-17 that silence let meeting mode run 52 minutes past
+        intent. This tick is what lets consent-watch.sh speak again while a
+        session is still hot; the run is a cheap directory scan that exits 0
+        when nothing is recording.
+    -->
+    <key>StartInterval</key>
+    <integer>300</integer>
 
     <key>StandardOutPath</key>
     <string>{{REPO}}/out/dictation-consent.log</string>
