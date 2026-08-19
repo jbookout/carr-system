@@ -36,8 +36,7 @@ from lib.client_asset_controls import (AssetControlRefusal, require_asset_tier,
                                        write_artifact_atomically)
 
 # CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant.
-BRAND = os.path.join(os.environ.get("CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"),
+BRAND = os.path.join(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
     "DNA", "Marketing", "Brand Assets")  # moved to shared DNA 2026-07-29 (T54)
 
 ASSETS = {

@@ -79,10 +79,8 @@ from pathlib import Path
 import psycopg
 
 SOURCE_SYSTEM = "decision-history"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
-                       "My Drive/CARR AI")))
+VAULT = Path(os.environ.get("CARR_VAULT") or os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
+                       "My Drive/CARR AI"))
 
 SOURCES = [
     ("decision-history", VAULT / "00_Context" / "decision-history.md"),

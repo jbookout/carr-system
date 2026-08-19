@@ -70,10 +70,8 @@ import psycopg
 
 SOURCE_SYSTEM = "idea-bank"
 REL_PATH = "00_Context/idea-bank.md"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
-                       "My Drive/CARR AI")))
+VAULT = Path(os.environ.get("CARR_VAULT") or os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
+                       "My Drive/CARR AI"))
 SRC = VAULT / "00_Context" / "idea-bank.md"
 
 PARKED_COLS = ["number", "title", "extra:domain", "since_text", "body",
