@@ -29,6 +29,17 @@
        minute as every other 7am job. -->
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>5</integer></dict>
+  <!-- A LOG PATH, because for eight days there was none. This job failed every
+       morning on Dell's Mac with an unhandled RuntimeError and the traceback
+       went nowhere: launchd discards a job's output when neither path is set,
+       so the only symptom was a file that quietly never appeared, and the
+       guard correctly falling back to its code list looks identical to the
+       guard working. Found 2026-08-19 while deciding whether that machine
+       needed a database credential; the missing log is why nobody was deciding
+       it sooner. Both streams go to one file, same as every other wrapped job
+       here — interleaved is how you see which output preceded the failure. -->
+  <key>StandardOutPath</key><string>{{REPO}}/out/fetch-allowlist.log</string>
+  <key>StandardErrorPath</key><string>{{REPO}}/out/fetch-allowlist.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/usr/local/opt/node@22/bin:/opt/homebrew/opt/libpq/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
