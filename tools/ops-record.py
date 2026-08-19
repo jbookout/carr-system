@@ -1219,11 +1219,12 @@ def cmd_release(args) -> int:
                             sbom_ref, migration_set, schema_highest_migration,
                             config_fingerprint, declared_env_differences,
                             asset_versions, maker_actor, maker_verification_ref,
+                            verifier_actor, verifier_evidence_ref,
                             test_evidence_ref, security_evidence_ref,
                             rollback_ready, rollback_plan_ref, work_request_ref,
                             plan_hash, source_kind, source_ref, expires_at)
                        values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                               %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
+                               %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
                                'tools/release-manifest.py', %s)
                        returning id, release_key""",
                     (corr, args.key, sid, args.environment,
@@ -1239,6 +1240,17 @@ def cmd_release(args) -> int:
                      manifest.get("declared_env_differences"),
                      json.dumps(manifest.get("asset_versions")) if manifest.get("asset_versions") else None,
                      args.maker, args.maker_verification,
+                     # COLLECTED AT CANDIDACY, which is exactly what migration
+                     # 0169's own comment says should be possible: "drafts and
+                     # candidates may still collect it." Until this line existed
+                     # they could not. The only writer of these two columns was
+                     # the `complete` branch, which runs AFTER approval and after
+                     # the deployment — while the constraint added in that same
+                     # migration demands both columns AT approval. The result was
+                     # an approve that could never succeed for any release on any
+                     # path; see the approve branch below for the refusal that
+                     # now explains it instead of surfacing a raw constraint name.
+                     args.verifier, args.verifier_evidence,
                      args.test_evidence, args.security_evidence,
                      (manifest.get("rollback_ready") if args.environment == "production"
                       else args.rollback_ready),
@@ -1447,6 +1459,54 @@ def cmd_release(args) -> int:
                           f"{args.plan_hash}, the release carries {stored_hash}. "
                           f"Rebuild the manifest and re-read it before approving.",
                           file=sys.stderr)
+                    return 2
+                # THE ATTESTATION HAS TO BE PRESENT AT APPROVAL, and until
+                # 2026-08-19 no code path could put it there. Migration 0169
+                # requires verifier_actor and verifier_evidence_ref for any
+                # release in 'approved' or later; the only statement that wrote
+                # them was `complete`, which runs after approval and after the
+                # deploy. Every approve therefore died on a raw constraint name
+                # with nothing saying what was missing or how to supply it.
+                #
+                # Both halves are fixed here: the candidate above now stores the
+                # verifier when it is known, and approve accepts it for the case
+                # where the verifying run finishes after the candidate was filed
+                # (the ordinary case — CI verifies the pushed artifact). The
+                # coalesce means passing it twice is harmless and passing it
+                # late still works.
+                #
+                # It REFUSES rather than letting the database refuse, because a
+                # constraint name is not an instruction. Rule 590b11e1's point,
+                # arriving from the other side: the message a person actually
+                # reads has to name the bound action.
+                cur.execute(
+                    """update ops.release
+                          set verifier_actor = coalesce(%s, verifier_actor),
+                              verifier_evidence_ref = coalesce(%s, verifier_evidence_ref)
+                        where release_key = %s
+                    returning verifier_actor, verifier_evidence_ref, maker_actor""",
+                    (args.verifier, args.verifier_evidence, args.key))
+                v_actor, v_evidence, m_actor = cur.fetchone()
+                if not v_actor or not v_evidence:
+                    print(
+                        f"ops-record: {args.key!r} cannot be approved without an "
+                        f"INDEPENDENT VERIFIER on the row.\n"
+                        f"  verifier_actor: {v_actor or 'MISSING'}\n"
+                        f"  verifier_evidence_ref: {v_evidence or 'MISSING'}\n"
+                        f"An approval says someone other than the maker checked the "
+                        f"artifact itself, not the maker's summary of it. Supply it "
+                        f"here or on the candidate:\n"
+                        f"    tools/ops-record.py release approve --key {args.key} "
+                        f"--plan-hash <hash> --actor <approver> \\\n"
+                        f"      --verifier <who> --verifier-evidence <ref to their run>",
+                        file=sys.stderr)
+                    return 2
+                if m_actor and v_actor == m_actor:
+                    print(
+                        f"ops-record: the verifier and the maker are both "
+                        f"{v_actor!r}. A maker cannot independently verify their own "
+                        f"release — name the run or person that checked it from the "
+                        f"artifact.", file=sys.stderr)
                     return 2
                 cur.execute(
                     """update ops.release
