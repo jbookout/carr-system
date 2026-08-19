@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """LIVE test: can a non-Claude-Code process drop a turn onto a live session?
 
-Rule 97326357 — a claim about what a surface can do needs a live test from
-that surface. So this does not assert against a mock. It spins up a REAL,
+The rule that says a claim about what a surface can do needs a live test from
+that surface (rule 97326357) binds here. So this does not assert against a mock. It spins up a REAL,
 LABELED throwaway Claude Code session (never one of Joe's production
 sessions), injects one turn over that session's unix socket from a plain
 python process, and asserts the session actually answered the injected turn.
