@@ -23,11 +23,19 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-PY = REPO / ".venv" / "bin" / "python"
+# The repo venv is what the nightly chain runs, so probe with it when it exists.
+# A GitHub runner has no .venv — it installs requirements into the interpreter
+# running this file — and hardcoding the venv path made this selftest die there
+# with FileNotFoundError before it could assert anything. The interpreter is
+# incidental to what is under test: the probe only has to import
+# exporters.common and print the root it resolved.
+_VENV = REPO / ".venv" / "bin" / "python"
+PY = _VENV if _VENV.exists() else Path(sys.executable)
 PROBE = "from exporters.common import VAULT; print(VAULT)"
 
 
