@@ -52,19 +52,32 @@ import sys
 
 HOME = os.path.expanduser("~")
 HERMES_HOME = os.environ.get("HERMES_HOME") or os.path.join(HOME, ".hermes")
+
+# THE ONE TEST SEAM, and why it is a single obviously-named variable rather than
+# one override per probe. HERMES_HOME was already injectable, so the selftest
+# could fixture the scheduled-jobs predicate — but gateway_state() read the real
+# ~/Library/LaunchAgents and shelled out to the real launchctl, so on any machine
+# where the gateway is installed the three "clean" cases could not pass no matter
+# what the fixture contained. A selftest that reads the world instead of its
+# fixture is not testing what it claims to test; it was reporting the machine.
+#
+# Set CARR_HERMES_CHECK_FIXTURE to a directory to read the launch agents from
+# <dir>/LaunchAgents and the launchctl listing from <dir>/launchctl.txt. Absent
+# — which is every real run, including run.sh health and the nightly — both
+# probes read the live machine exactly as before. The name says test, and its
+# presence is visible in the environment, so this cannot quietly neuter a check
+# in production the way a per-probe override could.
+FIXTURE = os.environ.get("CARR_HERMES_CHECK_FIXTURE") or ""
 CRON_DIR = os.path.join(HERMES_HOME, "cron")
 EXECUTIONS_DB = os.path.join(CRON_DIR, "executions.db")
 
-# TEST SEAMS. The fixtures in the selftest set HERMES_HOME, which used to steer
-# only HALF of this check: the gateway half read the real ~/Library/LaunchAgents
-# and the real launchctl no matter what, so every fixture case inherited
-# whatever this Mac happened to be running. Two cases written to prove a CLEAN
-# machine reads clean therefore failed here — reporting the live gateway, not
-# the fixture. A check whose "no install" case depends on the machine it runs
-# on is testing the machine.
-LAUNCH_AGENTS_DIR = os.environ.get("HERMES_LAUNCH_AGENTS_DIR") \
-    or os.path.join(HOME, "Library", "LaunchAgents")
-LAUNCHCTL_OUTPUT_FILE = os.environ.get("HERMES_LAUNCHCTL_OUTPUT")
+# The two per-probe seams this branch originally carried,
+# HERMES_LAUNCH_AGENTS_DIR and HERMES_LAUNCHCTL_OUTPUT, are gone: decision
+# b2f85c76 (2026-08-19) settled that a security-relevant check gets ONE
+# obviously-test-named fixture root and never a per-probe override, because a
+# per-probe override can quietly neuter one predicate while the check still
+# reports itself as having run. CARR_HERMES_CHECK_FIXTURE above is that root and
+# does the same job for both probes.
 
 # ACCEPTED BY NAME, 2026-08-18. Joe read this check's own output naming these
 # two and answered "no im leaving it. i chose it". Matching is exact: anything
@@ -110,14 +123,17 @@ def gateway_state():
     """
     findings, accepted = [], []
     # A user LaunchAgent is how `hermes gateway install` persists itself.
-    for plist in glob.glob(os.path.join(LAUNCH_AGENTS_DIR, "*hermes*")) + \
-                 glob.glob(os.path.join(LAUNCH_AGENTS_DIR, "*nousresearch*")):
+    agents_dir = os.path.join(FIXTURE, "LaunchAgents") if FIXTURE \
+        else os.path.join(HOME, "Library", "LaunchAgents")
+    for plist in glob.glob(os.path.join(agents_dir, "*hermes*")) + \
+                 glob.glob(os.path.join(agents_dir, "*nousresearch*")):
         name = os.path.basename(plist)
         line = f"launch agent installed: {name}"
         (accepted if name in ACCEPTED_LAUNCH_AGENTS else findings).append(line)
-    if LAUNCHCTL_OUTPUT_FILE:
+    if FIXTURE:
+        listing = os.path.join(FIXTURE, "launchctl.txt")
         try:
-            out = open(LAUNCHCTL_OUTPUT_FILE, encoding="utf-8").read()
+            out = open(listing, encoding="utf-8").read() if os.path.exists(listing) else ""
         except OSError:
             out = ""
     else:

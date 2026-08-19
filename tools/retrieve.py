@@ -25,8 +25,7 @@ from retrieval_lexical import rank_index, toks
 def main():
     args = sys.argv[1:]
     top = 8
-    vault = os.environ.get("CARR_VAULT",
-        "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+    vault = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
     words = []
     i = 0
     while i < len(args):

@@ -102,11 +102,27 @@ import signal
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 import time
 from typing import Optional
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+
+from lib.loadpy import load_module_from_path  # noqa: E402
+
 SCRIPT = os.path.join(REPO, "bin", "key-recovery-test.sh")
+OPS_RECORD = load_module_from_path("key_recovery_ops_record",
+                                    os.path.join(REPO, "tools", "ops-record.py"))
+DEAD_DSN = "postgresql://carr_jobs:probe@127.0.0.1:1/nonexistent"
+
+# The 0600 no-eval credential fixture the chained restore-rehearse.sh reads
+# through bin/routine-credential-env.sh. See unreachable_env() for why the
+# environment alone could not hold this line.
+ROUTINE_ENV_TMP = tempfile.TemporaryDirectory()
+ROUTINE_ENV_FILE = Path(ROUTINE_ENV_TMP.name) / "db.env"
+ROUTINE_ENV_FILE.write_text(f"CARR_DB_JOBS_URL='{DEAD_DSN}'\n", encoding="utf-8")
+ROUTINE_ENV_FILE.chmod(0o600)
 
 # Built from two literal halves, same reason bin/key-recovery-test.sh's own
 # comment gives: the CARR unattended guard matches this substring in Bash
@@ -128,14 +144,54 @@ def check(label: str, cond: bool, detail: str = "") -> bool:
 
 
 def unreachable_env(extra: Optional[dict] = None) -> dict:
-    """Same helper, same reasoning, as ops/restore-rehearse-record-selftest.py:
-    port 1 on loopback refuses instantly. DATABASE_URL wins over whatever real
-    credentials ~/.config/carr/db.env would otherwise supply, for BOTH this
-    script's own ops-record.py call and the chained restore-rehearse.sh's."""
+    """Every credential the recorder reads, SET to a dead port — never deleted.
+
+    Port 1 on loopback refuses instantly, so the suite pays no connect timeout,
+    and the list of names comes from ops-record.py's own credential_names() so
+    it cannot drift as connection modes are added.
+
+    DELETING WAS THE BUG, and this is the suite where it cost the most. The
+    helper used to point DATABASE_URL at a dead port and unset
+    CARR_DB_JOBS_URL — airtight while `run` was connect("write"), because
+    DATABASE_URL was that mode's first choice. PR #288 made `run`
+    connect("routine"), which reads CARR_DB_JOBS_URL and nothing else, so
+    ops-record.py's _load_db_env() re-supplied the PRODUCTION jobs DSN by
+    setdefault.
+
+    The two tier-1 suites fixed on 2026-08-18 got away with it because every
+    service key they name is a carr-selftest-* key production has never
+    registered, so the recorder refused EX_CONFIG. THIS suite names
+    restore-rehearse-weekly, which is registered, so nothing refused it.
+    Measured 2026-08-19: this file and ops/restore-rehearse-record-selftest.py
+    had written 206 fabricated rows into production's ops.run against that one
+    service — 146 failed, 60 succeeded — and four of them landed within six
+    seconds carrying contradictory outcomes (a clean success, a public-key
+    mismatch, a failed restore and an abort), which is what a fixture sweep
+    looks like when it reaches a real ledger. That service's entire production
+    health signal was this exhaust, the same shape open loop #450 already
+    records for radar-weekly. Nothing is deleted here; the purge is that
+    loop's ruling to make.
+
+    The username stays carr_jobs so routine mode's own credential-shape check
+    passes and the suite proves what it claims to: the CONNECTION fails, not
+    the credential's spelling.
+    """
     env = dict(os.environ)
-    env["DATABASE_URL"] = "postgresql://nobody@127.0.0.1:1/nothing"
-    for leak in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL", "PGSERVICE"):
-        env.pop(leak, None)
+    for name in OPS_RECORD.credential_names():
+        env[name] = DEAD_DSN
+    # THE SECOND BELT, and the one this suite was missing entirely. Blinding
+    # the environment is not enough on its own: this script chains into
+    # bin/restore-rehearse.sh, which sources bin/routine-credential-env.sh and
+    # calls carr_clear_routine_db_env — that UNSETS every credential name
+    # above, including the dead ones — and then reloads from
+    # ${CARR_ROUTINE_DB_ENV_FILE:-$HOME/.config/carr/db.env}. With the variable
+    # unset, the fallback is the developer's REAL production credential, so
+    # the chained rehearsal recorded to production no matter what this helper
+    # put in the environment. Pointing it at a 0600 no-eval fixture carrying a
+    # dead DSN closes that path, the same way
+    # ops/restore-rehearse-record-selftest.py already does for its own runs.
+    env["CARR_ROUTINE_DB_ENV_FILE"] = str(ROUTINE_ENV_FILE)
+    env.pop("PGSERVICE", None)
     if extra:
         env.update(extra)
     return env

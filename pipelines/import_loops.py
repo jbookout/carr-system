@@ -68,9 +68,7 @@ import psycopg
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_SOURCE_DIR = REPO / "frozen-sources" / "2026-07-31-loops"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
 # (vault-relative path, kind, tier, personal_to slug or None, [block_key per table
 #  block in file order], {block_key: col_order})

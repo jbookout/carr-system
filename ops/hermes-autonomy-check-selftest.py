@@ -30,6 +30,16 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHECK = os.path.join(HERE, "hermes-autonomy-check.py")
 
+# Both halves are fixtured, so these cases assert what the CHECK does rather
+# than what THIS MACHINE happens to have installed. The three cases main carried
+# here — "an installed launch agent is unattended", "a running gateway service
+# is unattended", "both together are unattended" — are deliberately NOT kept:
+# they expect exit 1 for ai.hermes.gateway, which is the exact path Joe accepted
+# on 2026-08-18. Post-acceptance they assert the opposite of the ruling. Their
+# real content, that the gateway half is covered at all, survives in the
+# acceptance-edge cases below, which pin both directions: the accepted names
+# read clean, anything else still fails.
+#
 # Exactly the shape `launchctl list` prints: pid, last exit status, label.
 ACCEPTED_SERVICE = "5590\t1\tai.hermes.gateway"
 DESKTOP_APP = "87172\t0\tapplication.com.nousresearch.hermes.202624494.202625507"
@@ -70,21 +80,21 @@ def run_case(name, files, agents, launchctl_lines, expected):
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(content)
-
-        agents_dir = os.path.join(tmp, "LaunchAgents")
+        # ONE fixture root, per decision b2f85c76: the check reads its launch
+        # agents from <root>/LaunchAgents and its launchctl listing from
+        # <root>/launchctl.txt, so a single obviously-test-named variable steers
+        # both probes and neither can be neutered on its own.
+        fixture = os.path.join(tmp, "fixture")
+        agents_dir = os.path.join(fixture, "LaunchAgents")
         os.makedirs(agents_dir, exist_ok=True)
         for plist in agents:
             with open(os.path.join(agents_dir, plist), "w", encoding="utf-8") as fh:
                 fh.write("<plist/>")
 
-        launchctl_out = os.path.join(tmp, "launchctl.txt")
-        with open(launchctl_out, "w", encoding="utf-8") as fh:
+        with open(os.path.join(fixture, "launchctl.txt"), "w", encoding="utf-8") as fh:
             fh.write("\n".join(launchctl_lines) + ("\n" if launchctl_lines else ""))
 
-        env = dict(os.environ,
-                   HERMES_HOME=home,
-                   HERMES_LAUNCH_AGENTS_DIR=agents_dir,
-                   HERMES_LAUNCHCTL_OUTPUT=launchctl_out)
+        env = dict(os.environ, HERMES_HOME=home, CARR_HERMES_CHECK_FIXTURE=fixture)
         proc = subprocess.run([sys.executable, CHECK], capture_output=True, text=True, env=env)
         ok = proc.returncode == expected
         print(f"  {'ok  ' if ok else 'FAIL'} {name}")
