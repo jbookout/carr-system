@@ -38,6 +38,22 @@ import sys
 
 HOME = os.path.expanduser("~")
 HERMES_HOME = os.environ.get("HERMES_HOME") or os.path.join(HOME, ".hermes")
+
+# THE ONE TEST SEAM, and why it is a single obviously-named variable rather than
+# one override per probe. HERMES_HOME was already injectable, so the selftest
+# could fixture the scheduled-jobs predicate — but gateway_state() read the real
+# ~/Library/LaunchAgents and shelled out to the real launchctl, so on any machine
+# where the gateway is installed the three "clean" cases could not pass no matter
+# what the fixture contained. A selftest that reads the world instead of its
+# fixture is not testing what it claims to test; it was reporting the machine.
+#
+# Set CARR_HERMES_CHECK_FIXTURE to a directory to read the launch agents from
+# <dir>/LaunchAgents and the launchctl listing from <dir>/launchctl.txt. Absent
+# — which is every real run, including run.sh health and the nightly — both
+# probes read the live machine exactly as before. The name says test, and its
+# presence is visible in the environment, so this cannot quietly neuter a check
+# in production the way a per-probe override could.
+FIXTURE = os.environ.get("CARR_HERMES_CHECK_FIXTURE") or ""
 CRON_DIR = os.path.join(HERMES_HOME, "cron")
 EXECUTIONS_DB = os.path.join(CRON_DIR, "executions.db")
 
@@ -73,13 +89,22 @@ def gateway_state():
     """The messaging gateway: installed as a service, or currently running."""
     findings = []
     # A user LaunchAgent is how `hermes gateway install` persists itself.
-    for plist in glob.glob(os.path.join(HOME, "Library", "LaunchAgents", "*hermes*")) + \
-                 glob.glob(os.path.join(HOME, "Library", "LaunchAgents", "*nousresearch*")):
+    agents_dir = os.path.join(FIXTURE, "LaunchAgents") if FIXTURE \
+        else os.path.join(HOME, "Library", "LaunchAgents")
+    for plist in glob.glob(os.path.join(agents_dir, "*hermes*")) + \
+                 glob.glob(os.path.join(agents_dir, "*nousresearch*")):
         findings.append(f"launch agent installed: {os.path.basename(plist)}")
-    try:
-        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=15).stdout
-    except Exception:
-        out = ""
+    if FIXTURE:
+        listing = os.path.join(FIXTURE, "launchctl.txt")
+        try:
+            out = open(listing, encoding="utf-8").read() if os.path.exists(listing) else ""
+        except OSError:
+            out = ""
+    else:
+        try:
+            out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=15).stdout
+        except Exception:
+            out = ""
     for line in out.splitlines():
         # The desktop app itself appears here as an `application.` label, which
         # is a window Joe opened rather than an unattended service. Only
