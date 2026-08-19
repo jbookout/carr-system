@@ -163,7 +163,12 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("backup login-role mapping is not bound by migration 0119")
     if "CARR_DB_BACKUP_URL" not in backup_dump or "carr_backup" not in backup_dump:
         errors.append("backup credential and login boundary are not bound by backup-dump")
-    if 'DATABASE_URL="$CARR_DB_BACKUP_URL"' not in nightly or "pipelines/doctrine_mirror.py" not in nightly:
+    # The guarded form is the one the chain uses: bare "$CARR_DB_BACKUP_URL"
+    # under `set -u` aborted the whole script when the credential was absent,
+    # instead of letting the step report SKIP (2026-08-19). What this check is
+    # for is unchanged — the mirror step must be bound to the backup credential
+    # and to nothing wider.
+    if 'DATABASE_URL="${CARR_DB_BACKUP_URL:-}"' not in nightly or "pipelines/doctrine_mirror.py" not in nightly:
         errors.append("backup credential is not scoped to the portability mirror step")
     if not all(token in calendar and token in notes for token in ("CARR_CANARY_DESTINATION_ID", "CARR_CONTROL_PLANE_MODE")) or "CARR_CALENDAR_CANARY_ENV" not in calendar or "CARR_NOTES_CANARY_ENV" not in notes:
         errors.append("isolated deterministic canary declarations are not bound by both entrypoints")
