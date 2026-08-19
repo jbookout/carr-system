@@ -69,15 +69,35 @@ def scheduled_jobs():
     return findings
 
 
+# THE TWO SEAMS BELOW EXIST SO THE NEGATIVE CASES CAN BE TESTED AT ALL, and they
+# were added on 2026-08-19 after this check's own selftest had been failing on
+# Joe's Mac for as long as Hermes has been installed there. The selftest points
+# HERMES_HOME at a temp dir, so the scheduled-jobs half was always hermetic — but
+# gateway_state() read the real ~/Library/LaunchAgents and shelled out to the
+# real launchctl, so both "clean" fixtures picked up the machine's actual Hermes
+# gateway and reported a failure the fixture never described. That failure is the
+# one every push from this Mac hit: the pre-push hook runs ops/ci.sh, the gates
+# class runs every selftest, and a machine-state leak inside one of them refuses
+# pushes that have nothing to do with it.
+#
+# Overriding either seam does NOT let anything silence the check where it counts.
+# The nightly chain and the pre-push hook each construct their own environment
+# and neither sets these. The same argument already applied to HERMES_HOME, which
+# has been overridable since this file shipped.
+LAUNCH_AGENTS = os.environ.get("HERMES_CHECK_LAUNCHAGENTS") or \
+    os.path.join(HOME, "Library", "LaunchAgents")
+LAUNCHCTL = os.environ.get("HERMES_CHECK_LAUNCHCTL") or "launchctl"
+
+
 def gateway_state():
     """The messaging gateway: installed as a service, or currently running."""
     findings = []
     # A user LaunchAgent is how `hermes gateway install` persists itself.
-    for plist in glob.glob(os.path.join(HOME, "Library", "LaunchAgents", "*hermes*")) + \
-                 glob.glob(os.path.join(HOME, "Library", "LaunchAgents", "*nousresearch*")):
+    for plist in glob.glob(os.path.join(LAUNCH_AGENTS, "*hermes*")) + \
+                 glob.glob(os.path.join(LAUNCH_AGENTS, "*nousresearch*")):
         findings.append(f"launch agent installed: {os.path.basename(plist)}")
     try:
-        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=15).stdout
+        out = subprocess.run([LAUNCHCTL, "list"], capture_output=True, text=True, timeout=15).stdout
     except Exception:
         out = ""
     for line in out.splitlines():
