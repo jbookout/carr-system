@@ -92,11 +92,18 @@ def main() -> int:
             print(msg)
 
     try:
+        # tools/ops-record.py carries a hyphen, so it cannot be imported by name.
+        # It is still the right thing to load: it owns the ledger DSN and the
+        # read-role connection, and duplicating either here would be a second
+        # home for the same fact.
         import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "ops_record",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "ops-record.py"),
+        ops_record_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "tools", "ops-record.py"
         )
+        spec = importlib.util.spec_from_file_location("ops_record", ops_record_path)
+        if spec is None or spec.loader is None:
+            say(f"PROCEED — cannot load {ops_record_path}; failing open")
+            return PROCEED
         ops_record = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(ops_record)
         with ops_record.connect("read") as conn, conn.cursor() as cur:
