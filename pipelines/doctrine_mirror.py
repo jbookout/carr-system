@@ -405,8 +405,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
-        print("mirror failed: DATABASE_URL is required", file=sys.stderr)
-        return 2
+        # 78 = EX_CONFIG, the same "ran, found no credential, wrote nothing"
+        # contract bin/backup-dump.sh uses, so an unprovisioned mirror reports
+        # SKIP in the nightly chain instead of a red FAIL every single night.
+        print("mirror skipped: DATABASE_URL is required", file=sys.stderr)
+        return 78
 
     try:
         import psycopg

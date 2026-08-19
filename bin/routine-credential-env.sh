@@ -62,9 +62,21 @@ carr_load_routine_db_env() {
 # credentials must be loaded by that child's own narrow adapter, never inherited
 # from a broad db.env source.
 carr_routine_exec() {
+  # CARR_VAULT is a PATH, and the only variable here where empty and absent mean
+  # different things to the child. Every Python caller reads it as
+  # os.environ.get("CARR_VAULT", <default vault>), which returns the EMPTY STRING
+  # when the key is present and empty — so passing it unconditionally turned the
+  # vault root into Path("") and every "LIVE" export path resolved against the
+  # working directory, the repo. Found 2026-08-19 after two nights of exports
+  # printed "(LIVE)" while writing into untracked ~/carr-system/DNA and
+  # ~/carr-system/00_Context. Omitting the key rather than passing it empty lets
+  # every caller's own default stand, which keeps ONE definition of the vault
+  # root instead of a copy of the path in this shell file.
+  local -a vault_env=()
+  [ -n "${CARR_VAULT:-}" ] && vault_env=(CARR_VAULT="$CARR_VAULT")
   env -i HOME="$HOME" PATH="$PATH" LANG="${LANG:-C}" TMPDIR="${TMPDIR:-/tmp}" \
     CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-}" \
-    CARR_VAULT="${CARR_VAULT:-}" \
+    "${vault_env[@]}" \
     CARR_EXPORT_LIVE="${CARR_EXPORT_LIVE:-}" \
     HC_EXPORTS_RC="${HC_EXPORTS_RC:-}" \
     HC_BACKUP_RC="${HC_BACKUP_RC:-}" \

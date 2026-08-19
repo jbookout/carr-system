@@ -26,9 +26,17 @@ import psycopg
 
 REPO = Path(__file__).resolve().parent.parent
 DRAFT = REPO / "out" / "exports"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+# `or`, not a get() default: carr_routine_exec runs every nightly step under
+# `env -i` and passes CARR_VAULT="${CARR_VAULT:-}", so the variable arrives as an
+# EMPTY STRING whenever it is unset in the parent — which it is under launchd.
+# get(name, default) hands back that empty string, VAULT becomes Path("") and
+# every "LIVE" path resolves against the working directory instead: the repo.
+# Two nights of exports printed "(LIVE)" while writing into untracked
+# ~/carr-system/DNA and ~/carr-system/00_Context (found 2026-08-19 by the nightly
+# run, which compared vault mtimes against the log rather than trusting it).
+# Held by ops/export-vault-root-selftest.py.
+VAULT = Path(os.environ.get("CARR_VAULT")
+             or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 LIVE = os.environ.get("CARR_EXPORT_LIVE") == "1"
 KEEP_GENERATIONS = 7
 
