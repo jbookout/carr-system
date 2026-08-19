@@ -1,0 +1,496 @@
+<title>Pensacola Industrial Pre-Tour — 20 Aug 2026</title>
+
+<style>
+  :root{
+    --ink:#14181B; --ink-2:#384347; --muted:#5E696D; --faint:#8A9599;
+    --ground:#E7EBEB; --surface:#FFFFFF; --sunk:#DFE4E4;
+    --rule:#C6CFD0; --rule-soft:#DCE2E2;
+    --steel:#0F5163; --steel-ink:#0B3D4B;
+    --flag:#A2500F; --flag-bg:#F6E9DC;
+    --sale:#4A5F2E; --sale-bg:#E7EDDC;
+    --lease-bg:#DDE8EB;
+    --shadow:0 1px 2px rgba(20,24,27,.06),0 6px 18px rgba(20,24,27,.05);
+
+    --display:"Helvetica Neue",Helvetica,Arial,sans-serif;
+    --body:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --data:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ink:#EAEEEE; --ink-2:#C2CBCD; --muted:#94A0A3; --faint:#6D797C;
+      --ground:#0E1113; --surface:#181D20; --sunk:#121618;
+      --rule:#2E373A; --rule-soft:#242C2F;
+      --steel:#6FB6C9; --steel-ink:#9AD0DE;
+      --flag:#E39A55; --flag-bg:#33220F;
+      --sale:#A9C182; --sale-bg:#1E2616;
+      --lease-bg:#14262C;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 18px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"]{
+      --ink:#EAEEEE; --ink-2:#C2CBCD; --muted:#94A0A3; --faint:#6D797C;
+      --ground:#0E1113; --surface:#181D20; --sunk:#121618;
+      --rule:#2E373A; --rule-soft:#242C2F;
+      --steel:#6FB6C9; --steel-ink:#9AD0DE;
+      --flag:#E39A55; --flag-bg:#33220F;
+      --sale:#A9C182; --sale-bg:#1E2616;
+      --lease-bg:#14262C;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 18px rgba(0,0,0,.3);
+  }
+  :root[data-theme="light"]{
+      --ink:#14181B; --ink-2:#384347; --muted:#5E696D; --faint:#8A9599;
+      --ground:#E7EBEB; --surface:#FFFFFF; --sunk:#DFE4E4;
+      --rule:#C6CFD0; --rule-soft:#DCE2E2;
+      --steel:#0F5163; --steel-ink:#0B3D4B;
+      --flag:#A2500F; --flag-bg:#F6E9DC;
+      --sale:#4A5F2E; --sale-bg:#E7EDDC;
+      --lease-bg:#DDE8EB;
+      --shadow:0 1px 2px rgba(20,24,27,.06),0 6px 18px rgba(20,24,27,.05);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:var(--body); font-size:16px; line-height:1.55;
+    -webkit-text-size-adjust:100%;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 20px 72px}
+
+  h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0}
+  .eyebrow{
+    font-family:var(--display); font-size:11px; font-weight:700;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+  }
+  .num{font-family:var(--data);font-variant-numeric:tabular-nums}
+
+  /* ---------- masthead ---------- */
+  .mast{border-top:3px solid var(--steel);padding-top:18px;margin-bottom:26px}
+  .mast h1{font-size:clamp(28px,5vw,44px);font-weight:700;letter-spacing:-.02em;line-height:1.05}
+  .mast .sub{color:var(--ink-2);font-size:17px;margin-top:8px;max-width:62ch}
+  .metaline{
+    display:flex;flex-wrap:wrap;gap:8px 22px;margin-top:16px;
+    font-size:13px;color:var(--muted);
+  }
+  .metaline b{color:var(--ink);font-weight:600}
+
+  /* ---------- route ---------- */
+  .route{
+    background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+    padding:20px;margin:26px 0;box-shadow:var(--shadow);
+  }
+  .route h2{font-size:19px;font-weight:700;letter-spacing:-.01em}
+  .totals{display:flex;flex-wrap:wrap;gap:26px;margin:14px 0 18px}
+  .tot .k{font-family:var(--data);font-size:26px;font-weight:600;color:var(--steel);font-variant-numeric:tabular-nums;line-height:1}
+  .tot .l{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-top:5px}
+  .btns{display:flex;flex-wrap:wrap;gap:10px}
+  a.btn{
+    display:inline-block;font-family:var(--display);font-size:13px;font-weight:600;
+    text-decoration:none;padding:10px 15px;border-radius:3px;
+    background:var(--steel);color:#fff;border:1px solid var(--steel);
+  }
+  :root[data-theme="dark"] a.btn,@media (prefers-color-scheme:dark){a.btn{color:#0B1416}}
+  a.btn.ghost{background:transparent;color:var(--steel);}
+  a.btn:hover{filter:brightness(1.08)}
+  a.btn:focus-visible,a:focus-visible{outline:2px solid var(--flag);outline-offset:2px}
+  .legnote{font-size:13px;color:var(--muted);margin-top:12px}
+
+  /* ---------- flags ---------- */
+  .alerts{display:grid;gap:10px;margin:26px 0}
+  .alert{
+    display:flex;gap:12px;background:var(--flag-bg);border-left:3px solid var(--flag);
+    padding:12px 14px;border-radius:0 3px 3px 0;font-size:14.5px;
+  }
+  .alert .who{font-family:var(--display);font-weight:700;color:var(--flag);white-space:nowrap}
+
+  /* ---------- table ---------- */
+  .tablewrap{overflow-x:auto;border:1px solid var(--rule);border-radius:4px;background:var(--surface);box-shadow:var(--shadow)}
+  table{border-collapse:collapse;width:100%;min-width:900px;font-size:13.5px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--rule-soft);white-space:nowrap}
+  thead th{
+    font-family:var(--display);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--muted);background:var(--sunk);position:sticky;top:0;border-bottom:1px solid var(--rule);
+  }
+  tbody tr:last-child td{border-bottom:none}
+  td.n{font-family:var(--data);font-variant-numeric:tabular-nums;text-align:right}
+  td.addr{white-space:normal;min-width:190px;font-weight:600}
+  .stopno{font-family:var(--data);color:var(--faint);font-size:12px}
+
+  .chip{
+    display:inline-block;font-family:var(--display);font-size:10px;font-weight:700;
+    letter-spacing:.08em;text-transform:uppercase;padding:3px 7px;border-radius:2px;
+  }
+  .chip.lease{background:var(--lease-bg);color:var(--steel-ink)}
+  .chip.sale{background:var(--sale-bg);color:var(--sale)}
+  :root[data-theme="dark"] .chip.lease{color:var(--steel)}
+  @media (prefers-color-scheme:dark){.chip.lease{color:var(--steel)}}
+
+  /* ---------- stop cards ---------- */
+  h2.sec{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+         margin:44px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--rule)}
+  .stop{
+    background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+    padding:20px;margin-bottom:16px;box-shadow:var(--shadow);
+  }
+  .stophead{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+  .badge{
+    font-family:var(--data);font-size:19px;font-weight:600;color:#fff;background:var(--steel);
+    width:38px;height:38px;border-radius:3px;display:flex;align-items:center;justify-content:center;flex:none;
+  }
+  :root[data-theme="dark"] .badge{color:#0B1416}
+  @media (prefers-color-scheme:dark){.badge{color:#0B1416}}
+  .stophead .t{flex:1 1 260px;min-width:0}
+  .stophead h3{font-size:20px;font-weight:700;letter-spacing:-.01em}
+  .stophead .where{font-size:13px;color:var(--muted);margin-top:3px}
+  .price{text-align:right;flex:none}
+  .price .big{font-family:var(--data);font-size:21px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .price .sm{font-size:12px;color:var(--muted);font-family:var(--data);font-variant-numeric:tabular-nums}
+
+  .specs{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));
+    gap:12px 18px;margin-top:18px;padding-top:16px;border-top:1px solid var(--rule-soft);
+  }
+  .spec .l{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-family:var(--display);font-weight:700}
+  .spec .v{font-family:var(--data);font-size:14px;font-variant-numeric:tabular-nums;margin-top:2px}
+  .notes{margin-top:16px;font-size:14.5px;color:var(--ink-2)}
+  .notes p{margin:0 0 8px}
+  .notes p:last-child{margin-bottom:0}
+  .watch{color:var(--flag);font-weight:600}
+  .stopfoot{margin-top:16px;display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  a.maplink{font-family:var(--display);font-size:12.5px;font-weight:600;color:var(--steel);text-decoration:none;border-bottom:1px solid currentColor}
+
+  /* ---------- ask block ---------- */
+  .ask{background:var(--sunk);border:1px solid var(--rule);border-radius:4px;padding:20px;margin-top:16px}
+  .ask ol{margin:10px 0 0;padding-left:20px}
+  .ask li{margin-bottom:7px;font-size:14.5px}
+
+  footer{margin-top:52px;padding-top:20px;border-top:1px solid var(--rule);font-size:13px;color:var(--muted)}
+  footer h3{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+  footer p{margin:0 0 10px;max-width:78ch}
+
+  @media print{
+    body{background:#fff}
+    .wrap{max-width:none;padding:0}
+    .stop,.route,.tablewrap{box-shadow:none;break-inside:avoid}
+    a.btn{border:1px solid #666;background:#fff;color:#000}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div class="eyebrow">CARR · Pre-Tour Packet · Industrial</div>
+    <h1>Pensacola Industrial — 10 Stops</h1>
+    <p class="sub">Eleven listings across ten addresses, ordered as one north-to-south drive in from Pace. Two are for sale; nine are for lease.</p>
+    <div class="metaline">
+      <span>Tour <b>Thursday 20 Aug 2026, AM</b></span>
+      <span>Start <b>Pace, FL</b></span>
+      <span>End <b>Downtown Pensacola</b></span>
+      <span>Prepared <b>19 Aug 2026</b></span>
+      <span>Agent <b>Dell McCraney</b></span>
+    </div>
+  </header>
+
+  <section class="route">
+    <h2>The drive</h2>
+    <div class="totals">
+      <div class="tot"><div class="k">10</div><div class="l">Stops</div></div>
+      <div class="tot"><div class="k">1:06</div><div class="l">Driving</div></div>
+      <div class="tot"><div class="k">26.4</div><div class="l">Miles</div></div>
+      <div class="tot"><div class="k">0</div><div class="l">Tolls</div></div>
+    </div>
+    <div class="btns">
+      <a class="btn" href="https://www.google.com/maps/dir/Pace,+FL/3375+Copter+Rd,+Pensacola,+FL+32514/125+E+Nine+Mile+Rd,+Pensacola,+FL+32534/10110+N+Palafox+Hwy,+Pensacola,+FL+32534/8038+N+Palafox+St,+Pensacola,+FL+32534/7801+Sears+Blvd,+Pensacola,+FL+32514/3890+Pasco+St,+Pensacola,+FL+32505/125+Lurton+St,+Pensacola,+FL+32505/2800+Delano+St,+Pensacola,+FL+32505/2110+W+Cervantes+St,+Pensacola,+FL+32505/2101+W+Government+St,+Pensacola,+FL+32502">Open full route — all 10 stops</a>
+      <a class="btn ghost" href="https://www.google.com/maps/dir/Pace,+FL/3375+Copter+Rd,+Pensacola,+FL+32514/125+E+Nine+Mile+Rd,+Pensacola,+FL+32534/10110+N+Palafox+Hwy,+Pensacola,+FL+32534/8038+N+Palafox+St,+Pensacola,+FL+32534/7801+Sears+Blvd,+Pensacola,+FL+32514">North leg — stops 1–5 (35 min)</a>
+      <a class="btn ghost" href="https://www.google.com/maps/dir/7801+Sears+Blvd,+Pensacola,+FL+32514/3890+Pasco+St,+Pensacola,+FL+32505/125+Lurton+St,+Pensacola,+FL+32505/2800+Delano+St,+Pensacola,+FL+32505/2110+W+Cervantes+St,+Pensacola,+FL+32505/2101+W+Government+St,+Pensacola,+FL+32502">South leg — stops 5–10 (31 min)</a>
+    </div>
+    <p class="legnote">Out US-90 W, up the Palafox corridor to Gonzalez, then straight back down Palafox into town — the two legs meet at Sears Blvd, so you can break there for coffee without losing the thread. All three links were opened and confirmed to resolve. Driving time only; add your own time on site.</p>
+  </section>
+
+  <div class="alerts">
+    <div class="alert"><span class="who">Can't occupy</span><span><b>Three of the ten can't take a tenant now.</b> 2101 W Government is still occupied until 1 Dec 2026, 8038 N Palafox opens Oct 2026, and 7801 Sears Blvd Suite A carries a year built of <span class="num">May 2028</span> — it isn't standing. Walk them as future options, not as answers to a today requirement.</span></div>
+    <div class="alert"><span class="who">Not comparable</span><span><b>Every lease quote here is NNN except one.</b> 8038 N Palafox is Modified Gross at $12.00 — it looks like the second-priciest space in the set and probably isn't. Nothing lines up until you have opex.</span></div>
+    <div class="alert"><span class="who">Blank on every sheet</span><span><b>Opex / CAM is empty on all nine lease listings.</b> Not one of these rents is an all-in number. Get the estimate from each broker while you're standing in the building.</span></div>
+    <div class="alert"><span class="who">Parking</span><span>Three sites are thin enough to matter: <b>10110 N Palafox</b> shows 6 spaces on 22,450 SF, <b>125 Lurton</b> 10 on 18,150 SF, <b>7801 Sears D</b> 14 on 28,410 SF. Count cars and trailer space yourself.</span></div>
+  </div>
+
+  <h2 class="sec">Side by side</h2>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Address</th><th>Deal</th><th>SF</th><th>Rate</th><th>Per month</th>
+          <th>Built</th><th>Class</th><th>Clear</th><th>Docks</th><th>Drive-in</th><th>Park</th><th>Available</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="stopno">1</td><td class="addr">3375 Copter Rd<br><span style="font-weight:400;color:var(--muted)">Ellyson Industrial Park</span></td><td><span class="chip lease">Lease NNN</span></td><td class="n">22,500</td><td class="n">$10.00</td><td class="n">$18,750</td><td class="n">—</td><td class="n">—</td><td class="n">20'</td><td class="n">yes</td><td class="n">yes</td><td class="n">—</td><td>Now</td></tr>
+        <tr><td class="stopno">2</td><td class="addr">125 E Nine Mile Rd</td><td><span class="chip lease">Lease NNN</span></td><td class="n">7,500–106,400</td><td class="n">$10.00</td><td class="n">$6,250+</td><td class="n">2025</td><td class="n">—</td><td class="n">18–24'</td><td class="n">6</td><td class="n">6</td><td class="n">—</td><td>Now</td></tr>
+        <tr><td class="stopno">3</td><td class="addr">10110 N Palafox Hwy</td><td><span class="chip sale">For sale</span></td><td class="n">22,450</td><td class="n">$126.95/SF</td><td class="n">$2,850,000</td><td class="n">1987</td><td class="n">C</td><td class="n">—</td><td class="n">4</td><td class="n">2</td><td class="n">6</td><td>Now</td></tr>
+        <tr><td class="stopno">4</td><td class="addr">8038 N Palafox St</td><td><span class="chip lease">Lease MG</span></td><td class="n">25,000</td><td class="n">$12.00</td><td class="n">$25,000</td><td class="n">2009</td><td class="n">B</td><td class="n">26'</td><td class="n">1</td><td class="n">4</td><td class="n">24</td><td>Oct 2026</td></tr>
+        <tr><td class="stopno">5a</td><td class="addr">7801 Sears Blvd, Ste D<br><span style="font-weight:400;color:var(--muted)">Sears Industrial Park</span></td><td><span class="chip lease">Lease NNN</span></td><td class="n">28,410</td><td class="n">$10.50</td><td class="n">$24,859</td><td class="n">1999</td><td class="n">A</td><td class="n">24'</td><td class="n">7</td><td class="n">2</td><td class="n">14</td><td>Now</td></tr>
+        <tr><td class="stopno">5b</td><td class="addr">7801 Sears Blvd, Ste A</td><td><span class="chip lease">Lease NNN</span></td><td class="n">15,000</td><td class="n">$15.00</td><td class="n">$18,750</td><td class="n">2028</td><td class="n">B</td><td class="n">—</td><td class="n">—</td><td class="n">none</td><td class="n">—</td><td>Not built</td></tr>
+        <tr><td class="stopno">6</td><td class="addr">3890 Pasco St, Ste 3</td><td><span class="chip lease">Lease NNN</span></td><td class="n">23,800</td><td class="n">$10.50</td><td class="n">$20,825</td><td class="n">1956</td><td class="n">B</td><td class="n">—</td><td class="n">5</td><td class="n">2</td><td class="n">33</td><td>Now</td></tr>
+        <tr><td class="stopno">7</td><td class="addr">125 Lurton St</td><td><span class="chip lease">Lease NNN</span></td><td class="n">18,150</td><td class="n">$8.50</td><td class="n">$12,856</td><td class="n">1969</td><td class="n">C</td><td class="n">24'</td><td class="n">3</td><td class="n">1</td><td class="n">10</td><td>Now</td></tr>
+        <tr><td class="stopno">8</td><td class="addr">2800 Delano St</td><td><span class="chip lease">Lease NNN</span></td><td class="n">27,736</td><td class="n">$9.00</td><td class="n">$20,802</td><td class="n">1961</td><td class="n">C</td><td class="n">24'</td><td class="n">13</td><td class="n">5</td><td class="n">20</td><td>Now</td></tr>
+        <tr><td class="stopno">9</td><td class="addr">2110 W Cervantes St</td><td><span class="chip sale">For sale</span></td><td class="n">13,673</td><td class="n">$98.00/SF</td><td class="n">$1,340,000</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td>Now</td></tr>
+        <tr><td class="stopno">10</td><td class="addr">2101 W Government St</td><td><span class="chip lease">Lease NNN</span></td><td class="n">26,886</td><td class="n">$8.00</td><td class="n">$17,924</td><td class="n">1962</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td class="n">—</td><td>1 Dec 2026</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 class="sec">North leg — stops 1 to 5</h2>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">1</div>
+      <div class="t"><h3>3375 Copter Rd</h3><div class="where">Ellyson Industrial Park · Pensacola 32514 · between Scenic Hwy 90 and Davis, just north of I-10</div></div>
+      <div class="price"><div class="big">$18,750<span style="font-size:13px;color:var(--muted)">/mo</span></div><div class="sm">$10.00/SF NNN · 22,500 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Eave</div><div class="v">20'</div></div>
+      <div class="spec"><div class="l">Docks</div><div class="v">Dock high</div></div>
+      <div class="spec"><div class="l">Grade level</div><div class="v">Present</div></div>
+      <div class="spec"><div class="l">Zoning</div><div class="v">HC/LI</div></div>
+      <div class="spec"><div class="l">Site</div><div class="v">10.14 ac</div></div>
+      <div class="spec"><div class="l">Building</div><div class="v">78,394 SF</div></div>
+      <div class="spec"><div class="l">On market</div><div class="v">293 days</div></div>
+      <div class="spec"><div class="l">Listing</div><div class="v">43640009</div></div>
+    </div>
+    <div class="notes">
+      <p>Divides in 7,500 SF bays, and each bay comes with 300 SF of conditioned office and two restrooms already built — the only listing in the set that spells that out. Fully insulated, exhaust fans, fire suppression, oversize roll-up (18'w × 12'h or 20'w × 12'h). Five-acre lot with ingress/egress sized for large vehicles.</p>
+      <p><span class="watch">Ask:</span> the description calls it "newly built" but the sheet leaves year built blank, and it has sat 293 days. Find out which is true and why it hasn't moved. Owner is Daws Phillips Properties.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=3375+Copter+Rd,+Pensacola,+FL+32514">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">2</div>
+      <div class="t"><h3>125 E Nine Mile Rd</h3><div class="where">Nine Mile Rd &amp; Holsberry · Pensacola 32534 · easy reach to both I-10 and Hwy 29</div></div>
+      <div class="price"><div class="big">$10.00<span style="font-size:13px;color:var(--muted)">/SF</span></div><div class="sm">NNN · 7,500 SF min divisible</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Total avail</div><div class="v">106,400 SF</div></div>
+      <div class="spec"><div class="l">Min bay</div><div class="v">7,500 SF</div></div>
+      <div class="spec"><div class="l">Clear</div><div class="v">18–24'</div></div>
+      <div class="spec"><div class="l">Dock high</div><div class="v">6</div></div>
+      <div class="spec"><div class="l">Grade level</div><div class="v">6</div></div>
+      <div class="spec"><div class="l">Sprinklers</div><div class="v">Yes</div></div>
+      <div class="spec"><div class="l">Built</div><div class="v">2025</div></div>
+      <div class="spec"><div class="l">Site</div><div class="v">9.58 ac</div></div>
+    </div>
+    <div class="notes">
+      <p>Newest product on the tour and the only true new construction you can actually occupy. Three buildings — 30,000, 32,000 and 54,400 SF — with three-phase power, high eave, and both dock and grade loading. Office finish available from 800 SF.</p>
+      <p><span class="watch">Read the monthly figure carefully:</span> the $88,667/month on the sheet is the entire 106,400 SF park, not a suite. A 7,500 SF bay prices around $6,250/month before opex. <span class="watch">Also:</span> the three buildings add to 116,400 SF but the listing markets 106,400 SF available — worth one question about what's already spoken for.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=125+E+Nine+Mile+Rd,+Pensacola,+FL+32534">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">3</div>
+      <div class="t"><h3>10110 N Palafox Hwy <span class="chip sale">For sale</span></h3><div class="where">Gonzalez / SW Santa Rosa · Pensacola 32534 · northernmost stop</div></div>
+      <div class="price"><div class="big">$2,850,000</div><div class="sm">$126.95/SF · 22,450 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Built</div><div class="v">1987</div></div>
+      <div class="spec"><div class="l">Class</div><div class="v">C</div></div>
+      <div class="spec"><div class="l">Docks</div><div class="v">4 ext</div></div>
+      <div class="spec"><div class="l">Drive-in</div><div class="v">2 @ 10'×14'</div></div>
+      <div class="spec"><div class="l">Levelators</div><div class="v">2 ext</div></div>
+      <div class="spec"><div class="l">Parking</div><div class="v">6 spaces</div></div>
+      <div class="spec"><div class="l">Sale type</div><div class="v">Owner user</div></div>
+      <div class="spec"><div class="l">On market</div><div class="v">3 mo 7 d</div></div>
+    </div>
+    <div class="notes">
+      <p>An owner-user purchase, and the more expensive of the two for-sale options per foot — $126.95 against $98.00 at Cervantes for a building only two years older in class terms.</p>
+      <p><span class="watch">Six parking spaces on 22,450 SF</span> is roughly a quarter space per 1,000. That is the single hardest fact on this sheet. Look at whether the yard absorbs it or whether it genuinely caps headcount.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=10110+N+Palafox+Hwy,+Pensacola,+FL+32534">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">4</div>
+      <div class="t"><h3>8038 N Palafox St</h3><div class="where">Ensley / N Brent · Pensacola 32534</div></div>
+      <div class="price"><div class="big">$25,000<span style="font-size:13px;color:var(--muted)">/mo</span></div><div class="sm">$12.00/SF Modified Gross · 25,000 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Built</div><div class="v">Apr 2009</div></div>
+      <div class="spec"><div class="l">Class</div><div class="v">B</div></div>
+      <div class="spec"><div class="l">Clear</div><div class="v">26'</div></div>
+      <div class="spec"><div class="l">Docks</div><div class="v">1 ext</div></div>
+      <div class="spec"><div class="l">Drive-in</div><div class="v">4 @ 11'×14'</div></div>
+      <div class="spec"><div class="l">Parking</div><div class="v">24 spaces</div></div>
+      <div class="spec"><div class="l">Occupancy</div><div class="v">Oct 2026</div></div>
+      <div class="spec"><div class="l">On market</div><div class="v">6 days</div></div>
+    </div>
+    <div class="notes">
+      <p>Tallest clear height on the tour at 26', the widest drive-in doors at 11' × 14', and second-newest building. Fresh listing — six days — so nothing has been picked over yet.</p>
+      <p><span class="watch">The one Modified Gross deal in the set.</span> At $12.00 MG the landlord is carrying costs that every NNN quote here pushes to the tenant, so it is very likely closer to the $10.50 NNN spaces than the raw number suggests. Ask what MG includes. <span class="watch">Only one dock</span> — fine for a drive-in operation, a problem for a distributor.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=8038+N+Palafox+St,+Pensacola,+FL+32534">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">5</div>
+      <div class="t"><h3>7801 Sears Blvd — two suites</h3><div class="where">Sears Industrial Park · Ensley / N Brent · Pensacola 32514 · one address, two very different listings</div></div>
+      <div class="price"><div class="big">$24,859<span style="font-size:13px;color:var(--muted)">/mo</span></div><div class="sm">Suite D · $10.50/SF NNN · 28,410 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Built</div><div class="v">1999</div></div>
+      <div class="spec"><div class="l">Class</div><div class="v">A</div></div>
+      <div class="spec"><div class="l">Clear</div><div class="v">24'</div></div>
+      <div class="spec"><div class="l">Docks</div><div class="v">7 ext</div></div>
+      <div class="spec"><div class="l">Drive-in</div><div class="v">2 @ 10'×14'</div></div>
+      <div class="spec"><div class="l">Levelators</div><div class="v">7 ext</div></div>
+      <div class="spec"><div class="l">Sprinklers</div><div class="v">Wet</div></div>
+      <div class="spec"><div class="l">On market</div><div class="v">27 days</div></div>
+    </div>
+    <div class="notes">
+      <p><b>Suite D is the best building on the lease side and it isn't close.</b> Only Class A in the set, only wet sprinkler system, seven docks each with a leveler, 24' clear, 1999 construction — and it is asking the same $10.50/SF as 3890 Pasco, which was built in 1956. If the requirement is real distribution, this is the benchmark the others have to beat. Twenty-seven days on market.</p>
+      <p><span class="watch">Suite A at the same address is a different animal.</span> It asks $15.00/SF — the top of the whole set — for 15,000 SF in a building whose year built reads <span class="num">May 2028</span>, with no drive-ins and no levelators listed. It has been "on market" 1 year 10 months while showing immediate occupancy. Treat it as proposed or build-to-suit until the broker tells you otherwise, and get that answered on site since you're standing there anyway.</p>
+      <p><span class="watch">Parking:</span> 14 spaces against 28,410 SF in Suite D.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=7801+Sears+Blvd,+Pensacola,+FL+32514">Navigate to this stop</a></div>
+  </article>
+
+  <h2 class="sec">South leg — stops 6 to 10</h2>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">6</div>
+      <div class="t"><h3>3890 Pasco St, Suite 3</h3><div class="where">Central Pensacola / S Brent · Pensacola 32505</div></div>
+      <div class="price"><div class="big">$20,825<span style="font-size:13px;color:var(--muted)">/mo</span></div><div class="sm">$10.50/SF NNN · 23,800 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Built</div><div class="v">1956</div></div>
+      <div class="spec"><div class="l">Class</div><div class="v">B</div></div>
+      <div class="spec"><div class="l">Docks</div><div class="v">5 ext</div></div>
+      <div class="spec"><div class="l">Drive-in</div><div class="v">2 @ 8'×10'</div></div>
+      <div class="spec"><div class="l">Levelators</div><div class="v">5 ext</div></div>
+      <div class="spec"><div class="l">Parking</div><div class="v">33 spaces</div></div>
+      <div class="spec"><div class="l">Building</div><div class="v">81,418 SF</div></div>
+      <div class="spec"><div class="l">On market</div><div class="v">9 mo 5 d</div></div>
+    </div>
+    <div class="notes">
+      <p>Best parking ratio on the tour by a wide margin — 33 spaces. Five docks all levelered.</p>
+      <p><span class="watch">The comparison to make while you're here:</span> same $10.50/SF as Sears Suite D, but built in 1956 rather than 1999, Class B rather than A. Nine months on market says the market has already noticed. <span class="watch">Drive-in doors are 8' × 10'</span> — the smallest openings in the set, which rules out anything that needs a truck inside.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=3890+Pasco+St,+Pensacola,+FL+32505">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">7</div>
+      <div class="t"><h3>125 Lurton St</h3><div class="where">Central Pensacola / S Brent · Pensacola 32505</div></div>
+      <div class="price"><div class="big">$12,856<span style="font-size:13px;color:var(--muted)">/mo</span></div><div class="sm">$8.50/SF NNN · 18,150 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Built</div><div class="v">1969</div></div>
+      <div class="spec"><div class="l">Class</div><div class="v">C</div></div>
+      <div class="spec"><div class="l">Clear</div><div class="v">24'</div></div>
+      <div class="spec"><div class="l">Docks</div><div class="v">3 ext</div></div>
+      <div class="spec"><div class="l">Drive-in</div><div class="v">1 @ 8'×12'</div></div>
+      <div class="spec"><div class="l">Sprinklers</div><div class="v">Dry</div></div>
+      <div class="spec"><div class="l">Parking</div><div class="v">10 spaces</div></div>
+      <div class="spec"><div class="l">Term</div><div class="v">5–10 yr</div></div>
+    </div>
+    <div class="notes">
+      <p><b>Cheapest monthly cost on the tour</b> at $12,856, and the most flexible term on offer — five to ten years, where most of this set is locked at three or five. 24' clear in a Class C shell is better than the class suggests.</p>
+      <p><span class="watch">Dry sprinkler system</span> is the detail to chase: it points to an unheated or partly unheated building, which matters for what can be stored. <span class="watch">Ten parking spaces</span> and a single 8' × 12' drive-in are the real constraints.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=125+Lurton+St,+Pensacola,+FL+32505">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">8</div>
+      <div class="t"><h3>2800 Delano St</h3><div class="where">West Pensacola · Pensacola 32505</div></div>
+      <div class="price"><div class="big">$20,802<span style="font-size:13px;color:var(--muted)">/mo</span></div><div class="sm">$9.00/SF NNN · 27,736 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Built</div><div class="v">1961</div></div>
+      <div class="spec"><div class="l">Class</div><div class="v">C</div></div>
+      <div class="spec"><div class="l">Clear</div><div class="v">24'</div></div>
+      <div class="spec"><div class="l">Docks</div><div class="v">13 ext</div></div>
+      <div class="spec"><div class="l">Drive-in</div><div class="v">5 total</div></div>
+      <div class="spec"><div class="l">Levelators</div><div class="v">2 ext</div></div>
+      <div class="spec"><div class="l">Parking</div><div class="v">20 spaces</div></div>
+      <div class="spec"><div class="l">Term</div><div class="v">3 yr</div></div>
+    </div>
+    <div class="notes">
+      <p><b>Thirteen dock doors</b> — nearly double the next best, on 27,736 SF at $9.00/SF. For a cross-dock or high-throughput distribution use this is the most loading capacity per dollar anywhere on the tour.</p>
+      <p><span class="watch">Three-year term only.</span> Everything else here offers five or more. If the client wants amortized buildout, a three-year deal fights that — worth testing whether the landlord will stretch it.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=2800+Delano+St,+Pensacola,+FL+32505">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">9</div>
+      <div class="t"><h3>2110 W Cervantes St <span class="chip sale">For sale</span></h3><div class="where">West Pensacola · Pensacola 32505</div></div>
+      <div class="price"><div class="big">$1,340,000</div><div class="sm">$98.00/SF · 13,673 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Sale type</div><div class="v">Owner user</div></div>
+      <div class="spec"><div class="l">Price/SF</div><div class="v">$98.00</div></div>
+      <div class="spec"><div class="l">Size</div><div class="v">13,673 SF</div></div>
+      <div class="spec"><div class="l">Status</div><div class="v">Active</div></div>
+      <div class="spec"><div class="l">On market</div><div class="v">4 mo 3 d</div></div>
+      <div class="spec"><div class="l">Amenities</div><div class="v">Signage</div></div>
+    </div>
+    <div class="notes">
+      <p>Lowest entry price on the tour and the lowest cost per foot of the two sale options — $98.00/SF against $126.95 at 10110 N Palafox. Also the smallest building in the set at 13,673 SF, which makes it the realistic owner-user play if the requirement is modest.</p>
+      <p><span class="watch">The sheet is nearly empty.</span> No year built, no class, no dock or drive-in count, no parking, no ceiling height — the listing gives size, price and "signage." This is the one stop where your own eyes are the entire data set, so photograph the loading, the roof, and the yard, and get the building detail from the listing broker before it goes to the client.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=2110+W+Cervantes+St,+Pensacola,+FL+32505">Navigate to this stop</a></div>
+  </article>
+
+  <article class="stop">
+    <div class="stophead">
+      <div class="badge">10</div>
+      <div class="t"><h3>2101 W Government St, Suite 1</h3><div class="where">Pensacola 32502 · last stop, downtown edge</div></div>
+      <div class="price"><div class="big">$17,924<span style="font-size:13px;color:var(--muted)">/mo</span></div><div class="sm">$8.00/SF NNN · 26,886 SF</div></div>
+    </div>
+    <div class="specs">
+      <div class="spec"><div class="l">Built</div><div class="v">1962</div></div>
+      <div class="spec"><div class="l">Type</div><div class="v">Whse/Office</div></div>
+      <div class="spec"><div class="l">Zoning</div><div class="v">C-3</div></div>
+      <div class="spec"><div class="l">Site</div><div class="v">1.16 ac</div></div>
+      <div class="spec"><div class="l">Building</div><div class="v">27,483 SF</div></div>
+      <div class="spec"><div class="l">Occupancy</div><div class="v">Single tenant</div></div>
+      <div class="spec"><div class="l">Available</div><div class="v">1 Dec 2026</div></div>
+      <div class="spec"><div class="l">On market</div><div class="v">111 days</div></div>
+    </div>
+    <div class="notes">
+      <p><b>Lowest rate in the entire set at $8.00/SF NNN</b> for 26,886 SF — the most square footage per dollar you will see tomorrow. Clear-span construction, multiple loading points, office already in place, C-3 zoning, secured site. Legal owner is Terhaar Development; parcel 000S009080001131, Escambia County.</p>
+      <p><span class="watch">It is still occupied.</span> The sheet reads vacant: no, with delivery 1 Dec 2026. Expect a working building tomorrow rather than an empty one, so plan the walk-through with the current tenant in mind — and if the client needs space before December, this is a conversation about timing, not about rent.</p>
+    </div>
+    <div class="stopfoot"><a class="maplink" href="https://www.google.com/maps/search/?api=1&amp;query=2101+W+Government+St,+Pensacola,+FL+32502">Navigate to this stop</a></div>
+  </article>
+
+  <h2 class="sec">Ask at every stop</h2>
+  <div class="ask">
+    <p style="margin:0;color:var(--ink-2)">The same six questions at all ten, so the packet comes back uniform instead of ten different shapes of incomplete.</p>
+    <ol>
+      <li><b>Opex / CAM estimate for the current year.</b> Blank on every listing — without it none of these rents can be compared.</li>
+      <li><b>What is actually included</b> — roof and structure, taxes, insurance, common area, management fee.</li>
+      <li><b>Power available at the panel</b>, service size and phase. Not listed on any of these sheets.</li>
+      <li><b>Real parking count and trailer/yard space</b>, counted rather than quoted.</li>
+      <li><b>Concessions</b> — free rent, TI allowance, and what the landlord will do for a longer term.</li>
+      <li><b>Who else has looked</b>, and whether anything is out for LOI right now.</li>
+    </ol>
+  </div>
+
+  <footer>
+    <h3>Where this came from</h3>
+    <p><b>Four listing PDFs supplied 18–19 Aug 2026:</b> CoStar client report for lease (6 listings — numbered 1, 2, 4, 5, 6 and 9 in the original, so three from that list were dropped before it reached this packet); Moody's/Catylist client report (3 industrial lease listings, prepared 18 Aug 2026); CoStar sale sheet for 2110 Cervantes St; CoStar sale sheet for 10110 Palafox Hwy N. All CoStar material licensed to CARR, Inc — 1691940.</p>
+    <h3>What has not been verified</h3>
+    <p>Route pins are geocoded from street addresses only. No entrance, driveway or dock-access point has been confirmed, so at each stop trust the building in front of you over the pin. Drive times are Google's estimate at the time this was built and exclude time on site. Every rate is the asking rate as published; nothing here has been confirmed with a listing broker, and opex is unknown everywhere. Suite A at 7801 Sears Blvd carries an internally inconsistent listing and may not be a standing building.</p>
+    <p>Not client-facing as it stands — this is a working packet for the drive. It needs opex, broker confirmation and a photo pass before any of it goes in front of a client.</p>
+  </footer>
+
+</div>
