@@ -465,6 +465,7 @@
     "session_boot": {
       "implementation": [
         "hooks/session-brief.py",
+        "hooks/machine-converge.py",
         "mcp-server/src/mcp.js"
       ],
       "test": [
