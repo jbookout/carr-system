@@ -140,3 +140,50 @@ A transcription error in the paper copy is silent until the day it matters.
 - **Cloudflare account recovery depends on the 2FA recovery codes**, which are
   offline with you. If those are lost, the Worker and the R2 archive are both
   unreachable and only the GitHub artifact path remains.
+
+## Worker rollback: backing out a bad release
+
+*Added 2026-08-19, because the release path requires a rollback-plan reference
+and the only worker procedure here was about re-pointing at a recovered
+database. That is a different incident. This one is: the Worker is up, serving,
+and the version now live is wrong.*
+
+**This is the plan `--rollback-plan-ref RECOVERY.md#worker-rollback` names.**
+
+Production traffic is moved by promoting an immutable provider version, never
+by rebuilding from source — `bin/deploy-worker.sh` refuses a source deploy to
+Production for exactly this reason. That property is what makes rollback cheap:
+the previous version is still uploaded, still immutable, and still promotable.
+
+1. **Get the version list.** `cd ~/carr-system && npx wrangler versions list`
+   The currently serving version is marked; the one before it is the rollback
+   target. Note its id.
+
+2. **Promote the previous version to all traffic.**
+   `./bin/deploy-worker.sh --promote-version <previous-id>` with the same four
+   approval inputs the forward release used. If the release record for that
+   earlier version still exists, its approval is already on file — a rollback
+   to a previously approved version is not a new approval decision.
+
+3. **Verify from outside, not from the command's exit code.** The deploy script
+   reads the serving identity back from the fixed Production endpoint and
+   refuses to claim success without it. Confirm independently:
+   `./run.sh call list-verbs '{}'` should return the verb count you expect for
+   the version you rolled back to. A verb count that DROPPED unexpectedly is
+   the signal that started loop #276 and the whole immutable-release design.
+
+4. **Say what happened.** Record the rollback with
+   `.venv/bin/python tools/ops-record.py run --kind check --service carr-mcp
+   --key release.rollback --state succeeded --environment production`
+   and log the reason with the `log-decision` verb. A rollback nobody recorded
+   looks identical to a release that never happened.
+
+**What this does NOT cover.** A bad *migration* is not rolled back this way —
+schema changes are forward-only here, and a Worker rollback across a migration
+boundary can leave code reading a shape the database no longer has. If the
+release included a migration, the rollback question is a database question
+first; see the record-layer section above.
+
+**Time to recover** is the length of one version promotion, which is seconds of
+Cloudflare propagation rather than a rebuild. That is the reason the recovery
+strategy on an ordinary verb release is `rollback` rather than `forward_fix`.
