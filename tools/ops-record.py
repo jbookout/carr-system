@@ -552,12 +552,33 @@ def resolve_preconditions(incident, root_cause, evidence=None,
     }
 
 
+# ONE CLOCK, not two. Until 2026-08-18 this read the day twice: the sequence
+# counted rows whose ref matched to_char(now(), ...), which Postgres evaluates
+# in the SERVER's timezone, while the ref itself was formatted from the
+# CLIENT's datetime.now(timezone.utc). The two agree only when the server runs
+# UTC, so production was correct by luck (Neon is UTC) rather than by design.
+# Against a local Postgres 17 inheriting the Mac's US/Central zone the split
+# was reproduced on 2026-08-18 19:22 CDT: the count matched prefix
+# INC-20260818- (no rows, so seq 01) while the ref written said
+# INC-20260819-01. Every incident opened in that 5-hour window is numbered 01,
+# and the second one dies on incident_ref_key — which is exactly how
+# ops/program3-incident-gate.py failed.
+#
+# So the query now derives BOTH the prefix and the sequence, and the caller
+# formats nothing: the label cannot disagree with the number it was counted
+# against, and changing the server's zone later cannot reintroduce the split.
+# `at time zone 'UTC'` is what pins the day, so the numbering space stays UTC
+# regardless of what zone the cluster happens to inherit.
 def _next_incident_ref(cur) -> str:
     cur.execute(
-        """select coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1
+        """select to_char(now() at time zone 'UTC', 'YYYYMMDD') as day,
+                  coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1 as seq
              from ops.incident
-            where ref like 'INC-' || to_char(now(), 'YYYYMMDD') || '-%'""")
-    return f"INC-{datetime.now(timezone.utc):%Y%m%d}-{cur.fetchone()[0]:02d}"
+            where ref like 'INC-'
+                          || to_char(now() at time zone 'UTC', 'YYYYMMDD')
+                          || '-%'""")
+    day, seq = cur.fetchone()
+    return f"INC-{day}-{seq:02d}"
 
 
 def _record_failure_incident(
