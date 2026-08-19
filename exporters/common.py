@@ -26,9 +26,7 @@ import psycopg
 
 REPO = Path(__file__).resolve().parent.parent
 DRAFT = REPO / "out" / "exports"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 LIVE = os.environ.get("CARR_EXPORT_LIVE") == "1"
 KEEP_GENERATIONS = 7
 
