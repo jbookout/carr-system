@@ -47,6 +47,15 @@
     <string>{{REPO}}/tools/db-tap.py</string>
     <string>run</string>
     <string>pipelines/partner_ping.py</string>
+    <!-- --scheduled confines the QUERY (not the wake) to weekdays 07:00-19:00
+         local. Outside that window neither partner is reading notification
+         centre, and the query was the last thing keeping the Neon compute
+         from ever autosuspending (2026-08-18 cloud-usage audit). The flag
+         sits here, after the script path, exactly as notes-sweep carries its
+         own --scheduled; the rule itself lives in pipelines/partner_ping.py
+         so the manual and automated paths stay one code path. Drop the flag
+         and the job queries around the clock again. -->
+    <string>--scheduled</string>
   </array>
 
   <key>WorkingDirectory</key>

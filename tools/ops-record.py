@@ -91,6 +91,27 @@ DSN_FOR = {
 TERMINAL_RUN_STATES = {"succeeded", "failed", "timed_out", "cancelled", "skipped"}
 
 
+def credential_names() -> tuple[str, ...]:
+    """Every environment variable this recorder will read a DSN from, in
+    declaration order.
+
+    Public because a suite that must prove "no reachable database" has to blind
+    EVERY one of them, and blinding the ones it remembers is not the same thing.
+    That distinction is not theoretical: from 2026-08-16 to 2026-08-18, the two
+    scheduled-run selftests set DATABASE_URL to a dead port and deleted
+    CARR_DB_JOBS_URL, which was airtight while `run` was connect("write") and
+    stopped being airtight the moment it became connect("routine") —
+    _load_db_env() below simply re-supplied the PRODUCTION jobs DSN by
+    setdefault. ops/scheduled-run-record-selftest.py then recorded 46 fabricated
+    SUCCEEDED rows into production's ops.run against loop-drain-weekdays and
+    radar-weekly, one pair per CI run, each one a false observation of a job
+    that had not run. Reading this list means a future mode added to DSN_FOR is
+    blinded by both suites without either one being edited.
+    """
+    return tuple(dict.fromkeys(
+        name for names in DSN_FOR.values() for name in names))
+
+
 def _load_db_env() -> None:
     """Read ~/.config/carr/db.env the same way every other job does. Values are
     shell-quoted there so `set -a; . db.env` survives an & in a DSN."""

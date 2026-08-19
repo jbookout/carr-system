@@ -121,13 +121,20 @@ def main() -> int:
     # ── the exit-code contract, exercised rather than asserted in prose ──────
     # The first cut of this check grepped the docstring for a sentence, which
     # passed nothing but a spell-check and broke on a line wrap. This runs the
-    # REAL main() against REAL targets that are certainly down, with a
-    # deliberately unreachable database — the exact state of a Mac whose
-    # credential has not loaded, which is a path production genuinely takes.
+    # REAL main() against REAL targets that are certainly down, twice:
     #
-    # Expected: 78, not 1. Every record fails, and three records failing at once
-    # is an unreachable ledger rather than three simultaneous outages. Returning
-    # 1 would make the probe alarm every ten minutes until a credential lands.
+    # (1) with an unreachable database but a WRITABLE local spool — the exact
+    #     state of a Mac whose credential has not loaded. Since the 2026-08-18
+    #     spool this is no longer a recording failure: every DOWN row queues
+    #     durably (a failed direct write falls back to the queue) and the probe
+    #     returns 0, its "probe worked" answer. The 2026-08-17 schema-drift
+    #     outage dropped 3,485 rows precisely because this path did not exist.
+    #
+    # (2) with the spool ALSO unwritable — nothing can be recorded anywhere.
+    #     Expected: 78, not 1. Three records failing at once is the recording
+    #     path being broken, not three simultaneous outages, and returning 1
+    #     would make the probe alarm every ten minutes until someone fixed it.
+    import tempfile
     saved_targets = getattr(pk, "TARGETS")
     saved_env = dict(os.environ)
     try:
@@ -138,9 +145,20 @@ def main() -> int:
         ])
         for var in ("DATABASE_URL", "CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL"):
             os.environ[var] = "postgresql://nobody@127.0.0.1:1/nothing"
+
+        os.environ["CARR_RUN_SPOOL_DB"] = os.path.join(
+            tempfile.mkdtemp(prefix="carr-probe-selftest-spool-"), "spool.sqlite3")
         rc = pk.main()
-        check("every server down AND the ledger unreachable returns 78, so a "
-              "missing credential cannot alarm every cycle", rc == 78, f"rc={rc}")
+        check("every server down with the ledger unreachable but the spool "
+              "writable returns 0 — the DOWN rows are queued durably, not lost",
+              rc == 0, f"rc={rc}")
+
+        os.environ["CARR_RUN_SPOOL_DB"] = os.path.join(
+            os.path.devnull, "spool.sqlite3")
+        rc = pk.main()
+        check("every server down AND nothing recordable anywhere returns 78, "
+              "so a broken recording path cannot alarm every cycle",
+              rc == 78, f"rc={rc}")
     finally:
         setattr(pk, "TARGETS", saved_targets)
         os.environ.clear()
