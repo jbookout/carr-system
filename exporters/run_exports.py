@@ -2,7 +2,7 @@
   python -m exporters.run_exports [--only <target>] [--bootstrap]
 Draft by default; CARR_EXPORT_LIVE=1 activates vault paths (cutover only).
 """
-import argparse, sys
+import argparse, os, sys
 from .common import run_export
 from .targets import TARGETS
 
@@ -29,7 +29,20 @@ def md_renders_retired():
     is skipped — the store serves doctrine and records; markdown projections
     are over. Non-md targets (xlsx working sheets, json feeds, html boards)
     are untouched. Fails OPEN (renders keep rendering) on any read error so a
-    dead config lookup can never silently kill the render fleet pre-cutoff."""
+    dead config lookup can never silently kill the render fleet pre-cutoff.
+
+    TEST HOOK, never set by a job or a shell profile: CARR_MD_RENDERS_RETIRED
+    pins the answer ('1' on, '0' off) so a selftest can exercise both sides of
+    the cutoff without its result depending on which day production fired it.
+    ops/vault-drift-watch-selftest.py builds a FIXTURE vault whose registry file
+    is DNA/compiled-rules-shared.md; once the real flag went true its six
+    registry-path cases started failing against a live config value they never
+    meant to read. The hook lives HERE, in the one function every caller shares,
+    rather than in each caller — a second place to decide this is the drift the
+    single flag function exists to prevent."""
+    pinned = os.environ.get("CARR_MD_RENDERS_RETIRED")
+    if pinned is not None:
+        return pinned.strip().lower() in ("1", "true", "yes")
     try:
         from .common import connect
         with connect() as conn, conn.cursor() as cur:

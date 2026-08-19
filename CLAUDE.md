@@ -3,8 +3,13 @@
 Code lives here. Business, brand, persona, and deal context does NOT — by
 design. Before concluding something "doesn't exist," query the CARR Record
 Layer (the MCP connector's verbs, or `./run.sh retrieve "<question>"` locally):
-it is the source of truth for doctrine, records, and brand; the Drive .md
-files are generated snapshots of it.
+it is the source of truth for doctrine, records, and brand.
+
+The cutoff fired 2026-08-19: the generated Drive .md files are GONE, moved to
+`_to_delete/md-renders-cutoff-20260819` in the vault, and the exporter now
+prints RETIRED instead of rewriting them. There is no compiled-rules file and
+no vault CLAUDE.md to fall back on — a session that cannot reach the store has
+no second surface to read, and must say so rather than working from memory.
 
 Naming trap that cost a real search (2026-08-08): the app persona is
 **Dr. CRE** — "Doc" is only the spoken nickname. Search "Dr. CRE" or the
@@ -47,9 +52,10 @@ silently treated as absent.
    paths, and stop. Do not close any migration record after a failed run.
 3. A zero exit is not sufficient by itself. Require the receipt status
    `machine_migrated_pending_record_closeout`, then call `standing-context`.
-   Verify that the server-derived sponsor is Dell, the personal brain is
-   `dell-personal`, and the returned shared and Dell-personal counts match the
-   current generated fallback headers. Never choose a partner, tenant, or
+   Verify that the server-derived sponsor is Dell and the personal brain is
+   `dell-personal`. The old cross-check against the generated fallback headers
+   is retired with the files themselves (cutoff 2026-08-19); the counts
+   standing-context returns are the counts. Never choose a partner, tenant, or
    capability through a caller-supplied argument. Never reconnect merely as a
    guess.
 4. Fresh-read and close exactly Dell action-required A15
@@ -62,6 +68,5 @@ silently treated as absent.
    A17 back as closed. Only then report the migration complete to Dell in plain
    language.
 
-The compiled shared and Dell-personal files remain the supported local fallback
-through the 2026-08-21 cutoff. The doctrine store is authoritative when live,
-but a successful store read does not erase that fallback early.
+There is no local fallback any more. The doctrine store is the only doctrine
+surface; if it is unreachable, stop and say so.
