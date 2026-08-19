@@ -82,10 +82,23 @@ def main() -> int:
     # empty; `or` treats empty and absent alike, which is the behaviour every
     # one of these callers actually wants. Static, so it holds for the files a
     # subprocess probe cannot import (missing credentials, heavy deps).
+    # SCOPE IS THIS CHECKOUT'S OWN TRACKED PYTHON, nothing else. The first cut
+    # skipped only .venv, out, node_modules and .claude, which is everything a
+    # GitHub runner or a fresh worktree contains — so it passed CI and passed in
+    # the worktree it was written in, then failed the moment it ran in Joe's
+    # canonical tree. That tree also holds .worktrees/ and .codex-worktrees/,
+    # which are OTHER SESSIONS' checkouts sitting at whatever commit they were
+    # cut from, plus _to_delete/, which is where superseded files are staged
+    # rather than deleted. Reporting another session's in-flight checkout as a
+    # regression in this one is a false positive that would refuse everybody's
+    # pushes, and it is the same mistake in kind as the bug this file exists to
+    # catch: reading a path that belongs to somebody else as if it were ours.
+    skip = (".venv/", "out/", "node_modules/", ".claude/",
+            ".worktrees/", ".codex-worktrees/", "_to_delete/", ".tmp")
     bad = []
     for path in sorted(REPO.rglob("*.py")):
         rel = path.relative_to(REPO).as_posix()
-        if rel.startswith((".venv/", "out/", "node_modules/", ".claude/")):
+        if rel.startswith(skip):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if "CARR_VAULT" not in text:
