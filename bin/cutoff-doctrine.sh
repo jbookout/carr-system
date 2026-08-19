@@ -26,6 +26,19 @@ stamp() { print -r -- "$(date -u +%FT%TZ) cutoff $*" >> "$LOG" }
 # The render list comes from the exporter registry via record-home-gate's
 # parser — the same single source the write-gate trusts. .md only; xlsx/json/
 # html surfaces survive the cutoff untouched.
+#
+# WHAT THE CUTOFF DELIBERATELY DOES NOT REACH, decided 2026-08-19 when firing it
+# turned up three vault .md files written OUTSIDE the registry, and settled so
+# that no later session "finishes the job" by deleting them:
+#   00_Context/today.md                        bin/local-briefs.sh, weekdays 06:45
+#   Automation/Learning/weekly-learning-latest.md    bin/learning-weekly.sh
+#   Automation/Learning/correction-miner-latest.md   bin/learning-monthly.sh
+# The cutoff ended the DOCTRINE render surface — files a session could read as
+# authoritative and a human could hand-edit into a second source of truth. These
+# three are periodic activity digests, regenerated whole on their own beat,
+# carrying no authority anything reads back. Killing them would remove a working
+# morning habit and replace it with nothing. They stay until someone rules
+# otherwise, and they are named in ops/vault-drift-watch.py's ALWAYS_EXPECTED.
 renders=$("$REPO/.venv/bin/python" - <<'PY'
 import importlib.util, os
 spec = importlib.util.spec_from_file_location(
