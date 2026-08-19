@@ -149,21 +149,34 @@ def _raw_via_verb():
     p = subprocess.run(
         [os.path.join(repo, "run.sh"), "call", "export-email-domains", "{}"],
         capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
-    # run.sh prints an identity preamble, then either a bare JSON object or
-    # "TOOL ERROR {json}". Both carry the JSON from the first brace onward, so
-    # parse from there rather than guessing at line positions — the error
-    # payload names the verb and the reason, and the last line is just "}".
-    text = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
-    brace = text.find("{")
-    payload = None
-    if brace != -1:
+    # STDOUT AND STDERR ARE DIFFERENT CHANNELS AND MERGING THEM BROKE THIS
+    # (found 2026-08-19, the first live run after the verb reached production).
+    # run.sh writes the result as clean JSON on stdout and its identity
+    # preamble on stderr. The first version concatenated the two, so the
+    # preamble landed AFTER the closing brace, json.loads choked on trailing
+    # content, and the failure surfaced as the reason "{" — a parser reporting
+    # a brace as the cause of its own confusion. The verb was live and working
+    # the whole time; only the reading of it was wrong.
+    #
+    # raw_decode stops at the end of the first complete object instead of
+    # demanding that the whole string be JSON, so trailing output can never
+    # break this again on either channel.
+    def _first_json(blob):
+        at = (blob or "").find("{")
+        if at == -1:
+            return None
         try:
-            payload = json.loads(text[brace:])
+            return json.JSONDecoder().raw_decode(blob, at)[0]
         except Exception:
-            payload = None
+            return None
+
+    payload = _first_json(p.stdout)
     if p.returncode != 0 or not isinstance(payload, dict):
-        why = (payload or {}).get("error") if isinstance(payload, dict) else None
-        raise RuntimeError(why or (text.strip().splitlines() or ["verb call failed"])[0][:160])
+        # Only now consult stderr, where a refusal prints "TOOL ERROR {json}".
+        err = _first_json(p.stderr)
+        why = (err or payload or {}).get("error") if isinstance(err or payload, dict) else None
+        first_line = ((p.stderr or p.stdout or "").strip().splitlines() or ["verb call failed"])[0]
+        raise RuntimeError(why or first_line[:160])
     if not payload.get("ok"):
         raise RuntimeError(payload.get("error") or "verb returned no ok")
     by_source = payload.get("by_source") or {}
