@@ -95,9 +95,7 @@ from fill_document import (fill, to_pdf, FillError, colored_runs, scrub_docx,  #
                            drop_rows, parse_row_address, table_row_texts)
 import r2_archive as r2  # noqa: E402
 
-VAULT = os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
 ONEDRIVE_DEALS = os.environ.get(
     "CARR_ONEDRIVE_DEALS",
     "/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/Deals/Active Deals")

@@ -52,10 +52,7 @@ import urllib.request
 import stat
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VAULT = os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
-)
+VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
 TEAM = os.path.join(VAULT, "DNA", "Team")
 LOG = os.path.join(REPO, "out", "capture-lanes.log")
 ENVFILE = os.path.expanduser("~/.config/carr/ingest.env")

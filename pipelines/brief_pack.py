@@ -58,9 +58,7 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out" / "brief-pack"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 CAL = {"joe": VAULT / "DNA/Team/calendar-latest.ics",
        "dell": VAULT / "DNA/Team/calendar-latest-dell.ics"}
 PARTNERS = ("joe", "dell")
