@@ -26,9 +26,14 @@ import psycopg
 
 REPO = Path(__file__).resolve().parent.parent
 DRAFT = REPO / "out" / "exports"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+# An UNSET var and a var set to the EMPTY STRING must both fall back. They do
+# not with os.environ.get(name, default), which returns "" for the empty case —
+# and bin/routine-credential-env.sh passes CARR_VAULT="${CARR_VAULT:-}" under
+# `env -i`, so every launchd-driven export saw exactly that. Path("") is the
+# working directory, which is the repo, so LIVE exports printed "-> DNA/... (LIVE)"
+# while writing into ~/carr-system. Contract pinned by ops/export-vault-root-selftest.py.
+VAULT = Path(os.environ.get("CARR_VAULT")
+             or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 LIVE = os.environ.get("CARR_EXPORT_LIVE") == "1"
 KEEP_GENERATIONS = 7
 
