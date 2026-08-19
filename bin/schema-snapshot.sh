@@ -118,8 +118,16 @@ cat > "$TMP" <<'ROLES'
 -- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
 -- carr_exporter aged into the same trap by way of 0006 and joined the list on
 -- 2026-08-14, when the grants section below started carrying its privileges.
--- carr_reader, carr_writer and carr_exporter are privilege bundles, so they
--- stay NOLOGIN. carr_jobs is the narrow unattended runtime identity: a fresh
+-- carr_authority aged into it by way of 0161 and joined on 2026-08-19: the
+-- refresh that carried the ledger past 0161 stopped that migration replaying,
+-- and the next rebuild failed five db-gates with `role "carr_authority" does
+-- not exist`. That is the third time this exact trap has been sprung, so the
+-- rule it teaches is worth stating plainly: ANY migration that creates a role
+-- must add that role here in the same change, because the day its ledger entry
+-- lands is the day it stops creating anything.
+-- carr_reader, carr_writer, carr_exporter and carr_authority are privilege
+-- bundles, so they stay NOLOGIN. carr_jobs is the narrow unattended runtime
+-- identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
 -- completely unchanged. The placeholder is generated in-process and never
@@ -131,7 +139,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -172,7 +180,7 @@ fi
 GRANTS_SQL="$(mktemp)"
 cat > "$GRANTS_SQL" <<'GRANTSQL'
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -186,7 +194,7 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -202,7 +210,7 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -219,7 +227,7 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -233,7 +241,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
 )
 select format('grant %s to %s;', gr.rolname, mem.rolname)
   from pg_auth_members m

@@ -7,8 +7,16 @@
 -- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
 -- carr_exporter aged into the same trap by way of 0006 and joined the list on
 -- 2026-08-14, when the grants section below started carrying its privileges.
--- carr_reader, carr_writer and carr_exporter are privilege bundles, so they
--- stay NOLOGIN. carr_jobs is the narrow unattended runtime identity: a fresh
+-- carr_authority aged into it by way of 0161 and joined on 2026-08-19: the
+-- refresh that carried the ledger past 0161 stopped that migration replaying,
+-- and the next rebuild failed five db-gates with `role "carr_authority" does
+-- not exist`. That is the third time this exact trap has been sprung, so the
+-- rule it teaches is worth stating plainly: ANY migration that creates a role
+-- must add that role here in the same change, because the day its ledger entry
+-- lands is the day it stops creating anything.
+-- carr_reader, carr_writer, carr_exporter and carr_authority are privilege
+-- bundles, so they stay NOLOGIN. carr_jobs is the narrow unattended runtime
+-- identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
 -- completely unchanged. The placeholder is generated in-process and never
@@ -20,7 +28,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -22036,9 +22044,11 @@ ALTER TABLE ONLY public.vendor
 -- enter the tree. Shapes pinned by tools/test-schema-snapshot-grants.py.
 --
 
+grant usage on schema ops to carr_authority;
 grant usage on schema ops to carr_jobs;
 grant usage on schema ops to carr_reader;
 grant usage on schema ops to carr_writer;
+grant usage on schema public to carr_authority;
 grant usage on schema public to carr_exporter;
 grant usage on schema public to carr_jobs;
 grant usage on schema public to carr_reader;
@@ -22067,14 +22077,19 @@ grant insert, select, update on table ops.deployment to carr_writer;
 grant select on table ops.device_evidence_receipt to carr_jobs;
 grant select on table ops.guidance_authority_binding to carr_reader;
 grant select on table ops.guidance_authority_binding to carr_writer;
+grant select on table ops.guidance_import_apply_event to carr_authority;
 grant select on table ops.guidance_import_apply_event to carr_reader;
 grant select on table ops.guidance_import_apply_event to carr_writer;
+grant select on table ops.guidance_import_batch to carr_authority;
 grant select on table ops.guidance_import_batch to carr_reader;
 grant select on table ops.guidance_import_batch to carr_writer;
+grant select on table ops.guidance_import_decision_event to carr_authority;
 grant select on table ops.guidance_import_decision_event to carr_reader;
 grant select on table ops.guidance_import_decision_event to carr_writer;
+grant select on table ops.guidance_import_entry to carr_authority;
 grant select on table ops.guidance_import_entry to carr_reader;
 grant select on table ops.guidance_import_entry to carr_writer;
+grant select on table ops.guidance_import_mapping_execution to carr_authority;
 grant select on table ops.guidance_import_mapping_execution to carr_reader;
 grant select on table ops.guidance_import_mapping_execution to carr_writer;
 grant select on table ops.guidance_intake to carr_jobs;
@@ -22227,6 +22242,7 @@ grant select on table ops.workflow_acceptance to carr_jobs;
 grant select on table ops.workflow_acceptance to carr_reader;
 grant select on table ops.workflow_acceptance to carr_writer;
 grant insert, select, update on table public.activity to carr_writer;
+grant select on table public.actor to carr_authority;
 grant insert, select, update on table public.actor to carr_writer;
 grant insert, select, update on table public.actor_profile to carr_writer;
 grant insert, select, update on table public.agreement to carr_writer;
@@ -22318,6 +22334,7 @@ grant select on table public.doctrine_snapshot to carr_reader;
 grant insert, select, update on table public.doctrine_snapshot to carr_writer;
 grant select on table public.document to carr_jobs;
 grant insert, select, update on table public.document to carr_writer;
+grant insert on table public.event to carr_authority;
 grant insert, select on table public.event to carr_jobs;
 grant insert, select, update on table public.event to carr_writer;
 grant insert, select, update on table public.experiment to carr_writer;
@@ -22398,6 +22415,7 @@ grant select on table public.submarket_condition to carr_reader;
 grant select on table public.submarket_condition to carr_writer;
 grant select on table public.system_config to carr_exporter;
 grant insert, select, update on table public.system_config to carr_writer;
+grant insert, select on table public.tool_call to carr_authority;
 grant insert, select, update on table public.tool_call to carr_writer;
 grant select on table public.tool_read_call to carr_exporter;
 grant select on table public.tool_read_call to carr_reader;
@@ -22578,20 +22596,30 @@ grant select (id, name) on table public.party to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
+grant execute on function ops.accept_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_feedback_hash text, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.accept_sourced_work_request_plan(p_work_request text, p_base_version integer, p_plan_hash text, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
+grant execute on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) to carr_authority;
 grant execute on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_jobs;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
+grant execute on function ops.authority_actor_slug() to carr_authority;
 grant execute on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence jsonb, p_receipt_ref text) to carr_jobs;
+grant execute on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
+grant execute on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
+grant execute on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) to carr_authority;
 grant execute on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) to carr_jobs;
 grant execute on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) to carr_jobs;
 grant execute on function ops.get_cognition_cache(p_cache_key text) to carr_jobs;
+grant execute on function ops.guidance_import_manifest_digest(p_manifest_text text) to carr_authority;
 grant execute on function ops.guidance_import_manifest_digest(p_manifest_text text) to carr_reader;
 grant execute on function ops.guidance_import_manifest_digest(p_manifest_text text) to carr_writer;
+grant execute on function ops.guidance_revision_contract_hash(p_revision_id uuid) to carr_authority;
 grant execute on function ops.guidance_revision_contract_hash(p_revision_id uuid) to carr_reader;
 grant execute on function ops.guidance_revision_contract_hash(p_revision_id uuid) to carr_writer;
 grant execute on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) to carr_jobs;
@@ -22604,7 +22632,10 @@ grant execute on function ops.propose_sourced_work_request_outcome_feedback(p_wo
 grant execute on function ops.propose_sourced_work_request_plan(p_work_request text, p_base_version integer, p_scope_summary text, p_runbook_ref text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
+grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
+grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
 grant execute on function ops.reserve_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
@@ -22613,6 +22644,7 @@ grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) to carr_jobs;
+grant execute on function ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) to carr_reader;
 grant execute on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) to carr_writer;
 grant execute on function public.assert_situation_retrieval_golden(p_suite_digest text) to carr_writer;
@@ -22628,6 +22660,7 @@ grant execute on function public.search_doctrine_situations(p_query text, p_acto
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_exporter;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_reader;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_writer;
+grant carr_authority to neondb_owner;
 grant carr_exporter to neondb_owner;
 grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;
