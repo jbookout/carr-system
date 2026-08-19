@@ -4,15 +4,30 @@
 # which ops/githooks/pre-push also calls. Rule a8c55a47: a manual path and an
 # automated path doing the same job must be the same code. If a check were
 # written here it would run in CI and not at push time, and the two would drift
-# without anyone noticing — which is the failure this whole design avoids.
+# without anyone noticing — which is the failure this whole design avoids. The
+# two helper scripts this file calls, ops/ci-postgres.sh and
+# ops/ci-runner-guard.sh, provision and bound the MACHINE; neither asserts
+# anything about the repository, which is the line a8c55a47 draws.
 #
-# WHAT THIS CAN AND CANNOT DO TODAY. It runs and reports. It cannot REQUIRE a
-# green result before a merge, because this repo is private on a free GitHub plan
-# and both the branch-protection API and the newer rulesets API refuse with
-# "Upgrade to GitHub Pro or make this repository public" (verified live against
-# both endpoints, 2026-08-13). Enforcement today comes from the pre-push hook.
-# When GitHub Pro is enabled, mark the `checks` job a required status check and
-# nothing in this file or in ops/ci.sh has to change.
+# WHAT THIS ENFORCES TODAY. Ruleset 20824501, "main: CI must be green", is active
+# on main and names the required status check "ops/ci.sh --strict" — which is the
+# `name:` of the job below, and the reason that string must not be edited
+# casually. Joe enabled GitHub Pro on 2026-08-13; the older comment here claiming
+# this repo is on a free plan and that the branch-protection and rulesets APIs
+# refuse with "Upgrade to GitHub Pro or make this repository public" has been
+# WRONG since that purchase, and on 2026-08-18 it caused a wrong diagnosis in a
+# live session. The pre-push hook is not redundant: it fails in seconds on the
+# machine that wrote the change, and the ruleset fails minutes later and cannot
+# be talked out of it with --no-verify.
+#
+# THE CHECKS JOB RUNS ON A SELF-HOSTED MAC, and the two scheduled cloud workflows
+# (backup-nightly.yml, edge-liveness.yml) deliberately do not. Volume is the whole
+# reason: measured 2026-08-18, this workflow took 209 runs over three days at
+# ~3.6 minutes each while the two cloud workflows took 7 runs a DAY between them.
+# Program 4's gate is that losing Joe's Mac must not silently stop critical
+# operations, so the workflows whose entire job is to notice a dead Mac must keep
+# running on hardware that is not that Mac. A quality gate for a push does not
+# have that property: if the Mac is off, nobody is pushing.
 #
 # ACTIONS ARE PINNED TO COMMIT SHAs, not to tags. Doctrine: "Pin dependencies and
 # CI actions" (end-state BDUF, s15 Security/supply chain). A tag is mutable — v7
@@ -34,7 +49,10 @@ on:
   workflow_dispatch:
 
 # A second push to the same branch cancels the first. Two runs of the same branch
-# racing tells you nothing extra and just delays the answer that matters.
+# racing tells you nothing extra and just delays the answer that matters. This
+# matters more than it did on hosted runners: a self-hosted Mac has a small fixed
+# number of job slots, so a superseded run is not just noise, it is holding a slot
+# that the run people are waiting on could be using.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -44,29 +62,44 @@ permissions:
 
 jobs:
   checks:
+    # THIS NAME IS THE REQUIRED STATUS CHECK. Ruleset 20824501 matches on the
+    # string "ops/ci.sh --strict" and nothing else — it carries no integration or
+    # runner pin — so the check keeps being satisfied after this move to
+    # self-hosted hardware precisely because this line did not change. Renaming
+    # the job silently un-protects main: the ruleset would wait forever for a
+    # context that no longer appears.
     name: ops/ci.sh --strict
-    runs-on: ubuntu-latest
+
+    # THE LABEL SET, not the bare `self-hosted`. `runs-on: self-hosted` would
+    # match any runner ever registered on this repo, so the day a second machine
+    # joins — Dell's Mac is the expected one — jobs would start landing on it
+    # whether or not it had been prepared. carr-ci is applied by
+    # ops/install-ci-runner.sh only after that machine's setup has completed.
+    runs-on: [self-hosted, macOS, ARM64, carr-ci]
+
     timeout-minutes: 20
 
-    services:
-      # The migration class needs a database to apply 130 forward migrations to.
-      # It is a throwaway container on loopback, which is what lets ops/ci.sh
-      # enforce its loopback-only rule with no override: production is not
-      # reachable from here even if someone tried.
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: carr_ci
-          POSTGRES_PASSWORD: carr_ci
-          POSTGRES_DB: carr_ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # NO `services:` BLOCK ANY MORE. It used to start a postgres:17 container for
+    # the migration class. Service containers are Docker, Docker is a Linux-runner
+    # feature, and this machine has no daemon to start one with — so the database
+    # is now a throwaway cluster from ops/ci-postgres.sh, which keeps both
+    # properties the container was chosen for: it is deleted when the job ends,
+    # and it listens on loopback only, which is what lets ops/ci.sh keep refusing
+    # any DSN that is not loopback with no override.
 
     steps:
+      # THE SECURITY BOUNDARY, CHECKED BEFORE ANYTHING ELSE RUNS — before
+      # checkout, so it holds even for a branch whose contents are hostile. A
+      # hosted runner was a fresh VM that got destroyed, so "this job cannot reach
+      # production" was free. This machine has ~/.config/carr on its disk: live
+      # Neon DSNs, the Neon API key, and the age key the encrypted backups are
+      # sealed with. That is only out of reach if the runner runs as its own
+      # unprivileged user, which is a property of how the service was installed
+      # and is invisible from here. So it is measured every run instead of
+      # assumed.
+      - name: Refuse to run if this runner can reach CARR production
+        run: ops/ci-runner-guard.sh
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # FULL HISTORY, for the freshness class only. actions/checkout defaults
@@ -75,6 +108,12 @@ jobs:
           # branch seen main's latest change to this file" is unanswerable. Every
           # other class reads the tree as it stands and does not care.
           fetch-depth: 0
+          # A self-hosted workspace is REUSED between jobs, unlike a hosted VM
+          # that starts empty every time. Left alone, an artifact written by one
+          # run is still sitting there for the next one to read, and a check could
+          # pass on a file the current branch does not contain. This is the
+          # default, stated out loud because the reason only exists on self-hosted.
+          clean: true
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -84,47 +123,63 @@ jobs:
         with:
           python-version-file: .python-version
 
-      - name: Install Python dependencies from the lock
+      - name: Install Python dependencies from the lock, into the workspace venv
+        # INTO .venv, WHICH IS NEW HERE AND IS NOT COSMETIC. On a hosted VM,
+        # `pip install` into the interpreter was safe because the whole machine
+        # was thrown away afterwards. On this Mac the interpreter comes out of a
+        # tool cache that every runner on the box SHARES, so two jobs installing
+        # the lock at the same time would be writing the same site-packages
+        # concurrently, and a third would inherit whatever they left. Each runner
+        # has its own workspace, so a venv inside the workspace is per-job again.
+        # ops/ci.sh already prefers $REPO/.venv/bin/python when it exists, so this
+        # also makes CI use the same interpreter layout the pre-push hook does.
+        #
         # The LOCK, not requirements.txt. requirements.txt is the loose
         # human-facing declaration; the lock is its pinned resolution, and
         # installing the lock is what makes this run reproducible. ci.sh's
         # dependency class separately refuses if the two have drifted.
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.lock
+          python -m venv .venv
+          ./.venv/bin/python -m pip install --upgrade pip
+          ./.venv/bin/python -m pip install -r requirements.lock
 
       - name: Install Node dependencies
         run: npm --prefix mcp-server ci
 
-      - name: Install zsh
-        # bin/review-council-runner.sh has a #!/bin/zsh shebang and its test
-        # invokes it by that interpreter. Installing zsh keeps that suite in CI
-        # rather than excluding it — the coverage is worth 3 seconds of apt.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      # NO "Install zsh" STEP. It existed to apt-get zsh onto Ubuntu so
+      # bin/review-council-runner.sh, which has a #!/bin/zsh shebang, stayed in
+      # the suite. macOS has shipped zsh as the default shell since Catalina and
+      # /bin/zsh is part of the OS, so the step has nothing left to do here.
 
-      - name: Create the Neon admin role the migrations expect
-        # Migration 0005 grants the privilege bundles to neondb_owner, which
-        # exists on every Neon project and on no vanilla Postgres. Without it the
-        # migration set is not rehearsable anywhere except production, which
-        # defeats the point of rehearsing. Creating it here models Neon's
-        # environment rather than editing a migration that is already applied.
-        env:
-          PGPASSWORD: carr_ci
-        run: |
-          psql -h localhost -U carr_ci -d carr_ci -v ON_ERROR_STOP=1 -c \
-            "do \$\$ begin
-               if not exists (select 1 from pg_roles where rolname = 'neondb_owner') then
-                 create role neondb_owner;
-               end if;
-             end \$\$;"
+      # NO "Create the Neon admin role" STEP either — the create-role statement
+      # moved into ops/ci-postgres.sh, next to the initdb that makes the cluster
+      # it applies to, so the whole shape of "the database the migration class
+      # expects" is defined in one file rather than split across two.
+      - name: Start the throwaway Postgres
+        run: ops/ci-postgres.sh start >> "$GITHUB_ENV"
 
       - name: Run every check class
         env:
-          # ops/ci.sh refuses any DSN that is not loopback. This one is the
-          # service container above.
-          CARR_CI_DATABASE_URL: postgres://carr_ci:carr_ci@localhost:5432/carr_ci # ci-secret-scan: allow — throwaway container credential, loopback only, dies with the runner
           # Excludes the checks whose dependency cannot exist on a runner
           # (installed Claude Code settings, macOS launchd). Each one prints its
-          # reason in the output; nothing is dropped silently.
+          # reason in the output; nothing is dropped silently. KEPT AT 1 even
+          # though this runner is now a Mac and some of those dependencies could
+          # in principle exist here: the runner user deliberately has no CARR
+          # install, and flipping this would silently change which checks gate a
+          # merge — a separate decision from where the job runs.
           CARR_CI_PORTABLE_ONLY: "1"
+        # CARR_CI_DATABASE_URL is not set here. It is exported into $GITHUB_ENV by
+        # the step above, because the port is chosen free at start time rather
+        # than fixed — more than one runner can be registered on this Mac, and two
+        # concurrent jobs must not collide on 5432 or on each other.
         run: ops/ci.sh --strict
+
+      - name: Delete the throwaway Postgres
+        # ALWAYS, INCLUDING AFTER A CANCELLATION. cancel-in-progress above means
+        # supersession is the single most common way this job ends, and a
+        # postmaster orphaned by each one would accumulate on a machine that,
+        # unlike a hosted VM, is never thrown away. The script exits 0 whatever
+        # it finds: failing cleanup would turn a green run red over a temp
+        # directory.
+        if: always()
+        run: ops/ci-postgres.sh stop
