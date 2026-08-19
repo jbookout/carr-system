@@ -58,18 +58,44 @@ class FakeProc:
 
 
 def verb_ok(by_source, notes=()):
-    """The real shape run.sh emits: an identity preamble, then the JSON."""
+    """The real shape run.sh emits, CORRECTED 2026-08-19 after the live run.
+
+    The fixture used to put the identity preamble on stdout ahead of the JSON,
+    and that is not what happens: run.sh writes clean JSON to STDOUT and its
+    preamble to STDERR. Because the fixture agreed with the parser's wrong
+    assumption instead of with reality, seven cases passed while the only live
+    call failed — the exact shape of a test that cannot fail for the reason
+    the code does. The preamble now sits on stderr, where it belongs.
+    """
     body = json.dumps({"ok": True, "domains": sorted({d for v in by_source.values() for d in v}),
                        "by_source": by_source,
                        "counts": {k: len(v) for k, v in by_source.items()},
                        "notes": list(notes)}, indent=2)
-    return FakeProc(0, "local-verb identity -> dell-local (via local-token) -> https://x\n" + body)
+    return FakeProc(0, body,
+                    "local-verb identity -> dell-local (via local-token) -> https://x")
 
 
 def verb_unknown():
-    """The real shape of a verb the deployed worker does not carry."""
-    return FakeProc(1, "local-verb identity -> dell-local (via local-token) -> https://x\n"
-                       'TOOL ERROR {\n  "error": "unknown_tool",\n  "name": "export-email-domains"\n}\n')
+    """A verb the deployed worker does not carry — refusal goes to STDERR."""
+    return FakeProc(1, "",
+                    "local-verb identity -> dell-local (via local-token) -> https://x\n"
+                    'TOOL ERROR {\n  "error": "unknown_tool",\n  "name": "export-email-domains"\n}\n')
+
+
+def verb_ok_with_trailing_noise(by_source):
+    """A well-formed answer followed by anything else on the same channel.
+
+    THE REGRESSION THIS PINS. The first parser demanded that everything from
+    the first brace onward be valid JSON, so one extra line after the object
+    made the whole read fail — and it reported the reason as "{", which tells
+    a reader nothing. raw_decode stops at the end of the first object, so
+    trailing output is simply ignored.
+    """
+    body = json.dumps({"ok": True, "domains": sorted({d for v in by_source.values() for d in v}),
+                       "by_source": by_source,
+                       "counts": {k: len(v) for k, v in by_source.items()},
+                       "notes": []}, indent=2)
+    return FakeProc(0, body + "\nsome trailing line the wrapper printed\n", "")
 
 
 def run_case(mod, proc, db_raw=None, db_exc=None):
@@ -118,6 +144,22 @@ def main():
     except RuntimeError:
         raised = True
     cases.append(("no verb and no credential RAISES rather than writing an empty list", raised))
+
+    # 3b. THE LIVE FAILURE, pinned. Preamble on stderr, JSON on stdout.
+    mod = load()
+    hosts, _, notes = run_case(
+        mod, verb_ok({"v_export_clients": ["stdout-only.com"]}),
+        db_raw={"v_export_clients": ["must-not-be-used.com"]})
+    cases.append(("a preamble on STDERR does not corrupt the STDOUT payload",
+                  hosts == ["stdout-only.com"]))
+
+    # 3c. Trailing output after a good object must not fail the read.
+    mod = load()
+    hosts, _, _ = run_case(
+        mod, verb_ok_with_trailing_noise({"v_export_clients": ["trailing-ok.com"]}),
+        db_raw={"v_export_clients": ["must-not-be-used.com"]})
+    cases.append(("trailing output after the JSON object is ignored",
+                  hosts == ["trailing-ok.com"]))
 
     # 4. The policy filter runs on whatever the source produced.
     mod = load()
