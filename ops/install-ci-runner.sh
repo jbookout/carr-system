@@ -157,8 +157,17 @@ say "actions/runner ${RUNNER_VERSION}"
 if [ -x "${SVC_HOME}/config.sh" ]; then
   echo "   already unpacked — leaving it alone"
 else
-  tmp="$(mktemp -d)"
+  # STAGED INSIDE THE SERVICE HOME, NOT IN mktemp -d. Under sudo, mktemp -d lands
+  # in ROOT's per-user temp directory, which _carrci cannot even traverse — so the
+  # download succeeded, the digest verified, and then `sudo -u _carrci tar` died
+  # with "Permission denied" on a file that was plainly there. Observed on the
+  # first real install, 2026-08-18. Staging in $SVC_HOME instead is the fix:
+  # root can write into it regardless of mode, and _carrci owns it, so the same
+  # unpack-as-the-service-user step works without loosening any permission.
+  tmp="${SVC_HOME}/.runner-download"
   trap 'rm -rf "$tmp"' EXIT
+  rm -rf "$tmp"
+  install -d -o "$SVC_USER" -g "$SVC_GROUP" -m 700 "$tmp"
   curl -fsSL -o "${tmp}/${RUNNER_TARBALL}" "$RUNNER_URL" || die "download failed"
 
   # VERIFY BEFORE UNPACKING, NEVER AFTER. This tarball is about to be executed as
@@ -170,6 +179,9 @@ else
   echo "${RUNNER_SHA256}  ${tmp}/${RUNNER_TARBALL}" | shasum -a 256 -c - \
     || die "SHA256 MISMATCH — refusing to unpack. Do not retry; find out why."
 
+  # curl ran as root, so the file it wrote is root-owned inside a directory the
+  # service user owns. Hand it over before unpacking as that user.
+  chown "$SVC_USER:$SVC_GROUP" "${tmp}/${RUNNER_TARBALL}"
   sudo -u "$SVC_USER" tar xzf "${tmp}/${RUNNER_TARBALL}" -C "$SVC_HOME" \
     || die "unpack failed"
   rm -rf "$tmp"; trap - EXIT
