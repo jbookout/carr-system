@@ -117,9 +117,10 @@ def main() -> int:
     release_abandon = (REPO / "ops" / "release-abandon-selftest.py").read_text(
         encoding="utf-8"
     )
-    check("the Neon fallback branch has provider-side expiry as well as finally cleanup",
-          '"--expires-at", expires_at' in release_abandon
-          and "timedelta(hours=2)" in release_abandon)
+    check("the release-abandon fixture never falls back to a metered Neon branch",
+          "branches create" not in release_abandon
+          and ('"branches",' + ' "create"') not in release_abandon
+          and "metered-provider fallback is disabled" in release_abandon)
     keepalive_plist = (REPO / "ops" / "launchd" / "com.carr.keepalive-probe.plist").read_text(
         encoding="utf-8"
     )

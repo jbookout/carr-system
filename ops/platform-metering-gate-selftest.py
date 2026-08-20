@@ -91,7 +91,6 @@ def main() -> int:
         "ops/p1-integration-gate.py",
         "ops/p1-rebuild-gate.py",
         "ops/cc-update-audit-shadow-harness.py",
-        "ops/release-abandon-selftest.py",
         "bin/restore-rehearse.sh",
     }
     branch_patterns = (
