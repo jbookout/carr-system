@@ -708,6 +708,9 @@ except OSError as _exc:
 # 12 HOURS, because it crosses a night. A session running four or six hours is
 # ordinary here and must not nag; work still loose the next morning is the thing
 # actually worth seeing.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import health_submodule as _health_sub  # noqa: E402
+
 _STALE_H = 12
 # Hours since the NEWEST loose file changed, past which nothing here can be
 # called in-flight. Two, not one: a session can legitimately think, research or
@@ -721,6 +724,19 @@ try:
     else:
         _tracked: list[tuple[float, str]] = []
         _untracked = 0
+        # A VENDORED SUBMODULE THAT CARRIES OUR PATCHES IS PERMANENTLY MODIFIED,
+        # and counting that as loose work is a tripwire nobody can act on.
+        # tools/dictation-rig/vendor/quill sits at a detached HEAD on a third-party
+        # upstream and bin/build-quill.sh applies tracked patches onto it at build
+        # time, so it reads dirty after every build — it had been reported for 283
+        # hours by 2026-08-19 and could never have been committed, because doing so
+        # would make a dangling commit in someone else's repository.
+        #
+        # This is NOT a path allowlist. The dirt is compared against the tracked
+        # patches that are supposed to explain it, so a hand-edit inside the same
+        # submodule still lands on the clock. Proven both ways by
+        # ops/submodule-patch-dirt-selftest.py.
+        _expected_sub: list[str] = []
         for _row in _gs.stdout.splitlines():
             if not _row.strip():
                 continue
@@ -729,11 +745,25 @@ try:
                 _untracked += 1
                 continue
             _full = os.path.join(REPO_ROOT, _gpath.split(" -> ")[-1])
+            if os.path.isdir(_full) and os.path.exists(os.path.join(_full, ".git")):
+                try:
+                    _sub_diff = subprocess.run(
+                        ["git", "diff"], cwd=_full, capture_output=True,
+                        text=True, timeout=20).stdout
+                    if _health_sub.submodule_dirt_is_tracked_patch(
+                            _sub_diff, _health_sub.patches_dir_for(_full)):
+                        _expected_sub.append(_gpath)
+                        continue
+                except (OSError, subprocess.SubprocessError):
+                    pass          # cannot vouch for it -> leave it on the clock
             try:
                 _tracked.append((os.path.getmtime(_full), _gpath))
             except OSError:
                 continue                  # deleted or renamed away; not loose work
         _extra = f" · {_untracked} untracked" if _untracked else ""
+        if _expected_sub:
+            _extra += (f" · {len(_expected_sub)} vendored submodule(s) dirty from their own "
+                       f"tracked patches, which is expected: {', '.join(_expected_sub)}")
         if not _tracked:
             print(f"  OK {'uncommitted work':<22} nothing tracked is loose{_extra}")
         else:
