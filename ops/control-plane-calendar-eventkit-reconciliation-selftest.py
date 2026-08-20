@@ -56,8 +56,8 @@ runner = (ROOT / "tools/control-plane.py").read_text()
 check("calendar command evidence recognizes EventKit markers",
       "calendar-capture: source=eventkit mode=shadow" in runner
       and "calendar-pull: source=calendar" not in runner
-      and 'CARR_CALENDAR_CANARY_DSN' in runner
-      and 'if mode == "canary"' in runner)
+      and '_calendar_canary_aggregate' in runner
+      and 'record_calendar_canary_receipt' in runner)
 
 capture = (ROOT / "bin/calendar-eventkit-capture.sh").read_text()
 # Contents/Resources/run.zsh, not Contents/MacOS/. The bundle's zsh logic moved
@@ -72,7 +72,7 @@ check("EventKit capture supports an isolated output root",
       and "CARR_CALENDAR_OUTPUT_ROOT" in bundle
       and "CARR_CALENDAR_OUTPUT_ROOT" in dump)
 check("EventKit canary diverts to its isolated receipt target before live writes",
-      "calendar-canary-record.py" in capture and "--canary requires explicit control-plane canary mode" in capture)
+      "calendar-canary-result.py" in capture and "--canary requires explicit control-plane canary mode" in capture)
 check("EventKit capture emits finite shadow and live evidence markers",
       "source=eventkit mode=" in capture and "writes=" in capture and "failed=" in capture
       and "RECEIPT_SAFE" in capture)
