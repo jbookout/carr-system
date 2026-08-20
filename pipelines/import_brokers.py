@@ -63,10 +63,8 @@ from pathlib import Path
 import openpyxl
 import psycopg
 
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
-    "My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/"
+    "My Drive/CARR AI")
 DEFAULT_SOURCE = VAULT / "DNA/Network/brokers.xlsx"
 SHEET = "Brokers"
 SOURCE_SYSTEM = "brokers.xlsx"

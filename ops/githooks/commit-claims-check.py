@@ -25,6 +25,11 @@ accident-stopper rather than a security control.
 Exit 0 to allow, 1 to refuse; 0 with a warning when git itself cannot be read.
 """
 
+# See the note in staged-gate-bless-check.py: `list[str] | None` below is
+# evaluated at def time before Python 3.10 and crashes the hook on a Mac whose
+# python3 is the system 3.9. Lazy annotations keep it running on both.
+from __future__ import annotations
+
 import re
 import subprocess
 import sys

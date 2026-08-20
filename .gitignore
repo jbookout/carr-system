@@ -71,3 +71,12 @@ graphify-out/
 # files. Recovery does not depend on it being visible to git: the selftest reads
 # it directly.
 _ci_selftest_seed_journal.json
+
+# CARR Calendar Access.app: per-machine build artifacts (bin/build-calendar-access.sh).
+# The ad-hoc signature verifies only on the Mac that made it and the compiled stub
+# is arch-specific, so both are rebuilt locally rather than shipped in git.
+tools/CARR Calendar Access.app/Contents/_CodeSignature/
+tools/CARR Calendar Access.app/Contents/MacOS/carr-calendar-access
+
+# npm installs are per machine; mcp-server/package-lock.json is the review surface.
+node_modules/

@@ -272,7 +272,12 @@ def load_for_endpoint_id(
     )
 
 
-def _build_role_uri(owner_uri: str, role_name: str, password: str) -> str:
+def build_role_uri(owner_uri: str, role_name: str, password: str) -> str:
+    """Public (2026-08-18): tools/staging_jobs_dsn.py builds isolated staging's
+    ephemeral carr_jobs DSN from the same owner URI, in the same shape, and
+    validates it with validate_uri below — rule a8c55a47, one construction of a
+    staging login URI rather than two that can drift. Was `_build_role_uri`; no
+    caller outside this file referenced the old name."""
     try:
         parsed = urlsplit(owner_uri)
         port = parsed.port
@@ -362,7 +367,7 @@ def prepare_pending(
     password = password_factory()
     if len(password.encode()) < 32 or any(ch.isspace() for ch in password):
         raise CredentialRefusal("generated password is not at least 256 bits of non-whitespace material")
-    value = _build_role_uri(owner_uri, role_name, password)
+    value = build_role_uri(owner_uri, role_name, password)
     validate_uri(
         value, role_name=role_name, expected_endpoint=expected_endpoint,
         expected_port=expected_port, expected_database=expected_database,

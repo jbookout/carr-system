@@ -197,7 +197,17 @@ def main():
             secondary_bad_install_rc = mod.cmd_install(True)
         secondary_bad_output = secondary_bad_out.getvalue()
         modified_task_preserved = modified_task.read_text(encoding="utf-8") == "modified CARR task\n"
-        mod.IS_PRIMARY = original_primary
+        # PIN THE MACHINE ROLE FOR THE LAUNCHD CASES. This used to restore the
+        # real machine's role here, which silently made the three launchd
+        # assertions below mean different things on different Macs: the synthetic
+        # plists are primary-scope, so on a SECONDARY machine (Dell's, actor slug
+        # dell) they are never loaded, load_attempts stays empty, and two cases
+        # fail for a reason that has nothing to do with what they test. They pass
+        # on Joe's Mac and on the GitHub runner, both of which resolve primary, so
+        # the split stayed invisible until pre-push CI was run on the secondary.
+        # A selftest must assert the same thing everywhere; the real role is
+        # restored after the block instead.
+        mod.IS_PRIMARY = True
         definition_only_plist = {
             "Label": "com.carr.control-plane-tick",
             "ProgramArguments": ["/usr/bin/true"],
@@ -232,6 +242,7 @@ def main():
                 launchd_retry_rc = mod.cmd_install(True)
         finally:
             mod.subprocess.run = real_run
+        mod.IS_PRIMARY = original_primary
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
         definition_only_absent = not (
             Path(mod.LAUNCHD_SRC) / "com.carr.control-plane-tick.plist"

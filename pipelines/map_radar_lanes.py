@@ -79,9 +79,7 @@ from pipelines.import_candidate_pool import (          # noqa: E402
     jsonable, load_known, match_known, val,
 )
 
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
 
 def _key(x):

@@ -48,13 +48,23 @@
 #   * the recorder's own output and the recorder's own failures never reach the
 #     job's log or the job's exit code.
 #
-# RECORDING NEVER FAILS A JOB, and is never hidden either. If the recorder
-# cannot reach the database the line still lands in out/run-scheduled.log with a
-# non-zero recorder_exit, and the service then reads `unknown` at the next
-# health look rather than staying green — ops.v_service_environment_health
-# derives health from the latest observation and its freshness and stores no
-# health anywhere. Silence is visible by design; that is Program 3's load-
-# bearing decision and this file leans on it rather than working around it.
+# RECORDING NEVER FAILS A JOB, and is never hidden either. Since 2026-08-18 the
+# recorder is tools/ops-spool.py rather than tools/ops-record.py directly: a
+# succeeded/skipped row goes to a local SQLite queue that a scheduled flusher
+# (com.carr.run-spool-flush) replays through the real ops-record in batches, so
+# ~1000 heartbeat recordings a day stop holding the Neon database awake around
+# the clock (the 2026-08-18 audit's measured leak), and a row survives an
+# unreachable or schema-drifted ledger instead of being lost — 3,485 rows were
+# dropped that way over 2026-08-17/18. A failed/timed_out/cancelled row is
+# still tried against the ledger DIRECTLY first (an incident should not wait
+# 30 minutes) and queues only when that write fails. recorder_exit=0 now means
+# the row is DURABLE — landed or queued with a scheduled path to ops.run —
+# and nonzero still means the line below is the only trace. If nothing could
+# be recorded the service reads `unknown` at the next health look rather than
+# staying green — ops.v_service_environment_health derives health from the
+# latest observation and its freshness and stores no health anywhere. Silence
+# is visible by design; that is Program 3's load-bearing decision and this
+# file leans on it rather than working around it.
 #
 # THE PROVENANCE LINE IS THE TESTED SURFACE. Every run appends exactly one line
 # to out/run-scheduled.log carrying the state this script derived and the exact
@@ -148,6 +158,12 @@ STARTED="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 "$@"
 rc=$?
 
+# Captured HERE, not at recording time: the spool may replay this row into the
+# ledger half an hour from now, and without an explicit end stamp ops-record
+# would derive ended_at from the clock at INSERT, inflating every spooled run's
+# elapsed window by the queue delay.
+ENDED="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
 # ── what that exit code MEANS ────────────────────────────────────────────────
 # 78 = EX_CONFIG: the job ran, found a credential or setting it needs is absent,
 # wrote nothing and said so. That is a SKIP, not a failed night — the same
@@ -206,19 +222,20 @@ if [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/nul
 fi
 
 if [ "$should_record" -eq 1 ]; then
-  set -A argv "$PY" "$REPO/tools/ops-record.py" run \
+  set -A argv "$PY" "$REPO/tools/ops-spool.py" run \
     --service "$SERVICE" --key "$RUN_KEY" --state "$state" \
-    --exit-code "$rc" --started-at "$STARTED" \
+    --exit-code "$rc" --started-at "$STARTED" --ended-at "$ENDED" \
     --source-kind wrapper --source-ref bin/run-scheduled.sh \
     --detail "$RUN_KEY exited $rc" "${fclass[@]}" "${corr[@]}"
   "${argv[@]}" >> "$LOG" 2>&1
   recorder_exit=$?
   record_action=recorded
-  # Stamp ONLY when the row actually landed. Stamping on the attempt meant a
-  # failed recording (DB unreachable) silenced the next interval's fires too —
-  # observed live 2026-08-14: a dev-iteration selftest's failed write stamped
-  # carr-local-edge-node and the first real heartbeat came up 'throttled'
-  # against a row that never existed.
+  # Stamp ONLY when the row is durably captured (recorder_exit 0: landed
+  # directly, or queued in the spool with a scheduled path to ops.run).
+  # Stamping on the mere attempt meant a failed recording silenced the next
+  # interval's fires too — observed live 2026-08-14: a dev-iteration
+  # selftest's failed write stamped carr-local-edge-node and the first real
+  # heartbeat came up 'throttled' against a row that never existed.
   if [ "$recorder_exit" -eq 0 ] && [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then
     mkdir -p "$STATE_DIR" 2>/dev/null
     date -u +%s > "$STATE_FILE" 2>/dev/null
@@ -261,9 +278,9 @@ if [ -n "$ALSO_HEARTBEAT" ]; then
     [ "$hb_elapsed" -lt "$HEARTBEAT_INTERVAL" ] && hb_should_record=0
   fi
   if [ "$hb_should_record" -eq 1 ]; then
-    set -A hb_argv "$PY" "$REPO/tools/ops-record.py" run \
+    set -A hb_argv "$PY" "$REPO/tools/ops-spool.py" run \
       --service "$ALSO_HEARTBEAT" --key "$HB_RUN_KEY" --state succeeded \
-      --exit-code 0 --started-at "$STARTED" \
+      --exit-code 0 --started-at "$STARTED" --ended-at "$ENDED" \
       --source-kind wrapper --source-ref bin/run-scheduled.sh \
       --detail "heartbeat via $SERVICE/$RUN_KEY" "${corr[@]}"
     "${hb_argv[@]}" >> "$LOG" 2>&1

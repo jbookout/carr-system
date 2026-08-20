@@ -58,7 +58,12 @@ check("calendar command evidence recognizes EventKit markers",
       and 'env.pop(inherited, None)' in runner)
 
 capture = (ROOT / "bin/calendar-eventkit-capture.sh").read_text()
-bundle = (ROOT / "tools/CARR Calendar Access.app/Contents/MacOS/carr-calendar-access").read_text()
+# Contents/Resources/run.zsh, not Contents/MacOS/. The bundle's zsh logic moved
+# there on 2026-08-18 when the main executable became a compiled Mach-O stub:
+# macOS 26 refuses to launch a bundle whose executable is a script (-10669), so
+# the script cannot live at the MacOS/ path any more. Reading the old path here
+# now reads a binary and dies on invalid UTF-8 rather than failing an assertion.
+bundle = (ROOT / "tools/CARR Calendar Access.app/Contents/Resources/run.zsh").read_text()
 dump = (ROOT / "tools/calendar-attendee-dump.py").read_text()
 check("EventKit capture supports an isolated output root",
       "CARR_CALENDAR_OUTPUT_ROOT" in capture

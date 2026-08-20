@@ -110,6 +110,22 @@ KNOWN_HOSTS = (
     # verifying a staging deploy toward the production URL instead. That is the
     # confusion the incident was made of, which is why it is listed here.
     "carr-mcp-staging.joe-bookout-carr-us.workers.dev",
+    # nodejs.org: the official Node.js download host, and node is INFRASTRUCTURE
+    # for this repo rather than a research read — mcp-server/local-verb.mjs is the
+    # only route from a terminal or an unattended job to the record verbs, and
+    # ops/ci.sh needs it too. Dell's Mac has no node, no Homebrew, and no sudo to
+    # install one, so both were simply dead there: `./run.sh call` exits with
+    # FileNotFoundError 'node' and local CI cannot run at all. This is the same
+    # class as console.neon.tech above — a fixed host somebody decides once — and
+    # the file's own header reserves the CODE list for exactly that, keeping the
+    # record-derived half for client practice domains. Downloads are checksum
+    # verified against the SHASUMS256.txt published beside the tarball.
+    # registry.npmjs.org travels with it: node alone does not run local-verb.mjs,
+    # which imports @neondatabase/serverless and the MCP SDK. Installs go through
+    # `npm ci` against mcp-server/package-lock.json, so every package is pinned and
+    # integrity-checked by npm from hashes already committed to this repo — the
+    # lockfile is the review, not the network call.
+    "nodejs.org", "registry.npmjs.org",
     "api.practicecre.com", "api.doctorcre.com", "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",

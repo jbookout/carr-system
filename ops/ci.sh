@@ -217,7 +217,21 @@ check_types() {
     # Dell's Mac before the venv exists, every push would be refused and the
     # stated reason would send the reader hunting for type errors that are not
     # there. CI on the runner is unaffected — mypy is pinned in requirements.lock.
-    skip types "mypy not installed (pinned in requirements.lock, so CI always has it)"
+    # NAME THE ACCEPTED STATE. requirements.txt pins mypy to python_version
+    # >= "3.10", so on an older interpreter mypy is not missing by accident, it
+    # is excluded by the pin. Printing the version keeps that visible instead of
+    # letting a standing machine state read as a vague absence — and keeps the
+    # DIFFERENT case (a 3.10+ machine that simply has not installed mypy) legible
+    # as the real problem it is. ops/ci-selftest.py holds the same boundary as
+    # MYPY_PIN_MIN_PYTHON and fails if the two drift apart.
+    local tcpy
+    tcpy="$( { [ -x "$REPO/.venv/bin/python" ] && "$REPO/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])'; } 2>/dev/null || python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo "unknown" )"
+    case "$tcpy" in
+      3.[0-9]|unknown)
+        skip types "mypy excluded by the requirements pin on Python $tcpy (pin needs >= 3.10) — accepted machine state" ;;
+      *)
+        skip types "mypy not installed on Python $tcpy (pinned in requirements.lock, so CI always has it)" ;;
+    esac
   else
     tail -25 "$LOGDIR/types.log" >&2
     bad types "mypy found shape mistakes — see the errors above"
@@ -286,8 +300,25 @@ PYEOF
       continue
     fi
     count=$((count+1))
-    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t" \
-      || { failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2; }
+    local grc
+    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$t"
+    grc=$?
+    # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE. It is EX_CONFIG, and it is
+    # already the repo's convention: bin/type-check.sh's header states it and the
+    # types class above honours it. This loop counted every nonzero the same, so
+    # a selftest that correctly DECLINED to run for want of a credential — e.g.
+    # release-abandon-selftest.py with no Neon key and no CARR_CI_DATABASE_URL —
+    # read as a red gate on any machine lacking that credential, and the only way
+    # past it was CARR_SKIP_CI on every push. Deliberately narrow: ONLY 78 skips,
+    # the reason is printed every run, and every other nonzero still fails.
+    # ops/ci-selftest.py seeds both cases and fails if this widens.
+    if [ "$grc" -eq 78 ]; then
+      skiplist="$skiplist $base"
+      printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
+        "$base" "$(tail -1 "$LOGDIR/gate-$base.log" 2>/dev/null)" >&2
+    elif [ "$grc" -ne 0 ]; then
+      failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2
+    fi
   done
 
   # SHELL TESTS, run under their own shebang rather than "$PY". The loop above

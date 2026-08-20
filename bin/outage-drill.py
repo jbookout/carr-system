@@ -93,6 +93,7 @@ if not PY.exists():
     PY = Path(sys.executable)
 
 OPS_RECORD = REPO / "tools" / "ops-record.py"
+OPS_SPOOL = REPO / "tools" / "ops-spool.py"
 RUN_SCHEDULED = REPO / "bin" / "run-scheduled.sh"
 SETTINGS_GATE = REPO / "hooks" / "settings-change-gate.py"
 DOC_CONVO_BIN = REPO / "tools" / "doc-convo" / "bin"
@@ -102,16 +103,68 @@ STAGING_WORKER = "https://carr-mcp-staging.joe-bookout-carr-us.workers.dev"
 EVIDENCE_SERVICE = "carr-outage-drill"
 UNREACHABLE_DSN = "postgresql://nobody@127.0.0.1:1/nothing"
 
+# The unreachable value for the JOBS variable specifically, which must carry the
+# carr_jobs user or tools/ops-record.py rejects it on sight (_is_jobs_dsn) and
+# never attempts a connection at all — a refusal that looks like an outage in an
+# exit code while proving nothing about reachability.
+UNREACHABLE_JOBS_DSN = "postgresql://carr_jobs@127.0.0.1:1/nothing"
+
 # Loopback:1 refuses instantly (RST), the same trick ops/run-scheduled-selftest.py
 # and ops/restore-rehearse-record-selftest.py already use — a suite (or a drill)
 # that ran on every push must never pay a connect timeout to prove an outage.
 
 
 def _unreachable_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """An environment in which every database this repo knows how to reach is
+    genuinely unreachable.
+
+    CARR_DB_JOBS_URL IS SET, NOT POPPED, and this is the whole subtlety
+    (measured 2026-08-18). tools/ops-record.py's routine mode — the path every
+    collector run row takes — reads that ONE variable, and its _load_db_env()
+    refills it from ~/.config/carr/db.env with os.environ.setdefault. Popping it
+    here therefore does not isolate the recorder: the child process quietly
+    reloads the PRODUCTION jobs DSN and connects to the live ledger, where an
+    unregistered probe service earns a 78 that satisfies a `!= 0` assertion for
+    entirely the wrong reason. An explicit value wins over setdefault, so the
+    outage this function names is the outage that actually happens.
+    """
     env = dict(base if base is not None else os.environ)
     env["DATABASE_URL"] = UNREACHABLE_DSN
-    for leak in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL", "CARR_DB_URL", "PGSERVICE"):
+    env["CARR_DB_JOBS_URL"] = UNREACHABLE_JOBS_DSN
+    for leak in ("CARR_DB_EXPORTER_URL", "CARR_DB_URL", "PGSERVICE"):
         env.pop(leak, None)
+    return env
+
+
+def _throwaway_spool_env(env: dict[str, str], scratch: Path) -> dict[str, str]:
+    """Point the wrapper's run-row spool and throttle stamps at a scratch
+    directory.
+
+    THE SHARED-STATE HAZARD, in one line: out/ is symlinked into every worktree
+    on this Mac, so a drill that leaves CARR_RUN_SPOOL_DB alone queues its
+    synthetic probe rows into out/run-spool.sqlite3 — the REAL queue that
+    com.carr.run-spool-flush drains into the production ledger every 30 minutes.
+    Those rows would be refused there (the probe is registered only in staging),
+    retried ten times, and dead-lettered: production noise manufactured by a
+    drill whose first ground rule is that it never writes to production. Same
+    lesson CARR_RUN_SCHEDULED_STATE_DIR already encodes for throttle stamps, so
+    both are redirected here together."""
+    env = dict(env)
+    env["CARR_RUN_SPOOL_DB"] = str(scratch / "spool.sqlite3")
+    env["CARR_RUN_SCHEDULED_STATE_DIR"] = str(scratch / "run-scheduled-state")
+    return env
+
+
+def _unwritable_spool_env(env: dict[str, str]) -> dict[str, str]:
+    """The state in which recording GENUINELY fails since the 2026-08-18 spool:
+    the ledger is unreachable AND the local queue cannot be written either,
+    because its path sits under /dev/null, inside which mkdir cannot create a
+    directory. This is the same fixture ops/run-scheduled-selftest.py's
+    broken_recording_env() uses, and it is the only remaining state in which
+    recorder_exit is nonzero — which is exactly what makes it the state this
+    drill must induce to prove a failed recording stays visible."""
+    env = dict(env)
+    env["CARR_RUN_SPOOL_DB"] = os.path.join(os.path.devnull, "spool.sqlite3")
     return env
 
 
@@ -205,6 +258,70 @@ def staging_conn():
     return psycopg.connect(staging_dsn(), autocommit=True)
 
 
+# ── the staging JOBS credential, which is a different thing entirely ─────────
+_STAGING_JOBS_DSN_CACHE: str | None = None
+
+
+def staging_jobs_dsn() -> str:
+    """The isolated staging project's carr_jobs DSN — the credential every
+    ROUTINE ledger write needs, as distinct from staging_dsn() above, which is
+    the owner credential this file uses for its own setup and read-back SQL.
+
+    WHY THE DRILL NEEDS ONE AT ALL, and why it was quietly unrunnable without it
+    (found 2026-08-18). Drills 1 and 2 aimed their probe rows at staging by
+    setting DATABASE_URL. tools/ops-record.py's `run` does not read DATABASE_URL:
+    since PR #288 it is connect("routine"), whose DSN comes only from
+    CARR_DB_JOBS_URL, and whose _load_db_env() refills that from
+    ~/.config/carr/db.env by setdefault when a caller pops it. So the probe rows
+    were aimed at PRODUCTION's ledger, refused there because the probe services
+    are registered only in staging, and drill 1 reported "staging may be
+    unreachable right now" while staging was perfectly fine — a message that
+    sent a real search after the wrong thing.
+
+    MINTED, NOT STORED, and NOT DERIVED HERE. PR #337 hit exactly this wall from
+    the selftest side and answered it in tools/staging_jobs_dsn.py: isolated
+    staging already HAS the carr_jobs role with the right grants (db/schema.sql's
+    role preamble creates it on every rebuild), so the only gap is a password,
+    and that file mints one per run in memory after proving the owner DSN
+    resolves to the staging endpoint db-tap itself derives. A stored credential
+    with its own provisioner was considered there and lost. This drill uses that
+    module rather than growing a second answer to the same question — rule
+    a8c55a47, and the reason ops/staging-jobs-dsn-selftest.py can guard one
+    mechanism instead of two."""
+    global _STAGING_JOBS_DSN_CACHE
+    if _STAGING_JOBS_DSN_CACHE is None:
+        spec = importlib.util.spec_from_file_location(
+            "carr_staging_jobs_dsn", REPO / "tools" / "staging_jobs_dsn.py")
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["carr_staging_jobs_dsn"] = module
+        spec.loader.exec_module(module)
+        try:
+            _STAGING_JOBS_DSN_CACHE = module.mint(staging_dsn())
+        except module.StagingJobsRefusal as e:
+            # Its refusals are precondition failures in this file's vocabulary:
+            # staging did not resolve, the role is absent, psycopg is missing.
+            # None of them is the system under test telling a lie.
+            raise RuntimeError(f"no isolated-staging jobs credential: {e}") from e
+    return _STAGING_JOBS_DSN_CACHE
+
+
+def staging_routine_env(base: dict[str, str], jobs_dsn: str) -> dict[str, str]:
+    """The environment a collector actually runs with: the jobs credential and
+    no broader one, via tools/staging_jobs_dsn.routine_env(), which strips every
+    name ops/config/control-plane-provisioning.v1.json's routine_jobs block
+    forbids. Handing the wrapped child an owner credential as well would let a
+    regression in routine-mode credential selection pass this drill silently —
+    the exact failure PR #288 introduced and nothing caught."""
+    spec = importlib.util.spec_from_file_location(
+        "carr_staging_jobs_dsn", REPO / "tools" / "staging_jobs_dsn.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["carr_staging_jobs_dsn"] = module
+    spec.loader.exec_module(module)
+    return module.routine_env(base, jobs_dsn)
+
+
 class DrillUnavailable(Exception):
     """Raised when a drill's PRECONDITION fails — staging unreachable, a tool
     missing — which is a reason to SKIP, not a finding that the system under
@@ -277,8 +394,11 @@ def record_evidence(result: DrillResult) -> None:
     ]
     if fclass:
         argv += ["--failure-class", fclass]
-    env = dict(os.environ)
-    env["DATABASE_URL"] = staging_dsn()
+    # CARR_DB_JOBS_URL, not DATABASE_URL: `ops-record run` is routine mode and
+    # reads only the former (see staging_jobs_dsn()). Setting DATABASE_URL here
+    # is what made every evidence row aim at production's ledger and get refused
+    # there, so the harness's own record of having run was never written.
+    env = staging_routine_env(dict(os.environ), staging_jobs_dsn())
     proc = _run(argv, env=env, timeout=30)
     if proc.returncode == 0:
         print(f"  evidence: recorded ({proc.stdout.strip()})")
@@ -311,21 +431,52 @@ def ensure_evidence_service(conn) -> None:
 # DRILL 1 — RECORD LAYER UNREACHABLE
 # ══════════════════════════════════════════════════════════════════════════
 def drill_record_layer_unreachable() -> DrillResult:
-    """Point the real collector (bin/run-scheduled.sh -> tools/ops-record.py)
-    at an unreachable database and assert: (a) the wrapped job's own exit
-    code is untouched, (b) the failure is visible in the provenance line
-    with a non-zero recorder exit, (c) no shadow markdown file appears
-    anywhere as a substitute for the failed write, and (d) the service then
-    reads `unknown` — never `healthy` — at the next health look, because
-    ops.v_service_environment_health derives health from the latest
-    TERMINAL observation and its freshness and stores none (migration
-    0115's load-bearing decision)."""
+    """Point the real collector (bin/run-scheduled.sh -> tools/ops-spool.py ->
+    tools/ops-record.py) at a broken record layer and assert: (a) the wrapped
+    job's own exit code is untouched, (b) an unreachable ledger alone is
+    absorbed DURABLY rather than lost, (c) a record layer that is broken all
+    the way down is reported with a non-zero recorder exit and inserts nothing,
+    (d) no shadow markdown file appears anywhere as a substitute for the failed
+    write, and (e) the service then reads `unknown` — never `healthy` — at the
+    next health look, because ops.v_service_environment_health derives health
+    from the latest TERMINAL observation and its freshness and stores none
+    (migration 0115's load-bearing decision).
+
+    REVISED 2026-08-18 FOR THE RUN-ROW SPOOL, which moved the line this drill
+    was reading. Before the spool, the wrapper called ops-record synchronously,
+    so an unreachable database produced recorder_exit != 0 and this drill
+    asserted exactly that. Since the spool, a succeeded row is queued in local
+    SQLite first and replayed into the ledger by com.carr.run-spool-flush every
+    30 minutes — so an unreachable database now yields recorder_exit=0, and the
+    old assertion inverts: it would report the system had LIED about a
+    successful recording when in fact the row is durable and en route. That
+    would be the worst possible failure for a drill whose entire job is
+    distinguishing truth from green.
+
+    So the drill now proves the TWO different truths the spool created, which is
+    strictly more than the one it proved before:
+      * ledger unreachable, queue writable  -> recorder_exit 0, and the row is
+        REALLY in the queue (checked in the queue itself, not merely claimed);
+      * ledger unreachable, queue unwritable -> recorder_exit non-zero, nothing
+        inserted anywhere, and the service goes `unknown` rather than staying
+        green on the strength of a recording that never happened.
+    The second state is induced the same way ops/run-scheduled-selftest.py's
+    broken_recording_env() induces it — CARR_RUN_SPOOL_DB under /dev/null."""
     name = "record-layer-unreachable"
     probe = "carr-outage-drill-record-layer-probe"
     run_key = "probe.heartbeat"
-    dsn = staging_dsn()
-
-    with staging_conn() as conn:
+    # A missing staging jobs credential is a PRECONDITION failure — a reason to
+    # skip with the fix named, not a finding that anything under test lied.
+    try:
+        jobs_dsn = staging_jobs_dsn()
+    except RuntimeError as e:
+        raise DrillUnavailable(str(e)) from e
+    # A context manager rather than mkdtemp + a trailing rmtree, matching drills
+    # 4 and 5: this drill has several DrillUnavailable exits between here and the
+    # end, and every one of them would otherwise leave a scratch queue behind.
+    with tempfile.TemporaryDirectory(prefix="carr-outage-drill-record-layer-") as scratch_dir, \
+            staging_conn() as conn:
+        scratch = Path(scratch_dir)
         ensure_evidence_service(conn)
         with conn.cursor() as cur:
             # Clean slate — a probe re-registered on a stale row would let a
@@ -368,10 +519,12 @@ def drill_record_layer_unreachable() -> DrillResult:
         before_md = _snapshot_markdown()
 
         # ── baseline: a REAL successful collector run ────────────────────────
-        baseline_env = dict(os.environ)
-        baseline_env["DATABASE_URL"] = dsn
-        for leak in ("CARR_DB_JOBS_URL", "CARR_DB_EXPORTER_URL"):
-            baseline_env.pop(leak, None)
+        # The credential shape a real collector runs with: the staging jobs DSN
+        # and nothing broader. See staging_jobs_dsn() for the measured history of
+        # getting this wrong, and staging_routine_env() for why the wrapped child
+        # must not also inherit an owner credential.
+        baseline_env = _throwaway_spool_env(
+            staging_routine_env(dict(os.environ), jobs_dsn), scratch)
         proc = _run([str(RUN_SCHEDULED), probe, run_key, "/bin/sh", "-c", "exit 0"],
                      env=baseline_env, cwd=REPO, timeout=30)
         base_line = _tail_provenance(run_key, probe)
@@ -381,6 +534,20 @@ def drill_record_layer_unreachable() -> DrillResult:
                 f"(rc={proc.returncode}, line={base_line!r}) — staging may be "
                 f"unreachable right now")
 
+        # THE FLUSH IS PART OF THE BASELINE NOW, not an optimisation. Since the
+        # 2026-08-18 spool, that succeeded row is sitting in the scratch queue,
+        # not in ops.run: "not in the ledger yet" is the designed steady state,
+        # for up to the 30-minute flush interval. A drill that read health here
+        # would find no observation at all and mistake the spool working
+        # correctly for staging being down — which is what it did.
+        flush = _run([str(PY), str(OPS_SPOOL), "flush"], env=baseline_env,
+                     cwd=REPO, timeout=120)
+        if flush.returncode != 0:
+            raise DrillUnavailable(
+                f"the baseline row could not be flushed from the spool into "
+                f"staging (rc={flush.returncode}): "
+                f"{(flush.stderr or flush.stdout).strip()[:300]}")
+
         with conn.cursor() as cur:
             cur.execute(
                 """select health, freshness_state from ops.v_service_environment_health
@@ -389,8 +556,27 @@ def drill_record_layer_unreachable() -> DrillResult:
         if baseline_health is None or baseline_health[0] != "healthy":
             raise DrillUnavailable(f"baseline health did not read healthy: {baseline_health}")
 
-        # ── induce: the SAME collector, now pointed at an unreachable DB ─────
-        outage_env = _unreachable_env(dict(os.environ))
+        # ── induce (1): ledger unreachable, local queue still writable ───────
+        # The ordinary outage now, and the one the spool was built for. The
+        # truthful behavior is DEFERRAL, not failure: the row is captured
+        # durably and reported as such. Asserted against the queue file itself,
+        # because "recorder_exit was 0" is exactly the claim under test.
+        # Byte for byte the baseline environment with one change — a jobs DSN
+        # pointed at a refusing port. Anything else differing between the two
+        # would weaken what the comparison below can claim.
+        deferred_env = _throwaway_spool_env(
+            staging_routine_env(dict(os.environ), UNREACHABLE_JOBS_DSN), scratch)
+        proc_deferred = _run(
+            [str(RUN_SCHEDULED), probe, run_key, "/bin/sh", "-c", "exit 0"],
+            env=deferred_env, cwd=REPO, timeout=30)
+        deferred_line = _tail_provenance(run_key, probe)
+        queued = _spool_rows(Path(deferred_env["CARR_RUN_SPOOL_DB"]), probe, run_key)
+
+        # ── induce (2): the record layer broken all the way down ─────────────
+        # Ledger unreachable AND the queue unwritable, which since the spool is
+        # the only state in which a row is durable nowhere — and therefore the
+        # only state in which recorder_exit is honestly allowed to be non-zero.
+        outage_env = _unwritable_spool_env(deferred_env)
         proc2 = _run([str(RUN_SCHEDULED), probe, run_key, "/bin/sh", "-c", "exit 0"],
                       env=outage_env, cwd=REPO, timeout=30)
         outage_line = _tail_provenance(run_key, probe)
@@ -404,14 +590,30 @@ def drill_record_layer_unreachable() -> DrillResult:
             row_count = cur.fetchone()[0]
 
         checks = {
-            "wrapped job's own exit code untouched (still 0)": proc2.returncode == 0,
-            "failure is visible in the provenance line": outage_line != "",
-            "provenance line's recorder_exit is non-zero (genuinely unreachable)":
+            "wrapped job's own exit code untouched by a deferred recording":
+                proc_deferred.returncode == 0,
+            "wrapped job's own exit code untouched by a failed recording":
+                proc2.returncode == 0,
+            "an unreachable ledger alone is still reported DURABLE "
+            "(recorder_exit 0) — the spool absorbed it":
+                _field(deferred_line, "recorder_exit") == "0",
+            "...and that durability is real: the row is sitting in the local "
+            "queue, not merely claimed": len(queued) == 1,
+            "with the queue unwritable too, the failure is visible in the "
+            "provenance line": outage_line != "",
+            "...and its recorder_exit is non-zero — the row is durable nowhere":
                 _field(outage_line, "recorder_exit") not in ("0", ""),
-            "the outage attempt inserted NO second ops.run row (no shadow write)":
-                row_count == 1,
+            # ONE number, TWO claims that happen to share it: neither induced
+            # state added a row to ops.run. For the deferred one that is the
+            # spool working (the row is queued, and letting the database sleep
+            # is the point); for the failed one it is the absence of a shadow
+            # write. The baseline's single row is what makes 1 the right answer.
+            "neither induced attempt inserted a second ops.run row — the "
+            "deferred one is queued, the failed one is nowhere": row_count == 1,
             "no shadow markdown file appeared as a substitute for the failed write":
                 after_md == before_md,
+            "the drill never queued into the SHARED production spool":
+                not _spool_rows(REPO / "out" / "run-spool.sqlite3", probe, run_key),
         }
 
         # ── the staleness half: silence must not stay green ──────────────────
@@ -433,13 +635,38 @@ def drill_record_layer_unreachable() -> DrillResult:
             restored = cur.fetchone()[0] == 0
         checks["restore: the probe service is fully deregistered afterward"] = restored
 
+    # The scratch queue went with the TemporaryDirectory above. Its one deferred
+    # row is deliberately never flushed: it names a service this drill has just
+    # deregistered, so replaying it would be a write with nothing to attach to.
     truthful = all(checks.values())
     lines = "; ".join(f"{'ok' if v else 'FAIL'}: {k}" for k, v in checks.items())
-    detail = (f"baseline={_field(base_line, 'state')} outage_recorder_exit="
-              f"{_field(outage_line, 'recorder_exit')} rows_after_outage={row_count} "
+    detail = (f"baseline={_field(base_line, 'state')} "
+              f"deferred_recorder_exit={_field(deferred_line, 'recorder_exit')} "
+              f"queued_rows={len(queued)} "
+              f"outage_recorder_exit={_field(outage_line, 'recorder_exit')} "
+              f"rows_after_outage={row_count} "
               f"health_after_stale={stale_health[0] if stale_health else '?'} — {lines}")
     return DrillResult(name, truthful, "truthful" if truthful else "NOT truthful — see detail",
                         detail)
+
+
+def _spool_rows(db: Path, service: str, run_key: str) -> list:
+    """Rows queued in a run-row spool for one service and run key. Read-only,
+    and tolerant of the file not existing at all — an unwritable spool never
+    creates one, and the shared production spool may legitimately be absent on
+    a machine that has not recorded anything yet."""
+    import sqlite3
+    if not db.exists():
+        return []
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return conn.execute(
+            "select service, run_key, state from spool where service = ? "
+            "and run_key = ?", (service, run_key)).fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
 
 
 _MD_SKIP_PARTS = (".git", "node_modules", "__pycache__", "worktrees", ".venv")
@@ -481,7 +708,10 @@ def drill_stale_observation() -> DrillResult:
     name = "stale-observation"
     probe = "carr-outage-drill-stale-probe"
     run_key = "probe.once"
-    dsn = staging_dsn()
+    try:
+        jobs_dsn = staging_jobs_dsn()
+    except RuntimeError as e:
+        raise DrillUnavailable(str(e)) from e
 
     with staging_conn() as conn:
         ensure_evidence_service(conn)
@@ -501,8 +731,12 @@ def drill_stale_observation() -> DrillResult:
                 """insert into ops.service_environment (service_id, environment)
                    values (%s, 'staging')""", (sid,))
 
-        env = dict(os.environ)
-        env["DATABASE_URL"] = dsn
+        # CARR_DB_JOBS_URL is the one this write actually travels on — see
+        # staging_jobs_dsn(). Setting only DATABASE_URL here aimed this probe
+        # row at production's ledger, where the staging-only probe service was
+        # refused, and the drill reported it as "could not write the baseline
+        # probe row" without ever naming the real cause.
+        env = staging_routine_env(dict(os.environ), jobs_dsn)
         # A short, explicit expiry — the observation is real and freshly made;
         # only its BELIEVABILITY WINDOW is short, which is what lets this
         # drill prove staleness in seconds rather than waiting out an hour
@@ -839,10 +1073,12 @@ def drill_settings_change_db_outage() -> DrillResult:
 DRILLS = {
     "record-layer-unreachable": (
         drill_record_layer_unreachable,
-        "Point the real collector at an unreachable staging database; prove "
-        "the wrapped job's exit code is untouched, the failure is visible "
-        "with a non-zero recorder exit, no shadow markdown appears, and the "
-        "service reads unknown (never healthy) once its baseline goes stale."),
+        "Point the real collector at a broken staging record layer; prove the "
+        "wrapped job's exit code is untouched, an unreachable ledger alone is "
+        "absorbed durably into the run-row spool, a spool that cannot be "
+        "written either is reported with a non-zero recorder exit and inserts "
+        "nothing, no shadow markdown appears, and the service reads unknown "
+        "(never healthy) once its baseline goes stale."),
     "stale-observation": (
         drill_stale_observation,
         "A throwaway staging service, past its cadence with no failed "

@@ -21,11 +21,15 @@ inline assertions, printed as ok/FAIL, isolated fixtures. Two tiers:
   run through the real CLI, reads it back from ops.run, and DELETES it
   explicitly before exiting — psycopg autocommit is what ops-record.py's own
   connections use (see tools/ops-record.py connect()), so there is no
-  transaction to roll back; explicit cleanup is the isolation instead. This
-  tier never runs against production: it only activates when DATABASE_URL is
-  already present, and DATABASE_URL is what tools/db-tap.py --project staging
-  sets — the bare CARR_DB_JOBS_URL production credential in
-  ~/.config/carr/db.env is never read by this file directly.
+  transaction to roll back; explicit cleanup is the isolation instead.
+
+  This tier never runs against production, and since 2026-08-18 that is CHECKED:
+  tools/staging_jobs_dsn.py proves the DSN addresses the isolated staging
+  endpoint before minting the ephemeral carr_jobs identity the recorder now
+  requires, and the CLI subprocess runs with that credential and no broader one.
+  The old wording — "it only activates when DATABASE_URL is present, and that is
+  what db-tap --project staging sets" — described a convention, and PR #288 is
+  what proved a convention was not enough.
 
 RUN IT:
     .venv/bin/python ops/scheduled-run-record-selftest.py                  # tier 1 only
@@ -48,6 +52,11 @@ from lib.scheduled_run import (  # noqa: E402
     build_run_args, RUN_KEY,
 )
 from lib.pgrow import fetch_one  # noqa: E402
+from lib.loadpy import load_module_from_path  # noqa: E402
+
+OPS_RECORD = load_module_from_path("scheduled_run_record_ops_record",
+                                    os.path.join(REPO, "tools", "ops-record.py"))
+DEAD_DSN = "postgresql://carr_jobs:probe@127.0.0.1:1/nonexistent"
 
 HOOK = os.path.join(REPO, "hooks", "scheduled-run-record.py")
 CLI = os.path.join(REPO, "bin", "record-scheduled-run.py")
@@ -128,16 +137,32 @@ def run_hook(payload: dict, env: dict | None = None) -> tuple[int, str]:
 
 
 def unreachable_db_env() -> dict:
-    """An environment where DATABASE_URL points at a port nothing listens on,
-    so ops-record.py's connection attempt fails FAST and LOCALLY — this proves
-    the missing/bad-credential tolerance without ever reaching a real database,
-    staging or production, and without depending on ~/.config/carr/db.env
-    being absent (Path.home() resolves via the system's user database even
-    with HOME unset, so simply clearing env vars does not guarantee no
-    credential is found)."""
+    """An environment where EVERY credential name ops-record.py reads points at
+    a port nothing listens on, so its connection attempt fails FAST and LOCALLY
+    — this proves the missing/bad-credential tolerance without ever reaching a
+    real database, staging or production, and without depending on
+    ~/.config/carr/db.env being absent (Path.home() resolves via the system's
+    user database even with HOME unset, so simply clearing env vars does not
+    guarantee no credential is found).
+
+    SETTING every name, from ops-record.py's own credential_names(), is the
+    whole point and it is written in blood. This helper used to set DATABASE_URL
+    and DELETE CARR_DB_JOBS_URL, which blinded the recorder completely while
+    `run` was connect("write"). PR #288 (cd3d7386, 2026-08-16) made it
+    connect("routine") — CARR_DB_JOBS_URL only — and ops-record.py's
+    _load_db_env() re-supplied the PRODUCTION jobs DSN by setdefault. The checks
+    below then recorded against production for real: 46 fabricated SUCCEEDED
+    rows in ops.run, two per CI run, against loop-drain-weekdays (the hook
+    fixture) and radar-weekly (the CLI fixture), each carrying the fixture's own
+    2026-08-14T11:00:00Z start. radar-weekly had no other observation at all, so
+    its entire health signal in production was this suite's exhaust. Found
+    2026-08-18.
+
+    The username stays carr_jobs so routine mode's credential-shape check passes
+    and what fails is the CONNECTION, which is the property under test."""
     env = dict(os.environ)
-    env["DATABASE_URL"] = "postgresql://probe:probe@127.0.0.1:1/nonexistent"
-    env.pop("CARR_DB_JOBS_URL", None)
+    for name in OPS_RECORD.credential_names():
+        env[name] = DEAD_DSN
     return env
 
 
@@ -276,11 +301,36 @@ def run_tier2() -> None:
         check("psycopg importable for tier 2", False, "pip install 'psycopg[binary]'")
         return
 
-    dsn = os.environ["DATABASE_URL"]
+    owner = os.environ["DATABASE_URL"]
     probe_key = "sched-probe-" + uuid.uuid4().hex[:8]
     corr = uuid.uuid4()
 
-    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+    # THE CLI STOPPED READING DATABASE_URL. Since PR #288 the recorder under
+    # bin/record-scheduled-run.py is connect("routine"), so handing it this
+    # environment recorded against PRODUCTION rather than against staging (see
+    # unreachable_db_env above for what that cost). Mint the identity it now
+    # requires; tools/staging_jobs_dsn.py refuses unless the DSN really does
+    # address the isolated staging endpoint, which turns "this tier never runs
+    # against production" from a convention into a check.
+    staging_jobs = load_module_from_path(
+        "staging_jobs_dsn", os.path.join(REPO, "tools", "staging_jobs_dsn.py"))
+    try:
+        jobs_dsn = staging_jobs.mint(owner)
+    except staging_jobs.StagingJobsRefusal as exc:
+        check("tier 2 runs against isolated staging, with a usable carr_jobs identity",
+              False, str(exc))
+        return
+    routine = staging_jobs.routine_env(os.environ, jobs_dsn)
+    check("the recorder subprocess gets the jobs credential and no broader one — "
+          "the same shape bin/routine-credential-env.sh gives it in production",
+          "DATABASE_URL" not in routine
+          and routine.get("CARR_DB_JOBS_URL") == jobs_dsn,
+          f"DATABASE_URL present={'DATABASE_URL' in routine}")
+
+    # The suite's own connection stays the OWNER's: carr_jobs may not insert a
+    # service and may not delete anything, so registering and cleaning up the
+    # probe is not work the routine identity can or should do.
+    with psycopg.connect(owner, autocommit=True) as conn, conn.cursor() as cur:
         try:
             cur.execute(
                 """insert into ops.service (key, name, family, criticality, owner_actor)
@@ -299,7 +349,7 @@ def run_tier2() -> None:
             p = fixture_gate_denied(task=probe_key)
             proc = subprocess.run(
                 [PY, CLI, "from-transcript", "--transcript", p, "--correlation", str(corr)],
-                capture_output=True, text=True, timeout=30, env=dict(os.environ))
+                capture_output=True, text=True, timeout=30, env=dict(routine))
             os.unlink(p)
             check("tier 2: the CLI recorded successfully against DATABASE_URL",
                   proc.returncode == 0, proc.stderr[-500:])
