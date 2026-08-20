@@ -36,15 +36,20 @@ import sys, os, re, json, shutil, unicodedata
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+from lib.record_sources import (MODE_FILES, MODE_RECORDS, load_clients, load_deals_doc,
                                 load_leads, load_vendors, resolve_mode, source_note)
 
-MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
-MODE = effective_mode(MODE, "graph-structure")
-
-ROOT = ARGS[0] if ARGS else os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", ".."))
-GRAPH = os.path.join(ROOT, "Graph")
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "graph-structure canonical record ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"graph-structure: {exc}") from exc
+if _RECOVERY.args:
+    raise SystemExit(f"graph-structure: unexpected argument: {_RECOVERY.args[0]}")
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MODE = MODE_FILES if _RECOVERY.recovery else MODE_RECORDS
+ROOT = str(_RECOVERY.vault) if _RECOVERY.recovery else REPO
+GRAPH = os.path.join(REPO, "out", "recovery" if _RECOVERY.recovery else "", "Graph")
 OUT = os.path.join(GRAPH, "hubs")
 
 # ORDER 29a: the same four records build-graph-notes.py just used, read the same

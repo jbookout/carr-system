@@ -50,10 +50,18 @@ falls back to opening every file exactly as before (no graph blindness).
 import sys, os, re, shutil, unicodedata
 from collections import defaultdict
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT = os.path.join(ROOT, "Graph-System")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "system-graph canonical repository ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"system-graph: {exc}") from exc
+if _RECOVERY.args:
+    raise SystemExit(f"system-graph: unexpected argument: {_RECOVERY.args[0]}")
+ROOT = str(_RECOVERY.vault) if _RECOVERY.recovery else REPO
+OUT = os.path.join(REPO, "out", "recovery" if _RECOVERY.recovery else "", "Graph-System")
 
 # Backups added 2026-08-13. Backups/portability-mirror held 224 .md copies that
 # the walk treated as live vault content, so a reference could resolve to a

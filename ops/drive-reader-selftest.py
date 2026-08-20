@@ -89,8 +89,13 @@ def main():
     run_lane = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "run_lane")
     args = [a.arg for a in run_lane.args.args]
     require("rows" in args, "run_lane cannot accept a writer's in-memory canonical rows")
-    require("run_lane(\"upstream\", rows=candidates)" in corroborate,
-            "corroborate does not map its newly produced rows directly")
+    # Corroborate currently has no canonical upstream-signal ingress.  Its only
+    # executable path is now explicit, reasoned recovery, so those noncanonical
+    # rows must never be promoted into candidate_pool.
+    require("canonical upstream signal ingress is not implemented" in corroborate,
+            "corroborate does not name its canonical-ingress gap")
+    require("run_lane(\"upstream\", rows=candidates)" not in corroborate,
+            "corroborate maps NONCANONICAL recovery rows into candidate_pool")
 
     # The upstream suppressor must query canonical candidate_pool/lead views
     # whenever that read path is available, retaining a loud file fallback.

@@ -22,15 +22,23 @@ import json, os, sys
 # it byte for byte, so no other reader loses anything; this only stops the room
 # from deriving today's queue from an export that may have failed hours ago.
 # Parity between the two modes is proven by tools/parity-records.py, not assumed.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.record_sources import MODE_RECORDS, effective_mode, load_deals_doc, resolve_mode, source_note
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+from lib.record_sources import MODE_FILES, MODE_RECORDS, load_deals_doc, source_note
 
-MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
-MODE = effective_mode(MODE, "deal-room")
+try:
+    CONTEXT = parse_recovery_controls(sys.argv[1:], "deal-room file export")
+except RecoveryArgumentError as exc:
+    sys.exit(f"deal-room: {exc}")
+if CONTEXT.args:
+    sys.exit(f"deal-room: unexpected surface argument(s): {' '.join(CONTEXT.args)}")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-JSON_PATH = ARGS[0] if len(ARGS) > 0 else os.path.normpath(os.path.join(HERE, "..", "..", "Deal Management", "panhandle-team-deals.json"))
-OUT_PATH  = ARGS[1] if len(ARGS) > 1 else os.path.join(HERE, "deal-room-panhandle.html")
+MODE = MODE_FILES if CONTEXT.recovery else MODE_RECORDS
+ROOT = str(CONTEXT.vault) if CONTEXT.recovery else REPO
+JSON_PATH = os.path.join(ROOT, "DNA", "Deal Management", "panhandle-team-deals.json")
+OUT_DIR = os.path.join(REPO, "out", "recovery" if CONTEXT.recovery else "")
+OUT_PATH = os.path.join(OUT_DIR, "deal-room-panhandle.html")
 
 # File mode reads exactly the path it was handed, as it always has. Records mode
 # ignores that path: there is no file in it to read, only the view behind it.
@@ -576,7 +584,10 @@ BODY = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 DOC = (BODY.replace("__CSS__", CSS)
            .replace("__STAMP__", STAMP)
            .replace("__JS__", JS.replace("__DATA__", PAYLOAD)))
+if CONTEXT.recovery:
+    DOC = "<!-- RECOVERY NONCANONICAL projection; never source truth. -->\n" + DOC
 
+os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
 open(OUT_PATH, "w").write(DOC)
 n_story = sum(1 for d in deals if (d.get("activity") or d.get("carr_status")))
 n_next = sum(1 for d in deals if d.get("next_step"))

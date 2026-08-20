@@ -27,7 +27,8 @@ import sys, os, re, json, glob, shutil, unicodedata
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.record_sources import (MODE_RECORDS, effective_mode, load_clients, load_deals_doc,
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+from lib.record_sources import (MODE_FILES, MODE_RECORDS, load_clients, load_deals_doc,
                                 load_leads, load_party_links, load_ref_index, load_vendors,
                                 resolve_mode, source_note)
 
@@ -66,11 +67,16 @@ PARTNER_NAMES = ("Joe Bookout", "Dell McCraney")
 # (Example sanitized 2026-08-06, ORDER 42b — the original named the real lead.)
 REF_PREFERENCE = ("client", "vendor", "lead", "party")
 
-MODE, ARGS = resolve_mode(sys.argv[1:], default=MODE_RECORDS)
-MODE = effective_mode(MODE, "graph-notes")
-
-ROOT = ARGS[0] if ARGS else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT  = os.path.join(ROOT, "Graph")
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "graph-notes canonical record ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"graph-notes: {exc}") from exc
+if _RECOVERY.args:
+    raise SystemExit(f"graph-notes: unexpected argument: {_RECOVERY.args[0]}")
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MODE = MODE_FILES if _RECOVERY.recovery else MODE_RECORDS
+ROOT = str(_RECOVERY.vault) if _RECOVERY.recovery else REPO
+OUT  = os.path.join(REPO, "out", "recovery" if _RECOVERY.recovery else "", "Graph")
 
 VERT_TAGS = {"dental":"dental","dentist":"dental","oral":"dental","ortho":"dental",
              "medical":"medical","medicine":"medical","cardio":"medical","derm":"medical",
