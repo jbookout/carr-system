@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-MIGRATION = REPO / "migrations" / "0185_atomic_rule_approval.sql"
+MIGRATION = REPO / "migrations" / "0194_atomic_rule_approval.sql"
 
 
 def main() -> int:

@@ -382,7 +382,7 @@
     "rule_shape": {
       "implementation": [
         "hooks/rule-shape-gate.py",
-        "migrations/0185_atomic_rule_approval.sql",
+        "migrations/0194_atomic_rule_approval.sql",
         "mcp-server/src/tools.js"
       ],
       "test": [

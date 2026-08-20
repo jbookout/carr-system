@@ -1,4 +1,4 @@
--- 0185_atomic_rule_approval.sql
+-- 0194_atomic_rule_approval.sql
 -- Approval has exactly one meaning: the rule becomes enforced and active in
 -- this transaction.  If exact verified enforcement is not ready, approval
 -- refuses without recording an approval receipt or changing rule authority.
@@ -430,20 +430,20 @@ grant execute on function ops.approve_rule(uuid,text,text[],text,text) to carr_a
 do $$
 begin
   if to_regprocedure('ops.approve_rule(uuid,text,text[],text,text)') is null then
-    raise exception '0185 FAILED: enforced approval function is missing';
+    raise exception '0194 FAILED: enforced approval function is missing';
   end if;
   if has_function_privilege('carr_writer',
        'ops.approve_rule(uuid,text,text[],text,text)'::regprocedure,'execute') then
-    raise exception '0185 FAILED: routine writer may approve rules';
+    raise exception '0194 FAILED: routine writer may approve rules';
   end if;
   if exists (select 1 from ops.enforcement_control_catalog
               where control_key='standing_context_runtime') then
-    raise exception '0185 FAILED: prose surfacing is mislabeled as unbreakable enforcement';
+    raise exception '0194 FAILED: prose surfacing is mislabeled as unbreakable enforcement';
   end if;
   if not exists (select 1 from ops.enforcement_control_catalog
                   where control_key='platform_metering_pre_dispatch'
                     and installed and verified_at is not null) then
-    raise exception '0185 FAILED: platform metering control is not registered';
+    raise exception '0194 FAILED: platform metering control is not registered';
   end if;
 end $$;
 

@@ -389,7 +389,7 @@ def main() -> int:
             cur.execute("""
                 insert into ops.enforcement_control_catalog
                   (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
-                values ('db-gate-fixture','migration:0185',
+                values ('db-gate-fixture','migration:0194',
                         'ops/control-plane-db-gate.py','transactional_schema',true,now())
                 on conflict (control_key) do update set installed=true,verified_at=now()
             """)

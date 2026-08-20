@@ -147,11 +147,11 @@ def rule_item(cur: psycopg.Cursor[Any], actor_id: Any, suffix: str) -> Any:
 
 def activate_enforced_rule_fixture(cur: psycopg.Cursor[Any], rule_id: Any,
                                    intake_id: Any, actor_id: Any, suffix: str) -> None:
-    """Activate a rollback-only rule through the exact 0185 receipt boundary."""
+    """Activate a rollback-only rule through the exact 0194 receipt boundary."""
     control_key = f"guidance-db-gate:{suffix}"
     cur.execute("""insert into ops.enforcement_control_catalog
         (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
-        values (%s,'migration:0185','ops/guidance-registry-db-gate.py',
+        values (%s,'migration:0194','ops/guidance-registry-db-gate.py',
                 'transactional_schema',true,now())
         on conflict (control_key) do update set installed=true,verified_at=now()""",
         (control_key,))
@@ -171,7 +171,7 @@ def activate_enforced_rule_fixture(cur: psycopg.Cursor[Any], rule_id: Any,
         (rule_id, intake_id, actor_id))
     cur.execute("""insert into ops.rule_enforcement_point
         (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
-        values (%s,%s,'migration:0185','ops/guidance-registry-db-gate.py',
+        values (%s,%s,'migration:0194','ops/guidance-registry-db-gate.py',
                 'transactional_schema',true,now())""", (rule_id, control_key))
     cur.execute("""with approved as (
           select r.id,r.version,encode(digest(r.statement,'sha256'),'hex') statement_hash,
