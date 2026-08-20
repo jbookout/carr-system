@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CARR Control Plane release recovery procedure",
+  "type": "object",
+  "required": ["schema_version", "contract", "candidate", "database_down_migration", "applied_schema_mutation", "previous_worker_traffic_rollback", "provider_version_recovery_path", "existing_version_promotion", "separate_promotion_requirement", "existing_promotion_contract_paths", "forward_fix_steps"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "contract": {"const": "control-plane-release-recovery-procedure"},
+    "candidate": {
+      "type": "object", "required": ["migrations"], "additionalProperties": false,
+      "properties": {"migrations": {"type": "array", "const": ["0194_atomic_rule_approval", "0195_control_plane_cache_observations"]}}
+    },
+    "database_down_migration": {"const": "does_not_exist"},
+    "applied_schema_mutation": {"const": "never_by_this_procedure"},
+    "previous_worker_traffic_rollback": {"const": "not_authorized_by_this_plan"},
+    "provider_version_recovery_path": {"const": "fresh_upload_only"},
+    "existing_version_promotion": {"const": "forbidden_by_this_plan"},
+    "separate_promotion_requirement": {
+      "type": "object", "required": ["required_inputs"], "additionalProperties": false,
+      "properties": {"required_inputs": {"type": "array", "const": ["fresh_source_sha", "fresh_uploaded_provider_version", "new_release_id", "new_plan_hash", "post_deploy_live_readback"]}}
+    },
+    "existing_promotion_contract_paths": {"type": "array", "const": ["migrations/0172_program5_release_assurance.sql", "tools/release-manifest.py", "tools/ops-record.py", "bin/deploy-worker.sh", "ops/verify-worker-release.py", "bin/migrate-prod.sh"]},
+    "forward_fix_steps": {"type": "array", "const": [{"id": "contain", "action_kind": "contain"}, {"id": "repair", "action_kind": "repair"}, {"id": "verify", "action_kind": "verify"}]}
+  },
+  "additionalProperties": false
+}

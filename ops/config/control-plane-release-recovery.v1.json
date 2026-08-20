@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "contract": "control-plane-release-recovery-procedure",
+  "candidate": {
+    "migrations": [
+      "0194_atomic_rule_approval",
+      "0195_control_plane_cache_observations"
+    ]
+  },
+  "database_down_migration": "does_not_exist",
+  "applied_schema_mutation": "never_by_this_procedure",
+  "previous_worker_traffic_rollback": "not_authorized_by_this_plan",
+  "provider_version_recovery_path": "fresh_upload_only",
+  "existing_version_promotion": "forbidden_by_this_plan",
+  "separate_promotion_requirement": {
+    "required_inputs": [
+      "fresh_source_sha",
+      "fresh_uploaded_provider_version",
+      "new_release_id",
+      "new_plan_hash",
+      "post_deploy_live_readback"
+    ]
+  },
+  "existing_promotion_contract_paths": [
+    "migrations/0172_program5_release_assurance.sql",
+    "tools/release-manifest.py",
+    "tools/ops-record.py",
+    "bin/deploy-worker.sh",
+    "ops/verify-worker-release.py",
+    "bin/migrate-prod.sh"
+  ],
+  "forward_fix_steps": [
+    {"id": "contain", "action_kind": "contain"},
+    {"id": "repair", "action_kind": "repair"},
+    {"id": "verify", "action_kind": "verify"}
+  ]
+}
