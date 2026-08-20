@@ -566,6 +566,7 @@ class RuntimeWorkflowFactCollector:
             return False
         markers: dict[tuple[str, str], tuple[str, ...]] = {
             ('calendar-fetch-daily', 'shadow'): (r'calendar-capture: source=eventkit mode=shadow scanned=\d+ exact=\d+ domain=\d+ unknown=\d+ writes=0 failed=0',),
+            ('calendar-fetch-daily', 'canary'): (r'calendar-capture: source=eventkit mode=canary destination=calendar-canary-[a-z0-9_-]+ exact=\d+ receipt=[0-9a-f-]{36}',),
             ('calendar-fetch-daily', 'live'): (r'calendar-capture: source=eventkit mode=live scanned=\d+ exact=\d+ domain=\d+ unknown=\d+ writes=\d+ failed=0',),
             ('nightly-record-layer', 'shadow'): (r'nightly preflight: \d+ chain surfaces present; writes=0',),
             ('nightly-record-layer', 'canary'): (r'nightly result: chain_ok',),
@@ -861,13 +862,14 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
     # Deterministic children never inherit ledger, provider, owner or live-ingest
     # credentials.  Their explicit canary config is the sole credential seam.
     env = {key: os.environ[key] for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL",
-                                             "CARR_CALENDAR_CANARY_ENV", "CARR_NOTES_CANARY_ENV",
-                                             "CARR_CALENDAR_CANARY_ROOT", "CARR_NOTES_CANARY_ROOT")
+                                             "CARR_NOTES_CANARY_ENV", "CARR_NOTES_CANARY_ROOT")
            if os.environ.get(key)}
     env.update({"CARR_JOB_PAYLOAD": json.dumps(payload, sort_keys=True), "CARR_CONTROL_PLANE_MODE": mode})
     if workflow.get("key") == "calendar-fetch-daily":
-        for inherited in ("CARR_CALENDAR_CANARY_ENV", "CARR_CALENDAR_CANARY_ROOT"):
-            env.pop(inherited, None)
+        if mode == "canary":
+            for key in ("CARR_CALENDAR_CANARY_DSN", "CARR_CALENDAR_CANARY_DESTINATION_ID"):
+                if os.environ.get(key):
+                    env[key] = os.environ[key]
         env["CARR_REPO"] = str(REPO)
         env["CARR_CALENDAR_OUTPUT_ROOT"] = str(
             REPO / "out" if mode == "live" else REPO / "out" / "control-plane" / "calendar" / mode)

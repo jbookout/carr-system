@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import time
 from datetime import datetime
@@ -169,6 +170,29 @@ def main() -> int:
     check("calendar EventKit child receives no legacy Drive or obsolete canary path",
           not any(key in calendar_env for key in (
               "CARR_VAULT", "CARR_CALENDAR_CANARY_ENV", "CARR_CALENDAR_CANARY_ROOT")))
+
+    # A poisoned parent environment must not leak Calendar's isolated database
+    # credential into any other deterministic child.
+    poison = {"CARR_CALENDAR_CANARY_DSN": "postgres://poison/isolated",
+              "CARR_CALENDAR_CANARY_DESTINATION_ID": "calendar-canary-poison"}
+    before = {key: os.environ.get(key) for key in poison}
+    os.environ.update(poison)
+    poisoned_envs: list[dict[str, str]] = []
+    def poisoned_run(argv, **kwargs):
+        poisoned_envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, "calendar-capture: source=eventkit mode=canary destination=calendar-canary-poison exact=0 receipt=00000000-0000-0000-0000-000000000000", "")
+    module.subprocess.run = poisoned_run
+    try:
+        module._execute_deterministic(calendar_workflow, {}, 30, "canary")
+        module._execute_deterministic({"key":"nightly-record-layer", "execution":{"entrypoint":"bin/nightly.sh", "args":[], "shadow_args":["--preflight"]}}, {}, 30, "live")
+    finally:
+        module.subprocess.run = original_run
+        for key, value in before.items():
+            if value is None: os.environ.pop(key, None)
+            else: os.environ[key] = value
+    check("Calendar canary credential is scoped to Calendar canary only",
+          len(poisoned_envs) == 2 and all(key in poisoned_envs[0] for key in poison)
+          and not any(key in poisoned_envs[1] for key in poison))
 
     canary_calls: list[list[str]] = []
 
