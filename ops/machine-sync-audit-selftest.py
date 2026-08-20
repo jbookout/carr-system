@@ -69,6 +69,16 @@ def main():
     # ---- it must actually run on this machine, read-only, and exit 0 plain
     py = os.path.join(REPO, ".venv", "bin", "python")
     py = py if os.path.exists(py) else sys.executable
+
+    # SNAPSHOT BEFORE, so the read-only check below compares like with like.
+    # See the comment on that check for what the single after-only reading cost.
+    def tracked_status():
+        out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                             capture_output=True, text=True, cwd=REPO).stdout
+        return [ln for ln in out.splitlines() if "machine-sync-audit" not in ln]
+
+    before = tracked_status()
+
     p = subprocess.run([py, AUDIT, "--json"], capture_output=True, text=True,
                        cwd=REPO, timeout=300)
     check("the audit exits 0 without --strict", p.returncode == 0, f"rc={p.returncode}")
@@ -88,11 +98,25 @@ def main():
               data["gaps"] == sum(1 for r in data["rows"] if r["state"] == mod.GAP))
 
     # ---- read-only: running it must not dirty the tree
-    dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
-                           capture_output=True, text=True, cwd=REPO).stdout
-    tracked = [ln for ln in dirty.splitlines() if "machine-sync-audit" not in ln]
-    check("the audit changes nothing on the machine", not tracked,
-          f"unexpected: {tracked[:3]}")
+    #
+    # BEFORE-AND-AFTER, not after-only. This used to read `git status` exactly
+    # once, after the audit, and assert the tree was CLEAN — so it did not
+    # measure "the audit changed nothing", it measured "nobody on this machine
+    # has uncommitted work". ~/carr-system is a shared checkout that several
+    # Claude sessions write at once by design, so the test failed on other
+    # people's files: on 2026-08-19 it blocked a push with two _to_delete
+    # deletions and a claude-tree settings edit, none of them belonging to the
+    # session being gated and none of them touched by the audit. A test that
+    # fails on work it does not own teaches its own bypass — the pre-push hook
+    # prints CARR_SKIP_CI=1 right underneath it.
+    #
+    # The diff is the claim. Comparing the two snapshots proves the audit is
+    # read-only whatever else is in flight, and it still catches the real
+    # regression: an audit that writes a tracked file shows up as a new line.
+    after = tracked_status()
+    changed = sorted(set(after) - set(before)) + sorted(set(before) - set(after))
+    check("the audit changes nothing on the machine", not changed,
+          f"the audit altered: {changed[:3]}")
 
     failed = sum(1 for _, ok, _ in RESULTS if not ok)
     print(f"\nmachine-sync-audit-selftest: {len(RESULTS) - failed}/{len(RESULTS)} passed")
