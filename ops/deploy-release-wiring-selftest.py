@@ -96,6 +96,35 @@ def main() -> int:
           and "--read-back-at now" in source,
           "the read-back is not conditioned on complete or verified identity")
 
+    # 3d. THE PRODUCTION READ-BACK RETRIES BEFORE IT CONDEMNS A DEPLOY.
+    # It used to read /release once, the instant Wrangler returned, and write
+    # whatever it saw into the production ledger as a permanent verdict. A
+    # Cloudflare promotion is not globally consistent that instant, so a single
+    # early read can observe the PREVIOUS identity — which is exactly what
+    # happened to release.eed.prod.v3 on 2026-08-19 at 23:36:47Z, eleven seconds
+    # after Joe approved it. The deploy recorded state=failed while the Worker it
+    # had just promoted was serving the approved identity correctly.
+    #
+    # That row also froze ops/last-deployed-verb-count.py, which reads its
+    # baseline from the newest COMPLETE production row: it stayed at 130 verbs
+    # while production served 140, so a deploy shipping 131 would have passed the
+    # verb-loss guard while dropping nine live verbs.
+    #
+    # A settled mismatch must still fail, so this pins BOTH halves: the loop
+    # exists, and the failed record still happens when the loop gives up.
+    check("3d. the Production read-back retries before recording a mismatch",
+          "LIVE_READBACK_ATTEMPTS" in source
+          and "LIVE_RELEASE_OK" in source
+          and re.search(r'while \[ "\$LIVE_RELEASE_ATTEMPT" -lt "\$LIVE_READBACK_ATTEMPTS" \]',
+                        source) is not None
+          and 'if [ "$LIVE_RELEASE_OK" -ne 1 ]; then' in source,
+          "a single early read can condemn a healthy deploy, and did on 2026-08-19")
+
+    check("3e. exhausting the retries still records the failure",
+          re.search(r'if \[ "\$LIVE_RELEASE_OK" -ne 1 \]; then(?:.|\n)*?'
+                    r'record_deployment failed', source) is not None,
+          "retrying must not become a way to never fail")
+
     # 3c. a verified deploy CLOSES its release
     close_at = source.find("release complete --key")
     check("3c. a complete deploy closes the release, and only a complete one",
