@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
-"""Hermetic checks for the one connection tools/rotate-credential.py may mint.
+"""Hermetic tests for the dormant carr_backup rotation primitives.
 
-No database, no network, no db.env: every check below runs against the pure
-functions and the argument parser. The DSN construction is the part worth
-pinning, because a backup credential that is scoped wrong still connects — it
-just quietly reads or misses the wrong things, and nothing fails until a
-restore needs the table that was not there.
+Backup mutation is deliberately unavailable until a canonical server-validated
+receipt exists.  These tests therefore exercise no provider or database: they
+cover the fail-closed entrypoints and the future-enablement helpers only.
 """
 from __future__ import annotations
 
+import contextlib
+import ast
 import importlib.util
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import types
 from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("rotate_credential",
-                                              REPO / "tools" / "rotate-credential.py")
+SPEC = importlib.util.spec_from_file_location("rotate_credential", REPO / "tools" / "rotate-credential.py")
 if SPEC is None or SPEC.loader is None:
-    raise SystemExit("rotate-credential-mint-selftest: cannot load tools/rotate-credential.py")
-# Any because the module is loaded by path: a type checker cannot see the
-# attributes of a file it was never told to follow.
+    raise SystemExit("rotate-credential-mint-selftest: cannot load credential tool")
 rc: Any = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(rc)
 
 FAILURES: list[str] = []
+OWNER = "postgresql://owner:ownerpw@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require"
+PEER = "postgresql://carr_jobs:oldpw@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 
 def check(label: str, ok: bool) -> None:
@@ -32,100 +37,183 @@ def check(label: str, ok: bool) -> None:
         FAILURES.append(label)
 
 
-# The jobs peer deliberately carries a second query parameter; the exporter peer
-# deliberately does not. A mint must produce the same result from either.
-JOBS = "postgresql://carr_jobs:pw1@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-EXPORTER = "postgresql://app_exporter_local:pw2@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require"
+def refused(call) -> str:
+    try:
+        call()
+    except SystemExit as exc:
+        return str(exc)
+    return ""
 
-PW = "A" * 40
+
+@contextlib.contextmanager
+def isolated_state():
+    with tempfile.TemporaryDirectory() as raw:
+        previous = rc.ENV_PATH
+        rc.ENV_PATH = str(Path(raw) / "db.env")
+        try:
+            yield Path(raw)
+        finally:
+            rc.ENV_PATH = previous
+
+
+class Result:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class Connection:
+    def __init__(self, row):
+        self.row = row
+        self.query = ""
+
+    def execute(self, query):
+        self.query = str(query)
+        return Result(self.row)
 
 
 def main() -> int:
-    check("carr_backup is the only mintable role", rc.MINTABLE == {"carr_backup"})
-    check("carr_backup maps to the env var backup-dump.sh reads",
-          rc.ROLE_ENV.get("carr_backup") == "CARR_DB_BACKUP_URL")
+    source = (REPO / "tools" / "rotate-credential.py").read_text(encoding="utf-8")
+    workflow = (REPO / ".github" / "workflows" / "backup-nightly.yml").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    check("no callable carr_backup ALTER ROLE path remains",
+          "_rotate_backup_role_enabled" not in function_names
+          and 'sql.Identifier("carr_backup")' not in source
+          and "alter role carr_backup" not in source.lower()
+          and {"rotate_role", "rotate_backup_role"}.issubset(function_names)
+          and rc.MINTABLE == set())
+    check("workflow documentation does not sanction direct backup credential mutation",
+          "PROVISIONING IS DISABLED" in workflow
+          and "alter role carr_backup password" not in workflow.lower()
+          and "gh secret set BACKUP_DATABASE_URL" not in workflow
+          and "Provisioning steps are in this workflow" not in workflow
+          and "run it manually (workflow_dispatch)" not in workflow)
+    _, owner_target = rc._postgres_parts(OWNER, "owner")
+    minted = rc.mint_url("carr_backup", {"CARR_DB_JOBS_URL": PEER}, "A" * 40, owner_target)
+    check("canonical TLS-only peer mints a pinned backup URL",
+          minted.endswith("?sslmode=require") and "oldpw" not in minted)
+    exact = (
+        "sslmode=require&host=evil", "sslmode=require&hostaddr=127.0.0.1",
+        "sslmode=require&port=5433", "sslmode=require&dbname=other",
+        "sslmode=require&user=other", "sslmode=require&service=other",
+        "sslmode=require&options=-csearch_path=evil", "sslmode=require&sslmode=require",
+        "channel_binding=require&sslmode=require", "sslmode=verify-full",
+    )
+    for query in exact:
+        dsn = f"postgresql://x:y@host/db?{query}"
+        check(f"libpq override refuses {query.split('=', 1)[0]}",
+              "ambiguous libpq query override" in refused(lambda dsn=dsn: rc._postgres_parts(dsn, "test")))
+    check("owner, peer, existing, and pending share strict parser",
+          all("ambiguous libpq query override" in refused(lambda value=value: rc._postgres_parts(value, "test"))
+              for value in ("postgresql://x:y@host/db?sslmode=require&user=x",) * 4))
 
-    from_exporter = rc.mint_url("carr_backup", {"CARR_DB_EXPORTER_URL": EXPORTER}, PW)
-    from_jobs = rc.mint_url("carr_backup", {"CARR_DB_JOBS_URL": JOBS}, PW)
-
-    check("minted URL authenticates as carr_backup, which backup-dump.sh enforces",
-          "://carr_backup:" in from_exporter)
-    check("host and database are copied from the peer",
-          "@ep-x-123.us-east-2.aws.neon.tech/neondb?" in from_exporter)
-    check("the peer's password never survives into the minted URL",
-          "pw1" not in from_jobs and "pw2" not in from_exporter)
-    # The whole point of setting rather than inheriting the query string.
-    check("query string is SET, so a jobs peer does not drag channel_binding along",
-          from_jobs.endswith("?sslmode=require") and "channel_binding" not in from_jobs)
-    check("either peer yields a byte-identical result", from_jobs == from_exporter)
-
-    # db.env is read by two parsers and therefore has two contracts. Python
-    # readers split on '=' and strip quotes and do not care; zsh SOURCES the
-    # file, so an unquoted & in a DSN is a background operator rather than a
-    # character. A minted line has to survive the shell one.
-    #
-    # This pins that property for the minted value only. It is NOT the
-    # every-consumer check the enforceability audit sketches for that rule, so
-    # the audit row stays where it is rather than being promoted off the back
-    # of a narrower test than it asks for.
-    quoted = rc.shell_quote(from_jobs)
-    check("minted value is single-quoted for the shell parser",
-          quoted.startswith("'") and quoted.endswith("'"))
-
-    # A peer that is present but malformed must not silently become a guess.
+    # Both public backup entrypoints must stop before every local or provider
+    # primitive.  Replacements would throw if any one were reached.
+    real_lock, real_read, real_run = rc.credential_env_lock, rc.read_env, rc.subprocess.run
+    rc.credential_env_lock = lambda: (_ for _ in ()).throw(AssertionError("lock reached"))
+    rc.read_env = lambda: (_ for _ in ()).throw(AssertionError("env reached"))
+    rc.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("subprocess reached"))
     try:
-        rc.mint_url("carr_backup", {"CARR_DB_EXPORTER_URL": "not-a-dsn"}, PW)
-        check("a malformed peer refuses rather than guessing a host", False)
-    except SystemExit:
-        check("a malformed peer refuses rather than guessing a host", True)
+        check("rotate_role backup refusal precedes all mutation primitives",
+              "disabled" in refused(lambda: rc.rotate_role("carr_backup", True, True)))
+        check("direct backup entrypoint refusal precedes all mutation primitives",
+              "disabled" in refused(lambda: rc.rotate_backup_role(True)))
+        check("generic internal helper cannot bypass carr_backup refusal",
+              "permitted only" in refused(lambda: rc._rotate_existing_role("carr_backup", True)))
+        check("deepest ALTER ROLE helper cannot bypass carr_backup refusal",
+              "permitted only" in refused(lambda: rc._rotate_existing_role_locked("carr_backup", True)))
+    finally:
+        rc.credential_env_lock, rc.read_env, rc.subprocess.run = real_lock, real_read, real_run
 
-    try:
-        rc.mint_url("carr_backup", {}, PW)
-        check("no peer at all refuses rather than inventing a host", False)
-    except SystemExit:
-        check("no peer at all refuses rather than inventing a host", True)
-
-    # Both ends of the same role, or the one still working breaks.
-    src = (REPO / "tools" / "rotate-credential.py").read_text(encoding="utf-8")
-    check("the GitHub secret is passed on stdin, never on a command line",
-          'input=url' in src and '"gh", "secret", "set"' in src)
-    check("a carr_backup run without --github-secret warns that the cloud end is stale",
-          "the cloud nightly still holds the OLD password" in src)
-    check("a failed secret write says db.env already moved",
-          "db.env IS WRITTEN but" in src)
-    check("no other role gained a mint path",
-          "role not in MINTABLE" in src)
-
-    # BEHAVIOUR, not a grep. An earlier cut of this file searched the source for
-    # the refusal sentence and failed only because the literal is split across
-    # two lines — the check was testing how the message is typed, not what the
-    # tool does. These drive the real function against a temp db.env instead.
-    import os
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as raw:
-        env_file = Path(raw) / "db.env"
-        env_file.write_text(f"CARR_DB_EXPORTER_URL='{EXPORTER}'\n", encoding="utf-8")
-        real_env_path, rc.ENV_PATH = rc.ENV_PATH, str(env_file)
-        # Set so the owner check upstream passes and the run reaches the branch
-        # under test; nothing here ever opens a connection.
-        os.environ["DATABASE_URL"] = "postgresql://owner:pw@host/db"
+    with isolated_state() as raw:
+        pending = "postgresql://carr_backup:Z@host/db?sslmode=require"
+        rc._write_pending_backup_url(pending)
+        path = Path(rc._private_pending_path())
+        check("pending canonical is private regular 0600 with one link",
+              path.read_text(encoding="utf-8") == pending + "\n"
+              and stat.S_IMODE(path.stat().st_mode) == 0o600 and path.stat().st_nlink == 1)
+        check("pending canonical publication never overwrites",
+              "already exists" in refused(lambda: rc._write_pending_backup_url(pending)))
+        prefix = rc._prepublication_prefix(str(path))
+        fd, twin = tempfile.mkstemp(dir=raw, prefix=prefix)
+        os.write(fd, (pending + "\n").encode())
+        os.fsync(fd)
+        os.close(fd)
+        os.chmod(twin, 0o600)
+        os.unlink(path)
+        os.link(twin, path)
+        rc._clean_prepublication_temps(str(path))
+        check("only a validated same-inode publication twin is cleaned", path.stat().st_nlink == 1)
+        rc._clear_pending_backup_url()
+        real_link = rc.os.link
+        rc.os.link = lambda *unused: (_ for _ in ()).throw(RuntimeError("injected prepublish failure"))
         try:
             try:
-                rc.rotate_role("carr_backup", generate=False)
-                check("minting refuses without --generate", False)
-            except SystemExit as e:
-                check("minting refuses without --generate", "--generate" in str(e))
-
-            try:
-                rc.rotate_role("carr_jobs", generate=True)
-                check("a non-mintable role with no env line still refuses", False)
-            except SystemExit as e:
-                check("a non-mintable role with no env line still refuses",
-                      "does not mint a connection" in str(e))
+                rc._write_pending_backup_url(pending)
+            except RuntimeError:
+                pass
+            check("prepublication crash leaves canonical pending state absent", not path.exists())
+            check("prepublication temp is safely cleaned on next attempt",
+                  not list(raw.glob(path.name + ".prepublish.*")))
         finally:
-            rc.ENV_PATH = real_env_path
-            os.environ.pop("DATABASE_URL", None)
+            rc.os.link = real_link
+
+        lock = Path(rc.ENV_PATH + ".rotate-credential.lock")
+        target = raw / "not-a-lock"
+        target.write_text("x", encoding="utf-8")
+        lock.symlink_to(target)
+        check("symlink lock is refused", "cannot be opened safely" in refused(lambda: rc.credential_env_lock().__enter__()))
+        lock.unlink()
+        lock.write_text("x", encoding="utf-8")
+        os.chmod(lock, 0o644)
+        check("non-0600 lock is refused", "not a private regular" in refused(lambda: rc.credential_env_lock().__enter__()))
+        lock.unlink()
+        lock.write_text("x", encoding="utf-8")
+        os.chmod(lock, 0o600)
+        sibling = raw / "lock-hardlink"
+        os.link(lock, sibling)
+        check("multi-link lock is refused", "not a private regular" in refused(lambda: rc.credential_env_lock().__enter__()))
+        sibling.unlink()
+        lock.unlink()
+        with rc.credential_env_lock():
+            check("private regular lock can be acquired", True)
+
+    recorded: dict[str, object] = {}
+    real_run, old_host = rc.subprocess.run, os.environ.get("GH_HOST")
+    rc.subprocess.run = lambda argv, **kw: (recorded.update(argv=argv, **kw) or types.SimpleNamespace(returncode=0))
+    try:
+        rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")
+        check("GitHub call pins repository, host, and a bounded timeout",
+              recorded["argv"] == ["gh", "secret", "set", "BACKUP_DATABASE_URL", "--repo", "jbookout/carr-system"]
+              and recorded["env"]["GH_HOST"] == "github.com" and recorded["timeout"] == 30)
+        rc.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("gh", 30))
+        check("GitHub timeout is secret-free and resumable", "timed out" in refused(
+            lambda: rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")))
+        os.environ["GH_HOST"] = "evil.example"
+        check("ambient GitHub host redirect is refused", "non-github.com" in refused(
+            lambda: rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")))
+    finally:
+        rc.subprocess.run = real_run
+        if old_host is None:
+            os.environ.pop("GH_HOST", None)
+        else:
+            os.environ["GH_HOST"] = old_host
+
+    identity = Connection(("carr_backup", "carr_backup"))
+    rc.verify_backup_connection(identity)
+    check("credential identity requires session_user and current_user", "session_user" in identity.query)
+    check("credential identity rejects SET ROLE/proxy mismatch",
+          "session identity" in refused(lambda: rc.verify_backup_connection(Connection(("owner", "carr_backup")))))
+    owner_ok = Connection((True,) * 9)
+    rc.verify_backup_least_privilege(owner_ok)
+    check("owner-derived verification covers powerful attrs, reachability, ownership, ACLs, tables and sequences",
+          all(token in owner_ok.query for token in ("rolbypassrls", "reachable", "pg_database",
+              "pg_proc", "aclexplode", "has_table_privilege", "has_sequence_privilege", "is_grantable")))
+    check("owner-derived verification fails closed on any missing contract element",
+          "least-privilege" in refused(lambda: rc.verify_backup_least_privilege(Connection((True,) * 8 + (False,)))))
 
     if FAILURES:
         print(f"rotate-credential-mint-selftest: {len(FAILURES)} FAILED")

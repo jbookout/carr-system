@@ -30,25 +30,17 @@
 # BACKUP_DATABASE_URL secret can produce a read-only copy of the database
 # and nothing more.
 #
-# PROVISIONING — DONE ONCE, BY THE MAIN SESSION, NEVER BY THIS FILE. No
-# secret is created or handled anywhere in this workflow; these three steps
-# are the only place a value is chosen, and none of them touch this repo:
-#   1. carr_backup is created by 0119 with a random, unrecorded placeholder
-#      password and cannot log in until this runs:
-#        alter role carr_backup password '<a real value, chosen by Joe>';
-#   2. Land a full connection string (role carr_backup, that password) as
-#      the repo secret this workflow reads:
-#        gh secret set BACKUP_DATABASE_URL
-#      (paste a postgres://carr_backup:<password>@<host>/<db>?sslmode=require URL when prompted — the neonctl-derivable shape, role carr_backup) # ci-secret-scan: allow — documentation example shape, not a real credential
-#   3. Only once both of the above are done, turn the schedule on:
-#        gh variable set CARR_CLOUD_BACKUP_ENABLED --body true
-# Until step 3, every SCHEDULED run exits neutral-success with a clear log
-# line and touches nothing — merging this file cannot start firing at
-# 02:35 UTC before the secret exists. workflow_dispatch (manual runs) is
-# deliberately exempt from the same gate, the same asymmetry
-# automerge-pilot.yml uses for CARR_AUTOMERGE_PILOT_ENABLED, so the main
-# session can test-run this once BACKUP_DATABASE_URL is set but before
-# flipping the nightly schedule on.
+# PROVISIONING IS DISABLED. Migration 0119 created carr_backup with an
+# unrecorded placeholder, but no sanctioned path currently exists to set its
+# password or BACKUP_DATABASE_URL. Do NOT run direct ALTER ROLE commands, do
+# NOT set the GitHub secret, and do NOT enable this schedule. A caller-provided
+# approval string is not authority: provisioning/rotation stays disabled until
+# a canonical server-validated immutable receipt binds Joe's approval and the
+# metering admission to this exact target and credential material.
+#
+# Until that receipt seam is designed, a scheduled invocation stays neutral at
+# the gate below and manual dispatch is not a provisioning substitute. Merging
+# this file therefore cannot authorize a credential mutation or cloud backup.
 #
 # ACTIONS ARE PINNED TO COMMIT SHAs, not tags — same rule and the same two
 # pins ci.yml and automerge-pilot.yml already use.
@@ -85,8 +77,7 @@ jobs:
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "CARR_CLOUD_BACKUP_ENABLED is not 'true' and this is a scheduled run — exiting neutral-success, nothing ran."
-            echo "This gate exists so merging backup-nightly.yml cannot start firing at 02:35 UTC before BACKUP_DATABASE_URL is provisioned."
-            echo "Provisioning steps are in this workflow file's own header comment. To test before flipping the switch, run it manually (workflow_dispatch)."
+            echo "Cloud backup provisioning is disabled pending a canonical server-validated receipt seam; do not treat workflow_dispatch as a provisioning path."
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

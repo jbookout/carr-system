@@ -17,15 +17,12 @@ scoped to one database and does not expire. Rotation was the remedy, and doing
 it by hand would have meant a password on a command line, which is the same
 class of mistake one step further along.
 
-THE FOUR THINGS IT ROTATES
+THE THREE THINGS IT ROTATES (AND ONE DISABLED BACKUP PATH)
 
   --role carr_jobs             ALTER ROLE, then rewrite CARR_DB_JOBS_URL
   --role app_exporter_local    ALTER ROLE, then rewrite CARR_DB_EXPORTER_URL
-  --role carr_backup           ALTER ROLE, then rewrite CARR_DB_BACKUP_URL —
-                               and MINT that line if it does not exist yet,
-                               which is the only minting this tool does. See
-                               the MINTABLE block below for why that exception
-                               is one role wide.
+  --role carr_backup           DISABLED: refuses before local or provider work
+                               until a canonical server-validated receipt exists
   --neon-api-key               mint a new Neon API key, then revoke the old one
 
   --generate makes it non-interactive: a 40-character password from the
@@ -34,15 +31,13 @@ THE FOUR THINGS IT ROTATES
   --generate only: a credential no human ever types should not be one a human
   chooses.
 
-  --github-secret also sets the BACKUP_DATABASE_URL repo secret, passed on
-  stdin so it never reaches the process table or shell history. Use it for
-  carr_backup every time. bin/backup-dump.sh serves this Mac AND
-  .github/workflows/backup-nightly.yml off that one role (rule a8c55a47), so
-  moving one end alone does not degrade the backup — it breaks the other end
-  silently, on a night nobody is watching.
+  --github-secret is reserved for a future receipt-bound carr_backup path. It
+  is never invoked by the disabled public backup route. A future implementation
+  must keep its value on stdin, never a command line or shell history.
 
-  DATABASE_URL=<owner> .venv/bin/python tools/rotate-credential.py \
-      --role carr_backup --generate --github-secret
+  carr_backup rotation is intentionally disabled until a server-validated,
+  immutable receipt binds Joe's approval and metering admission to this exact
+  target and credential material.  A caller-supplied string is not authority.
 
 THE PASSWORD IS SWAPPED INTO THE EXISTING URL, NOT REBUILT FROM THE OWNER URL.
 The original tool derived the jobs URL from the owner DSN by substituting the
@@ -67,6 +62,8 @@ is db.env, mode 600.
 """
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import getpass
 import json
 import os
@@ -79,6 +76,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 ENV_PATH = os.path.expanduser("~/.config/carr/db.env")
 NEON_API = "https://console.neon.tech/api/v2"
@@ -93,23 +91,16 @@ ROLE_ENV = {
     "carr_backup": "CARR_DB_BACKUP_URL",
 }
 
-# THE ONE ROLE THIS TOOL MAY MINT A CONNECTION FOR, rather than only rotate.
+# No role may mint a connection while the backup provider mutation is disabled.
 #
-# Everywhere else the refusal below stands: an absent env key means somebody
-# should look at why, not that a tool should invent a DSN. carr_backup is the
-# exception for a reason with a date on it. On 2026-08-20 the nightly chain was
-# found dead for three nights because CARR_DB_BACKUP_URL had never existed on
-# this Mac — #288 began requiring it, migration 0119 ships the role with a
-# placeholder password for a human to replace, and nothing in between could
-# produce the line. The gap was not the credential; it was that no path existed
-# to create it, so the only routes left were a hand-built DSN or a break-glass
-# session, and both of those are worse than this.
+# The pure URI/pending helpers below remain tested so future receipt-bound
+# enablement has a narrow foundation, but absent db.env keys always refuse now.
 #
-# The password still never leaves this process, the human still runs the
-# command, and the control-plane declaration (routine_backup.provisioning =
-# external_human_approval) still holds: this is the tool that approval drives,
-# not a way around it.
-MINTABLE = {"carr_backup"}
+# The control-plane declaration says external_human_approval.  There is not yet
+# a canonical, server-validated receipt that binds that approval and metering
+# admission to this exact target/material, so the public backup entrypoints
+# fail closed rather than pretending a caller-provided string is authority.
+MINTABLE: set[str] = set()
 
 # The database is the same one every routine credential already points at, so
 # the host and database name are COPIED from a routine DSN that is known to
@@ -130,9 +121,227 @@ MINT_QUERY = "sslmode=require"
 # The GitHub repository secret the cloud nightly reads. Same script, same role,
 # same database — see .github/workflows/backup-nightly.yml.
 GITHUB_SECRET = "BACKUP_DATABASE_URL"
+GITHUB_REPOSITORY = "jbookout/carr-system"
+GITHUB_HOST = "github.com"
+GITHUB_TIMEOUT_SECONDS = 30
 
 # No spaces, quotes, @ / : ? # — every one of them changes how a URL parses.
 ALPHABET = string.ascii_letters + string.digits
+
+
+def _fsync_directory(path: str) -> None:
+    """Make a preceding rename or unlink durable, not merely atomic."""
+    fd = os.open(path or ".", os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _durable_replace(path: str, content: str, *, prefix: str) -> None:
+    """Write a 0600 file, fsync it, atomically replace it, then fsync its dir."""
+    directory = os.path.dirname(path) or "."
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=prefix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(temporary, path)
+        _fsync_directory(directory)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+
+
+def _private_pending_path() -> str:
+    return ENV_PATH + ".carr_backup.pending"
+
+
+@contextmanager
+def credential_env_lock():
+    """Serialize every db.env writer in this tool through one hardened lock."""
+    path = ENV_PATH + ".rotate-credential.lock"
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        sys.exit("rotate-credential: credential lock cannot be opened safely")
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or stat.S_IMODE(st.st_mode) != (stat.S_IRUSR | stat.S_IWUSR)):
+            sys.exit("rotate-credential: credential lock is not a private regular 0600 file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit("rotate-credential: another credential rotation is in progress")
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _postgres_parts(url: str, label: str):
+    """Parse only the narrow URI form this tool can safely republish."""
+    if not isinstance(url, str) or not url or any(ch.isspace() for ch in url):
+        sys.exit(f"rotate-credential: {label} is not a strict PostgreSQL URI")
+    try:
+        parts = urlsplit(url)
+        # urlsplit accepts a second raw @ as part of userinfo.  PostgreSQL URI
+        # passwords must percent-encode it, so accepting it would make the
+        # endpoint parsed by this tool differ from the endpoint libpq receives.
+        if "@" in parts.netloc.rsplit("@", 1)[0]:
+            raise ValueError("multiple at signs")
+        port = parts.port  # force urlsplit to reject a non-numeric port
+    except ValueError:
+        sys.exit(f"rotate-credential: {label} is not a strict PostgreSQL URI")
+    # A libpq query parameter can replace the URI's authority, database,
+    # identity, service profile, or connection behavior.  The backup contract
+    # accepts precisely the one TLS form used by the workflow, with its optional
+    # channel-binding hardening; no duplicate or encoded spelling is accepted.
+    if parts.query not in {"sslmode=require", "sslmode=require&channel_binding=require"}:
+        sys.exit(f"rotate-credential: {label} has an ambiguous libpq query override")
+    database = unquote(parts.path[1:]) if parts.path.startswith("/") else ""
+    if (parts.scheme not in {"postgres", "postgresql"} or parts.fragment
+            or not parts.hostname or not parts.username or parts.password is None
+            or not database or "/" in database):
+        sys.exit(f"rotate-credential: {label} is not a strict PostgreSQL URI")
+    return parts, (parts.hostname.lower(), port or 5432, database)
+
+
+def _url_for_role(parts, role: str, password: str, query: str) -> str:
+    host = parts.hostname
+    assert host is not None  # _postgres_parts already refused an absent host.
+    rendered_host = f"[{host}]" if ":" in host else host
+    try:
+        port = parts.port
+    except ValueError:
+        sys.exit("rotate-credential: strict PostgreSQL URI port check failed")
+    if port is not None:
+        rendered_host += f":{port}"
+    return urlunsplit(("postgresql", f"{quote(role, safe='')}:{quote(password, safe='')}@{rendered_host}",
+                       parts.path, query, ""))
+
+
+def _read_pending_backup_url(owner_target: tuple[str, int, str]) -> str | None:
+    path = _private_pending_path()
+    _clean_prepublication_temps(path)
+    try:
+        st = os.lstat(path)
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                or stat.S_IMODE(st.st_mode) != (stat.S_IRUSR | stat.S_IWUSR)):
+            sys.exit("rotate-credential: pending backup state is not mode 0600")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            value = handle.read()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        sys.exit("rotate-credential: cannot read pending backup state")
+    if not value.endswith("\n") or value.count("\n") != 1:
+        sys.exit("rotate-credential: pending backup state has an invalid shape")
+    url = value[:-1]
+    parts, target = _postgres_parts(url, "pending backup state")
+    if parts.username != "carr_backup" or target != owner_target:
+        sys.exit("rotate-credential: pending backup state does not match this owner target")
+    return url
+
+
+def _prepublication_prefix(path: str) -> str:
+    return os.path.basename(path) + ".prepublish."
+
+
+def _clean_prepublication_temps(path: str) -> None:
+    """Remove only stale, private temp files created before canonical publish."""
+    directory = os.path.dirname(path) or "."
+    prefix = _prepublication_prefix(path)
+    removed = False
+    try:
+        canonical = os.lstat(path)
+    except FileNotFoundError:
+        canonical = None
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        try:
+            st = os.lstat(entry.path)
+        except FileNotFoundError:
+            continue
+        orphan = (stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid()
+                  and stat.S_IMODE(st.st_mode) == (stat.S_IRUSR | stat.S_IWUSR))
+        published_twin = (canonical is not None and stat.S_ISREG(st.st_mode)
+                          and st.st_nlink == 2 and st.st_uid == os.getuid()
+                          and stat.S_IMODE(st.st_mode) == (stat.S_IRUSR | stat.S_IWUSR)
+                          and (st.st_dev, st.st_ino) == (canonical.st_dev, canonical.st_ino))
+        if orphan or published_twin:
+            try:
+                os.unlink(entry.path)
+                removed = True
+            except FileNotFoundError:
+                pass
+    if removed:
+        _fsync_directory(directory)
+
+
+def _write_pending_backup_url(url: str) -> None:
+    """Durably publish one resume value without ever overwriting canonical state."""
+    path = _private_pending_path()
+    directory = os.path.dirname(path) or "."
+    _clean_prepublication_temps(path)
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=_prepublication_prefix(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(url + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
+        # link(2) is an atomic no-overwrite publication: FileExistsError means
+        # a different canonical state won, and the caller must resume that one.
+        os.link(temporary, path)
+        _fsync_directory(directory)
+        os.unlink(temporary)
+        _fsync_directory(directory)
+    except FileExistsError:
+        sys.exit("rotate-credential: pending backup state already exists; rerun to resume it")
+    except BaseException:
+        raise
+    finally:
+        # Before publication it has one link and is safe to remove; after a
+        # crash immediately after link(2), it has two links and is deliberately
+        # left for the next locked run to inspect rather than guessed away.
+        try:
+            st = os.lstat(temporary)
+            if (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+                    and stat.S_IMODE(st.st_mode) == (stat.S_IRUSR | stat.S_IWUSR)):
+                os.unlink(temporary)
+                _fsync_directory(directory)
+        except FileNotFoundError:
+            pass
+
+
+def _clear_pending_backup_url() -> None:
+    path = _private_pending_path()
+    try:
+        os.unlink(path)
+        _fsync_directory(os.path.dirname(path) or ".")
+    except FileNotFoundError:
+        sys.exit("rotate-credential: pending backup state disappeared; refusing to guess")
+
+
+def _backup_mutation_unavailable() -> None:
+    """Fail closed: no canonical receipt seam exists for this provider mutation."""
+    sys.exit("rotate-credential: carr_backup rotation is disabled: no server-validated immutable "
+             "approval-and-metering receipt binds this exact target and credential material")
 
 
 def read_env() -> dict[str, str]:
@@ -192,17 +401,7 @@ def write_env_key(key: str, value: str) -> None:
     if not replaced:
         lines.append(f"{key}={value}")
 
-    d = os.path.dirname(ENV_PATH)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".db.env.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-        os.replace(tmp, ENV_PATH)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    _durable_replace(ENV_PATH, "\n".join(lines) + "\n", prefix=".db.env.")
 
 
 def swap_password(url: str, password: str) -> str:
@@ -219,7 +418,8 @@ def new_password() -> str:
     return "".join(secrets.choice(ALPHABET) for _ in range(40))
 
 
-def mint_url(role: str, env: dict[str, str], password: str) -> str:
+def mint_url(role: str, env: dict[str, str], password: str,
+             owner_target: tuple[str, int, str]) -> str:
     """Build a first connection string for `role` from a peer routine DSN.
 
     Host and database are copied from a peer that already connects; user is the
@@ -232,15 +432,13 @@ def mint_url(role: str, env: dict[str, str], password: str) -> str:
         peer = env.get(key)
         if not peer:
             continue
-        m = re.match(r"^(?P<scheme>\w+://)[^:/@]+:[^@]*@(?P<host>[^/]+)/(?P<db>[^?]+)", peer)
-        if not m:
-            continue
-        return (f"{m.group('scheme')}{role}:{password}@"
-                f"{m.group('host')}/{m.group('db')}?{MINT_QUERY}")
+        parts, peer_target = _postgres_parts(peer, f"{key} value")
+        if peer_target != owner_target:
+            sys.exit("rotate-credential: routine peer target does not match the owner target")
+        return _url_for_role(parts, role, password, MINT_QUERY)
     sys.exit(f"rotate-credential: cannot mint {ROLE_ENV[role]} — none of "
              f"{', '.join(MINT_SOURCE_KEYS)} is present in {ENV_PATH} in "
-             f"scheme://user:pass@host/db form, and this tool copies a host from a "
-             f"peer rather than inventing one.")
+             f"strict PostgreSQL URI form.")
 
 
 def set_github_secret(url: str) -> None:
@@ -255,17 +453,139 @@ def set_github_secret(url: str) -> None:
 
     The value goes in on stdin, never on a command line, so it stays out of the
     process table and out of shell history."""
-    proc = subprocess.run(["gh", "secret", "set", GITHUB_SECRET],
-                          input=url, text=True, capture_output=True)
+    ambient_host = os.environ.get("GH_HOST")
+    if ambient_host not in (None, "", GITHUB_HOST):
+        sys.exit("rotate-credential: refusing a non-github.com GH_HOST for the pinned repository secret")
+    safe_env = dict(os.environ)
+    safe_env["GH_HOST"] = GITHUB_HOST
+    try:
+        proc = subprocess.run(["gh", "secret", "set", GITHUB_SECRET,
+                               "--repo", GITHUB_REPOSITORY],
+                              input=url, text=True, capture_output=True,
+                              timeout=GITHUB_TIMEOUT_SECONDS, env=safe_env)
+    except subprocess.TimeoutExpired:
+        sys.exit("rotate-credential: GitHub secret update timed out; pending state retained "
+                 "for a same-value resume")
+    except OSError:
+        sys.exit("rotate-credential: GitHub secret update could not be started; pending state retained")
     if proc.returncode != 0:
-        sys.exit(f"rotate-credential: db.env IS WRITTEN but `gh secret set {GITHUB_SECRET}` "
-                 f"failed ({proc.stderr.strip()[:200]}). The two ends are now out of step and "
-                 f"the cloud nightly will fail on its next run. Re-run this command to reset "
-                 f"both together.")
-    print(f"  github secret {GITHUB_SECRET}: set (value passed on stdin, never displayed)")
+        # Do not render gh stderr: a future gh version or proxy must never turn
+        # a secret-bearing request into this tool's stderr.  The O_EXCL pending
+        # file remains, so retry always publishes exactly the same value.
+        sys.exit("rotate-credential: GitHub secret update was not confirmed; pending state retained "
+                 "for a same-value resume")
+    print(f"  github secret {GITHUB_SECRET}: set for {GITHUB_REPOSITORY} (value passed on stdin)")
+
+
+def verify_backup_connection(conn) -> None:
+    """The credential path itself must have no SET ROLE or proxy identity."""
+    row = conn.execute("select session_user, current_user").fetchone()
+    if row != ("carr_backup", "carr_backup"):
+        sys.exit("rotate-credential: carr_backup session identity verification failed; pending state retained")
+
+
+def verify_backup_least_privilege(owner_conn) -> None:
+    """Use owner-visible catalogs, never a restricted role's partial metadata view."""
+    row = owner_conn.execute("""
+        with recursive backup as (
+          select oid from pg_roles where rolname = 'carr_backup'
+        ), reachable(roleid) as (
+          select m.roleid from pg_auth_members m join backup b on b.oid = m.member
+          union
+          select m.roleid from pg_auth_members m join reachable r on r.roleid = m.member
+        ), objects as (
+          select c.oid, c.relkind, c.relnamespace, c.relowner, c.relacl,
+                 c.relrowsecurity, c.relforcerowsecurity
+           from pg_class c join pg_namespace n on n.oid = c.relnamespace
+           where n.nspname in ('public', 'ops')
+        ), all_objects as (
+          select c.oid, c.relkind, c.relnamespace, c.relowner, c.relacl
+            from pg_class c
+        )
+        select
+          exists (select 1 from pg_roles r
+                  where r.rolname = 'carr_backup' and r.rolcanlogin
+                    and not (r.rolsuper or r.rolcreatedb or r.rolcreaterole
+                             or r.rolreplication or r.rolbypassrls)),
+          not exists (select 1 from reachable),
+          not exists (select 1 from objects o join backup b on o.relowner = b.oid)
+            and not exists (select 1 from pg_namespace n join backup b on n.nspowner = b.oid)
+            and not exists (select 1 from pg_database d join backup b on d.datdba = b.oid)
+            and not exists (select 1 from pg_proc p join backup b on p.proowner = b.oid),
+          not exists (select 1 from pg_database d cross join backup b
+                      cross join lateral aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
+                      where a.grantee = b.oid and (a.privilege_type <> 'CONNECT' or a.is_grantable)),
+          has_database_privilege('carr_backup', current_database(), 'CONNECT')
+            and not has_database_privilege('carr_backup', current_database(), 'CREATE')
+            and not has_database_privilege('carr_backup', current_database(), 'TEMPORARY'),
+          not exists (select 1 from pg_namespace n cross join backup b
+                      cross join lateral aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
+                      where a.grantee = b.oid
+                        and (n.nspname not in ('public', 'ops') or a.privilege_type <> 'USAGE' or a.is_grantable)),
+          not exists (select 1 from pg_namespace n
+                      where n.nspname in ('public', 'ops')
+                        and (not has_schema_privilege('carr_backup', n.oid, 'USAGE')
+                             or has_schema_privilege('carr_backup', n.oid, 'CREATE')))
+            and not exists (select 1 from pg_namespace n
+                            where n.nspname not in ('public', 'ops', 'pg_catalog', 'information_schema')
+                              and (has_schema_privilege('carr_backup', n.oid, 'USAGE')
+                                   or has_schema_privilege('carr_backup', n.oid, 'CREATE'))),
+          not exists (select 1 from all_objects o cross join backup b
+                      cross join lateral aclexplode(coalesce(o.relacl,
+                        acldefault(case when o.relkind = 'S' then 'S'::"char" else 'r'::"char" end,
+                                   o.relowner))) a
+                      where a.grantee = b.oid
+                        and (o.relnamespace not in (select oid from pg_namespace
+                                                     where nspname in ('public', 'ops'))
+                             or o.relkind not in ('r', 'p', 'S')
+                             or a.privilege_type <> 'SELECT' or a.is_grantable)),
+          not exists (select 1 from pg_proc p cross join backup b
+                      cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                      where a.grantee = b.oid),
+          not exists (select 1 from objects o
+                      where o.relkind in ('r', 'p')
+                        and (o.relrowsecurity or o.relforcerowsecurity
+                             or not has_table_privilege('carr_backup', o.oid, 'SELECT')
+                             or has_table_privilege('carr_backup', o.oid,
+                                   'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'))),
+          not exists (select 1 from objects o
+                      where o.relkind = 'S'
+                        and (not has_sequence_privilege('carr_backup', o.oid, 'SELECT')
+                             or has_sequence_privilege('carr_backup', o.oid, 'USAGE, UPDATE'))),
+          not exists (select 1 from pg_proc p
+                      where has_function_privilege('carr_backup', p.oid, 'EXECUTE'))
+    """).fetchone()
+    if not row or not all(row):
+        sys.exit("rotate-credential: carr_backup least-privilege contract failed; pending state retained")
 
 
 def rotate_role(role: str, generate: bool, github_secret: bool = False) -> int:
+    # Refuse an accidental backup-secret overwrite before password generation,
+    # database imports, db.env reads, or any provider work.
+    if github_secret and role != "carr_backup":
+        sys.exit("rotate-credential: --github-secret is permitted only with --role carr_backup")
+
+    if role == "carr_backup":
+        _backup_mutation_unavailable()
+
+    return _rotate_existing_role(role, generate)
+
+
+def _rotate_existing_role(role: str, generate: bool) -> int:
+    # This private helper is intentionally an allowlist too: callers importing
+    # it must not bypass the public carr_backup refusal before any lock, import,
+    # environment read, password generation, or database work.
+    if role not in {"carr_jobs", "app_exporter_local"}:
+        sys.exit("rotate-credential: generic rotation is permitted only for carr_jobs or app_exporter_local")
+    with credential_env_lock():
+        return _rotate_existing_role_locked(role, generate)
+
+
+def _rotate_existing_role_locked(role: str, generate: bool) -> int:
+    # Defense in depth for imported/private callers: this is the deepest helper
+    # that holds ALTER ROLE, so it carries the same closed non-backup allowlist.
+    if role not in {"carr_jobs", "app_exporter_local"}:
+        sys.exit("rotate-credential: generic rotation is permitted only for carr_jobs or app_exporter_local")
     import psycopg
     from psycopg import sql
 
@@ -309,9 +629,10 @@ def rotate_role(role: str, generate: bool, github_secret: bool = False) -> int:
             sql.Identifier(role), sql.Literal(pw)))
         conn.commit()
 
-    # Branch on `existing` rather than on the flag: same two cases, but this
-    # form lets a type checker see that swap_password never receives None.
-    new_url = swap_password(existing, pw) if existing else mint_url(role, env, pw)
+    # carr_backup is disabled. The two permitted roles retain their historical
+    # behavior: replace only the password in an existing URL.
+    assert existing is not None
+    new_url = swap_password(existing, pw)
 
     # PROVE IT BEFORE WRITING IT. If the new credential does not connect, the old
     # line stays in db.env and the only damage is a role whose password no longer
@@ -327,18 +648,12 @@ def rotate_role(role: str, generate: bool, github_secret: bool = False) -> int:
     print(f"{role}: password {'set' if minting else 'rotated'} · {env_key} "
           f"{'created' if minting else 'rewritten'} · verified connection as {role}")
 
-    if github_secret:
-        set_github_secret(new_url)
-    elif role == "carr_backup":
-        # Not a suggestion. bin/backup-dump.sh runs in both places off the same
-        # role, and the cloud end is the one that kept working through the
-        # 2026-08-20 outage — so the end left behind here is the one currently
-        # protecting the data.
-        print(f"  WARNING: the cloud nightly still holds the OLD password. "
-              f"{GITHUB_SECRET} must be set to match or "
-              f".github/workflows/backup-nightly.yml fails on its next run. "
-              f"Re-run this with --github-secret to set both together.")
     return 0
+
+
+def rotate_backup_role(generate: bool) -> int:
+    """Public entrypoint deliberately refuses before touching local state."""
+    _backup_mutation_unavailable()
 
 
 def neon(method: str, path: str, key: str, body: dict | None = None) -> dict | list:
@@ -361,6 +676,11 @@ def neon(method: str, path: str, key: str, body: dict | None = None) -> dict | l
 
 
 def rotate_api_key(label: str) -> int:
+    with credential_env_lock():
+        return _rotate_api_key_locked(label)
+
+
+def _rotate_api_key_locked(label: str) -> int:
     env = read_env()
     old = env.get("NEON_API_KEY")
     if not old:
@@ -429,13 +749,15 @@ def main() -> int:
                    help="generate the password in-process instead of prompting")
     p.add_argument("--github-secret", action="store_true",
                    help=f"also set the {GITHUB_SECRET} repo secret the cloud nightly reads, "
-                        f"so both ends of the same role move together")
+                        "only permitted for carr_backup")
     p.add_argument("--label", default="carr-system",
                    help="name for the new Neon API key")
     args = p.parse_args()
 
     if bool(args.role) == bool(args.neon_api_key):
         p.error("choose exactly one of --role or --neon-api-key")
+    if args.github_secret and args.role != "carr_backup":
+        p.error("--github-secret is permitted only with --role carr_backup")
 
     return (rotate_role(args.role, args.generate, args.github_secret)
             if args.role else rotate_api_key(args.label))
