@@ -1,4 +1,4 @@
--- 0192_session_work.sql
+-- 0193_session_work.sql
 -- Session CRM v0: a staff-owned book of SESSION WORK in Neon.
 --
 -- WHAT THIS IS. The Chief of Staff needs a glanceable view of what is doing,
@@ -109,5 +109,5 @@ begin
   -- rest of this schema (insert a row, not a migration). The harvest enforces
   -- the known set; a future source adds a new kind without a migration.
 
-  raise notice '0192: session_work created, carr_jobs has insert+update (no delete), carr_reader has select';
+  raise notice '0193: session_work created, carr_jobs has insert+update (no delete), carr_reader has select';
 end $$;
