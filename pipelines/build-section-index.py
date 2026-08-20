@@ -57,9 +57,18 @@ Output: <CARR_ROOT>/Automation/section-index.tsv
 """
 import sys, os, re
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT  = os.path.join(ROOT, "Automation", "section-index.tsv")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+from lib.drive_recovery import RecoveryArgumentError, parse_recovery_controls
+
+try:
+    _RECOVERY = parse_recovery_controls(sys.argv[1:], "section-index canonical doctrine ingress")
+except RecoveryArgumentError as exc:
+    raise SystemExit(f"section-index: {exc}") from exc
+if _RECOVERY.args:
+    raise SystemExit(f"section-index: unexpected argument: {_RECOVERY.args[0]}")
+ROOT = str(_RECOVERY.vault) if _RECOVERY.recovery else REPO
+OUT  = os.path.join(REPO, "out", "recovery" if _RECOVERY.recovery else "", "section-index.tsv")
 
 SKIP_DIRS  = {"Source Material", "Output", ".obsidian", ".claude", ".git",
               "source-exports", "photos", "Prospects",
