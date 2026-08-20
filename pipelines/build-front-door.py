@@ -2,27 +2,61 @@
 # Regenerate: python3 build-front-door.py  (writes front-door.html beside it). Edit the GROUPS list to change tiles.
 # Mirrors the lead board's build-lead-board.py pattern so the Front Door is regenerable, not hand-edited.
 
-import argparse
 import urllib.parse, html, json, re, os, sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.drive_recovery import add_recovery_arguments, require_recovery
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "front-door.html")
+if sys.argv[1:]:
+    raise SystemExit("build-front-door: no folder or recovery arguments are accepted")
+REMINDER = (
+    "Use the CARR record-layer verbs and canonical carr-system repository context only. "
+    "Do not attach external folders. Start with "
+    "standing-context; use doctrine-index, search-doctrine, and read-doctrine for doctrine, "
+    "and the purpose-built record verbs for business records."
+)
+DOCTRINE = (
+    "Run this as a guided flow: say up front how many questions it will be, ask one at a "
+    "time with multiple choice wherever possible and fill-in-the-blank otherwise. Capture "
+    "the core record first through its verb, then offer to fill in the rest later."
+)
 
-_ap = argparse.ArgumentParser(description="Build the legacy Drive Front Door projection.")
-_ap.add_argument("folder", nargs="?", help="Drive root (recovery only; defaults to --vault)")
-add_recovery_arguments(_ap)
-_args = _ap.parse_args()
-if _args.folder and _args.vault:
-    _ap.error("pass either the recovery folder positional argument or --vault, not both")
-if _args.folder:
-    _args.vault = _args.folder
-try:
-    FOLDER = str(require_recovery(
-        _args, "record-native Front Door launcher and document destination API"))
-except ValueError as _exc:
-    _ap.error(str(_exc))
-REMINDER = "Reminder before we start: this session needs the CARR AI folder connected to read and write (this launcher link should connect it automatically; if it is not connected, connect it before sending)."
-DOCTRINE = "Run this as a guided flow per DNA/Team/guided-entry-doctrine.md: tell me up front how many questions it will be, ask one at a time with multiple choice wherever possible and fill-in-the-blank otherwise, and if this creates a record, capture the core first, save it, then offer to fill in the rest later so a couple of minutes is enough (the daily heartbeat or Monday brief will chase the missing pieces)."
+LEGACY_TOPICS = {
+    "DNA/Clients/clients-active.md": "canonical client records through find and catch-me-up",
+    "DNA/Clients/prospects/": "the prospect's canonical record through find and catch-me-up",
+    "DNA/Deal Management/fill-engine/fill-it-in-workflow.md": "the fill-it-in workflow via doctrine verbs",
+    "DNA/Deal Management/legal-considerations-lease-review.md": "the lease-review doctrine via doctrine verbs",
+    "DNA/Deal Management/playbooks/practice-os-playbooks.md": "the practice-OS playbooks via doctrine verbs",
+    "DNA/Deal Management/playbooks/negotiation.md": "the negotiation doctrine via doctrine verbs",
+    "DNA/Deal Management/playbooks/renewals.md": "the renewals doctrine via doctrine verbs",
+    "DNA/Deal Management/deal-room-kit.md": "the deal-room-kit doctrine via doctrine verbs",
+    "DNA/Deal Management comps conventions": "the comp-record conventions via doctrine verbs",
+    "DNA/Leads/lease-term-estimator.md": "the lease-term-estimator doctrine via doctrine verbs",
+    "DNA/Leads/lead-registry.xlsx": "canonical lead records through find and catch-me-up",
+    "DNA/Leads/lead-system.md": "the lead-system doctrine via doctrine verbs",
+    "DNA/Network/introduction-rules.md": "the introduction-rules doctrine via doctrine verbs",
+    "DNA/Network/README.md": "the vendor-network doctrine via doctrine verbs",
+    "DNA/Network/deals.md": "canonical activity and relationship records",
+    "DNA/Network/engine.md": "the network-engine doctrine via doctrine verbs",
+    "DNA/Network/vendors.xlsx": "canonical vendor records through find and catch-me-up",
+    "DNA/Research/costar-how-to.md": "the CoStar research doctrine via doctrine verbs",
+    "DNA/Research conventions": "the research conventions via doctrine verbs",
+    "DNA/Research": "canonical research captures through record verbs",
+    "DNA/Team/abilities.md": "the abilities catalog via doctrine verbs",
+    "DNA/Team/dna-protocol.md": "the record-write protocol via doctrine verbs",
+    "DNA/Team/team-loops.md": "canonical team loops through the loop verbs",
+    "DNA/templates.md": "the outreach-template doctrine via doctrine verbs",
+    "DNA/writing-rules.md": "the writing rules via doctrine verbs",
+    "00_Context/today.md": "the output returned by today-triage",
+}
+
+
+def canonical_prompt(prompt):
+    """Turn retained legacy path labels into record/doctrine topic names."""
+    for legacy, canonical in sorted(LEGACY_TOPICS.items(), key=lambda item: -len(item[0])):
+        prompt = prompt.replace(legacy, canonical)
+    if "DNA/" in prompt or "00_Context/" in prompt:
+        raise ValueError(f"Front Door prompt still names a legacy path: {prompt}")
+    return REMINDER + " " + prompt + " " + DOCTRINE
 
 GROUPS = [
 ("Add to the system", [
@@ -85,10 +119,9 @@ GROUPS = [
 ]
 
 def link(prompt):
-    q=REMINDER+" "+prompt+" "+DOCTRINE
-    return "claude://cowork/new?q="+urllib.parse.quote(q,safe="")+"&folder="+urllib.parse.quote(FOLDER,safe="")
+    return "claude://cowork/new?q="+urllib.parse.quote(canonical_prompt(prompt),safe="")
 def fullprompt(prompt):
-    return REMINDER+" "+prompt+" "+DOCTRINE
+    return canonical_prompt(prompt)
 def tiles_html(btns):
     out=[]
     for lbl,sub,p in btns:
@@ -178,12 +211,12 @@ HTML=f'''<!DOCTYPE html>
     <div class="head">
       <div class="wordmark">CARR<span class="b"></span></div>
       <h1>The Front Door</h1>
-      <p class="lede">Tap what you need. A new session opens pointed at your CARR folder with the task written in, you review, hit send, and answer one question at a time. Start with your everyday few. The full set is under All actions.</p>
+      <p class="lede">Tap what you need. A new session opens with the task written in, you review, hit send, and answer one question at a time. Start with your everyday few. The full set is under All actions.</p>
     </div>
     {everyday_html}
     {boards_html}
     <details class="more"><summary>All actions</summary>{more_html}</details>
-    <p class="foot">Every tile opens a fresh session with your CARR folder linked and the prompt loaded, and nothing sends on its own, so you always review first. Each session tells you in plain words what it changed, and you can say <b>undo</b> to reverse the last thing it did. If a tile does not open the app, tap <b>copy</b> and paste into a new session.</p>
+    <p class="foot">Every tile opens a fresh session with the canonical record workflow loaded, and nothing sends on its own, so you always review first. Each session tells you in plain words what it changed, and you can say <b>undo</b> to reverse the last thing it did. If a tile does not open the app, tap <b>copy</b> and paste into a new session.</p>
   </div>
   <div id="toast">Prompt copied</div>
 <script>
@@ -198,44 +231,20 @@ HTML=f'''<!DOCTYPE html>
       else{{fallback(text,ok);}}
     }});
   }});
-  document.querySelectorAll('.tile-main').forEach(function(a){{a.addEventListener('click',function(){{try{{var q=(a.getAttribute('href').split('q=')[1]||'').split('&folder=')[0];var text=decodeURIComponent(q);var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();document.execCommand('copy');document.body.removeChild(ta);toast.textContent='Prompt copied. Paste into the new chat (Cmd+V)';flash();setTimeout(function(){{toast.textContent='Prompt copied';}},2800);}}catch(e){{}}}});}});
+  document.querySelectorAll('.tile-main').forEach(function(a){{a.addEventListener('click',function(){{try{{var q=(a.getAttribute('href').split('q=')[1]||'');var text=decodeURIComponent(q);var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();document.execCommand('copy');document.body.removeChild(ta);toast.textContent='Prompt copied. Paste into the new chat (Cmd+V)';flash();setTimeout(function(){{toast.textContent='Prompt copied';}},2800);}}catch(e){{}}}});}});
   function fallback(text,ok){{var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();try{{document.execCommand('copy');ok();}}catch(err){{}}document.body.removeChild(ta);}}
 </script>
 </body>
 </html>'''
 
-# DELIVER IT. Added 2026-08-09. This script wrote the page beside itself inside
-# the repo and NOTHING copied it anywhere, so the front-door.html Joe actually
-# opens in the vault was last written 2026-07-14. Every change made to this
-# generator for nearly a month, including the board links that were built and
-# never inserted, reached a file no human opens.
-#
-# That is the third instance of one property in one audit: brief_pack wrote the
-# daily call list into a gitignored folder, the renewal shortlist went with it,
-# and this page did the same. Codex named the property, and it is worth naming
-# here too because it will keep recurring otherwise: a producer in this system
-# declares success when it CREATES an artifact, never when the consumer can
-# reach it. The generator that builds a surface is the right place to deliver
-# it, so the two cannot drift apart again.
-import os as _os
-_dest = _os.path.join(FOLDER, "DNA", "Team", "front-door.html")
-_dest_dir = _os.path.dirname(_dest)
-if not _os.path.isdir(_dest_dir):
-    # Recovery was explicitly requested, so a missing destination is a failed
-    # delivery, never a successful local-only render.
-    print("NOT DELIVERED: requested recovery destination is unavailable at", _dest_dir,
-          file=sys.stderr)
-    raise SystemExit(2)
-
-open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html'),'w',encoding='utf-8').write(HTML)
-open(_dest, "w", encoding="utf-8").write(HTML)
-print("delivered ->", _dest)
+open(OUTPUT,'w',encoding='utf-8').write(HTML)
+print("generated ->", OUTPUT)
 visible=' '.join(re.findall(r'>([^<>]+)<',HTML))
 assert '—' not in visible, "em-dash in visible copy"
 low=visible.lower()
 hits=[b for b in ['delve','seamless','unlock','elevate','leverage','robust','tapestry','realm'] if b in low]
 hrefs=[html.unescape(x) for x in re.findall(r'href="(claude://[^"]+)"',HTML)]
-allfolder=all('&folder=' in x for x in hrefs)
-allrem=all(urllib.parse.parse_qs(urllib.parse.urlparse(x.replace('claude://','https://')).query)['q'][0].startswith("Reminder") for x in hrefs)
-print("total tiles:",nbtn,"| links:",len(hrefs),"| AI-tell:",hits,"| folder all:",allfolder,"| reminder all:",allrem)
+nofolder=all('&folder=' not in x for x in hrefs)
+allcanonical=all(urllib.parse.parse_qs(urllib.parse.urlparse(x.replace('claude://','https://')).query)['q'][0].startswith("Use the CARR record-layer verbs") for x in hrefs)
+print("total tiles:",nbtn,"| links:",len(hrefs),"| AI-tell:",hits,"| folder none:",nofolder,"| canonical all:",allcanonical)
 print("has everyday:","everyday" in HTML,"| has details:","<details" in HTML,"| boards:","See the boards" in HTML)
