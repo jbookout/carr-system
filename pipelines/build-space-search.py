@@ -86,6 +86,17 @@ def spec(label, value, em=False, note=None):
     return f'<div><dt>{esc(label)}</dt><dd{cls}>{value}{sub}</dd></div>'
 
 
+def band(lo, hi, unit="SF"):
+    """A min-to-max span, or the visible gap when the span was never established."""
+    if lo is None and hi is None:
+        return NOT_PUBLISHED
+    if lo is None or hi is None:
+        return f'{sf(lo if lo is not None else hi)} {unit}'
+    if lo == hi:
+        return f'{sf(lo)} {unit}'
+    return f'{sf(lo)} to {sf(hi)} {unit}'
+
+
 def size_line(s):
     # A listing that never published a suite size gets the visible gap, same as any
     # other unknown. " SF" with nothing in front of it reads as a broken template.
@@ -151,26 +162,134 @@ def yield_line(x):
 
 def occupancy_line(x):
     """What the buyer can actually take, stated as a share of the building, because
-    that share is the whole deal on an owner-occupier purchase."""
+    that share is the whole deal on an owner-occupier purchase.
+
+    Returns (value, note). Splitting the two is the fix for a duplication that showed
+    on every record without an own_sf -- land, and any building whose split is still
+    an open question. The note was being returned AS the value and then passed to
+    spec() as the note as well, so the same sentence printed twice, the second time in
+    small grey type directly under itself. Land records are most of a bank's search,
+    so it was on most of the pages."""
     own, bldg = x.get("own_sf"), x.get("building_sf")
+    note = x.get("occupancy_note")
     if not own:
-        return x.get("occupancy_note") or NOT_PUBLISHED
+        return (note, None) if note else (NOT_PUBLISHED, None)
     pct = f' ({own / bldg:.0%} of the building)' if bldg else ""
     # square feet are whole numbers; a float reaching sf() prints "10,422.0 SF"
-    return f'{sf(int(round(own)))} SF{pct}'
+    return f'{sf(int(round(own)))} SF{pct}', note
 
 
 def sale_specs(p, s, b):
     x = p["sale"]
+    # "He could occupy" was written for one client, a single male buyer, and then read
+    # every search after it. A bank, a partnership, or a woman buying a building all
+    # got the same pronoun. The label is the client-neutral one now.
+    occupies, occ_note = occupancy_line(x)
     return [
         spec("Price", price_line(x), em=True),
         spec("Yield", yield_line(x)),
         spec("Building", f'{sf(b["building_sf"])} SF' if b.get("building_sf") else NOT_PUBLISHED),
-        spec("He could occupy", occupancy_line(x), em=True,
-             note=x.get("occupancy_note")),
+        spec("Could occupy", occupies, em=True, note=occ_note),
         spec("Tenancy", val(b.get("tenancy"))),
         spec("Status", val(p["timing"]["status"])),
     ]
+
+
+# ---------------------------------------------------------------------------
+# TOUR-PACKET SUPPORT (added 2026-08-20, River Bank & Trust C-200 US-98 search)
+#
+# Three things a packet that gets CARRIED needs and a report that gets READ
+# does not: who is meeting us at the door, somewhere to write while standing in
+# the building, and the drawings for an option where we hold them.
+#
+# ADDITIVE BY DESIGN, exactly like the "sale" block. None of this fires unless a
+# record carries "listing_agent", "notes", or "plans", so every prior search
+# renders byte for byte unchanged. Proven by rendering this search's own records
+# with the three blocks stripped against the pre-change generator.
+# ---------------------------------------------------------------------------
+
+# Joe's 2026-07-22 rule bars listing-agent and brokerage CONTACT detail from anything
+# a client sees. Dell asked for the NAME on the River Bank packet, which is a different
+# fact: it is who to expect at the door. The name is allowed; the contact detail is not,
+# and this is what keeps the two apart. A whole source record pasted into the field
+# fails loudly here rather than leaking a phone number onto a printed page.
+_CONTACT = re.compile(
+    r"""\d{3}      # any three consecutive digits: catches every phone shape
+      | @          # email
+      | https?://  # url
+      | \bwww\.    # url without scheme
+      | \.(?:com|net|org|us|biz|co)\b
+    """, re.I | re.X)
+
+
+class ContactLeak(ValueError):
+    """A listing-agent field carried contact detail, which never reaches a client page."""
+
+
+def agent_line(p):
+    """Name and firm only. Either may be absent; a record with neither renders nothing."""
+    a = p.get("listing_agent")
+    if not a:
+        return ""
+    name, firm = (a.get("name") or "").strip(), (a.get("firm") or "").strip()
+    for label, value in (("name", name), ("firm", firm)):
+        if _CONTACT.search(value):
+            raise ContactLeak(
+                f'{p["address"]}: listing_agent.{label} contains contact detail '
+                f'({value!r}). Names and firms only — no phone, email, or web address.')
+    if not (name or firm):
+        return ""
+    who = f"<b>{esc(name)}</b>" if name else ""
+    at = f'{who}, {esc(firm)}' if who and firm else (who or esc(firm))
+    return (f'<p class="agent">Listing agent: {at}. '
+            f'Contact details are in the internal sheet, not here.</p>')
+
+
+def notes_box(p):
+    """Ruled space for our own notes on the property. Ours, not the client's."""
+    if not p.get("notes"):
+        return ""
+    label = p["notes"] if isinstance(p["notes"], str) else "Notes"
+    return (f'<div class="notes"><h4>{esc(label)}</h4>'
+            f'<div class="nlines" role="presentation"></div></div>')
+
+
+def build_plans_sheet(p, plans):
+    """A second sheet for one option, carrying the drawings we hold for it.
+
+    Each plan names what the drawing IS and where it came from, because an
+    undated drawing of unknown provenance is not evidence — several of these
+    are twenty-year-old construction documents and the packet has to say so.
+    """
+    items = []
+    for pl in p.get("plans") or []:
+        if pl["file"] not in plans:
+            continue
+        src = f' <b>{esc(pl["source"])}</b>' if pl.get("source") else ""
+        note = f' {esc(pl["note"])}' if pl.get("note") else ""
+        items.append(
+            f'<div class="plan"><figure>'
+            f'<img src="data:image/png;base64,{plans[pl["file"]]}" '
+            f'alt="{esc(pl["title"])} for {esc(p["address"])}">'
+            f'<figcaption><b>{esc(pl["title"])}</b>{note}{src}</figcaption>'
+            f'</figure></div>')
+    if not items:
+        return ""
+    return f"""
+      <article class="prop plans" id="p{p["rank"]:02d}plans">
+        <div class="idx">{p["rank"]:02d}</div>
+        <div class="pbody">
+          <div class="phead">
+            <div><h3 class="paddr">{esc(p["address"])}</h3>
+                 <p class="pcity">{esc(p["city"])} &middot; Plans</p></div>
+            <span class="chip b">Drawings</span>
+          </div>
+          <div class="plansheet">{"".join(items)}</div>
+          <p class="plansrc">{esc(p.get("plans_note") or
+             "Drawings supplied with the listing. Dimensions and areas are to be "
+             "verified against a current measured survey before anything is signed.")}</p>
+        </div>
+      </article>"""
 
 
 def build_tour_card(p, photos, minis=None):
@@ -245,7 +364,7 @@ def build_tour_card(p, photos, minis=None):
     hl = ""
     if p.get("highlights"):
         items = "".join(f"<li>{esc(h)}</li>" for h in p["highlights"])
-        hl = f'<div class="sub"><h4>About the building</h4><ul>{items}</ul></div>'
+        hl = f'<div class="sub about"><h4>About the building</h4><ul>{items}</ul></div>'
 
     vf = ""
     if p.get("verify"):
@@ -295,7 +414,9 @@ def build_tour_card(p, photos, minis=None):
               {hl}{vf}{src}
             </div>
           </details>
+          {agent_line(p)}
           {act}
+          {notes_box(p)}
         </div>
       </article>"""
 
@@ -393,12 +514,32 @@ def main():
         return 2
     props = data["properties"]
 
+    # Refuse the whole render before anything is written, rather than discovering a
+    # leaked phone number partway through the tour cards. agent_line() raises the same
+    # error at render time as well; this is the one that fires first and names the row.
+    try:
+        for p in props:
+            agent_line(p)
+    except ContactLeak as exc:
+        print(f"STOP: {exc}", file=sys.stderr)
+        return 2
+
     photos = {}
     pdir = os.path.join(folder, "photos")
     if os.path.isdir(pdir):
         for fn in os.listdir(pdir):
             if fn.lower().endswith((".jpg", ".jpeg")):
                 photos[fn] = b64(os.path.join(pdir, fn))
+
+    # Plans are PNG rather than JPEG on purpose: these are line drawings, and JPEG
+    # ringing around thin black linework is exactly what makes a floor plan unreadable
+    # once it has been through a printer.
+    plans = {}
+    ldir = os.path.join(folder, "plans")
+    if os.path.isdir(ldir):
+        for fn in os.listdir(ldir):
+            if fn.lower().endswith(".png"):
+                plans[fn] = b64(os.path.join(ldir, fn))
 
     minis = {}
     mpath = os.path.join(folder, "map.json")
@@ -417,7 +558,14 @@ def main():
     # The opening sentence names the deal type. It used to be hardcoded to "available
     # for lease", which told a BUYER his purchase search was a rent roll (caught on the
     # Le C-063 report, 2026-07-31, before it left the building).
-    if any(p.get("sale") for p in tour):
+    #
+    # A search that mixes deal types and asset classes -- buildings for sale, one
+    # suite for lease, and raw sites -- cannot be described by either sentence
+    # below without saying something untrue, so such a search states its own
+    # opening line. Absent the key, the two authored defaults are unchanged.
+    if c.get("standfirst"):
+        standfirst = c["standfirst"]
+    elif any(p.get("sale") for p in tour):
         standfirst = (f'{len(props)} buildings are for sale across your search area right now. '
                       f'{len(tour)} of them are worth your time, and the reasons the others are not '
                       f'tell you a great deal about this market.')
@@ -453,16 +601,40 @@ def main():
         """Each item is [lead, body]. The lead is bolded; the body carries the point."""
         return "".join(f'<li><b>{esc(lead)}</b> {esc(body)}</li>' for lead, body in items)
 
+    # Whoever ran the search signs it. The defaults are the values that were hardcoded
+    # in the template, so a search that names no advisor renders exactly as before.
+    adv = c.get("advisor") or {}
     repl = {
+        # "packet" prints one listing to a sheet; anything else keeps the full report
+        # print, which is the default and what every prior search rendered.
+        "__PRINT_MODE__": (' data-print="packet"'
+                           if c.get("print_mode") == "packet" else ""),
+        "__KICKER__": esc(c.get("kicker") or "Healthcare Real Estate"),
+        "__ADVISOR__": esc(adv.get("name") or "Joe Bookout"),
+        "__ADVISOR_TITLE__": esc(adv.get("title") or "Healthcare Real Estate Advisor, CARR"),
+        "__ADVISOR_EMAIL__": esc(adv.get("email") or "joe.bookout@carr.us"),
+        "__ADVISOR_PROMISE__": esc(adv.get("promise") or
+            "CARR represents healthcare tenants and buyers only. We never represent "
+            "landlords or sellers, so there is no question about whose interests are "
+            "being protected in your negotiation."),
         "__MAP__": build_map(folder),
         "__FINDINGS__": bullets(c.get("findings", [])),
         "__CONFIRMATIONS__": bullets(c.get("confirmations", [])),
-        "__TITLE__": f'{c["area"].split(" through ")[0]} Space Search',
+        "__DECLINED__": bullets(c.get("declined_and_why", [])),
+        # The area string doubles as the headline, which works while an area reads like
+        # a place name and stops working when it reads like a corridor description. A
+        # search may name its own headline; absent that, the split-on-"through" default
+        # every prior search used is untouched.
+        "__TITLE__": f'{c.get("headline") or c["area"].split(" through ")[0]} Space Search',
         "__CLIENT__": esc(c["name"]),
         "__PREPARED__": esc(c["prepared"]),
         "__PRACTICE__": esc(c["practice"]),
-        "__TARGET__": f'{sf(c["target_min_sf"])} to {sf(c["target_max_sf"])} SF',
-        "__SEARCHED__": f'{sf(c["searched_min_sf"])} to {sf(c["searched_max_sf"])} SF',
+        # A size band nobody has given us yet is an unknown like any other, and it gets
+        # the same visible gap rather than a number we invented. " to  SF" -- which is
+        # what the old unguarded format produced from a null -- reads as a broken template
+        # and hides the fact that the requirement is still an open question for the client.
+        "__TARGET__": band(c.get("target_min_sf"), c.get("target_max_sf")),
+        "__SEARCHED__": band(c.get("searched_min_sf"), c.get("searched_max_sf")),
         "__AREA__": esc(c["area"]),
         "__STRUCTURE__": esc(c["structure"]),
         "__N_TOTAL__": str(len(props)),
@@ -471,7 +643,10 @@ def main():
         "__N_OUT__": str(len(out)),
         "__RATE_SPAN__": rate_span,
         "__STANDFIRST__": standfirst,
-        "__TOUR_CARDS__": ("".join(build_tour_card(p, photos, minis) for p in tour) or empty_state(
+        # A plans sheet follows the card it belongs to, so the drawings sit behind
+        # that property in the packet rather than in an appendix nobody turns to.
+        "__TOUR_CARDS__": ("".join(build_tour_card(p, photos, minis) + build_plans_sheet(p, plans)
+                                   for p in tour) or empty_state(
             "Nothing clears the bar yet",
             "Every available space in this size range has a disqualifying problem right now. That is a real "
             "finding rather than a gap in the search, and it usually means the right move is to wait for the "
@@ -484,7 +659,7 @@ def main():
             "Every available space in your size range is still in play, which is unusual and worth talking about.")),
         "__SOURCES__": esc(", ".join(c["sources_run"])),
         "__PENDING__": pending,
-        "__H1_A__": c["area"].split(" through ")[0],
+        "__H1_A__": c.get("headline") or c["area"].split(" through ")[0],
     }
     for k, v in repl.items():
         html = html.replace(k, v)
@@ -494,7 +669,11 @@ def main():
     leftover = re.findall(r"__[A-Z_]+__", html)
     assert not leftover, f"unreplaced tokens: {set(leftover)}"
 
-    slug = re.sub(r"[^a-z0-9]+", "-", c["name"].split(",")[0].split()[-1].lower())
+    # The default takes the last word of the client's name, which is a surname for a
+    # doctor and a noun for an organisation: "River Bank & Trust" produced
+    # trust-space-search.html. A client may name its own slug.
+    slug = re.sub(r"[^a-z0-9]+", "-",
+                  (c.get("slug") or c["name"].split(",")[0].split()[-1]).lower()).strip("-")
     date = re.sub(r"[^0-9a-zA-Z]+", "-", c["prepared"]).strip("-")
     outp = os.path.join(folder, f"{slug}-space-search-{date}.html")
     tombstone = None
