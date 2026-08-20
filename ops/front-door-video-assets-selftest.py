@@ -23,6 +23,12 @@ def run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=REPO, env=env, text=True, capture_output=True)
 
 
+def run_env(args: list[str], extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args, cwd=REPO, env={**env, **extra}, text=True, capture_output=True
+    )
+
+
 build = REPO / "pipelines/build-front-door.py"
 page = REPO / "pipelines/front-door.html"
 first = run([sys.executable, str(build)])
@@ -44,7 +50,33 @@ for href, label in re.findall(
 ):
     parsed = urllib.parse.urlparse(html_lib.unescape(href).replace("claude://", "https://"))
     tile_prompts[html_lib.unescape(label)] = urllib.parse.parse_qs(parsed.query)["q"][0]
-assert "new-lead or new-client" in tile_prompts["New Prospect"]
+def calls(label: str) -> list[tuple[str, tuple[str, ...]]]:
+    return [
+        (verb, tuple(field.strip() for field in fields.split(",") if field.strip()))
+        for verb, fields in re.findall(r"CALL ([a-z-]+)\(([^)]*)\)", tile_prompts[label])
+    ]
+
+
+assert calls("New Prospect") == [
+    ("find", ("query",)),
+    ("add-party", ("idempotency_key", "name")),
+    ("new-lead", ("idempotency_key", "party_id", "stage")),
+    ("new-client", ("idempotency_key", "party_id", "status", "acquisition_source", "research_evidence")),
+]
+assert calls("New Vendor") == [
+    ("find", ("query",)),
+    ("add-party", ("idempotency_key", "name")),
+    ("new-vendor", ("idempotency_key", "party_id", "category", "ref_code", "stage", "research_evidence")),
+    ("update-vendor", ("idempotency_key", "vendor", "base_version", "fields")),
+]
+assert calls("New Idea") == [("add-loop", ("idempotency_key", "kind", "owner", "body"))]
+assert calls("Teach a Rule") == [
+    ("teach", ("idempotency_key", "statement", "human_quote")),
+    ("approve-rule", ("idempotency_key", "rule_id", "policy_kind", "control_keys", "reason")),
+]
+assert "owner Joe" in tile_prompts["New Idea"]
+assert "Owner is derived by the server from the authenticated actor" in tile_prompts["New Prospect"]
+assert "pending seam: exact installed control contract unavailable" in tile_prompts["Teach a Rule"]
 assert "allocate the next" not in tile_prompts["New Prospect"] and "live sheet" not in tile_prompts["New Vendor"]
 assert "comp-ingress seam as unavailable" in tile_prompts["File a Comp"]
 assert "prepare-conversation" in tile_prompts["Prep for a Meeting"]
@@ -96,6 +128,120 @@ with tempfile.TemporaryDirectory() as tmp:
     ])
     assert commit.returncode == 0 and "contract-proof" in log.read_text(), commit.stderr
     assert "NONCANONICAL" in initial.stderr and "NONCANONICAL" in commit.stderr
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    layer_dir = root / "layers"
+    layer_dir.mkdir()
+    fake_sfx = root / "landing.wav"
+    fake_sfx.write_bytes(b"sound")
+    calls_path = root / "planner-calls.jsonl"
+    fake_planner = root / "planner.py"
+    fake_planner.write_text(
+        """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with Path(os.environ["CARR_FAKE_CALLS"]).open("a") as capture:
+    capture.write(json.dumps(args) + "\\n")
+if "--commit" in args:
+    if os.environ.get("CARR_FAKE_PLANNER_FAIL_COMMIT") == "1":
+        raise SystemExit(17)
+    with Path(args[1]).open("a") as log:
+        log.write("2026-08-20\\ttransaction-proof\\treading-order\\ttick-ui-soft\\n")
+    raise SystemExit(0)
+plan = Path(args[args.index("--plan-out") + 1])
+job = Path(args[args.index("--json-out") + 1])
+job.write_text("{}")
+plan.write_text(
+    'CONCEPT="reading-order"\\n'
+    'SFX_KEY="tick-ui-soft"\\n'
+    f'SFX_FILE="{os.environ["CARR_FAKE_SFX"]}"\\n'
+    'SFX_VOL="0.3"\\n'
+    'DUR="1"\\n'
+    'LANDINGS="0.1"\\n'
+    'CANVAS="1x1"\\n'
+    'HERO="headline"\\n'
+)
+"""
+    )
+    fake_osascript = root / "osascript"
+    fake_osascript.write_text(
+        """#!/bin/zsh
+[ "${CARR_FAKE_OSASCRIPT_FAIL:-0}" -ne 1 ] || exit 19
+print -r -- rendered > "$CARR_ANIMSTATIC_RAW"
+print -r -- project > "$CARR_ANIMSTATIC_AEP"
+"""
+    )
+    fake_ffmpeg = root / "ffmpeg"
+    fake_ffmpeg.write_text(
+        """#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+if os.environ.get("CARR_FAKE_FFMPEG_FAIL") == "1":
+    raise SystemExit(23)
+Path(sys.argv[-1]).write_bytes(b"rendered")
+"""
+    )
+    fake_osascript.chmod(0o755)
+    fake_ffmpeg.chmod(0o755)
+    recovery_controls = [
+        "--recovery", "--reason", "asset restore drill", "--vault", str(root / "vault")
+    ]
+
+    def wrapper_run(pipe: Path, extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return run_env(
+            [
+                "zsh", str(REPO / "video/make-animated-static.sh"), str(layer_dir),
+                "transaction-proof", "--email", *recovery_controls,
+            ],
+            {
+                "CARR_VIDEO_PIPE": str(pipe),
+                "CARR_ANIMSTATIC_PLANNER": str(fake_planner),
+                "CARR_OSASCRIPT": str(fake_osascript),
+                "CARR_FFMPEG": str(fake_ffmpeg),
+                "CARR_FAKE_CALLS": str(calls_path),
+                "CARR_FAKE_SFX": str(fake_sfx),
+                **extra,
+            },
+        )
+
+    def assert_no_delivery(pipe: Path) -> None:
+        assert not (pipe / "03_Output/transaction-proof.mp4").exists()
+        assert not (pipe / "03_Output/transaction-proof.gif").exists()
+        assert not (pipe / "03_Output/transaction-proof_email.gif").exists()
+        assert not (pipe / "AE_Templates/AnimatedStatic_last_generated.aep").exists()
+        assert not (pipe / "choreography-log.tsv").exists()
+        workspaces = list((pipe / "Scripts").glob(".animstatic.transaction-proof.*"))
+        assert not workspaces, workspaces
+        assert not (pipe / "Scripts/animstatic-job.json").exists()
+        assert not (pipe / "Scripts/animstatic-plan.env").exists()
+
+    early_pipe = root / "early-pipe"
+    early = wrapper_run(early_pipe, {"CARR_FAKE_OSASCRIPT_FAIL": "1"})
+    assert early.returncode != 0 and "OK:" not in early.stdout, (early.stdout, early.stderr)
+    assert_no_delivery(early_pipe)
+
+    commit_pipe = root / "commit-pipe"
+    late = wrapper_run(commit_pipe, {"CARR_FAKE_PLANNER_FAIL_COMMIT": "1"})
+    assert late.returncode != 0 and "choreography commit failed" in late.stderr
+    assert "OK:" not in late.stdout
+    assert_no_delivery(commit_pipe)
+
+    success_pipe = root / "success-pipe"
+    good = wrapper_run(success_pipe, {})
+    assert good.returncode == 0 and good.stdout.count("OK:") == 3, (good.stdout, good.stderr)
+    assert (success_pipe / "03_Output/transaction-proof.mp4").read_bytes() == b"rendered"
+    assert (success_pipe / "03_Output/transaction-proof.gif").read_bytes() == b"rendered"
+    assert (success_pipe / "03_Output/transaction-proof_email.gif").read_bytes() == b"rendered"
+    assert (success_pipe / "AE_Templates/AnimatedStatic_last_generated.aep").read_bytes() == b"project\n"
+    assert "transaction-proof" in (success_pipe / "choreography-log.tsv").read_text()
+    assert not list((success_pipe / "Scripts").glob(".animstatic.transaction-proof.*"))
+    planner_calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    successful_calls = planner_calls[-2:]
+    assert len(successful_calls) == 2
+    assert all(call[-len(recovery_controls):] == recovery_controls for call in successful_calls)
 
 wrapper = (REPO / "video/make-animated-static.sh").read_text()
 assert '"${RECOVERY_ARGS[@]}"' in wrapper

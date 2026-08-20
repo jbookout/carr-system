@@ -29,11 +29,12 @@
 #   MUSIC="$AUD/music/close-up.mp3" make-animated-static.sh ...
 
 set -e
+set -o pipefail
 PIPE="${CARR_VIDEO_PIPE:-$HOME/Movies/CARR Video Pipeline}"
 REPO="$(cd "$(dirname "$0")" && pwd)"
-LOG="$PIPE/choreography-log.tsv"
-FF=/opt/homebrew/bin/ffmpeg
-PLANNER="$REPO/plan-animated-static.py"
+FF="${CARR_FFMPEG:-/opt/homebrew/bin/ffmpeg}"
+PLANNER="${CARR_ANIMSTATIC_PLANNER:-$REPO/plan-animated-static.py}"
+OSASCRIPT="${CARR_OSASCRIPT:-osascript}"
 
 if [ "${1:-}" = "--list" ]; then exec python3 "$PLANNER" --list; fi
 
@@ -56,11 +57,51 @@ done
 
 [ -d "$LAYERDIR" ] || { echo "no such layers folder: $LAYERDIR" >&2; exit 1; }
 
-RAW="$PIPE/03_Output/${NAME}_raw.mov"
-FINAL="$PIPE/03_Output/${NAME}.mp4"
-GIF="$PIPE/03_Output/${NAME}.gif"
-JOB="$PIPE/Scripts/animstatic-job.json"
-PLAN="$PIPE/Scripts/animstatic-plan.env"
+mkdir -p "$PIPE/Scripts" "$PIPE/03_Output" "$PIPE/AE_Templates"
+WORK="$(mktemp -d "$PIPE/Scripts/.animstatic.${NAME}.XXXXXX")"
+RAW="$WORK/${NAME}_raw.mov"
+FINAL="$WORK/${NAME}.mp4"
+GIF="$WORK/${NAME}.gif"
+EGIF="$WORK/${NAME}_email.gif"
+JOB="$WORK/animstatic-job.json"
+PLAN="$WORK/animstatic-plan.env"
+AELOG="$WORK/animstatic-log.txt"
+PAL="$WORK/${NAME}_palette.png"
+LAST="$WORK/${NAME}_last.png"
+AEP="$WORK/AnimatedStatic_last_generated.aep"
+LOG="$WORK/choreography-log.tsv"
+LOG_DEST="$PIPE/choreography-log.tsv"
+FINAL_DEST="$PIPE/03_Output/${NAME}.mp4"
+GIF_DEST="$PIPE/03_Output/${NAME}.gif"
+EGIF_DEST="$PIPE/03_Output/${NAME}_email.gif"
+AEP_DEST="$PIPE/AE_Templates/AnimatedStatic_last_generated.aep"
+[ ! -f "$LOG_DEST" ] || cp "$LOG_DEST" "$LOG"
+PUBLISHED=0
+
+cleanup() {
+  exit_code="${1:-$?}"
+  trap - EXIT HUP INT TERM
+  set +e
+  rm -f "$RAW" "$JOB" "$PLAN" "$AELOG" "$PAL" "$LAST" "$AEP" "$FINAL" "$GIF" "$EGIF"
+  if [ "$PUBLISHED" -ne 1 ]; then
+    rollback() {
+      dest="$1"; backup="$2"
+      [ -z "$dest" ] || rm -f "$dest"
+      [ -z "$dest" ] || [ -z "$backup" ] || [ ! -f "$backup" ] || mv "$backup" "$dest"
+    }
+    rollback "${final_dest:-}" "${final_backup:-}"
+    rollback "${gif_dest:-}" "${gif_backup:-}"
+    rollback "${egif_dest:-}" "${egif_backup:-}"
+    rollback "${aep_dest:-}" "${aep_backup:-}"
+    rollback "${log_dest:-}" "${log_backup:-}"
+  fi
+  case "$WORK" in "$PIPE/Scripts/.animstatic.${NAME}."*) rm -rf "$WORK" ;; esac
+  exit "$exit_code"
+}
+trap 'cleanup $?' EXIT
+trap 'cleanup 129' HUP
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 # --- plan the choreography ----------------------------------------------------
 python3 "$PLANNER" "$LAYERDIR" "$LOG" --name "$NAME" --out-path "$RAW" \
@@ -76,19 +117,23 @@ fi
 [ -f "$SFX_FILE" ] || { echo "landing SFX missing: $SFX_FILE" >&2; exit 1; }
 
 # --- AE build + lossless render ----------------------------------------------
-: > "$PIPE/Scripts/animstatic-log.txt"
+: > "$AELOG"
 rm -f "$RAW"
+JOB_URI="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$JOB")"
+AELOG_URI="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$AELOG")"
+AEP_URI="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$AEP")"
+JSX_URI="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$PIPE/Scripts/carr_animated_static.jsx")"
 echo "Building comp in After Effects..."
-osascript <<APPLESCRIPT
-with timeout of 900 seconds
-    tell application "Adobe After Effects 2026"
-        activate
-        DoScript "\$.evalFile(File('$PIPE/Scripts/carr_animated_static.jsx'))"
-    end tell
-end timeout
-APPLESCRIPT
+env CARR_ANIMSTATIC_RAW="$RAW" CARR_ANIMSTATIC_AEP="$AEP" \
+  "$OSASCRIPT" \
+  -e 'with timeout of 900 seconds' \
+  -e '    tell application "Adobe After Effects 2026"' \
+  -e '        activate' \
+  -e "        DoScript \"CARR_ANIMSTATIC_JOB_URI='$JOB_URI'; CARR_ANIMSTATIC_LOG_URI='$AELOG_URI'; CARR_ANIMSTATIC_AEP_URI='$AEP_URI'; \$.evalFile(File(decodeURIComponent('$JSX_URI')))\"" \
+  -e '    end tell' \
+  -e 'end timeout'
 
-echo "--- AE log:"; cat "$PIPE/Scripts/animstatic-log.txt"
+echo "--- AE log:"; cat "$AELOG"
 [ -s "$RAW" ] || { echo "AE render missing" >&2; exit 1; }
 
 # --- audio: one quiet landing sound, fired on the frame each element stops ----
@@ -127,7 +172,6 @@ $FF -y -nostdin -i "$RAW" "${IN_ARGS[@]}" \
 # Stepped motion suits a GIF better than smooth footage does: a coarse cadence
 # means the palette only has to hold a few distinct frames a second.
 echo "Building GIF..."
-PAL="$PIPE/03_Output/.${NAME}_palette.png"
 $FF -y -nostdin -i "$FINAL" -vf "fps=15,scale=${GIF_WIDTH}:-1:flags=lanczos,palettegen=stats_mode=diff" "$PAL" 2>/dev/null
 $FF -y -nostdin -i "$FINAL" -i "$PAL" \
   -lavfi "fps=15,scale=${GIF_WIDTH}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
@@ -146,9 +190,7 @@ rm -f "$PAL"
 # this plays once and rests on the finished card.
 if [ "$EMAIL" -eq 1 ]; then
   echo "Building email GIF (Outlook-safe first frame, no loop)..."
-  EGIF="$PIPE/03_Output/${NAME}_email.gif"
   EW="${EMAIL_WIDTH:-600}"
-  LAST="$PIPE/03_Output/.${NAME}_last.png"
   $FF -y -nostdin -sseof -0.2 -i "$FINAL" -frames:v 1 "$LAST" 2>/dev/null
   $FF -y -nostdin -loop 1 -t 0.07 -i "$LAST" -i "$FINAL" -filter_complex "\
 [0:v]fps=15,scale=${EW}:-1:flags=lanczos,setsar=1[a];\
@@ -166,12 +208,28 @@ fi
 # Only now does the concept get burned — a failed render must not consume one.
 if ! python3 "$PLANNER" "$LAYERDIR" "$LOG" --name "$NAME" --out-path "$RAW" \
   --concept "$CONCEPT" --sfx "$SFX_KEY" --commit "${RECOVERY_ARGS[@]}" >/dev/null; then
-  rm -f "$FINAL" "$GIF" "${EGIF:-}"
   echo "animated-static: choreography commit failed; removed uncommitted outputs" >&2
   exit 1
 fi
 
-echo "OK: $FINAL"
-echo "OK: $GIF  ($(du -h "$GIF" | cut -f1))"
-[ "$EMAIL" -eq 0 ] || echo "OK: $EGIF  ($(du -h "$EGIF" | cut -f1))"
-echo "logged: $CONCEPT / $SFX_KEY -> $(basename "$LOG")"
+final_dest="$FINAL_DEST"; gif_dest="$GIF_DEST"; aep_dest="$AEP_DEST"; log_dest="$LOG_DEST"
+final_backup="$WORK/prior.mp4"; gif_backup="$WORK/prior.gif"; aep_backup="$WORK/prior.aep"; log_backup="$WORK/prior-log.tsv"
+[ ! -f "$final_dest" ] || mv "$final_dest" "$final_backup"
+[ ! -f "$gif_dest" ] || mv "$gif_dest" "$gif_backup"
+[ ! -f "$aep_dest" ] || mv "$aep_dest" "$aep_backup"
+[ ! -f "$log_dest" ] || mv "$log_dest" "$log_backup"
+if [ "$EMAIL" -eq 1 ]; then
+  egif_dest="$EGIF_DEST"; egif_backup="$WORK/prior-email.gif"
+  [ ! -f "$egif_dest" ] || mv "$egif_dest" "$egif_backup"
+fi
+mv "$FINAL" "$final_dest"
+mv "$GIF" "$gif_dest"
+[ "$EMAIL" -eq 0 ] || mv "$EGIF" "$egif_dest"
+mv "$AEP" "$aep_dest"
+mv "$LOG" "$log_dest"
+PUBLISHED=1
+
+echo "OK: $final_dest"
+echo "OK: $gif_dest  ($(du -h "$gif_dest" | cut -f1))"
+[ "$EMAIL" -eq 0 ] || echo "OK: $egif_dest  ($(du -h "$egif_dest" | cut -f1))"
+echo "logged: $CONCEPT / $SFX_KEY -> $(basename "$log_dest")"
