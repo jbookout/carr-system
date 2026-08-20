@@ -1,4 +1,4 @@
--- 0190_session_work.sql
+-- 0192_session_work.sql
 -- Session CRM v0: a staff-owned book of SESSION WORK in Neon.
 --
 -- WHAT THIS IS. The Chief of Staff needs a glanceable view of what is doing,
