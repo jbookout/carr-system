@@ -23390,6 +23390,16 @@ b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a rec
 
 
 --
+-- Data for Name: retrieval_ranking_policy; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.retrieval_ranking_policy (policy_id, version, formula, config, golden_suite_digest, status, is_default, created_at, approved_at) FROM stdin;
+lexical-dominant-v1	1	weighted_sum	{"concept_weight": 0.25, "lexical_weight": 0.75, "concept_enabled": true}	b1a5a61945c5e5fc5f7c74f45c3403f2c5df3e61db29e58f281d49015f63dae3	candidate	f	2026-08-16 14:49:59.066172+00	\N
+coequal-normalized-v1	1	coequal_normalized	{"concept_enabled": true, "dual_evidence_bonus": 0.15}	b1a5a61945c5e5fc5f7c74f45c3403f2c5df3e61db29e58f281d49015f63dae3	active	t	2026-08-16 14:49:59.066172+00	2026-08-16 14:49:59.066172+00
+\.
+
+
+--
 -- Data for Name: submarket_condition; Type: TABLE DATA; Schema: public; Owner: -
 --
 

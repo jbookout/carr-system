@@ -376,6 +376,21 @@ fi
 #     only" block, which it says "activate nothing until Joe or Dell approves
 #     the batch". Without them situation-retrieval-db-gate fails on "expected 10
 #     pending seed proposals, found 0".
+#   * retrieval_ranking_policy (2 rows) — the versioned ranking policies,
+#     coequal-normalized-v1 (active, default) and lexical-dominant-v1
+#     (candidate). The active row carries golden_suite_digest, which
+#     assert_situation_retrieval_golden() looks up BY DIGEST; with no policy row
+#     the lookup returns null and it raises "golden suite digest mismatch".
+#     Found only after adding the two above, because the gate could not reach
+#     this check until it got past the proposals.
+#
+# I counted every other table 0135 and 0168 seed, so the next rebuild does not
+# discover a fourth one the same way: doctrine_concept_mapping,
+# retrieval_concept, retrieval_phrase, ops.guidance_authority_binding,
+# ops.guidance_situation_mapping and ops.guidance_registry_event are all EMPTY on
+# production and need nothing. retrieval_query_log has 185 rows and is
+# deliberately EXCLUDED — it is a usage log, not configuration, it carries the
+# text of real queries, and no gate asks for it.
 # HAND-CHECKED BEFORE ADDING, which is the rule this list lives by: counted on
 # production (exactly 1 and exactly 10, all ten still pending), and every payload
 # read. They are search concepts and phrases about this system's own runbooks —
@@ -390,7 +405,8 @@ VOCAB_TABLES="activity_kind client_status client_type contact_state deal_lane \
 deal_phase deal_type_ref lead_lane lead_stage loop_domain negotiation_claim_type \
 participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
-doctrine_review_policy actor retrieval_proposal ops.guidance_registry"
+doctrine_review_policy actor retrieval_proposal retrieval_ranking_policy \
+ops.guidance_registry"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do
