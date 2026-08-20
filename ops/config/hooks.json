@@ -129,7 +129,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/drift-claim-gate.py",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py drift-claim-gate.py",
           "timeout": 10
         },
         {
@@ -244,7 +244,7 @@
         },
         {
           "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/drift-assertion-gate.py",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py drift-assertion-gate.py",
           "timeout": 20
         },
         {
