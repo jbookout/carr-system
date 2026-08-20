@@ -16,6 +16,7 @@ No command accepts a model name or canonical-write instruction.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 from urllib.parse import unquote, urlsplit
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -566,7 +568,7 @@ class RuntimeWorkflowFactCollector:
             return False
         markers: dict[tuple[str, str], tuple[str, ...]] = {
             ('calendar-fetch-daily', 'shadow'): (r'calendar-capture: source=eventkit mode=shadow scanned=\d+ exact=\d+ domain=\d+ unknown=\d+ writes=0 failed=0',),
-            ('calendar-fetch-daily', 'canary'): (r'calendar-capture: source=eventkit mode=canary destination=calendar-canary-[a-z0-9_-]+ exact=\d+ receipt=[0-9a-f-]{36}',),
+            ('calendar-fetch-daily', 'canary'): (r'calendar-capture: canary-result \{"contact_count":\d+,"domain_count":\d+,"exact_count":\d+,"snapshot_digest":"[0-9a-f]{64}","source_snapshot_id":"[0-9a-f-]{36}","unknown_count":\d+\}',),
             ('calendar-fetch-daily', 'live'): (r'calendar-capture: source=eventkit mode=live scanned=\d+ exact=\d+ domain=\d+ unknown=\d+ writes=\d+ failed=0',),
             ('nightly-record-layer', 'shadow'): (r'nightly preflight: \d+ chain surfaces present; writes=0',),
             ('nightly-record-layer', 'canary'): (r'nightly result: chain_ok',),
@@ -854,33 +856,53 @@ def _workflow_fact_collector(workflow: dict[str, Any], payload: Any, **kwargs: A
 
 
 def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
-                           timeout: int, mode: str) -> dict[str, Any]:
+                           timeout: int, mode: str, stdin_text: str | None = None) -> dict[str, Any]:
     execution = workflow["execution"]
     path = (REPO / execution["entrypoint"]).resolve()
     if REPO not in path.parents or not path.is_file():
         raise RuntimeError("deterministic entrypoint is outside the registered repository")
     # Deterministic children never inherit ledger, provider, owner or live-ingest
-    # credentials.  Their explicit canary config is the sole credential seam.
+    # credentials.  A canary child produces evidence only; the parent runner
+    # mints its receipt with the already-leased jobs connection.
     env = {key: os.environ[key] for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL",
                                              "CARR_NOTES_CANARY_ENV", "CARR_NOTES_CANARY_ROOT")
            if os.environ.get(key)}
     env.update({"CARR_JOB_PAYLOAD": json.dumps(payload, sort_keys=True), "CARR_CONTROL_PLANE_MODE": mode})
     if workflow.get("key") == "calendar-fetch-daily":
-        if mode == "canary":
-            for key in ("CARR_CALENDAR_CANARY_DSN", "CARR_CALENDAR_CANARY_DESTINATION_ID"):
-                if os.environ.get(key):
-                    env[key] = os.environ[key]
         env["CARR_REPO"] = str(REPO)
         env["CARR_CALENDAR_OUTPUT_ROOT"] = str(
             REPO / "out" if mode == "live" else REPO / "out" / "control-plane" / "calendar" / mode)
     args = deterministic_args(execution, mode)
     proc = subprocess.run([str(path), *args], cwd=REPO, env=env,
-                          capture_output=True, text=True, timeout=timeout)
+                          input=stdin_text, capture_output=True, text=True, timeout=timeout)
     if proc.returncode:
         raise RuntimeError(f"entrypoint exited {proc.returncode}")
     return {"entrypoint": execution["entrypoint"], "mode": mode,
             "args": args, "exit_code": proc.returncode,
             "stdout_tail": proc.stdout[-2000:]}
+
+
+def _calendar_canary_aggregate(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Parse exactly one typed Calendar canary aggregate from child stdout."""
+    text = evidence.get("stdout_tail")
+    lines = [line.removeprefix("calendar-capture: canary-result ") for line in text.splitlines()
+             if line.startswith("calendar-capture: canary-result ")] if isinstance(text, str) else []
+    if len(lines) != 1:
+        raise RuntimeError("calendar canary child emitted no single structured aggregate")
+    try:
+        value = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("calendar canary aggregate is not JSON") from exc
+    required={"source_snapshot_id","snapshot_digest","contact_count","exact_count","domain_count","unknown_count"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise RuntimeError("calendar canary aggregate has an unregistered shape")
+    counts = (value["exact_count"], value["domain_count"], value["unknown_count"])
+    try: canonical_snapshot_id=str(uuid.UUID(value["source_snapshot_id"]))
+    except (ValueError,TypeError,AttributeError): canonical_snapshot_id=""
+    if not all(type(count) is int and count >= 0 for count in (*counts,value["contact_count"])) or canonical_snapshot_id!=value["source_snapshot_id"] or not re.fullmatch(r"[0-9a-f]{64}",value["snapshot_digest"]):
+        raise RuntimeError("calendar canary aggregate is not deterministic")
+    output = hashlib.sha256(json.dumps({"schema":"calendar-canary-output-v1","exact_count":counts[0],"domain_count":counts[1],"unknown_count":counts[2]},sort_keys=True,separators=(",",":" )).encode()).hexdigest()
+    return {**value,"output_digest":output}
 
 
 class LeaseKeeper:
@@ -968,10 +990,32 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                 if not evaluate_stage(workflow, "routing", facts):
                     raise RuntimeError(f"{workflow['key']}.routing predicate was not satisfied")
             input_payload: dict[str, Any] | None = None
+            calendar_source: dict[str, Any] | None = None
+            if workflow["key"] == "calendar-fetch-daily" and claim["mode"] == "canary":
+                cur.execute("select * from ops.create_calendar_canary_source_snapshot(%s,%s)",(job_id,lease))
+                source_row=cur.fetchone()
+                if source_row is None: raise RuntimeError("calendar source snapshot was not minted")
+                calendar_source={"source_snapshot_id":str(source_row[0]),"snapshot_digest":source_row[1],"contact_count":source_row[2],"snapshot_text":source_row[3]}
+                conn.commit()
             with LeaseKeeper(job_id,lease):
                 if claim["execution_kind"] == "deterministic":
                     evidence = _execute_deterministic(
-                        workflow,claim["payload"],claim["timeout_seconds"],claim["mode"])
+                        workflow,claim["payload"],claim["timeout_seconds"],claim["mode"],
+                        json.dumps(calendar_source,separators=(",",":")) if calendar_source else None)
+                    if workflow["key"] == "calendar-fetch-daily" and claim["mode"] == "canary":
+                        aggregate=_calendar_canary_aggregate(evidence)
+                        if calendar_source is None or any(aggregate[k]!=calendar_source[k] for k in ("source_snapshot_id","snapshot_digest","contact_count")): raise RuntimeError("calendar child source snapshot does not reconcile")
+                        cur.execute("""select (ops.record_calendar_canary_receipt(%s,%s,%s,%s,%s,%s,%s)).id""",
+                                    (job_id,lease,aggregate["source_snapshot_id"],aggregate["output_digest"],aggregate["exact_count"],aggregate["domain_count"],aggregate["unknown_count"]))
+                        minted = cur.fetchone()
+                        cur.execute("""select id,source_snapshot_id,source_snapshot_digest,source_contact_count,output_digest,exact_count,domain_count,unknown_count
+                                       from ops.resolve_calendar_canary_receipt(%s,%s)""", (job_id, claim["attempt"]))
+                        readback = cur.fetchone()
+                        if minted is None or readback is None or readback[0] != minted[0] \
+                           or str(readback[1]) != aggregate["source_snapshot_id"] or readback[2] != aggregate["snapshot_digest"] or readback[3] != aggregate["contact_count"] or tuple(readback[4:]) != (aggregate["output_digest"],aggregate["exact_count"],aggregate["domain_count"],aggregate["unknown_count"]):
+                            raise RuntimeError("calendar canary immutable receipt did not read back")
+                        evidence = {**evidence, "calendar_canary_receipt": {
+                            "id": str(minted[0]), **aggregate}}
                 else:
                     cognition = _contract(manifest,workflow["execution"]["cognition_job"])
                     input_payload = _build_and_admit_cognition_input(manifest, workflow, claim)

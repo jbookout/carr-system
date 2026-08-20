@@ -27,6 +27,26 @@ def main() -> int:
         if not condition:
             failures.append(name)
 
+    def canary_refuses(text: str) -> bool:
+        try:
+            module._calendar_canary_aggregate({"stdout_tail": text})
+        except RuntimeError:
+            return True
+        return False
+
+    marker = 'calendar-capture: canary-result {"contact_count":1,"domain_count":2,"exact_count":1,"snapshot_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_snapshot_id":"00000000-0000-0000-0000-000000000000","unknown_count":3}'
+    check("Calendar canary parser accepts exactly one strict aggregate",
+          module._calendar_canary_aggregate({"stdout_tail": marker})["exact_count"] == 1)
+    check("Calendar canary parser rejects duplicate, malformed, bool, negative and shape markers",
+          all(canary_refuses(value) for value in (
+              marker + "\n" + marker,
+              "calendar-capture: canary-result {bad-json}",
+              marker.replace('"domain_count":2','"domain_count":false'),
+              marker.replace('"exact_count":1','"exact_count":-1'),
+              marker.replace(',"unknown_count":3',''),
+              marker.replace('00000000-0000-0000-0000-000000000000','------------------------------------'),
+          )))
+
     heartbeats: list[tuple] = []
 
     class Cursor:
@@ -171,8 +191,8 @@ def main() -> int:
           not any(key in calendar_env for key in (
               "CARR_VAULT", "CARR_CALENDAR_CANARY_ENV", "CARR_CALENDAR_CANARY_ROOT")))
 
-    # A poisoned parent environment must not leak Calendar's isolated database
-    # credential into any other deterministic child.
+    # A poisoned parent environment must never leak a database credential into
+    # any deterministic child, including Calendar canary.
     poison = {"CARR_CALENDAR_CANARY_DSN": "postgres://poison/isolated",
               "CARR_CALENDAR_CANARY_DESTINATION_ID": "calendar-canary-poison"}
     before = {key: os.environ.get(key) for key in poison}
@@ -180,7 +200,7 @@ def main() -> int:
     poisoned_envs: list[dict[str, str]] = []
     def poisoned_run(argv, **kwargs):
         poisoned_envs.append(kwargs["env"])
-        return subprocess.CompletedProcess(argv, 0, "calendar-capture: source=eventkit mode=canary destination=calendar-canary-poison exact=0 receipt=00000000-0000-0000-0000-000000000000", "")
+        return subprocess.CompletedProcess(argv, 0, marker.replace('"domain_count":2','"domain_count":0').replace('"exact_count":1','"exact_count":0').replace('"unknown_count":3','"unknown_count":0'), "")
     module.subprocess.run = poisoned_run
     try:
         module._execute_deterministic(calendar_workflow, {}, 30, "canary")
@@ -190,8 +210,8 @@ def main() -> int:
         for key, value in before.items():
             if value is None: os.environ.pop(key, None)
             else: os.environ[key] = value
-    check("Calendar canary credential is scoped to Calendar canary only",
-          len(poisoned_envs) == 2 and all(key in poisoned_envs[0] for key in poison)
+    check("Calendar canary child inherits no database credential",
+          len(poisoned_envs) == 2 and not any(key in poisoned_envs[0] for key in poison)
           and not any(key in poisoned_envs[1] for key in poison))
 
     canary_calls: list[list[str]] = []

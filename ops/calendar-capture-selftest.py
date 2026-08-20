@@ -78,14 +78,14 @@ def fixture(app_exists=True, appends="", *, dump_json="", matcher_json=""):
     return root, stub
 
 
-def run(root, stub, *args, timeout=90, extra_env=None):
+def run(root, stub, *args, timeout=90, extra_env=None, input_text=None):
     env = dict(os.environ)
     env["CARR_REPO"] = str(root)
     env["CARR_CALENDAR_CAPTURE_WAIT_SECONDS"] = "2"
     env["PATH"] = f"{stub}:{env['PATH']}"
     env.update(extra_env or {})
     return subprocess.run(["sh", str(SCRIPT), *args], env=env,
-                          capture_output=True, text=True, timeout=timeout)
+                          input=input_text, capture_output=True, text=True, timeout=timeout)
 
 
 print("calendar capture — refusal beats an empty answer")
@@ -167,13 +167,12 @@ check("receipt-safe EventKit shadow confines scratch evidence to its output root
 # proves it wrote only the dedicated receipt seam, not a live activity/intake.
 root, stub = fixture(appends="events scanned: 12; carrying attendees: 3\nexit=0",
                      dump_json="{}", matcher_json=json.dumps(sensitive))
-(root / "tools" / "calendar-canary-record.py").write_text(
-    "#!/usr/bin/env python3\nprint('calendar-capture: source=eventkit mode=canary destination=calendar-canary-fixture exact=1 receipt=00000000-0000-0000-0000-000000000000')\n")
+(root / "tools" / "calendar-canary-result.py").write_text(
+    "#!/usr/bin/env python3\nprint('calendar-capture: canary-result {\"contact_count\":1,\"domain_count\":1,\"exact_count\":1,\"snapshot_digest\":\"8057599fd071214d206d766b28876a7ef467c6e86a44ecdb6b19bbbe785ccfac\",\"source_snapshot_id\":\"00000000-0000-0000-0000-000000000000\",\"unknown_count\":1}')\n")
 p = run(root, stub, "--canary", "--days", "7", extra_env={
-    "CARR_CONTROL_PLANE_MODE": "canary", "CARR_CALENDAR_CANARY_DSN": "postgres://fixture/isolated",
-    "CARR_CALENDAR_CANARY_DESTINATION_ID": "calendar-canary-fixture"})
-check("canary bypasses normal intake and writes only its receipt target",
-      p.returncode == 0 and "mode=canary destination=calendar-canary-fixture" in p.stdout)
+    "CARR_CONTROL_PLANE_MODE": "canary"}, input_text='{"source_snapshot_id":"00000000-0000-0000-0000-000000000000","snapshot_digest":"8057599fd071214d206d766b28876a7ef467c6e86a44ecdb6b19bbbe785ccfac","contact_count":1,"snapshot_text":"[{\\"email\\":\\"fixture@example.com\\",\\"name\\":\\"Fixture\\",\\"org\\":null,\\"ref\\":\\"C-1\\"}]"}')
+check("canary bypasses normal intake and emits only its strict aggregate",
+      p.returncode == 0 and 'calendar-capture: canary-result' in p.stdout)
 
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

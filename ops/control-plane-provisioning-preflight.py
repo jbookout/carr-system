@@ -49,8 +49,8 @@ def equals(value: Any, expected: str, path: str, errors: list[str]) -> None:
 
 def validate(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if set(config) != {"version", "authority", "device_evidence", "providers", "routine_jobs", "routine_backup", "deterministic_canaries", "calendar_eventkit_canary"}:
-        errors.append("config must contain exactly version, authority, device_evidence, providers, routine_jobs, routine_backup, deterministic_canaries, calendar_eventkit_canary")
+    if set(config) != {"version", "authority", "device_evidence", "providers", "routine_jobs", "routine_backup", "deterministic_canaries"}:
+        errors.append("config must contain exactly version, authority, device_evidence, providers, routine_jobs, routine_backup, deterministic_canaries")
         return errors
     if config.get("version") != 1:
         errors.append("version must be 1")
@@ -119,14 +119,6 @@ def validate(config: dict[str, Any]) -> list[str]:
     if canaries.get("required_names") != ["CARR_CANARY_INGEST_URL", "CARR_CANARY_DESTINATION_ID"]:
         errors.append("deterministic_canaries.required_names must declare only the isolated calendar/Notes names")
     equals(canaries.get("scope"), "isolated calendar and Notes canary destinations only; no live URL or local state root", "deterministic_canaries.scope", errors)
-    calendar_canary = mapping(config.get("calendar_eventkit_canary"), "calendar_eventkit_canary", errors,
-                              {"file", "required_names", "login_role", "provisioning", "production_default"})
-    equals(calendar_canary.get("file"), "~/.config/carr/calendar-eventkit-canary.env", "calendar_eventkit_canary.file", errors)
-    if calendar_canary.get("required_names") != ["CARR_CALENDAR_CANARY_DSN", "CARR_CALENDAR_CANARY_DESTINATION_ID"]:
-        errors.append("calendar_eventkit_canary.required_names must declare the dedicated Calendar DB seam")
-    equals(calendar_canary.get("login_role"), "carr_jobs", "calendar_eventkit_canary.login_role", errors)
-    equals(calendar_canary.get("provisioning"), "external_human_approval", "calendar_eventkit_canary.provisioning", errors)
-    equals(calendar_canary.get("production_default"), "empty; never provision this destination in Production", "calendar_eventkit_canary.production_default", errors)
 
     mcp = text("mcp-server/src/mcp.js")
     authority_runtime_probe = text("ops/control-plane-authority-runtime-preflight.py")
@@ -141,7 +133,6 @@ def validate(config: dict[str, Any]) -> list[str]:
     backup_dump = text("bin/backup-dump.sh")
     backup_role = text("migrations/0119_backup_role.sql")
     calendar = text("bin/pull-gmail-calendar.py")
-    eventkit_canary = text("tools/calendar-canary-record.py")
     notes = text("bin/notes-sweep-post.sh")
     if "CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL" not in mcp or "CARR_DB_AUTHORITY_URL" not in mcp:
         errors.append("authority declarations are not bound by mcp-server/src/mcp.js")
@@ -185,8 +176,6 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("backup credential is not scoped to the portability mirror step")
     if not all(token in calendar and token in notes for token in ("CARR_CANARY_DESTINATION_ID", "CARR_CONTROL_PLANE_MODE")) or "CARR_CALENDAR_CANARY_ENV" not in calendar or "CARR_NOTES_CANARY_ENV" not in notes:
         errors.append("isolated deterministic canary declarations are not bound by both entrypoints")
-    if not all(token in eventkit_canary for token in ("CARR_CALENDAR_CANARY_DSN", "CARR_CALENDAR_CANARY_DESTINATION_ID", "CARR_CONTROL_PLANE_MODE")):
-        errors.append("EventKit calendar canary is not bound to its dedicated externally provisioned DB seam")
     return errors
 
 
