@@ -25,7 +25,7 @@ at one request per second, which this script honours.
 Usage:  python3 build-search-map.py <search-folder>
 """
 
-import json, math, os, sys, time, urllib.parse, urllib.request, base64, io
+import json, math, os, re, sys, time, urllib.parse, urllib.request, base64, io
 
 UA = "CARR-space-search/1.0 (joe.bookout@carr.us)"
 TILE = 256
@@ -137,13 +137,43 @@ def geocode(addr, city, cache):
     head = strip_unit(addr)
     street = head.lstrip("0123456789 ").strip()      # street name with no number
 
+    # The city as OSM would name it: "Santa Rosa Beach, FL 32459" -> "Santa Rosa Beach".
+    town = city.split(",")[0].strip()
+    # The house number, when the listing has one. Nominatim answers an address query it
+    # cannot satisfy by returning the STREET, and the returned display_name is the only
+    # place that shows it: an exact hit reads "4635, Gulfstarr Drive, Destin", a road
+    # centre reads "Emerald Coast Parkway, Destin". Same query, same shape of response,
+    # completely different precision.
+    number = re.match(r"\s*(\d+)", head)
+    number = number.group(1) if number else None
+
     out = None
-    for q in (f"{head}, {city}, FL", head, street):
+    # Only the FIRST query form — the full address with its town — can produce an exact
+    # coordinate. The other two drop the town, then the house number, so a hit on either
+    # is a road somewhere in the viewbox and nothing stronger. All three used to be
+    # written with approx=False, which is how a road centre reached a client map drawn
+    # as an exact building pin. (River Bank US-98 search, 2026-08-20, defect 03d959bf:
+    # 13331 and 13381 Emerald Coast Pkwy both landed on one shared road centre and both
+    # printed as exact.)
+    for n, q in enumerate((f"{head}, {town}, FL", head, street)):
         hit = nominatim(q)
-        if hit:
-            out = {"lat": float(hit["lat"]), "lon": float(hit["lon"]),
-                   "matched": hit.get("display_name", ""), "approx": False, "query": q}
-            break
+        if not hit:
+            continue
+        matched = hit.get("display_name", "")
+        # A match that does not name the town we asked for is not this property. The
+        # viewbox spans the whole panhandle, so "4400 W US Hwy 98" without a town
+        # cheerfully returned Harbor Boulevard in Destin for a Santa Rosa Beach site —
+        # twenty miles away, in another county, recorded as exact. Downgrading that to
+        # "approximate" would not help: a pin twenty miles out is wrong, not fuzzy.
+        if town and town.lower() not in matched.lower():
+            continue
+        # Exact only when the full-address query came back carrying the house number.
+        # Anything else is a road, and a road is approximate however confidently the
+        # geocoder phrased it.
+        exact = n == 0 and bool(number) and number in matched
+        out = {"lat": float(hit["lat"]), "lon": float(hit["lon"]),
+               "matched": matched, "approx": not exact, "query": q}
+        break
 
     if out is None:
         hit = overpass_street(street)
@@ -309,10 +339,21 @@ def main():
         json.dump(out, fh)
 
     print(f"wrote map.json  zoom {zoom}  {W}x{H}px  {fetched}/{cols*rows} tiles")
-    print(f"  {len(pins)} pins placed, {len(missing)} not located")
+    n_approx = sum(1 for p in pins if p.get("approx"))
+    print(f"  {len(pins)} pins placed ({n_approx} approximate), {len(missing)} not located")
+    # Print what each address actually MATCHED, not just that it matched something.
+    # The old summary reported counts only, so "9 pins placed" read as nine correct
+    # locations while three of them sat in the wrong county. A count cannot be checked;
+    # a name can, and this is the line that gets read before a map goes to a client.
+    for p, g in located:
+        flag = "~" if g.get("approx") else " "
+        print(f"   {flag}{p['rank']:02d} {p['address']}, {p['city']}"
+              f"\n        -> {g.get('matched', '')}")
     for p in missing:
         print(f"    no pin: {p['rank']:02d} {p['address']}")
     print(f"  image {len(b64)/1024/1024:.2f} MB base64")
+    print("  CHECK EVERY '->' LINE ABOVE against the address beside it before this map "
+          "reaches a client. A wrong pin is worse than a missing one.")
 
 
 if __name__ == "__main__":
