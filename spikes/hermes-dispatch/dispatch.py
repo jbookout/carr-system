@@ -44,11 +44,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent / "partner-line-78"))
 
 import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
-import inject as inject_mod  # noqa: E402  — the proven wire, not a second copy
+import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 
 DEFAULT_RESULTS = Path(
