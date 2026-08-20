@@ -71,7 +71,7 @@ class Connection:
                  disable_rows: list[tuple[Any, ...]] | None = None,
                  observation_rows: list[tuple[Any, ...]] | None = None) -> None:
         self.identity, self.authority = identity, authority
-        self.rows = rows or [("nightly-record-layer", 2, "canary", "accepted", "receipt:canary", "joe")]
+        self.rows = rows or [("nightly-record-layer", 3, "canary", "accepted", "receipt:canary", "joe")]
         self.disable_rows = disable_rows if disable_rows is not None else [("disable:cc", "cc-update-audit", 1,
                                               "cc-update-audit.claude-code.v1", "cc-update-audit",
                                               "accepted after native readback", "joe",
@@ -182,7 +182,7 @@ def main() -> int:
     check("provider observation uses a separate exact allowlisted receipt query",
           conn.calls[-1] == (PROVIDER_OBSERVATION_SQL, ("scheduler-observation:fixture",)))
     launchd_conn = Connection(observation_rows=[(
-        "scheduler-observation:launchd", "nightly-record-layer.launchd.v1", "nightly-record-layer", 2,
+        "scheduler-observation:launchd", "nightly-record-layer.launchd.v1", "nightly-record-layer", 3,
         "com.carr.nightly-record-layer", "launchd", "disabled", "c" * 64, "America/Chicago",
         "d" * 64, "e" * 64, "f" * 64, datetime(2026, 8, 16, 18, 1, tzinfo=timezone.utc), "joe-mac",
     )])

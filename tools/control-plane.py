@@ -36,6 +36,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from lib.control_plane import deterministic_args, validate_manifest  # noqa: E402
+from pipelines.availability_matcher import canary_report  # noqa: E402
 from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
                                             validate_rotation_policy)  # noqa: E402
@@ -571,7 +572,7 @@ class RuntimeWorkflowFactCollector:
             ('calendar-fetch-daily', 'canary'): (r'calendar-capture: canary-result \{"contact_count":\d+,"domain_count":\d+,"exact_count":\d+,"snapshot_digest":"[0-9a-f]{64}","source_snapshot_id":"[0-9a-f-]{36}","unknown_count":\d+\}',),
             ('calendar-fetch-daily', 'live'): (r'calendar-capture: source=eventkit mode=live scanned=\d+ exact=\d+ domain=\d+ unknown=\d+ writes=\d+ failed=0',),
             ('nightly-record-layer', 'shadow'): (r'nightly preflight: \d+ chain surfaces present; writes=0',),
-            ('nightly-record-layer', 'canary'): (r'nightly result: chain_ok',),
+            ('nightly-record-layer', 'canary'): (r'nightly canary result: \{"availability_count":\d+,"match_count":\d+,"open_search_count":\d+,"output_digest":"[0-9a-f]{64}","snapshot_digest":"[0-9a-f]{64}","source_snapshot_id":"[0-9a-f-]{36}"\}',),
             ('nightly-record-layer', 'live'): (r'nightly result: chain_ok',),
             ('notes-sweep-hourly', 'shadow'): (r'notes-sweep shadow: scanned=\d+ unposted=\d+ writes=0 posts=0',),
             ('notes-sweep-hourly', 'canary'): (r'notes-sweep: source=.+ mode=canary destination=[^\s]+ posted=\d+ duplicate=\d+ failed=0 still_queued=0',),
@@ -856,7 +857,8 @@ def _workflow_fact_collector(workflow: dict[str, Any], payload: Any, **kwargs: A
 
 
 def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
-                           timeout: int, mode: str, stdin_text: str | None = None) -> dict[str, Any]:
+                           timeout: int, mode: str, stdin_text: str | None = None,
+                           canary_run_id: str | None = None) -> dict[str, Any]:
     execution = workflow["execution"]
     path = (REPO / execution["entrypoint"]).resolve()
     if REPO not in path.parents or not path.is_file():
@@ -872,6 +874,11 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
         env["CARR_REPO"] = str(REPO)
         env["CARR_CALENDAR_OUTPUT_ROOT"] = str(
             REPO / "out" if mode == "live" else REPO / "out" / "control-plane" / "calendar" / mode)
+    if workflow.get("key") == "nightly-record-layer" and mode == "canary":
+        if not canary_run_id or not re.fullmatch(r"[0-9a-f-]{36}", canary_run_id):
+            raise RuntimeError("nightly canary requires a leased UUID run identity")
+        env["CARR_NIGHTLY_CANARY_ROOT"] = str(
+            REPO / "out" / "canary" / "nightly-record-layer" / canary_run_id)
     args = deterministic_args(execution, mode)
     proc = subprocess.run([str(path), *args], cwd=REPO, env=env,
                           input=stdin_text, capture_output=True, text=True, timeout=timeout)
@@ -903,6 +910,34 @@ def _calendar_canary_aggregate(evidence: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("calendar canary aggregate is not deterministic")
     output = hashlib.sha256(json.dumps({"schema":"calendar-canary-output-v1","exact_count":counts[0],"domain_count":counts[1],"unknown_count":counts[2]},sort_keys=True,separators=(",",":" )).encode()).hexdigest()
     return {**value,"output_digest":output}
+
+
+def _nightly_canary_aggregate(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Parse exactly one isolated availability-matcher canary aggregate."""
+    text = evidence.get("stdout_tail")
+    lines = [line.removeprefix("nightly canary result: ") for line in text.splitlines()
+             if line.startswith("nightly canary result: ")] if isinstance(text, str) else []
+    if len(lines) != 1:
+        raise RuntimeError("nightly canary child emitted no single structured aggregate")
+    try:
+        value = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("nightly canary aggregate is not JSON") from exc
+    required = {"source_snapshot_id", "snapshot_digest", "availability_count",
+                "open_search_count", "match_count", "output_digest"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise RuntimeError("nightly canary aggregate has an unregistered shape")
+    try:
+        canonical_snapshot_id = str(uuid.UUID(value["source_snapshot_id"]))
+    except (ValueError, TypeError, AttributeError):
+        canonical_snapshot_id = ""
+    counts = (value["availability_count"], value["open_search_count"], value["match_count"])
+    if canonical_snapshot_id != value["source_snapshot_id"] \
+            or not all(type(count) is int and count >= 0 for count in counts) \
+            or not all(isinstance(value[key], str) and re.fullmatch(r"[0-9a-f]{64}", value[key])
+                       for key in ("snapshot_digest", "output_digest")):
+        raise RuntimeError("nightly canary aggregate is not deterministic")
+    return value
 
 
 class LeaseKeeper:
@@ -991,17 +1026,34 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                     raise RuntimeError(f"{workflow['key']}.routing predicate was not satisfied")
             input_payload: dict[str, Any] | None = None
             calendar_source: dict[str, Any] | None = None
+            nightly_source: dict[str, Any] | None = None
+            nightly_child_source: dict[str, Any] | None = None
             if workflow["key"] == "calendar-fetch-daily" and claim["mode"] == "canary":
                 cur.execute("select * from ops.create_calendar_canary_source_snapshot(%s,%s)",(job_id,lease))
                 source_row=cur.fetchone()
                 if source_row is None: raise RuntimeError("calendar source snapshot was not minted")
                 calendar_source={"source_snapshot_id":str(source_row[0]),"snapshot_digest":source_row[1],"contact_count":source_row[2],"snapshot_text":source_row[3]}
                 conn.commit()
+            if workflow["key"] == "nightly-record-layer" and claim["mode"] == "canary":
+                cur.execute("select * from ops.create_nightly_availability_canary_source_snapshot(%s,%s)", (job_id, lease))
+                source_row = cur.fetchone()
+                if source_row is None:
+                    raise RuntimeError("nightly availability source snapshot was not minted")
+                try:
+                    snapshot_body = json.loads(source_row[4])
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise RuntimeError("nightly availability source snapshot was not readable") from exc
+                if not isinstance(snapshot_body, dict) or set(snapshot_body) != {"availabilities", "searches"}:
+                    raise RuntimeError("nightly availability source snapshot has an unregistered shape")
+                nightly_source = {"source_snapshot_id": str(source_row[0]), "snapshot_digest": source_row[1], **snapshot_body}
+                nightly_child_source = {"source_snapshot_id": str(source_row[0]), "snapshot_digest": source_row[1], "snapshot_preimage": source_row[4]}
+                conn.commit()
             with LeaseKeeper(job_id,lease):
                 if claim["execution_kind"] == "deterministic":
                     evidence = _execute_deterministic(
                         workflow,claim["payload"],claim["timeout_seconds"],claim["mode"],
-                        json.dumps(calendar_source,separators=(",",":")) if calendar_source else None)
+                        json.dumps(calendar_source or nightly_child_source,separators=(",",":")) if (calendar_source or nightly_child_source) else None,
+                        canary_run_id=str(job_id) if nightly_source else None)
                     if workflow["key"] == "calendar-fetch-daily" and claim["mode"] == "canary":
                         aggregate=_calendar_canary_aggregate(evidence)
                         if calendar_source is None or any(aggregate[k]!=calendar_source[k] for k in ("source_snapshot_id","snapshot_digest","contact_count")): raise RuntimeError("calendar child source snapshot does not reconcile")
@@ -1016,6 +1068,26 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                             raise RuntimeError("calendar canary immutable receipt did not read back")
                         evidence = {**evidence, "calendar_canary_receipt": {
                             "id": str(minted[0]), **aggregate}}
+                    if workflow["key"] == "nightly-record-layer" and claim["mode"] == "canary":
+                        aggregate = _nightly_canary_aggregate(evidence)
+                        if nightly_source is None or any(aggregate[key] != nightly_source[key] for key in ("source_snapshot_id", "snapshot_digest")) \
+                                or aggregate["availability_count"] != len(nightly_source["availabilities"]) \
+                                or aggregate["open_search_count"] != len(nightly_source["searches"]):
+                            raise RuntimeError("nightly canary child source snapshot does not reconcile")
+                        _expected_report, expected_aggregate = canary_report(nightly_source)
+                        if aggregate != expected_aggregate:
+                            raise RuntimeError("nightly canary child aggregate does not reproduce parent snapshot")
+                        cur.execute("""select (ops.record_nightly_availability_canary_receipt(%s,%s,%s,%s,%s)).id""",
+                                    (job_id, lease, aggregate["source_snapshot_id"], aggregate["output_digest"], aggregate["match_count"]))
+                        minted = cur.fetchone()
+                        cur.execute("""select id,source_snapshot_id,source_snapshot_digest,availability_count,open_search_count,match_count,output_digest
+                                       from ops.resolve_nightly_availability_canary_receipt(%s,%s)""", (job_id, claim["attempt"]))
+                        readback = cur.fetchone()
+                        if minted is None or readback is None or readback[0] != minted[0] \
+                                or str(readback[1]) != aggregate["source_snapshot_id"] or readback[2] != aggregate["snapshot_digest"] \
+                                or tuple(readback[3:]) != (aggregate["availability_count"], aggregate["open_search_count"], aggregate["match_count"], aggregate["output_digest"]):
+                            raise RuntimeError("nightly canary immutable receipt did not read back")
+                        evidence = {**evidence, "nightly_availability_canary_receipt": {"id": str(minted[0]), **aggregate}}
                 else:
                     cognition = _contract(manifest,workflow["execution"]["cognition_job"])
                     input_payload = _build_and_admit_cognition_input(manifest, workflow, claim)
