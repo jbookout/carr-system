@@ -405,8 +405,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
-        print("mirror failed: DATABASE_URL is required", file=sys.stderr)
-        return 2
+        # 78 = EX_CONFIG, THE HOUSE SKIP CONTRACT, and the same one
+        # bin/backup-dump.sh line 57 already implements for this exact
+        # credential. bin/nightly.sh lines 143-151 spell out why it matters:
+        # exit 78 means "the step ran, found a setting it needs is absent,
+        # wrote nothing and said so", which is NOT a failed night, while any
+        # other nonzero code records a FAIL.
+        #
+        # THIS WAS EXIT 2 UNTIL 2026-08-20 AND NOBODY SAW IT, because the
+        # chain used to die at the backup step a few lines earlier and never
+        # reached this one. Fixing that abort made this step run for the
+        # first time in days — and it would have recorded a hard failure
+        # every single night that CARR_DB_BACKUP_URL stays absent from
+        # ~/.config/carr/db.env. An alarm that fires nightly over a known
+        # missing credential trains people to stop reading alarms, which is
+        # the failure the SKIP convention exists to prevent.
+        #
+        # The step still prints its reason and still shows in the log, so a
+        # missing mirror stays visible without being counted as a breakage.
+        print("mirror skipped: DATABASE_URL is not configured", file=sys.stderr)
+        return 78
 
     try:
         import psycopg

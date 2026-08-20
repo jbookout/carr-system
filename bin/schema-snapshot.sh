@@ -118,8 +118,31 @@ cat > "$TMP" <<'ROLES'
 -- snapshot's ledger passed 0115 that migration stopped being pending anywhere.
 -- carr_exporter aged into the same trap by way of 0006 and joined the list on
 -- 2026-08-14, when the grants section below started carrying its privileges.
--- carr_reader, carr_writer and carr_exporter are privilege bundles, so they
--- stay NOLOGIN. carr_jobs is the narrow unattended runtime identity: a fresh
+-- carr_authority aged into it by way of 0161 and joined on 2026-08-19: the
+-- refresh that carried the ledger past 0161 stopped that migration replaying,
+-- and the next rebuild failed five db-gates with `role "carr_authority" does
+-- not exist`. That is the third time this exact trap has been sprung, so the
+-- rule it teaches is worth stating plainly: ANY migration that creates a role
+-- must add that role here in the same change, because the day its ledger entry
+-- lands is the day it stops creating anything.
+-- carr_device_evidence made it FOUR, the same day and on this same branch, by
+-- way of 0163. It surfaced only after the guidance and retrieval seed rows were
+-- added, because control-plane-db-gate could not reach the privilege check that
+-- names it until the gates ahead of it stopped failing — and when it did reach
+-- it, it did not fail cleanly: `has_function_privilege('carr_device_evidence',
+-- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
+-- of a finding. Four for four, every one caught by a rebuild rather than by the
+-- change that created the role.
+--
+-- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
+-- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
+-- login role with a placeholder password to satisfy nothing is a cost with no
+-- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
+-- widening a pattern.
+-- carr_reader, carr_writer, carr_exporter, carr_authority and
+-- carr_device_evidence are privilege bundles, so they stay NOLOGIN. carr_jobs is
+-- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
 -- completely unchanged. The placeholder is generated in-process and never
@@ -131,7 +154,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -165,14 +188,58 @@ fi
 #
 # The section rides AFTER the structure because a grant on a table that does
 # not exist yet aborts the load, and BEFORE the ledger because it is structure,
-# not data. Five shapes, each ordered deterministically so --check reports
-# drift and nothing else: schema usage, relation grants (tables, views,
-# sequences), column-scoped grants (0021, 0117 — where the columns OUTSIDE the
-# list are the point), function execute (0094, 0106), and memberships.
+# not data. SIX shapes, each ordered deterministically so --check reports
+# drift and nothing else: PUBLIC revokes, schema usage, relation grants (tables,
+# views, sequences), column-scoped grants (0021, 0117 — where the columns
+# OUTSIDE the list are the point), function execute (0094, 0106), and
+# memberships.
+#
+# THE PUBLIC REVOKES COME FIRST AND ARE THE ONLY SHAPE THAT TAKES A PRIVILEGE
+# AWAY, added 2026-08-19. Postgres grants EXECUTE on every new function to
+# PUBLIC by default, and PUBLIC includes every role, so a migration that means
+# to keep a function to one principal has to revoke that default explicitly —
+# 0168 does exactly this: `revoke all on function ops.record_guidance_decision
+# (uuid,text,text,text) from public,carr_writer`. This section emitted only
+# GRANTs, so a database built from the snapshot got every function back at its
+# permissive default while the revoke that tightened it sat in a migration the
+# ledger had already absorbed.
+#
+# That is the same aging trap as the roles, one level down, and it fails in the
+# more dangerous direction: a rebuilt environment is LOOSER than production, not
+# broken, so nothing refuses to start — CI's db-gates caught it as
+# "carr_writer can execute authority function ops.record_guidance_decision",
+# "browser challenge ledger grant leaked" and "raw plan/acceptance authority
+# leaked" only because those gates assert the boundary directly. Production is
+# unaffected: it holds the revokes already, and this file is never loaded into
+# it.
+#
+# Read from production's catalogs like everything else here. A NULL proacl means
+# the function still carries the default, so there is nothing to revoke; a
+# non-null proacl that does not name PUBLIC (grantee 0) is a function whose
+# default was deliberately taken away, and that is what gets emitted.
 GRANTS_SQL="$(mktemp)"
 cat > "$GRANTS_SQL" <<'GRANTSQL'
+-- Built from nspname + proname + identity arguments rather than from
+-- oid::regprocedure, which omits the schema for anything the current
+-- search_path already covers. That produced bare `revoke all on function
+-- capture_call_context(uuid[])` lines, which resolve to whatever the LOADING
+-- session's search_path happens to point at — the one thing a snapshot must
+-- never depend on.
+select format('revoke all on function %s.%s(%s) from public;',
+              quote_ident(n.nspname), quote_ident(p.proname),
+              pg_get_function_identity_arguments(p.oid))
+  from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname in ('ops', 'public')
+   and p.proacl is not null
+   and not exists (select 1
+                     from aclexplode(p.proacl) a
+                    where a.grantee = 0
+                      and a.privilege_type = 'EXECUTE')
+ order by 1;
+
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -186,7 +253,7 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -202,7 +269,7 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -219,7 +286,7 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -233,7 +300,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s to %s;', gr.rolname, mem.rolname)
   from pg_auth_members m
@@ -310,11 +377,51 @@ fi
 #   * client, party, deal, event and every other business table — the point.
 # `actor` (12 rows) IS included: internal actor identities (joe, dell, system,
 # automation) that events carry foreign keys to. Not client data.
+#
+# TWO SEEDED CONFIGURATION TABLES JOINED ON 2026-08-19, on Joe's ruling, and they
+# widen this list's category from "closed vocabulary" to "rows production has
+# that a rebuild silently lacks". Both are data steps inside migrations the
+# ledger has now absorbed, so the migration no longer replays and a database
+# built from this file gets the table and none of its rows — the same aging trap
+# as the roles and the PUBLIC revokes above, one level further in:
+#   * ops.guidance_registry (1 row) — the registry's own header row, created by
+#     0168's `insert into ops.guidance_registry(created_by)`. Without it
+#     guidance-registry-db-gate fails on "expected one row ... where singleton".
+#   * retrieval_proposal (10 rows, all pending) — 0135's own "Seed evidence
+#     only" block, which it says "activate nothing until Joe or Dell approves
+#     the batch". Without them situation-retrieval-db-gate fails on "expected 10
+#     pending seed proposals, found 0".
+#   * retrieval_ranking_policy (2 rows) — the versioned ranking policies,
+#     coequal-normalized-v1 (active, default) and lexical-dominant-v1
+#     (candidate). The active row carries golden_suite_digest, which
+#     assert_situation_retrieval_golden() looks up BY DIGEST; with no policy row
+#     the lookup returns null and it raises "golden suite digest mismatch".
+#     Found only after adding the two above, because the gate could not reach
+#     this check until it got past the proposals.
+#
+# I counted every other table 0135 and 0168 seed, so the next rebuild does not
+# discover a fourth one the same way: doctrine_concept_mapping,
+# retrieval_concept, retrieval_phrase, ops.guidance_authority_binding,
+# ops.guidance_situation_mapping and ops.guidance_registry_event are all EMPTY on
+# production and need nothing. retrieval_query_log has 185 rows and is
+# deliberately EXCLUDED — it is a usage log, not configuration, it carries the
+# text of real queries, and no gate asks for it.
+# HAND-CHECKED BEFORE ADDING, which is the rule this list lives by: counted on
+# production (exactly 1 and exactly 10, all ten still pending), and every payload
+# read. They are search concepts and phrases about this system's own runbooks —
+# "record layer outage diagnosis", "how the operating playbook learns from
+# mistakes". No client, party, deal, note or event appears in either table.
+#
+# THE LINE THAT STILL HOLDS, so this widening does not become a licence: a table
+# qualifies because someone read its rows and can say what is in them, never
+# because a migration seeded it. "Tables seeded by a migration" would sweep in
+# client, party and event, which the same migrations also insert into.
 VOCAB_TABLES="activity_kind client_status client_type contact_state deal_lane \
 deal_phase deal_type_ref lead_lane lead_stage loop_domain negotiation_claim_type \
 participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
-doctrine_review_policy actor"
+doctrine_review_policy actor retrieval_proposal retrieval_ranking_policy \
+ops.guidance_registry"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do

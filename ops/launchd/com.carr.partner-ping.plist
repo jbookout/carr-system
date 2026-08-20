@@ -47,14 +47,22 @@
     <string>{{REPO}}/tools/db-tap.py</string>
     <string>run</string>
     <string>pipelines/partner_ping.py</string>
-    <!-- --scheduled confines the QUERY (not the wake) to weekdays 07:00-19:00
-         local. Outside that window neither partner is reading notification
-         centre, and the query was the last thing keeping the Neon compute
-         from ever autosuspending (2026-08-18 cloud-usage audit). The flag
-         sits here, after the script path, exactly as notes-sweep carries its
-         own --scheduled; the rule itself lives in pipelines/partner_ping.py
-         so the manual and automated paths stay one code path. Drop the flag
-         and the job queries around the clock again. -->
+    <!-- The scheduled flag below confines the QUERY (not the wake) to
+         weekdays 07:00-19:00 local. Outside that window neither partner is
+         reading notification centre, and the query was the last thing keeping
+         the Neon compute from ever autosuspending (2026-08-18 cloud-usage
+         audit). The flag sits here, after the script path, exactly as
+         notes-sweep carries its own. The rule itself lives in
+         pipelines/partner_ping.py so the manual and automated paths stay one
+         code path. Drop the flag and the job queries around the clock again.
+
+         WRITTEN WITHOUT A DOUBLE HYPHEN ON PURPOSE. XML forbids the two-dash
+         sequence inside a comment, so naming the flag literally here made this
+         file unparseable by Python's plistlib while plutil and launchd both
+         accepted it. That silently disabled the missing-program check in
+         ops/config-as-code.py, which returns "no missing paths" for any plist
+         it cannot read. ops/config-as-code-selftest.py now refuses the whole
+         set on a parse failure, so this cannot come back unnoticed. -->
     <string>--scheduled</string>
   </array>
 

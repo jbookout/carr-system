@@ -48,6 +48,25 @@ def commands(doc):
             for group in groups for hook in group.get("hooks", []) if isinstance(hook, dict)]
 
 
+PLIST_DIR = Path(__file__).resolve().parents[1] / "ops" / "launchd"
+
+
+def _plist_parses(path):
+    """True when Python can read the plist, not merely when plutil can.
+
+    launchd uses CoreFoundation's lenient parser and accepts files that
+    plistlib rejects.  Every repo tool that inspects these jobs uses plistlib,
+    so a file only launchd can read is a file the tooling silently skips.
+    """
+    try:
+        with open(path, "rb") as fh:
+            plistlib.load(fh)
+        return True
+    except Exception as exc:
+        print(f"  UNPARSEABLE  {path.name}: {type(exc).__name__} {exc}")
+        return False
+
+
 def main():
     merged = mod.merge_codex_carr_hooks(LIVE, DESIRED)
     names = commands(merged)
@@ -322,6 +341,17 @@ def main():
          and "SKIP  com.carr.control-plane-tick.plist (definition only:" in launchd_out.getvalue()),
         ("fresh install creates the LaunchAgents directory",
          launchd_dir_created),
+        # EVERY REPO PLIST MUST PARSE WITH plistlib, not merely with plutil.
+        # com.carr.partner-ping.plist named a flag literally inside an XML
+        # comment on 2026-08-18, and XML forbids the two-dash sequence there.
+        # plutil and launchd both accepted the file; Python's parser did not.
+        # The cost was silent: _missing_paths in ops/config-as-code.py catches
+        # the parse error and returns [] — "no missing paths" — so the check
+        # that stops a job installing when its program was never built did
+        # nothing at all for that job, and nothing said so. A text-only drift
+        # comparison cannot see this, which is why it needs its own case.
+        ("every repo launchd plist parses with plistlib, not just plutil",
+         all(_plist_parses(f) for f in sorted(PLIST_DIR.glob("*.plist")))),
     ]
     for label, passed in cases:
         print(f"{'PASS' if passed else 'FAIL'}  {label}")

@@ -78,52 +78,29 @@ else
   echo "$(date -u +%FT%TZ) FAIL review-queue rc=$?" >> "$LOG"; rc=1
 fi
 
-# DELIVER THE CALL LIST TO A SURFACE JOE ACTUALLY OPENS. Added 2026-08-09 by the
-# system-design council: brief_pack writes one-thing.md and renewal-shortlist.md
-# into out/brief-pack/, and .gitignore line 5 excludes out/ entirely. Nothing
-# copied them anywhere, and grep found no consumer but health-check.py watching
-# the mtime — a freshness check on a file with no reader. Meanwhile the shortlist
-# named 15 Pensacola healthcare tenants with phone numbers and lease windows, and
-# THREE of those windows expired unread, each carrying its own auto-generated
-# "est window already past, verify before outreach" footnote. The file recorded
-# the opportunity it was losing.
+# today.md USED TO BE WRITTEN HERE, and the doctrine cutoff retired it on
+# 2026-08-20. The block concatenated three brief-pack sections into
+# 00_Context/today.md in the vault because out/ is gitignored and the call list
+# had no reader — three renewal windows had expired unread while the shortlist
+# sat in a folder nobody opened.
 #
-# The canonical document output is repo-local. It is not projected to Drive in
-# normal mode. Do not build it from stale component files after brief-pack has
-# refused: that would convert a loud missing-calendar failure into a plausible
-# but degraded daily brief.
-TODAY="$REPO/out/brief-pack/today.md"
-if [ "$brief_ok" -eq 1 ]; then
-  { echo "# Today, generated $(date -u +%FT%TZ). Do not hand-edit."
-    echo
-    cat "$REPO/out/brief-pack/one-thing.md" 2>/dev/null
-    echo
-    cat "$REPO/out/brief-pack/claim-card.md" 2>/dev/null
-    echo
-    cat "$REPO/out/brief-pack/renewal-shortlist.md" 2>/dev/null
-  } > "$TODAY.tmp" \
-    && mv "$TODAY.tmp" "$TODAY" \
-    && echo "$(date -u +%FT%TZ) OK today.md -> canonical document output" >> "$LOG" \
-    || { echo "$(date -u +%FT%TZ) FAIL canonical today.md" >> "$LOG"; rc=1; }
-else
-  echo "$(date -u +%FT%TZ) REFUSED today.md because brief-pack was incomplete" >> "$LOG"
-fi
-
-# The retired delivery behavior survives only as explicit, labeled recovery.
-# It projects the already-built document; it is never the source of truth.
-if [ "$RECOVERY" -eq 1 ] && [ "$brief_ok" -eq 1 ]; then
-  VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
-  if [ -d "$VAULT/00_Context" ]; then
-    { echo "# RECOVERY NONCANONICAL PROJECTION. Source: $TODAY"
-      cat "$TODAY"
-    } > "$VAULT/00_Context/today.md" \
-      && echo "$(date -u +%FT%TZ) RECOVERY today.md -> Drive" >> "$LOG" \
-      || { echo "$(date -u +%FT%TZ) FAIL recovery Drive projection" >> "$LOG"; rc=1; }
-  else
-    echo "$(date -u +%FT%TZ) FAIL recovery Drive projection: vault not mounted" >> "$LOG"
-    rc=1
-  fi
-fi
+# THAT PROBLEM IS SOLVED BY VERBS NOW, which is the only reason this is safe to
+# remove. All three sections are served live:
+#   the one thing        today-triage
+#   renewal windows      today-triage (the T-6 and T-3 lease-event rows)
+#   the claim card       claim-card, deployed to production 2026-08-20, 141 verbs
+#
+# The claim card is why this waited. promote-pool and decline-candidate each tell
+# the caller to read the row from v_claim_card first, and until claim-card
+# shipped, the markdown card was the only reader that existed anywhere — pulling
+# the file before the verb would have left both write verbs naming a surface
+# nothing could reach. Verified against the live Worker before this line was
+# deleted: claim-card returned the same 9,778 claimable and 388 needs-contact
+# totals this block used to print.
+#
+# The brief-pack sections still build into out/brief-pack/ above; what ends here
+# is the copy into the vault. health-check.py watches those files' mtime, so the
+# freshness signal is unaffected.
 
 # Known defect, tracked as loop #182: review-queue's touches lane reports 0 while
 # ingest_inbox holds real rows, because the read fails and the handler discards

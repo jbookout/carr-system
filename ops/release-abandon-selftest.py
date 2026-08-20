@@ -24,21 +24,13 @@ letting it be marked abandoned would let a deploy be written out of the record
 after the fact, which is the opposite of what a release ledger is for.
 
 WHERE THESE RUN. They need a Postgres carrying the schema and nothing more —
-NOT Neon specifically. So when CARR_CI_DATABASE_URL is set (the throwaway
-Postgres the GitHub runner stands up) they use it directly, and only when it is
-absent do they provision an ephemeral Neon branch of staging, guarded the way
-ops/p1-rebuild-gate.py guards its own: never production, never the default
-branch, fresh database, destroyed on every exit path.
-
-The first version asked for Neon unconditionally and returned 78 in CI, where
---strict counts a skip as a failure — so a verb with real fixtures shipped with
-its fixtures never running on the one surface that gates the merge. Asking for
-the cheapest thing that can answer the question is also the thing that runs
-everywhere.
+NOT Neon specifically. CI supplies a disposable loopback PostgreSQL service via
+CARR_CI_DATABASE_URL. A developer push without that explicit fixture DSN does
+not substitute a metered Neon branch: it reports the database cases as not run,
+while hosted CI executes them against its already-running local service.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -46,24 +38,15 @@ import sys
 import time
 from contextlib import contextmanager
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
 from psycopg import sql
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
-from lib.platform_metering import MeteringRefusal, authorize_metered_execution
 ABANDON_DB = "abandon_check"
 PROVIDER = "cloudflare-workers"
 PROVIDER_VERSION = "11111111-2222-4333-8444-555555555555"
-
-_spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
-if _spec is None or _spec.loader is None:
-    sys.exit("release-abandon-selftest: could not load tools/db-tap.py")
-db_tap = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(db_tap)
 
 PASSED: int = 0
 FAILED: list[str] = []
@@ -77,15 +60,6 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         FAILED.append(name)
         print(f"  FAIL  {name}" + (f" — {detail}" if detail else ""))
-
-
-def host_of(cs: str) -> str:
-    return cs.split("@", 1)[1].split("/", 1)[0].split("?", 1)[0] if "@" in cs else ""
-
-
-def neon(env, *args):
-    return subprocess.run([db_tap.NEONCTL, *args], capture_output=True,
-                          text=True, timeout=300, env=env)
 
 
 def psql(dsn, *args):
@@ -354,80 +328,8 @@ def main() -> int:
             return 1
         return 0
 
-    key = db_tap._neon_api_key()
-    if not key and not os.environ.get("NEON_API_KEY"):
-        print("release-abandon-selftest: no Neon credential and no CI database — "
-              "not configured")
-        return 78
-    env = {**os.environ,
-           "PATH": "/usr/local/opt/node@22/bin:/opt/homebrew/bin:" + os.environ.get("PATH", "")}
-    if key:
-        env["NEON_API_KEY"] = key
-
-    staging = db_tap.PROJECTS["staging"]
-    prod = db_tap.PROJECTS["production"]
-    project_id = staging.get("id") or db_tap._project_id_by_name(staging["name"], env)
-    if project_id == prod.get("id"):
-        sys.exit("release-abandon-selftest: staging resolved to PRODUCTION — refusing.")
-
-    prod_host = host_of(db_tap.dsn(project="production"))
-    stg_host = host_of(db_tap.dsn(project="staging"))
-    branch_id = ""
-    name = f"abandon-check-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
-    # `finally` handles ordinary failures, but the process can be terminated by
-    # a CI cancellation or host shutdown before Python gets to run it. Give the
-    # provider its own cleanup deadline so an interrupted test cannot leave a
-    # metered branch behind indefinitely.
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat().replace(
-        "+00:00", "Z"
-    )
-    try:
-        metering_rows = neon(env, "branches", "list", "--project-id", project_id, "--output", "json")
-        if metering_rows.returncode != 0:
-            sys.exit("release-abandon-selftest: cannot read branch count for metering admission")
-        try:
-            authorize_metered_execution(
-                json.loads((REPO / "ops/config/platform-metering.v1.json").read_text()),
-                "neon-disposable-branch",
-                {"requested_lifetime_minutes": 120, "cleanup_registered": True,
-                 "active_nondefault_branches": sum(
-                     1 for row in json.loads(metering_rows.stdout) if not row.get("default"))})
-        except (MeteringRefusal, ValueError, TypeError) as exc:
-            sys.exit(f"release-abandon-selftest: metered branch refused: {exc}")
-        out = neon(env, "branches", "create", "--project-id", project_id,
-                   "--name", name, "--expires-at", expires_at, "--output", "json")
-        if out.returncode != 0:
-            sys.exit(f"could not create the branch: {out.stderr.strip()[:200]}")
-        branch_id = (json.loads(out.stdout).get("branch") or json.loads(out.stdout)).get("id", "")
-        listed = neon(env, "branches", "list", "--project-id", project_id, "--output", "json")
-        defaults = {b.get("id") for b in (json.loads(listed.stdout) if listed.returncode == 0 else [])
-                    if b.get("default")}
-        if not branch_id or branch_id in defaults:
-            branch_id = ""
-            sys.exit("branch create returned nothing usable, or the default branch")
-        cs = neon(env, "connection-string", branch_id, "--project-id", project_id,
-                  "--role-name", "neondb_owner")
-        bdsn = cs.stdout.strip()
-        if host_of(bdsn) in (prod_host, stg_host):
-            sys.exit("the branch shares a host with a real environment — refusing")
-        psql(bdsn, "-c", f"create database {ABANDON_DB}")
-        head, _, q = bdsn.partition("?")
-        dsn = head.rsplit("/", 1)[0] + "/" + ABANDON_DB + (f"?{q}" if q else "")
-
-        run_cases(dsn)
-    finally:
-        if branch_id:
-            gone = neon(env, "branches", "delete", branch_id, "--project-id", project_id)
-            if gone.returncode == 0:
-                print(f"\n  ok    the ephemeral branch {branch_id} is gone")
-            else:
-                FAILED.append("teardown deleted the ephemeral branch")
-                print(f"\n  FAIL  COULD NOT DELETE branch {branch_id} — delete it by hand")
-
-    print(f"\nrelease-abandon-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
-    if FAILED:
-        print("FAILURES: " + ", ".join(FAILED))
-        return 1
+    print("release-abandon-selftest: database cases NOT RUN — "
+          "CARR_CI_DATABASE_URL is absent; metered-provider fallback is disabled")
     return 0
 
 

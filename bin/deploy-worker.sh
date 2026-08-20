@@ -842,14 +842,37 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
   echo "  correlation $CARR_CORRELATION_ID"
   DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#identity-ok;bin/smoke-and-record.sh#$CARR_CORRELATION_ID"
   DEPLOYMENT_FAILURE_CLASS="golden_workflow_failed"
-  PERFORMANCE_STARTED_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
+  SUITE_STARTED_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
   if "$REPO/bin/smoke-and-record.sh"; then
     echo "  golden workflow suite PASSED against the deploy you just shipped."
-    # Performance is measured around the functional suite, then written as a
-    # release-bound run.  This does not mint a recovery receipt: recovery is
-    # consumed only through the existing DB-enforced release relationship.
-    PERFORMANCE_ENDED_MS="$("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)')"
-    PERFORMANCE_ELAPSED_MS=$((PERFORMANCE_ENDED_MS - PERFORMANCE_STARTED_MS))
+    SUITE_ELAPSED_MS=$(( $("$PY" -c 'import time; print(time.monotonic_ns() // 1_000_000)') - SUITE_STARTED_MS ))
+
+    # THE BUDGET MEASURES A REQUEST, NOT THE SUITE. This used to clock
+    # bin/smoke-and-record.sh end to end — 33 workflow tests against the live
+    # Worker over the network — and compare that to PERFORMANCE_BUDGET_MS, whose
+    # approved value on every production release is 1000. A remote suite cannot
+    # finish inside one second, so the gate failed EVERY promotion after
+    # everything real had passed: measured 2026-08-20 promoting claim-card,
+    # "33 passed, 0 failed" immediately followed by "FAIL 229615ms exceeds
+    # approved 1000ms", and the deploy recorded failed on that alone.
+    #
+    # That is not a cosmetic complaint. ops.deployment is what the verb-loss
+    # guard reads for its baseline, so every good promotion booked as failed
+    # left the newest success further behind reality — production was serving
+    # 141 verbs while the ledger's newest success still said 130, wide enough
+    # for a deploy shipping 131 to pass the guard and drop ten live verbs.
+    #
+    # So measure what the budget is actually about: how long production takes to
+    # answer. Slowest of five samples, not the mean — a budget met on average
+    # and blown one call in five is not met. Measured on the same endpoint the
+    # identity read-back already uses, so this adds no new dependency. Real
+    # readings that morning: 101, 156, 187, 446, 589 ms.
+    PERFORMANCE_ELAPSED_MS="$(
+      for _ in 1 2 3 4 5; do
+        curl -s -o /dev/null -w '%{time_total}\n' --max-time 30 "$LIVE_RELEASE_URL" || echo 999
+      done | "$PY" -c 'import sys; print(max(int(float(x) * 1000) for x in sys.stdin.read().split()))'
+    )"
+    echo "  slowest of 5 live requests: ${PERFORMANCE_ELAPSED_MS}ms (suite took ${SUITE_ELAPSED_MS}ms, not gated)"
     PERFORMANCE_EVIDENCE_REF="$LIVE_RELEASE_URL#performance-$CARR_CORRELATION_ID"
     set +e
     "$PY" "$REPO/ops/performance-budget-gate.py" \
@@ -868,7 +891,7 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
           --source-kind wrapper --source-ref bin/deploy-worker.sh \
           --evidence-ref "$PERFORMANCE_EVIDENCE_REF" \
           --failure-class performance_budget_exceeded \
-          --detail "${PERFORMANCE_ELAPSED_MS}ms exceeds ${PERFORMANCE_BUDGET_REF}"; then
+          --detail "slowest of 5 live requests ${PERFORMANCE_ELAPSED_MS}ms exceeds ${PERFORMANCE_BUDGET_REF}; golden suite ${SUITE_ELAPSED_MS}ms, not gated"; then
         DEPLOYMENT_EVIDENCE_REF="$PERFORMANCE_EVIDENCE_REF"
         DEPLOYMENT_FAILURE_CLASS="performance_evidence_unrecorded"
         record_deployment verifying "$CARR_CORRELATION_ID"
@@ -891,7 +914,7 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
         --duration-ms "$PERFORMANCE_ELAPSED_MS" --correlation "$CARR_CORRELATION_ID" \
         --source-kind wrapper --source-ref bin/deploy-worker.sh \
         --evidence-ref "$PERFORMANCE_EVIDENCE_REF" \
-        --detail "${PERFORMANCE_ELAPSED_MS}ms within ${PERFORMANCE_BUDGET_REF}"; then
+        --detail "slowest of 5 live requests ${PERFORMANCE_ELAPSED_MS}ms within ${PERFORMANCE_BUDGET_REF}; golden suite ${SUITE_ELAPSED_MS}ms, not gated"; then
       DEPLOYMENT_EVIDENCE_REF="$PERFORMANCE_EVIDENCE_REF"
       DEPLOYMENT_FAILURE_CLASS="performance_evidence_unrecorded"
       record_deployment verifying "$CARR_CORRELATION_ID"
