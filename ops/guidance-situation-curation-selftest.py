@@ -192,12 +192,23 @@ def main() -> int:
         "sha256": review_digest,
     }:
         errors.append("mapping plan does not bind the exact curation review digest")
-    if bridges:
+    multi_mapping_row = next(
+        (row for row in rows if len(row["mappings"]) > 1), None
+    )
+    if multi_mapping_row is None:
+        errors.append("fixture lacks a multi-mapping doctrine row")
+    else:
+        missing_mapping = multi_mapping_row["mappings"][0]
+        missing_bridge = (
+            concept_rows[multi_mapping_row["concept_key"]]["concept_id"],
+            missing_mapping["doctrine_section_id"],
+        )
         refused_plan, refused_errors = preflight.compile_plan(
-            review, sections, concept_rows, set(list(bridges)[1:]),
+            review, sections, concept_rows, bridges - {missing_bridge},
             review_digest=review_digest,
         )
-        if not refused_errors or set(refused_plan.get("doctrine_mappings", {})) == set(doctrine_items):
+        if (not refused_errors
+                or multi_mapping_row["guidance_id"] in refused_plan.get("doctrine_mappings", {})):
             errors.append("missing approved bridge did not refuse exact mapping-plan coverage")
     mutated_review = json.loads(json.dumps(review))
     mutated_review["doctrine_guidance"][0]["guidance_id"] = "rule-unreviewed-whole-v1"

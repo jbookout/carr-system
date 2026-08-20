@@ -180,17 +180,20 @@ def compile_plan(
             continue
         concept_id = str(concept["concept_id"])
         bindings: list[dict[str, str]] = []
+        complete = True
         for mapping in row["mappings"]:
             address = mapping["section_address"]
             expected_section_id = mapping["doctrine_section_id"]
             target = sections.get((address, expected_section_id))
             if target is None:
+                complete = False
                 errors.append(
                     f"{guidance_id}: active doctrine target drifted: "
                     f"{address} expected {expected_section_id}"
                 )
                 continue
             if (concept_id, expected_section_id) not in approved_bridges:
+                complete = False
                 errors.append(
                     f"{guidance_id}: approved doctrine bridge is absent: "
                     f"{concept_key} -> {address}"
@@ -204,7 +207,10 @@ def compile_plan(
                     "reason": mapping["rationale"],
                 }
             )
-        if bindings:
+        # A guidance row is an exact reviewed mapping set.  Returning its valid
+        # subset when one target is absent would make a rejected plan look
+        # complete to a consumer that keys only by guidance id.
+        if complete and bindings:
             doctrine_mappings[guidance_id] = bindings
     plan = {
         "schema": MAPPING_PLAN_SCHEMA,
