@@ -30,10 +30,18 @@ def main() -> int:
     check("admin nightly steps refuse through evidence-producing step calls",
           nightly.count("routine-admin-refusal.sh") == 5)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
+    # The ":-" default is REQUIRED, not incidental. nightly.sh runs under `set -u`,
+    # so a bare $CARR_DB_BACKUP_URL aborts the whole chain when the key is absent
+    # from db.env — which is what silently killed thirteen steps a night from
+    # 2026-08-17. bin/backup-dump.sh already treats an empty URL as exit 78, a SKIP
+    # that does not fail the night; the bare form denied it the chance to run at all.
+    # The boundary this pair guards is UNCHANGED and still exact: these steps receive
+    # the backup capability or nothing. An empty value is strictly weaker than a
+    # wrong one, so it cannot smuggle an owner or writer URL past the check.
     check("portability mirror uses only the backup capability",
-          'step "portability mirror' in nightly and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
+          'step "portability mirror' in nightly and 'DATABASE_URL="${CARR_DB_BACKUP_URL:-}"' in nightly)
     check("each backup invocation binds the backup capability explicitly",
-          nightly.count('env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh') == 3)
+          nightly.count('env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh') == 3)
     check("clean child preserves explicit export mode", 'CARR_EXPORT_LIVE="${CARR_EXPORT_LIVE:-}"' in HELPER.read_text(encoding="utf-8"))
     check("scheduled recovery refuses unprovisioned admin capability",
           "CARR_JOB_PAYLOAD" in restore and "routine dispatch refused" in restore)
