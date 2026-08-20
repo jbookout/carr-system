@@ -18,7 +18,8 @@ classifies scheduled tasks by whether a firing window has actually PASSED, so a
 brand-new task is never mistaken for a broken one. See the scheduler section below.
 """
 import json, os, sys, glob, time, re, subprocess, calendar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -26,7 +27,62 @@ from datetime import datetime, timedelta
 # would have left the render-tamper check dead on any clone outside $HOME.
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+DEFAULT_RECOVERY_VAULT = (
+    "/Users/booko/Library/CloudStorage/"
+    "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+)
+
+
+def _reader_args(argv):
+    """Return the Drive boundary without letting normal mode inherit a vault."""
+    recovery = False
+    reason = ""
+    vault = None
+    section = "all"
+    fixture = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--recovery":
+            recovery = True
+        elif arg in ("--reason", "--vault", "--section", "--fixture"):
+            if i + 1 >= len(argv):
+                raise SystemExit(f"health-check: {arg} requires a value")
+            value = argv[i + 1]
+            i += 1
+            if arg == "--reason":
+                reason = value
+            elif arg == "--vault":
+                vault = value
+            elif arg == "--section":
+                section = value
+            else:
+                fixture = value
+        else:
+            rest.append(arg)
+        i += 1
+    if vault and not recovery:
+        raise SystemExit("health-check: --vault is recovery-only; pass --recovery")
+    if recovery:
+        reason = (reason or os.environ.get("CARR_RECOVERY_REASON", "")).strip()
+        if not reason:
+            raise SystemExit("health-check: --recovery requires a nonblank --reason")
+        vault = vault or os.environ.get("CARR_VAULT") or DEFAULT_RECOVERY_VAULT
+    else:
+        # A parent shell may carry this old ambient variable.  Normal health must
+        # not pass it to any child or let a child silently choose a Drive reader.
+        os.environ.pop("CARR_VAULT", None)
+    if section not in ("all", "exports", "jobs", "registry"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry")
+    if fixture and recovery:
+        raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
+    return recovery, reason, vault, section, fixture, rest
+
+
+RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, _READER_REST = \
+    _reader_args(sys.argv[1:])
+sys.argv[1:] = _READER_REST
 
 # ── scheduler register (added 2026-08-02) ────────────────────────────────────
 # A TASK THAT HAS NEVER REACHED ITS FIRST WINDOW LOOKS EXACTLY LIKE A TASK THAT IS
@@ -176,6 +232,459 @@ if "--tasks" in sys.argv:
     if _i + 1 >= len(sys.argv):
         sys.exit("usage: health-check.py --tasks <list_scheduled_tasks.json>")
     sys.exit(classify_tasks(sys.argv[_i + 1]))
+
+
+def _canonical_snapshot():
+    """Read canonical database/control-plane evidence, never a Drive render."""
+    if CANONICAL_FIXTURE:
+        with open(CANONICAL_FIXTURE, encoding="utf-8") as fh:
+            value = json.load(fh)
+        if not isinstance(value, dict):
+            raise ValueError("canonical health fixture must be an object")
+        return value
+
+    snapshot = {"exports": None, "job_definitions": None, "jobs": None,
+                "controls": None, "errors": []}
+    if CANONICAL_SECTION in ("all", "exports"):
+        probe = r'''
+import json
+from exporters.targets import TARGETS
+from exporters.common import connect
+with connect() as c, c.cursor() as cur:
+    cur.execute("""select target,
+                          max(ran_at) filter (where status='ok'),
+                          (array_agg(status order by ran_at desc))[1]
+                     from export_run group by target""")
+    rows = [{"target": t, "last_ok": x.isoformat() if x else None,
+             "latest_status": s} for t, x, s in cur.fetchall()]
+print(json.dumps({"registered": sorted(TARGETS), "rows": rows}))
+'''
+        _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
+        _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
+        p = subprocess.run(
+            [_query_python, "-c", probe],
+            cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.returncode:
+            snapshot["errors"].append("exports: " + ((p.stderr or "").strip() or "query failed"))
+        else:
+            try:
+                snapshot["exports"] = json.loads(p.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError) as exc:
+                snapshot["errors"].append(f"exports: unparseable result ({exc})")
+
+    if CANONICAL_SECTION in ("all", "jobs"):
+        # v_job_control is the durable provider-independent job ledger.  The
+        # SQL is intentionally here (rather than a projection parser) so a test
+        # can prove exactly which authority surface health reads.
+        sql = """select 'DEF',d.key,d.version,d.recurrence::text,d.registered_at
+                   from ops.job_definition d where d.enabled order by d.key;
+                 select 'JOB',v.id,v.definition_key,v.definition_version,v.state,v.mode,
+                        v.attempt,v.max_attempts,v.scheduled_for,v.created_at,
+                        v.started_at,v.ended_at,v.next_attempt_at,v.leased_until,
+                        j.timeout_seconds,
+                        (select count(*) from ops.job_receipt r
+                          where r.job_id=v.id and r.attempt=v.attempt
+                            and r.kind='completion') as completion_receipt_count
+                   from ops.v_job_control v join ops.job j on j.id=v.id
+                   where v.created_at > now() - interval '40 days' and v.mode='live'
+                  order by v.created_at desc"""
+        _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
+        _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
+        p = subprocess.run(
+            [_query_python,
+             os.path.join(REPO_ROOT, "tools/db-tap.py"), "sql", "/dev/stdin"],
+            input=sql, cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.returncode:
+            snapshot["errors"].append("jobs: " + ((p.stderr or "").strip() or "query failed"))
+        else:
+            definitions = []
+            rows = []
+            for line in p.stdout.splitlines():
+                cols = [c.strip() for c in line.split("|")]
+                if len(cols) == 5 and cols[0] == "DEF":
+                    try:
+                        recurrence = json.loads(cols[3])
+                    except ValueError:
+                        recurrence = None
+                    definitions.append({"key": cols[1], "version": int(cols[2]),
+                                        "recurrence": recurrence,
+                                        "registered_at": cols[4]})
+                elif len(cols) == 16 and cols[0] == "JOB" and cols[4] in {
+                    "queued", "running", "retry_wait", "waiting_approval", "succeeded",
+                    "failed", "timed_out", "dead_lettered", "cancelled",
+                }:
+                    rows.append({
+                        "id": cols[1], "definition_key": cols[2],
+                        "definition_version": int(cols[3]), "state": cols[4],
+                        "mode": cols[5], "attempt": int(cols[6]),
+                        "max_attempts": int(cols[7]), "scheduled_for": cols[8],
+                        "created_at": cols[9], "started_at": cols[10],
+                        "ended_at": cols[11], "next_attempt_at": cols[12],
+                        "leased_until": cols[13], "timeout_seconds": int(cols[14]),
+                        "completion_receipt_count": int(cols[15]),
+                    })
+            snapshot["job_definitions"] = definitions
+            snapshot["jobs"] = rows
+    if CANONICAL_SECTION == "all":
+        sql = """select
+          (select count(*) from doctrine_gate_run
+            where result='fail' and dry_run=false
+              and started_at > now() - interval '24 hours'),
+          (select count(*) from doctrine_section s join doctrine_document d
+             on d.id=s.document_id join doctrine_review_policy p
+             on p.id=d.review_policy_id
+            where s.status='active' and p.max_age_days is not null
+              and s.review_after is null),
+          (select count(*) from doctrine_section
+            where status='active' and review_after < now()),
+          (select count(*) from ops.v_rule_enforcement_status
+            where policy_status='active' and enforcement_status <> 'hard_enforced')"""
+        _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
+        _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
+        p = subprocess.run(
+            [_query_python, os.path.join(REPO_ROOT, "tools/db-tap.py"),
+             "sql", "/dev/stdin"],
+            input=sql, cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.returncode:
+            snapshot["errors"].append("controls: " +
+                                      ((p.stderr or "").strip() or "query failed"))
+        else:
+            for line in p.stdout.splitlines():
+                cols = [c.strip() for c in line.split("|")]
+                if len(cols) == 4 and all(c.isdigit() for c in cols):
+                    snapshot["controls"] = {
+                        "doctrine_gate_failures_24h": int(cols[0]),
+                        "doctrine_never_reviewed": int(cols[1]),
+                        "doctrine_stale_sections": int(cols[2]),
+                        "active_rules_not_hard_enforced": int(cols[3]),
+                    }
+                    break
+    return snapshot
+
+
+def _iso(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _canonical_now(snap):
+    fixed = _iso(snap.get("observed_at"))
+    return fixed or datetime.now(timezone.utc)
+
+
+def _live_jobs(snap):
+    """Fixture and database paths both enforce the live-only health contract."""
+    return [j for j in (snap.get("jobs") or [])
+            if isinstance(j, dict) and j.get("mode") == "live"]
+
+
+def _missing_due_executions(snap):
+    """Due cron windows without a successful, exact ledger completion.
+
+    A ledger row is evidence only when its ``scheduled_for`` is one of the
+    cron's eligible instants (not merely in the same calendar month), it is
+    already due, and that exact attempt succeeded with its completion receipt.
+    This matters most for collapsed monthly windows: a cancelled run, an old
+    failure, or a future/off-window row must not make the month look healthy.
+    """
+    now_utc = _canonical_now(snap)
+    jobs = _live_jobs(snap)
+    findings = []
+    for definition in snap.get("job_definitions") or []:
+        if not isinstance(definition, dict):
+            continue
+        recurrence = definition.get("recurrence")
+        if not isinstance(recurrence, dict) or not recurrence.get("cron"):
+            continue
+        zone_name = str(recurrence.get("timezone") or "America/Chicago")
+        try:
+            zone = ZoneInfo(zone_name)
+        except Exception:
+            findings.append((str(definition.get("key")), f"invalid timezone {zone_name}"))
+            continue
+        now_local = now_utc.astimezone(zone).replace(tzinfo=None)
+        registered = _iso(definition.get("registered_at"))
+        registered_local = (registered.astimezone(zone).replace(tzinfo=None)
+                            if registered else now_local - timedelta(days=40))
+        collapsed = "collapses window" in str(recurrence.get("source") or "").lower()
+        start = max(registered_local,
+                    now_local - timedelta(days=40 if collapsed else 8))
+        try:
+            windows = [w for w in cron_windows(str(recurrence["cron"]), start, now_local)
+                       if w <= now_local - timedelta(minutes=5)]
+        except (ValueError, IndexError) as exc:
+            findings.append((str(definition.get("key")), f"invalid cron: {exc}"))
+            continue
+        eligible = set(windows)
+        scheduled = []
+        for job in jobs:
+            try:
+                version_matches = (int(job.get("definition_version", -1)) ==
+                                   int(definition.get("version", -2)))
+            except (TypeError, ValueError):
+                version_matches = False
+            if job.get("definition_key") != definition.get("key") or not version_matches:
+                continue
+            stamp = _iso(job.get("scheduled_for"))
+            if stamp:
+                local_stamp = stamp.astimezone(zone).replace(tzinfo=None)
+                # An exact scheduled instant is the ledger identity.  Do not
+                # give a row a five-minute grace here: the scheduler itself
+                # creates the exact instant, and a nearby/manual row is not a
+                # receipt for this due window.
+                if local_stamp in eligible:
+                    scheduled.append((local_stamp, job))
+
+        def is_successful(job):
+            return (job.get("state") == "succeeded" and
+                    int(job.get("completion_receipt_count", 0)) >= 1)
+
+        def non_success_detail(scope, candidates):
+            states = sorted({str(job.get("state") or "unknown") for _, job in candidates})
+            if any(job.get("state") == "succeeded" for _, job in candidates):
+                states.append("succeeded without exact completion receipt")
+            return f"{scope} NON-SUCCESS execution ({', '.join(states)})"
+        if collapsed:
+            # A monthly window cron intentionally exposes several eligible days;
+            # its ledger contract admits one *successful exact eligible* job in
+            # that month, not one arbitrary row or one per eligible day.
+            months = sorted({(w.year, w.month) for w in windows})
+            for year, month in months:
+                candidates = [(s, job) for s, job in scheduled
+                              if s.year == year and s.month == month]
+                if any(is_successful(job) for _, job in candidates):
+                    continue
+                scope = f"monthly window {year:04d}-{month:02d}"
+                if candidates:
+                    findings.append((str(definition.get("key")),
+                                     non_success_detail(scope, candidates)))
+                else:
+                    findings.append((str(definition.get("key")), scope))
+        else:
+            for window in windows:
+                candidates = [(s, job) for s, job in scheduled if s == window]
+                if any(is_successful(job) for _, job in candidates):
+                    continue
+                scope = window.strftime("%Y-%m-%d %H:%M") + f" {zone_name}"
+                if candidates:
+                    findings.append((str(definition.get("key")),
+                                     non_success_detail(scope, candidates)))
+                else:
+                    findings.append((str(definition.get("key")), scope))
+    return findings
+
+
+def _stuck_live_jobs(snap):
+    now = _canonical_now(snap)
+    findings = []
+    for job in _live_jobs(snap):
+        state = job.get("state")
+        reason = None
+        if state == "queued":
+            due = _iso(job.get("scheduled_for"))
+            if due and due < now - timedelta(minutes=15):
+                reason = "queued more than 15m after scheduled_for"
+        elif state == "retry_wait":
+            due = _iso(job.get("next_attempt_at"))
+            if due and due < now - timedelta(minutes=5):
+                reason = "retry_wait more than 5m past next_attempt_at"
+        elif state == "running":
+            lease = _iso(job.get("leased_until"))
+            started = _iso(job.get("started_at"))
+            timeout = int(job.get("timeout_seconds") or 0)
+            if lease and lease < now:
+                reason = "running with expired lease"
+            elif started and timeout and started + timedelta(seconds=timeout) < now:
+                reason = "running past registered timeout"
+        elif state == "waiting_approval":
+            created = _iso(job.get("created_at"))
+            if created and created < now - timedelta(hours=24):
+                reason = "waiting_approval more than 24h"
+        if reason:
+            findings.append((job, reason))
+    return findings
+
+
+def _canonical_finding(key, detail):
+    print(f"  CANONICAL_FINDING {key} — {detail}")
+
+
+def _canonical_health():
+    """The normal health surface: record/control-plane/local truth only."""
+    rc = 0
+    try:
+        snap = _canonical_snapshot()
+    except Exception as exc:
+        print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
+        return 1
+
+    print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
+    for error in snap.get("errors", []):
+        print(f"  ⚠︎ canonical source UNREADABLE — {error}")
+        _canonical_finding("source_unreadable", str(error))
+        rc = 1
+
+    if CANONICAL_SECTION in ("all", "exports"):
+        exports = snap.get("exports")
+        print("Export register — canonical export_run receipts")
+        if not isinstance(exports, dict):
+            print("  ⚠︎ export receipts UNREADABLE")
+            rc = 1
+        else:
+            registered = set(exports.get("registered") or [])
+            rows = {r.get("target"): r for r in exports.get("rows") or [] if isinstance(r, dict)}
+            bad = []
+            for target in sorted(registered):
+                row = rows.get(target)
+                if not row:
+                    bad.append(f"NEVER RAN {target}")
+                    continue
+                if row.get("latest_status") != "ok":
+                    bad.append(f"LATEST FAILED {target} (latest status {row.get('latest_status')})")
+                    continue
+                last_ok = row.get("last_ok")
+                if not last_ok:
+                    bad.append(f"NEVER OK {target}")
+                    continue
+                try:
+                    stamp = datetime.fromisoformat(str(last_ok).replace("Z", "+00:00"))
+                    now = datetime.now(stamp.tzinfo) if stamp.tzinfo else datetime.now()
+                    if now - stamp > timedelta(hours=26):
+                        bad.append(f"STALE {target} (last ok {str(last_ok)[:16]})")
+                except ValueError:
+                    bad.append(f"UNPARSEABLE {target} last_ok={last_ok}")
+            for finding in bad:
+                print(f"  ⚠︎ {finding}")
+                _canonical_finding("export_receipt", finding)
+            if bad:
+                rc = 1
+            else:
+                print(f"  OK {len(registered)} registered target(s), all receipted inside 26h")
+
+    if CANONICAL_SECTION in ("all", "jobs"):
+        print("Schedule drift — durable Control Plane job state")
+        jobs = snap.get("jobs")
+        definitions = snap.get("job_definitions")
+        if not isinstance(jobs, list) or not isinstance(definitions, list):
+            print("  ⚠︎ job ledger UNREADABLE")
+            _canonical_finding("job_ledger", "jobs or enabled definitions missing")
+            rc = 1
+        else:
+            live_jobs = _live_jobs(snap)
+            cutoff = _canonical_now(snap) - timedelta(days=8)
+            bad = [j for j in live_jobs if j.get("state") in
+                   ("failed", "timed_out", "dead_lettered") and
+                   (_iso(j.get("created_at")) or cutoff) >= cutoff]
+            unreceipted = [j for j in live_jobs if j.get("state") == "succeeded" and
+                           int(j.get("completion_receipt_count", 0)) < 1]
+            missing = _missing_due_executions(snap)
+            stuck = _stuck_live_jobs(snap)
+            for job in bad:
+                print(f"  ⚠︎ {job.get('definition_key')} {job.get('state')} "
+                      f"attempt {job.get('attempt')}/{job.get('max_attempts')}")
+                _canonical_finding("job_terminal_failure",
+                                   f"{job.get('definition_key')} {job.get('state')}")
+            for job in unreceipted:
+                detail = (f"{job.get('definition_key')} job={job.get('id')} "
+                          f"attempt={job.get('attempt')} succeeded without exact completion receipt")
+                print(f"  ⚠︎ {detail}")
+                _canonical_finding("job_completion_receipt", detail)
+            for key, window in missing:
+                if " NON-SUCCESS execution" in window:
+                    detail = f"{key} {window}"
+                    finding = "job_due_non_success"
+                else:
+                    detail = f"{key} MISSING DUE execution for {window}"
+                    finding = "job_missing_due"
+                print(f"  ⚠︎ {detail}")
+                _canonical_finding(finding, detail)
+            for job, why in stuck:
+                detail = f"{job.get('definition_key')} job={job.get('id')} {why}"
+                print(f"  ⚠︎ {detail}")
+                _canonical_finding("job_stuck", detail)
+            if bad or unreceipted or missing or stuck:
+                rc = 1
+            else:
+                print(f"  OK {len(live_jobs)} live job(s), every due window present; "
+                      "no terminal failure, stuck state, or unreceipted success")
+
+    if CANONICAL_SECTION in ("all", "registry"):
+        print("Registry integrity — canonical v_export_leads")
+        p = subprocess.run(
+            [sys.executable, os.path.join(REPO_ROOT, "tools/registry-audit.py")],
+            cwd=REPO_ROOT, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+        if p.stdout:
+            print(p.stdout.rstrip())
+        if p.returncode:
+            print("  ⚠︎ canonical registry audit failed")
+            _canonical_finding("registry_integrity", "canonical registry audit failed")
+            rc = 1
+    if CANONICAL_SECTION == "all":
+        print("Doctrine and rule controls — canonical database state")
+        controls = snap.get("controls")
+        if not isinstance(controls, dict):
+            print("  ⚠︎ doctrine/rule controls UNREADABLE")
+            _canonical_finding("control_state", "doctrine/rule controls unreadable")
+            rc = 1
+        else:
+            gate_failures = int(controls.get("doctrine_gate_failures_24h", 0))
+            never_reviewed = int(controls.get("doctrine_never_reviewed", 0))
+            stale = int(controls.get("doctrine_stale_sections", 0))
+            rule_gaps = int(controls.get("active_rules_not_hard_enforced", 0))
+            print(f"  {'OK' if not gate_failures else '⚠︎'} gate-blocks-24h      "
+                  f"{gate_failures}")
+            print(f"  {'OK' if not never_reviewed else '⚠︎'} never-reviewed       "
+                  f"{never_reviewed} policy-bearing sections")
+            print(f"  {'OK' if not stale else '⚠︎'} stale-sections       "
+                  f"{stale} past review_after")
+            print(f"  {'OK' if not rule_gaps else '⚠︎'} active-rule-gaps      "
+                  f"{rule_gaps} active admitted rules not hard-enforced")
+            if gate_failures or never_reviewed or stale or rule_gaps:
+                if gate_failures:
+                    _canonical_finding("doctrine_gate", f"{gate_failures} failures in 24h")
+                if never_reviewed:
+                    _canonical_finding("doctrine_review", f"{never_reviewed} never reviewed")
+                if stale:
+                    _canonical_finding("doctrine_stale", f"{stale} stale sections")
+                if rule_gaps:
+                    _canonical_finding("rule_enforcement", f"{rule_gaps} active rule gaps")
+                rc = 1
+
+        p = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                           text=True, capture_output=True, timeout=30)
+        if p.returncode:
+            print("  ⚠︎ repository worktree status UNREADABLE")
+            _canonical_finding("repo_status", "git status unreadable")
+            rc = 1
+        else:
+            loose = [line for line in p.stdout.splitlines() if line.strip()]
+            print(f"  {'OK' if not loose else '⚠︎'} loose-work            "
+                  f"{len(loose)} path(s) outside committed canonical history")
+            if loose:
+                _canonical_finding("repo_loose_work", f"{len(loose)} path(s)")
+                rc = 1
+    print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
+    return rc
+
+
+if not RECOVERY_MODE:
+    sys.exit(_canonical_health())
+
+print(f"HEALTH RECOVERY MODE — NONCANONICAL Drive projections — reason: {RECOVERY_REASON}", file=sys.stderr)
+print(f"HEALTH RECOVERY MODE — vault: {VAULT}", file=sys.stderr)
 
 # name, output (glob ok — newest match wins), max_age_days (None = no cadence),
 # input globs (any newer than output => BEHIND), note shown on failure

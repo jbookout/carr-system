@@ -135,6 +135,17 @@ def main() -> int:
         all_ready["npi_taxonomy"]["policy_present_and_nonempty"] = True
         check("declared external prerequisite presence is not external authentication", module.declared_external_prerequisites_present(all_ready)
               and all_ready["external_prerequisites_authenticated"] is False)
+        joe_only = copy.deepcopy(all_ready)
+        joe_only["authority"]["dell"]["credential_present"] = False
+        joe_only["authority"]["single_seat_fallback"]["credential_present"] = False
+        check("Joe authority credential is sufficient for system-rollout readiness",
+              module.declared_external_prerequisites_present(joe_only)
+              and joe_only["authority_readiness"]["required_for_system_rollout"] == ["joe"]
+              and joe_only["authority_readiness"]["optional_nonblocking"] == ["dell", "single_seat_fallback"])
+        dell_only = copy.deepcopy(all_ready)
+        dell_only["authority"]["joe"]["credential_present"] = False
+        check("Dell and fallback credentials cannot substitute for Joe system authority",
+              not module.declared_external_prerequisites_present(dell_only))
         for label, mutate in (
             ("authority credential", lambda value: value["authority"]["joe"].__setitem__("credential_present", False)),
             ("provider selector", lambda value: value["providers"].__setitem__("selector_present", False)),

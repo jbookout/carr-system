@@ -25,16 +25,51 @@
 # stand-down: Sat/Sun are not workdays for Joe or Dell and Monday absorbs.
 #
 # SKIP-not-FAIL on missing env, per house convention.
+#
+# NORMAL MODE writes only repo-local document outputs. Drive projection is an
+# explicit recovery act: pass --recovery and set CARR_RECOVERY_REASON. The
+# scheduled launchd path passes neither, so it can never silently write Drive.
 REPO="$HOME/carr-system"
 LOG="$REPO/out/local-briefs.log"
 [ -f "$HOME/.config/carr/db.env" ] || { echo "$(date -u +%FT%TZ) SKIP no db.env" >> "$LOG"; exit 0; }
 cd "$REPO" || exit 1
 
+RECOVERY=0
+if [ "${1:-}" = "--recovery" ]; then
+  RECOVERY=1
+  [ -n "${CARR_RECOVERY_REASON:-}" ] || {
+    echo "local-briefs: --recovery requires CARR_RECOVERY_REASON" >&2
+    exit 2
+  }
+elif [ -n "${1:-}" ]; then
+  echo "usage: bin/local-briefs.sh [--recovery]" >&2
+  exit 2
+fi
+
 rc=0
-if ./run.sh brief-pack --quiet >> "$LOG" 2>&1; then
-  echo "$(date -u +%FT%TZ) OK brief-pack" >> "$LOG"
+brief_ok=0
+if [ "$RECOVERY" -eq 1 ]; then
+  echo "$(date -u +%FT%TZ) RECOVERY brief-pack reason=${CARR_RECOVERY_REASON}" >> "$LOG"
+  if ./run.sh brief-pack --quiet --recovery >> "$LOG" 2>&1; then
+    echo "$(date -u +%FT%TZ) OK brief-pack recovery" >> "$LOG"
+    brief_ok=1
+  else
+    echo "$(date -u +%FT%TZ) FAIL brief-pack recovery rc=$?" >> "$LOG"; rc=1
+  fi
 else
-  echo "$(date -u +%FT%TZ) FAIL brief-pack rc=$?" >> "$LOG"; rc=1
+  # The weekday artifact consumes exactly these three canonical-safe sections.
+  # Do not ask for `all`: that includes prebriefs, whose only current source is
+  # the explicitly-recovery Drive ICS path and must keep refusing normal use.
+  brief_ok=1
+  for section in one-thing claim-card renewal-shortlist; do
+    if ./run.sh brief-pack --quiet --section "$section" >> "$LOG" 2>&1; then
+      echo "$(date -u +%FT%TZ) OK brief-pack section=$section" >> "$LOG"
+    else
+      echo "$(date -u +%FT%TZ) FAIL brief-pack section=$section rc=$?" >> "$LOG"
+      brief_ok=0
+      rc=1
+    fi
+  done
 fi
 
 if ./run.sh review-queue >> "$LOG" 2>&1; then

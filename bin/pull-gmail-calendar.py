@@ -3,13 +3,11 @@
 
 Two halves, deliberately at different maturities.
 
-CALENDAR — LIVE. It rides the existing house pattern rather than inventing one:
-`fetch-calendar.sh` already lands Joe's published Outlook feed at
-DNA/Team/calendar-latest.ics (weekday task `calendar-fetch-daily`), and Dell's
-Mac drops calendar-latest-dell.ics beside it at 7:55 via Drive sync. This script
-reads whatever .ics files are already on disk and POSTs a normalized event per
-meeting to the ingest socket. It NEVER fetches a feed itself — one fetcher, one
-job, and a network failure stays in the fetcher's log where it already gets read.
+CALENDAR — the normal Drive-fed route is retired.  Until a canonical calendar
+record source is installed, normal use refuses before it reads a vault, loads a
+credential, writes a log, or posts an event.  The old ICS reader is a deliberate
+recovery path only.  The isolated canary remains functional using fixture ICS
+files below its own ``out/canary`` root; it never reads a Drive root.
 
 GMAIL — BUILT TO THE AUTH BOUNDARY AND STOPS THERE, on purpose. The order is
 explicit: the auth method is decided WITH Joe, with his credentials, in his
@@ -31,9 +29,9 @@ re-land; the socket updates nothing on conflict. That is a known, accepted edge
 (the record layer learns the new title at the next human touch, and the first row
 already carries the meeting).
 
-  ./bin/pull-gmail-calendar.py                  calendar half, live POST
-  ./bin/pull-gmail-calendar.py --dry-run        parse/count only; POST and event output suppressed
-  ./bin/pull-gmail-calendar.py --days-back 3 --days-ahead 21
+  ./bin/pull-gmail-calendar.py                  refuses: canonical source required
+  ./bin/pull-gmail-calendar.py --recovery --reason OUTAGE --recovery-root /path/to/legacy-vault
+  ./bin/pull-gmail-calendar.py --canary --dry-run
   ./bin/pull-gmail-calendar.py --gmail          prints the auth decision, exits 78
 
 Stdlib only, by choice: this runs from a scheduled session under whatever python3
@@ -52,25 +50,30 @@ import urllib.request
 import stat
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
-TEAM = os.path.join(VAULT, "DNA", "Team")
-LOG = os.path.join(REPO, "out", "capture-lanes.log")
 ENVFILE = os.path.expanduser("~/.config/carr/ingest.env")
 DEFAULT_URL = "https://api.practicecre.com/ingest"
 
-# owner slug -> the file its feed lands in. Both are written by somebody else's
-# job; this script is a reader of both.
-FEEDS = {
-    "joe": os.path.join(TEAM, "calendar-latest.ics"),
-    "dell": os.path.join(TEAM, "calendar-latest-dell.ics"),
-}
+# Compatibility seam for hermetic direct unit tests.  The CLI never sets this
+# and therefore cannot obtain a Drive path through module import state.
+FEEDS: dict[str, str] = {}
 
 
-def say(msg):
-    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+def say(log: str, msg: str):
+    os.makedirs(os.path.dirname(log), exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(LOG, "a") as fh:
+    with open(log, "a") as fh:
         fh.write(f"{stamp}  calendar-pull  {msg}\n")
+
+
+def feed_paths(root: str) -> dict[str, str]:
+    """Derive the legacy feed paths only after recovery/canary admission."""
+    if FEEDS:
+        return FEEDS
+    team = os.path.join(root, "DNA", "Team")
+    return {
+        "joe": os.path.join(team, "calendar-latest.ics"),
+        "dell": os.path.join(team, "calendar-latest-dell.ics"),
+    }
 
 
 # ---------------------------------------------------------------- ics parsing
@@ -314,27 +317,39 @@ def post(url, token, payload, timeout=30):
 # ---------------------------------------------------------------- halves
 
 def run_calendar(args):
-    global LOG
-    # A shadow run must be observational only: even its audit log is a write
-    # to canonical local state, so keep all log appends out of --dry-run.
-    def record(message):
-        if not args.dry_run:
-            say(message)
-
-    # Keep the long-standing direct ``run_calendar(Namespace(...))`` test and
-    # operator seam compatible: older callers predate the CLI's canary flag.
-    canary = bool(getattr(args, "canary", False))
+    """Run only an already admitted recovery or isolated-canary route."""
+    canary = bool(args.canary)
+    recovery = bool(args.recovery)
+    if canary and recovery:
+        raise RuntimeError("calendar recovery and canary modes are mutually exclusive")
     if os.environ.get("CARR_CONTROL_PLANE_MODE") == "canary" and not canary:
         raise RuntimeError("calendar canary mode requires --canary")
     if canary and os.environ.get("CARR_CONTROL_PLANE_MODE") != "canary":
         raise RuntimeError("calendar canary requires CARR_CONTROL_PLANE_MODE=canary")
-    env = canary_env() if canary else load_env()
     if canary:
+        env = canary_env()
         root = canary_root("CARR_CALENDAR_CANARY_ROOT")
-        os.makedirs(root, exist_ok=True)
-        LOG = os.path.join(root, "calendar-pull.log")
-    url = env.get("CARR_CANARY_INGEST_URL") if canary else env.get("CARR_INGEST_URL", DEFAULT_URL)
-    token = env.get("CARR_CANARY_INGEST_TOKEN_CALENDAR", "") if canary else env.get("CARR_INGEST_TOKEN_CALENDAR", "")
+        log = os.path.join(root, "calendar-pull.log")
+        source_root = os.path.join(root, "calendar-input")
+        mode = "canary"
+        url = env["CARR_CANARY_INGEST_URL"]
+        token = env["CARR_CANARY_INGEST_TOKEN_CALENDAR"]
+    elif recovery:
+        env = load_env()
+        source_root = os.path.realpath(str(args.recovery_root))
+        log = os.path.join(source_root, "DNA", "Team", "calendar-pull.log")
+        mode = "recovery"
+        url = env.get("CARR_INGEST_URL", DEFAULT_URL)
+        token = env.get("CARR_INGEST_TOKEN_CALENDAR", "")
+    else:
+        raise RuntimeError("normal calendar route requires its canonical record source")
+
+    # A shadow run must be observational only: even its audit log is a write
+    # to canonical local state, so keep all log appends out of --dry-run.
+    def record(message):
+        if not args.dry_run:
+            say(log, message)
+
     if not args.dry_run and not token:
         print(
             "calendar-pull: NOT CONFIGURED — CARR_INGEST_TOKEN_CALENDAR is not set in "
@@ -350,7 +365,7 @@ def run_calendar(args):
 
     posted = dup = failed = skipped = 0
     seen = set()
-    for owner, path in FEEDS.items():
+    for owner, path in feed_paths(source_root).items():
         if not os.path.exists(path):
             print(f"calendar-pull: {owner}: no feed at {os.path.basename(path)} (skipped)")
             record(f"{owner}: feed absent {path}")
@@ -400,7 +415,7 @@ def run_calendar(args):
         record(f"{owner}: feed_events={len(events)} in_window={in_window} age_h={age_h:.1f}")
 
     print(
-        f"calendar-pull: source=calendar mode={'canary' if canary else 'live'}" + (f" destination={env['CARR_CANARY_DESTINATION_ID']}" if canary else "") + f" window={lo}..{hi} posted={posted} "
+        f"calendar-pull: source=calendar mode={mode}" + (f" destination={env['CARR_CANARY_DESTINATION_ID']}" if canary else "") + f" window={lo}..{hi} posted={posted} "
         f"duplicate={dup} failed={failed} unparseable={skipped}"
     )
     record(f"summary posted={posted} duplicate={dup} failed={failed} unparseable={skipped}")
@@ -444,6 +459,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="parse/count only; POST and event payload output are suppressed")
     ap.add_argument("--canary", action="store_true", help="post only to configured isolated canary destination")
+    ap.add_argument("--recovery", action="store_true",
+                    help="use a legacy ICS projection after explicit operator admission")
+    ap.add_argument("--reason", help="nonblank operator reason; required with --recovery")
+    ap.add_argument("--recovery-root", help="direct legacy ICS root; required with --recovery")
     ap.add_argument("--days-back", type=int, default=1)
     ap.add_argument("--days-ahead", type=int, default=14)
     args = ap.parse_args()
@@ -452,9 +471,28 @@ def main():
         print("calendar-pull: REFUSED — --gmail cannot share a canary invocation", file=sys.stderr)
         return 78
     if args.gmail:
+        if args.recovery or args.reason or args.recovery_root:
+            ap.error("--gmail cannot share a calendar recovery invocation")
         print(GMAIL_BOUNDARY)
-        say("gmail half invoked; stopped at the auth boundary as ordered")
         return 78
+
+    if args.canary and (args.recovery or args.reason or args.recovery_root):
+        ap.error("--canary cannot share a legacy ICS recovery invocation")
+    if args.recovery:
+        if not args.reason or not args.reason.strip():
+            ap.error("--recovery requires a directly supplied nonblank --reason")
+        if not args.recovery_root:
+            ap.error("--recovery requires a directly supplied --recovery-root")
+        print(f"calendar-pull: RECOVERY NONCANONICAL; reason={args.reason}", file=sys.stderr)
+    elif args.reason or args.recovery_root:
+        ap.error("--reason and --recovery-root require --recovery")
+    elif not args.canary:
+        print(
+            "calendar-pull: MISSING_CANONICAL_SEAM: calendar record source; "
+            "normal mode refuses the retired Drive ICS projection",
+            file=sys.stderr,
+        )
+        return 69
     try:
         return run_calendar(args)
     except RuntimeError as exc:

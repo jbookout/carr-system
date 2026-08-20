@@ -143,11 +143,30 @@ def main() -> int:
         "CARR_DB_AUTHORITY_DELL_URL": dell_dsn,
     }
     report = probe.collect_runtime(env, connector)
-    check("both partner authority identities verify", report["authority_runtime_identities_verified"] is True)
+    check("Joe authority identity is the required rollout proof",
+          report["required_authority_identities_verified"] is True
+          and report["authority_runtime_identities_verified"] is True)
+    check("Dell authority identity is verified when available without becoming required",
+          report["optional_authority_identities_verified"] == {"dell": True})
     check("runtime report never authenticates phase exit", report["phase_exit_authorized"] is False)
     check("runtime report contains no credential material",
           "synthetic-only" not in json.dumps(report) and "invalid.invalid" not in json.dumps(report))
     check("partner-specific credentials are both exercised", len(connector_calls) == 2)
+
+    joe_only = probe.collect_runtime({"CARR_DB_AUTHORITY_JOE_URL": joe_dsn}, connector)
+    check("Joe-only authority is rollout-ready and Dell remains optional",
+          joe_only["required_authority_identities_verified"] is True
+          and joe_only["authority_runtime_identities_verified"] is False
+          and joe_only["principals"]["dell"]["credential_present"] is False
+          and joe_only["optional_authority_identities_verified"] == {"dell": False}
+          and probe.system_rollout_ready(joe_only) is True)
+
+    dell_only = probe.collect_runtime({"CARR_DB_AUTHORITY_DELL_URL": dell_dsn}, connector)
+    check("Dell-only authority preserves Dell capability but cannot replace Joe's ownership",
+          dell_only["required_authority_identities_verified"] is False
+          and dell_only["authority_runtime_identities_verified"] is False
+          and dell_only["optional_authority_identities_verified"] == {"dell": True}
+          and probe.system_rollout_ready(dell_only) is False)
 
     joe_conn = connector(joe_dsn)
     joe = probe.probe_principal("joe", "carr_authority_joe", joe_dsn, lambda _dsn: joe_conn)

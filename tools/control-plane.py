@@ -362,22 +362,27 @@ def enqueue_due(manifest: dict[str, Any], instant: datetime,
 
 class DatabaseCache:
     def __init__(self, cognition_key: str, cognition_version: int,
-                 output_schema_version: int, dependency_refs: list[str]):
+                 output_schema_version: int, dependency_refs: list[str], *,
+                 job_id: Any, lease_token: Any):
         self.cognition_key = cognition_key
         self.cognition_version, self.output_schema_version = cognition_version, output_schema_version
         self.dependency_refs = dependency_refs
+        self.job_id, self.lease_token = job_id, lease_token
 
     def get(self, key: str):
         with connect() as conn, conn.cursor() as cur:
-            cur.execute("select ops.get_cognition_cache(%s)", (key,))
+            cur.execute("select cache_state,proposal "
+                        "from ops.get_cognition_cache_for_job(%s,%s,%s)",
+                        (self.job_id, self.lease_token, key))
             row = cur.fetchone()
-            return row[0] if row and row[0] is not None else None
+            conn.commit()
+            return row[1] if row and row[0] == "hit" and row[1] is not None else None
 
     def put(self, key: str, value: dict[str, Any], ttl_seconds: int) -> None:
         with connect() as conn, conn.cursor() as cur:
-            cur.execute("select ops.put_cognition_cache(%s,%s,%s,%s,%s,%s,%s)",
-                (key,self.cognition_key,self.cognition_version,self.output_schema_version,
-                 json.dumps(value),self.dependency_refs,ttl_seconds))
+            cur.execute("select ops.put_cognition_cache_for_job(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.job_id,self.lease_token,key,self.cognition_key,self.cognition_version,
+                 self.output_schema_version,json.dumps(value),self.dependency_refs,ttl_seconds))
             conn.commit()
 
 
@@ -855,13 +860,13 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
         raise RuntimeError("deterministic entrypoint is outside the registered repository")
     # Deterministic children never inherit ledger, provider, owner or live-ingest
     # credentials.  Their explicit canary config is the sole credential seam.
-    env = {key: os.environ[key] for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "CARR_VAULT",
+    env = {key: os.environ[key] for key in ("HOME", "PATH", "TMPDIR", "LANG", "LC_ALL",
                                              "CARR_CALENDAR_CANARY_ENV", "CARR_NOTES_CANARY_ENV",
                                              "CARR_CALENDAR_CANARY_ROOT", "CARR_NOTES_CANARY_ROOT")
            if os.environ.get(key)}
     env.update({"CARR_JOB_PAYLOAD": json.dumps(payload, sort_keys=True), "CARR_CONTROL_PLANE_MODE": mode})
     if workflow.get("key") == "calendar-fetch-daily":
-        for inherited in ("CARR_VAULT", "CARR_CALENDAR_CANARY_ENV", "CARR_CALENDAR_CANARY_ROOT"):
+        for inherited in ("CARR_CALENDAR_CANARY_ENV", "CARR_CALENDAR_CANARY_ROOT"):
             env.pop(inherited, None)
         env["CARR_REPO"] = str(REPO)
         env["CARR_CALENDAR_OUTPUT_ROOT"] = str(
@@ -980,7 +985,8 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                     cognition = {**cognition,"provider_routes":eligible}
                     cache = DatabaseCache(cognition["key"],cognition["version"],
                                           cognition["output_schema_version"],
-                                          [x["source_ref"] for x in input_payload.get("source_evidence",[])])
+                                          [x["source_ref"] for x in input_payload.get("source_evidence",[])],
+                                          job_id=job_id, lease_token=lease)
                     route_started: dict[str, float] = {}
                     observation_ref = f"control-plane:{job_id}:attempt:{claim['attempt']}"
 

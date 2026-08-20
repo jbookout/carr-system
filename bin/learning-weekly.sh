@@ -40,6 +40,9 @@ LOG="$REPO/out/learning.log"
 # is regenerable on demand from rows that never left the database.
 LEARN_DIR="$REPO/out/Learning"
 mkdir -p "$REPO/out" "$LEARN_DIR"
+# Reports are canonical repo-local output.  Do not let an inherited Drive root
+# leak into either child clause merely because a caller still has one mounted.
+unset CARR_VAULT
 
 # Credentials, both from files on disk, never inlined here.
 #  · db.env carries the least-privilege exporter URL the read-only jobs ride.

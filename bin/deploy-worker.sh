@@ -563,6 +563,15 @@ if [ "$CHECK_ONLY" = "1" ]; then
   exit 0
 fi
 
+# Cost admission binds the release wrapper before any Wrangler operation.  The
+# preflights above are the evidence; a direct Wrangler call remains outside the
+# sanctioned path and is independently refused by the command gate.
+"$PY" "$REPO/ops/platform-metering-gate.py" --gate cloudflare-worker-release \
+  --release-preflight-green \
+  --performance-budget-ref "${PERFORMANCE_BUDGET_REF:-${RELEASE_PLAN_HASH:-staging-release-preflight}}" \
+  --release-candidate-count 1 >/dev/null \
+  || fail "cloudflare-worker-release metering admission refused."
+
 # ---------- deploy ----------
 echo ""
 echo "== deploy =="

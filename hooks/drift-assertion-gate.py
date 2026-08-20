@@ -94,15 +94,16 @@ def _load(name, filename):
 def policy():
     """drift-claim-gate, the WRITE door's module — imported, never copied.
 
-    Its DECISIONS constant is redirected when CARR_DECISIONS_PATH is set, which
-    is what lets the selftest run against a throwaway log instead of the vault.
+    Its explicitly NONCANONICAL fixture path is redirected only in tests.  The
+    normal policy reads the canonical decision record and ignores ambient vault
+    configuration.
     """
     global _policy
     if _policy is None:
         _policy = _load("carr_drift_claim_policy", "drift-claim-gate.py")
-        override = os.environ.get("CARR_DECISIONS_PATH")
+        override = os.environ.get("CARR_NONCANONICAL_DECISIONS_PATH")
         if override:
-            _policy.DECISIONS = override
+            _policy.NONCANONICAL_DECISIONS_PATH = "CARR_NONCANONICAL_DECISIONS_PATH"
     return _policy
 
 
@@ -165,9 +166,6 @@ def main():
         prose = chat().strip_fences(text)
         if not module.DRIFT.search(prose):
             sys.exit(0)
-        if not os.path.exists(getattr(module, "DECISIONS", "")):
-            sys.exit(0)
-
         hits = module.search_decisions(module.salient_tokens(prose))
         if not hits:
             sys.exit(0)                     # no ruling: probably a real finding

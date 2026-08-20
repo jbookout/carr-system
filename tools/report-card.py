@@ -46,10 +46,15 @@ import subprocess
 import time
 import sys
 import tomllib
+import shlex
+import json
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SPEC = os.path.join(REPO, "ops", "report-card", "rubric-v2.toml")
-VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+SPEC = os.path.join(REPO, "ops", "report-card", "rubric.toml")
+DEFAULT_RECOVERY_VAULT = (
+    "/Users/booko/Library/CloudStorage/"
+    "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+)
 
 # How many independent_command rows the integrity sampler re-derives per run.
 # Small on purpose: the point is a spot-check that costs little enough to run
@@ -206,6 +211,10 @@ def validate(spec):
         if not m.get("added_on"):
             errs.append(f"metric {key}: no added_on")
 
+        source_mode = m.get("source_mode", "both")
+        if source_mode not in ("canonical", "recovery", "both"):
+            errs.append(f"metric {key}: source_mode must be canonical|recovery|both")
+
         # An empty source_command is LEGAL and deliberate: it declares a known
         # gap out loud. It is a warning, never silence — v1 accumulated
         # unmeasurable rows precisely by staying quiet about them.
@@ -291,12 +300,12 @@ def _grade(val, threshold):
     return "OK"
 
 
-def capture(cmd, timeout=600):
+def capture(cmd, timeout=600, env=None):
     """Run a command, return (rc, stdout). Never raises — a failing evidence
     source is a finding to report, not a crash that hides every other row."""
     try:
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout, env=env)
         return p.returncode, p.stdout
     except subprocess.TimeoutExpired:
         # A hang is rule a9ecd5b4's limit case: no exit code exists, so an
@@ -306,14 +315,38 @@ def capture(cmd, timeout=600):
         return 1, f"ERROR {exc}"
 
 
-def run(spec, skip_evidence=False):
+def _evidence_source(recovery, vault):
+    if not recovery:
+        return {"mode": "canonical", "contract": "canonical-record-control-v1",
+                "vault": None}
+    normalized = os.path.realpath(os.path.abspath(os.path.expanduser(str(vault))))
+    return {"mode": "recovery", "contract": "drive-projection-recovery-v1",
+            "vault": normalized}
+
+
+def _metric_mode_matches(metric, recovery):
+    wanted = metric.get("source_mode", "both")
+    actual = "recovery" if recovery else "canonical"
+    return wanted in ("both", actual)
+
+
+def run(spec, skip_evidence=False, recovery=False, reason="", vault=None,
+        evidence_dir=None):
     env = dict(os.environ)
-    env["VAULT"] = VAULT
-    scratch = os.path.join(REPO, "out", "report-card")
+    env.pop("CARR_VAULT", None)
+    if recovery:
+        env["CARR_RECOVERY_REASON"] = reason
+        env["CARR_VAULT"] = str(vault)
+        env["VAULT"] = str(vault)
+    else:
+        env.pop("VAULT", None)
+    scratch = evidence_dir or os.path.join(REPO, "out", "report-card")
     os.makedirs(scratch, exist_ok=True)
 
     health_p = os.path.join(scratch, "health.txt")
     check_p = os.path.join(scratch, "check.txt")
+    evidence_meta_p = os.path.join(scratch, "evidence-source.json")
+    expected_source = _evidence_source(recovery, vault)
 
     if skip_evidence and os.path.exists(health_p) and os.path.exists(check_p):
         # AGE IS PRINTED AND BOUNDED. The old code reused the cache silently with
@@ -321,6 +354,16 @@ def run(spec, skip_evidence=False):
         # identical confident numbers and say nothing — a staleness instrument
         # with no staleness guard on its own evidence. 26h matches the dead-man
         # window health-check.py already uses everywhere else.
+        try:
+            with open(evidence_meta_p, encoding="utf-8") as fh:
+                evidence_meta = json.load(fh)
+        except (OSError, ValueError):
+            print("evidence: REFUSED — cached capture has no trustworthy source-mode metadata")
+            return 1
+        if evidence_meta.get("source") != expected_source:
+            print(f"evidence: REFUSED — cached source {evidence_meta.get('source')!r} "
+                  f"does not exactly match required source {expected_source!r}")
+            return 1
         age_h = (time.time() - os.path.getmtime(health_p)) / 3600.0
         stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(health_p)))
         if age_h > 26:
@@ -330,16 +373,22 @@ def run(spec, skip_evidence=False):
         print(f"evidence: reusing cache from {stamp} ({age_h:.1f}h old)")
     else:
         print("evidence: capturing run.sh health (this takes minutes) ...")
-        rc, out = capture(f'"{REPO}/run.sh" health')
+        recovery_args = (f' --recovery --reason {shlex.quote(reason)} '
+                         f'--vault {shlex.quote(str(vault))}'
+                         if recovery else "")
+        rc, out = capture(f'"{REPO}/run.sh" health{recovery_args}', env=env)
         with open(health_p, "w") as fh:
             fh.write(out)
         print(f"  health rc={rc}, {len(out.splitlines())} lines")
 
         print("evidence: capturing run.sh check ...")
-        rc, out = capture(f'"{REPO}/run.sh" check')
+        rc, out = capture(f'"{REPO}/run.sh" check{recovery_args}', env=env)
         with open(check_p, "w") as fh:
             fh.write(out)
         print(f"  check  rc={rc}, {len(out.splitlines())} lines")
+        with open(evidence_meta_p, "w", encoding="utf-8") as fh:
+            json.dump({"source": expected_source,
+                       "captured_at": time.time()}, fh, sort_keys=True)
 
     env["HEALTH"] = health_p
     env["CHECK"] = check_p
@@ -349,7 +398,10 @@ def run(spec, skip_evidence=False):
     for m in spec.get("metric", []):
         key, cmd = m["key"], m.get("source_command", "")
         if not cmd:
-            gaps.append(key)
+            gaps.append((key, "no source_command"))
+            continue
+        if not _metric_mode_matches(m, recovery):
+            gaps.append((key, f"source_mode={m.get('source_mode')}; mixed semantics refused"))
             continue
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=env)
         val = p.stdout.strip()
@@ -383,8 +435,8 @@ def run(spec, skip_evidence=False):
     for key, m, val, state in breaches:
         print(f"\n  {state} {key} = {val}")
         print(f"       → {m.get('bound_action', '(none)')[:300]}")
-    for key in gaps:
-        print(f"  -- {key:28} DECLARED GAP — no source_command, not collected")
+    for key, reason in gaps:
+        print(f"  -- {key:28} UNAVAILABLE — {reason}; not collected")
     if drifted:
         print("\nRUBRIC DRIFT — these rows could not produce a value:")
         for key, rc, err in drifted:
@@ -394,7 +446,8 @@ def run(spec, skip_evidence=False):
 
     # --- measurement-layer integrity: sample and re-derive -------------------
     disagreed = 0
-    sampleable = [m for m in spec.get("metric", []) if m.get("independent_command")]
+    sampleable = [m for m in spec.get("metric", [])
+                  if m.get("independent_command") and _metric_mode_matches(m, recovery)]
     if sampleable:
         picked = random.sample(sampleable, min(INTEGRITY_SAMPLE, len(sampleable)))
         print(f"\nmeasurement integrity — re-deriving {len(picked)} of "
@@ -437,7 +490,24 @@ def main():
     ap.add_argument("--skip-evidence", action="store_true",
                     help="reuse cached health/check output from a previous run")
     ap.add_argument("--spec", default=SPEC)
+    ap.add_argument("--recovery", action="store_true",
+                    help="include legacy Drive projection evidence")
+    ap.add_argument("--reason", help="required reason for recovery mode")
+    ap.add_argument("--vault", help="recovery Drive root")
+    ap.add_argument("--evidence-dir", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    if args.vault and not args.recovery:
+        ap.error("--vault is recovery-only; pass --recovery")
+    if args.recovery:
+        args.reason = (args.reason or os.environ.get("CARR_RECOVERY_REASON", "")).strip()
+        if not args.reason:
+            ap.error("--recovery requires a nonblank --reason")
+        args.vault = args.vault or os.environ.get("CARR_VAULT") or DEFAULT_RECOVERY_VAULT
+        print(f"REPORT CARD RECOVERY MODE — NONCANONICAL Drive projections — "
+              f"reason: {args.reason}", file=sys.stderr)
+    else:
+        os.environ.pop("CARR_VAULT", None)
 
     spec = load(args.spec)
     meta = spec.get("meta", {})
@@ -478,7 +548,9 @@ def main():
         if not args.run:
             return 0
 
-    return run(spec, skip_evidence=args.skip_evidence)
+    return run(spec, skip_evidence=args.skip_evidence, recovery=args.recovery,
+               reason=args.reason or "", vault=args.vault,
+               evidence_dir=args.evidence_dir)
 
 
 if __name__ == "__main__":

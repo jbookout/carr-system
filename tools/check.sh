@@ -7,7 +7,76 @@
 
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
+DEFAULT_RECOVERY_VAULT="/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+RECOVERY=0
+REASON=""
+RECOVERY_VAULT=""
+typeset -a REST
+REST=()
+while (( $# )); do
+  case "$1" in
+    --recovery) RECOVERY=1; shift ;;
+    --reason) [ $# -ge 2 ] || { echo "check: --reason requires a value" >&2; exit 2; }
+              REASON="$2"; shift 2 ;;
+    --vault) [ $# -ge 2 ] || { echo "check: --vault requires a value" >&2; exit 2; }
+             RECOVERY_VAULT="$2"; shift 2 ;;
+    *) REST+=("$1"); shift ;;
+  esac
+done
+set -- "${REST[@]}"
+
+if (( ! RECOVERY )) && [ -n "$RECOVERY_VAULT" ]; then
+  echo "check: --vault is recovery-only; pass --recovery" >&2
+  exit 2
+fi
+if (( RECOVERY )); then
+  REASON="${REASON:-${CARR_RECOVERY_REASON:-}}"
+  [ -n "${REASON//[[:space:]]/}" ] || {
+    echo "check: --recovery requires a nonblank --reason" >&2; exit 2;
+  }
+  VAULT="${RECOVERY_VAULT:-${CARR_VAULT:-$DEFAULT_RECOVERY_VAULT}}"
+  echo "CHECK RECOVERY MODE - NONCANONICAL Drive projections - reason: $REASON" >&2
+  echo "CHECK RECOVERY MODE - vault: $VAULT" >&2
+else
+  unset CARR_VAULT
+  if [ "${1:-}" = "--code" ] || [ "${1:-}" = "--out" ]; then
+    echo "check: --code/--out compare Drive projections and require --recovery --reason <why>" >&2
+    exit 2
+  fi
+
+  rc=0
+  echo "== Code integrity (working tree vs committed canonical repo) =="
+  while IFS=$'\t' read -r rp vp; do
+    [ -z "$rp" ] && continue
+    case "$rp" in \#*) continue ;; esac
+    if [ ! -f "$REPO/$rp" ]; then
+      echo "  MISSING $rp   (canonical repo path absent)"; rc=1
+    elif git -C "$REPO" diff --quiet HEAD -- "$rp"; then
+      echo "  OK      $rp"
+    else
+      echo "  DRIFT   $rp   (uncommitted change vs HEAD; review git diff -- $rp)"; rc=1
+    fi
+  done < "$REPO/manifest.tsv"
+
+  echo "== Export integrity (canonical export_run receipts) =="
+  PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY=python3
+  "$PY" "$REPO/tools/health-check.py" --section exports || rc=1
+
+  echo "== Twin-copy identity (generator vs shared template) =="
+  if diff -q "$REPO/generators/build-lead-board.py" "$REPO/shared/build-lead-board-template.py" >/dev/null 2>&1; then
+    echo "  OK      build-lead-board (both copies identical)"
+  else
+    echo "  SPLIT   build-lead-board - the two copies diverged"; rc=1
+  fi
+
+  echo "== Registry integrity (canonical v_export_leads) =="
+  if "$PY" "$REPO/tools/registry-audit.py"; then
+    echo "  OK      canonical lead registry"
+  else
+    echo "  BROKEN  canonical lead registry"; rc=1
+  fi
+  exit $rc
+fi
 
 typeset -A OUT
 OUT[deal-room-panhandle.html]="$VAULT/DNA/Team/live-boards/deal-room-panhandle.html"
@@ -134,7 +203,8 @@ fi
 # (#100) and L-164/165/166 reassigned on top of live rows (#101) — ran for weeks behind a
 # clean-looking weekly digest because nothing resolved a pointer end to end. This does.
 echo "== Registry integrity (pointer rot, occupant drift, schema, ledger) =="
-if CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" >/dev/null 2>&1; then
+if python3 "$REPO/tools/registry-audit.py" --recovery --reason "$REASON" \
+     --vault "$VAULT" >/dev/null 2>&1; then
   echo "  OK      lead-registry (every pointer resolves)"
 else
   echo "  BROKEN  lead-registry — run: ./run.sh registry-audit"; rc=1

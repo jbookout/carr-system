@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Hermetic contract tests for the one-command disposable local PG lane."""
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parents[1]
+MODULE_PATH = REPO / "ops/local-pg-ci.py"
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location("local_pg_ci", MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load local PG CI module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+mod = load_module()
+passed = 0
+failed: list[str] = []
+
+
+def check(label: str, condition: bool) -> None:
+    global passed
+    if condition:
+        passed += 1
+    else:
+        failed.append(label)
+
+
+check("valid loopback port accepted", mod.validate_port(55432) == 55432)
+for invalid in (0, 80, 65536):
+    try:
+        mod.validate_port(invalid)
+    except mod.LocalPGRefusal:
+        pass
+    else:
+        failed.append(f"invalid port {invalid} refused")
+
+source = {
+    "PATH": "/usr/bin:/bin",
+    "HOME": "/tmp/home",
+    "TMPDIR": "/tmp",
+    "DATABASE_URL": "postgres://owner:secret@remote/db",  # ci-secret-scan: allow - synthetic non-routable fixture
+    "CARR_DB_JOBS_URL": "postgres://jobs:secret@remote/db",  # ci-secret-scan: allow - synthetic non-routable fixture
+    "CARR_AI_ROUTE_PRIMARY_TOKEN": "secret",
+    "NEON_API_KEY": "secret",
+    "PGPASSWORD": "secret",
+    "GH_TOKEN": "secret",
+    "OPENAI_API_KEY": "secret",
+    "ANTHROPIC_API_KEY": "secret",
+    "SAFE_LOCAL_FLAG": "must-not-cross",
+}
+clean = mod.scrub_cloud_environment(source)
+check("required local environment survives", clean["PATH"] == source["PATH"] and clean["HOME"] == source["HOME"])
+check("unregistered ambient values are scrubbed", "SAFE_LOCAL_FLAG" not in clean)
+check("owner DSN is scrubbed", "DATABASE_URL" not in clean)
+check("routine DB DSNs are scrubbed", "CARR_DB_JOBS_URL" not in clean)
+check("provider token is scrubbed", "CARR_AI_ROUTE_PRIMARY_TOKEN" not in clean)
+check("Neon credential is scrubbed", "NEON_API_KEY" not in clean)
+check("libpq credential is scrubbed", "PGPASSWORD" not in clean)
+check("GitHub credential is scrubbed", "GH_TOKEN" not in clean)
+check("model credentials are scrubbed", "OPENAI_API_KEY" not in clean and "ANTHROPIC_API_KEY" not in clean)
+
+with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=True):
+    try:
+        mod.refuse_hosted_execution()
+    except mod.LocalPGRefusal:
+        check("hosted runner refuses", True)
+    else:
+        check("hosted runner refuses", False)
+
+# The remaining cases use a fully mocked local runner. Clear the ambient hosted
+# marker after testing the refusal so CI and a developer shell exercise the
+# exact same hermetic fixtures below.
+os.environ.pop("GITHUB_ACTIONS", None)
+
+events: list[tuple[str, ...]] = []
+child_envs: list[dict[str, str]] = []
+
+
+class FakeRunner:
+    def run(self, command, *, env=None, cwd=None, capture=False):
+        del cwd, capture
+        events.append(tuple(str(part) for part in command))
+        child_envs.append(dict(env or {}))
+        return mod.CommandResult(0, "", "")
+
+
+fake_bins = mod.PostgresBinaries(
+    initdb=Path("/fake/initdb"), pg_ctl=Path("/fake/pg_ctl"),
+    createdb=Path("/fake/createdb"), psql=Path("/fake/psql"),
+)
+fake_root = Path("/tmp/carr-local-pg-ci.selftest")
+with (
+    patch.object(mod, "find_postgres_binaries", return_value=fake_bins),
+    patch.object(mod, "port_is_available", return_value=True),
+    patch.object(mod.tempfile, "mkdtemp", return_value=str(fake_root)),
+    patch.object(mod.shutil, "rmtree") as remove,
+):
+    result = mod.run_local_ci(
+        repo=REPO, ci_class="migration", port=55432, runner=FakeRunner()
+    )
+check("successful lane returns zero", result == 0)
+check("initdb is first PostgreSQL operation", events[0][0] == "/fake/initdb")
+check("server binds loopback", "-h 127.0.0.1 -p 55432" in events[1])
+check("server output is detached from runner pipes", "-l" in events[1] and "postgres.log" in events[1][events[1].index("-l") + 1])
+check("database is created locally", events[2][0] == "/fake/createdb")
+check("fixture owner role is created", events[3][0] == "/fake/psql" and "neondb_owner" in events[3][-1])
+check("migration class runs through canonical CI", events[4][-2:] == ("--only", "migration"))
+check("server always stops", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
+check("temporary cluster is always removed", remove.call_count == 1)
+check("ordinary children receive no ambient secrets", all(
+    not ({"DATABASE_URL", "NEON_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GH_TOKEN"} & set(env))
+    for env in child_envs
+))
+
+events.clear()
+with (
+    patch.object(mod, "find_postgres_binaries", return_value=fake_bins),
+    patch.object(mod, "port_is_available", return_value=True),
+    patch.object(mod.tempfile, "mkdtemp", return_value=str(fake_root)),
+    patch.object(mod.shutil, "rmtree"),
+):
+    result = mod.run_local_ci(repo=REPO, ci_class="strict", port=55432, runner=FakeRunner())
+check("strict lane uses canonical strict CI", result == 0 and events[4][-1] == "--strict")
+
+
+class FailingRunner(FakeRunner):
+    def run(self, command, *, env=None, cwd=None, capture=False):
+        result = super().run(command, env=env, cwd=cwd, capture=capture)
+        if str(command[0]).endswith("ops/ci.sh"):
+            return mod.CommandResult(7, "", "local CI failed")
+        return result
+
+
+class FailingStartRunner(FakeRunner):
+    def run(self, command, *, env=None, cwd=None, capture=False):
+        result = super().run(command, env=env, cwd=cwd, capture=capture)
+        if str(command[0]).endswith("pg_ctl") and command[-1] == "start":
+            return mod.CommandResult(1, "", "start failed after spawn")
+        return result
+
+
+events.clear()
+with (
+    patch.object(mod, "find_postgres_binaries", return_value=fake_bins),
+    patch.object(mod, "port_is_available", return_value=True),
+    patch.object(mod.tempfile, "mkdtemp", return_value=str(fake_root)),
+    patch.object(mod.shutil, "rmtree") as remove_failure,
+):
+    result = mod.run_local_ci(repo=REPO, ci_class="migration", port=55432,
+                              runner=FailingRunner())
+check("CI failure is preserved", result == 7)
+check("failure still stops server", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
+check("failure still removes cluster", remove_failure.call_count == 1)
+
+events.clear()
+with (
+    patch.object(mod, "find_postgres_binaries", return_value=fake_bins),
+    patch.object(mod, "port_is_available", return_value=True),
+    patch.object(mod.tempfile, "mkdtemp", return_value=str(fake_root)),
+    patch.object(mod.shutil, "rmtree") as remove_start_failure,
+):
+    result = mod.run_local_ci(repo=REPO, ci_class="migration", port=55432,
+                              runner=FailingStartRunner())
+check("start failure is preserved", result == 1)
+check("start failure still attempts stop", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
+check("start failure still removes cluster", remove_start_failure.call_count == 1)
+
+run_sh = (REPO / "run.sh").read_text(encoding="utf-8")
+check("one-command route is registered", "local-db-ci)" in run_sh and "ops/local-pg-ci.py" in run_sh)
+
+print(f"local PG CI selftest — {passed}/{passed + len(failed)} passed")
+if failed:
+    print("FAILED: " + "; ".join(failed))
+    raise SystemExit(1)

@@ -5,10 +5,14 @@ with playbook audio: music bed at -23 LUFS, whoosh 120ms before each cut,
 riser into the end card, impact on the card. Verifies loudness at the end.
 """
 import json, pathlib, subprocess, sys
+from asset_boundary import recovery_video_assets
 
+ASSETS = recovery_video_assets(sys.argv[1:], "versioned b-roll and audio library")
+if ASSETS.context.args:
+    raise SystemExit(f"build-video: unexpected argument: {ASSETS.context.args[0]}")
 PIPE = pathlib.Path.home() / "Movies/CARR Video Pipeline"
-BROLL = "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Stock/broll"
-AUD = pathlib.Path("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Audio/library")
+BROLL = ASSETS.brand_root / "Stock" / "broll"
+AUD = ASSETS.brand_root / "Audio" / "library"
 FF = "/opt/homebrew/bin/ffmpeg"
 
 # ---------- the piece ----------

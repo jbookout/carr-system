@@ -42,10 +42,12 @@
 # successor.
 
 [meta]
-version           = "2.0.0-draft"
+version           = "2.1.0-draft"
 status            = "DRAFT — redteam gate open; not wired to any scheduled run"
 supersedes        = "system-report-card-2026-07-07.md (v1: 12 categories + the bolted-on orchestrator lane)"
 drafted_on        = "2026-08-09"
+revised_on        = "2026-08-17"
+evidence_contracts = ["canonical-record-control-v1", "drive-projection-recovery-v1"]
 adopted_on        = ""            # stays empty until the redteam passes and Joe rules
 dry_run_window    = "2026-08-25/2026-08-28"
 first_production  = "2026-09-04"
@@ -544,6 +546,7 @@ reason     = "Renamed only, to the COO seat's own name. Same subject and same so
 
 [[metric]]
 key            = "facade_stale_rows"
+source_mode    = "recovery"
 category       = "automation_safety"
 dimension      = "staleness"
 question       = "How many watched outputs are stale right now?"
@@ -554,6 +557,11 @@ bound_action   = "Open/update ONE deduplicated loop (domain system, owner Joe/Cl
 added_on       = "2026-08-09"
 independent_command = "awk '/^Façade check/,/^Schedule drift/' \"$HEALTH\" | grep -cE 'STALE|MISSING' || true"
 note = """
+RECOVERY-ONLY AS OF 2026-08-17. This metric keeps its historical key and trend
+only when an operator explicitly measures the noncanonical Drive projection.
+Canonical health uses canonical_health_findings_v1 below; the two series must
+never be compared or averaged because their substrates and denominators differ.
+
 SECTION-SCOPED ON PURPOSE, and this row is its own worked example. The first
 draft counted every '⚠︎' in the whole health output and returned 13 — it was
 silently summing façade staleness, schedule drift, six deprecation rows and a
@@ -568,11 +576,24 @@ version and it is not written yet.
 """
 
 [[metric]]
+key            = "canonical_health_findings_v1"
+source_mode    = "canonical"
+category       = "automation_safety"
+dimension      = "staleness"
+question       = "How many canonical record, Control Plane, doctrine, rule, registry, or repository findings are active?"
+source_command = "grep -c '^  CANONICAL_FINDING ' \"$HEALTH\" || true"
+measured_from  = "versioned canonical-record-control-v1 findings emitted by run.sh health from export_run, ops job/receipt ledgers, doctrine/rule controls, v_export_leads, and committed Git state"
+threshold      = { warn = 1, fail = 3 }
+bound_action   = "Name each CANONICAL_FINDING by key and repair its canonical source. Verification: the exact finding is absent from a fresh canonical health capture."
+added_on       = "2026-08-17"
+note           = "Fresh baseline. It does not carry facade_stale_rows history because file-mtime projection staleness and canonical ledger findings are different measurements."
+
+[[metric]]
 key            = "export_deadman_failures"
 category       = "automation_safety"
 dimension      = "staleness"
 question       = "Did every registered export target succeed inside its dead-man window?"
-source_command = "grep -cE '⚠︎ (STALE|NEVER RAN|NEVER OK) ' \"$HEALTH\" || true"
+source_command = "grep -cE '⚠︎ (STALE|NEVER RAN|NEVER OK|LATEST FAILED) ' \"$HEALTH\" || true"
 measured_from  = "health's export dead-man lines, which it emits one per failing target from the record layer's per-target last-success timestamps"
 independent_command = "grep -cE '^  OK [0-9]+ registered target\\(s\\)' \"$HEALTH\" | sed 's/1/0/' || true"
 note = """
@@ -590,7 +611,8 @@ what the command reads and what `measured_from` claims:
       config, rules-live, forgetting, renders-verify) and reported the machine
       config drift as an export failure.
   v3, this one: anchored on the FAILURE TOKENS health actually emits per failing
-      target — `⚠︎ STALE <key>`, `⚠︎ NEVER RAN <key>`, `⚠︎ NEVER OK <key>`. The
+      target — `⚠︎ STALE <key>`, `⚠︎ NEVER RAN <key>`, `⚠︎ NEVER OK <key>`, or
+      `⚠︎ LATEST FAILED <key>`. The
       trailing space matters: the façade section prints `⚠︎ <name>  STALE 13.0d`,
       name first, so it cannot collide.
 
@@ -607,6 +629,7 @@ added_on       = "2026-08-09"
 
 [[metric]]
 key            = "code_drift_rows"
+source_mode    = "recovery"
 category       = "system_development"
 dimension      = "staleness"
 question       = "How many repo files have drifted from their live vault copy?"
@@ -615,9 +638,24 @@ measured_from  = "check.sh's byte diff of each manifest.tsv row, repo vs vault"
 threshold      = { warn = 1, fail = 5 }
 bound_action   = "Per drifted row, decide which side is canonical and reconcile; drift that is intentional gets a manifest note. Verification: check.sh reports OK for that row."
 added_on       = "2026-08-09"
+note           = "RECOVERY-ONLY AS OF 2026-08-17. This preserves the historical repo-vs-live-Drive series. Canonical runs use canonical_repo_worktree_drift_v1; trends do not carry between them."
+
+[[metric]]
+key            = "canonical_repo_worktree_drift_v1"
+source_mode    = "canonical"
+category       = "system_development"
+dimension      = "staleness"
+question       = "How many manifest-tracked canonical repo paths differ from committed HEAD?"
+source_command = "grep -c '^  DRIFT' \"$CHECK\" || true"
+measured_from  = "check.sh's versioned canonical Git comparison of manifest-tracked repo paths against committed HEAD"
+threshold      = { warn = 1, fail = 5 }
+bound_action   = "Review and intentionally commit or revert each manifest-tracked worktree change. Verification: canonical check reports no DRIFT row for that path."
+added_on       = "2026-08-17"
+note           = "Fresh baseline. It cannot inherit code_drift_rows because that older metric compared the repo with a Drive runtime copy."
 
 [[metric]]
 key            = "rules_live_agreement"
+source_mode    = "recovery"
 category       = "governance"
 dimension      = "staleness"
 question       = "Does the rule store's active count match what every live surface declares?"

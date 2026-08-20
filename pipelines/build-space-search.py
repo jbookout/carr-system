@@ -34,17 +34,20 @@ sys.path.insert(0, REPO)
 from lib.client_asset_controls import (AssetControlRefusal, require_asset_tier,
                                        require_declined_and_why, require_search_commentary,
                                        write_artifact_atomically)
+from lib.drive_recovery import add_recovery_arguments, require_recovery
 
-# CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant.
-BRAND = os.path.join(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI",
-    "DNA", "Marketing", "Brand Assets")  # moved to shared DNA 2026-07-29 (T54)
+ASSETS: dict[str, str] = {}
 
-ASSETS = {
-    "OSWALD":     f"{BRAND}/fonts/Oswald.ttf",
-    "MONTSERRAT": f"{BRAND}/fonts/Montserrat.ttf",
-    "LOGO_BLUE":  f"{BRAND}/Logos/CARR_Solo_Blue_Logo.png",
-    "LOGO_WHITE": f"{BRAND}/Logos/CARR_White_Logo.png",
-}
+
+def configure_recovery_assets(vault: str) -> None:
+    """Set legacy assets only after the recovery boundary is selected."""
+    brand = os.path.join(vault, "DNA", "Marketing", "Brand Assets")
+    ASSETS.update({
+        "OSWALD": f"{brand}/fonts/Oswald.ttf",
+        "MONTSERRAT": f"{brand}/fonts/Montserrat.ttf",
+        "LOGO_BLUE": f"{brand}/Logos/CARR_Solo_Blue_Logo.png",
+        "LOGO_WHITE": f"{brand}/Logos/CARR_White_Logo.png",
+    })
 
 
 def b64(path):
@@ -368,7 +371,14 @@ def main():
     ap.add_argument("--supersede-existing", action="store_true",
                     help="tombstone a same-name prior render after its canonical add-loop receipt exists")
     ap.add_argument("--loop-ref", help="canonical add-loop receipt/reference for the supersession")
+    add_recovery_arguments(ap)
     a = ap.parse_args()
+    try:
+        configure_recovery_assets(str(require_recovery(
+            a, "document asset API for CARR brand fonts and logos")))
+    except ValueError as exc:
+        print(f"build-space-search: STOP: {exc}", file=sys.stderr)
+        return 2
     folder = a.folder
     with open(os.path.join(folder, "properties.json"), encoding="utf-8") as fh:
         data = json.load(fh)

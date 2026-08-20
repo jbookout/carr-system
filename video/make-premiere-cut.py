@@ -7,9 +7,14 @@ Usage: python3 make-premiere-cut.py            (uses the built-in CARR shot list
 Edit SHOTS below or import this and call build_xmeml() with your own list.
 """
 import pathlib
+import sys
 from xml.sax.saxutils import escape
+from asset_boundary import recovery_video_assets
 
-BROLL = "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Stock/broll"
+ASSETS = recovery_video_assets(sys.argv[1:], "versioned b-roll library")
+if ASSETS.context.args:
+    raise SystemExit(f"make-premiere-cut: unexpected argument: {ASSETS.context.args[0]}")
+BROLL = ASSETS.brand_root / "Stock" / "broll"
 OUT = pathlib.Path.home() / "Movies/CARR Video Pipeline/03_Output/carr_rough_cut.xml"
 
 FPS = 30          # timebase (29.97 uses ntsc flag)

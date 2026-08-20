@@ -23,6 +23,8 @@ class IntakeFake {
       const row = this.toolCalls.get(params[0]);
       return { rows: row ? [row] : [] };
     }
+    if (sql.startsWith("select id from actor where slug=$1 and kind='human'"))
+      return { rows: [{ id: ACTOR.id }] };
     if (sql.includes("search_doctrine_situations") && this.noHits) return { rows: [] };
     if (sql.includes("search_doctrine_situations")) return { rows: [
       ...(this.personalFirst ? [{ section_id: "30000000-0000-0000-0000-000000000099", doc_slug: "personal", section_key: "top",

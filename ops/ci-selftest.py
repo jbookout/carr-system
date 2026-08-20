@@ -653,9 +653,9 @@ def test_gates_treats_only_78_as_not_configured():
     """Exit 78 in the gates loop must mean "not configured", and nothing else.
 
     The loop used to count every nonzero alike, so a selftest that correctly
-    declined for want of a credential (release-abandon-selftest.py with no Neon
-    key) read as a red gate, and the only way past it was CARR_SKIP_CI on every
-    push. The risk in the fix is that it widens: if an ordinary crash ever
+    declined for want of a local dependency read as a red gate, and the only way
+    past it was CARR_SKIP_CI on every push. The risk in the fix is that it
+    widens: if an ordinary crash ever
     skipped too, this class would go quiet exactly when it should shout.
 
     THIS TEST IS STRUCTURAL, AND THAT IS A DELIBERATE DOWNGRADE — say so rather
@@ -668,11 +668,8 @@ def test_gates_treats_only_78_as_not_configured():
     they survived, the nested re-entry runs the slowest class in ci.sh a second
     and third time, costing more on every push forever than the bug it guards.
 
-    The behaviour itself IS proven, just not by a seeded fixture: a real 78 case
-    ships in the tree. release-abandon-selftest.py exits 78 without a credential,
-    and a full local run prints it as "not run — NOT CONFIGURED (exit 78)" with
-    the gates class green. What this test adds is the narrowness guarantee, which
-    is the part a future edit could quietly lose.
+    This structural check binds the narrowness of the exception without adding
+    a recursively executing fixture to the slowest CI class.
     """
     ci = (REPO / "ops" / "ci.sh").read_text(encoding="utf-8")
     body = ci[ci.index("check_gates()"):]

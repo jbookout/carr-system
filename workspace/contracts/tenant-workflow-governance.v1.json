@@ -1,6 +1,6 @@
 {
   "contract": "carr-workspace-tenant-workflow-governance",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "status": "phase0_contract_only_no_production_enforcement_claim",
   "canonical_sources": [
     {
@@ -231,7 +231,7 @@
       "no cross-tenant or authority-boundary failure",
       "all consequential effects match exact approval and fresh read-back",
       "rollback remains executable",
-      "Joe and Dell can complete and understand the routine without a heavy AI session",
+      "Joe can complete and understand the routine without a heavy AI session; Dell compatibility validation is supported but optional and nonblocking",
       "observed toil and exceptions are attributed",
       "owner approves promotion from the collected evidence"
     ],

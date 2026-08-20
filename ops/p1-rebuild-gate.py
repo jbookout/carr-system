@@ -76,6 +76,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
 
 import importlib.util  # noqa: E402
+from lib.platform_metering import MeteringRefusal, authorize_metered_execution  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
 if _spec is None or _spec.loader is None:
@@ -210,6 +211,18 @@ def main() -> int:
     branch_name = f"rebuild-check-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
     try:
         # ── create the ephemeral branch ──────────────────────────────────────
+        metering_rows = neon(env, "branches", "list", "--project-id", project_id, "--output", "json")
+        if metering_rows.returncode != 0:
+            sys.exit("p1-rebuild-gate: cannot read branch count for metering admission")
+        try:
+            authorize_metered_execution(
+                json.loads((REPO / "ops/config/platform-metering.v1.json").read_text()),
+                "neon-disposable-branch",
+                {"requested_lifetime_minutes": 120, "cleanup_registered": True,
+                 "active_nondefault_branches": sum(
+                     1 for row in json.loads(metering_rows.stdout) if not row.get("default"))})
+        except (MeteringRefusal, ValueError, TypeError) as exc:
+            sys.exit(f"p1-rebuild-gate: metered branch refused: {exc}")
         out = neon(env, "branches", "create", "--project-id", project_id,
                    "--name", branch_name, "--output", "json")
         if out.returncode != 0:

@@ -42,7 +42,7 @@ bsi = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bsi)
 
 sys.path.insert(0, REPO)
-from lib.record_sources import _strip_vault_prefix  # noqa: E402
+from lib.record_sources import _strip_source_root  # noqa: E402
 
 failures: list[str] = []
 
@@ -52,7 +52,7 @@ def check(name, got, expected):
         failures.append(f"{name}: got {got!r}, expected {expected!r}")
 
 
-VAULT = "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+ROOT = "/repo"
 
 # ---------------------------------------------------------------- classification gate
 migrated = {"DNA/writing-rules.md", "DNA/brand-voice.md"}
@@ -73,15 +73,15 @@ check("an export-target render (never migrated) is walked regardless — "
       bsi.is_store_held("00_Context/decision-history.md", migrated, store_ok=True), False)
 
 # ---------------------------------------------------------------- path stripping
-check("strip the mounted GoogleDrive path down to vault-relative",
-      _strip_vault_prefix(VAULT + "/DNA/writing-rules.md", VAULT), "DNA/writing-rules.md")
+check("strip a declared source root down to a record-relative identity",
+      _strip_source_root(ROOT + "/DNA/writing-rules.md", ROOT), "DNA/writing-rules.md")
 
-check("strip the ~/My Drive alias form (retrieve.py's second prefix) down to vault-relative",
-      _strip_vault_prefix("/Users/booko/My Drive/CARR AI/DNA/writing-rules.md", VAULT),
-      "DNA/writing-rules.md")
+check("a different absolute root is not rewritten by ambient mount aliases",
+      _strip_source_root("/alternate-root/DNA/writing-rules.md", ROOT),
+      "/alternate-root/DNA/writing-rules.md")
 
 check("a path outside the vault is left untouched (no accidental truncation)",
-      _strip_vault_prefix("/Users/booko/Desktop/scratch.md", VAULT),
+      _strip_source_root("/Users/booko/Desktop/scratch.md", ROOT),
       "/Users/booko/Desktop/scratch.md")
 
 # ---------------------------------------------------------------- store_rows() shape

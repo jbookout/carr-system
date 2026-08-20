@@ -11,7 +11,9 @@
       "dell": "carr_authority_dell"
     },
     "privilege_bundle_role": "carr_authority",
-    "provisioning": "external_human_approval"
+    "provisioning": "external_human_approval",
+    "required_for_system_rollout": ["joe"],
+    "optional_nonblocking": ["dell"]
   },
   "device_evidence": {
     "privilege_bundle_role": "carr_device_evidence",

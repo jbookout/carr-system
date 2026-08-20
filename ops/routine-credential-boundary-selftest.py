@@ -35,7 +35,9 @@ def main() -> int:
           nightly.count("routine-admin-refusal.sh") == 6)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
     check("portability mirror uses only the backup capability",
-          'step "portability mirror' in nightly and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
+          'portability mirror (md+csv, 2 locations)' in nightly
+          and 'if [ -n "$CARR_DB_BACKUP_URL" ]; then' in nightly
+          and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
     check("each backup invocation binds the backup capability explicitly",
           nightly.count('env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh') == 3)
     # The bare form above is SAFE, and this file is not where that is proved.
@@ -45,10 +47,8 @@ def main() -> int:
     # and checks it the only way it can be checked honestly — by running the
     # shell with the variable genuinely UNSET rather than by reading source.
     #
-    # #380 briefly asserted the opposite here ("no bare expansion anywhere"),
-    # which pinned an inline-`:-`-at-every-call-site style and would now refuse
-    # the single-default form. A gate that pins a spelling rather than a
-    # property is a gate that blocks the better version of the same fix.
+    # The executable nightly-capability test proves that the single default
+    # precedes every use; this boundary test only verifies capability scoping.
     check("clean child preserves explicit export mode", 'CARR_EXPORT_LIVE="${CARR_EXPORT_LIVE:-}"' in HELPER.read_text(encoding="utf-8"))
     check("scheduled recovery refuses unprovisioned admin capability",
           "CARR_JOB_PAYLOAD" in restore and "routine dispatch refused" in restore)

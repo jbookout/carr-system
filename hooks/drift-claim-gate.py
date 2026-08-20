@@ -61,11 +61,11 @@ from datetime import datetime, timezone
 # Script-relative, NOT expanduser("~/carr-system") — same fix as
 # hooks/record-home-gate.py and the tools/test-*.py suites (commit fad87a4).
 # Log path only here, so a clone outside $HOME loses the audit trail rather
-# than mis-enforcing. DECISIONS below stays expanduser on purpose: that one is
-# the Drive vault, which really is $HOME-relative and is not the repo.
+# than mis-enforcing.  Decisions are read from the canonical record view; this
+# hook never discovers a mounted file tree through its environment.
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LOG = os.path.join(REPO, "out", "hook-guard.log")
-DECISIONS = os.path.expanduser("~/My Drive/CARR AI/00_Context/decision-history.md")
+NONCANONICAL_DECISIONS_PATH = "CARR_NONCANONICAL_DECISIONS_PATH"
 
 # Fields worth reading across the verbs this watches.
 TEXT_FIELDS = ("claimed", "actual", "body", "title", "outcome", "blocker_detail",
@@ -173,6 +173,44 @@ def stem(token):
     return (alpha.group(0)[:STEM_LEN] if alpha else token[:STEM_LEN])
 
 
+def _record_decision_lines():
+    """Read decision text from the canonical record view, newest first.
+
+    This is intentionally a small, fail-open hook read: unavailable record
+    credentials or an unreachable reader simply produce no context, as the old
+    file reader did.  The named noncanonical path is test/recovery injection
+    only; it never consults an ambient synced-root setting.
+    """
+    fixture = os.environ.get(NONCANONICAL_DECISIONS_PATH)
+    if fixture:
+        try:
+            with open(fixture, "r", encoding="utf-8", errors="replace") as fh:
+                return [line for line in fh.read().splitlines() if len(line.strip()) >= 20]
+        except OSError:
+            return []
+    try:
+        sys.path.insert(0, REPO)
+        from lib.record_sources import _connect
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                select entry_date, title, human_quote, agent_rationale, cause
+                  from v_decision_entry
+                 order by occurred_at desc nulls last, event_id desc
+                 limit 2000
+            """)
+            rows = cur.fetchall()
+    except Exception:
+        return []
+    lines = []
+    for entry_date, title, human_quote, rationale, cause in rows:
+        text = " — ".join(str(value).strip() for value in
+                           (entry_date, title, human_quote, rationale, cause)
+                           if isinstance(value, str) and value.strip())
+        if len(text) >= 20:
+            lines.append(text)
+    return lines
+
+
 def search_decisions(tokens):
     """Lines whose subject the claim is actually about, strongest first.
 
@@ -182,11 +220,7 @@ def search_decisions(tokens):
     recent", which did exactly the opposite. File order IS recency order, and
     is the tiebreak between equally-scoring lines.
     """
-    try:
-        with open(DECISIONS, "r", encoding="utf-8", errors="replace") as fh:
-            lines = [l for l in fh.read().splitlines() if len(l.strip()) >= 20]
-    except Exception:
-        return []
+    lines = _record_decision_lines()
     if not lines:
         return []
     lowered = [l.lower() for l in lines]

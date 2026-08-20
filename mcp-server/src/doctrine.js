@@ -633,7 +633,6 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         limit: { type: "integer" } },
         required: ["q"] },
       handler: async (c, actor, args) => {
-        await actorId(c, actor);
         return searchDoctrineSituations(c, actor, args);
       },
     },
@@ -1091,7 +1090,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
               scope: r.personal_to ? `${r.personal_to}-personal` : "shared",
               taught_by: r.taught_by,
               proposed_on: r.created_at ? String(r.created_at).slice(0, 10) : null })),
-            hint: "read the full text with rule_ids, then activate-rule or retire-rule. "
+            hint: "read the full text with rule_ids, then approve-rule or retire-rule. "
                 + "Surfacing these is loop #149: a rule nobody knows is proposed is a "
                 + "rule nobody can approve.",
           } } : {}),

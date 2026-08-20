@@ -39,6 +39,17 @@ def main() -> int:
     check("declared external boundary contract passes without credential values",
           accepted.returncode == 0, accepted.stderr or accepted.stdout)
 
+    check("system rollout requires Joe while Dell remains optional and supported",
+          config["authority"]["required_for_system_rollout"] == ["joe"]
+          and config["authority"]["optional_nonblocking"] == ["dell"])
+
+    dell_required = json.loads(json.dumps(config))
+    dell_required["authority"]["required_for_system_rollout"].append("dell")
+    rejected = run(dell_required)
+    check("Dell cannot become a required rollout authority",
+          rejected.returncode != 0 and "required_for_system_rollout" in rejected.stdout,
+          rejected.stdout or rejected.stderr)
+
     missing_canary_name = json.loads(json.dumps(config))
     missing_canary_name["deterministic_canaries"]["required_names"].pop()
     rejected = run(missing_canary_name)

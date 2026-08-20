@@ -10,11 +10,13 @@
 #   ./run.sh restore-rehearse — prove the encrypted backups actually restore (needs the age key)
 #   ./run.sh key-recovery-test — prove the OFFLINE PAPER key copy alone can recover a backup
 #   ./run.sh call-mode     — inspect or operate the local Quill Call Mode bridge
-# CARR_VAULT overrides the vault path (default: Joe's Drive mount).
+#   ./run.sh local-db-ci   — run migration or strict CI on disposable local PG
+# Drive-backed legacy inputs are recovery-only. Scoped commands parse their own
+# explicit --recovery --reason WHY [--vault PATH] boundary and erase ambient
+# CARR_VAULT in normal mode.
 
 set -eu
 REPO="$(cd "$(dirname "$0")" && pwd)"
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
 
 # ORDER 29a: the Deal Room and the graph pipeline read the RECORD by default
 # (v_export_* through lib/record_sources.py), so they run on the repo venv — that
@@ -24,9 +26,7 @@ VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.c
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 
-deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" \
-                   "$VAULT/DNA/Deal Management/panhandle-team-deals.json" \
-                   "$VAULT/DNA/Team/live-boards/deal-room-panhandle.html" "$@"; }
+deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" "$@"; }
 # ORDER 26(b): the board gained --files/--records. The DEFAULT IS STILL FILES and
 # the chain still calls this with no arguments, so `run.sh all` is byte-for-byte
 # what it was. Records mode is reachable by hand — and needs the repo venv (it
@@ -34,13 +34,13 @@ deal_room()    { "$PY" "$REPO/generators/build-deal-room.py" \
 # `tools/db-tap.py run` supplies. Parity passed 2026-07-31; the default flip waits
 # on a pool read surface the exporter credential can reach (parked, see the
 # ORDER 26 execution log).
-lead_board()   { "$PY" "$REPO/generators/build-lead-board.py" "$VAULT" "$@"; }
-lead_promote() { shift; "$PY" "$REPO/pipelines/lead-promote.py" "$VAULT" "$@"; }  # ORDER 29b flip: venv, records-mode reads (parity byte-identical 2026-08-05)
-renewal_feed() { "$PY" "$REPO/generators/build-renewal-feed.py" "$VAULT"; }  # ORDER 29b flip: venv, records-mode suppressor (parity byte-identical 2026-08-05)
-corroborate()  { "$PY" "$REPO/pipelines/radar/corroborate.py" "$VAULT"; }
+lead_board()   { "$PY" "$REPO/generators/build-lead-board.py" "$@"; }
+lead_promote() { "$PY" "$REPO/pipelines/lead-promote.py" "$@"; }  # ORDER 29b flip: venv, records-mode reads (parity byte-identical 2026-08-05)
+renewal_feed() { "$PY" "$REPO/generators/build-renewal-feed.py" "$@"; }  # external MLS ingress: explicit recovery only until canonical intake exists
+corroborate()  { "$PY" "$REPO/pipelines/radar/corroborate.py" "$@"; }     # upstream file pools: explicit recovery only until canonical intake exists
 space_search() { python3 "$REPO/pipelines/build-space-search.py" "$2"; }
-graph()        { "$PY" "$REPO/pipelines/build-graph-notes.py" "$VAULT" "$@" \
-                 && "$PY" "$REPO/pipelines/build-graph-structure.py" "$VAULT" "$@"; }
+graph()        { "$PY" "$REPO/pipelines/build-graph-notes.py" "$@" \
+                 && "$PY" "$REPO/pipelines/build-graph-structure.py" "$@"; }
 # NOTE: build-graph-notes.py wipes and rebuilds Graph/, which deletes Graph/hubs.
 # The hub pass MUST run after it, so `graph` always runs both.
 # phase1 (2026-08-13): both now read the doctrine store (lib/record_sources,
@@ -49,16 +49,16 @@ graph()        { "$PY" "$REPO/pipelines/build-graph-notes.py" "$VAULT" "$@" \
 # below. Plain python3 still runs them (fail-soft: file-walk everything, no
 # store pass) but on this Mac it has no psycopg at all, so it would silently
 # never take the store path — always prefer $PY here.
-graph_system() { "$PY" "$REPO/pipelines/build-system-graph.py" "$VAULT"; }
-graph_health() { shift; "$PY" "$REPO/pipelines/graph-health.py" "$VAULT" "$@"; }
-sf_diff()      { shift; "$PY" "$REPO/pipelines/diff-salesforce-deals.py" "$VAULT" "$@"; }  # ORDER 29b flip: venv, records-mode read (parity byte-identical 2026-08-05)
-section_index(){ "$PY" "$REPO/pipelines/build-section-index.py" "$VAULT"; }
-registry_audit(){ shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/registry-audit.py" "$@"; }
+graph_system() { "$PY" "$REPO/pipelines/build-system-graph.py" "$@"; }
+graph_health() { "$PY" "$REPO/pipelines/graph-health.py" "$@"; }
+sf_diff()      { "$PY" "$REPO/pipelines/diff-salesforce-deals.py" "$REPO" "$@"; }  # records mode; no wrapper Drive root
+section_index(){ "$PY" "$REPO/pipelines/build-section-index.py" "$@"; }
+registry_audit(){ shift; "$PY" "$REPO/tools/registry-audit.py" "$@"; }
 # ORDER 16. Both are READ-ONLY surfaces: no database write, no send, no push.
 # They run on the repo venv because they speak to Neon through psycopg.
-review_queue() { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/review_queue.py" "$@"; }
-brief_pack()   { shift; CARR_VAULT="$VAULT" "$REPO/.venv/bin/python" "$REPO/pipelines/brief_pack.py" "$@"; }
-verify_emails(){ shift; python3 "$REPO/tools/verify-emails.py" --vault "$VAULT" "$@"; }
+review_queue() { shift; "$REPO/.venv/bin/python" "$REPO/pipelines/review_queue.py" "$@"; }
+brief_pack()   { shift; "$REPO/.venv/bin/python" "$REPO/pipelines/brief_pack.py" "$@"; }
+verify_emails(){ python3 "$REPO/tools/verify-emails.py" "$@"; }
 # The restore rehearsal (2026-08-02). Proves backups/*.sql.age can come BACK:
 # throwaway Neon branch, decrypt, load, reconcile row counts, delete the branch.
 # It writes NOTHING to production and needs the age PRIVATE key, which this repo
@@ -84,37 +84,39 @@ call_verb()    { shift; python3 "$REPO/tools/call-verb.py" "$@"; }
 case "${1:-}" in
   deal-room)    shift; deal_room "$@" ;;
   lead-board)   shift; lead_board "$@" ;;
-  lead-promote) lead_promote "$@" ;;
-  renewal-feed) renewal_feed ;;
-  all)          renewal_feed; lead_board; deal_room ;;
-  corroborate)  corroborate ;;
+  lead-promote) shift; lead_promote "$@" ;;
+  renewal-feed) shift; renewal_feed "$@" ;;
+  all)          shift; renewal_feed "$@"; lead_board "$@"; deal_room "$@" ;;
+  corroborate)  shift; corroborate "$@" ;;
   space-search) space_search "$@" ;;
   graph)        shift; graph "$@" ;;
-  graph-system) graph_system ;;
-  graph-health) graph_health "$@" ;;
+  graph-system) shift; graph_system "$@" ;;
+  graph-health) shift; graph_health "$@" ;;
   salesforce-diff) sf_diff "$@" ;;
-  section-index) section_index ;;
+  section-index) shift; section_index "$@" ;;
   registry-audit) registry_audit "$@" ;;
   review-queue) review_queue "$@" ;;
   brief-pack)   brief_pack "$@" ;;
-  verify-emails) verify_emails "$@" ;;
+  verify-emails) shift; verify_emails "$@" ;;
   restore-rehearse) restore_rehearse "$@" ;;
   key-recovery-test) shift; key_recovery_test "$@" ;;
   call)         call_verb "$@" ;;
   call-mode)    shift; python3 "$REPO/tools/dictation-rig/bin/call-mode.py" "$@" ;;
-  # retrieve runs on the repo venv since the store pass (P4 dual-read) needs psycopg;
-  # fails soft to file-index-only on any machine without it.
-  retrieve)     shift; CARR_VAULT="$VAULT" "$PY" "$REPO/tools/retrieve.py" "$@" ;;
+  # Normal retrieval is canonical-store only and fail-closed. The reader itself
+  # resolves CARR_VAULT only after an operator passes --recovery; do not export a
+  # Drive path into the ordinary user-session command.
+  retrieve)     shift; "$PY" "$REPO/tools/retrieve.py" "$@" ;;
   # health runs on the repo venv for the same reason retrieve does: its ops-record
   # pass needs psycopg. Under a bare python3 it died mid-report, and the rows it
   # never reached were the nightly chain result and rules live — the two the
   # session-start brief tells sessions to go read when it reports a failure.
-  health)       CARR_VAULT="$VAULT" "$PY" "$REPO/tools/health-check.py" ;;
+  health)       shift; "$PY" "$REPO/tools/health-check.py" "$@" ;;
   config)       shift; python3 "$REPO/ops/config-as-code.py" "$@" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
   export)       shift; "$REPO/.venv/bin/python" -m exporters.run_exports "$@" ;;
-  check)        "$REPO/tools/check.sh" ;;
+  check)        shift; "$REPO/tools/check.sh" "$@" ;;
+  smoke)        shift; "$REPO/tools/smoke.sh" "$@" ;;
   # `next` (2026-08-09, loop #297): open loops ordered by how LITTLE is left,
   # which no other surface answers — bell/dated/decision all order by urgency.
   # Read-only over v_loop_proximity (migration 0084). Prints its own coverage
@@ -130,12 +132,13 @@ case "${1:-}" in
   # a human runs this, and the monthly audit runs this. Rule a8c55a47 — the
   # manual path and the automated path that do the same job must be the SAME
   # code, which under v1 they were not.
-  report-card)  shift; CARR_VAULT="$VAULT" python3 "$REPO/tools/report-card.py" "$@" ;;
+  report-card)  shift; "$PY" "$REPO/tools/report-card.py" "$@" ;;
   # `worktree` (2026-08-10): an isolated checkout in one command. Two sessions
   # collided in the shared tree twice in one morning, and git-writer-gate's own
   # deny message already prescribes the fix — this makes it one step instead of
   # three, two of which (the .venv and out/ symlinks) are invisible until
   # something breaks on a path that is simply not there.
   worktree)     shift; "$REPO/bin/worktree.sh" "$@" ;;
-  *) echo "usage: run.sh deal-room [--files]|lead-board [--files|--records]|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|space-search <folder>|graph [--files]|graph-system|graph-health [--files] [--verbose]|salesforce-diff [--apply]|section-index|registry-audit [--verbose]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve <question>|health|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|key-recovery-test|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
+  local-db-ci)  shift; "$PY" "$REPO/ops/local-pg-ci.py" "$@" ;;
+  *) echo "usage: run.sh deal-room|lead-board|lead-promote [--count N] [--county X] [--segment X]|renewal-feed|all|corroborate|graph|graph-system|graph-health [--verbose]|section-index [each supports --recovery --reason WHY [--vault PATH]]|space-search <folder>|salesforce-diff [--apply]|registry-audit [--verbose] [--recovery --reason WHY [--vault PATH]]|review-queue [--fixture f.json]|brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda|renewal-shortlist] [--quiet] [--recovery [--vault PATH]]|verify-emails [--source registry|vendors|roster] [--segment X] [--out f.csv]|retrieve [--recovery [--vault PATH]] <question>|health [--recovery --reason WHY [--vault PATH]]|config [check|pull|install] [--apply]|lint <file> [--surface email|social|proposal|web]|restore-rehearse [--preflight] [--verify-only] [--date YYYYMMDD] [--identity PATH] [--keep-branch]|key-recovery-test|migrate [--apply] [--yes]|export [--only <target>] [--bootstrap]|call [--branch <name>] <verb> '<json args>'|call-mode [serve|state|start|stop]|check [--recovery --reason WHY [--vault PATH]]|smoke [--recovery --reason WHY [--vault PATH]]|next [--all] [--domain X]|report-card [--validate|--run] [--skip-evidence] [--recovery --reason WHY [--vault PATH]]|local-db-ci [--class migration|strict] [--port N]|worktree <name> [--from B]|--list|--remove <name|path>"; exit 2 ;;
 esac

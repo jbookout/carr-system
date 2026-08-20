@@ -96,12 +96,14 @@
     "drift_claim": {
       "implementation": [
         "hooks/drift-claim-gate.py",
-        "hooks/drift-assertion-gate.py"
+        "hooks/drift-assertion-gate.py",
+        "hooks/run-record-gate.py"
       ],
       "test": [
-        "ops/drift-assertion-gate-selftest.py"
+        "ops/drift-assertion-gate-selftest.py",
+        "ops/drive-runtime-hooks-selftest.py"
       ],
-      "failure_mode": "surfaces the governing ruling; Stop door reopens the turn once"
+      "failure_mode": "fixed-interpreter launcher fails closed if the canonical drift runtime is unavailable; otherwise surfaces the governing ruling and the Stop door reopens the turn once"
     },
     "stale_claim": {
       "implementation": [
@@ -381,12 +383,16 @@
     },
     "rule_shape": {
       "implementation": [
-        "hooks/rule-shape-gate.py"
+        "hooks/rule-shape-gate.py",
+        "migrations/0194_atomic_rule_approval.sql",
+        "mcp-server/src/tools.js"
       ],
       "test": [
-        "ops/rule-shape-gate-selftest.py"
+        "ops/rule-shape-gate-selftest.py",
+        "ops/atomic-rule-approval-selftest.py",
+        "mcp-server/test/rule-admission.test.mjs"
       ],
-      "failure_mode": "PreToolUse deny"
+      "failure_mode": "approval succeeds only when exact registered enforcement is installed and bound to that rule id plus statement hash, then atomically activates it; missing or unrelated enforcement refuses approval and direct activation is retired"
     },
     "scheduled_run_record": {
       "implementation": [
@@ -1795,10 +1801,10 @@
     "ab814a26": {
       "category": "hard_pre_action",
       "enforcement_class": "deny_gate",
-      "binding_moment": "at teach/activate-rule",
+      "binding_moment": "at explicit human approve-rule",
       "control": "rule_shape",
-      "exceptions": "a rule that ships its enforcement class and binding moment passes",
-      "planned_control": "Extend rule-shape-gate.py (already a PreToolUse gate on mcp__.*__teach): require an enforcement_class field (machine_enforceable | judgment) at teach time; refuse activate-rule on a machine_enforceable rule with no linked control in rule-enforcement-map.json."
+      "exceptions": "capture remains proposed and non-binding until a human approves; the system must build and verify exact enforcement before presenting approval, because no approved-but-inactive or active-but-pending rule state exists",
+      "note": "Corrected 2026-08-17. The old three-step teach -> admit -> activate workflow made the partner repeat one decision; the first atomic replacement still wrongly allowed active rules with pending coverage. approve-rule now has one meaning only: exact registered controls bound to the rule id and statement hash are verified and the rule becomes active in the same transaction. Missing or unrelated coverage refuses approval, direct activate-rule is retired, and advisory prose cannot masquerade as an unbreakable rule."
     },
     "6330bec8": {
       "category": "judgment_advisory",

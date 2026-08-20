@@ -15,10 +15,12 @@ def check(name, condition):
         failures += 1
 
 
-check("store pass calls the shared situation retrieval function",
-      "search_doctrine_situations(" in source)
-check("store pass follows the versioned default policy row",
-      "'lexical-dominant-v1'" not in source and "null)" in source)
+check("store pass calls the authenticated shared situation-retrieval verb",
+      '"search-doctrine", payload' in source
+      and 'tools" / "call-verb.py"' in source)
+check("store identity is server-derived rather than a caller actor field",
+      '"actor"' not in source and '"sponsoring_human_slug"' not in source
+      and "_connect" not in source)
 check("store pass no longer duplicates FTS rank SQL",
       "ts_rank_cd(r.search_vector" not in source and "websearch_to_tsquery('english'" not in source)
 check("store results retain the live doctrine verb pointer",

@@ -306,9 +306,8 @@ PYEOF
     # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE. It is EX_CONFIG, and it is
     # already the repo's convention: bin/type-check.sh's header states it and the
     # types class above honours it. This loop counted every nonzero the same, so
-    # a selftest that correctly DECLINED to run for want of a credential — e.g.
-    # release-abandon-selftest.py with no Neon key and no CARR_CI_DATABASE_URL —
-    # read as a red gate on any machine lacking that credential, and the only way
+    # a selftest that correctly DECLINED to run for want of a local dependency
+    # read as a red gate on any machine lacking it, and the only way
     # past it was CARR_SKIP_CI on every push. Deliberately narrow: ONLY 78 skips,
     # the reason is printed every run, and every other nonzero still fails.
     # ops/ci-selftest.py seeds both cases and fails if this widens.
@@ -373,7 +372,8 @@ PYEOF
   # only, no machine state, no network, no database. Each carries its own
   # escape hatch for a genuinely mid-flight tree and names its own remedy in
   # its own output, so none is repeated here.
-  for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check; do
+  for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
+             drive-dependency-inventory drive-retirement-readiness-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }

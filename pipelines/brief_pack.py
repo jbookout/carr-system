@@ -40,7 +40,12 @@ WHAT THIS CANNOT SEE, SAID OUT LOUD RATHER THAN PAPERED OVER
 
 Usage:
   ./run.sh brief-pack [--section all|one-thing|prebriefs|capacity|monday-agenda]
-                      [--date YYYY-MM-DD] [--quiet]
+                      [--date YYYY-MM-DD] [--quiet] [--recovery]
+
+Normal mode reads canonical database views only. Calendar ICS files are device
+exports, not canonical records, so prebriefs fail closed until a canonical
+calendar receipt/source exists. ``--recovery`` explicitly opts into those Drive
+exports during an acknowledged recovery exercise.
 
 EXIT CODES
   0  ran, including when a section is honestly empty.
@@ -56,11 +61,17 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.local_principal import LocalPrincipalError, local_partner_principal
+
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out" / "brief-pack"
-VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
-CAL = {"joe": VAULT / "DNA/Team/calendar-latest.ics",
-       "dell": VAULT / "DNA/Team/calendar-latest-dell.ics"}
+DEFAULT_RECOVERY_VAULT = Path(
+    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
+)
+RECOVERY_MODE = False
+RECOVERY_VAULT: Path | None = None
+CURRENT_PRINCIPAL: str | None = None
 PARTNERS = ("joe", "dell")
 
 # Phase is the value proxy. Later phase = nearer a fee, which is the only
@@ -290,9 +301,23 @@ def section_prebriefs(cur, today) -> str:
            "stand and the one thing to come away with. Written once this morning; nothing here "
            "interrupts you before a meeting._", ""]
 
+    if not RECOVERY_MODE:
+        out += [
+            "Calendar prebriefs are unavailable in normal mode: the current ICS feeds are "
+            "Drive exports, not canonical record-layer evidence. Run with --recovery only "
+            "during an acknowledged recovery exercise.",
+            "",
+        ]
+        return "\n".join(out)
+
+    assert RECOVERY_VAULT is not None
+    calendars = {
+        "joe": RECOVERY_VAULT / "DNA/Team/calendar-latest.ics",
+        "dell": RECOVERY_VAULT / "DNA/Team/calendar-latest-dell.ics",
+    }
     total = 0
     for partner in PARTNERS:
-        events = read_events(CAL[partner], today)
+        events = read_events(calendars[partner], today)
         name = partner.capitalize()
         if events is None:
             out += [f"## {name}", "",
@@ -402,36 +427,39 @@ def section_capacity(cur, today) -> str:
 # 4. Monday partner agenda — decisions only
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_decisions():
-    """❓ rows are the house marker for a pending decision, and the open-loops
-    header is the authority on that. This reads the marker, so a row becomes an
-    agenda item the moment it is marked, with nobody remembering to copy it."""
+def read_decisions(cur):
+    """Read pending decisions from the canonical safe-column loop view."""
+    if CURRENT_PRINCIPAL is None:
+        raise LocalPrincipalError("brief-pack has no established personal-scope principal")
     items = []
-    for name in ("00_Context/open-loops-backlog.md", "00_Context/open-loops.md"):
-        f = VAULT / name
-        if not f.exists():
-            continue
-        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.startswith("|") or "❓" not in line:
-                continue
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cells) < 5 or not cells[0].isdigit():
-                continue
-            body = cells[2]
-            head = re.sub(r"\*\*(.+?)\*\*", r"\1", body).replace("❓", "").strip()
-            head = plain(" ".join(head.split()))
-            question = head.split(". ")[0].rstrip(" .")
-            if len(question) > 210:
-                question = question[:210].rsplit(" ", 1)[0].rstrip(",;") + "..."
-            items.append({"owner": plain(cells[1]), "question": no_ids(question) + ".",
-                          "unblocks": no_ids(plain(cells[4])) if len(cells) > 4 else ""})
+    rows = q(cur, """select owner, title, body, unblocks
+                       from v_loops
+                      where status = 'open'
+                        and marker = 'decision'
+                        and renders_into in
+                            ('00_Context/open-loops.md',
+                             '00_Context/open-loops-backlog.md')
+                        and ((tier = 'shared' and personal_to is null)
+                             or (tier = 'personal' and personal_to = %s))
+                      order by renders_into, render_seq""", (CURRENT_PRINCIPAL,))
+    for row in rows:
+        head = plain(row.get("title") or row.get("body") or "")
+        question = head.split(". ")[0].rstrip(" .")
+        if len(question) > 210:
+            question = question[:210].rsplit(" ", 1)[0].rstrip(",;") + "..."
+        if question:
+            items.append({
+                "owner": plain(row.get("owner") or ""),
+                "question": no_ids(question) + ".",
+                "unblocks": no_ids(plain(row.get("unblocks") or "")),
+            })
     return items
 
 
 def section_monday(cur, today) -> str:
     days = (7 - today.weekday()) % 7 or 7
     nxt = today + timedelta(days=days)
-    items = read_decisions()
+    items = read_decisions(cur)
     both = [i for i in items if "+" in i["owner"] or "/" in i["owner"] or "Dell" in i["owner"]]
     solo = [i for i in items if i not in both]
 
@@ -673,12 +701,41 @@ def lint(text: str):
 
 
 def main() -> int:
+    global RECOVERY_MODE, RECOVERY_VAULT, CURRENT_PRINCIPAL
     ap = argparse.ArgumentParser(description="Build the brief pack sections.")
     ap.add_argument("--section", default="all",
                     choices=["all"] + list(SECTIONS), help="which unit to run")
     ap.add_argument("--date", help="YYYY-MM-DD; defaults to today")
     ap.add_argument("--quiet", action="store_true", help="write the files, print one line")
+    ap.add_argument("--recovery", action="store_true",
+                    help="allow legacy Drive calendar exports for prebriefs")
+    ap.add_argument("--vault", help="recovery vault root; requires --recovery")
     a = ap.parse_args()
+
+    if a.vault and not a.recovery:
+        ap.error("--vault is a recovery source; pass --recovery explicitly")
+    RECOVERY_MODE = a.recovery
+    RECOVERY_VAULT = Path(a.vault or os.environ.get("CARR_VAULT") or DEFAULT_RECOVERY_VAULT) \
+        if a.recovery else None
+    if a.recovery:
+        print(f"brief_pack: RECOVERY MODE - Drive calendar exports at {RECOVERY_VAULT}",
+              file=sys.stderr)
+
+    try:
+        CURRENT_PRINCIPAL = local_partner_principal()
+    except LocalPrincipalError as exc:
+        print(f"brief_pack: REFUSED - {exc}", file=sys.stderr)
+        return 78
+
+    wanted = list(SECTIONS) if a.section == "all" else [a.section]
+    if "prebriefs" in wanted and not a.recovery:
+        print(
+            "brief_pack: REFUSED - prebriefs have no canonical calendar receipt/source; "
+            "normal mode will not produce a degraded brief. Use --recovery only for an "
+            "acknowledged outage.",
+            file=sys.stderr,
+        )
+        return 69
 
     today = date.fromisoformat(a.date) if a.date else date.today()
     url = db_url()
@@ -689,7 +746,6 @@ def main() -> int:
 
     import psycopg
     OUT.mkdir(parents=True, exist_ok=True)
-    wanted = list(SECTIONS) if a.section == "all" else [a.section]
     written, findings = [], []
 
     with psycopg.connect(url) as conn, conn.cursor() as cur:

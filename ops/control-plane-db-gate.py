@@ -34,7 +34,7 @@ REQUIRED_TABLES = [
     "ops.legacy_schedule_provider_contract", "ops.legacy_schedule_launchd_contract",
     "ops.legacy_schedule_observation_receipt", "ops.job_definition", "ops.job",
     "ops.job_attempt", "ops.job_receipt", "ops.cognition_job",
-    "ops.cognition_result_cache", "ops.workflow_acceptance",
+    "ops.cognition_result_cache", "ops.cognition_cache_observation", "ops.workflow_acceptance",
     "ops.provider_route", "ops.provider_observation",
     "ops.cost_reservation", "ops.cost_refusal", "ops.npi_device_evidence_receipt",
 ]
@@ -55,6 +55,9 @@ REQUIRED_FUNCTIONS = [
     "ops.get_cognition_cache(text)",
     "ops.put_cognition_cache(text,text,integer,integer,jsonb,text[],integer)",
     "ops.invalidate_cognition_cache(text)",
+    "ops.get_cognition_cache_for_job(uuid,uuid,text)",
+    "ops.put_cognition_cache_for_job(uuid,uuid,text,text,integer,integer,jsonb,text[],integer)",
+    "ops.invalidate_cognition_cache_for_job(uuid,uuid,text)",
     "ops.record_provider_observation(text,text,integer,text,integer,text)",
     "ops.reserve_job_cost(uuid,uuid,text,numeric)",
     "ops.admit_job_cost(uuid,uuid,text,numeric)",
@@ -377,21 +380,52 @@ def main() -> int:
             intake_id = fetchone_required(cur.fetchone(), "fixture guidance intake")[0]
             cur.execute("""
                 insert into ops.rule_admission
-                  (rule_id,guidance_intake_id,enforcement_class,binding_moment,
+                  (rule_id,guidance_intake_id,enforcement_class,enforcement_status,binding_moment,
                    applicability,projection,reachability,input_contract,fixture_refs,
                    state,admitted_by,admitted_at)
-                values (%s,%s,'machine_enforceable','before fixture action',
+                values (%s,%s,'machine_enforceable','hard_enforced','before fixture action',
                         '{"workflows":["db-gate"]}',
                         '{"targets":["db-gate"]}', '{"paths":["database"]}',
                         '{"type":"object"}',
                         array['ops/control-plane-db-gate.py'],'admitted',%s,now())
             """, (rule_id, intake_id, actor))
             cur.execute("""
-                insert into ops.rule_enforcement_point
-                  (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed)
-                values (%s,'db-gate-fixture','migration:0148',
-                        'ops/control-plane-db-gate.py','transactional_schema',true)
+                insert into ops.enforcement_control_catalog
+                  (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+                values ('db-gate-fixture','migration:0194',
+                        'ops/control-plane-db-gate.py','transactional_schema',true,now())
+                on conflict (control_key) do update set installed=true,verified_at=now()
+            """)
+            cur.execute("""
+                insert into ops.rule_control_binding
+                  (rule_id,control_key,statement_hash,binding_contract)
+                select id,'db-gate-fixture',encode(digest(statement,'sha256'),'hex'),
+                       '{"fixture":"control-plane-db-gate"}'::jsonb
+                  from rule where id=%s
             """, (rule_id,))
+            cur.execute("""
+                insert into ops.rule_enforcement_point
+                  (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+                values (%s,'db-gate-fixture','migration:0148',
+                        'ops/control-plane-db-gate.py','transactional_schema',true,now())
+            """, (rule_id,))
+            cur.execute("""
+                with approved as (
+                  select r.id,r.version,encode(digest(r.statement,'sha256'),'hex') statement_hash,
+                         jsonb_build_object('fixture','control-plane-db-gate') contract
+                    from rule r where r.id=%s
+                )
+                insert into ops.rule_approval_receipt
+                  (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,
+                   enforcement_status,requested_control_keys,installed_control_keys,reason,
+                   normalized_contract,contract_hash,evidence_refs)
+                select 'db-gate-approval:'||id::text,id,version,statement_hash,%s,
+                       'machine_enforceable','hard_enforced',array['db-gate-fixture'],
+                       array['db-gate-fixture'],'rollback-only enforced activation fixture',
+                       contract,encode(digest(contract::text,'sha256'),'hex'),
+                       array['ops/control-plane-db-gate.py']
+                  from approved
+            """, (rule_id, actor))
             # Exercise the trigger as its real firing role, not as owner. A
             # grant that exists only for the migration actor is not a control.
             # The Neon owner credential is intentionally not standing SET-role
@@ -518,6 +552,97 @@ def main() -> int:
             cur.execute("select ops.get_cognition_cache('gate-cache')")
             if fetchone_required(cur.fetchone(), "invalidated cognition cache")[0] is not None:
                 fail("invalidated cache entry remained readable")
+
+            # Cache reads and writes from a running cognition job are durable,
+            # immutable evidence.  A deterministic job or an arbitrary table
+            # insert cannot forge the workflow/job/attempt/mode binding.
+            cur.execute("reset role")
+            cache_definition = f"db-gate-cache-{uuid.uuid4()}"
+            cur.execute("""
+                insert into ops.job_definition
+                  (key,version,enabled,risk,execution_kind,execution_contract,
+                   recurrence,retry_policy,deduplication,completion_contract,legacy_schedule)
+                values (%s,1,true,'green','cognition','{"cognition_job":"db-gate-cognition"}',
+                        '{"cron":"* * * * *","timezone":"UTC"}',
+                        '{"max_attempts":2,"base_seconds":1,"cap_seconds":2,"timeout_seconds":30,"backoff":"exponential"}',
+                        '{"key_template":"cache-observation-fixture"}',
+                        '{"predicate":"fixture","receipt_kind":"fixture"}',
+                        '{"status":"enabled"}')
+            """, (cache_definition,))
+            set_local_role(cur, "carr_jobs")
+            cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
+                        (cache_definition, "2026-08-15T12:01:00Z", '{}',
+                         f"cache-observation-{uuid.uuid4()}"))
+            cache_job = fetchone_required(cur.fetchone(), "cache observation job enqueue")[0]
+            cur.execute("select * from ops.claim_job_mode('db-gate-cache-worker','shadow',1,30)")
+            cache_claim = fetchone_required(cur.fetchone(), "cache observation job claim")
+            if cache_claim[0] != cache_job:
+                fail("cache observation worker claimed the wrong job")
+            cache_lease = cache_claim[1]
+            cur.execute("select cache_state,proposal from ops.get_cognition_cache_for_job(%s,%s,'gate-cache-observed')",
+                        (cache_job, cache_lease))
+            if fetchone_required(cur.fetchone(), "cache miss observation") != ("miss", None):
+                fail("cache miss was not measured before provider dispatch")
+            cur.execute("select ops.put_cognition_cache_for_job(%s,%s,'gate-cache-observed',"
+                        "'db-gate-cognition',1,1,%s,array['party:P-2'],300)",
+                        (cache_job, cache_lease, '{"route":"gate-secondary","proposal":{}}'))
+            if not fetchone_required(cur.fetchone(), "cache store observation")[0]:
+                fail("cache store was refused for a live cognition lease")
+            for bad_key, bad_version, bad_schema in (("db-gate-cognition", 2, 1),
+                                                     ("db-gate-cognition", 1, 2),
+                                                     ("wrong-cognition", 1, 1)):
+                cur.execute("savepoint bad_cache_contract")
+                try:
+                    cur.execute("select ops.put_cognition_cache_for_job(%s,%s,'bad-cache',%s,%s,%s,'{}',array[]::text[],300)",
+                                (cache_job, cache_lease, bad_key, bad_version, bad_schema))
+                    fail("wrong cognition contract wrote a cache entry")
+                except psycopg.Error:
+                    cur.execute("rollback to savepoint bad_cache_contract")
+            cur.execute("select cache_state,proposal from ops.get_cognition_cache_for_job(%s,%s,'gate-cache-observed')",
+                        (cache_job, cache_lease))
+            cache_hit = fetchone_required(cur.fetchone(), "cache hit observation")
+            if cache_hit[0] != "hit" or cache_hit[1] is None:
+                fail("cache hit did not return measured proposal evidence")
+            cur.execute("reset role")
+            cur.execute("update ops.cognition_result_cache set output_schema_version=2 where cache_key='gate-cache-observed'")
+            set_local_role(cur, "carr_jobs")
+            cur.execute("select cache_state,proposal from ops.get_cognition_cache_for_job(%s,%s,'gate-cache-observed')",
+                        (cache_job, cache_lease))
+            if fetchone_required(cur.fetchone(), "mismatched cache contract")[0] != "miss":
+                fail("mismatched cache entry produced a hit")
+            cur.execute("reset role")
+            cur.execute("update ops.cognition_result_cache set output_schema_version=1 where cache_key='gate-cache-observed'")
+            set_local_role(cur, "carr_jobs")
+            cur.execute("select ops.invalidate_cognition_cache_for_job(%s,%s,'party:P-2')",
+                        (cache_job, cache_lease))
+            if fetchone_required(cur.fetchone(), "cache invalidation observation")[0] != 1:
+                fail("cache invalidation did not persist one bound observation")
+            cur.execute("select cache_state,proposal from ops.get_cognition_cache_for_job(%s,%s,'gate-cache-observed')",
+                        (cache_job, cache_lease))
+            if fetchone_required(cur.fetchone(), "cache invalidated observation")[0] != "invalidated":
+                fail("invalidated cache state was not measured")
+            cur.execute("""select observation_kind,workflow_key,workflow_version,mode
+                             from ops.cognition_cache_observation
+                            where job_id=%s and attempt=1 and cache_key='gate-cache-observed'
+                            order by observed_at,observation_kind""", (cache_job,))
+            cache_evidence = [tuple(row) for row in cur.fetchall()]
+            if {row[0] for row in cache_evidence} != {"miss", "store", "hit", "invalidate", "invalidated"} \
+                    or any(row[1:] != (cache_definition, 1, "shadow") for row in cache_evidence):
+                fail("cache observations did not bind exact workflow and mode")
+            cur.execute("reset role")
+            cur.execute("select has_table_privilege('carr_jobs','ops.cognition_cache_observation','insert'),"
+                        "has_table_privilege('carr_jobs','ops.cognition_cache_observation','update'),"
+                        "has_table_privilege('carr_jobs','ops.cognition_cache_observation','delete')")
+            if fetchone_required(cur.fetchone(), "cache observation jobs ACL") != (False, False, False):
+                fail("jobs role can directly rewrite cache observations")
+            set_local_role(cur, "carr_jobs")
+            cur.execute("savepoint cache_wrong_job")
+            try:
+                cur.execute("select cache_state from ops.get_cognition_cache_for_job(%s,%s,'forbidden')",
+                            (first, lease_token))
+                fail("deterministic job could create a cache observation")
+            except psycopg.Error:
+                cur.execute("rollback to savepoint cache_wrong_job")
 
             # Cost is reserved before provider dispatch and settled against the
             # live lease. A configured monthly ceiling is a durable pre-
