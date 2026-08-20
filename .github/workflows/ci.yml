@@ -6,13 +6,26 @@
 # written here it would run in CI and not at push time, and the two would drift
 # without anyone noticing — which is the failure this whole design avoids.
 #
-# WHAT THIS CAN AND CANNOT DO TODAY. It runs and reports. It cannot REQUIRE a
-# green result before a merge, because this repo is private on a free GitHub plan
-# and both the branch-protection API and the newer rulesets API refuse with
-# "Upgrade to GitHub Pro or make this repository public" (verified live against
-# both endpoints, 2026-08-13). Enforcement today comes from the pre-push hook.
-# When GitHub Pro is enabled, mark the `checks` job a required status check and
-# nothing in this file or in ops/ci.sh has to change.
+# WHAT THIS ENFORCES. The `checks` job IS a required status check: repository
+# ruleset "main: CI must be green" (id 20824501) targets refs/heads/main and
+# requires the context `ops/ci.sh --strict`. A red result blocks the merge.
+#
+# The paragraph that stood here until 2026-08-20 said the opposite — that CI
+# "cannot REQUIRE a green result before a merge, because this repo is private on
+# a free GitHub plan" and that both the branch-protection and rulesets APIs
+# refuse. That was true when it was written on 2026-08-13 and false within hours:
+# the account moved to Pro and the ruleset was created at 19:58 the same day. It
+# then sat here for a week describing its own enforcement as a future condition.
+# Filed as defect 384e7deb, the 21st recorded instance of a dated observation
+# being read as present state. The lesson worth keeping is in the shape of the
+# original sentence: it carried its own verification date in a parenthetical,
+# which is the tell that a claim is a snapshot rather than a standing property.
+#
+# BECAUSE IT IS REQUIRED, path filters are a trap here. Skipping this workflow
+# for docs-only changes would leave the required context unreported, and a
+# required check that never reports blocks the merge instead of speeding it.
+# Reducing spend has to come from run COUNT or from crossing a billing minute
+# (see the caching note below), never from not running on some commits.
 #
 # ACTIONS ARE PINNED TO COMMIT SHAs, not to tags. Doctrine: "Pin dependencies and
 # CI actions" (end-state BDUF, s15 Security/supply chain). A tag is mutable — v7
@@ -76,13 +89,31 @@ jobs:
           # other class reads the tree as it stands and does not care.
           fetch-depth: 0
 
+      # BOTH SETUP ACTIONS CACHE THEIR DEPENDENCY DOWNLOADS, and the reason is
+      # arithmetic rather than taste. GitHub bills each JOB rounded UP to the
+      # whole minute, so what matters is not what fraction of the run a step
+      # costs but which side of the next 60-second line the run lands on.
+      # Measured 2026-08-20 over 18 successful runs: 203s to 275s, median 249s,
+      # twelve billing five minutes against six billing four. The line is at
+      # 240s and the median sat nine seconds past it. The two dependency
+      # installs below are 21s of that, so caching them moves the median run to
+      # roughly 228s and bills four minutes instead of five.
+      #
+      # The cache key is the lockfile, so a dependency change invalidates it
+      # and the next run reinstalls from scratch. That is the point: this
+      # changes how long the checks take to start, never which checks run or
+      # what they are allowed to conclude.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.lock
 
       - name: Install Python dependencies from the lock
         # The LOCK, not requirements.txt. requirements.txt is the loose
