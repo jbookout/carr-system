@@ -20,12 +20,12 @@ ALLOWED = frozenset({"drift-claim-gate.py", "drift-assertion-gate.py"})
 def main() -> int:
     gate = sys.argv[1] if len(sys.argv) == 2 else ""
     if gate not in ALLOWED:
-        return 0
+        return 2
     python = REPO / ".venv" / "bin" / "python"
-    # Match the gates' fail-open posture for an incomplete checkout, but never
-    # fall back to system Python: it cannot perform the canonical record read.
+    # Never fall back to system Python: it cannot perform the canonical record
+    # read.  A bootstrap fault is a closed gate, not a silent loss of context.
     if not os.access(python, os.X_OK):
-        return 0
+        return 2
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env["PYTHONNOUSERSITE"] = "1"
@@ -33,12 +33,15 @@ def main() -> int:
         ready = subprocess.run([str(python), "-c", "import psycopg"], env=env,
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=3)
-    except OSError:
-        return 0
+    except (OSError, subprocess.TimeoutExpired):
+        return 2
     if ready.returncode != 0:
-        return 0
-    os.execve(str(python), [str(python), str(REPO / "hooks" / gate)], env)
-    return 0
+        return 2
+    try:
+        os.execve(str(python), [str(python), str(REPO / "hooks" / gate)], env)
+    except OSError:
+        return 2
+    return 2
 
 
 if __name__ == "__main__":
