@@ -45,6 +45,41 @@ RECOVERY_REASON=""
 # surfaces without loading credentials, taking locks, writing logs, touching
 # Drive, or calling production. A canary uses the normal path under the same
 # singleton lock as the legacy schedule.
+run_canary() {
+  # The Nightly canary is intentionally only the availability-matcher subchain.
+  # It must reject ambient capability before it can create a directory, log,
+  # acquire the normal nightly lock, or source the routine credential loader.
+  [ "${CARR_CONTROL_PLANE_MODE:-}" = "canary" ] || {
+    print -ru2 -- "nightly canary requires explicit control-plane canary mode"; return 64; }
+  [ -n "${CARR_NIGHTLY_CANARY_ROOT:-}" ] || {
+    print -ru2 -- "nightly canary requires a parent-selected output root"; return 64; }
+  local key value
+  while IFS='=' read -r key value; do
+    case "$key" in
+      DATABASE_URL|BACKUP_DATABASE_URL|PG*|CARR_VAULT|CARR_ONEDRIVE_DEALS|CARR_EXPORT_LIVE|CARR_DRIVE_RECOVERY|CARR_ROUTINE_DB_ENV_FILE|CARR_INGEST_URL|CARR_AI_ROUTE_PRIMARY_URL|CARR_AI_ROUTE_SECONDARY_URL|CARR_GMAIL_APP_PASSWORD|CARR_AGE_IDENTITY|CARR_DB_*|*TOKEN*|*SECRET*|*PASSWORD*|*API_KEY*|*PROVIDER_URL*|*EXPORTER_URL*|*BACKUP_URL*)
+        print -ru2 -- "nightly canary refused ambient live capability: $key"; return 78 ;;
+    esac
+  done < <(env)
+  local base="$REPO/out/canary/nightly-record-layer" root="$CARR_NIGHTLY_CANARY_ROOT"
+  case "$root" in "$base"/*) ;; *) print -ru2 -- "nightly canary output root escapes dedicated canary directory"; return 64 ;; esac
+  [[ "$root" != *'/../'* && "$root" != *'/./'* && "$root" != "$base" ]] || {
+    print -ru2 -- "nightly canary output root is not a direct run directory"; return 64; }
+  local component
+  for component in "$REPO/out" "$REPO/out/canary" "$base"; do
+    [ ! -L "$component" ] || { print -ru2 -- "nightly canary output root crosses a symlink"; return 64; }
+  done
+  local py="$REPO/.venv/bin/python"
+  [ -x "$py" ] || py=python3
+  local snapshot marker
+  snapshot="$(cat)"
+  [ -n "$snapshot" ] || { print -ru2 -- "nightly canary requires a protected parent snapshot"; return 78; }
+  marker="$(print -rn -- "$snapshot" | "$py" "$REPO/pipelines/availability_matcher.py" --canary)" || return $?
+  case "$marker" in
+    'availability-matcher: canary-result '*) print -r -- "nightly canary result: ${marker#availability-matcher: canary-result }" ;;
+    *) print -ru2 -- "nightly canary child emitted no registered aggregate"; return 1 ;;
+  esac
+}
+
 if [ "${1:-}" = "--preflight" ]; then
   required=(
     ops/vault-drift-watch.py bin/schema-snapshot.sh ops/p1-environment-gate.py
@@ -68,7 +103,10 @@ if [ "${1:-}" = "--preflight" ]; then
   print -r -- "nightly preflight: ${#required[@]} chain surfaces present; writes=0"
   exit 0
 fi
-if [ "$#" -eq 0 ]; then
+if [ "$#" -eq 1 ] && [ "$1" = "--canary" ]; then
+  run_canary
+  exit $?
+elif [ "$#" -eq 0 ]; then
   unset CARR_VAULT CARR_EXPORT_LIVE
 elif [ "$#" -eq 3 ] && [ "$1" = "--recovery" ] && [ "$2" = "--reason" ] && [ -n "$3" ]; then
   RECOVERY=1

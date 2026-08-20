@@ -177,6 +177,8 @@ for key,evidence in command_fixtures.items():
 # Every enabled deterministic canary has a separate registered command
 # and must attest their nonsecret destination in the receipt marker.
 canary_fixtures={
+ 'nightly-record-layer': {'entrypoint':'bin/nightly.sh','mode':'canary','args':['--canary'],'exit_code':0,
+   'stdout_tail':'nightly canary result: {"availability_count":0,"match_count":0,"open_search_count":0,"output_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapshot_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source_snapshot_id":"00000000-0000-0000-0000-000000000001"}'},
  'notes-sweep-hourly': {'entrypoint':'bin/notes-sweep-post.sh','mode':'canary','args':['--canary'],'exit_code':0,
    'stdout_tail':'notes-sweep: source=notes_sweep mode=canary destination=canary-destination posted=1 duplicate=0 failed=0 still_queued=0'},
 }
@@ -184,13 +186,13 @@ for key,evidence in canary_fixtures.items():
     workflow=by[key]
     canary=cp._workflow_fact_collector(workflow,weekday_payload,execution=evidence,mode='canary')
     check(f'{key} isolated canary marker and registered arguments validate',evaluate_stage(workflow,'validation',canary))
-    missing_destination={**evidence,'stdout_tail':str(evidence['stdout_tail']).replace(' destination=canary-destination','')}
-    check(f'{key} canary marker without destination identity refuses',not evaluate_stage(workflow,'validation',cp._workflow_fact_collector(workflow,weekday_payload,execution=missing_destination,mode='canary')))
+    missing_identity={**evidence,'stdout_tail':(
+        str(evidence['stdout_tail']).replace('"source_snapshot_id":"00000000-0000-0000-0000-000000000001"','"source_snapshot_id":"missing"')
+        if key == 'nightly-record-layer' else str(evidence['stdout_tail']).replace(' destination=canary-destination',''))}
+    check(f'{key} canary marker without isolated source/destination identity refuses',not evaluate_stage(workflow,'validation',cp._workflow_fact_collector(workflow,weekday_payload,execution=missing_identity,mode='canary')))
 
-# Nightly's actual completion result goes to stdout for the live receipt.  The
-# old canary used the same command and destination as live, so it is now
-# deliberately unregistered and must fail closed even when handed a valid live
-# marker.
+# Nightly's live completion marker cannot stand in for its newly isolated
+# availability-matcher canary.  The modes have distinct arguments and markers.
 nightly=by['nightly-record-layer']
 live_evidence={'entrypoint':'bin/nightly.sh','mode':'live','args':[],'exit_code':0,
                'stdout_tail':'nightly result: chain_ok'}
@@ -199,7 +201,7 @@ check('nightly live stdout completion marker validates',evaluate_stage(nightly,'
 false_marker={**live_evidence,'stdout_tail':'nightly result: chain_failed'}
 check('nightly live failed marker refuses',not evaluate_stage(nightly,'validation',cp._workflow_fact_collector(nightly,weekday_payload,execution=false_marker,mode='live')))
 old_canary={**live_evidence,'mode':'canary'}
-check('nightly live-equivalent canary cannot satisfy command validation',
+check('nightly live-equivalent marker cannot satisfy isolated canary validation',
       not evaluate_stage(nightly,'validation',cp._workflow_fact_collector(nightly,weekday_payload,execution=old_canary,mode='canary')))
 
 # Every cognition predicate is fail-closed when its exact canonical input,
