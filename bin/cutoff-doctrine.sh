@@ -46,14 +46,17 @@ stamp() { print -r -- "$(date -u +%FT%TZ) cutoff $*" >> "$LOG" }
 #   three agent definitions that read the old paths were re-pointed in the same
 #   commit, and the folder's README moved to pipelines/learning-reports.md.
 #
-#   today.md — RETIRES AS SOON AS THE claim-card VERB IS DEPLOYED, and not one
-#   minute before. Two of its three sections (one-thing, renewal windows) are
-#   already served by today-triage. The third is the claim card, and until the
-#   claim-card verb ships there is NO reader for v_claim_card in the verb layer —
+#   today.md — RETIRED 2026-08-20, once its replacement was actually serving.
+#   Two of its three sections (one-thing, renewal windows) were already covered
+#   by today-triage. The third was the claim card, and until claim-card shipped
+#   there was NO reader for v_claim_card anywhere in the verb layer, while
 #   promote-pool and decline-candidate both tell the caller to read that view
-#   first, so removing the file early would leave both verbs naming a surface
-#   nothing can reach. Same gap read-loop closed for loops. Verb written and its
-#   SQL proven against the live view; it retires the file on the deploy.
+#   first — the same gap read-loop closed for loops. claim-card went to
+#   production on 2026-08-20 (141 verbs) and was called live before the write
+#   came out of bin/local-briefs.sh, returning the same 9,778 claimable and 388
+#   needs-contact totals the file printed. Order mattered more than speed here:
+#   pulling the file first would have left two write verbs naming a surface
+#   nothing could reach.
 renders=$("$REPO/.venv/bin/python" - <<'PY'
 import importlib.util, os
 spec = importlib.util.spec_from_file_location(
