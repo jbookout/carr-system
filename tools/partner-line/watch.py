@@ -358,10 +358,11 @@ def poll_once(*, self_partner: str, target_label: str, room: str = DEFAULT_ROOM,
             continue
         payload = build_peer_message(text)
         injector(sock_path, payload)
+        sponsor = str(t.get("sponsor") or "")
         notifier(
-            f"Partner line — {DISPLAY.get(t.get('sponsor'), t.get('sponsor'))}",
-            t.get("seat") or "",
-            (t.get("body") or "")[:200],
+            f"Partner line — {DISPLAY.get(sponsor, sponsor)}",
+            str(t.get("seat") or ""),
+            (str(t.get("body") or ""))[:200],
         )
         injected += 1
 
