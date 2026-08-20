@@ -14,9 +14,24 @@
 -- rule it teaches is worth stating plainly: ANY migration that creates a role
 -- must add that role here in the same change, because the day its ledger entry
 -- lands is the day it stops creating anything.
--- carr_reader, carr_writer, carr_exporter and carr_authority are privilege
--- bundles, so they stay NOLOGIN. carr_jobs is the narrow unattended runtime
--- identity: a fresh
+-- carr_device_evidence made it FOUR, the same day and on this same branch, by
+-- way of 0163. It surfaced only after the guidance and retrieval seed rows were
+-- added, because control-plane-db-gate could not reach the privilege check that
+-- names it until the gates ahead of it stopped failing — and when it did reach
+-- it, it did not fail cleanly: `has_function_privilege('carr_device_evidence',
+-- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
+-- of a finding. Four for four, every one caught by a rebuild rather than by the
+-- change that created the role.
+--
+-- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
+-- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
+-- login role with a placeholder password to satisfy nothing is a cost with no
+-- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
+-- widening a pattern.
+-- carr_reader, carr_writer, carr_exporter, carr_authority and
+-- carr_device_evidence are privilege bundles, so they stay NOLOGIN. carr_jobs is
+-- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
 -- completely unchanged. The placeholder is generated in-process and never
@@ -28,7 +43,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -22243,6 +22258,7 @@ revoke all on function public.promote_retrieval_proposal(p_proposal_id uuid, p_a
 revoke all on function public.retire_retrieval_curation(p_target_type text, p_target_id uuid, p_base_version bigint, p_actor_id uuid, p_reason text) from public;
 revoke all on function public.search_doctrine_situations(p_query text, p_actor_id uuid, p_content_classes text[], p_limit integer, p_policy_id text) from public;
 grant usage on schema ops to carr_authority;
+grant usage on schema ops to carr_device_evidence;
 grant usage on schema ops to carr_jobs;
 grant usage on schema ops to carr_reader;
 grant usage on schema ops to carr_writer;
@@ -22838,7 +22854,11 @@ grant execute on function ops.propose_sourced_work_request_outcome_feedback(p_wo
 grant execute on function ops.propose_sourced_work_request_plan(p_work_request text, p_base_version integer, p_scope_summary text, p_runbook_ref text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.put_cognition_cache(p_cache_key text, p_cognition_key text, p_cognition_version integer, p_output_schema_version integer, p_proposal jsonb, p_dependency_refs text[], p_ttl_seconds integer) to carr_jobs;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.record_claude_scheduler_observation(p_surface_id text, p_provider_task_id text, p_cron_expression text, p_timezone text, p_enabled boolean, p_definition_sha256 text, p_provider_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
+grant execute on function ops.record_device_evidence(p_job_id uuid, p_builder_key text, p_observed_at timestamp with time zone, p_values jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_guidance_decision(p_revision_id uuid, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
+grant execute on function ops.record_launchd_scheduler_observation(p_surface_id text, p_label text, p_timezone text, p_enabled boolean, p_plist_sha256 text, p_schedule_sha256 text, p_launchctl_revision text, p_source_fingerprint text, p_observed_at timestamp with time zone, p_idempotency_key text) to carr_device_evidence;
+grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
@@ -22867,6 +22887,7 @@ grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timest
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_reader;
 grant execute on function public.state_as_of(p_type text, p_id uuid, p_at timestamp with time zone) to carr_writer;
 grant carr_authority to neondb_owner;
+grant carr_device_evidence to neondb_owner;
 grant carr_exporter to neondb_owner;
 grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;

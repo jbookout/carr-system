@@ -125,9 +125,24 @@ cat > "$TMP" <<'ROLES'
 -- rule it teaches is worth stating plainly: ANY migration that creates a role
 -- must add that role here in the same change, because the day its ledger entry
 -- lands is the day it stops creating anything.
--- carr_reader, carr_writer, carr_exporter and carr_authority are privilege
--- bundles, so they stay NOLOGIN. carr_jobs is the narrow unattended runtime
--- identity: a fresh
+-- carr_device_evidence made it FOUR, the same day and on this same branch, by
+-- way of 0163. It surfaced only after the guidance and retrieval seed rows were
+-- added, because control-plane-db-gate could not reach the privilege check that
+-- names it until the gates ahead of it stopped failing — and when it did reach
+-- it, it did not fail cleanly: `has_function_privilege('carr_device_evidence',
+-- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
+-- of a finding. Four for four, every one caught by a rebuild rather than by the
+-- change that created the role.
+--
+-- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
+-- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
+-- login role with a placeholder password to satisfy nothing is a cost with no
+-- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
+-- widening a pattern.
+-- carr_reader, carr_writer, carr_exporter, carr_authority and
+-- carr_device_evidence are privilege bundles, so they stay NOLOGIN. carr_jobs is
+-- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
 -- completely unchanged. The placeholder is generated in-process and never
@@ -139,7 +154,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -224,7 +239,7 @@ select format('revoke all on function %s.%s(%s) from public;',
  order by 1;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -238,7 +253,7 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -254,7 +269,7 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -271,7 +286,7 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -285,7 +300,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
 select format('grant %s to %s;', gr.rolname, mem.rolname)
   from pg_auth_members m

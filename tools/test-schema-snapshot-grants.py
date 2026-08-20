@@ -55,7 +55,13 @@ SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 # both the role and its 24 grants. This list and the preamble in
 # bin/schema-snapshot.sh are the same set and have to move together — leaving it
 # out here reports the role's own grants as strays.
-APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter", "carr_authority"]
+#
+# carr_device_evidence joined the same day, by way of 0163 — the fourth role to
+# age out of the snapshot. This list and the preamble in bin/schema-snapshot.sh
+# are the same set written twice, so they have to move together: a role in one
+# and not the other makes its own grants report as strays.
+APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
+             "carr_authority", "carr_device_evidence"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []
