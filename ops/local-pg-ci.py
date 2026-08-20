@@ -263,6 +263,23 @@ def run_local_ci(
                         file=sys.stderr,
                     )
                 else:
+                    canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
+                    canary = command_runner.run(
+                        [acceptance_python, canary_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if canary.returncode:
+                        print(
+                            f"local-db-ci: calendar canary acceptance failed: "
+                            f"{_failure_detail(canary)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = canary.returncode
+                    else:
+                        print("local-db-ci: calendar canary isolation acceptance passed")
+                if exit_code == 0:
                     print(
                         f"local-db-ci: {ci_class} proof and atomic Joe authority lifecycle "
                         "passed on disposable PostgreSQL"

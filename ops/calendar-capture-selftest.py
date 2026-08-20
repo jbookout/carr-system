@@ -162,5 +162,18 @@ check("receipt-safe EventKit shadow confines scratch evidence to its output root
       and (isolated / "calendar-touch-proposals.json").is_file()
       and not (root / "out" / "calendar-access.log").exists())
 
+# 6. Canary must stop before the normal unmatched-attendee intake gate.  The
+# fixture deliberately has no intake helper; a successful canary therefore
+# proves it wrote only the dedicated receipt seam, not a live activity/intake.
+root, stub = fixture(appends="events scanned: 12; carrying attendees: 3\nexit=0",
+                     dump_json="{}", matcher_json=json.dumps(sensitive))
+(root / "tools" / "calendar-canary-record.py").write_text(
+    "#!/usr/bin/env python3\nprint('calendar-capture: source=eventkit mode=canary destination=calendar-canary-fixture exact=1 receipt=00000000-0000-0000-0000-000000000000')\n")
+p = run(root, stub, "--canary", "--days", "7", extra_env={
+    "CARR_CONTROL_PLANE_MODE": "canary", "CARR_CALENDAR_CANARY_DSN": "postgres://fixture/isolated",
+    "CARR_CALENDAR_CANARY_DESTINATION_ID": "calendar-canary-fixture"})
+check("canary bypasses normal intake and writes only its receipt target",
+      p.returncode == 0 and "mode=canary destination=calendar-canary-fixture" in p.stdout)
+
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
