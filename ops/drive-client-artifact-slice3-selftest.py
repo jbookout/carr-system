@@ -28,7 +28,6 @@ with tempfile.TemporaryDirectory(prefix="drive-client-artifact-slice3-") as td:
     env = dict(os.environ, CARR_VAULT=str(poison))
     cases = {
         "audit-template-colors": (str(PY), "fill-engine/audit_template_colors.py"),
-        "front-door": (str(PY), "pipelines/build-front-door.py"),
         "space-search": (str(PY), "pipelines/build-space-search.py", str(Path(td) / "search")),
         "dso-match": (str(PY), "pipelines/dso-match.py"),
         "map-radar-lanes": (str(PY), "pipelines/map_radar_lanes.py", "--all"),
@@ -47,17 +46,24 @@ with tempfile.TemporaryDirectory(prefix="drive-client-artifact-slice3-") as td:
         assert proc.returncode == 2 and "nonblank --reason" in proc.stdout + proc.stderr, (
             f"{label}: recovery without reason was accepted: {proc.stdout}{proc.stderr}")
 
+    # Front Door is now a deterministic record-native artifact, not a Drive
+    # client.  Normal generation must therefore succeed while ignoring an
+    # ambient legacy vault completely.
+    front_door = ROOT / "pipelines" / "front-door.html"
+    before = front_door.read_bytes()
+    proc = run(str(PY), "pipelines/build-front-door.py", env=env)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, f"front-door: record-native generation failed: {output}"
+    assert "generated ->" in output and "canonical all: True" in output, (
+        f"front-door: missing deterministic record-native evidence: {output}")
+    assert str(poison) not in output, f"front-door: resolved poisoned vault: {output}"
+    assert marker.read_text() == "unchanged", "front-door: wrote poisoned vault"
+    assert front_door.read_bytes() == before, "front-door: deterministic generation changed its checked-in artifact"
+
     proc = run(str(PY), "tools/verify-emails.py", "--source", "registry",
                "--recovery", "--reason", "fixture recovery", "--vault", str(poison), env=env)
     assert proc.returncode == 0 and "RECOVERY MODE - NONCANONICAL Drive projection" in proc.stderr, (
         f"recovery was not visibly noncanonical: {proc.stdout}{proc.stderr}")
     assert marker.read_text() == "unchanged", "recovery verifier unexpectedly wrote Drive"
 
-    missing_delivery = Path(td) / "missing-front-door-root"
-    proc = run(str(PY), "pipelines/build-front-door.py", "--recovery", "--reason",
-               "fixture recovery", "--vault", str(missing_delivery), env=env)
-    assert proc.returncode == 2 and "NOT DELIVERED" in proc.stderr, (
-        f"missing Front Door recovery destination reported success: {proc.stdout}{proc.stderr}")
-    assert not missing_delivery.exists(), "failed Front Door delivery created a recovery root"
-
-print("drive client artifact slice3 selftest: 46/46 passed")
+print("drive client artifact slice3 selftest: record-native Front Door and Drive boundaries passed")

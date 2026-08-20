@@ -96,12 +96,14 @@
     "drift_claim": {
       "implementation": [
         "hooks/drift-claim-gate.py",
-        "hooks/drift-assertion-gate.py"
+        "hooks/drift-assertion-gate.py",
+        "hooks/run-record-gate.py"
       ],
       "test": [
-        "ops/drift-assertion-gate-selftest.py"
+        "ops/drift-assertion-gate-selftest.py",
+        "ops/drive-runtime-hooks-selftest.py"
       ],
-      "failure_mode": "surfaces the governing ruling; Stop door reopens the turn once"
+      "failure_mode": "fixed-interpreter launcher fails closed if the canonical drift runtime is unavailable; otherwise surfaces the governing ruling and the Stop door reopens the turn once"
     },
     "stale_claim": {
       "implementation": [

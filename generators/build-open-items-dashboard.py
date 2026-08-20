@@ -761,7 +761,12 @@ def main() -> None:
             "normal mode refuses the retired Drive projection"
         )
 
-    vault = args.vault or Path(os.environ.get("CARR_VAULT", str(RECOVERY_DEFAULT_VAULT)))
+    # This legacy location is eligible only after the explicit recovery door
+    # above; an empty ambient value must not turn into a current-directory root.
+    ambient_recovery_vault = os.environ.get("CARR_VAULT")
+    vault = args.vault or Path(
+        ambient_recovery_vault if ambient_recovery_vault else RECOVERY_DEFAULT_VAULT
+    )
     out_path = vault / "00_Context" / "open-items.html"
     print(f"RECOVERY NONCANONICAL: Drive dashboard projection; reason={args.reason}", file=sys.stderr)
     dsn = get_dsn()
