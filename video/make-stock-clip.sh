@@ -5,7 +5,9 @@
 
 set -e
 PIPE="$HOME/Movies/CARR Video Pipeline"
-BROLL="/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Stock/broll"
+VIDEO_DIR="$(cd "$(dirname "$0")" && pwd)"
+BRAND="$(python3 "$VIDEO_DIR/recovery-asset-root.py" "$@")"
+BROLL="$BRAND/Stock/broll"
 AUD="$PIPE/Audio_Library"
 RAW="$PIPE/03_Output/stockclip_raw.mov"
 FINAL="$PIPE/03_Output/carr_conflict_clip_1080sq.mp4"

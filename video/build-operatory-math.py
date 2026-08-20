@@ -6,10 +6,14 @@ Numbers are a conservative illustrative model from cited industry benchmarks
 (production/op $300-600K; buildout $150-350/sqft; TI $50-100/sqft dental)."""
 import json, pathlib, subprocess, sys, time
 from typing import Any
+from asset_boundary import recovery_video_assets
 
+ASSETS = recovery_video_assets(sys.argv[1:], "versioned b-roll and audio library")
+if ASSETS.context.args:
+    raise SystemExit(f"build-operatory-math: unexpected argument: {ASSETS.context.args[0]}")
 PIPE = pathlib.Path.home() / "Movies/CARR Video Pipeline"
-BROLL = "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Stock/broll"
-AUD = pathlib.Path("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets/Audio/library")
+BROLL = ASSETS.brand_root / "Stock" / "broll"
+AUD = ASSETS.brand_root / "Audio" / "library"
 FF = "/opt/homebrew/bin/ffmpeg"
 RAW = PIPE / "03_Output/opmath_raw.mov"
 FINAL = PIPE / "03_Output/carr_operatory_math_1080sq.mp4"

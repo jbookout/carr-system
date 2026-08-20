@@ -31,8 +31,6 @@
 set -e
 PIPE="${CARR_VIDEO_PIPE:-$HOME/Movies/CARR Video Pipeline}"
 REPO="$(cd "$(dirname "$0")" && pwd)"
-BRAND="/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Marketing/Brand Assets"
-AUD="$BRAND/Audio/library"
 LOG="$PIPE/choreography-log.tsv"
 FF=/opt/homebrew/bin/ffmpeg
 PLANNER="$REPO/plan-animated-static.py"
@@ -47,7 +45,8 @@ case "${1:-}" in -*|"") ;; *) NAME="$1"; shift ;; esac
 PLANARGS=(); DRY=0; EMAIL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --concept|--sfx|--avoid) PLANARGS+=("$1" "$2"); shift 2 ;;
+    --concept|--sfx|--avoid|--reason|--vault) PLANARGS+=("$1" "$2"); shift 2 ;;
+    --recovery) PLANARGS+=("$1"); shift ;;
     --dry-run) DRY=1; shift ;;
     --email) EMAIL=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
