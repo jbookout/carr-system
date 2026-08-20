@@ -117,19 +117,30 @@ check(
 # ---- 5. set -u is still on, or none of the above matters -------------------
 check("the chain still runs under set -u", re.search(r"^set -u$", text, re.M) is not None)
 
-# ---- 6. the mirror step is GUARDED, not merely defaulted -------------------
-# An empty DATABASE_URL makes pipelines/doctrine_mirror.py exit 2 (FAIL). A
-# capability nobody provisioned is a SKIP, so that step needs a branch, not a
-# default. Exit 78 is the chain's not-configured contract.
-check(
-    "the portability mirror branches on the credential",
-    re.search(r'if \[ -n "\$CARR_DB_BACKUP_URL" \]', text) is not None,
+# ---- 6. the mirror SKIPS on an absent credential ---------------------------
+# This used to assert the shape of a shell guard in nightly.sh: that the step
+# sat inside `if [ -n "$CARR_DB_BACKUP_URL" ]` and refused through the helper.
+# That guard existed because doctrine_mirror.py exited 2 on an empty
+# DATABASE_URL, and 2 reads as FAIL. #387 moved the fix into the callee, where
+# it belongs — one exit code protects every caller instead of one branch
+# protecting one caller — and the guard came out again.
+#
+# So this now checks the PROPERTY the guard was standing in for, by running the
+# mirror with no credential and reading what it returns. A test that pins the
+# shape of a fix cannot survive the fix moving; a test that pins the behaviour
+# does not care where it lives. That is the same mistake #380's gate made in
+# the other direction, and this file should not repeat it.
+mirror = subprocess.run(
+    [sys.executable, str(REPO / "pipelines" / "doctrine_mirror.py"),
+     "--out", "/tmp/nightly-capability-skip-probe",
+     "--also", "/tmp/nightly-capability-skip-probe2"],
+    capture_output=True, text=True,
+    env={k: v for k, v in os.environ.items() if k != "DATABASE_URL"},
 )
-check(
-    "its unconfigured branch refuses with the SKIP helper",
-    re.search(r'portability mirror \(backup capability unavailable\)[^\n]*routine-admin-refusal\.sh', text)
-    is not None,
-)
+check("the portability mirror skips rather than fails without a credential",
+      mirror.returncode == 78, f"rc={mirror.returncode}")
+check("and it says which setting is missing",
+      "DATABASE_URL" in (mirror.stderr + mirror.stdout))
 
 refusal = subprocess.run(
     ["/bin/sh", str(REPO / "bin" / "routine-admin-refusal.sh"), "probe"],
