@@ -153,6 +153,11 @@ ALWAYS_EXPECTED = {
     # written by bin/local-briefs.sh (com.carr.local-briefs), not an export target
     "00_Context/today.md",
 }
+# The two Automation/Learning reports were briefly listed here as expected
+# writers. They are not listed any more because they no longer exist in the
+# vault: the same 2026-08-19 cutoff retired them, and bin/learning-weekly.sh and
+# bin/learning-monthly.sh now write to the repo's out/Learning instead. A path
+# that nothing writes does not belong in an expected-WRITERS set.
 
 # ---------------------------------------------------------------- ingest wiring
 # Same house pattern as bin/notes-sweep-post.sh and bin/pull-gmail-calendar.py:
@@ -178,7 +183,26 @@ def load_expected_writers():
         sys.path.insert(0, str(REPO_ROOT))
         from exporters import targets as _targets  # noqa: PLC0415 (deliberate late import)
         paths = {rel for rel, _builder in _targets.TARGETS.values()}
+        # THE CUTOFF (fired 2026-08-19). A retired .md render was MOVED to
+        # _to_delete staging on purpose and the exporter will never write it
+        # again, so keeping it registered here means 37 paths permanently
+        # "not present" and, on the tamper pass, 37 findings that describe a
+        # deliberate act as drift. Reads the SAME flag the exporter gates on;
+        # any read failure leaves the path registered, which is the safe
+        # direction this function already documents.
         paths |= ALWAYS_EXPECTED
+        # Subtracted AFTER the union on purpose: ALWAYS_EXPECTED re-lists the
+        # three compiled-rules renders as a belt against a broken registry
+        # import, and they are retired too. 00_Context/today.md is NOT — it is
+        # written daily by bin/local-briefs.sh, not by the exporter, so the
+        # cutoff does not touch it and it stays tracked here.
+        try:
+            from exporters.run_exports import md_renders_retired  # noqa: PLC0415
+            if md_renders_retired():
+                paths -= {rel for rel, _b in _targets.TARGETS.values()
+                          if rel.lower().endswith(".md")}
+        except Exception:
+            pass
         return paths, None
     except Exception as exc:  # pragma: no cover - exercised via a real import failure only
         return set(ALWAYS_EXPECTED), f"{type(exc).__name__}: {exc}"

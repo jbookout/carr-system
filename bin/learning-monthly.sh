@@ -12,7 +12,7 @@
 # way. These two produce reading material for the monthly review, nothing more.
 #
 # Appends to out/learning.log. Verified by OUTPUT: the two report files under
-# Automation/Learning/ and their first lines.
+# out/Learning/ and their first lines.
 #
 # Run by hand any time: ./bin/learning-monthly.sh
 set -u
@@ -20,8 +20,10 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin"
 LOG="$REPO/out/learning.log"
-VAULT="${CARR_VAULT:-/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI}"
-LEARN_DIR="$VAULT/Automation/Learning"
+# THE CUTOFF, 2026-08-19 — same change and same reasoning as bin/learning-weekly.sh:
+# these reports are renderings of database content, not a home for it, so the
+# vault copy retired with the 37 doctrine renders. The repo copy stays.
+LEARN_DIR="$REPO/out/Learning"
 mkdir -p "$REPO/out" "$LEARN_DIR"
 
 [ -f "$HOME/.config/carr/db.env" ] && { set -a; . "$HOME/.config/carr/db.env"; set +a; }
@@ -40,7 +42,7 @@ cd "$REPO" || { say "FATAL cannot cd $REPO"; exit 2; }
 
 rc=0
 ./.venv/bin/python pipelines/learning_jobs.py monthly-chain \
-  --report-dir "$LEARN_DIR" --report-dir "$REPO/out/Learning" >> "$LOG" 2>&1 || rc=$?
+  --report-dir "$LEARN_DIR" >> "$LOG" 2>&1 || rc=$?
 
 # CORRECTIONS SWEEP (loop #113, added 2026-08-13). The rule store had a rich output
 # path and no INPUT path except a session noticing in the moment and remembering to
