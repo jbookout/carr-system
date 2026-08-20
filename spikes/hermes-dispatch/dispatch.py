@@ -80,7 +80,14 @@ def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
     }
     conn = inject_mod.inject_keepalive(entry["socket"], payload)
     try:
-        return {"status": "delivered", "detail": "turn accepted by the desk socket"}
+        # `delivered` is deliberately narrow. The socket binds before the
+        # session finishes its first-run prompts, so a turn sent to a desk
+        # still sitting on "use my browser?" is accepted and then queued
+        # behind a modal nobody is watching. Clear a new desk's prompts once
+        # before dispatching to it; `dispatch.py where` says so too.
+        return {"status": "delivered",
+                "detail": "the desk's socket accepted the turn; it answers in "
+                          "its own window, and this file does not carry that back"}
     finally:
         conn.close()
 
@@ -221,14 +228,26 @@ def _cmd_where() -> int:
     print("THIS session's socket:", sock or "<unset — not a messaging-enabled session>")
     if sock and desks.PID_SOCKET.match(os.path.basename(sock)):
         print()
-        print("That is a pid socket, so it cannot be registered as a desk.")
-        print("A desk is a session started on purpose with a name:")
+        print("That is a pid socket, so it cannot be registered as a desk —")
+        print("it names a process that happened to start, and it changes every")
+        print("time. A desk is a session started on purpose, under a name:")
         print()
-        print("    claude --messaging-socket-path /tmp/cc-socks/claude-desk.sock")
+        print("    tmux new-session -d -s carr-desk -c ~/carr-system \\")
+        print("      \"claude --messaging-socket-path /tmp/cc-socks/claude-desk.sock\"")
         print()
         print("Then, once per live window:")
         print()
         print("    dispatch.py register claude-desk --socket /tmp/cc-socks/claude-desk.sock")
+    print()
+    print("CLEAR THE DESK'S FIRST-RUN PROMPTS BEFORE DISPATCHING ANYTHING.")
+    print("A brand-new session opens on questions that wait for a keypress —")
+    print("whether to use the Chrome browser, whether to trust the folder. The")
+    print("socket is already bound and accepting while those are up, so a task")
+    print("dispatched then reports `delivered` and sits behind the prompt doing")
+    print("nothing. Attach once (tmux attach -t carr-desk), answer them, detach.")
+    print("`delivered` means the desk's socket took the turn. It never means the")
+    print("desk has acted on it: a live session answers in its own window, on its")
+    print("own time, and its answer is not carried back through this file.")
     return 0
 
 
