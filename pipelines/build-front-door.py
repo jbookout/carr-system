@@ -6,8 +6,7 @@ import urllib.parse, html, json, re, os, sys
 
 # CARR_VAULT override (orchestrator-lane corrective, 2026-07-25): was a bare constant,
 # which structurally blocked any non-Joe machine (Dell's clone) from running this.
-FOLDER = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+FOLDER = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
 REMINDER = "Reminder before we start: this session needs the CARR AI folder connected to read and write (this launcher link should connect it automatically; if it is not connected, connect it before sending)."
 DOCTRINE = "Run this as a guided flow per DNA/Team/guided-entry-doctrine.md: tell me up front how many questions it will be, ask one at a time with multiple choice wherever possible and fill-in-the-blank otherwise, and if this creates a record, capture the core first, save it, then offer to fill in the rest later so a couple of minutes is enough (the daily heartbeat or Monday brief will chase the missing pieces)."
 
@@ -207,9 +206,7 @@ open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'front-door.html
 # declares success when it CREATES an artifact, never when the consumer can
 # reach it. The generator that builds a surface is the right place to deliver
 # it, so the two cannot drift apart again.
-_vault = _os.environ.get(
-    "CARR_VAULT",
-    _os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+_vault = _os.environ.get("CARR_VAULT") or _os.path.expanduser("~/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 _dest = _os.path.join(_vault, "DNA", "Team", "front-door.html")
 if _os.path.isdir(_os.path.dirname(_dest)):
     open(_dest, "w", encoding="utf-8").write(HTML)

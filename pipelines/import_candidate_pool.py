@@ -89,9 +89,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "lib"))
 from sheets import header_map, data_rows          # noqa: E402
 
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 DEFAULT_SOURCE = VAULT / "DNA/Leads/lead-router-2026-07-13.xlsx"
 SHEET = "Lead Router"
 SOURCE_SLUG = "lead-router"

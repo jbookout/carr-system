@@ -161,7 +161,7 @@ test("recordWorkerFailure: a brand-new signature opens an incident and attaches 
   const { query, calls } = fakeQuery([
     { match: /select id from ops\.service/, rows: [{ id: svcId }] },
     { match: /select id from ops\.incident where signature/, rows: [] }, // no open incident yet
-    { match: /select coalesce\(max/, rows: [{ n: 1 }] },                  // ref numbering
+    { match: /coalesce\(max\(substring/, rows: [{ day: "20260818", seq: 1 }] },                  // ref numbering
     { match: /insert into ops\.incident\b/, rows: [{ id: incId }] },
     { match: /select 1 from ops\.incident_fact/, rows: [] },              // no prior fact for this correlation id
   ]);
@@ -236,6 +236,74 @@ test("recordWorkerFailure: NEVER writes state, resolved_at, recovery_evidence_re
   }
 });
 
+// ────────────────────────────────────────────────────────────────────────
+// INCIDENT NUMBERING — the day prefix and the sequence must come from ONE
+// clock. This writer used to count against to_char(now(), ...) (the SERVER's
+// timezone) and then stamp the ref from `new Date()` (the CLIENT's). The two
+// agree only on a UTC server, and a Worker talking to Neon is UTC on both
+// ends, so nothing here could ever have caught the split — which is precisely
+// why these fakes now hand back a server day that is NOT today's.
+// ────────────────────────────────────────────────────────────────────────
+
+test("nextIncidentRef: the day prefix comes from the SERVER's answer, never from this runtime's clock", async () => {
+  const svcId = "svc-1";
+  // A day no client clock will ever produce: if the ref carries it, the label
+  // came from the same query the sequence was counted by.
+  const { query, calls } = fakeQuery([
+    { match: /select id from ops\.service/, rows: [{ id: svcId }] },
+    { match: /select id from ops\.incident where signature/, rows: [] },
+    { match: /coalesce\(max\(substring/, rows: [{ day: "19991231", seq: 7 }] },
+    { match: /insert into ops\.incident\b/, rows: [{ id: "inc-1" }] },
+    { match: /select 1 from ops\.incident_fact/, rows: [] },
+  ]);
+  await recordWorkerFailure(query, {
+    environment: "staging", routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR,
+  });
+  const insert = calls.find((c) => /insert into ops\.incident\b/.test(c.text));
+  assert.equal(insert.params[0], "INC-19991231-07");
+
+  // And the query itself must pin the day to UTC, so the numbering space does
+  // not move when the cluster's own zone does.
+  const numbering = calls.find((c) => /coalesce\(max\(substring/.test(c.text));
+  assert.match(numbering.text, /now\(\) at time zone 'UTC'/);
+  assert.doesNotMatch(numbering.text, /to_char\(now\(\),/,
+    "a bare to_char(now(), ...) is the server-zone read this fix removed");
+});
+
+test("nextIncidentRef: two incidents opened across a non-UTC server's day boundary get DISTINCT refs", async () => {
+  // The reproduced failure: a US/Central server at 19:22 CDT counts under
+  // INC-20260818- (its own day) while a UTC client labels INC-20260819-. Every
+  // incident in that 5-hour window came out numbered 01 and the second insert
+  // died on incident_ref_key. Here the server answers as it would across that
+  // boundary — same UTC day, sequence advancing — and both refs must differ.
+  const serverDay = "20260819";
+  const calls = [];
+  let opened = 0;
+  const query = async (text, params) => {
+    calls.push({ text, params });
+    if (/select id from ops\.service/.test(text)) return { rows: [{ id: "svc-1" }] };
+    if (/select id from ops\.incident where signature/.test(text)) return { rows: [] };
+    // What the fixed query returns: the day it counted under, and the next
+    // sequence within THAT day — the two can no longer be read apart.
+    if (/coalesce\(max\(substring/.test(text)) return { rows: [{ day: serverDay, seq: opened + 1 }] };
+    if (/^\s*insert into ops\.incident\b/.test(text)) return { rows: [{ id: `inc-${++opened}` }] };
+    return { rows: [] };
+  };
+  // Two DIFFERENT failure signatures, so 0116's dedupe opens two incidents
+  // rather than appending a fact to the first.
+  for (const routeKey of ["/mcp", "/health"]) {
+    await recordWorkerFailure(query, {
+      environment: "staging", routeKey, failureClass: "http_5xx", correlationId: A_CORR,
+    });
+  }
+  const refs = calls
+    .filter((c) => /^\s*insert into ops\.incident\b/.test(c.text))
+    .map((c) => c.params[0]);
+  assert.equal(opened, 2, "both failures must have opened an incident");
+  assert.deepEqual(refs, [`INC-${serverDay}-01`, `INC-${serverDay}-02`]);
+  assert.notEqual(refs[0], refs[1], "two incidents on one day must never share a ref");
+});
+
 test("recordWorkerFailure: an existing open incident gets a fact appended, never a second incident row", async () => {
   const svcId = "svc-1", incId = "inc-existing";
   const { query, calls } = fakeQuery([
@@ -276,7 +344,7 @@ test("recordWorkerFailure: a concurrent writer winning the open-incident race (2
       // inside openIncident's catch): the concurrent writer's row is there.
       return { rows: incidentInsertAttempts > 0 ? [{ id: incId }] : [] };
     }
-    if (/select coalesce\(max/.test(text)) return { rows: [{ n: 1 }] };
+    if (/coalesce\(max\(substring/.test(text)) return { rows: [{ day: "20260818", seq: 1 }] };
     if (/^\s*insert into ops\.incident\b/.test(text)) {
       incidentInsertAttempts++;
       const e = new Error("duplicate key value violates unique constraint \"incident_one_open_per_signature\"");
@@ -344,7 +412,7 @@ test("recordWorkerFailure: a successful call logs NOTHING — the log line is fo
     const { query } = fakeQuery([
       { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
       { match: /select id from ops\.incident where signature/, rows: [] },
-      { match: /select coalesce\(max/, rows: [{ n: 1 }] },
+      { match: /coalesce\(max\(substring/, rows: [{ day: "20260818", seq: 1 }] },
       { match: /insert into ops\.incident\b/, rows: [{ id: "inc-1" }] },
       { match: /select 1 from ops\.incident_fact/, rows: [] },
     ]);
@@ -409,7 +477,7 @@ test("REGRESSION (defect cae5be2e, second finding): recordWorkerFailure through 
       calls.push({ text, params });
       if (/select id from ops\.service/.test(text)) return [{ id: "svc-1" }];
       if (/select id from ops\.incident where signature/.test(text)) return [];
-      if (/select coalesce\(max/.test(text)) return [{ n: 1 }];
+      if (/coalesce\(max\(substring/.test(text)) return [{ day: "20260818", seq: 1 }];
       if (/^\s*insert into ops\.incident\b/.test(text)) return [{ id: "inc-1" }];
       if (/select 1 from ops\.incident_fact/.test(text)) return [];
       return [];
@@ -455,7 +523,7 @@ test("openIncident's INSERT supplies every column ops.incident's constraints act
   const { query } = fakeQuery([
     { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
     { match: /select id from ops\.incident where signature/, rows: [] },
-    { match: /select coalesce\(max/, rows: [{ n: 1 }] },
+    { match: /coalesce\(max\(substring/, rows: [{ day: "20260818", seq: 1 }] },
   ]);
   const capturingQuery = async (text, params) => {
     if (/^\s*insert into ops\.incident\b/.test(text)) {
@@ -490,7 +558,7 @@ test("the default severity satisfies ops.incident's CHECK constraint (severity ~
   const { query } = fakeQuery([
     { match: /select id from ops\.service/, rows: [{ id: "svc-1" }] },
     { match: /select id from ops\.incident where signature/, rows: [] },
-    { match: /select coalesce\(max/, rows: [{ n: 1 }] },
+    { match: /coalesce\(max\(substring/, rows: [{ day: "20260818", seq: 1 }] },
     { match: /select 1 from ops\.incident_fact/, rows: [] },
   ]);
   const capturingQuery = async (text, params) => {

@@ -377,16 +377,66 @@ step "3. python environment"
 # migration would have reported success on a machine whose scheduled work could
 # not run. That is precisely the "reports success while half-migrated" outcome
 # this script was written to prevent.
-if [ -x "$REPO/.venv/bin/python" ]; then
-  good "venv present"
+# THE INTERPRETER FLOOR, added 2026-08-19 after this bit shipped a machine that
+# looked migrated and could not run its own checks. This block used to accept
+# ANY interpreter: it said "venv present" for whatever was on disk and built new
+# ones with a bare `python3 -m venv`. On Dell's Mac that meant the Command Line
+# Tools' Python 3.9.6, and the repo is written for 3.10+ — `dict | None`
+# annotations are evaluated at definition time and raise TypeError on 3.9, so
+# THIRTY-SIX gate selftests could not even be imported, mypy could not be
+# installed at all (requirements.txt pins it to python_version >= "3.10"), and
+# tomllib was missing. Pre-push checks were red on a clean trunk, so every push
+# from that machine needed CARR_SKIP_CI, which is how a skip flag becomes
+# routine. The floor is named once here and enforced on BOTH paths — an existing
+# venv is version-checked, not merely existence-checked, because "it is there"
+# was exactly the wrong question.
+PY_MIN_MINOR=10
+
+py_meets_floor() {  # py_meets_floor <interpreter>
+  "$1" -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, $PY_MIN_MINOR) else 1)" >/dev/null 2>&1
+}
+
+py_version_of() { "$1" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo unknown; }
+
+find_base_python() {  # newest-first; prints a path, or nothing
+  for c in python3.14 python3.13 python3.12 python3.11 python3.10 \
+           "$HOME/.local/bin/python3.12" python3; do
+    p="$(command -v "$c" 2>/dev/null || true)"
+    [ -z "$p" ] && [ -x "$c" ] && p="$c"
+    if [ -n "$p" ] && py_meets_floor "$p"; then printf '%s\n' "$p"; return 0; fi
+  done
+  return 1
+}
+
+VENV_PY="$REPO/.venv/bin/python"
+VENV_OK=0
+if [ -x "$VENV_PY" ] && py_meets_floor "$VENV_PY"; then
+  VENV_OK=1
+  good "venv present (Python $(py_version_of "$VENV_PY"))"
+elif [ -x "$VENV_PY" ]; then
+  bad "venv is Python $(py_version_of "$VENV_PY"), below the 3.$PY_MIN_MINOR floor this repo requires — move it aside and re-run so it is rebuilt"
 elif [ $APPLY -eq 1 ]; then
-  if python3 -m venv "$REPO/.venv" </dev/null >/tmp/mig-venv.log 2>&1; then
-    good "venv created"
+  BASE_PY="$(find_base_python || true)"
+  if [ -z "$BASE_PY" ]; then
+    # Self-serve rather than stopping: uv installs a standalone CPython into the
+    # user's home with no admin password and no system change. Only reached when
+    # the machine genuinely has nothing recent enough.
+    if python3 -m pip install --user --quiet uv </dev/null >>/tmp/mig-venv.log 2>&1 \
+       && "$HOME/Library/Python/3.9/bin/uv" python install 3.12 </dev/null >>/tmp/mig-venv.log 2>&1; then
+      BASE_PY="$(find_base_python || true)"
+      [ -n "$BASE_PY" ] && good "installed Python $(py_version_of "$BASE_PY") (user-local, no admin needed)"
+    fi
+  fi
+  if [ -z "$BASE_PY" ]; then
+    bad "no Python 3.$PY_MIN_MINOR+ available and none could be installed — see /tmp/mig-venv.log"
+  elif "$BASE_PY" -m venv "$REPO/.venv" </dev/null >>/tmp/mig-venv.log 2>&1; then
+    VENV_OK=1
+    good "venv created on Python $(py_version_of "$VENV_PY")"
   else
     bad "venv creation failed — see /tmp/mig-venv.log"
   fi
 else
-  good "would create .venv"
+  good "would create .venv on Python 3.$PY_MIN_MINOR or newer"
 fi
 
 if [ -x "$REPO/.venv/bin/python" ]; then
