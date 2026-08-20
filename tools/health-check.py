@@ -1513,6 +1513,40 @@ except Exception as e:
     print(f"  ⚠︎ {'renders-verify':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+# ── ledger-vs-live ───────────────────────────────────────────────────────────
+# Does the deployment ledger still describe the Worker that is answering? The
+# two disagreed THREE times on 2026-08-19 and 2026-08-20 — a good deploy booked
+# failed on a stale identity read-back, another booked failed on a performance
+# budget that clocked the whole golden suite, and a third booked complete with
+# no verb count at all — and every one was found by a human curling /release,
+# never by a check. The ledger is not a diary: bin/deploy-worker.sh's verb-loss
+# guard reads it to decide whether a deploy is about to remove verbs, so a
+# baseline that has drifted below reality re-opens the 2026-08-09 hole where
+# production went from 75 verbs to 66 with nothing objecting. Bound action is
+# printed by the child per rule 590b11e1.
+try:
+    _dlv = os.path.join(REPO_ROOT, "ops", "deploy-ledger-vs-live.py")
+    if not os.path.exists(_dlv):
+        print(f"  -- {'ledger-vs-live':<18} ops/deploy-ledger-vs-live.py not present; skipped")
+    else:
+        _venv = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+        _py = _venv if os.path.exists(_venv) else sys.executable
+        _p = subprocess.run([_py, _dlv], capture_output=True, text=True, timeout=120)
+        _lines = (_p.stdout or "").strip().splitlines()
+        _first = _lines[0] if _lines else (
+            f"(no output; stderr: {(_p.stderr or '').strip().splitlines()[-1]})"
+            if (_p.stderr or "").strip() else "(no output, no stderr)")
+        if _first.startswith("SKIP"):
+            print(f"  -- {'ledger-vs-live':<18} {_first.split(': ', 1)[-1]}")
+        elif _p.returncode == 0:
+            print(f"  OK {'ledger-vs-live':<18} {_first.split('— ', 1)[-1]}")
+        else:
+            print(f"  ⚠︎ {'ledger-vs-live':<18} {_first.split('— ', 1)[-1]}")
+            rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'ledger-vs-live':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
 # --- the doctrine store (P4/P5, 2026-08-08; decisions 82a2fb62 + import door) -
 # Every row prints its bound action inline (rule 590b11e1: no metric without a
 # bound action, visible in the render itself). A failed read is never all-clear.
