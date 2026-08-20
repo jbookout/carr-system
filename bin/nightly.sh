@@ -255,12 +255,12 @@ RPO_HOURS=24
 newest_backup="$(ls -t "$REPO"/backups/*.sql.age 2>/dev/null | head -1)"
 if [ -z "$newest_backup" ]; then
   say "CATCH-UP  no prior backup found — taking one before the chain begins"
-  step "recovery-point catch-up (no prior backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+  step "recovery-point catch-up (no prior backup)" env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh
 else
   backup_age_h=$(( ( $(date +%s) - $(stat -f %m "$newest_backup") ) / 3600 ))
   if [ "$backup_age_h" -ge "$RPO_HOURS" ]; then
     say "CATCH-UP  newest backup is ${backup_age_h}h old, objective is ${RPO_HOURS}h — taking one before the chain begins"
-    step "recovery-point catch-up (${backup_age_h}h since last backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+    step "recovery-point catch-up (${backup_age_h}h since last backup)" env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh
   else
     say "OK    recovery point intact (newest backup ${backup_age_h}h old, objective ${RPO_HOURS}h)"
   fi
@@ -442,10 +442,10 @@ step "system graph (Graph-System/, derived)"         ./run.sh graph-system
 # credential, same contract as the other steps.
 step "vendor level drift (reports, never changes a level)" ./.venv/bin/python ops/vendor-level-drift-check.py
 
-step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
+step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
-step "portability mirror (md+csv, 2 locations)" env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
+step "portability mirror (md+csv, 2 locations)" env DATABASE_URL="${CARR_DB_BACKUP_URL:-}" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
 BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window
