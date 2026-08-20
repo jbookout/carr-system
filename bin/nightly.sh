@@ -86,6 +86,33 @@ source "$REPO/bin/routine-credential-env.sh"
 carr_clear_routine_db_env
 carr_load_routine_db_env CARR_DB_JOBS_URL CARR_DB_EXPORTER_URL CARR_DB_BACKUP_URL || exit $?
 
+# A CAPABILITY THIS MACHINE DOES NOT HOLD IS A SKIP, NEVER A SILENT DEATH.
+# The loader exports only the names it FINDS in db.env, so an unprovisioned
+# capability leaves its variable unset — and under `set -u` (line 33) the first
+# "$CARR_DB_BACKUP_URL" below then kills the whole chain mid-run: no FAIL line,
+# no `chain FINISHED` line, nothing in out/nightly.log to find it by. Every step
+# after that point simply never happens.
+#
+# That is not hypothetical. It began on 2026-08-17, when the hardening that
+# replaced backup-dump.sh's neonctl owner-credential path with a dedicated
+# carr_backup DSN landed in the code while this Mac had no such DSN. By 08-19
+# the local backup had aged past the catch-up threshold, which moved the first
+# dereference to the TOP of the chain, and three consecutive nights then ran
+# zero steps — no cadence, no matcher, no exports, no boards, no graph.
+#
+# ONE DEFAULT, HERE, rather than a `:-` at each call site. #380 did it inline at
+# four sites, which works but leaves nothing to point at when asking "is every
+# use of this variable safe?" — the answer has to be re-derived by reading all
+# four. Defaulting once makes that a single fact, and lets
+# ops/nightly-capability-skip-selftest.py check "every use comes AFTER the
+# default" as a property of the file instead of a habit.
+#
+# bin/backup-dump.sh ALREADY handles the missing credential correctly — it
+# exits 78, which this chain reports as SKIP and steps past. Defaulting the
+# variable here is what lets that graceful path be reached at all: the callee's
+# fallback cannot run if dereferencing the variable kills the caller first.
+CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}"
+
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
 rc_total=0
@@ -288,12 +315,12 @@ RPO_HOURS=24
 newest_backup="$(ls -t "$REPO"/backups/*.sql.age 2>/dev/null | head -1)"
 if [ -z "$newest_backup" ]; then
   say "CATCH-UP  no prior backup found — taking one before the chain begins"
-  step "recovery-point catch-up (no prior backup)" env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh
+  step "recovery-point catch-up (no prior backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 else
   backup_age_h=$(( ( $(date +%s) - $(stat -f %m "$newest_backup") ) / 3600 ))
   if [ "$backup_age_h" -ge "$RPO_HOURS" ]; then
     say "CATCH-UP  newest backup is ${backup_age_h}h old, objective is ${RPO_HOURS}h — taking one before the chain begins"
-    step "recovery-point catch-up (${backup_age_h}h since last backup)" env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh
+    step "recovery-point catch-up (${backup_age_h}h since last backup)" env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
   else
     say "OK    recovery point intact (newest backup ${backup_age_h}h old, objective ${RPO_HOURS}h)"
   fi
@@ -495,13 +522,21 @@ drive_projection "system graph (Graph-System/, derived)" \
 # credential, same contract as the other steps.
 step "vendor level drift (reports, never changes a level)" ./.venv/bin/python ops/vendor-level-drift-check.py
 
-step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh
+step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
-# Guarded rather than defaulted: an empty DATABASE_URL makes doctrine_mirror.py
-# exit 2, which reads as FAIL, and a capability nobody provisioned is a SKIP.
+# GUARDED, NOT DEFAULTED. Everything else on this page is safe to default,
+# because the callee exits 78 on an empty value and 78 reads as SKIP. This one
+# is not: an empty DATABASE_URL makes doctrine_mirror.py exit 2, which reads as
+# FAIL, so defaulting it trades a dead chain for a red row that fires every
+# night the credential is absent — which is the alarm-fatigue failure the ORDER
+# 2 addendum already fixed once for the boards. Observed live on 2026-08-20:
+# #380 defaulted this line and the very next run logged
+# `FAIL portability mirror (exit 2)`.
+#
 # The refusal helper is the same one the environment gates above use, so the
-# unconfigured case says WHICH capability is missing instead of a bare error.
+# unconfigured case names WHICH capability is missing instead of surfacing a
+# bare traceback.
 if [ -n "$CARR_DB_BACKUP_URL" ]; then
   drive_projection "portability mirror (md+csv, 2 locations)" \
     "canonical portability document destination" \
