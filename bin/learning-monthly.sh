@@ -25,6 +25,9 @@ LOG="$REPO/out/learning.log"
 # vault copy retired with the 37 doctrine renders. The repo copy stays.
 LEARN_DIR="$REPO/out/Learning"
 mkdir -p "$REPO/out" "$LEARN_DIR"
+# Reports are canonical repo-local output.  Do not let an inherited Drive root
+# leak into either child clause merely because a caller still has one mounted.
+unset CARR_VAULT
 
 [ -f "$HOME/.config/carr/db.env" ] && { set -a; . "$HOME/.config/carr/db.env"; set +a; }
 jobs_url="${CARR_DB_JOBS_URL:-}"

@@ -28,10 +28,12 @@ def main() -> int:
     check("nightly never sources db.env", '. "$HOME/.config/carr/db.env"' not in nightly)
     check("nightly uses a clean child environment", "carr_routine_exec \"$@\"" in nightly)
     check("admin nightly steps refuse through evidence-producing step calls",
-          nightly.count("routine-admin-refusal.sh") == 5)
+          nightly.count("routine-admin-refusal.sh") == 6)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
     check("portability mirror uses only the backup capability",
-          'step "portability mirror' in nightly and 'DATABASE_URL="${CARR_DB_BACKUP_URL:-}"' in nightly)
+          'step "portability mirror' in nightly
+          and 'if [ -n "$CARR_DB_BACKUP_URL" ]; then' in nightly
+          and 'env DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
     check("each backup invocation binds the backup capability explicitly",
           nightly.count('env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh') == 3)
     # A missing backup credential must SKIP its step, never kill the chain. On
@@ -40,8 +42,9 @@ def main() -> int:
     # corpus push, consumer rebuilds and graph all silently stopped running for
     # three nights over a credential none of them needed. backup-dump.sh
     # already exits 78 on an absent URL; only these expansions were unsafe.
-    check("no bare backup-capability expansion can abort the chain under set -u",
-          '"$CARR_DB_BACKUP_URL"' not in nightly)
+    check("backup capability is only expanded bare after its explicit nonblank guard",
+          nightly.count('"$CARR_DB_BACKUP_URL"') == 2
+          and 'if [ -n "$CARR_DB_BACKUP_URL" ]; then' in nightly)
     check("clean child preserves explicit export mode", 'CARR_EXPORT_LIVE="${CARR_EXPORT_LIVE:-}"' in HELPER.read_text(encoding="utf-8"))
     check("scheduled recovery refuses unprovisioned admin capability",
           "CARR_JOB_PAYLOAD" in restore and "routine dispatch refused" in restore)

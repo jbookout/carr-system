@@ -69,6 +69,23 @@ def main() -> int:
 
         rejected("calendar missing config refuses before isolated writes", run_calendar)
         rejected("Notes missing config refuses before isolated writes", lambda: run_notes("--status"))
+        normal = subprocess.run(["python3", str(CALENDAR)],
+                                env={**os.environ, **base, "CARR_RECOVERY_REASON": "ambient-bypass"},
+                                text=True, capture_output=True)
+        check("calendar normal mode refuses before ambient Drive or recovery state",
+              normal.returncode == 69 and "MISSING_CANONICAL_SEAM" in normal.stderr
+              and "empty-vault" not in normal.stderr)
+        missing_root = subprocess.run(["python3", str(CALENDAR), "--recovery", "--reason", "direct"],
+                                      env={**os.environ, **base}, text=True, capture_output=True)
+        check("calendar legacy recovery requires a directly supplied root",
+              missing_root.returncode == 2 and "--recovery-root" in missing_root.stderr)
+        recovery_root = tmp / "recovery"
+        recovery = subprocess.run(["python3", str(CALENDAR), "--recovery", "--reason", "direct",
+                                   "--recovery-root", str(recovery_root), "--dry-run"],
+                                  env={**os.environ, **base, "CARR_CONTROL_PLANE_MODE": ""},
+                                  text=True, capture_output=True)
+        check("calendar direct recovery is explicit and visibly noncanonical",
+              recovery.returncode == 0 and "RECOVERY NONCANONICAL" in recovery.stderr)
         live_log = REPO / "out" / "capture-lanes.log"
         before_live = live_log.read_bytes() if live_log.exists() else None
         gmail = subprocess.run(["python3", str(CALENDAR), "--gmail"], env={**os.environ, **base}, text=True, capture_output=True)
@@ -132,10 +149,9 @@ def main() -> int:
         try:
             root.mkdir(parents=True, exist_ok=True)
             configs(endpoint)
-            vault = tmp / "vault" / "DNA" / "Team"; vault.mkdir(parents=True)
+            vault = root / "calendar" / "calendar-input" / "DNA" / "Team"; vault.mkdir(parents=True)
             today = date.today().strftime("%Y%m%d")
             (vault / "calendar-latest.ics").write_text(f"BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:canary-event\nDTSTART:{today}T120000Z\nDTEND:{today}T130000Z\nSUMMARY:Private Test\nEND:VEVENT\nEND:VCALENDAR\n")
-            base["CARR_VAULT"] = str(tmp / "vault")
             calendar = run_calendar()
             check("calendar loopback posts one isolated event with exact auth", bool(calendar.returncode == 0 and len(captured) == 1 and captured[0][0] == "/canary" and captured[0][1] == "Bearer calendar-token" and captured[0][2].get("external_id") and "calendar-token" not in calendar.stdout))
             copied = tmp / "notes-copy.sh"; fake = tmp / "fake-osascript"

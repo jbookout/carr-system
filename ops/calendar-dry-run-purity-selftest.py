@@ -16,8 +16,10 @@ from lib.loadpy import load_module_from_path
 
 calendar = load_module_from_path('calendar_dry_run_under_test', str(ROOT / 'bin' / 'pull-gmail-calendar.py'))
 setattr(calendar, 'FEEDS', {'joe': '/definitely/missing/joe.ics', 'dell': '/definitely/missing/dell.ics'})
-setattr(calendar, 'say', lambda _message: (_ for _ in ()).throw(AssertionError('dry-run attempted log append')))
-rc = calendar.run_calendar(argparse.Namespace(dry_run=True, days_back=1, days_ahead=14))
+setattr(calendar, 'say', lambda _log, _message: (_ for _ in ()).throw(AssertionError('dry-run attempted log append')))
+rc = calendar.run_calendar(argparse.Namespace(dry_run=True, days_back=1, days_ahead=14,
+                                               canary=False, recovery=True,
+                                               recovery_root='/fixture-root', reason='test'))
 if rc != 0:
     raise SystemExit('dry-run should succeed when feeds are absent')
 
@@ -37,7 +39,9 @@ with tempfile.TemporaryDirectory() as td:
     setattr(calendar, 'FEEDS', {'joe': str(feed)})
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        rc = calendar.run_calendar(argparse.Namespace(dry_run=True, days_back=1, days_ahead=1))
+        rc = calendar.run_calendar(argparse.Namespace(dry_run=True, days_back=1, days_ahead=1,
+                                                       canary=False, recovery=True,
+                                                       recovery_root=td, reason='test'))
     if rc != 0:
         raise SystemExit('dry-run should parse an in-window fixture without posting')
     stdout = output.getvalue()

@@ -113,12 +113,23 @@ def main() -> int:
         check("dashboard recovery requires a nonblank reason", recovery.returncode != 0 and
               "nonblank --reason" in recovery.stderr)
 
+        hard = subprocess.run(["/bin/sh", str(ROOT / "bin" / "routine-canonical-seam-refusal.sh"),
+                               "record-backed dashboard destination"], text=True, capture_output=True,
+                              check=False)
+        admin = subprocess.run(["/bin/sh", str(ROOT / "bin" / "routine-admin-refusal.sh"),
+                                "backup capability unavailable"], text=True, capture_output=True,
+                               check=False)
+        check("missing canonical seams are hard failures, distinct from admin skips",
+              hard.returncode == 69 and "MISSING_CANONICAL_SEAM" in hard.stderr
+              and admin.returncode == 78 and "routine capability refused" in admin.stderr)
+
         nightly = (ROOT / "bin" / "nightly.sh").read_text(encoding="utf-8")
         normal, _recovery = nightly.split('if [ "$RECOVERY" -eq 1 ]; then\n  export CARR_EXPORT_LIVE=1', 1)
         check("nightly normal route clears ambient Drive before its first child",
               "unset CARR_VAULT CARR_EXPORT_LIVE" in normal)
         check("nightly Drive projections are routed through the recovery envelope",
-              nightly.count("drive_projection ") >= 12 and "RECOVERY NONCANONICAL" in nightly)
+              nightly.count("drive_projection ") >= 12 and "RECOVERY NONCANONICAL" in nightly
+              and "routine-canonical-seam-refusal.sh" in nightly)
 
     print(f"scheduled Drive writer selftest — {len(FAILED)} failure(s)")
     return 1 if FAILED else 0
