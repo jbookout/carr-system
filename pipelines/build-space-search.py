@@ -173,7 +173,7 @@ def occupancy_line(x):
     own, bldg = x.get("own_sf"), x.get("building_sf")
     note = x.get("occupancy_note")
     if not own:
-        return (note, None) if note else (NOT_PUBLISHED, None)
+        return NOT_PUBLISHED, note
     pct = f' ({own / bldg:.0%} of the building)' if bldg else ""
     # square feet are whole numbers; a float reaching sf() prints "10,422.0 SF"
     return f'{sf(int(round(own)))} SF{pct}', note
@@ -189,7 +189,7 @@ def sale_specs(p, s, b):
         spec("Price", price_line(x), em=True),
         spec("Yield", yield_line(x)),
         spec("Building", f'{sf(b["building_sf"])} SF' if b.get("building_sf") else NOT_PUBLISHED),
-        spec("Could occupy", occupies, em=True, note=occ_note),
+        spec("Could occupy", occupies, em=True),
         spec("Tenancy", val(b.get("tenancy"))),
         spec("Status", val(p["timing"]["status"])),
     ]
@@ -324,8 +324,18 @@ def build_tour_card(p, photos, minis=None):
 
     s, r, t, b, site = p["size"], p["rate"], p["timing"], p["building_info"], p["site"]
 
+    # The occupancy note is PROSE and belongs in body type under the grid, not inside a
+    # spec cell. A spec cell is a short value in tabular figures, and `em` paints it
+    # orange — so a 40-word sentence landed as a wall of orange monospace that blew out
+    # the row height and pushed the rest of the grid sideways. Brand doctrine is
+    # explicit that orange is an accent and never body text, and this was body text.
+    # Nine of the eleven River Bank pages looked broken because of it.
+    occ = ""
     if p.get("sale"):
         specs = sale_specs(p, s, b)
+        _, occ_note = occupancy_line(p["sale"])
+        if occ_note:
+            occ = f'<p class="onote">{esc(occ_note)}</p>'
     else:
       specs = [
         spec("Available", size_line(s)),
@@ -407,6 +417,7 @@ def build_tour_card(p, photos, minis=None):
           {img}
           <p class="why">{esc(p["why"])}</p>
           <dl class="specs">{"".join(x for x in specs if x)}</dl>
+          {occ}
           <details class="more">
             <summary><span class="sopen">Full detail</span><span class="sclose">Hide detail</span></summary>
             <div class="mbody">
@@ -607,7 +618,11 @@ def main():
     repl = {
         # "packet" prints one listing to a sheet; anything else keeps the full report
         # print, which is the default and what every prior search rendered.
-        "__PRINT_MODE__": (' data-print="packet"'
+        # The empty-tier attributes ride along so print CSS can drop a section that has
+        # no rows. On screen the authored empty state still shows — "nothing was ruled
+        # out" is a real finding to a reader. On paper, in a packet, three boxes
+        # explaining that three lists are empty is just three sheets to carry.
+        "__PRINT_MODE__": (f' data-print="packet" data-look="{len(look)}" data-out="{len(out)}"'
                            if c.get("print_mode") == "packet" else ""),
         "__KICKER__": esc(c.get("kicker") or "Healthcare Real Estate"),
         "__ADVISOR__": esc(adv.get("name") or "Joe Bookout"),
@@ -633,7 +648,11 @@ def main():
         # the same visible gap rather than a number we invented. " to  SF" -- which is
         # what the old unguarded format produced from a null -- reads as a broken template
         # and hides the fact that the requirement is still an open question for the client.
-        "__TARGET__": band(c.get("target_min_sf"), c.get("target_max_sf")),
+        # A client with no size band is not the same as a client whose band we failed to
+        # ask for. "Flexible" is a REQUIREMENT, and saying "Not published" where the
+        # answer is "they'll take what works" tells the reader we did not do our job.
+        "__TARGET__": esc(c["target_note"]) if c.get("target_note")
+                      else band(c.get("target_min_sf"), c.get("target_max_sf")),
         "__SEARCHED__": band(c.get("searched_min_sf"), c.get("searched_max_sf")),
         "__AREA__": esc(c["area"]),
         "__STRUCTURE__": esc(c["structure"]),
