@@ -1,4 +1,4 @@
--- 0187_control_plane_cache_observations.sql
+-- 0195_control_plane_cache_observations.sql
 -- Phase 5 measurement substrate.  Cache reads/stores/invalidation are immutable
 -- ledger evidence, not a mutable dashboard counter.  The jobs role can append
 -- only through lease-bound functions and cannot write the table directly.
@@ -160,11 +160,11 @@ begin
      or to_regprocedure('ops.get_cognition_cache_for_job(uuid,uuid,text)') is null
      or to_regprocedure('ops.put_cognition_cache_for_job(uuid,uuid,text,text,integer,integer,jsonb,text[],integer)') is null
      or to_regprocedure('ops.invalidate_cognition_cache_for_job(uuid,uuid,text)') is null then
-    raise exception '0187 FAILED: cache observation evidence contract missing';
+    raise exception '0195 FAILED: cache observation evidence contract missing';
   end if;
   if has_table_privilege('carr_jobs','ops.cognition_cache_observation','insert')
      or has_table_privilege('carr_jobs','ops.cognition_cache_observation','update')
      or has_table_privilege('carr_jobs','ops.cognition_cache_observation','delete') then
-    raise exception '0187 FAILED: jobs role can rewrite cache observations';
+    raise exception '0195 FAILED: jobs role can rewrite cache observations';
   end if;
 end $$;
