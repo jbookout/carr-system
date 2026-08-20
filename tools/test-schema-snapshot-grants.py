@@ -45,10 +45,23 @@ from schema_snapshot_grants import (
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 
-# The four NOLOGIN app roles the migrations grant to. neondb_owner may appear
-# as a membership grantee only (0005/0006 bundle it the roles), never as an
-# ACL grantee: its own ACLs are Neon's business, not this repo's.
-APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter"]
+# The app roles the migrations grant to. neondb_owner may appear as a membership
+# grantee only (0005/0006 bundle it the roles), never as an ACL grantee: its own
+# ACLs are Neon's business, not this repo's.
+#
+# carr_authority joined on 2026-08-19, with the snapshot's role preamble and for
+# the same reason. 0161 creates it, and once a refresh carried the ledger past
+# 0161 that migration stopped creating anything, so the snapshot has to carry
+# both the role and its 24 grants. This list and the preamble in
+# bin/schema-snapshot.sh are the same set and have to move together — leaving it
+# out here reports the role's own grants as strays.
+#
+# carr_device_evidence joined the same day, by way of 0163 — the fourth role to
+# age out of the snapshot. This list and the preamble in bin/schema-snapshot.sh
+# are the same set written twice, so they have to move together: a role in one
+# and not the other makes its own grants report as strays.
+APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
+             "carr_authority", "carr_device_evidence"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []

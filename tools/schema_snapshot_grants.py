@@ -17,7 +17,7 @@ from typing import Iterable
 SECTION_MARKER = "-- CARR GRANTS (bin/schema-snapshot.sh) — not produced by pg_dump."
 SECTION_END = "-- PostgreSQL database dump"
 
-# Keep this grammar in lockstep with the five format() calls in
+# Keep this grammar in lockstep with the six format() calls in
 # bin/schema-snapshot.sh.  The old ``.+`` parser admitted an arbitrary second
 # statement so long as the line eventually ended in ``to carr_writer;``.
 # Catalog names emitted by that generator are deliberately unquoted lower-case
@@ -46,7 +46,19 @@ GRANT_PATTERNS = (
         rf"\((?P<function_args>{FUNCTION_ARGS})\) to {ROLE};$"
     ),
     re.compile(rf"^grant (?P<granted_role>{IDENT}) to {ROLE};$"),
+    # The sixth shape, and the only one that takes a privilege away rather than
+    # conferring one: the snapshot must re-assert the PUBLIC revokes that its
+    # own migrations already applied to production, or a database rebuilt from
+    # it hands every function back at Postgres' permissive default. It names no
+    # grantee, so it contributes no ACL fact — acl_facts() skips it — and it can
+    # never widen anyone's authority, which is why admitting it into a grammar
+    # a privileged provisioner consumes is safe.
+    re.compile(
+        rf"^revoke all on function (?P<schema>{IDENT})\.(?P<object>{IDENT})"
+        rf"\((?P<function_type_args>{FUNCTION_TYPE_ARGS})\) from public;$"
+    ),
 )
+REVOKE_FROM_PUBLIC = re.compile(r"^revoke all on function .* from public;$")
 DERIVED_FUNCTION_GRANT = re.compile(
     rf"^grant execute on function (?P<schema>{IDENT})\.(?P<object>{IDENT})"
     rf"\((?P<function_type_args>{FUNCTION_TYPE_ARGS})\) to {ROLE};$"
@@ -170,6 +182,12 @@ def grants_to_role(schema_text: str, role: str) -> list[str]:
         raise SnapshotGrantError(f"unsafe role name {role!r}")
     selected: list[str] = []
     for statement in carr_grants_section_lines(schema_text):
+        # A PUBLIC revoke names no grantee and confers nothing, so it belongs to
+        # no role's grant set. It is still validated above, against the grammar,
+        # before being skipped.
+        if REVOKE_FROM_PUBLIC.fullmatch(statement):
+            match_generated_grant(statement)
+            continue
         match = match_generated_grant(statement)
         grantee = match.group("grantee")
         if role.lower() == grantee:
@@ -190,6 +208,11 @@ def acl_facts(statements: Iterable[str]) -> tuple[AclFact, ...]:
     """
     facts: set[AclFact] = set()
     for statement in statements:
+        # Revokes remove a default rather than conferring authority, so they
+        # produce no ACL fact — the fact set stays a set of things somebody CAN
+        # do, which is what every comparison built on it assumes.
+        if REVOKE_FROM_PUBLIC.fullmatch(statement):
+            continue
         match = match_safe_grant(statement)
         groups = match.groupdict()
         if groups.get("granted_role") is not None:
