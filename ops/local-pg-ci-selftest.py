@@ -77,6 +77,11 @@ with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=True):
     else:
         check("hosted runner refuses", False)
 
+# The remaining cases use a fully mocked local runner. Clear the ambient hosted
+# marker after testing the refusal so CI and a developer shell exercise the
+# exact same hermetic fixtures below.
+os.environ.pop("GITHUB_ACTIONS", None)
+
 events: list[tuple[str, ...]] = []
 child_envs: list[dict[str, str]] = []
 

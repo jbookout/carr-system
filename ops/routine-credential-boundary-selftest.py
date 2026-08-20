@@ -27,24 +27,32 @@ def main() -> int:
     restore = RESTORE.read_text(encoding="utf-8")
     check("nightly never sources db.env", '. "$HOME/.config/carr/db.env"' not in nightly)
     check("nightly uses a clean child environment", "carr_routine_exec \"$@\"" in nightly)
+    # Back to 5: the mirror's refusal branch came out again once #387 made
+    # doctrine_mirror.py exit 78 on its own. An exact count rather than a floor,
+    # deliberately — the point of this check is that an admin-capability step
+    # CANNOT be added without going through the helper, and `>=` would let a
+    # sixth slip past unrefused.
     check("admin nightly steps refuse through evidence-producing step calls",
-          nightly.count("routine-admin-refusal.sh") == 6)
+          nightly.count("routine-admin-refusal.sh") == 5)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
+    # Scope only: the mirror gets the backup capability and nothing wider. What
+    # happens when that capability is ABSENT is not this file's question — the
+    # mirror answers it itself with exit 78, and
+    # ops/nightly-capability-skip-selftest.py proves that by running it.
     check("portability mirror uses only the backup capability",
-          'step "portability mirror' in nightly
-          and 'if [ -n "$CARR_DB_BACKUP_URL" ]; then' in nightly
-          and 'env DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
+          'portability mirror (md+csv, 2 locations)' in nightly
+          and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
     check("each backup invocation binds the backup capability explicitly",
-          nightly.count('env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh') == 3)
-    # A missing backup credential must SKIP its step, never kill the chain. On
-    # 2026-08-20 the bare form below aborted nightly.sh under `set -u` before
-    # step() could log a single START line, and cadence, matcher, exports,
-    # corpus push, consumer rebuilds and graph all silently stopped running for
-    # three nights over a credential none of them needed. backup-dump.sh
-    # already exits 78 on an absent URL; only these expansions were unsafe.
-    check("backup capability is only expanded bare after its explicit nonblank guard",
-          nightly.count('"$CARR_DB_BACKUP_URL"') == 2
-          and 'if [ -n "$CARR_DB_BACKUP_URL" ]; then' in nightly)
+          nightly.count('env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh') == 3)
+    # The bare form above is SAFE, and this file is not where that is proved.
+    # nightly.sh defaults CARR_DB_BACKUP_URL once, right after the loader, so
+    # every dereference below it is defined even when the credential was never
+    # provisioned. ops/nightly-capability-skip-selftest.py owns that property
+    # and checks it the only way it can be checked honestly — by running the
+    # shell with the variable genuinely UNSET rather than by reading source.
+    #
+    # The executable nightly-capability test proves that the single default
+    # precedes every use; this boundary test only verifies capability scoping.
     check("clean child preserves explicit export mode", 'CARR_EXPORT_LIVE="${CARR_EXPORT_LIVE:-}"' in HELPER.read_text(encoding="utf-8"))
     check("scheduled recovery refuses unprovisioned admin capability",
           "CARR_JOB_PAYLOAD" in restore and "routine dispatch refused" in restore)
