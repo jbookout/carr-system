@@ -516,16 +516,24 @@ _ROUTER_DB_COLS = {
 # the mismatch is silently DROPPED rather than mis-attributed — a graph edge
 # that cannot be placed is a smaller loss than one placed on the wrong folder.
 
-def _strip_vault_prefix(path, vault):
-    for pref in (vault + os.sep, vault.replace(
-            "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com",
-            "/Users/booko") + os.sep):
-        if path.startswith(pref):
-            return path[len(pref):]
+def _strip_source_root(path, source_root):
+    """Return a record source identity relative to its declared source root.
+
+    This deliberately has no machine-specific mount aliases.  Callers in the
+    normal path pass their repository root, and a recovery caller must pass the
+    root it explicitly selected.  Ambient mount configuration is not evidence
+    of a canonical source identity.
+    """
+    root = os.path.abspath(os.fspath(source_root))
+    candidate = os.path.abspath(os.fspath(path))
+    try:
+        return os.path.relpath(candidate, root) if os.path.commonpath((root, candidate)) == root else path
+    except ValueError:
+        return path
     return path
 
 
-def doctrine_migrated_paths(vault):
+def doctrine_migrated_paths(source_root):
     """Vault-relative paths recorded on a VERIFIED migration batch. Content for
     these lives in the store now — a file-walking consumer must stop opening
     them, exactly what retrieve.py's dual-read pass already assumes."""
@@ -534,11 +542,11 @@ def doctrine_migrated_paths(vault):
         cur.execute("select source_paths from doctrine_migration_batch where state = 'verified'")
         for (paths,) in cur.fetchall():
             for p in paths or []:
-                migrated.add(_strip_vault_prefix(p, vault))
+                migrated.add(_strip_source_root(p, source_root))
     return migrated
 
 
-def doctrine_slug_by_path(vault):
+def doctrine_slug_by_path(source_root):
     """{vault-relative path: document slug} for every migrated file, replaying
     doctrine_import.py's kebab/collision rule against the batch ledger (no file
     opens — the ledger alone is enough to reproduce it, see module note above)."""
@@ -567,7 +575,7 @@ def doctrine_slug_by_path(vault):
                 if slug in assigned:
                     slug = f"{kebab(parent)}-{slug}"
                 assigned.add(slug)
-                mapping[_strip_vault_prefix(p, vault)] = slug
+                mapping[_strip_source_root(p, source_root)] = slug
     return mapping
 
 
