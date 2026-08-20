@@ -89,31 +89,34 @@ jobs:
           # other class reads the tree as it stands and does not care.
           fetch-depth: 0
 
-      # BOTH SETUP ACTIONS CACHE THEIR DEPENDENCY DOWNLOADS, and the reason is
-      # arithmetic rather than taste. GitHub bills each JOB rounded UP to the
-      # whole minute, so what matters is not what fraction of the run a step
-      # costs but which side of the next 60-second line the run lands on.
-      # Measured 2026-08-20 over 18 successful runs: 203s to 275s, median 249s,
-      # twelve billing five minutes against six billing four. The line is at
-      # 240s and the median sat nine seconds past it. The two dependency
-      # installs below are 21s of that, so caching them moves the median run to
-      # roughly 228s and bills four minutes instead of five.
+      # DO NOT ADD `cache:` TO THE TWO SETUP ACTIONS BELOW. It was tried on this
+      # branch on 2026-08-20, measured end to end against a real cache hit, and
+      # it makes the job SLOWER. Numbers, baseline against cache-hit run:
       #
-      # The cache key is the lockfile, so a dependency change invalidates it
-      # and the next run reinstalls from scratch. That is the point: this
-      # changes how long the checks take to start, never which checks run or
-      # what they are allowed to conclude.
+      #   setup-python      0s -> 5s    (restoring the cache)
+      #   setup-node        7s -> 10s   (restoring the cache)
+      #   pip install      15s -> 11s   (the only real saving, 4s)
+      #   npm ci            6s -> 6s    (no change at all)
+      #
+      # Restoring costs 8s to save 4s. The reason is that `cache: pip` and
+      # `cache: npm` cache the DOWNLOAD caches, not the installed trees — pip
+      # still unpacks and installs every package, and `npm ci` still builds
+      # node_modules from scratch. Downloading was never the expensive half.
+      #
+      # The billing mechanic that made this look attractive is real and worth
+      # keeping in mind for other work: GitHub bills each JOB rounded UP to the
+      # whole minute, so only crossing a 60-second line saves anything. Measured
+      # over 18 successful runs the job ran 203s to 275s, median 249s, with the
+      # line at 240s. But the dependency steps cannot deliver a crossing, and
+      # 61% of the run is ops/ci.sh doing genuine work. Spend has to come out of
+      # run COUNT, not run duration.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: mcp-server/package-lock.json
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: .python-version
-          cache: pip
-          cache-dependency-path: requirements.lock
 
       - name: Install Python dependencies from the lock
         # The LOCK, not requirements.txt. requirements.txt is the loose
