@@ -60,15 +60,15 @@ import sys
 from datetime import datetime, timezone
 
 LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Where a subagent definition may live. Project scope first: that is where the
 # fifteen CARR agents are, and a project definition wins over a user-level one
 # of the same name.
-AGENT_DIRS = [
-    os.path.expanduser("~/My Drive/.claude/agents"),
-    os.path.expanduser("~/My Drive/CARR AI/.claude/agents"),
-    os.path.expanduser("~/.claude/agents"),
-]
+# Definitions that affect repository policy are versioned with the repository.
+# A machine-local or synced definition would make the tier decision depend on
+# ambient state, so it is deliberately not consulted by this normal hook.
+AGENT_DIRS = [os.path.join(REPO, "claude-tree", "agents")]
 
 # Forks are exempt by the tool's own contract, not by preference.
 ALWAYS_INHERITS = {"fork"}
