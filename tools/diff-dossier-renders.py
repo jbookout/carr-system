@@ -23,9 +23,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from exporters.targets import DOSSIER_DIR, DOSSIER_FILES, build_dossier  # noqa: E402
 
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 SNAPSHOTS = VAULT / "Archive" / "snapshots"
 FREEZES = [("2026-08-01-dossiers-freeze.zip", "2026-08-01-dossiers"),
            ("2026-08-01-dossiers-freeze-2.zip", "2026-08-01-dossiers-2")]

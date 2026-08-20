@@ -209,13 +209,30 @@ async function nextIncidentRef(query) {
   // runtimes, stays one piece of logic — here expressed as one shared query
   // shape rather than one shared process, since a Cloudflare Worker cannot
   // invoke Python).
+  //
+  // BOTH halves come from the query, and this writer formats no date of its
+  // own. The old shape counted against to_char(now(), ...) — the SERVER's
+  // timezone — and then stamped the ref from `new Date()`, the CLIENT's. A
+  // Worker is always UTC and Neon is always UTC, so the two coincided in
+  // production by luck; on any non-UTC server they diverge for the length of
+  // the offset, every incident in that window is numbered 01, and the second
+  // one dies on incident_ref_key. Keeping the split here while ops-record.py
+  // pins UTC would be worse than the original defect: the two writers would
+  // count in one numbering space and label in two.
   const r = await query(
-    `select coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1 as n
-       from ops.incident where ref like 'INC-' || to_char(now(), 'YYYYMMDD') || '-%'`,
+    `select to_char(now() at time zone 'UTC', 'YYYYMMDD') as day,
+            coalesce(max(substring(ref from '[0-9]+$')::int), 0) + 1 as seq
+       from ops.incident
+      where ref like 'INC-'
+                     || to_char(now() at time zone 'UTC', 'YYYYMMDD')
+                     || '-%'`,
     []);
-  const n = r.rows[0]?.n || 1;
-  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  return `INC-${stamp}-${String(n).padStart(2, "0")}`;
+  const row = r.rows[0];
+  // An aggregate select always returns exactly one row, so a missing day means
+  // the query did not run as written. Fail loudly rather than falling back to
+  // a client-side date, which is the very split this function just removed.
+  if (!row?.day) throw new Error("incident numbering: day/sequence query returned no row");
+  return `INC-${row.day}-${String(row.seq || 1).padStart(2, "0")}`;
 }
 
 async function openIncident(query, { environment, routeKey, failureClass, severity, signature, correlationId, serviceKey }) {

@@ -49,9 +49,7 @@ import tomllib
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC = os.path.join(REPO, "ops", "report-card", "rubric-v2.toml")
-VAULT = os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
 
 # How many independent_command rows the integrity sampler re-derives per run.
 # Small on purpose: the point is a spot-check that costs little enough to run
