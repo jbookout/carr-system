@@ -69,18 +69,45 @@ def main() -> int:
             pass
 
     print(f"booting a labeled desk on {DESK_SOCK}")
+    # A DESK MUST OUTLIVE ITS FIRST ANSWER. Plain `claude -p` prints and
+    # exits, so a turn dispatched into it lands on a process already on its
+    # way out — the first version of this test passed exactly once, by
+    # winning that race. Streaming input keeps the session alive and waiting,
+    # which is what a desk is.
     proc = subprocess.Popen(
-        ["claude", "--messaging-socket-path", DESK_SOCK, "-p", SEED],
-        stdin=subprocess.DEVNULL,
+        ["claude", "--messaging-socket-path", DESK_SOCK,
+         "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+         "--verbose"],
+        stdin=subprocess.PIPE,
         stdout=log.open("w"),
         stderr=subprocess.STDOUT,
         cwd=str(root),
+        text=True,
     )
+    proc.stdin.write(json.dumps(
+        {"type": "user", "message": {"role": "user", "content": SEED}}) + "\n")
+    proc.stdin.flush()
     try:
         if not wait_for(lambda: desks.is_live(DESK_SOCK), BOOT_TIMEOUT_S, "the desk socket"):
             print(log.read_text()[-2000:], file=sys.stderr)
             return 1
         print(f"  desk bound {DESK_SOCK} (pid {proc.pid})")
+
+        # Wait for the seed answer to LAND before dispatching. A socket that is
+        # bound is not a desk that is listening: the session is still working
+        # through its startup turn, and a turn delivered into that window is
+        # read by a process on its way out. The Idea 78 spike hit this and said
+        # so; this test raced it anyway on its second run.
+        def seeded() -> bool:
+            try:
+                return "READY" in log.read_text(errors="replace")
+            except FileNotFoundError:
+                return False
+
+        if not wait_for(seeded, BOOT_TIMEOUT_S, "the desk to finish its seed turn"):
+            print(log.read_text(errors="replace")[-2000:], file=sys.stderr)
+            return 1
+        print("  desk finished its seed turn")
 
         registry.register("hermes-desk-test", "claude-session", socket=DESK_SOCK)
         print("  registered as desk 'hermes-desk-test'")
@@ -112,6 +139,10 @@ def main() -> int:
         print(f"      results file carries {len(rows)} line(s) for Hermes")
         return 0
     finally:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
         proc.terminate()
         try:
             proc.wait(timeout=10)
