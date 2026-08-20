@@ -106,6 +106,39 @@ rm -f /tmp/migrate-prod-neonctl.err
 if [[ "${1:-}" == "--apply" ]]; then
   if DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" --apply --yes; then
     stamp "OK applied"
+    # THE SNAPSHOT REFRESH RIDES WITH THE APPLY, and this is the only place it
+    # can. db/schema.sql is a picture of production's structure, and THIS is the
+    # moment that structure changes — so leaving the refresh to a later, separate
+    # act is what let five layers of drift pile up behind one refresh nobody
+    # took, measured 2026-08-20: two app roles that had stopped being created
+    # anywhere, 67 PUBLIC revokes the file never carried, three seeded
+    # configuration tables, and two tests that had quietly come to depend on the
+    # file being stale. Every one of them was found by a rebuild failing, never
+    # by the change that caused it.
+    #
+    # It runs AFTER the apply and cannot refuse it. Production has already
+    # changed by this line; a snapshot that fails to regenerate is a reason to
+    # shout, never a reason to pretend the migration did not happen. So this
+    # never touches the exit code.
+    print ""
+    print "== refreshing db/schema.sql, because production's structure just moved =="
+    if "$REPO/bin/schema-snapshot.sh"; then
+      if "$REPO/bin/schema-snapshot.sh" --check >/dev/null 2>&1; then
+        stamp "OK snapshot refreshed"
+        print "  db/schema.sql now matches production. COMMIT IT — naming the path,"
+        print "  in the same change as the migration you just applied."
+      else
+        stamp "WARN snapshot refreshed but --check still stale"
+        print -u2 "  schema-snapshot.sh wrote the file and --check still reports it stale."
+        print -u2 "  That is a real finding: read it before committing anything."
+      fi
+    else
+      stamp "WARN snapshot refresh FAILED rc=$?"
+      print -u2 "  THE MIGRATION APPLIED; ONLY THE SNAPSHOT DID NOT REFRESH."
+      print -u2 "  Production is changed and db/schema.sql now describes a database"
+      print -u2 "  that no longer exists. Re-run bin/schema-snapshot.sh by hand and"
+      print -u2 "  commit it, or the next rebuild inherits the gap."
+    fi
   else
     rc=$?
     stamp "FAIL apply rc=$rc"
