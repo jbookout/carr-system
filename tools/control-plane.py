@@ -575,14 +575,21 @@ class RuntimeWorkflowFactCollector:
             ('nightly-record-layer', 'canary'): (r'nightly canary result: \{"availability_count":\d+,"match_count":\d+,"open_search_count":\d+,"output_digest":"[0-9a-f]{64}","snapshot_digest":"[0-9a-f]{64}","source_snapshot_id":"[0-9a-f-]{36}"\}',),
             ('nightly-record-layer', 'live'): (r'nightly result: chain_ok',),
             ('notes-sweep-hourly', 'shadow'): (r'notes-sweep shadow: scanned=\d+ unposted=\d+ writes=0 posts=0',),
-            ('notes-sweep-hourly', 'canary'): (r'notes-sweep: source=.+ mode=canary destination=[^\s]+ posted=\d+ duplicate=\d+ failed=0 still_queued=0',),
+            ('notes-sweep-hourly', 'canary'): (r'notes-sweep: notes-canary-result \{',),
             ('notes-sweep-hourly', 'live'): (r'notes-sweep: source=.+ posted=\d+ duplicate=\d+ failed=0 still_queued=0',),
             ('restore-rehearse-weekly', 'shadow'): (r'PREFLIGHT OK — every check that runs before anything is created has passed\.', r'Nothing was created, decrypted or charged for\.'),
             ('restore-rehearse-weekly', 'canary'): (r'RESTORE REHEARSAL: PASS',),
             ('restore-rehearse-weekly', 'live'): (r'RESTORE REHEARSAL: PASS',),
         }
         required = markers.get((self.workflow['key'], self.mode))
-        return required is not None and all(re.search(marker, text) is not None for marker in required)
+        if required is None or not all(re.search(marker, text) is not None for marker in required):
+            return False
+        if self.workflow['key'] == 'notes-sweep-hourly' and self.mode == 'canary':
+            try:
+                _notes_canary_aggregate(evidence)
+            except RuntimeError:
+                return False
+        return True
 
     def _audit_value(self, fact: str) -> bool:
         facts = self.input_payload.get('facts')
@@ -749,11 +756,30 @@ class RuntimeWorkflowFactCollector:
                 return (typed and cognition.get('canonical_write_authority') is False
                         and 'canonical_write' not in proposal and 'mutation' not in proposal)
             if fact == 'command.receipt_persisted':
-                return self._command_evidence_valid(receipt)
+                if not self._command_evidence_valid(receipt):
+                    return False
+                if self.workflow['key'] == 'notes-sweep-hourly' and self.mode == 'canary':
+                    try:
+                        return receipt.get('notes_canary_result') == _notes_canary_aggregate(receipt)
+                    except RuntimeError:
+                        return False
+                return True
             if fact == 'command.execution_evidence_reconciles':
-                return (self._command_evidence_valid(receipt) and isinstance(self.execution, dict)
-                        and all(receipt.get(field) == self.execution.get(field)
-                                for field in ('entrypoint', 'mode', 'args', 'exit_code', 'stdout_tail')))
+                execution = self.execution
+                if not isinstance(execution, dict):
+                    return False
+                matches = (self._command_evidence_valid(receipt)
+                           and all(receipt.get(field) == execution.get(field)
+                                   for field in ('entrypoint', 'mode', 'args', 'exit_code', 'stdout_tail')))
+                if not matches:
+                    return False
+                if self.workflow['key'] == 'notes-sweep-hourly' and self.mode == 'canary':
+                    try:
+                        return (receipt.get('notes_canary_result') == _notes_canary_aggregate(receipt)
+                                == _notes_canary_aggregate(execution))
+                    except RuntimeError:
+                        return False
+                return True
             # Other deterministic completion facts are never implied by a receipt.
             return False
         if not self.execution:
@@ -858,7 +884,8 @@ def _workflow_fact_collector(workflow: dict[str, Any], payload: Any, **kwargs: A
 
 def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
                            timeout: int, mode: str, stdin_text: str | None = None,
-                           canary_run_id: str | None = None) -> dict[str, Any]:
+                           canary_run_id: str | None = None,
+                           canary_attempt: int | None = None) -> dict[str, Any]:
     execution = workflow["execution"]
     path = (REPO / execution["entrypoint"]).resolve()
     if REPO not in path.parents or not path.is_file():
@@ -879,6 +906,16 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
             raise RuntimeError("nightly canary requires a leased UUID run identity")
         env["CARR_NIGHTLY_CANARY_ROOT"] = str(
             REPO / "out" / "canary" / "nightly-record-layer" / canary_run_id)
+    if workflow.get("key") == "notes-sweep-hourly" and mode == "canary":
+        if not canary_run_id or not re.fullmatch(r"[0-9a-f-]{36}", canary_run_id) \
+                or type(canary_attempt) is not int or canary_attempt < 1:
+            raise RuntimeError("notes canary requires a leased job and attempt identity")
+        # Do not inherit a reusable canary ledger from the runner environment:
+        # each leased attempt gets its own private local queue and receipt root.
+        env["CARR_NOTES_CANARY_RUN_ID"] = canary_run_id
+        env["CARR_NOTES_CANARY_ATTEMPT"] = str(canary_attempt)
+        env["CARR_NOTES_CANARY_ROOT"] = str(
+            REPO / "out" / "canary" / "notes-sweep-hourly" / canary_run_id / f"attempt-{canary_attempt}")
     args = deterministic_args(execution, mode)
     proc = subprocess.run([str(path), *args], cwd=REPO, env=env,
                           input=stdin_text, capture_output=True, text=True, timeout=timeout)
@@ -937,6 +974,64 @@ def _nightly_canary_aggregate(evidence: dict[str, Any]) -> dict[str, Any]:
             or not all(isinstance(value[key], str) and re.fullmatch(r"[0-9a-f]{64}", value[key])
                        for key in ("snapshot_digest", "output_digest")):
         raise RuntimeError("nightly canary aggregate is not deterministic")
+    return value
+
+
+def _notes_canary_aggregate(evidence: dict[str, Any], *, expected_receipt_identity: str | None = None) -> dict[str, Any]:
+    """Parse one canonical, isolated Notes canary aggregate.
+
+    Unlike a free-text success line, this binds the private Notes source
+    snapshot digest, opaque destination and the exact leased job attempt.  The
+    generic job receipt persists the entire command evidence immutably only
+    after this reconciliation succeeds.
+    """
+    text = evidence.get("stdout_tail")
+    marker = "notes-sweep: notes-canary-result "
+    mentions = [line for line in text.splitlines() if "notes-canary-result" in line] if isinstance(text, str) else []
+    if len(mentions) != 1 or not mentions[0].startswith(marker):
+        raise RuntimeError("notes canary child emitted no single structured aggregate")
+    raw = mentions[0][len(marker):]
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("notes canary aggregate is not JSON") from exc
+    if not isinstance(value, dict) or json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) != raw:
+        raise RuntimeError("notes canary aggregate is not canonical JSON")
+    required = {"contract", "schema_version", "destination_id", "source_snapshot_id",
+                "source_snapshot_digest", "receipt_identity", "source_note_count",
+                "source_new_count", "queued_count", "attempted_count", "posted_count",
+                "duplicate_count", "failed_count", "still_queued_count", "source_digest_kind"}
+    if set(value) != required or value.get("contract") != "notes-canary-result.v1" \
+            or value.get("schema_version") != 1 or value.get("source_digest_kind") != "note_id_set_sha256":
+        raise RuntimeError("notes canary aggregate has an unregistered shape")
+    if not all(isinstance(value[key], str) for key in ("destination_id", "source_snapshot_id", "source_snapshot_digest", "receipt_identity")) \
+            or not re.fullmatch(r"[0-9a-f]{64}", value["destination_id"]) \
+            or not re.fullmatch(r"[0-9a-f]{64}", value["source_snapshot_digest"]):
+        raise RuntimeError("notes canary aggregate has an unsafe identity")
+    match = re.fullmatch(r"notes-sweep-hourly:([0-9a-f-]{36}):attempt:([1-9][0-9]*)", value["source_snapshot_id"])
+    receipt = re.fullmatch(r"job:([0-9a-f-]{36}):attempt:([1-9][0-9]*)", value["receipt_identity"])
+    if match is None or receipt is None:
+        raise RuntimeError("notes canary aggregate has an invalid source or receipt identity")
+    try:
+        source_uuid, receipt_uuid = str(uuid.UUID(match.group(1))), str(uuid.UUID(receipt.group(1)))
+    except ValueError as exc:
+        raise RuntimeError("notes canary aggregate identity is not a UUID") from exc
+    if source_uuid != match.group(1) or receipt_uuid != receipt.group(1) \
+            or source_uuid != receipt_uuid or match.group(2) != receipt.group(2):
+        raise RuntimeError("notes canary aggregate identities do not reconcile")
+    if expected_receipt_identity is not None and value["receipt_identity"] != expected_receipt_identity:
+        raise RuntimeError("notes canary aggregate does not bind the leased receipt")
+    counts = ("source_note_count", "source_new_count", "queued_count", "attempted_count",
+              "posted_count", "duplicate_count", "failed_count", "still_queued_count")
+    if not all(type(value[key]) is int and value[key] >= 0 for key in counts):
+        raise RuntimeError("notes canary aggregate counts are invalid")
+    if value["source_new_count"] != value["source_note_count"] \
+            or value["queued_count"] != value["attempted_count"] \
+            or value["attempted_count"] != value["posted_count"] + value["duplicate_count"] + value["failed_count"] \
+            or value["source_note_count"] < 1 or value["attempted_count"] < 1 \
+            or value["posted_count"] + value["duplicate_count"] < 1 \
+            or value["failed_count"] != 0 or value["still_queued_count"] != 0:
+        raise RuntimeError("notes canary aggregate counts do not reconcile")
     return value
 
 
@@ -1053,7 +1148,13 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
                     evidence = _execute_deterministic(
                         workflow,claim["payload"],claim["timeout_seconds"],claim["mode"],
                         json.dumps(calendar_source or nightly_child_source,separators=(",",":")) if (calendar_source or nightly_child_source) else None,
-                        canary_run_id=str(job_id) if nightly_source else None)
+                        canary_run_id=str(job_id) if (nightly_source or (workflow["key"] == "notes-sweep-hourly" and claim["mode"] == "canary")) else None,
+                        canary_attempt=claim["attempt"] if workflow["key"] == "notes-sweep-hourly" and claim["mode"] == "canary" else None)
+                    if workflow["key"] == "notes-sweep-hourly" and claim["mode"] == "canary":
+                        expected_receipt = f"job:{job_id}:attempt:{claim['attempt']}"
+                        aggregate = _notes_canary_aggregate(
+                            evidence, expected_receipt_identity=expected_receipt)
+                        evidence = {**evidence, "notes_canary_result": aggregate}
                     if workflow["key"] == "calendar-fetch-daily" and claim["mode"] == "canary":
                         aggregate=_calendar_canary_aggregate(evidence)
                         if calendar_source is None or any(aggregate[k]!=calendar_source[k] for k in ("source_snapshot_id","snapshot_digest","contact_count")): raise RuntimeError("calendar child source snapshot does not reconcile")
