@@ -496,13 +496,17 @@ def main(argv: list[str]) -> int:
                 print("no desks registered — see `dispatch.py where`")
                 return 0
             for name, e in sorted(rows.items()):
-                if e.get("kind") == "claude-session":
+                kind = e.get("kind", "?")
+                thread = e.get("thread_id")
+                where = "new thread on first task" if not thread else f"thread {thread}"
+                if kind == "claude-session":
                     live = "live" if desks.is_live(e.get("socket", "")) else "not live"
-                    print(f"{name:20} claude-session  {e.get('socket')}  [{live}]")
+                    print(f"{name:20} {kind:15} {e.get('socket')}  [{live}]")
+                elif kind == "codex-live":
+                    live = "live" if desks.is_live(e.get("socket", "")) else "app-server down"
+                    print(f"{name:20} {kind:15} {e.get('socket')}  [{live}, {where}]")
                 else:
-                    thread = e.get("thread_id")
-                    where = "new thread on first task" if not thread else f"thread {thread}"
-                    print(f"{name:20} codex-session   {e.get('model')}  in {e.get('cwd')}  [{where}]")
+                    print(f"{name:20} {kind:15} {e.get('model')}  in {e.get('cwd')}  [{where}]")
             return 0
 
         row = dispatch(a.name, a.task, registry=reg, results_path=results,
