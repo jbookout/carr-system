@@ -166,8 +166,8 @@ def main() -> int:
     proc = subprocess.run([str(py if py.exists() else sys.executable), str(CHECK)],
                           capture_output=True, text=True, timeout=120,
                           cwd=str(REPO), env=dict(os.environ))
-    first = (proc.stdout or proc.stderr).strip().splitlines()
-    first = first[0] if first else ""
+    out_lines = (proc.stdout or proc.stderr).strip().splitlines()
+    first = out_lines[0] if out_lines else ""
     check("the real script runs against the real endpoint and ledger",
           proc.returncode in (0, 1, 2) and first[:4] in ("OK d", "WARN", "SKIP"),
           f"rc={proc.returncode} {first[:100]}")
