@@ -42,11 +42,12 @@ shift
 NAME="animated_static"
 case "${1:-}" in -*|"") ;; *) NAME="$1"; shift ;; esac
 
-PLANARGS=(); DRY=0; EMAIL=0
+PLANARGS=(); RECOVERY_ARGS=(); DRY=0; EMAIL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --concept|--sfx|--avoid|--reason|--vault) PLANARGS+=("$1" "$2"); shift 2 ;;
-    --recovery) PLANARGS+=("$1"); shift ;;
+    --concept|--sfx|--avoid) PLANARGS+=("$1" "$2"); shift 2 ;;
+    --reason|--vault) RECOVERY_ARGS+=("$1" "$2"); shift 2 ;;
+    --recovery) RECOVERY_ARGS+=("$1"); shift ;;
     --dry-run) DRY=1; shift ;;
     --email) EMAIL=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -63,7 +64,7 @@ PLAN="$PIPE/Scripts/animstatic-plan.env"
 
 # --- plan the choreography ----------------------------------------------------
 python3 "$PLANNER" "$LAYERDIR" "$LOG" --name "$NAME" --out-path "$RAW" \
-  --json-out "$JOB" --plan-out "$PLAN" "${PLANARGS[@]}"
+  --json-out "$JOB" --plan-out "$PLAN" "${PLANARGS[@]}" "${RECOVERY_ARGS[@]}"
 source "$PLAN"
 GIF_WIDTH="${GIF_WIDTH:-640}"
 echo "canvas $CANVAS · hero '$HERO'"
@@ -158,14 +159,19 @@ if [ "$EMAIL" -eq 1 ]; then
     -loop -1 "$EGIF" 2>/dev/null
   rm -f "$LAST"
   ESIZE=$(du -k "$EGIF" | cut -f1)
-  echo "OK: $EGIF  (${ESIZE}K)"
+  echo "built pending choreography commit: $EGIF  (${ESIZE}K)"
   [ "$ESIZE" -gt 1024 ] && echo "  WARNING: over 1MB — drop EMAIL_WIDTH or shorten the build before sending."
 fi
 
 # Only now does the concept get burned — a failed render must not consume one.
-python3 "$PLANNER" "$LAYERDIR" "$LOG" --name "$NAME" --out-path "$RAW" \
-  --concept "$CONCEPT" --sfx "$SFX_KEY" --commit >/dev/null
+if ! python3 "$PLANNER" "$LAYERDIR" "$LOG" --name "$NAME" --out-path "$RAW" \
+  --concept "$CONCEPT" --sfx "$SFX_KEY" --commit "${RECOVERY_ARGS[@]}" >/dev/null; then
+  rm -f "$FINAL" "$GIF" "${EGIF:-}"
+  echo "animated-static: choreography commit failed; removed uncommitted outputs" >&2
+  exit 1
+fi
 
 echo "OK: $FINAL"
 echo "OK: $GIF  ($(du -h "$GIF" | cut -f1))"
+[ "$EMAIL" -eq 0 ] || echo "OK: $EGIF  ($(du -h "$EGIF" | cut -f1))"
 echo "logged: $CONCEPT / $SFX_KEY -> $(basename "$LOG")"
