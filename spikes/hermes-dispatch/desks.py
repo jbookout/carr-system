@@ -18,7 +18,8 @@ That flag is a statement of intent. A pid is not.
 
 TWO KINDS SO FAR:
   claude-session   a live labeled Claude Code session, addressed by socket
-  codex-session    a standing Codex thread, addressed by its thread id
+  codex-session    a standing Codex thread, resumed per task through the CLI
+  codex-live       a live Codex app-server, addressed by its unix socket
 
 BOTH KINDS KEEP THEIR CONTEXT, and that is the whole point. Joe, 2026-08-20:
 "codex should be able to do the same thing as you. It has its own context. I
@@ -49,7 +50,7 @@ NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
 PID_SOCKET = re.compile(r"^\d+\.sock$")
 
-KINDS = ("claude-session", "codex-session")
+KINDS = ("claude-session", "codex-session", "codex-live")
 # the old name for the Codex kind, before it carried a thread
 KIND_ALIASES = {"codex-exec": "codex-session"}
 
@@ -137,6 +138,14 @@ class Registry:
                 raise DeskError("missing_socket", "a claude-session desk needs --socket")
             refuse_pid_socket(socket)
             entry = {"kind": kind, "socket": str(socket)}
+        elif kind == "codex-live":
+            if not socket:
+                raise DeskError("missing_socket", "a codex-live desk needs --socket")
+            refuse_pid_socket(socket)
+            entry = {"kind": kind, "socket": str(socket), "thread_id": None,
+                     "cwd": str(cwd or Path.cwd())}
+            if model:
+                entry["model"] = model
         else:
             if not model:
                 raise DeskError("missing_model", "a codex-session desk needs --model")
@@ -186,7 +195,7 @@ class Registry:
         entry = {**entry, "kind": kind}
         if kind not in KINDS:
             raise DeskError("bad_kind", f"desk {name!r} has kind {kind!r}")
-        if kind == "claude-session":
+        if kind in ("claude-session", "codex-live"):
             sock = entry.get("socket", "")
             # second refusal: the file is editable, the guard is not
             refuse_pid_socket(sock)

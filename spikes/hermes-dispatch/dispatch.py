@@ -49,6 +49,7 @@ sys.path.insert(0, str(HERE.parent / "partner-line-78"))
 import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import inject as inject_mod  # noqa: E402  — the proven wire, not a second copy
+import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 
 DEFAULT_RESULTS = Path(
     os.environ.get(
@@ -207,6 +208,14 @@ def dispatch(
 
     if entry["kind"] == "claude-session":
         outcome = _to_claude(entry, task, msg_id)
+    elif entry["kind"] == "codex-live":
+        outcome = codex_wire.run_turn(
+            entry["socket"], task,
+            thread_id=None if fresh else entry.get("thread_id"),
+            cwd=entry.get("cwd"), model=entry.get("model"),
+        )
+        if outcome.get("thread_id"):
+            registry.remember_thread(name, outcome["thread_id"])
     else:
         outcome = _to_codex(entry, task, env, fresh=fresh)
         # pin the desk to its thread so the next task lands in the same one
