@@ -191,28 +191,78 @@ export const PROFILES = {
   // guards do not, and the council made a canonical action-risk registry
   // blocking before any of it.
   //
-  // THE SET IS A STRICT SUBSET OF `capture`, ASSERTED BY TEST rather than by
-  // this comment. Written out rather than spread from capture on purpose: a
-  // spread means a verb added to capture for a scheduled run's benefit lands
-  // silently in a persistent daemon's hands, and "silently" is the whole
-  // problem with this class of actor. Widening here is an edit somebody makes
-  // and reviews.
+  // THE SET IS A STRICT SUBSET OF `away`, ASSERTED BY TEST rather than by this
+  // comment. It was a subset of `capture` until 2026-08-19; see the CoS grant
+  // below for what moved and why the containing set had to move with it.
+  // Written out rather than spread on purpose: a spread means a verb added to
+  // another profile for a scheduled run's benefit lands silently in a
+  // persistent daemon's hands, and "silently" is the whole problem with this
+  // class of actor. Widening here is an edit somebody makes and reviews.
   //
-  // WHAT IT DELIBERATELY EXCLUDES, beyond everything outside capture:
-  // record-signal and record-branch-evidence, which are investigation
-  // machinery. An investigation is a chain of reasoning a human is steering,
-  // and a runtime dropping evidence into one mid-flight changes what the
-  // adjudicator sees without being asked.
+  // THE CHIEF-OF-STAFF GRANT (loop #459, Joe 2026-08-19: "Doc should write
+  // whatever the CoS job needs"). The Pelham tour prep is the trigger and it
+  // failed twice in one run: the ball it set landed on hermes-pilot instead of
+  // Joe, and it could not correct the deal from purchase-only to lease+purchase,
+  // so it prepared a tour against a brief it knew was wrong. A seat that can
+  // only file notes about the corrections it cannot make is not a chief of
+  // staff; it is a very well-informed bystander. So two verbs join:
   //
-  // Nothing here can destroy, re-point, or create a party, advance a deal,
-  // touch a rule, draft a client document, or send anything. Every verb is
-  // additive and idempotency-keyed.
+  //   update-deal   — FIELD-LOCKED, not granted whole. See HERMES_DEAL_FIELDS
+  //                   below: deal_type plus the search criteria (segment, city,
+  //                   lane), and nothing else. phase stays out, so "no advancing
+  //                   a deal" is still literally true; outcome/closed_on/
+  //                   won_value stay out, so it can never claim a deal closed or
+  //                   name a number; salesforce_id and notes_path stay out as
+  //                   reconciliation and narrative keys a human owns.
+  //   add-premises  — the packet it has already read is where premises come
+  //                   from, and away's own charter already treats premises
+  //                   capture against EXISTING parties as unattended work. The
+  //                   new_party create path is refused here exactly as it is for
+  //                   away (see callTool's payload guard), so this adds spaces
+  //                   and buildings to a deal and never a person or a company.
+  //
+  // WHAT IT STILL DELIBERATELY EXCLUDES: record-signal and record-branch-evidence,
+  // which are investigation machinery — an investigation is a chain of reasoning a
+  // human is steering, and a runtime dropping evidence into one mid-flight changes
+  // what the adjudicator sees without being asked. And the four noes this grant was
+  // explicitly conditioned on, none of which is reachable from any set here: no
+  // send (there is no send verb in this Worker at all), no teach, no merge, no
+  // identity-field edit. Those are asserted by test, because a promise in a comment
+  // is not a lock.
   hermes: new Set([
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-defect",
+    // the CoS grant, 2026-08-19
+    "update-deal", "add-premises",
   ]),
 };
+
+// The ONLY deal columns a Hermes runtime may set through update-deal. Enforced
+// in callTool as a payload-aware profile guard, the same shape as away's
+// add-premises/new_party refusal and every narrow profile's log-activity/links[]
+// refusal: name-level gating cannot see WHICH field a verb was asked to change,
+// and here the field is the whole boundary. A key outside this list refuses the
+// entire call rather than silently applying the acceptable subset — a partial
+// write the caller did not ask for is worse than a refusal it can read.
+export const HERMES_DEAL_FIELDS = Object.freeze(["deal_type", "segment", "city", "lane"]);
+
+/**
+ * The field half of the CoS grant, as a pure function, for the same reason
+ * profileForActor was extracted on 2026-08-16: callTool needs a Worker and a
+ * database, so a lock left inline is a lock nothing can exercise before a
+ * deploy. Returns the offending keys, or null when the call is clean.
+ *
+ * Answers null for every profile except `hermes` — no other profile carries
+ * update-deal under a field restriction, and `full` is unrestricted by design.
+ */
+export function hermesDealFieldRefusal(profile, name, args) {
+  if (profile !== "hermes" || name !== "update-deal") return null;
+  const fields = args?.fields;
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
+  const refused = Object.keys(fields).filter(k => !HERMES_DEAL_FIELDS.includes(k));
+  return refused.length ? refused : null;
+}
 
 const PROFILE_NOTICE = {
   capture:
@@ -254,15 +304,20 @@ const PROFILE_NOTICE = {
     "model, the commit sha, and the contract version), and a clean run with nothing to flag is still " +
     "a finding worth recording (found:false), not silence.</notice>",
   hermes:
-    "\n\n<notice>This session runs on the HERMES profile: every read verb, plus exactly nine " +
-    "additive write verbs — log-activity, stamp-touch, add-loop, update-loop, set-next-action, " +
-    "complete-action, add-critical-date, record-finding, record-defect. Every other write verb " +
-    "refuses with not_in_profile: no advancing a deal, no creating a party, no merging, no touching " +
-    "a rule, no drafting a client document, and there is no send verb in this system at all. This " +
-    "profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and cannot be " +
-    "widened by this token under any request. You carry Joe's personal brain and never Dell's. " +
-    "File what he tells you to file; for anything outside those nine verbs, say what you would have " +
-    "written and hand it back for a human.</notice>",
+    "\n\n<notice>This session runs on the HERMES profile — the chief-of-staff seat: every read verb, " +
+    "plus eleven write verbs. Nine are additive: log-activity, stamp-touch, add-loop, update-loop, " +
+    "set-next-action, complete-action, add-critical-date, record-finding, record-defect. Two are the " +
+    "CoS grant: add-premises (never its new_party path — premises against parties that already exist) " +
+    "and update-deal RESTRICTED TO deal_type, segment, city and lane, which is the brief a deal is " +
+    "worked against. Correcting that brief is your job; do it rather than filing a note about it. " +
+    "set-next-action takes owner — hand the ball to joe when the next move is his, or it lands in " +
+    "your own queue where his triage will never see it. Every other write verb, and every other deal " +
+    "field, refuses with not_in_profile: no advancing or closing a deal, no valuing one, no creating " +
+    "a party, no merging, no teaching or touching a rule, no editing an identity field, no drafting a " +
+    "client document, and there is no send verb in this system at all. This profile is locked " +
+    "server-side by a HERMES_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
+    "under any request. You carry Joe's personal brain and never Dell's. For anything outside the " +
+    "eleven, say what you would have written and hand it back for a human.</notice>",
 };
 
 /** Resolve ?profile= to a name, defaulting to full. An unknown value fails CLOSED to read. */
@@ -447,10 +502,27 @@ export async function callTool(env, actor, name, args, profile = "full") {
   // only humans who could vouch for it are away). The verb stays in the profile
   // because premises capture against existing parties is squarely away-mode work;
   // only the create path is refused, filed-not-dropped like any other block.
-  if (profile === "away" && name === "add-premises" &&
+  // WIDENED FROM `away` TO EVERY NARROW PROFILE (2026-08-19, loop #459), because
+  // hermes now holds add-premises too and the reasoning was never about away
+  // specifically — it is about asserting a new identity when the humans who could
+  // vouch for it are not in the loop. `profile !== "full"` is equal-or-tighter
+  // than the old condition everywhere: no other narrow profile carries
+  // add-premises by name, so the name-level gate above already refuses them first.
+  if (profile !== "full" && name === "add-premises" &&
       Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
-      hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
+      hint: "a narrow profile may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
+  // [loop #459] update-deal is granted to `hermes` FIELD BY FIELD, never whole.
+  // Name-level gating cannot tell "correct deal_type from purchase-only to
+  // lease+purchase" — the write Joe asked for — from "mark this deal closed and
+  // won for $180,000", and both are update-deal. So the field list IS the grant;
+  // see HERMES_DEAL_FIELDS above for which columns and why each of the others
+  // stays out. Refuses the whole call, naming the offending keys.
+  const refusedDealFields = hermesDealFieldRefusal(profile, name, args);
+  if (refusedDealFields)
+    throw new ToolError({ error: "not_in_profile", verb: "update-deal", profile,
+      refused_fields: refusedDealFields, allowed_fields: HERMES_DEAL_FIELDS,
+      hint: "this seat may correct the brief a deal is worked against — deal_type and the search criteria — and nothing else. Advancing, closing, valuing or re-keying a deal is a partner's call: file what you would have changed with add-loop" });
   // [#214 RED-4, 2026-08-06] The same payload-aware pattern, eleven lines down
   // from its model: log-activity's links[] array runs link-parties' exact INSERT
   // (writeLinks, tools.js), so a profile that refuses link-parties BY NAME could

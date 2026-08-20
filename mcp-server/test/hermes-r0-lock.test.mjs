@@ -94,17 +94,30 @@ test("dispatch forces the hermes profile and ignores ?profile=", () => {
   }
 });
 
-test("the hermes write set is a strict subset of capture", () => {
-  // The set is written out rather than spread from capture, so a verb added to
-  // capture never lands in a persistent daemon's hands unreviewed. This is the
-  // assertion that keeps the two honest in the other direction: hermes may
-  // never hold a verb capture does not.
+test("the hermes write set is a strict subset of away", () => {
+  // The set is written out rather than spread, so a verb added to another
+  // profile never lands in a persistent daemon's hands unreviewed. This is the
+  // assertion that keeps them honest in the other direction: hermes may never
+  // hold a verb the widest UNATTENDED profile does not.
+  //
+  // The containing set was `capture` until 2026-08-19. The CoS grant added
+  // update-deal and add-premises, which capture does not hold and away does, so
+  // the honest ceiling moved with it rather than the assertion being deleted.
   for (const verb of PROFILES.hermes) {
-    assert.ok(PROFILES.capture.has(verb),
-      `${verb} is in hermes but not in capture — hermes must never exceed the additive set`);
+    assert.ok(PROFILES.away.has(verb),
+      `${verb} is in hermes but not in away — hermes must never exceed the unattended set`);
   }
-  assert.ok(PROFILES.hermes.size < PROFILES.capture.size,
-    "strict subset: hermes deliberately excludes the investigation verbs");
+  assert.ok(PROFILES.hermes.size < PROFILES.away.size,
+    "strict subset: hermes deliberately excludes investigation, decisions, documents and campaigns");
+});
+
+test("everything outside the CoS grant is still inside capture", () => {
+  // The nine additive verbs R0 shipped with are unchanged, and the grant is
+  // exactly two verbs wide. Written as a diff against capture so that widening
+  // hermes by a third verb has to come here and say so.
+  const beyondCapture = [...PROFILES.hermes].filter(v => !PROFILES.capture.has(v));
+  assert.deepEqual(beyondCapture.sort(), ["add-premises", "update-deal"],
+    "the CoS grant is update-deal + add-premises and nothing else");
 });
 
 test("the investigation verbs stay out of the hermes set", () => {
@@ -159,10 +172,15 @@ test("HERMES-CASE-010 — an unsponsored Hermes runtime still resolves, shared-o
 // ---------- HERMES-CASE-006: mutations refuse ----------
 
 test("HERMES-CASE-006 — the consequential write verbs still refuse", () => {
-  // Joe granted the additive set on 2026-08-16. These are the ones that stayed
-  // out, and they are the substance of the boundary: destroy, re-point
-  // ownership, create a party, advance a deal, touch a rule, draft for a client.
-  for (const verb of ["update-deal", "new-client", "new-lead", "new-vendor", "add-party",
+  // Joe granted the additive set on 2026-08-16 and the two CoS verbs on
+  // 2026-08-19. These are the ones that stayed out, and they are the substance
+  // of the boundary: destroy, re-point ownership, create a party, touch a rule,
+  // draft for a client.
+  //
+  // update-deal LEFT THIS LIST on 2026-08-19 and did not become unguarded — it
+  // is now allowed by NAME and locked by FIELD, which name-level allowedIn()
+  // cannot express. hermes-cos-grant.test.mjs holds that half.
+  for (const verb of ["new-client", "new-lead", "new-vendor", "add-party",
                       "confirm-merge", "reassign-deal", "set-lead", "log-decision",
                       "activate-rule", "retire-rule", "prepare-document", "close-loop"]) {
     assert.equal(allowedIn("hermes", verb, WRITE), false, `${verb} must refuse under hermes`);

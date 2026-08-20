@@ -202,6 +202,39 @@ export function personalScopeForActor(actor) {
 }
 
 /**
+ * The actor slugs a given runtime may leave an OPEN BALL under — set-next-action's
+ * `owner` argument, and nothing else.
+ *
+ * WHY THIS EXISTS (loop #459, Joe 2026-08-19). The Pelham tour-prep run set its
+ * next action and the ball landed on `hermes-pilot`, because set-next-action had
+ * one owner and it was always the caller. Joe's triage reads HIS open balls, so
+ * the work Doc queued for him was queued somewhere he does not look. A chief of
+ * staff whose to-dos land in its own inbox has not handed anything off.
+ *
+ * THE SET IS DERIVED, NEVER CLAIMED. It is exactly the caller's own slug plus —
+ * for a non-human runtime — the sponsor personalScopeForActor already derived
+ * server-side from HERMES_SPONSOR / LOCAL_SPONSOR. So `owner` cannot select an
+ * identity the server had not already resolved for this token; it can only pick
+ * between the two the grant already carries. hermes-pilot may hand Joe a ball
+ * because Joe sponsors it; it can never hand Dell one, and Joe's own interactive
+ * session still cannot hand Dell one either (his set is {joe} alone), because
+ * one partner assigning another's ball is a matter between two humans.
+ *
+ * NOT A WIDENING UNDER RULE d7f74c93. The boundary is held credentials and
+ * unsupervised authority. Naming Joe as the owner of a task is a routing fact
+ * that surfaces in HIS triage — it puts the work in front of the human rather
+ * than acting without him, which is the direction the rule wants.
+ */
+export function permittedActionOwnerSlugs(actor) {
+  const owners = [];
+  if (actor && typeof actor.slug === "string") owners.push(actor.slug);
+  const scope = personalScopeForActor(actor);
+  if (scope.status === "personal" && isKnownPartner(scope.sponsor) && !owners.includes(scope.sponsor))
+    owners.push(scope.sponsor);
+  return owners;
+}
+
+/**
  * The server-derived authority class. It is intentionally distinct from the
  * legacy request-side operational limiter (?profile=), which can only reduce
  * the verb surface and is not an authorization boundary.
@@ -335,11 +368,20 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
  * end.
  *
  * WHAT THIS GRANTS, precisely: reads scoped to joe-personal. His 33 personal
- * rules, and his side of any read verb that splits by brain. It grants no write
- * (the hermes profile's write set stays empty), no humanOnly verb (human:false
- * is unchanged), and no access to Dell's brain — cross-brain refusal is enforced
- * by the same rule that refuses it for every other actor, and the R0 test suite
- * asserts it explicitly.
+ * rules, and his side of any read verb that splits by brain. It grants no
+ * humanOnly verb (human:false is unchanged) and no access to Dell's brain —
+ * cross-brain refusal is enforced by the same rule that refuses it for every
+ * other actor, and the R0 test suite asserts it explicitly.
+ *
+ * IT GRANTS NO WRITE EITHER. Sponsorship and the write set are separate
+ * questions decided in separate files: what this runtime may WRITE is
+ * PROFILES.hermes in mcp.js and nothing here. (This paragraph read "the hermes
+ * profile's write set stays empty" until 2026-08-19; that was true for the few
+ * hours between R0 shipping and Joe's additive grant the same day, and stating
+ * another file's contents was the mistake, not the drift. Sponsorship is now the
+ * reason the chief-of-staff grant can hand JOE a ball — permittedActionOwnerSlugs
+ * below reads exactly this map — so the two are related, but still not the same
+ * decision.)
  *
  * WHY THIS IS SAFE UNDER THE BOUNDARY THAT ACTUALLY BINDS. Rule d7f74c93: the
  * question is never who may READ, it is who HOLDS A CREDENTIAL and who may ACT
