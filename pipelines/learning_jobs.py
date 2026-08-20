@@ -106,9 +106,11 @@ class Source:
         self.conn = None
         self.reason = {
             "jobs": "CARR_DB_JOBS_URL present (carr_jobs, the nightly-jobs role). It reads "
-                    "`placement`, `placement_metric`, `content_piece`, `event` and "
-                    "`v_compiled_rules`, which is every source these four jobs need. "
-                    "Anything outside that set still reports "
+                    "`placement_metric`, `event` and `v_compiled_rules` directly, and it "
+                    "reaches placements and their copy through the collector view "
+                    "`v_control_plane_social_feature_cells` — the control plane holds this "
+                    "role off `placement` and `content_piece` themselves. That is every "
+                    "source these four jobs need. Anything outside that set still reports "
                     f"{UNAVAILABLE} rather than a number nobody measured.",
             "full": "DATABASE_URL present — base tables readable, every clause runs.",
             "views": "only CARR_DB_EXPORTER_URL present (least-privilege exporter role, "
@@ -198,12 +200,15 @@ def job_weekly(src):
     threshold = src.config("learning.min_posts_per_feature_cell")
     exploration = src.config("learning.exploration_share")
 
+    # Feature cells come from a collector view, not from the join. The control
+    # plane took carr_jobs off placement and content_piece directly, enforced by
+    # ops/control-plane-db-gate.py, which FAILS the build if this role regains
+    # table-wide select on either. The view carries the same five values and
+    # coalesces `format` itself, so every caller bins identically. If this ever
+    # returns None again, the answer is another projection, never a table grant.
     placements = src.rows("""
-        select p.platform,
-               coalesce(cp.features->>'format', 'unknown') as format,
-               p.id, p.live_at,
-               (select count(*) from placement_metric m where m.placement_id = p.id) as metric_rows
-        from placement p join content_piece cp on cp.id = p.piece_id
+        select platform, format, placement_id as id, live_at, metric_rows
+        from public.v_control_plane_social_feature_cells
     """)
 
     r.line("## The floor")
@@ -222,10 +227,13 @@ def job_weekly(src):
             "measured posts per feature cell. No conclusions.")
         r.line("## Result")
         r.line("")
-        r.line(f"`placement` / `placement_metric` / `content_piece` are {UNAVAILABLE} "
-               "under the credential this run had. That is a permissions fact, not a "
-               "count of zero: the exporter role holds views only, by design (ORDER 7). "
-               "Rerun with `DATABASE_URL` set to state real numbers.")
+        r.line(f"`v_control_plane_social_feature_cells` is {UNAVAILABLE} under the "
+               "credential this run had. That is a permissions fact, not a count of "
+               "zero, and the two read almost identically — which is how this went "
+               "unnoticed for a week in August 2026. Do NOT answer it by granting this "
+               "role select on `placement` or `content_piece`: a control-plane gate "
+               "fails the build for exactly that. Check the view exists and is granted "
+               "(migration 0191), or rerun with `DATABASE_URL` set.")
         r.verdict = "unavailable"
         return r
 
