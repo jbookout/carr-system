@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,35 +80,40 @@ def main() -> int:
           and sources._strip_source_root(POISON + "/DNA/example.md", "/repo")
           == POISON + "/DNA/example.md")
 
-    policy = load("drive_runtime_drift", REPO / "hooks" / "drift-claim-gate.py")
-    original_connect = None
-    try:
-        import lib.record_sources as record_sources
-        original_connect = record_sources._connect
-        record_sources._connect = lambda: (_ for _ in ()).throw(AssertionError("record call"))
-        old = os.environ.get("CARR_VAULT")
-        os.environ["CARR_VAULT"] = POISON
-        lines = policy._record_decision_lines()
-    finally:
-        if original_connect is not None:
-            record_sources._connect = original_connect
-        if old is None:
-            os.environ.pop("CARR_VAULT", None)
-        else:
-            os.environ["CARR_VAULT"] = old
-    check("drift policy does not turn poisoned ambient root into a file read", lines == [])
+    policy_text = (REPO / "hooks" / "drift-claim-gate.py").read_text()
+    check("drift policy has no ambient Drive-root reader", "CARR_VAULT" not in policy_text)
 
-    # The installed command deliberately routes to the repository interpreter:
-    # system Python has no psycopg on this Mac.  The canonical-path fixture below
-    # is non-empty and reaches v_decision_entry through the same query boundary;
-    # it is not a monkeypatched empty-reader acceptance test.
+    # The installed command deliberately routes to the repository interpreter.
+    # The fixture below invokes the launcher from /usr/bin/python3 and returns a
+    # nonempty canonical v_decision_entry row; no direct-gate monkeypatches are
+    # accepted as evidence for this boundary.
     hooks_config = (REPO / "ops" / "config" / "hooks.json").read_text()
-    check("installed drift hooks use the fixed repository record interpreter",
-          hooks_config.count("run-record-gate.py drift-") == 2)
+    check("installed drift hooks use fixed system bootstrap and repository interpreter",
+          hooks_config.count("/usr/bin/python3 {{REPO}}/hooks/run-record-gate.py drift-") == 2
+          and "/usr/bin/env python3 {{REPO}}/hooks/run-record-gate.py" not in hooks_config)
 
     with tempfile.TemporaryDirectory(dir=REPO) as tmp:
         root = Path(tmp)
-        (root / "psycopg.py").write_text('''
+        for directory in (root / "hooks", root / "lib", root / ".venv" / "bin"):
+            directory.mkdir(parents=True, exist_ok=True)
+        for name in ("run-record-gate.py", "drift-claim-gate.py", "drift-assertion-gate.py"):
+            shutil.copy2(REPO / "hooks" / name, root / "hooks" / name)
+        (root / "hooks" / "chat-lint-gate.py").write_text('''
+import json
+def read_tail(path):
+    with open(path) as fh: return [json.loads(line) for line in fh if line.strip()]
+def text_of(record, _roles):
+    content = record.get("message", {}).get("content", [])
+    return "\\n".join(item.get("text", "") for item in content if isinstance(item, dict))
+def strip_fences(text): return text
+''')
+        (root / "lib" / "__init__.py").write_text("")
+        (root / "lib" / "record_sources.py").write_text('''
+import os
+if os.environ.get("PYTHONPATH"):
+    raise RuntimeError("launcher failed to scrub PYTHONPATH")
+if os.environ.get("FIXTURE_FIXED_INTERPRETER") != "1":
+    raise RuntimeError("launcher did not select the fixed interpreter")
 class Cursor:
     def __enter__(self): return self
     def __exit__(self, *_): return False
@@ -118,26 +124,52 @@ class Connection:
     def __enter__(self): return self
     def __exit__(self, *_): return False
     def cursor(self): return Cursor()
-def connect(_url): return Connection()
+def _connect(): return Connection()
 ''')
-        record_env = {**env, "PYTHONPATH": str(root), "CARR_DB_EXPORTER_URL": "synthetic://record",
-                      "HOME": str(root)}
-        record_env.pop("CARR_NONCANONICAL_DECISIONS_PATH", None)
+        interpreter = root / ".venv" / "bin" / "python"
+        interpreter.write_text('''#!/bin/sh
+if [ "${FIXTURE_PSYCOG_TIMEOUT:-0}" = 1 ] && [ "$1" = -c ]; then sleep 4; fi
+if [ "$1" = -c ]; then [ "${FIXTURE_PSYCOG_OK:-1}" = 1 ] && exit 0 || exit 1; fi
+export FIXTURE_FIXED_INTERPRETER=1
+exec /usr/bin/python3 "$@"
+''')
+        interpreter.chmod(0o755)
+        record_env = {**env, "PYTHONPATH": str(root / "poisoned-pythonpath"), "HOME": str(root)}
         claim = ("The quokka-indexer lane is no longer running. It was supposed to fire nightly "
                  "and the schedule silently reverted, so the index is stale and nothing has been re-pointed.")
-        write = subprocess.run(["/usr/bin/python3", str(REPO / "hooks" / "drift-claim-gate.py")],
+        write = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
                                input=json.dumps({"tool_name": "mcp__x__record-defect",
                                                  "tool_input": {"body": claim}}),
                                text=True, capture_output=True, env=record_env)
         transcript = root / "transcript.jsonl"
         transcript.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": claim}]}}) + "\n")
-        assertion = subprocess.run(["/usr/bin/python3", str(REPO / "hooks" / "drift-assertion-gate.py")],
+        assertion = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-assertion-gate.py"],
                                    input=json.dumps({"hook_event_name": "Stop", "transcript_path": str(transcript)}),
                                    text=True, capture_output=True,
                                    env={**record_env, "CARR_DRIFT_ASSERTION_STATE": str(root / "state")})
-    check("system Python loads nonempty canonical record context and assertion blocks",
+        unknown = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "unknown.py"],
+                                 text=True, capture_output=True, env=record_env)
+        malformed = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"),
+                                    "drift-claim-gate.py", "extra"], text=True, capture_output=True, env=record_env)
+        missing_dependency = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
+                                            text=True, capture_output=True,
+                                            env={**record_env, "FIXTURE_PSYCOG_OK": "0"})
+        missing_path = root / ".venv" / "bin" / "python-missing"
+        interpreter.rename(missing_path)
+        try:
+            missing_interpreter = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
+                                                 text=True, capture_output=True, env=record_env)
+        finally:
+            missing_path.rename(interpreter)
+        timeout = subprocess.run(["/usr/bin/python3", str(root / "hooks" / "run-record-gate.py"), "drift-claim-gate.py"],
+                                 text=True, capture_output=True,
+                                 env={**record_env, "FIXTURE_PSYCOG_TIMEOUT": "1"})
+    check("system bootstrap reaches fixed interpreter, scrubs PYTHONPATH, and blocks on canonical context",
           write.returncode == 0 and "quokka-indexer" in write.stdout
           and assertion.returncode == 2 and "quokka-indexer" in assertion.stderr)
+    check("launcher fails closed for unknown/malformed/missing dependency/interpreter/timeout",
+          all(item.returncode != 0 for item in (unknown, malformed, missing_dependency,
+                                                 missing_interpreter, timeout)))
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")
