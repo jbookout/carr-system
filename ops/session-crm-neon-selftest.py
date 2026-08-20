@@ -546,10 +546,10 @@ def test_upsert_to_neon() -> None:
     # The migration must have a version column — without it trg_touch_row()
     # crashes on the UPDATE path. This is the guard that prevents a missing
     # version from going green again.
-    mig_path = Path(HERE).parent / "migrations" / "0189_session_work.sql"
+    mig_path = Path(HERE).parent / "migrations" / "0190_session_work.sql"
     sql_text = mig_path.read_text()
     if "version" not in sql_text:
-        fail("upsert version column", "migration 0189 has no 'version' column — trg_touch_row will crash")
+        fail("upsert version column", "migration 0190 has no 'version' column — trg_touch_row will crash")
         return
 
     ok(f"upsert: {inserted} inserts + {updated} updates via ON CONFLICT DO UPDATE, migration has version column")
@@ -559,7 +559,7 @@ def test_upsert_to_neon() -> None:
 
 def test_migration_exists() -> None:
     """The migration file exists and contains the session_work table."""
-    mig_path = Path(HERE).parent / "migrations" / "0189_session_work.sql"
+    mig_path = Path(HERE).parent / "migrations" / "0190_session_work.sql"
     if not mig_path.exists():
         fail("migration exists", f"not found at {mig_path}")
         return
@@ -577,7 +577,7 @@ def test_migration_exists() -> None:
             fail("migration content", f"missing fragment: {fragment}")
             return
 
-    ok("migration: 0189_session_work.sql exists and contains required DDL (incl. version column)")
+    ok("migration: 0190_session_work.sql exists and contains required DDL (incl. version column)")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
