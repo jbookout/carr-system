@@ -7386,6 +7386,48 @@ Object.assign(TOOLS, {
                  inputSchema: TOOLS[n].inputSchema || null })) };
     },
   },
+  "export-email-domains": {
+    description: "The email DOMAINS on record for clients and leads — never the addresses. Aggregated in SQL, so an address cannot leave through this verb even by accident. WHY IT EXISTS (decision 2026-08-19): ops/fetch-allowlist.py builds the egress guard's allowlist from these two views, and on a second machine it was the ONLY thing that needed a direct database connection — the one credential standing between Dell's Mac and needing none at all. This returns strictly less than that connection does (two columns, aggregated, no write, no other view) while keeping every read attributable through the machine door. The guard's POLICY — freemail suffixes, institutional TLDs, hostname shape — deliberately stays in the caller: this verb is a data read and must never become the place that decides what the guard trusts.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (c) => {
+      // Constant identifiers, never caller input — these two names are the
+      // whole surface of this verb and are not parameterisable on purpose.
+      const SOURCES = [["v_export_clients", '"Email"'], ["v_export_leads", '"Email"']];
+      const domains = new Set();
+      // PER-SOURCE, not just the union. The caller reports "N seen, M kept"
+      // for each view, and folding the two together here would cost it that
+      // line — a report that cannot say WHICH book a domain came from is the
+      // kind of small loss that gets noticed only when something is wrong.
+      const by_source = {}, counts = {}, notes = [];
+      for (const [view, col] of SOURCES) {
+        try {
+          const r = await c.query(
+            `select distinct lower(split_part(${col}, '@', 2)) as domain
+               from ${view} where ${col} like '%@%'`);
+          const seen = [];
+          for (const row of r.rows) {
+            const d = String(row.domain || "").trim().replace(/^\.+|\.+$/g, "").toLowerCase();
+            if (!d) continue;
+            seen.push(d);
+            domains.add(d);
+          }
+          by_source[view] = seen.sort();
+          counts[view] = seen.length;
+        } catch (exc) {
+          // One unreadable view must not cost the caller the other one — the
+          // same tolerance ops/fetch-allowlist.py has always had. A skipped
+          // source is REPORTED rather than folded silently into a smaller
+          // answer, because a quietly short allowlist looks exactly like a
+          // correct one and the guard would refuse real client domains.
+          notes.push(`${view}: skipped (${exc && exc.name ? exc.name : "error"})`);
+        }
+      }
+      if (!Object.keys(counts).length)
+        throw new ToolError({ error: "no_export_view_readable", notes,
+          hint: "Neither export view could be read. Treat this as NO ANSWER and keep the previous allowlist — an empty result here is indistinguishable from 'this book has no clients', and writing it out would silently strip every client domain the guard trusts." });
+      return { ok: true, domains: [...domains].sort(), by_source, counts, notes };
+    },
+  },
   "record-defect": {
     write: true,
     description: "File ONE defect: a claim the system made that was not true, with what WAS true beside it. This is the record layer's only RETROSPECTIVE mechanism — every other safeguard here (a hook, a gate, a registry) is prospective and guesses in advance at what will go wrong; this one gets better as failures accumulate. NOT record-finding: a finding is something learned about a client, a commit or a platform, while a defect is something the system itself got wrong. NOT a loop either, and that distinction is the reason this verb exists — a loop is a TO-DO, so it gets closed and disappears, while a defect must ACCUMULATE to be worth anything. The four load-bearing fields are claimed / actual / source_unread / rule_violated, and claimed and actual are both required and must actually differ: a row that does not state a contradiction is a note, not a defect. detected_by is required and closed-vocabulary because it is the most diagnostic field in the table — a log where every row reads 'human' is a log saying the self-checks do not work, and that is only visible if it is counted. FILE ONE THE MOMENT IT IS FOUND, including when the session filing it is the one that erred; a defect caught and not recorded is the failure this whole mechanism exists to stop. Read them back through v_defect and v_defect_class; standing-context surfaces the class counts at session start.",

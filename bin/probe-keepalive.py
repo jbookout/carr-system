@@ -54,6 +54,7 @@ import os
 import socket
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -118,10 +119,20 @@ def record(service: str, up: bool, signal: str, detail: str) -> int:
     py = os.path.join(REPO, ".venv", "bin", "python")
     if not os.access(py, os.X_OK):
         py = sys.executable
-    argv = [py, os.path.join(REPO, "tools", "ops-record.py"), "run",
+    # Through tools/ops-spool.py since 2026-08-18, not ops-record directly: a
+    # succeeded probe result is a heartbeat and queues locally for the batch
+    # flusher, so six probe passes an hour stop holding Neon awake; a DOWN
+    # result still goes to the ledger immediately (the spool tries failed
+    # states direct first) because `assess` turns it into an incident. The
+    # explicit timestamps exist because a spooled row is INSERTED up to a
+    # flush interval after it was observed, and without them ops-record would
+    # stamp the row with the flush clock instead of the probe clock.
+    observed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    argv = [py, os.path.join(REPO, "tools", "ops-spool.py"), "run",
             "--kind", "check", "--service", service, "--key", "liveness.probe",
             "--state", "succeeded" if up else "failed",
             "--exit-code", "0" if up else "1",
+            "--started-at", observed, "--ended-at", observed,
             "--source-kind", "collector", "--source-ref", "bin/probe-keepalive.py",
             "--detail", f"[{signal}] {detail}"]
     if not up:
@@ -155,12 +166,14 @@ def main() -> int:
     # ALL OF THEM FAILING IS A DIFFERENT FACT FROM ONE OF THEM FAILING, and the
     # difference decides whether this alarms.
     #
-    # tools/ops-record.py returns 1 both for an unreachable database and for an
-    # absent credential — measured, not assumed — so the exit code alone cannot
-    # tell them apart. What can: three independent records failing on the same
-    # pass is not three coincidences, it is the ledger being out of reach. That
-    # is EX_CONFIG, the same reading bin/nightly.sh and bin/smoke-and-record.sh
-    # give a step that ran, found a credential absent, wrote nothing and said so.
+    # Since the 2026-08-18 spool, a record "fails" here only when the row could
+    # not even be QUEUED locally (tools/ops-spool.py returns nonzero only when
+    # both the direct write and the SQLite spool are out of reach). Three
+    # independent records failing on the same pass is not three coincidences,
+    # it is the recording path itself being broken on this machine. That is
+    # EX_CONFIG, the same reading bin/nightly.sh and bin/smoke-and-record.sh
+    # give a step that ran, found a setting it needs absent, wrote nothing and
+    # said so.
     #
     # Returning 1 here instead would make this probe report FAILED every ten
     # minutes on any Mac whose credential has not loaded, and an alarm that

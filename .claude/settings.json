@@ -19,6 +19,11 @@
             "type": "command",
             "command": "/usr/bin/env python3 \"${HOME}/carr-system/hooks/worktree-self-plumb.py\"",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"${HOME}/carr-system/hooks/machine-converge.py\"",
+            "timeout": 180
           }
         ]
       }

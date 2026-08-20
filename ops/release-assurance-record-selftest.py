@@ -163,6 +163,32 @@ def main() -> int:
           all(field in source for field in (
               "performance_budget_ref", "performance_budget_ms", "recovery_strategy")))
 
+    # 8-10 pin the defect found 2026-08-19: `approve` set state='approved' and
+    # NEVER wrote verifier_actor or verifier_evidence_ref, while migration 0169
+    # requires both for that state. The only writer of those columns was the
+    # `complete` branch, which runs after approval and after the deploy — so
+    # approve could not succeed for ANY release, on any path, and died on a raw
+    # constraint name that told the reader nothing.
+    #
+    # Source assertions rather than a live database, matching how 7 above works
+    # and why: this selftest runs in CI, which must never hold a production
+    # credential, and the columns in question are only observable through a
+    # write nobody should be doing from a test run.
+    candidate_insert = source[source.index("insert into ops.release"):]
+    candidate_insert = candidate_insert[:candidate_insert.index("returning id, release_key")]
+    check("8. the CANDIDATE can collect the verifier, which 0169 says it may",
+          "verifier_actor" in candidate_insert
+          and "verifier_evidence_ref" in candidate_insert)
+
+    approve_block = source[source.index('if args.action == "approve":'):]
+    approve_block = approve_block[:approve_block.index("# read one back")]
+    check("9. APPROVE accepts a verifier, for the ordinary case where the "
+          "verifying run finishes after the candidate was filed",
+          "verifier_actor = coalesce" in approve_block)
+    check("10. approve REFUSES in words rather than leaving it to the constraint",
+          "INDEPENDENT VERIFIER" in approve_block
+          and "cannot independently verify their own" in approve_block)
+
     if FAILURES:
         print(f"release-assurance-record-selftest: {len(FAILURES)} FAILED")
         return 1
