@@ -27,21 +27,28 @@ def main() -> int:
     restore = RESTORE.read_text(encoding="utf-8")
     check("nightly never sources db.env", '. "$HOME/.config/carr/db.env"' not in nightly)
     check("nightly uses a clean child environment", "carr_routine_exec \"$@\"" in nightly)
+    # 5 -> 6 on 2026-08-20: the portability mirror gained a refusal branch. An
+    # exact count rather than a floor, deliberately — the point of this check is
+    # that an admin-capability step CANNOT be added without going through the
+    # helper, and `>=` would let a seventh slip past unrefused.
     check("admin nightly steps refuse through evidence-producing step calls",
-          nightly.count("routine-admin-refusal.sh") == 5)
+          nightly.count("routine-admin-refusal.sh") == 6)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
     check("portability mirror uses only the backup capability",
-          'step "portability mirror' in nightly and 'DATABASE_URL="${CARR_DB_BACKUP_URL:-}"' in nightly)
+          'step "portability mirror' in nightly and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
     check("each backup invocation binds the backup capability explicitly",
-          nightly.count('env CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}" ./bin/backup-dump.sh') == 3)
-    # A missing backup credential must SKIP its step, never kill the chain. On
-    # 2026-08-20 the bare form below aborted nightly.sh under `set -u` before
-    # step() could log a single START line, and cadence, matcher, exports,
-    # corpus push, consumer rebuilds and graph all silently stopped running for
-    # three nights over a credential none of them needed. backup-dump.sh
-    # already exits 78 on an absent URL; only these expansions were unsafe.
-    check("no bare backup-capability expansion can abort the chain under set -u",
-          '"$CARR_DB_BACKUP_URL"' not in nightly)
+          nightly.count('env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh') == 3)
+    # The bare form above is SAFE, and this file is not where that is proved.
+    # nightly.sh defaults CARR_DB_BACKUP_URL once, right after the loader, so
+    # every dereference below it is defined even when the credential was never
+    # provisioned. ops/nightly-capability-skip-selftest.py owns that property
+    # and checks it the only way it can be checked honestly — by running the
+    # shell with the variable genuinely UNSET rather than by reading source.
+    #
+    # #380 briefly asserted the opposite here ("no bare expansion anywhere"),
+    # which pinned an inline-`:-`-at-every-call-site style and would now refuse
+    # the single-default form. A gate that pins a spelling rather than a
+    # property is a gate that blocks the better version of the same fix.
     check("clean child preserves explicit export mode", 'CARR_EXPORT_LIVE="${CARR_EXPORT_LIVE:-}"' in HELPER.read_text(encoding="utf-8"))
     check("scheduled recovery refuses unprovisioned admin capability",
           "CARR_JOB_PAYLOAD" in restore and "routine dispatch refused" in restore)
