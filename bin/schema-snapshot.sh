@@ -73,15 +73,21 @@
 # Usage:
 #   bin/schema-snapshot.sh            # regenerate db/schema.sql from production
 #   bin/schema-snapshot.sh --check    # non-zero if the checked-in file is stale
+#   CARR_SCHEMA_SNAPSHOT_DSN=postgres://127.0.0.1:55434/carr_ci bin/schema-snapshot.sh
+#                                     # regenerate from a disposable loopback DB
 #
-# Needs production access, so it runs on Joe's Mac and never in CI — CI consumes
-# the committed file and cannot reach production by construction.
+# By default this needs production access, so it runs on Joe's Mac and never in
+# CI — CI consumes the committed file and cannot reach production by
+# construction. The explicit local DSN mode exists only for a disposable
+# loopback reconstruction: it refuses any other host before pg_dump or psql
+# receive the URL.
 
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$REPO/db/schema.sql"
 NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"
+LOCAL_DSN_VALIDATOR="$REPO/ops/schema-snapshot-dsn.py"
 
 PG_DUMP=""
 for c in /opt/homebrew/opt/libpq/bin/pg_dump /usr/local/opt/libpq/bin/pg_dump pg_dump; do
@@ -94,14 +100,25 @@ for c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do
   if command -v "$c" >/dev/null 2>&1; then PSQL="$c"; break; fi
 done
 [ -n "$PSQL" ] || { echo "schema-snapshot: no psql found (needed for the grants section)" >&2; exit 69; }
-[ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
 
 CHECK=0
 [ "${1:-}" = "--check" ] && CHECK=1
 
-URL="$("$NEONCTL" connection-string production \
-        --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
-[ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
+if [ -n "${CARR_SCHEMA_SNAPSHOT_DSN:-}" ]; then
+  [ -f "$LOCAL_DSN_VALIDATOR" ] || {
+    echo "schema-snapshot: local DSN validator is missing" >&2; exit 69; }
+  if ! CARR_SCHEMA_SNAPSHOT_DSN="$CARR_SCHEMA_SNAPSHOT_DSN" \
+       python3 "$LOCAL_DSN_VALIDATOR"; then
+    echo "schema-snapshot: CARR_SCHEMA_SNAPSHOT_DSN is not an allowed credential-free loopback URL" >&2
+    exit 64
+  fi
+  URL="$CARR_SCHEMA_SNAPSHOT_DSN"
+else
+  [ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
+  URL="$("$NEONCTL" connection-string production \
+          --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
+  [ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
+fi
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
