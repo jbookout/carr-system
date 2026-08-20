@@ -340,11 +340,45 @@ def main() -> int:
 
     check("--fresh deliberately starts a new Codex thread", fresh_starts_a_new_thread)
 
+    def a_desk_carries_its_own_sandbox_posture():
+        """A seat that cannot bind a socket reports the wrong answer confidently.
+
+        Codex investigated this very bridge and returned a negative — every
+        probe "Operation not permitted" — which was its own workspace-write
+        sandbox, not the machine. The tell was that it could not even take the
+        git index lock to commit on its own branch. A desk that needs to bind
+        or write outside its workspace has to say so at registration, or the
+        seat keeps reporting its cage as a fact about the world.
+        """
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        reg.register("codex-wide", "codex-session", model="m", cwd=str(root),
+                     sandbox="workspace-write", add_dirs=[str(root / "probe")])
+        dispatch.dispatch("codex-wide", "bind something", registry=reg,
+                          results_path=results, env=env)
+        argv = [json.loads(l) for l in argv_log.read_text().splitlines() if l.strip()][-1]
+        assert "-s" in argv and argv[argv.index("-s") + 1] == "workspace-write", argv
+        assert "--add-dir" in argv, argv
+        assert argv[argv.index("--add-dir") + 1] == str(root / "probe"), argv
+
+    check("a desk carries the sandbox posture its work needs",
+          a_desk_carries_its_own_sandbox_posture)
+
+    def default_desks_stay_locked_down():
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        dispatch.dispatch("codex-desk", "ordinary work", registry=reg,
+                          results_path=results, env=env)
+        argv = [json.loads(l) for l in argv_log.read_text().splitlines() if l.strip()][-1]
+        assert "--add-dir" not in argv, argv
+        assert "--dangerously-bypass-approvals-and-sandbox" not in argv, argv
+
+    check("a desk that asked for nothing extra stays as locked down as before",
+          default_desks_stay_locked_down)
+
     # ---- the trail Hermes reads back --------------------------------------
 
     def results_are_ndjson():
         lines = [l for l in results.read_text().splitlines() if l.strip()]
-        assert len(lines) == 5, f"expected one line per dispatch, got {len(lines)}"
+        assert len(lines) == 7, f"expected one line per dispatch, got {len(lines)}"
         rows = [json.loads(l) for l in lines]
         assert rows[0]["desk"] == "claude-desk", rows[0]
         assert rows[0]["kind"] == "claude-session", rows[0]

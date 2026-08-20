@@ -129,6 +129,10 @@ def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> 
             "-C", entry.get("cwd") or str(Path.cwd()),
             "-o", str(last),
         ]
+        if entry.get("sandbox"):
+            argv += ["-s", entry["sandbox"]]
+        for extra in entry.get("add_dirs") or []:
+            argv += ["--add-dir", extra]
         if thread:
             argv.append(thread)
         argv.append(task)
@@ -415,6 +419,11 @@ def main(argv: list[str]) -> int:
     r.add_argument("--socket", default=None)
     r.add_argument("--model", default=None)
     r.add_argument("--cwd", default=None)
+    r.add_argument("--sandbox", default=None,
+                   choices=["read-only", "workspace-write", "danger-full-access"],
+                   help="Codex sandbox for this desk; omit to leave Codex's default")
+    r.add_argument("--add-dir", dest="add_dirs", action="append", default=None,
+                   help="a directory this desk may write outside its workspace (repeatable)")
 
     f = sub.add_parser("forget", help="drop a desk")
     f.add_argument("name")
@@ -461,7 +470,9 @@ def main(argv: list[str]) -> int:
 
         if a.cmd == "register":
             kind = a.kind or ("claude-session" if a.socket else "codex-exec")
-            entry = reg.register(a.name, kind, socket=a.socket, model=a.model, cwd=a.cwd)
+            entry = reg.register(a.name, kind, socket=a.socket, model=a.model, cwd=a.cwd,
+                                 sandbox=getattr(a, "sandbox", None),
+                                 add_dirs=getattr(a, "add_dirs", None))
             print(json.dumps({a.name: entry}, indent=2))
             return 0
 

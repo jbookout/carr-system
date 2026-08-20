@@ -119,6 +119,8 @@ class Registry:
         socket: str | None = None,
         model: str | None = None,
         cwd: str | None = None,
+        sandbox: str | None = None,
+        add_dirs: list[str] | None = None,
     ) -> dict:
         if not NAME_OK.match(name or ""):
             raise DeskError(
@@ -141,6 +143,14 @@ class Registry:
             # thread_id is filled in by the first dispatch and reused after
             entry = {"kind": kind, "model": model, "cwd": str(cwd or Path.cwd()),
                      "thread_id": None}
+            # A seat that cannot bind a socket or write where the work lives
+            # reports its own cage as a fact about the machine. Carrying the
+            # posture on the desk is how a task that genuinely needs more room
+            # gets it WITHOUT every other desk being loosened to match.
+            if sandbox:
+                entry["sandbox"] = sandbox
+            if add_dirs:
+                entry["add_dirs"] = [str(x) for x in add_dirs]
 
         entry["registered_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         data = self._load()
