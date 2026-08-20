@@ -35,15 +35,44 @@
 
 name: CI
 
-# push is main-only: a branch with an open PR already gets a run from the
-# pull_request event, so `branches: ["**"]` made every PR commit run (and email)
-# twice — the concurrency group can't dedupe them because push and pull_request
-# resolve to different refs. Branches without a PR are still covered by the
-# pre-push hook running the same ops/ci.sh.
+# THERE IS NO push TRIGGER, and the reason is measured rather than assumed.
+#
+# It used to run on every push to main, which is the moment AFTER a merge has
+# already landed. That run enforces nothing: the ruleset checks this context on
+# the pull request, so by the time a push-to-main run starts, the merge it would
+# have judged is in. Its only value was telling us main had broken. Over the six
+# days after CI stabilised (2026-08-14 onward) it produced 131 successes, 52
+# CANCELLED, and 1 failure across 184 runs. Two things follow. It caught one real
+# break in six days, and it was already silently reporting nothing 28% of the
+# time, because merges land faster than a four-minute run finishes and the
+# concurrency group below cancels the earlier one. A net with a 28% hole that
+# fires once a week is not the safety net it looks like, and it was costing
+# roughly 20 of the ~45 daily runs.
+#
+# WHAT STILL CATCHES A BROKEN main, on a weekday, within minutes: the
+# pull_request event builds refs/pull/N/merge, which is the PR head merged into
+# CURRENT main. Main's content is inside every PR run. At the ~44 merges a day
+# this repo sees, a broken main turns the next PR red almost immediately — the
+# same way the one 2026-08-18 break surfaced and was fixed 88 minutes later by
+# the next merge.
+#
+# THE SCHEDULE IS THE BACKSTOP FOR QUIET PERIODS ONLY — overnight and weekends,
+# when no PR is opening and nothing else would look. Weekends are not workdays
+# for either partner, so that is exactly the window with no other cover.
+#
+# WHAT WOULD REOPEN THIS: turning on strict_required_status_checks_policy (it is
+# false today, which is why a PR tested against an older main can merge and break
+# it). Strict mode would remove the breakage at its source but forces a re-run of
+# every open PR each time main moves — at 44 merges a day that costs far more
+# than it saves. The cheap ordering is this schedule now, strict mode only if the
+# break rate climbs well above one a week.
 on:
-  push:
-    branches: ["main"]
   pull_request:
+  schedule:
+    # 06:20 UTC daily. Sits after the nightly backup (02:35 UTC) and the 05:10
+    # edge-liveness slot, and before the automerge pilot (08:30 UTC weekdays), so
+    # the pilot has a fresh answer on main before it considers merging anything.
+    - cron: "20 6 * * *"
   workflow_dispatch:
 
 # A second push to the same branch cancels the first. Two runs of the same branch
