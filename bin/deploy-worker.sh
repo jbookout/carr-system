@@ -630,23 +630,86 @@ if [ "$TARGET_ENV" = "production" ]; then
   LIVE_RELEASE_URL="https://api.doctorcre.com/release"
   echo ""
   echo "== postflight: Production release identity =="
-  set +e
-  LIVE_RELEASE_JSON="$(curl --fail --silent --show-error --max-time 30 \
-    "$LIVE_RELEASE_URL" 2>&1)"
-  LIVE_RELEASE_RC=$?
-  set -e
-  if [ "$LIVE_RELEASE_RC" -ne 0 ]; then
-    echo "  Production /release could not be read (curl exit $LIVE_RELEASE_RC)." >&2
+  # THE READ-BACK RETRIES, and that is the whole point of this block. It used to
+  # read /release exactly once, the instant Wrangler returned, and turn anything
+  # it saw into a permanent verdict. A Cloudflare promotion is not globally
+  # consistent the moment the upload command exits, so a single immediate read
+  # can legitimately observe the PREVIOUS identity — and the old code wrote that
+  # observation into the production ledger as state=failed,
+  # failure_class=production_readback_mismatch, then exited 1.
+  #
+  # That is what happened to release.eed.prod.v3 on 2026-08-19 at 23:36:47Z. Joe
+  # had approved it eleven seconds earlier. The deploy recorded a hard failure
+  # while the Worker it had just promoted was serving correctly: read back later
+  # the same night, /release returned the exact identity that deploy expected,
+  # git_sha 7c7e1bd12946 and worker version 8f622345-c4df-4469-9676-dc4425c0cf45,
+  # with 140 verbs. Nothing was wrong with the deploy. The verifier looked too
+  # early, once, and its answer was permanent.
+  #
+  # The cost was not the wrong row alone. ops/last-deployed-verb-count.py takes
+  # its baseline from the newest COMPLETE production row, so a false failure
+  # freezes that baseline: it sat at the 130 verbs of 2026-08-16 while production
+  # served 140, and a later deploy shipping 131 would have passed the guard while
+  # dropping nine live verbs.
+  #
+  # A STABLE mismatch still fails, which is the property worth keeping. Retrying
+  # costs a minute and cannot turn a genuinely wrong identity into a right one —
+  # if the Worker is serving another commit, every attempt sees that commit and
+  # the failed row is recorded exactly as before. This only removes the race.
+  LIVE_READBACK_ATTEMPTS="${CARR_READBACK_ATTEMPTS:-12}"
+  LIVE_READBACK_SLEEP="${CARR_READBACK_SLEEP:-5}"
+  LIVE_RELEASE_OK=0
+  LIVE_RELEASE_ATTEMPT=0
+  while [ "$LIVE_RELEASE_ATTEMPT" -lt "$LIVE_READBACK_ATTEMPTS" ]; do
+    LIVE_RELEASE_ATTEMPT=$((LIVE_RELEASE_ATTEMPT + 1))
+    set +e
+    LIVE_RELEASE_JSON="$(curl --fail --silent --show-error --max-time 30 \
+      "$LIVE_RELEASE_URL" 2>&1)"
+    LIVE_RELEASE_RC=$?
+    set -e
+    if [ "$LIVE_RELEASE_RC" -eq 0 ]; then
+      set +e
+      printf '%s' "$LIVE_RELEASE_JSON" | \
+        "$PY" "$REPO/ops/verify-worker-release.py" \
+          --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
+          --provider-version-id "$PROVIDER_VERSION_ID" >/dev/null 2>&1
+      LIVE_VERIFY_RC=$?
+      set -e
+      if [ "$LIVE_VERIFY_RC" -eq 0 ]; then
+        LIVE_RELEASE_OK=1
+        break
+      fi
+    fi
+    if [ "$LIVE_RELEASE_ATTEMPT" -lt "$LIVE_READBACK_ATTEMPTS" ]; then
+      echo "  attempt $LIVE_RELEASE_ATTEMPT of $LIVE_READBACK_ATTEMPTS did not yet" \
+           "observe the approved identity; waiting ${LIVE_READBACK_SLEEP}s"
+      sleep "$LIVE_READBACK_SLEEP"
+    fi
+  done
+  if [ "$LIVE_RELEASE_OK" -eq 1 ] && [ "$LIVE_RELEASE_ATTEMPT" -gt 1 ]; then
+    echo "  read-back settled on attempt $LIVE_RELEASE_ATTEMPT of $LIVE_READBACK_ATTEMPTS"
+  fi
+  if [ "$LIVE_RELEASE_OK" -ne 1 ] && [ "$LIVE_RELEASE_RC" -ne 0 ]; then
+    echo "  Production /release could not be read after $LIVE_RELEASE_ATTEMPT attempt(s)" \
+         "(curl exit $LIVE_RELEASE_RC)." >&2
     DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#unavailable"
     DEPLOYMENT_FAILURE_CLASS="production_readback_unavailable"
     record_deployment verifying "$CARR_CORRELATION_ID"
     exit 1
   fi
-  if ! printf '%s' "$LIVE_RELEASE_JSON" | \
+  if [ "$LIVE_RELEASE_OK" -ne 1 ]; then
+    # Re-run the verifier once WITHOUT suppressing it, so the operator sees which
+    # fields disagreed rather than only that something did. The loop above
+    # silenced it because a first attempt that has not settled yet is expected
+    # noise, not a finding.
+    printf '%s' "$LIVE_RELEASE_JSON" | \
       "$PY" "$REPO/ops/verify-worker-release.py" \
         --environment production --sha "$HEAD_SHA" --provider "$PROVIDER" \
-        --provider-version-id "$PROVIDER_VERSION_ID"; then
-    echo "  Production /release is malformed or does not match the approved identity." >&2
+        --provider-version-id "$PROVIDER_VERSION_ID" || true
+    echo "  Production /release is malformed or does not match the approved identity," \
+         "still, after $LIVE_RELEASE_ATTEMPT attempt(s) over" \
+         "$((LIVE_RELEASE_ATTEMPT * LIVE_READBACK_SLEEP))s. This is a settled" \
+         "disagreement, not a propagation race." >&2
     DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#identity-mismatch"
     DEPLOYMENT_FAILURE_CLASS="production_readback_mismatch"
     record_deployment failed "$CARR_CORRELATION_ID"
