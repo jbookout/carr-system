@@ -60,8 +60,21 @@ def main() -> int:
         rows = [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()] if capture.exists() else []
         check("jobs-configured weekly workflow invokes both established programs", completed.returncode == 0 and len(rows) == 2,
               f"rc={completed.returncode} stderr={completed.stderr.strip()!r}")
+        # THE CUTOFF, 2026-08-19: the report directory moved from the vault's
+        # Automation/Learning to the repo's own out/Learning, because both
+        # clauses are pure readers and their reports are renderings of rows that
+        # never left the database. The harness copies the script to root/bin, so
+        # the script's own REPO resolves to root and LEARN_DIR is root/out/Learning.
         check("metrics program retains its registered --apply invocation",
-              bool(rows) and rows[0]["args"] == ["pipelines/pull_placement_metrics.py", "--apply", "--report-dir", str(root / "vault" / "Automation" / "Learning")])
+              bool(rows) and rows[0]["args"] == ["pipelines/pull_placement_metrics.py", "--apply", "--report-dir", str(root / "out" / "Learning")])
+        # AND THE RETIREMENT HOLDS. run_weekly still points CARR_VAULT at a temp
+        # directory, so if anything ever writes a report back into the vault —
+        # including by restoring the old default, which was the real Drive path —
+        # this catches it here instead of in the live vault.
+        check("nothing is written into the vault any more",
+              not (root / "vault").exists(),
+              f"vault dir reappeared: {sorted(p.name for p in (root / 'vault').rglob('*'))[:3]}"
+              if (root / "vault").exists() else "")
         check("children receive only the jobs database credential",
               bool(rows) and all(r["env"].get("CARR_DB_JOBS_URL") == "postgresql://carr_jobs:file-only@db/carr"  # ci-secret-scan: allow — selftest fixture
               and not any(key in r["env"] for key in ("DATABASE_URL", "CARR_DB_WRITER_URL", "CARR_DB_OWNER_URL", "CARR_DB_CADENCE_URL", "CARR_IMPORT_DB_URL")) for r in rows))
