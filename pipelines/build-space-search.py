@@ -239,10 +239,18 @@ def agent_line(p):
                 f'({value!r}). Names and firms only — no phone, email, or web address.')
     if not (name or firm):
         return ""
-    who = f"<b>{esc(name)}</b>" if name else ""
-    at = f'{who}, {esc(firm)}' if who and firm else (who or esc(firm))
-    return (f'<p class="agent">Listing agent: {at}. '
-            f'Contact details are in the internal sheet, not here.</p>')
+    # Where only the brokerage is published, "Listing agent: Somers & Company" names a
+    # firm under a person's label. The listing carries the office, so say office.
+    if not name:
+        return f'<p class="agent">Listing office: {esc(firm)}</p>'
+    who = f"<b>{esc(name)}</b>"
+    at = f'{who}, {esc(firm)}' if firm else who
+    # Name and firm, full stop. The line used to end "Contact details are in the
+    # internal sheet, not here", which announced to the client that we were withholding
+    # something — drawing attention to an omission they had no reason to notice and
+    # would never have asked about. (Dell, 2026-08-20.) The withholding itself is
+    # unchanged and still enforced above; it just does not narrate itself on the page.
+    return f'<p class="agent">Listing agent: {at}</p>'
 
 
 def notes_box(p):
