@@ -68,6 +68,18 @@ def build(tmp):
     git(a, "commit", "-qm", "base")
     git(a, "branch", "-M", "main")
     git(a, "push", "-q", "origin", "main")
+    # THE FIXTURE MUST DECLARE ITS DEFAULT BRANCH, NOT INHERIT THE MACHINE'S.
+    # `git init --bare` points the new repository's HEAD at whatever
+    # init.defaultBranch says, which is "main" on this Mac and "master" on a
+    # GitHub runner. Clone B below takes its branch from origin's HEAD, so on
+    # the runner it landed on an unborn "master" while the only real branch was
+    # "main" — leaving B detached. fleet-sync.sh then refused for the RIGHT
+    # reason ("checkout is on 'HEAD', not main") and the dirty-tree assertion
+    # failed against a message about something else entirely. Four cases passed
+    # locally and the same four failed in CI, which is the shape of a test that
+    # is measuring the host rather than the code. Setting HEAD explicitly here
+    # is version-safe where `init -b` is not.
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
 
     b = os.path.join(tmp, "B")
     git(tmp, "clone", "-q", origin, "B")
