@@ -1139,6 +1139,44 @@ async function resolveCampaign(c, ref) {
 // handles that appear in the published log. Measured 2026-08-02: all 89
 // placements carry a non-null external_id and url, and all 89 of each are
 // distinct, so both are usable as keys and neither can silently collide.
+// LinkedIn hands a human a DIFFERENT id than the one we store, and there is no
+// way to convert between them. Blotato reports `postUrl` in the share/ugcPost
+// form (urn:li:share:… / urn:li:ugcPost:…) and that is what `placement.url`
+// holds. Every LinkedIn surface a person can reach — the recent-activity feed,
+// the per-post analytics link, the whole rendered DOM — shows only the ACTIVITY
+// urn. The two ids are minted for the same post milliseconds apart and are not
+// derivable from each other:
+//     2026-08-05  stored ugcPost 7490800344260841472  activity 7490800345598779392
+//     2026-08-03  stored share   7490064185725280256  activity 7490064188413870080
+// Measured 2026-08-19: this stranded four readings in one week, including the
+// best-performing post on any platform, and it would have stranded four or five
+// more every week for as long as it stood.
+//
+// Both ids are Snowflake-shaped, so the high bits ARE the publish time
+// (ms = id >> 22). That gives an exact, checkable bridge rather than a guess.
+// Measured against all four stranded posts on 2026-08-19: each activity urn
+// decoded to within 0.1 SECONDS of a real linkedin placement's live_at, while
+// the next-nearest linkedin placement sat ~170,000 seconds (about two days)
+// away. A ±90s window therefore separates the true match from its nearest rival
+// by more than three orders of magnitude. If that ever stops holding — two
+// LinkedIn posts inside 90 seconds — this REFUSES as ambiguous rather than
+// guessing, which is the same posture as every other handle here.
+const LINKEDIN_ACTIVITY_URN = /urn:li:activity:(\d{6,25})\b/i;
+const LINKEDIN_SNOWFLAKE_EPOCH_SHIFT = 22n;
+const LINKEDIN_MATCH_WINDOW_SECONDS = 90;
+
+export function linkedInActivityPublishedAt(ref) {
+  const m = LINKEDIN_ACTIVITY_URN.exec(ref);
+  if (!m) return null;
+  const ms = BigInt(m[1]) >> LINKEDIN_SNOWFLAKE_EPOCH_SHIFT;
+  const at = new Date(Number(ms));
+  // A decode that lands outside plausible range means the id is not what we
+  // think it is; say nothing rather than match on nonsense.
+  if (!Number.isFinite(at.getTime())) return null;
+  if (at.getUTCFullYear() < 2010 || at.getUTCFullYear() > 2100) return null;
+  return at;
+}
+
 async function resolvePlacement(c, ref) {
   const raw = String(ref || "").trim();
   if (!raw) throw new ToolError({ error: "placement_required" });
@@ -1149,15 +1187,46 @@ async function resolvePlacement(c, ref) {
   if (!rows.length && /^https?:\/\//i.test(raw))
     rows = await by("select * from placement where url = $1", raw);
   if (!rows.length) rows = await by("select * from placement where external_id = $1", raw);
+  if (!rows.length) {
+    const publishedAt = linkedInActivityPublishedAt(raw);
+    if (publishedAt) {
+      rows = (await c.query(
+        "select * from placement where platform = 'linkedin' and live_at is not null " +
+        "and live_at between $1::timestamptz - make_interval(secs => $2) " +
+        "                and $1::timestamptz + make_interval(secs => $2)",
+        [publishedAt.toISOString(), LINKEDIN_MATCH_WINDOW_SECONDS])).rows;
+      if (rows.length === 1) {
+        // Say so out loud. A handle that matched on a derived timestamp rather
+        // than on a stored key is a different kind of certainty, and the caller
+        // recording a number against it should see which one they got.
+        return Object.assign({}, rows[0], {
+          _resolved_by: "linkedin_activity_urn_publish_time",
+          _resolved_note:
+            `matched the linkedin activity urn to placement.live_at within ` +
+            `${LINKEDIN_MATCH_WINDOW_SECONDS}s (LinkedIn never exposes the stored ` +
+            `share/ugcPost urn, so the publish time encoded in the activity id is ` +
+            `the only bridge)`,
+        });
+      }
+      if (rows.length > 1) throw new ToolError({ error: "ambiguous_placement", ref: raw,
+        candidates: rows.map(r => ({ placement_id: r.id, platform: r.platform, url: r.url,
+                                     live_at: r.live_at })),
+        hint: "two or more linkedin placements published within " +
+              `${LINKEDIN_MATCH_WINDOW_SECONDS}s of this activity urn, so the publish ` +
+              "time cannot identify one. Pass the stored post URL or the Blotato id." });
+    }
+  }
   if (rows.length === 1) return rows[0];
   if (rows.length > 1) throw new ToolError({ error: "ambiguous_placement", ref: raw,
     candidates: rows.map(r => ({ placement_id: r.id, platform: r.platform, url: r.url })),
     hint: "this handle resolves to more than one placement — a data fault; surface it" });
   throw new ToolError({ error: "placement_not_found", ref: raw,
-    hint: "pass the live post URL, the Blotato post id, or the placement uuid. Placements " +
-          "are created by pipelines/pull_placement_metrics.py when a post publishes — if " +
-          "the post is live and this fails, the pull has not run since it published. Do NOT " +
-          "invent a placement to hang a number on." });
+    hint: "pass the live post URL, the Blotato post id, or the placement uuid — and for " +
+          "LinkedIn, the activity urn or any URL containing it works too, matched on the " +
+          "publish time encoded in the id. Placements are created by " +
+          "pipelines/pull_placement_metrics.py when a post publishes — if the post is live " +
+          "and this fails, the pull has not run since it published. Do NOT invent a " +
+          "placement to hang a number on." });
 }
 
 async function livePlatformSlugs(c) {
@@ -6632,6 +6701,12 @@ export const TOOLS = {
                outcome: "recorded", source, measured: true,
                metrics_written: landed, metrics_already_present: unchanged,
                piece_marked_measured: !!promoted.rows.length,
+               // Present ONLY when the handle did not match a stored key. The
+               // caller is recording a number against a row identified by a
+               // derived publish time, and that is worth seeing.
+               ...(pl._resolved_by ? { resolved_by: pl._resolved_by,
+                                       resolved_note: pl._resolved_note,
+                                       resolved_url: pl.url } : {}),
                note: unchanged && !landed
                  ? "every kind already had a row at this exact observed_at — nothing changed. " +
                    "Pass the real read time if this was a new pull."
