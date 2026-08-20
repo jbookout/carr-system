@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import time
@@ -46,6 +47,51 @@ def main() -> int:
               marker.replace(',"unknown_count":3',''),
               marker.replace('00000000-0000-0000-0000-000000000000','------------------------------------'),
           )))
+
+    notes_receipt_identity = "job:00000000-0000-0000-0000-000000000001:attempt:1"
+    notes_value = {
+        "attempted_count": 1, "contract": "notes-canary-result.v1", "destination_id": "a" * 64,
+        "duplicate_count": 0, "failed_count": 0, "posted_count": 1, "queued_count": 1,
+        "receipt_identity": notes_receipt_identity,
+        "schema_version": 1, "source_new_count": 1, "source_note_count": 1,
+        "source_digest_kind": "note_id_set_sha256",
+        "source_snapshot_digest": "b" * 64,
+        "source_snapshot_id": "notes-sweep-hourly:00000000-0000-0000-0000-000000000001:attempt:1",
+        "still_queued_count": 0,
+    }
+    notes_marker = "notes-sweep: notes-canary-result " + json.dumps(
+        notes_value, sort_keys=True, separators=(",", ":"))
+    def notes_refuses(text: str, *, identity: str | None = None) -> bool:
+        try:
+            module._notes_canary_aggregate({"stdout_tail": text}, expected_receipt_identity=identity)
+        except RuntimeError:
+            return True
+        return False
+    check("Notes canary parser accepts one canonical leased aggregate",
+          module._notes_canary_aggregate(
+              {"stdout_tail": notes_marker},
+              expected_receipt_identity=notes_receipt_identity)["posted_count"] == 1)
+    check("Notes canary parser rejects duplicate, malformed, extra, noncanonical and mismatched aggregates",
+          all(notes_refuses(value, identity=notes_receipt_identity) for value in (
+              notes_marker + "\n" + notes_marker,
+              "notes-sweep: notes-canary-result {bad-json}",
+              notes_marker.replace('"posted_count":1', '"posted_count":false'),
+              notes_marker.replace('"still_queued_count":0', '"still_queued_count":1'),
+              notes_marker.replace('"source_new_count":1', '"source_new_count":0'),
+              notes_marker.replace('"queued_count":1', '"queued_count":0'),
+              notes_marker.replace('"attempted_count":1', '"attempted_count":2'),
+              notes_marker.replace('"destination_id":"' + "a" * 64 + '"', '"destination_id":"canary-destination"'),
+              notes_marker.replace('"contract":"notes-canary-result.v1",', ''),
+              "notes-sweep: notes-canary-result " + json.dumps(notes_value, separators=(",", ":")),
+              notes_marker.replace('"receipt_identity":"job:00000000-0000-0000-0000-000000000001:attempt:1"',
+                                   '"receipt_identity":"job:00000000-0000-0000-0000-000000000002:attempt:1"'),
+              notes_marker[:-1] + ',"unexpected":true}',
+          )))
+    vacuous_notes = {**notes_value, "source_note_count": 0, "source_new_count": 0,
+                     "queued_count": 0, "attempted_count": 0, "posted_count": 0}
+    check("Notes canary parser refuses a vacuous zero-source or zero-outcome aggregate",
+          notes_refuses("notes-sweep: notes-canary-result " + json.dumps(
+              vacuous_notes, sort_keys=True, separators=(",", ":"))))
 
     heartbeats: list[tuple] = []
 
@@ -213,6 +259,37 @@ def main() -> int:
     check("Calendar canary child inherits no database credential",
           len(poisoned_envs) == 2 and not any(key in poisoned_envs[0] for key in poison)
           and not any(key in poisoned_envs[1] for key in poison))
+
+    notes_workflow = next(item for item in module.load_manifest()["workflows"]
+                          if item["key"] == "notes-sweep-hourly")
+    notes_envs: list[dict[str, str]] = []
+    def notes_run(argv, **kwargs):
+        notes_envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, notes_marker, "")
+    previous_notes_root = os.environ.get("CARR_NOTES_CANARY_ROOT")
+    os.environ["CARR_NOTES_CANARY_ROOT"] = "/poisoned/reusable-ledger"
+    module.subprocess.run = notes_run
+    try:
+        notes_evidence = module._execute_deterministic(
+            notes_workflow, {}, 30, "canary",
+            canary_run_id="00000000-0000-0000-0000-000000000001", canary_attempt=1)
+        try:
+            module._execute_deterministic(notes_workflow, {}, 30, "canary")
+            notes_identity_refused = False
+        except RuntimeError as exc:
+            notes_identity_refused = "requires a leased job and attempt identity" in str(exc)
+    finally:
+        module.subprocess.run = original_run
+        if previous_notes_root is None: os.environ.pop("CARR_NOTES_CANARY_ROOT", None)
+        else: os.environ["CARR_NOTES_CANARY_ROOT"] = previous_notes_root
+    check("Notes canary child receives only a leased identity and attempt-scoped isolated root",
+          notes_evidence["stdout_tail"] == notes_marker and len(notes_envs) == 1
+          and notes_envs[0].get("CARR_NOTES_CANARY_RUN_ID") == "00000000-0000-0000-0000-000000000001"
+          and notes_envs[0].get("CARR_NOTES_CANARY_ATTEMPT") == "1"
+          and notes_envs[0].get("CARR_NOTES_CANARY_ROOT") == str(
+              REPO / "out" / "canary" / "notes-sweep-hourly" / "00000000-0000-0000-0000-000000000001" / "attempt-1"))
+    check("Notes canary refuses to launch without a leased run and attempt identity",
+          notes_identity_refused and len(notes_envs) == 1)
 
     canary_calls: list[list[str]] = []
 
