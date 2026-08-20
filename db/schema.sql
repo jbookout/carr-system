@@ -518,10 +518,11 @@ end $$;
 --
 
 CREATE FUNCTION ops.applicable_rules(p_workflow text DEFAULT NULL::text, p_surface text DEFAULT NULL::text, p_tier text DEFAULT NULL::text) RETURNS TABLE(rule_id uuid, statement text, enforcement_class text, binding_moment text, applicability jsonb)
-    LANGUAGE sql STABLE
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
     AS $$
   select r.id,r.statement,a.enforcement_class,a.binding_moment,a.applicability
-    from rule r join ops.rule_admission a on a.rule_id=r.id
+    from public.rule r join ops.rule_admission a on a.rule_id=r.id
    where r.status='active' and a.state='admitted'
      and (p_workflow is null or not(a.applicability?'workflows')
           or a.applicability->'workflows'?'*' or a.applicability->'workflows'?p_workflow)
@@ -537,7 +538,7 @@ $$;
 -- Name: FUNCTION applicable_rules(p_workflow text, p_surface text, p_tier text); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.applicable_rules(p_workflow text, p_surface text, p_tier text) IS 'The deterministic policy compiler/applicability index: finite tags select admitted active rules; no model performs routing.';
+COMMENT ON FUNCTION ops.applicable_rules(p_workflow text, p_surface text, p_tier text) IS 'Compiles the active admitted rule set for a workflow/surface/tier. SECURITY DEFINER with a pinned search_path (0188): the caller is the worker''s carr_reader role, which is views-only by design and cannot read public.rule or ops.rule_admission directly. Read-only, no dynamic SQL.';
 
 
 --
@@ -10375,6 +10376,48 @@ COMMENT ON COLUMN public.participant_role.side IS 'Which side of the deal this r
 
 
 --
+-- Name: partner_room_turn; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.partner_room_turn (
+    id bigint NOT NULL,
+    room_id text DEFAULT 'partner-line'::text NOT NULL,
+    at timestamp with time zone DEFAULT now() NOT NULL,
+    sponsor text NOT NULL,
+    seat text NOT NULL,
+    kind text DEFAULT 'turn'::text NOT NULL,
+    body text NOT NULL,
+    msg_id uuid NOT NULL,
+    CONSTRAINT partner_room_turn_body_bounds CHECK (((btrim(body) <> ''::text) AND (length(body) <= 20000))),
+    CONSTRAINT partner_room_turn_kind_known CHECK ((kind = ANY (ARRAY['turn'::text, 'system'::text, 'receipt'::text]))),
+    CONSTRAINT partner_room_turn_room_slug CHECK ((room_id ~ '^[a-z0-9][a-z0-9-]{0,31}$'::text)),
+    CONSTRAINT partner_room_turn_seat_slug CHECK ((seat ~ '^[a-z0-9][a-z0-9-]{0,31}$'::text)),
+    CONSTRAINT partner_room_turn_sponsor_known CHECK ((sponsor = ANY (ARRAY['joe'::text, 'dell'::text])))
+);
+
+
+--
+-- Name: TABLE partner_room_turn; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.partner_room_turn IS 'Idea 78 partner room: append-only AI-to-AI turn log served by the Worker. sponsor is server-derived from the verified credential; seat is the claimed brain on that side. Raw text, never a summary. The live wire, not the record — durable outcomes go through decisions/loops.';
+
+
+--
+-- Name: partner_room_turn_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.partner_room_turn ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.partner_room_turn_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: party; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11867,6 +11910,35 @@ CREATE VIEW public.v_control_plane_social_coverage AS
 
 
 --
+-- Name: v_control_plane_social_feature_cells; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_social_feature_cells AS
+ SELECT p.platform,
+    COALESCE((cp.features ->> 'format'::text), 'unknown'::text) AS format,
+    p.id AS placement_id,
+    p.live_at,
+    ( SELECT count(*) AS count
+           FROM public.placement_metric m
+          WHERE (m.placement_id = p.id)) AS metric_rows
+   FROM (public.placement p
+     JOIN public.content_piece cp ON ((cp.id = p.piece_id)));
+
+
+--
+-- Name: v_control_plane_social_measured_pieces; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_social_measured_pieces AS
+ SELECT DISTINCT c.id AS piece_id,
+    c.status,
+    (c.features ->> 'source'::text) AS piece_source
+   FROM ((public.content_piece c
+     JOIN public.placement p ON ((p.piece_id = c.id)))
+     JOIN public.placement_metric m ON ((m.placement_id = p.id)));
+
+
+--
 -- Name: v_control_plane_social_metric_exports; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -11883,6 +11955,19 @@ CREATE VIEW public.v_control_plane_social_metric_exports AS
    FROM (public.v_placement_metric_latest m
      JOIN public.placement p ON ((p.id = m.placement_id)))
   WHERE (p.external_id IS NOT NULL);
+
+
+--
+-- Name: v_control_plane_social_placement_identity; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_control_plane_social_placement_identity AS
+ SELECT id AS placement_id,
+    piece_id,
+    external_id,
+    platform
+   FROM public.placement p
+  WHERE (external_id IS NOT NULL);
 
 
 --
@@ -14621,6 +14706,29 @@ COMMENT ON VIEW public.v_orphaned_role IS 'Role records whose party was merged a
 
 
 --
+-- Name: v_partner_room_turn; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_partner_room_turn AS
+ SELECT id,
+    room_id,
+    at,
+    sponsor,
+    seat,
+    kind,
+    body,
+    msg_id
+   FROM public.partner_room_turn;
+
+
+--
+-- Name: VIEW v_partner_room_turn; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_partner_room_turn IS 'read-room''s read surface: the partner room verbatim, cursor over (room_id, id). carr_reader holds no grant on the table itself.';
+
+
+--
 -- Name: v_party_graph; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -17301,6 +17409,22 @@ ALTER TABLE ONLY public.participant_role
 
 
 --
+-- Name: partner_room_turn partner_room_turn_msg_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.partner_room_turn
+    ADD CONSTRAINT partner_room_turn_msg_id_unique UNIQUE (msg_id);
+
+
+--
+-- Name: partner_room_turn partner_room_turn_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.partner_room_turn
+    ADD CONSTRAINT partner_room_turn_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: party_link_kind party_link_kind_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -18336,6 +18460,13 @@ CREATE INDEX negotiation_claim_type_idx ON public.negotiation_claim USING btree 
 --
 
 CREATE UNIQUE INDEX one_open_next_action_per_owner ON public.next_action USING btree (subject_type, subject_id, owner_id) WHERE (status = 'open'::text);
+
+
+--
+-- Name: partner_room_turn_room_cursor; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX partner_room_turn_room_cursor ON public.partner_room_turn USING btree (room_id, id);
 
 
 --
@@ -22442,6 +22573,7 @@ grant insert, select, update on table public.negotiation_round to carr_writer;
 grant insert, select on table public.next_action to carr_jobs;
 grant insert, select, update on table public.next_action to carr_writer;
 grant insert, select, update on table public.parcel to carr_writer;
+grant insert, select on table public.partner_room_turn to carr_writer;
 grant insert, select, update on table public.party to carr_writer;
 grant insert, select, update on table public.party_link to carr_writer;
 grant select on table public.party_link_kind to carr_writer;
@@ -22508,7 +22640,10 @@ grant select on table public.v_control_plane_idea_candidates to carr_jobs;
 grant select on table public.v_control_plane_npi_delta to carr_jobs;
 grant select on table public.v_control_plane_radar_candidates to carr_jobs;
 grant select on table public.v_control_plane_social_coverage to carr_jobs;
+grant select on table public.v_control_plane_social_feature_cells to carr_jobs;
+grant select on table public.v_control_plane_social_measured_pieces to carr_jobs;
 grant select on table public.v_control_plane_social_metric_exports to carr_jobs;
+grant select on table public.v_control_plane_social_placement_identity to carr_jobs;
 grant select on table public.v_control_plane_social_sources to carr_jobs;
 grant select on table public.v_correction_sweep_decisions to carr_jobs;
 grant select on table public.v_correction_sweep_defects to carr_jobs;
@@ -22608,6 +22743,8 @@ grant select on table public.v_negotiation_deal to carr_reader;
 grant select on table public.v_negotiation_deal to carr_writer;
 grant select on table public.v_negotiation_position to carr_reader;
 grant select on table public.v_negotiation_position to carr_writer;
+grant select on table public.v_partner_room_turn to carr_reader;
+grant select on table public.v_partner_room_turn to carr_writer;
 grant select on table public.v_party_graph to carr_reader;
 grant select on table public.v_party_graph to carr_writer;
 grant select on table public.v_placement_measurement to carr_exporter;
@@ -22655,11 +22792,13 @@ grant select (id, slug, kind, display_name) on table public.actor to carr_jobs;
 grant select (id, slug) on table public.actor to carr_reader;
 grant select (id, address, city, state, name, sub_type) on table public.building to carr_jobs;
 grant select (id, roster_ref, party_id, status, owner_id) on table public.client to carr_jobs;
+grant select (id) on table public.content_piece to carr_jobs;
 grant select (id, client_id, name) on table public.deal to carr_jobs;
 grant select (deal_id, actor_id, role, to_at) on table public.deal_participant to carr_jobs;
 grant select (id, registry_ref, party_id, est_lease_event, client_id, owner_id) on table public.lead to carr_jobs;
 grant select (slug, side) on table public.participant_role to carr_writer;
 grant select (id, name) on table public.party to carr_jobs;
+grant select (id) on table public.placement to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
@@ -22940,6 +23079,11 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0182_launchd_scheduler_observation_receipt.sql	1d33c6e8304bc917fcd989b90719f8d2074b8290aceef813669fb41638138c6a	2026-08-19 00:16:37.881367+00
 0183_program6_browser_action_challenge.sql	39b74d4933b4766d99ea2df253fb41f411647f6d067f0e9af0e4b206b2505a37	2026-08-19 00:16:38.090526+00
 0184_notes_duplicate_schedule_cutover.sql	638a208035d0ab6b3c2a1ef2a86737a88254576ab8006396fe9e917b3b91b074	2026-08-19 00:16:38.402038+00
+0188_applicable_rules_security_definer.sql	60d0ec6899a78c38aea2289c10301f3677595871b291c0eb306d74796a6a5ebf	2026-08-20 00:17:59.089864+00
+0189_social_pull_collector_views.sql	37463903086d136e453958ee4044011e50a67e0ed4cb75ea896e8c031b72e822	2026-08-20 00:17:59.373399+00
+0190_placement_id_returning_grant.sql	9b87b30a497686f7393aad7b6e3746183370c76ad64e40020f8e397cb59522b8	2026-08-20 00:29:38.28571+00
+0191_learning_feature_cell_view.sql	5d676e49491d5c5cabf4793ea1d6ae8d23074c308d8c0ed7f45c11dff27a4d11	2026-08-20 00:38:59.420452+00
+0192_partner_room.sql	fe681f9dd274b7b9f44b334a3dafbd0778bde41b502c4967c6135b80316790d7	2026-08-20 02:17:59.066682+00
 \.
 
 
@@ -22967,27 +23111,6 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
--- Data for Name: activity_kind; Type: TABLE DATA; Schema: public; Owner: -
---
-
-COPY public.activity_kind (slug, label, is_contact) FROM stdin;
-call	Call	t
-email_out	Email Out	t
-email_in	Email In	t
-meeting	Meeting	t
-tour	Tour	t
-text	Text	t
-counter_sent	Counter Sent	t
-counter_received	Counter Received	t
-loi	LOI	t
-lease_signed	Lease Signed	t
-note	Note	f
-task	Task	f
-analysis	Analysis	f
-\.
-
-
---
 -- Data for Name: actor; Type: TABLE DATA; Schema: public; Owner: -
 --
 
@@ -23005,6 +23128,36 @@ eec6654d-4433-4a93-9b22-61decbd3aa4e	quill-joe-mac	automation	Quill capture rig 
 88c9d50d-1ed0-4cc1-a779-68de9bba4554	claude	automation	Claude Code (sponsored runtime agent, 0095)	\N	t	\N
 63923291-cea4-426f-8a78-d21512e15a45	joe-local	automation	Joe (local)	\N	t	\N
 e6d681d4-ceac-43ed-a830-d86749e64814	hermes-pilot	automation	Hermes Agent (R0 evaluation runtime, Joe-sponsored, additive write grant 2026-08-16)	\N	t	\N
+\.
+
+
+--
+-- Data for Name: guidance_registry; Type: TABLE DATA; Schema: ops; Owner: -
+--
+
+COPY ops.guidance_registry (id, singleton, created_by, created_at) FROM stdin;
+67aa96b6-3cf8-45ce-b73c-6965d36a664c	t	b6c38b27-d006-4fad-9c38-49edf3130a07	2026-08-16 18:19:38.132972+00
+\.
+
+
+--
+-- Data for Name: activity_kind; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.activity_kind (slug, label, is_contact) FROM stdin;
+call	Call	t
+email_out	Email Out	t
+email_in	Email In	t
+meeting	Meeting	t
+tour	Tour	t
+text	Text	t
+counter_sent	Counter Sent	t
+counter_received	Counter Received	t
+loi	LOI	t
+lease_signed	Lease Signed	t
+note	Note	f
+task	Task	f
+analysis	Analysis	f
 \.
 
 
@@ -23215,6 +23368,24 @@ referral	Referral	60
 intro_requested	Intro requested (we asked)	45
 introduced	Introduced (completed)	50
 referred	Referred (business sent)	60
+\.
+
+
+--
+-- Data for Name: retrieval_proposal; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.retrieval_proposal (id, proposal_type, payload, reason, proposer_id, status, reviewer_id, resulting_row_ids, idempotency_key, version, created_at, reviewed_at) FROM stdin;
+b4188a13-123f-4897-bbe0-c45dfcec2602	concept	{"label": "Record layer outage diagnosis", "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair.", "concept_key": "record-layer-outage-diagnosis"}	RET-002 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000001	1	2026-08-16 14:49:59.066172+00	\N
+b9d066b1-c5e3-447b-a12e-fa256ef04965	phrase	{"phrase": "record layer outage diagnosis runbook", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-002", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000002	1	2026-08-16 14:49:59.066172+00	\N
+d26c9779-33fa-4ac1-a49a-304926dd48b9	phrase	{"phrase": "database service unavailable troubleshooting steps", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-002 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000003	1	2026-08-16 14:49:59.066172+00	\N
+d5f92043-e10b-435d-bbaa-ab3d8c393657	phrase	{"phrase": "review cycle after a record layer outage diagnosis", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "record-layer-outage-diagnosis", "min_similarity": 0.35}	RET-AMB-001 explicit outage-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000009	1	2026-08-16 14:49:59.066172+00	\N
+4546a581-b8a5-4a62-8a50-1716a615f8e4	mapping	{"role": "governs", "weight": 1, "rationale": "This current runbook section is the ordered diagnosis procedure.", "concept_key": "record-layer-outage-diagnosis", "section_address": "runbook#diagnosis-checklist-in-order-2-minutes"}	RET-002 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000004	1	2026-08-16 14:49:59.066172+00	\N
+1bd30896-b82b-4444-9f1d-2c6e7b3ecd39	concept	{"label": "Playbook self-improvement review", "definition": "Reviewing operating evidence so the playbook learns from mistakes and improves.", "concept_key": "playbook-self-improvement-review"}	RET-003 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000005	1	2026-08-16 14:49:59.066172+00	\N
+10814895-c50b-49e7-9687-8e76d50416e1	phrase	{"phrase": "playbook self improvement review cycle", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-003", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 exact situation language	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000006	1	2026-08-16 14:49:59.066172+00	\N
+7edd92a9-a803-4bff-a543-bda5a6ef2416	phrase	{"phrase": "how the operating playbook learns from mistakes", "source": "golden_miss", "weight": 0.9, "match_mode": "fts", "source_ref": "RET-PHRASE-002", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-003 approved paraphrase candidate	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000007	1	2026-08-16 14:49:59.066172+00	\N
+b348e3b3-36b8-402a-8834-efe8ae14fe77	phrase	{"phrase": "review cycle after a record layer outage playbook", "source": "golden_miss", "weight": 0.8, "match_mode": "fts", "source_ref": "RET-AMB-001", "concept_key": "playbook-self-improvement-review", "min_similarity": 0.35}	RET-AMB-001 explicit review-side ambiguity evidence	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000010	1	2026-08-16 14:49:59.066172+00	\N
+6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	pending	\N	{}	13500000-0000-4000-8000-000000000008	1	2026-08-16 14:49:59.066172+00	\N
 \.
 
 

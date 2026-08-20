@@ -362,11 +362,35 @@ fi
 #   * client, party, deal, event and every other business table — the point.
 # `actor` (12 rows) IS included: internal actor identities (joe, dell, system,
 # automation) that events carry foreign keys to. Not client data.
+#
+# TWO SEEDED CONFIGURATION TABLES JOINED ON 2026-08-19, on Joe's ruling, and they
+# widen this list's category from "closed vocabulary" to "rows production has
+# that a rebuild silently lacks". Both are data steps inside migrations the
+# ledger has now absorbed, so the migration no longer replays and a database
+# built from this file gets the table and none of its rows — the same aging trap
+# as the roles and the PUBLIC revokes above, one level further in:
+#   * ops.guidance_registry (1 row) — the registry's own header row, created by
+#     0168's `insert into ops.guidance_registry(created_by)`. Without it
+#     guidance-registry-db-gate fails on "expected one row ... where singleton".
+#   * retrieval_proposal (10 rows, all pending) — 0135's own "Seed evidence
+#     only" block, which it says "activate nothing until Joe or Dell approves
+#     the batch". Without them situation-retrieval-db-gate fails on "expected 10
+#     pending seed proposals, found 0".
+# HAND-CHECKED BEFORE ADDING, which is the rule this list lives by: counted on
+# production (exactly 1 and exactly 10, all ten still pending), and every payload
+# read. They are search concepts and phrases about this system's own runbooks —
+# "record layer outage diagnosis", "how the operating playbook learns from
+# mistakes". No client, party, deal, note or event appears in either table.
+#
+# THE LINE THAT STILL HOLDS, so this widening does not become a licence: a table
+# qualifies because someone read its rows and can say what is in them, never
+# because a migration seeded it. "Tables seeded by a migration" would sweep in
+# client, party and event, which the same migrations also insert into.
 VOCAB_TABLES="activity_kind client_status client_type contact_state deal_lane \
 deal_phase deal_type_ref lead_lane lead_stage loop_domain negotiation_claim_type \
 participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
-doctrine_review_policy actor"
+doctrine_review_policy actor retrieval_proposal ops.guidance_registry"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do
