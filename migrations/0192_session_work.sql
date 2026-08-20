@@ -109,5 +109,5 @@ begin
   -- rest of this schema (insert a row, not a migration). The harvest enforces
   -- the known set; a future source adds a new kind without a migration.
 
-  raise notice '0189: session_work created, carr_jobs has insert+update (no delete), carr_reader has select';
+  raise notice '0192: session_work created, carr_jobs has insert+update (no delete), carr_reader has select';
 end $$;
