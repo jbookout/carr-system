@@ -32,7 +32,8 @@ Sources:
   <root>/Automation/lead-board-decisions.json  (optional; the curated decision queue)
   <root>/Automation/renewal-radar.json  (optional; CoStar renewal feed, built by build-renewal-feed.py)
   <root>/Automation/entity-formation-leads.json + pre-entity-watch.json  (optional segment feeds)
-  <root>/Automation/lead-board-template.html   (the shell)
+  generators/lead-board-template.html          (the shell; repo-canonical 2026-08-20,
+                                                vault copy is the cloud-only fallback)
 Writes:
   <root>/Automation/lead-board.html
 Then: update the `the-lead-board` artifact from that file if the desktop app is
@@ -424,7 +425,30 @@ if _payload_to:
               open(_payload_to, "w"), sort_keys=True, default=str)
     print(f"payload -> {_payload_to}  (mode {MODE})")
 
-template = open(os.path.join(AUTO, "lead-board-template.html"), encoding="utf-8").read()
+# ── the shell ────────────────────────────────────────────────────────────────
+# THE REPO COPY IS CANONICAL as of 2026-08-20. This file is hand-authored
+# SOURCE, not a render: the generator reads it and writes lead-board.html from
+# it. It lived only in the vault, tracked by git nowhere, so its only history
+# was Drive's own versioning. That cost a real bug — until 2026-08-09 the
+# board's date classifier hardcoded today as 2026-07-13, so four weeks of leads
+# rendered as future work rather than overdue, and the fix that repaired it had
+# no commit behind it. A source file outside version control cannot be
+# reviewed, diffed, or restored from the repo if the vault copy is damaged.
+#
+# The vault path stays as a FALLBACK rather than being deleted, because the
+# cloud-only copy of this script (see manifest.tsv) runs from the vault with no
+# repo beside it and would otherwise stop building the board entirely. Repo
+# first, vault second, and the vault keeps only the BUILT board once that
+# cloud-only surface is retired on its own gate.
+# Resolved from the REPO ROOT, not from this file's own directory, because the
+# two twins live in different folders (generators/ and shared/) and must find
+# the one shell. In the vault's cloud-only copies this resolves to a path that
+# does not exist, which is exactly what makes the fallback below fire there.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_repo_shell = os.path.join(_repo_root, "generators", "lead-board-template.html")
+_vault_shell = os.path.join(AUTO, "lead-board-template.html")
+_shell = _repo_shell if os.path.exists(_repo_shell) else _vault_shell
+template = open(_shell, encoding="utf-8").read()
 stamp = date.today().strftime("%B %-d, %Y") if hasattr(date.today(),'strftime') else "today"
 
 html = template

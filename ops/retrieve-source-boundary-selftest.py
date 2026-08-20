@@ -203,9 +203,10 @@ try:
           and "tier = 'personal' and personal_to = %s" in review_sql)
     check("social query returns the in-scope canonical row", social[0]["item_id"] == "social-17")
 
-    # Execute the real scheduled shell path in an isolated fake HOME. Normal
-    # failure must write neither a degraded repo brief nor Drive; normal success
-    # writes repo-local today.md only; Drive requires explicit recovery+reason.
+    # Execute the real scheduled shell path in an isolated fake HOME. The
+    # composite today.md surface is retired now that its three sections are
+    # served by record-layer verbs. Failure must not leave a plausible composite,
+    # and neither normal nor recovery mode may resurrect the retired Drive file.
     with tempfile.TemporaryDirectory() as td:
         home = Path(td)
         repo = home / "carr-system"
@@ -240,10 +241,12 @@ exit 0
 
         normal = subprocess.run(["/bin/zsh", str(script)], env=base_env,
                                 text=True, capture_output=True)
-        check("normal scheduled success writes canonical document output", normal.returncode == 0
-              and (repo / "out/brief-pack/today.md").exists())
-        check("normal scheduled success never projects to Drive",
-              not (vault / "00_Context/today.md").exists())
+        check("normal scheduled success leaves canonical component outputs", normal.returncode == 0
+              and all((repo / "out/brief-pack" / name).exists() for name in (
+                  "one-thing.md", "claim-card.md", "renewal-shortlist.md")))
+        check("normal scheduled success never recreates retired today surfaces",
+              not (repo / "out/brief-pack/today.md").exists()
+              and not (vault / "00_Context/today.md").exists())
         normal_calls = (repo / "out/fake-run-calls.log").read_text()
         check("normal scheduler requests only the three consumed canonical-safe sections",
               all(f"brief-pack --quiet --section {section}" in normal_calls
@@ -256,9 +259,10 @@ exit 0
             env={**base_env, "CARR_RECOVERY_REASON": "record layer outage exercise"},
             text=True, capture_output=True,
         )
-        projected = (vault / "00_Context/today.md").read_text()
-        check("Drive projection requires explicit receipted recovery", recovery.returncode == 0
-              and projected.startswith("# RECOVERY NONCANONICAL PROJECTION")
+        check("recovery is receipted without resurrecting retired today surfaces",
+              recovery.returncode == 0
+              and not (repo / "out/brief-pack/today.md").exists()
+              and not (vault / "00_Context/today.md").exists()
               and "RECOVERY brief-pack reason=record layer outage exercise"
                   in (repo / "out/local-briefs.log").read_text())
 finally:
