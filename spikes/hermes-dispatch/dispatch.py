@@ -32,8 +32,11 @@ import argparse
 import json
 import os
 import re
+import shlex
+import signal
 import subprocess
 import sys
+import time
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -219,6 +222,154 @@ def dispatch(
 
 
 # ---------------------------------------------------------------------------
+# putting a desk on the line
+# ---------------------------------------------------------------------------
+
+DESK_STATE = Path(
+    os.environ.get("CARR_HERMES_DESK_STATE", Path.home() / ".config" / "carr" / "desks")
+)
+SOCK_DIR = Path(os.environ.get("CARR_HERMES_SOCK_DIR", "/tmp/cc-socks"))
+BIND_TIMEOUT_S = float(os.environ.get("CARR_HERMES_BIND_TIMEOUT", "90"))
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _read_pid(pid_file: Path) -> int | None:
+    try:
+        return int(pid_file.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def desk_start(
+    name: str,
+    registry: Registry | None = None,
+    state_dir: Path | None = None,
+    sock_dir: Path | None = None,
+    env: dict | None = None,
+    seed: str | None = None,
+) -> dict:
+    """Start a Claude session that STAYS, and register it under `name`.
+
+    TWO THINGS KEEP A DESK STANDING, and leaving out either one produces a
+    session that answers once and dies:
+
+      * streaming input, so the session waits for more turns instead of
+        printing an answer and exiting;
+      * a stdin that never reaches end-of-file. The session is handed a FIFO
+        it opens read-write and holds both ends of, which is what makes it
+        un-EOF-able — a pipe from the launcher would close the moment this
+        command returned, and the desk would go down with it.
+
+    The first version of the live test in this package passed exactly once,
+    by delivering its turn into the closing window of a session already on its
+    way out. That is the failure this function exists to make impossible.
+    """
+    registry = registry or Registry()
+    state_dir = Path(state_dir or DESK_STATE)
+    sock_dir = Path(sock_dir or SOCK_DIR)
+
+    if not desks.NAME_OK.match(name or ""):
+        raise DeskError("bad_name", f"{name!r} is not a desk name")
+    sock = sock_dir / f"{name}.sock"
+    # a desk named 12345 would bind 12345.sock, which is indistinguishable
+    # from an ordinary session's pid socket and refused everywhere else
+    desks.refuse_pid_socket(str(sock))
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    sock_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = state_dir / f"{name}.pid"
+    log = state_dir / f"{name}.log"
+    fifo = state_dir / f"{name}.stdin"
+
+    running = _read_pid(pid_file)
+    if running and _alive(running) and desks.is_live(str(sock)):
+        registry.register(name, "claude-session", socket=str(sock))
+        return {"name": name, "socket": str(sock), "pid": running, "log": str(log),
+                "already_running": True}
+
+    for stale in (sock, fifo):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    os.mkfifo(fifo, 0o600)
+
+    # `exec 3<>fifo` opens BOTH ends in the session itself, so nothing outside
+    # it has to stay alive to keep stdin open.
+    shell = (
+        f"exec 3<>{shlex.quote(str(fifo))}; "
+        f"exec claude --messaging-socket-path {shlex.quote(str(sock))} "
+        f"-p --input-format stream-json --output-format stream-json --verbose "
+        f"<&3 >>{shlex.quote(str(log))} 2>&1"
+    )
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", shell],
+        env=env or os.environ.copy(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,          # outlives the shell that started it
+    )
+    pid_file.write_text(f"{proc.pid}\n")
+
+    deadline = time.monotonic() + BIND_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if desks.is_live(str(sock)):
+            break
+        if not _alive(proc.pid):
+            tail = log.read_text(errors="replace")[-800:] if log.exists() else ""
+            raise DeskError("desk_failed_to_start",
+                            f"the session exited before binding {sock}. Log tail:\n{tail}")
+        time.sleep(0.2)
+    else:
+        raise DeskError("desk_failed_to_start",
+                        f"nothing bound {sock} within {BIND_TIMEOUT_S:.0f}s")
+
+    registry.register(name, "claude-session", socket=str(sock))
+    if seed:
+        with fifo.open("w") as fh:
+            fh.write(json.dumps(
+                {"type": "user", "message": {"role": "user", "content": seed}}) + "\n")
+
+    return {"name": name, "socket": str(sock), "pid": proc.pid, "log": str(log),
+            "already_running": False}
+
+
+def desk_stop(name: str, state_dir: Path | None = None,
+              sock_dir: Path | None = None) -> dict:
+    """Take a desk down. Safe to run on a desk that is already down."""
+    state_dir = Path(state_dir or DESK_STATE)
+    sock_dir = Path(sock_dir or SOCK_DIR)
+    pid_file = state_dir / f"{name}.pid"
+    pid = _read_pid(pid_file)
+    stopped = False
+    if pid and _alive(pid):
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        stopped = True
+    for gone in (sock_dir / f"{name}.sock", state_dir / f"{name}.stdin", pid_file):
+        try:
+            os.unlink(gone)
+        except FileNotFoundError:
+            pass
+    return {"name": name, "stopped": stopped, "pid": pid}
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -269,6 +420,14 @@ def main(argv: list[str]) -> int:
     f.add_argument("name")
 
     sub.add_parser("desks", help="list registered desks and whether they are live")
+
+    st = sub.add_parser("start", help="put a Claude desk on the line and register it")
+    st.add_argument("name")
+    st.add_argument("--seed", default=None,
+                    help="an opening instruction to hand the desk once it is up")
+
+    sp = sub.add_parser("stop", help="take a desk down")
+    sp.add_argument("name")
     sub.add_parser("where", help="print how to find and name THIS session's socket")
 
     s = sub.add_parser("send", help="dispatch one task to one desk")
@@ -284,6 +443,21 @@ def main(argv: list[str]) -> int:
     try:
         if a.cmd == "where":
             return _cmd_where()
+
+        if a.cmd == "start":
+            out = desk_start(a.name, registry=reg, seed=a.seed)
+            state = "is already on the line" if out["already_running"] else "is on the line"
+            print(f"{a.name} {state} (pid {out['pid']})")
+            print(f"  socket  {out['socket']}")
+            print(f"  log     {out['log']}")
+            print(f'  send    dispatch.py send {a.name} "<task>"')
+            print(f"  stop    dispatch.py stop {a.name}")
+            return 0
+
+        if a.cmd == "stop":
+            out = desk_stop(a.name)
+            print(f"{a.name}: {'stopped' if out['stopped'] else 'was not running'}")
+            return 0
 
         if a.cmd == "register":
             kind = a.kind or ("claude-session" if a.socket else "codex-exec")
