@@ -34,9 +34,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "bin" / "python")
 ART = REPO / "out" / "parity-records"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
 MODES = ("files", "records")
 

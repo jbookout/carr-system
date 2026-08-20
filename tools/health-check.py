@@ -26,8 +26,7 @@ from datetime import datetime, timedelta
 # would have left the render-tamper check dead on any clone outside $HOME.
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-VAULT = os.environ.get("CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
+VAULT = os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
 
 # ── scheduler register (added 2026-08-02) ────────────────────────────────────
 # A TASK THAT HAS NEVER REACHED ITS FIRST WINDOW LOOKS EXACTLY LIKE A TASK THAT IS
@@ -709,6 +708,9 @@ except OSError as _exc:
 # 12 HOURS, because it crosses a night. A session running four or six hours is
 # ordinary here and must not nag; work still loose the next morning is the thing
 # actually worth seeing.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import health_submodule as _health_sub  # noqa: E402
+
 _STALE_H = 12
 # Hours since the NEWEST loose file changed, past which nothing here can be
 # called in-flight. Two, not one: a session can legitimately think, research or
@@ -722,6 +724,19 @@ try:
     else:
         _tracked: list[tuple[float, str]] = []
         _untracked = 0
+        # A VENDORED SUBMODULE THAT CARRIES OUR PATCHES IS PERMANENTLY MODIFIED,
+        # and counting that as loose work is a tripwire nobody can act on.
+        # tools/dictation-rig/vendor/quill sits at a detached HEAD on a third-party
+        # upstream and bin/build-quill.sh applies tracked patches onto it at build
+        # time, so it reads dirty after every build — it had been reported for 283
+        # hours by 2026-08-19 and could never have been committed, because doing so
+        # would make a dangling commit in someone else's repository.
+        #
+        # This is NOT a path allowlist. The dirt is compared against the tracked
+        # patches that are supposed to explain it, so a hand-edit inside the same
+        # submodule still lands on the clock. Proven both ways by
+        # ops/submodule-patch-dirt-selftest.py.
+        _expected_sub: list[str] = []
         for _row in _gs.stdout.splitlines():
             if not _row.strip():
                 continue
@@ -730,11 +745,25 @@ try:
                 _untracked += 1
                 continue
             _full = os.path.join(REPO_ROOT, _gpath.split(" -> ")[-1])
+            if os.path.isdir(_full) and os.path.exists(os.path.join(_full, ".git")):
+                try:
+                    _sub_diff = subprocess.run(
+                        ["git", "diff"], cwd=_full, capture_output=True,
+                        text=True, timeout=20).stdout
+                    if _health_sub.submodule_dirt_is_tracked_patch(
+                            _sub_diff, _health_sub.patches_dir_for(_full)):
+                        _expected_sub.append(_gpath)
+                        continue
+                except (OSError, subprocess.SubprocessError):
+                    pass          # cannot vouch for it -> leave it on the clock
             try:
                 _tracked.append((os.path.getmtime(_full), _gpath))
             except OSError:
                 continue                  # deleted or renamed away; not loose work
         _extra = f" · {_untracked} untracked" if _untracked else ""
+        if _expected_sub:
+            _extra += (f" · {len(_expected_sub)} vendored submodule(s) dirty from their own "
+                       f"tracked patches, which is expected: {', '.join(_expected_sub)}")
         if not _tracked:
             print(f"  OK {'uncommitted work':<22} nothing tracked is loose{_extra}")
         else:
@@ -940,7 +969,16 @@ _probe = r'''
 import sys
 from exporters.targets import TARGETS
 from exporters.common import connect
+from exporters.run_exports import md_renders_retired
 print("REG\t" + "\t".join(sorted(TARGETS)))
+# THE CUTOFF (fired 2026-08-19). A retired .md target stops producing export_run
+# rows entirely, so 26 hours later every one of them reads STALE — 38 amber lines
+# prescribing a re-export of targets the exporter now refuses to write. Emitted as
+# its own class so the row keeps meaning "the nightly chain missed something".
+# Same flag function the exporter gates on: one contract, no second opinion.
+if md_renders_retired():
+    print("RETIRED\t" + "\t".join(sorted(
+        k for k, (rel, _fn) in TARGETS.items() if rel.lower().endswith(".md"))))
 with connect() as c, c.cursor() as cur:
     cur.execute("""select target,
                           coalesce(max(ran_at) filter (where status='ok')::text,''),
@@ -958,14 +996,21 @@ if _ep.returncode != 0:
           f"({_tail[-1] if _tail else 'no stderr'})")
     rc = 1
 else:
-    _registered, _seen, _bad = set(), {}, []
+    _registered, _seen, _bad, _retired = set(), {}, [], set()
     for _line in _ep.stdout.splitlines():
         _c = _line.split("\t")
         if _c[0] == "REG":
             _registered = {x for x in _c[1:] if x}
+        elif _c[0] == "RETIRED":
+            _retired = {x for x in _c[1:] if x}
         elif _c[0] == "ROW" and len(_c) >= 4:
             _seen[_c[1]] = (_c[2], _c[3])
-    _unreg = sorted(k for k in _seen if k not in _registered)
+    _registered -= _retired
+    _unreg = sorted(k for k in _seen if k not in _registered and k not in _retired)
+    if _retired:
+        print(f"  -- RETIRED       {len(_retired)} md render target(s) ended at the "
+              f"2026-08-19 cutoff — the exporter prints RETIRED instead of writing "
+              f"them, so no run row is the correct state rather than a missed chain")
     for _k in _unreg:
         _lastok, _status = _seen[_k]
         print(f"  -- NOT A TARGET  {_k:<26} no such key in exporters.targets.TARGETS "

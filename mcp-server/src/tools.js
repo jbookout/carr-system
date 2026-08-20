@@ -13,6 +13,7 @@ import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
 import { workRequestIntakeTools } from "./work-request-intake.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
+import { partnerRoomTools } from "./partner-room.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 
@@ -1139,6 +1140,44 @@ async function resolveCampaign(c, ref) {
 // handles that appear in the published log. Measured 2026-08-02: all 89
 // placements carry a non-null external_id and url, and all 89 of each are
 // distinct, so both are usable as keys and neither can silently collide.
+// LinkedIn hands a human a DIFFERENT id than the one we store, and there is no
+// way to convert between them. Blotato reports `postUrl` in the share/ugcPost
+// form (urn:li:share:… / urn:li:ugcPost:…) and that is what `placement.url`
+// holds. Every LinkedIn surface a person can reach — the recent-activity feed,
+// the per-post analytics link, the whole rendered DOM — shows only the ACTIVITY
+// urn. The two ids are minted for the same post milliseconds apart and are not
+// derivable from each other:
+//     2026-08-05  stored ugcPost 7490800344260841472  activity 7490800345598779392
+//     2026-08-03  stored share   7490064185725280256  activity 7490064188413870080
+// Measured 2026-08-19: this stranded four readings in one week, including the
+// best-performing post on any platform, and it would have stranded four or five
+// more every week for as long as it stood.
+//
+// Both ids are Snowflake-shaped, so the high bits ARE the publish time
+// (ms = id >> 22). That gives an exact, checkable bridge rather than a guess.
+// Measured against all four stranded posts on 2026-08-19: each activity urn
+// decoded to within 0.1 SECONDS of a real linkedin placement's live_at, while
+// the next-nearest linkedin placement sat ~170,000 seconds (about two days)
+// away. A ±90s window therefore separates the true match from its nearest rival
+// by more than three orders of magnitude. If that ever stops holding — two
+// LinkedIn posts inside 90 seconds — this REFUSES as ambiguous rather than
+// guessing, which is the same posture as every other handle here.
+const LINKEDIN_ACTIVITY_URN = /urn:li:activity:(\d{6,25})\b/i;
+const LINKEDIN_SNOWFLAKE_EPOCH_SHIFT = 22n;
+const LINKEDIN_MATCH_WINDOW_SECONDS = 90;
+
+export function linkedInActivityPublishedAt(ref) {
+  const m = LINKEDIN_ACTIVITY_URN.exec(ref);
+  if (!m) return null;
+  const ms = BigInt(m[1]) >> LINKEDIN_SNOWFLAKE_EPOCH_SHIFT;
+  const at = new Date(Number(ms));
+  // A decode that lands outside plausible range means the id is not what we
+  // think it is; say nothing rather than match on nonsense.
+  if (!Number.isFinite(at.getTime())) return null;
+  if (at.getUTCFullYear() < 2010 || at.getUTCFullYear() > 2100) return null;
+  return at;
+}
+
 async function resolvePlacement(c, ref) {
   const raw = String(ref || "").trim();
   if (!raw) throw new ToolError({ error: "placement_required" });
@@ -1149,15 +1188,46 @@ async function resolvePlacement(c, ref) {
   if (!rows.length && /^https?:\/\//i.test(raw))
     rows = await by("select * from placement where url = $1", raw);
   if (!rows.length) rows = await by("select * from placement where external_id = $1", raw);
+  if (!rows.length) {
+    const publishedAt = linkedInActivityPublishedAt(raw);
+    if (publishedAt) {
+      rows = (await c.query(
+        "select * from placement where platform = 'linkedin' and live_at is not null " +
+        "and live_at between $1::timestamptz - make_interval(secs => $2) " +
+        "                and $1::timestamptz + make_interval(secs => $2)",
+        [publishedAt.toISOString(), LINKEDIN_MATCH_WINDOW_SECONDS])).rows;
+      if (rows.length === 1) {
+        // Say so out loud. A handle that matched on a derived timestamp rather
+        // than on a stored key is a different kind of certainty, and the caller
+        // recording a number against it should see which one they got.
+        return Object.assign({}, rows[0], {
+          _resolved_by: "linkedin_activity_urn_publish_time",
+          _resolved_note:
+            `matched the linkedin activity urn to placement.live_at within ` +
+            `${LINKEDIN_MATCH_WINDOW_SECONDS}s (LinkedIn never exposes the stored ` +
+            `share/ugcPost urn, so the publish time encoded in the activity id is ` +
+            `the only bridge)`,
+        });
+      }
+      if (rows.length > 1) throw new ToolError({ error: "ambiguous_placement", ref: raw,
+        candidates: rows.map(r => ({ placement_id: r.id, platform: r.platform, url: r.url,
+                                     live_at: r.live_at })),
+        hint: "two or more linkedin placements published within " +
+              `${LINKEDIN_MATCH_WINDOW_SECONDS}s of this activity urn, so the publish ` +
+              "time cannot identify one. Pass the stored post URL or the Blotato id." });
+    }
+  }
   if (rows.length === 1) return rows[0];
   if (rows.length > 1) throw new ToolError({ error: "ambiguous_placement", ref: raw,
     candidates: rows.map(r => ({ placement_id: r.id, platform: r.platform, url: r.url })),
     hint: "this handle resolves to more than one placement — a data fault; surface it" });
   throw new ToolError({ error: "placement_not_found", ref: raw,
-    hint: "pass the live post URL, the Blotato post id, or the placement uuid. Placements " +
-          "are created by pipelines/pull_placement_metrics.py when a post publishes — if " +
-          "the post is live and this fails, the pull has not run since it published. Do NOT " +
-          "invent a placement to hang a number on." });
+    hint: "pass the live post URL, the Blotato post id, or the placement uuid — and for " +
+          "LinkedIn, the activity urn or any URL containing it works too, matched on the " +
+          "publish time encoded in the id. Placements are created by " +
+          "pipelines/pull_placement_metrics.py when a post publishes — if the post is live " +
+          "and this fails, the pull has not run since it published. Do NOT invent a " +
+          "placement to hang a number on." });
 }
 
 async function livePlatformSlugs(c) {
@@ -2546,6 +2616,46 @@ export const TOOLS = {
     description: "Scored, unsuppressed leads (score, lane, est_lease_event, next_action_date). ALL of them surface — qualification is the human's job, never pre-filtered.",
     inputSchema: { type: "object", properties: { limit: { type: "integer", default: 30 } } },
     handler: async (c, _a, args) => ({ leads: (await c.query("select * from v_lead_hot order by score desc nulls last limit $1", [args.limit || 30])).rows }),
+  },
+
+  "claim-card": {
+    write: false,
+    description: "The claimable candidate reservoir: who Joe or Dell could turn into a lead today, nearest lease window first. THE GAP THIS CLOSES, and it is the same one read-loop closed for loops: promote-pool and decline-candidate both refuse without base_version and both tell the caller to 'read the row from v_pool / v_claim_card first' — and nothing in the verb layer could perform that read. The only reader was a generated markdown card in the vault, which the doctrine cutoff retired on 2026-08-19; without this verb the two claim verbs would name a surface that no longer exists. Returns pool_id and base_version on every row, so a promote or decline follows directly with no guess and no version_conflict. SAFE COLUMNS ONLY — the view carries no email, phone or address by construction (has_channel says a channel exists; the human reads the number off the lead record after claiming). Ranked, never filtered: rows whose window has already PASSED are shown with a negative days_to_window rather than dropped, because a passed window is still a live conversation and three of them expired unread the last time this list had no reader. `needs_contact_count` is the tail with no channel at all — research, not calls, counted rather than hidden.",
+    inputSchema: { type: "object", properties: {
+      limit: { type: "integer", default: 5, description: "how many claimable rows to return, nearest window first" },
+      include_needs_contact: { type: "boolean", default: false, description: "also return the rows with no phone or email on file — a research queue, not a call list" },
+    } },
+    handler: async (c, _a, args) => {
+      // SAME ORDERING AS pipelines/brief_pack.py's claim card, deliberately:
+      // dated rows before undated, future windows before passed ones, then
+      // nearest window, then score. Rule a8c55a47 — a manual path and an
+      // automated path that do the same job must be the same code; this is the
+      // closest that gets across two languages, so the clause is copied
+      // verbatim rather than reinvented, and any change belongs in both.
+      const order = `order by (est_lease_event is null),
+                              (days_to_window < 0),
+                              abs(days_to_window) nulls last,
+                              score desc nulls last`;
+      const channel = args.include_needs_contact ? "" : "where has_channel";
+      const rows = (await c.query(
+        `select pool_id, base_version, lane, display_name, org_name, vertical,
+                city, county, state, segment, segment_play, score, score_basis,
+                est_lease_event, est_basis, days_to_window, has_channel,
+                needs_contact, dup_tier, dup_ref, dup_basis
+           from v_claim_card ${channel} ${order} limit $1`,
+        [args.limit || 5])).rows;
+      const totals = (await c.query(
+        `select count(*)::int as claimable,
+                count(*) filter (where not has_channel)::int as needs_contact_count
+           from v_claim_card`)).rows[0];
+      return {
+        showing: rows.length,
+        claimable: totals.claimable,
+        needs_contact_count: totals.needs_contact_count,
+        candidates: rows,
+        hint: "promote-pool or decline-candidate with the row's own pool_id and base_version. Every decline shortens this list permanently, which is the only thing that makes it shorter.",
+      };
+    },
   },
 
   "stale-records": {
@@ -6632,6 +6742,12 @@ export const TOOLS = {
                outcome: "recorded", source, measured: true,
                metrics_written: landed, metrics_already_present: unchanged,
                piece_marked_measured: !!promoted.rows.length,
+               // Present ONLY when the handle did not match a stored key. The
+               // caller is recording a number against a row identified by a
+               // derived publish time, and that is worth seeing.
+               ...(pl._resolved_by ? { resolved_by: pl._resolved_by,
+                                       resolved_note: pl._resolved_note,
+                                       resolved_url: pl.url } : {}),
                note: unchanged && !landed
                  ? "every kind already had a row at this exact observed_at — nothing changed. " +
                    "Pass the real read time if this was a new pull."
@@ -7386,6 +7502,48 @@ Object.assign(TOOLS, {
                  inputSchema: TOOLS[n].inputSchema || null })) };
     },
   },
+  "export-email-domains": {
+    description: "The email DOMAINS on record for clients and leads — never the addresses. Aggregated in SQL, so an address cannot leave through this verb even by accident. WHY IT EXISTS (decision 2026-08-19): ops/fetch-allowlist.py builds the egress guard's allowlist from these two views, and on a second machine it was the ONLY thing that needed a direct database connection — the one credential standing between Dell's Mac and needing none at all. This returns strictly less than that connection does (two columns, aggregated, no write, no other view) while keeping every read attributable through the machine door. The guard's POLICY — freemail suffixes, institutional TLDs, hostname shape — deliberately stays in the caller: this verb is a data read and must never become the place that decides what the guard trusts.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (c) => {
+      // Constant identifiers, never caller input — these two names are the
+      // whole surface of this verb and are not parameterisable on purpose.
+      const SOURCES = [["v_export_clients", '"Email"'], ["v_export_leads", '"Email"']];
+      const domains = new Set();
+      // PER-SOURCE, not just the union. The caller reports "N seen, M kept"
+      // for each view, and folding the two together here would cost it that
+      // line — a report that cannot say WHICH book a domain came from is the
+      // kind of small loss that gets noticed only when something is wrong.
+      const by_source = {}, counts = {}, notes = [];
+      for (const [view, col] of SOURCES) {
+        try {
+          const r = await c.query(
+            `select distinct lower(split_part(${col}, '@', 2)) as domain
+               from ${view} where ${col} like '%@%'`);
+          const seen = [];
+          for (const row of r.rows) {
+            const d = String(row.domain || "").trim().replace(/^\.+|\.+$/g, "").toLowerCase();
+            if (!d) continue;
+            seen.push(d);
+            domains.add(d);
+          }
+          by_source[view] = seen.sort();
+          counts[view] = seen.length;
+        } catch (exc) {
+          // One unreadable view must not cost the caller the other one — the
+          // same tolerance ops/fetch-allowlist.py has always had. A skipped
+          // source is REPORTED rather than folded silently into a smaller
+          // answer, because a quietly short allowlist looks exactly like a
+          // correct one and the guard would refuse real client domains.
+          notes.push(`${view}: skipped (${exc && exc.name ? exc.name : "error"})`);
+        }
+      }
+      if (!Object.keys(counts).length)
+        throw new ToolError({ error: "no_export_view_readable", notes,
+          hint: "Neither export view could be read. Treat this as NO ANSWER and keep the previous allowlist — an empty result here is indistinguishable from 'this book has no clients', and writing it out would silently strip every client domain the guard trusts." });
+      return { ok: true, domains: [...domains].sort(), by_source, counts, notes };
+    },
+  },
   "record-defect": {
     write: true,
     description: "File ONE defect: a claim the system made that was not true, with what WAS true beside it. This is the record layer's only RETROSPECTIVE mechanism — every other safeguard here (a hook, a gate, a registry) is prospective and guesses in advance at what will go wrong; this one gets better as failures accumulate. NOT record-finding: a finding is something learned about a client, a commit or a platform, while a defect is something the system itself got wrong. NOT a loop either, and that distinction is the reason this verb exists — a loop is a TO-DO, so it gets closed and disappears, while a defect must ACCUMULATE to be worth anything. The four load-bearing fields are claimed / actual / source_unread / rule_violated, and claimed and actual are both required and must actually differ: a row that does not state a contradiction is a note, not a defect. detected_by is required and closed-vocabulary because it is the most diagnostic field in the table — a log where every row reads 'human' is a log saying the self-checks do not work, and that is only visible if it is counted. FILE ONE THE MOMENT IT IS FOUND, including when the session filing it is the one that erred; a defect caught and not recorded is the failure this whole mechanism exists to stop. Read them back through v_defect and v_defect_class; standing-context surfaces the class counts at session start.",
@@ -7619,3 +7777,7 @@ Object.assign(TOOLS, workRequestIntakeTools({ withEnvelope, writeEvent, ToolErro
 
 // Pure workbook-derived lease economics. No database, model, or write path.
 Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
+
+// The partner room (Idea 78): shared AI-to-AI transcript both Macs poll; raw
+// turns, server-derived attribution, human-watchable. See src/partner-room.js.
+Object.assign(TOOLS, partnerRoomTools({ withEnvelope, ToolError }));

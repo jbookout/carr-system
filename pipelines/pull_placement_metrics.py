@@ -287,7 +287,14 @@ def apply_plan(conn, pieces, placements, metrics):
         raise RuntimeError("actor rows 'joe' and 'automation' must both exist")
     joe, automation = joe[0], automation[0]
 
-    cur.execute("select external_id, id, piece_id from placement where external_id is not null")
+    # THE DEDUP MAP comes from a collector view, not from `placement` itself.
+    # The control plane took carr_jobs off the raw source tables (enforced by
+    # ops/control-plane-db-gate.py, which FAILS the build if this role regains
+    # table-wide select on placement or content_piece). Writes are unaffected —
+    # the role still holds insert and update — so only the reads move. Do not
+    # "fix" a permission error here by re-granting: see migration 0189.
+    cur.execute("select external_id, placement_id, piece_id "
+                "from public.v_control_plane_social_placement_identity")
     existing = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
 
     piece_ids = {}
@@ -373,11 +380,18 @@ def apply_plan(conn, pieces, placements, metrics):
     # Status catches up for pieces whose placements gained metrics on a later run.
     # Scoped to rows THIS pipeline authored (features.source), so a piece created
     # by any other path can never be relabelled by a metrics pull.
+    # The status/source filter and the has-metrics join both live in the
+    # collector view now, for the same reason as the dedup map above. What stays
+    # here is the choice of WHICH source label to act on, so the view stays
+    # generic and this pipeline keeps deciding that it only ever relabels rows it
+    # authored itself. The UPDATE still names content_piece.id in its WHERE,
+    # which Postgres requires select on — 0189 grants that ONE column and asserts
+    # it did not widen into table-wide access.
     cur.execute("""
         update content_piece set status='measured', updated_by=%s
-        where status='live' and features->>'source' = %s and id in (
-          select p.piece_id from placement p
-          join placement_metric m on m.placement_id = p.id)
+        where id in (
+          select piece_id from public.v_control_plane_social_measured_pieces
+          where status='live' and piece_source = %s)
     """, (automation, PIECE_SOURCE))
     promoted = cur.rowcount
 
@@ -534,10 +548,15 @@ def main():
                          "are the FULL source counts, not a delta against what is "
                          "already recorded")
 
-    # [ORDER 19a] The nightly-jobs role holds select/insert/update on exactly the
-    # three tables this pipeline writes, so CARR_DB_JOBS_URL is the credential
-    # this lane is meant to run under. DATABASE_URL (owner) still wins nothing —
-    # it is simply the next name accepted, unchanged for a human at a terminal.
+    # [ORDER 19a] CARR_DB_JOBS_URL is the credential this lane is meant to run
+    # under. DATABASE_URL (owner) still wins nothing — it is simply the next name
+    # accepted, unchanged for a human at a terminal.
+    # AMENDED: this used to say the role holds select/insert/update on the three
+    # tables this pipeline writes. The select half is no longer true and has not
+    # been since the control plane drew its boundary. The role WRITES those three
+    # tables and READS through collector views (migration 0189). If a permission
+    # error ever appears here again, the answer is another projection, never a
+    # restored table grant — ops/control-plane-db-gate.py exists to refuse that.
     url = (os.environ.get("CARR_DB_JOBS_URL")
            or os.environ.get("DATABASE_URL")
            or os.environ.get("CARR_IMPORT_DB_URL"))
@@ -549,7 +568,8 @@ def main():
                 db_state["note"] = "written"
             else:
                 cur = conn.cursor()
-                cur.execute("select external_id from placement where external_id is not null")
+                cur.execute("select external_id "
+                            "from public.v_control_plane_social_placement_identity")
                 have = {r[0] for r in cur.fetchall()}
                 new_pl = [p for p in placements if p["external_id"] not in have]
                 db_state.update(

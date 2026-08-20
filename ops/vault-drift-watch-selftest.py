@@ -56,6 +56,15 @@ VERBOSE = "-v" in sys.argv[1:]
 # races. TMPDIR keeps it in the sandbox's scratch area rather than /tmp.
 SCRATCH_BASE = tempfile.mkdtemp(prefix="vault-drift-watch-selftest-")
 
+# PIN THE CUTOFF FLAG OFF FOR THE WHOLE SUITE. Six cases build a fixture vault
+# whose registry file is DNA/compiled-rules-shared.md, and the production
+# doctrine.md_renders_retired flag went true on 2026-08-19 — which drops every
+# .md registry path out of load_expected_writers() and made those six fail
+# against a live config value they never meant to consult. A test whose result
+# depends on which day production fired a switch is not a test. The retired
+# side of the switch gets its own case below, which sets the variable itself.
+os.environ.setdefault("CARR_MD_RENDERS_RETIRED", "0")
+
 CASES: list[tuple] = []
 
 
@@ -214,6 +223,55 @@ def _(assert_):
             "compiled-rules-shared.md should be classified expected-writer: exporter")
     assert_("UNEXPECTED VAULT MARKDOWN CHANGE" not in out2,
             "no warning block should print when nothing is unexpected")
+
+
+@case("after the cutoff a retired .md render is untracked, and the vault is still watched")
+def _(assert_):
+    # THE CUTOFF. The registry renders were MOVED to _to_delete staging on
+    # purpose. Before this guard the tamper pass reported every staged file as
+    # TAMPER on the next check — a deliberate act read as an attack, and dozens
+    # of lines of noise standing in front of the one real finding this file
+    # exists to surface.
+    #
+    # THE CONTROL CHANGED ON 2026-08-20. It used to be 00_Context/today.md, on
+    # the grounds that bin/local-briefs.sh wrote it rather than the exporter. The
+    # cutoff reached that file too once the claim-card verb shipped and served
+    # the one section no verb could read, so today.md is no longer written and
+    # would be a control that proves nothing. The control is now an ordinary
+    # hand-edited file: retiring renders must not make the watch blind to the
+    # rest of the vault.
+    #
+    # Runs the REAL sequence, in order: renders live and baselined (flag off),
+    # the cutoff fires and stages them, one rebaseline under the new flag, then
+    # every check after that. The first check after a move legitimately reports
+    # the deletion — that is the detector working — so what is asserted here is
+    # the state the cutoff actually leaves behind once rebaselined.
+    d = fresh_dirs("cutoff")
+    retired = {"CARR_MD_RENDERS_RETIRED": "1"}
+    write(d["root"], "DNA/compiled-rules-shared.md", "# rules v1\n")
+    write(d["root"], "someones-notes.md", "draft\n")
+    rc1, _, _ = run(d, mode="--rebaseline")
+    assert_(rc1 == 0, "pre-cutoff rebaseline should exit 0")
+
+    # the cutoff: the render moves to _to_delete staging and the flag goes true
+    os.remove(os.path.join(d["root"], "DNA/compiled-rules-shared.md"))
+    rcb, outb, _ = run(d, mode="--rebaseline", env_overrides=retired)
+    assert_(rcb == 0, f"post-cutoff rebaseline should exit 0, got {rcb}")
+    assert_("compiled-rules-shared.md" not in outb,
+            "a retired .md render should leave the tracked set entirely")
+
+    # Seed the structural manifest first: the very first --check on a fresh
+    # manifest is a SEED RUN that reports everything ADDED and exits 0, so an
+    # edit made before it would be invisible. This cost a wrong result once.
+    rcs, _, _ = run(d, env_overrides=retired)
+    assert_(rcs == 0, f"the seeding check should exit 0, got {rcs}")
+
+    write(d["root"], "someones-notes.md", "draft, hand-edited without logging it\n")
+    rc2, out2, err2 = run(d, env_overrides=retired)
+    assert_("compiled-rules-shared.md" not in out2,
+            f"a retired render must never be reported again\nstderr={err2}")
+    assert_(rc2 == 2 and "UNEXPECTED" in out2 and "someones-notes.md" in out2,
+            f"the watch must still catch an unlogged vault edit after the cutoff, got rc={rc2}")
 
 
 @case("mixed run: one expected + one unexpected change -> exit 2, both reported")

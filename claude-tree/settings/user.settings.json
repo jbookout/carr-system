@@ -22,6 +22,7 @@
   "permissions": {
     "defaultMode": "auto",
     "allow": [
+      "Bash(./.venv/bin/python tools/ops-record.py *)",
       "Bash(git *)",
       "Bash(gh *)",
       "Bash(cd *)",
@@ -192,6 +193,11 @@
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/write-effect-check.py",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/draft-export-gate.py",
+            "timeout": 10
           }
         ]
       },
@@ -336,6 +342,11 @@
           },
           {
             "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/stale-claim-gate.py",
+            "timeout": 20
+          },
+          {
+            "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/loose-work-gate.py"
           },
           {
@@ -358,6 +369,16 @@
             "type": "command",
             "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/gate-integrity.py",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 /Users/booko/carr-system/hooks/chat-lint-carryover.py"
           }
         ]
       }

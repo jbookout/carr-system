@@ -42,9 +42,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from exporters.targets import DOSSIER_DIR, DOSSIER_FILES  # noqa: E402
 
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
 H2 = re.compile(r"^## +(.*)$")
 ISO_DATE = re.compile(r"(20\d\d)-(\d\d)-(\d\d)")

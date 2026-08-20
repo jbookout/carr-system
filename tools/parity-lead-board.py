@@ -37,9 +37,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "bin" / "python")
 ART = REPO / "out" / "parity-lead-board"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
 # Everything the board reads, and nothing it does not. Missing files are fine —
 # the board treats each lane as optional and so does this.

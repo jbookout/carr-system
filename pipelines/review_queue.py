@@ -80,9 +80,7 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "out"
 STORE = OUT / "review-queue"
 DOCUMENTS = OUT / "documents"
-VAULT = Path(os.environ.get(
-    "CARR_VAULT",
-    "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"))
+VAULT = Path(os.environ.get("CARR_VAULT") or "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 
 # The standing enforcement rule's own words, from social-media-workflow.md step 4.
 # Every scheduled batch writes an open-loops row carrying this in its
