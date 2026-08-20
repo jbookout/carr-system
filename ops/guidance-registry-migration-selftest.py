@@ -9,8 +9,8 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIGRATION = os.path.join(REPO, "migrations", "0168_guidance_registry.sql")
-HARDENING_MIGRATION = os.path.join(
-    REPO, "migrations", "0170_guidance_import_lifecycle.sql"
+STANDING_CONTEXT_BOUNDARY_MIGRATION = os.path.join(
+    REPO, "migrations", "0199_guidance_standing_context_boundary.sql"
 )
 
 
@@ -20,8 +20,8 @@ def main() -> int:
         return 1
     sql = open(MIGRATION, encoding="utf-8").read().lower()
     compact = re.sub(r"\s+", " ", sql)
-    hardening_sql = open(HARDENING_MIGRATION, encoding="utf-8").read().lower()
-    hardening_compact = re.sub(r"\s+", " ", hardening_sql)
+    boundary_sql = open(STANDING_CONTEXT_BOUNDARY_MIGRATION, encoding="utf-8").read().lower()
+    boundary_compact = re.sub(r"\s+", " ", boundary_sql)
     checks = {
         "canonical item spine": "create table ops.guidance_item" in compact,
         "append-only revisions": "create table ops.guidance_revision" in compact
@@ -60,10 +60,10 @@ def main() -> int:
         "standing-context projection": "standing_guidance" in compact,
         "coverage gate": "assert_guidance_registry_coverage" in compact,
         "standing corpus excludes intro-politics surface":
-            hardening_compact.count(
+            boundary_compact.count(
                 "coalesce(scope->>'kind','') <> 'intro_politics'"
             ) >= 3
-            and "standing-context active rules" in hardening_compact,
+            and "standing-context active rules" in boundary_compact,
         "guarded activation": "activate_guidance_registry" in compact
             and "between 5 and 10" in compact,
         "human authority lifecycle": "record_guidance_decision" in compact

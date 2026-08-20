@@ -148,22 +148,16 @@ begin
   if not exists (select 1 from ops.guidance_import_batch where id=p_batch_id) then
     raise exception 'unknown guidance import batch %',p_batch_id;
   end if;
-  -- Typed Guidance replaces the standing-context corpus. intro_politics rules
-  -- intentionally render to their own introduction surface and are excluded
-  -- from standing-context counts; importing them here would collapse that
-  -- separate reviewed boundary into the boot registry.
   if exists (
-    (select id from rule
-      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
+    (select id from rule where status='active')
     except
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
   ) or exists (
     (select distinct source_rule_id from ops.guidance_import_entry where batch_id=p_batch_id)
     except
-    (select id from rule
-      where status='active' and coalesce(scope->>'kind','') <> 'intro_politics')
+    (select id from rule where status='active')
   ) then
-    raise exception 'guidance import batch source inventory no longer exactly matches standing-context active rules';
+    raise exception 'guidance import batch source inventory no longer exactly matches active rules';
   end if;
 end $$;
 
@@ -774,8 +768,7 @@ create or replace function ops.assert_guidance_registry_coverage()
 returns table(source_rule_id uuid, issue text)
 language sql stable security definer set search_path=ops,public,pg_temp as $$
   with active_rules as (
-    select id from rule
-     where status='active' and coalesce(scope->>'kind','') <> 'intro_politics'
+    select id from rule where status='active'
   ), primary_counts as (
     select ar.id,
            count(g.*) filter (where g.is_primary) as primary_count
