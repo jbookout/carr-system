@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -95,6 +96,48 @@ def main() -> int:
         else:
             os.environ["CARR_VAULT"] = old
     check("drift policy does not turn poisoned ambient root into a file read", lines == [])
+
+    # The installed command deliberately routes to the repository interpreter:
+    # system Python has no psycopg on this Mac.  The canonical-path fixture below
+    # is non-empty and reaches v_decision_entry through the same query boundary;
+    # it is not a monkeypatched empty-reader acceptance test.
+    hooks_config = (REPO / "ops" / "config" / "hooks.json").read_text()
+    check("installed drift hooks use the fixed repository record interpreter",
+          hooks_config.count("run-record-gate.py drift-") == 2)
+
+    with tempfile.TemporaryDirectory(dir=REPO) as tmp:
+        root = Path(tmp)
+        (root / "psycopg.py").write_text('''
+class Cursor:
+    def __enter__(self): return self
+    def __exit__(self, *_): return False
+    def execute(self, *_): pass
+    def fetchall(self):
+        return [("2026-08-20", "The quokka-indexer lane stays disabled", "Joe approved it", "the cost exceeded value", "chosen state")]
+class Connection:
+    def __enter__(self): return self
+    def __exit__(self, *_): return False
+    def cursor(self): return Cursor()
+def connect(_url): return Connection()
+''')
+        record_env = {**env, "PYTHONPATH": str(root), "CARR_DB_EXPORTER_URL": "synthetic://record",
+                      "HOME": str(root)}
+        record_env.pop("CARR_NONCANONICAL_DECISIONS_PATH", None)
+        claim = ("The quokka-indexer lane is no longer running. It was supposed to fire nightly "
+                 "and the schedule silently reverted, so the index is stale and nothing has been re-pointed.")
+        write = subprocess.run(["/usr/bin/python3", str(REPO / "hooks" / "drift-claim-gate.py")],
+                               input=json.dumps({"tool_name": "mcp__x__record-defect",
+                                                 "tool_input": {"body": claim}}),
+                               text=True, capture_output=True, env=record_env)
+        transcript = root / "transcript.jsonl"
+        transcript.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": claim}]}}) + "\n")
+        assertion = subprocess.run(["/usr/bin/python3", str(REPO / "hooks" / "drift-assertion-gate.py")],
+                                   input=json.dumps({"hook_event_name": "Stop", "transcript_path": str(transcript)}),
+                                   text=True, capture_output=True,
+                                   env={**record_env, "CARR_DRIFT_ASSERTION_STATE": str(root / "state")})
+    check("system Python loads nonempty canonical record context and assertion blocks",
+          write.returncode == 0 and "quokka-indexer" in write.stdout
+          and assertion.returncode == 2 and "quokka-indexer" in assertion.stderr)
 
     if failures:
         print(f"FAIL {len(failures)}: {', '.join(failures)}")
