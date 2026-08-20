@@ -51,6 +51,46 @@ REPO = Path(__file__).resolve().parent.parent
 SHIPPED_STATES = ("complete", "verifying", "rolled_back", "superseded")
 
 
+def load_ops_record():
+    """tools/ops-record.py as a module — THE ONE reader of the ops ledger."""
+    spec = importlib.util.spec_from_file_location(
+        "ops_record", REPO / "tools" / "ops-record.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load tools/ops-record.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def baseline_row(cur, service, environment):
+    """The row bin/deploy-worker.sh's verb-loss guard measures against, with the
+    identity fields alongside the count.
+
+    EXPORTED SO THERE IS ONE DEFINITION OF "BASELINE" (rule a8c55a47). The check
+    in ops/deploy-ledger-vs-live.py has to reason about the very same row this
+    script prints a number from; a second copy of this WHERE clause would be free
+    to drift, and the whole point of that check is that two records disagreeing
+    is the bug. Note `verb_count is not null` is part of the definition, not an
+    incidental filter: a complete row carrying no count is invisible here, which
+    on 2026-08-20 silently held the baseline at 141 while production served 143.
+
+    Returns (verb_count, git_sha, provider_version_id, state, observed_at) or None.
+    """
+    cur.execute(
+        """select d.verb_count, d.git_sha, d.provider_version_id,
+                  d.state, d.observed_at
+             from ops.deployment d
+             join ops.service s on s.id = d.service_id
+            where s.key = %s
+              and d.environment = %s
+              and d.verb_count is not null
+              and d.state = any(%s)
+            order by d.observed_at desc
+            limit 1""",
+        (service, environment, list(SHIPPED_STATES)))
+    return cur.fetchone()
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: last-deployed-verb-count.py <service> <environment>",
@@ -58,15 +98,8 @@ def main() -> int:
         return 64
     service, environment = sys.argv[1], sys.argv[2]
 
-    spec = importlib.util.spec_from_file_location(
-        "ops_record", REPO / "tools" / "ops-record.py")
-    if spec is None or spec.loader is None:
-        print("last-deployed-verb-count: could not load tools/ops-record.py",
-              file=sys.stderr)
-        return 1
-    ops = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(ops)
+        ops = load_ops_record()
     except Exception as exc:
         print(f"last-deployed-verb-count: {exc}", file=sys.stderr)
         return 1
@@ -89,18 +122,7 @@ def main() -> int:
 
     try:
         with conn, conn.cursor() as cur:
-            cur.execute(
-                """select d.verb_count
-                     from ops.deployment d
-                     join ops.service s on s.id = d.service_id
-                    where s.key = %s
-                      and d.environment = %s
-                      and d.verb_count is not null
-                      and d.state = any(%s)
-                    order by d.observed_at desc
-                    limit 1""",
-                (service, environment, list(SHIPPED_STATES)))
-            row = cur.fetchone()
+            row = baseline_row(cur, service, environment)
     except Exception as exc:
         print(f"last-deployed-verb-count: could not read the ledger: {exc}",
               file=sys.stderr)
