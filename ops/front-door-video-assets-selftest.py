@@ -76,6 +76,14 @@ assert calls("Teach a Rule") == [
 ]
 assert "owner Joe" in tile_prompts["New Idea"]
 assert "Owner is derived by the server from the authenticated actor" in tile_prompts["New Prospect"]
+for label in ("New Prospect", "New Vendor"):
+    prompt = tile_prompts[label]
+    assert "find returns role or group refs, not a party_id" in prompt
+    assert "If find returns any live match, stop" in prompt
+    assert "existing-party UUID resolution/intake seam unavailable" in prompt
+    assert "Never pass a find ref as party_id" in prompt
+    assert "Only when find returns no live match" in prompt
+    assert "use that returned party_id" not in prompt
 assert "pending seam: exact installed control contract unavailable" in tile_prompts["Teach a Rule"]
 assert "allocate the next" not in tile_prompts["New Prospect"] and "live sheet" not in tile_prompts["New Vendor"]
 assert "comp-ingress seam as unavailable" in tile_prompts["File a Comp"]
