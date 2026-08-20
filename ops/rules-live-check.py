@@ -87,6 +87,23 @@ def declared_count(path: Path):
 
 
 def main():
+    # THE CUTOFF (fired 2026-08-19). Once the .md renders are retired there is no
+    # "live file" left to be behind the store — the store IS the live surface, read
+    # through standing-context. Left unguarded this row went permanently amber with
+    # "live file missing" for all three audiences and prescribed bin/refresh-rules.sh,
+    # a remedy that now exports nothing: a red light whose fix is a no-op, which is
+    # how a reader learns to skip the row that exists to catch a genuinely dormant
+    # rule. Same flag function the exporter gates on, so the two can never disagree.
+    try:
+        from exporters.run_exports import md_renders_retired
+        if md_renders_retired():
+            print("OK rules live — md renders retired at the cutoff; the store is the "
+                  "live surface and sessions read it through standing-context, so there "
+                  "is no file left to lag it")
+            return 0
+    except Exception:
+        pass          # fail OPEN, same as the exporter: run the file comparison
+
     try:
         conn = connect()
     except SystemExit as e:

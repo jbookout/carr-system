@@ -939,7 +939,16 @@ _probe = r'''
 import sys
 from exporters.targets import TARGETS
 from exporters.common import connect
+from exporters.run_exports import md_renders_retired
 print("REG\t" + "\t".join(sorted(TARGETS)))
+# THE CUTOFF (fired 2026-08-19). A retired .md target stops producing export_run
+# rows entirely, so 26 hours later every one of them reads STALE — 38 amber lines
+# prescribing a re-export of targets the exporter now refuses to write. Emitted as
+# its own class so the row keeps meaning "the nightly chain missed something".
+# Same flag function the exporter gates on: one contract, no second opinion.
+if md_renders_retired():
+    print("RETIRED\t" + "\t".join(sorted(
+        k for k, (rel, _fn) in TARGETS.items() if rel.lower().endswith(".md"))))
 with connect() as c, c.cursor() as cur:
     cur.execute("""select target,
                           coalesce(max(ran_at) filter (where status='ok')::text,''),
@@ -957,14 +966,21 @@ if _ep.returncode != 0:
           f"({_tail[-1] if _tail else 'no stderr'})")
     rc = 1
 else:
-    _registered, _seen, _bad = set(), {}, []
+    _registered, _seen, _bad, _retired = set(), {}, [], set()
     for _line in _ep.stdout.splitlines():
         _c = _line.split("\t")
         if _c[0] == "REG":
             _registered = {x for x in _c[1:] if x}
+        elif _c[0] == "RETIRED":
+            _retired = {x for x in _c[1:] if x}
         elif _c[0] == "ROW" and len(_c) >= 4:
             _seen[_c[1]] = (_c[2], _c[3])
-    _unreg = sorted(k for k in _seen if k not in _registered)
+    _registered -= _retired
+    _unreg = sorted(k for k in _seen if k not in _registered and k not in _retired)
+    if _retired:
+        print(f"  -- RETIRED       {len(_retired)} md render target(s) ended at the "
+              f"2026-08-19 cutoff — the exporter prints RETIRED instead of writing "
+              f"them, so no run row is the correct state rather than a missed chain")
     for _k in _unreg:
         _lastok, _status = _seen[_k]
         print(f"  -- NOT A TARGET  {_k:<26} no such key in exporters.targets.TARGETS "

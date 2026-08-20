@@ -148,7 +148,7 @@ Every command below was verified to exist on 2026-08-02.
 **Generated reports.** Never hand-edit these; `pipelines/learning_jobs.py` writes them. Check the
 `Generated` timestamp inside each against today. Older than eight days means the Wednesday chain
 did not run or did not write.
-`Automation/Learning/placement-pull-latest.md`, `weekly-learning-latest.md`,
+`out/Learning/placement-pull-latest.md`, `weekly-learning-latest.md`,
 `correction-miner-latest.md`, and (monthly, written by the playbook review's STEP 0.5)
 `promotion-review-latest.md`, `conflict-surfacing-latest.md`.
 
