@@ -18,13 +18,21 @@ That flag is a statement of intent. A pid is not.
 
 TWO KINDS SO FAR:
   claude-session   a live labeled Claude Code session, addressed by socket
-  codex-exec       a headless `codex exec` run at a named model and directory
+  codex-session    a standing Codex thread, addressed by its thread id
 
-The kinds differ in one way that matters to Hermes: a claude-session is a
-CONVERSATION that keeps its context between tasks, and a codex-exec is a
-SHOT that starts empty every time. Route work that needs yesterday's context
-to the first; route a self-contained mechanical job to the second, which is
-the cheaper seat.
+BOTH KINDS KEEP THEIR CONTEXT, and that is the whole point. Joe, 2026-08-20:
+"codex should be able to do the same thing as you. It has its own context. I
+use codex equally as I do Claude code." An earlier draft of this file treated
+Codex as a one-shot that started empty every time, which quietly made it the
+lesser seat — fine for a mechanical job, useless for anything with a thread
+running through it. It is not a lesser seat. A codex-session desk remembers
+its thread id and resumes that thread on every later task, so a Codex desk
+picks up where it left off exactly as a Claude desk does.
+
+The kinds differ only in HOW a turn reaches them: a Claude desk is a live
+process listening on a socket, so a turn is delivered to something already
+running. A Codex thread is durable rather than live — it is stored, resumed
+per task, and needs no process sitting idle between turns.
 """
 
 from __future__ import annotations
@@ -41,7 +49,9 @@ NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
 PID_SOCKET = re.compile(r"^\d+\.sock$")
 
-KINDS = ("claude-session", "codex-exec")
+KINDS = ("claude-session", "codex-session")
+# the old name for the Codex kind, before it carried a thread
+KIND_ALIASES = {"codex-exec": "codex-session"}
 
 DEFAULT_REGISTRY = Path(
     os.environ.get(
@@ -116,6 +126,7 @@ class Registry:
                 f"{name!r} is not a desk name — lowercase letters, digits and "
                 f"hyphens, 2 to 41 characters",
             )
+        kind = KIND_ALIASES.get(kind, kind)
         if kind not in KINDS:
             raise DeskError("bad_kind", f"{kind!r} is not one of {', '.join(KINDS)}")
 
@@ -126,8 +137,10 @@ class Registry:
             entry = {"kind": kind, "socket": str(socket)}
         else:
             if not model:
-                raise DeskError("missing_model", "a codex-exec desk needs --model")
-            entry = {"kind": kind, "model": model, "cwd": str(cwd or Path.cwd())}
+                raise DeskError("missing_model", "a codex-session desk needs --model")
+            # thread_id is filled in by the first dispatch and reused after
+            entry = {"kind": kind, "model": model, "cwd": str(cwd or Path.cwd()),
+                     "thread_id": None}
 
         entry["registered_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         data = self._load()
@@ -140,12 +153,27 @@ class Registry:
         if data.get("desks", {}).pop(name, None) is not None:
             self._save(data)
 
+    def remember_thread(self, name: str, thread_id: str) -> None:
+        """Pin a Codex desk to the thread it just spoke in.
+
+        Without this a Codex desk would start empty every task, which is the
+        behaviour Joe rejected: it has its own context and is used as an equal
+        seat, not as a shot.
+        """
+        data = self._load()
+        entry = data.get("desks", {}).get(name)
+        if entry is None or entry.get("thread_id") == thread_id:
+            return
+        entry["thread_id"] = thread_id
+        self._save(data)
+
     def resolve(self, name: str) -> dict:
         entry = self.entries().get(name or "")
         if entry is None:
             known = ", ".join(sorted(self.entries())) or "none registered"
             raise DeskError("unknown_desk", f"no desk named {name!r} (known: {known})")
-        kind = entry.get("kind")
+        kind = KIND_ALIASES.get(entry.get("kind"), entry.get("kind"))
+        entry = {**entry, "kind": kind}
         if kind not in KINDS:
             raise DeskError("bad_kind", f"desk {name!r} has kind {kind!r}")
         if kind == "claude-session":

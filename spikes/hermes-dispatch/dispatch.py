@@ -57,7 +57,7 @@ DEFAULT_RESULTS = Path(
 CODEX_TIMEOUT_S = float(os.environ.get("CARR_HERMES_CODEX_TIMEOUT", "900"))
 
 # Codex prints this on STDOUT and still exits 0, so the exit code lies.
-QUOTA_HINT = re.compile(r"You've hit your usage limit[^\n]*", re.I)
+QUOTA_HINT = re.compile(r"hit your usage limit", re.I)
 RETRY_AT = re.compile(r"try again at ([0-9:]+ ?[AP]M)", re.I)
 
 
@@ -85,17 +85,44 @@ def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
         conn.close()
 
 
-def _to_codex(entry: dict, task: str, env: dict | None) -> dict:
-    """Run one headless codex shot and hand back its last message."""
+def _codex_events(stdout: str) -> list[dict]:
+    """Codex prints one JSON object per line with --json. Ignore the rest."""
+    out = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> dict:
+    """Send one task to a standing Codex thread, resuming it when there is one.
+
+    The thread is what makes this an equal seat rather than a shot: Codex
+    keeps its own context, so a desk that started a new thread every task
+    would throw away everything it had been told. `codex exec resume <id>`
+    carries it, and --json reports the thread id in its first event.
+    """
+    thread = None if fresh else entry.get("thread_id")
     with tempfile.TemporaryDirectory(prefix="hermes-codex-") as tmp:
         last = Path(tmp) / "last-message.txt"
-        argv = [
-            "codex", "exec",
+        argv = ["codex", "exec"]
+        if thread:
+            argv.append("resume")
+        argv += [
+            "--json",
             "-m", entry["model"],
             "-C", entry.get("cwd") or str(Path.cwd()),
             "-o", str(last),
-            task,
         ]
+        if thread:
+            argv.append(thread)
+        argv.append(task)
+
         try:
             # stdin=DEVNULL is load-bearing: `codex exec` reads stdin when it
             # is not a terminal and appends it to the prompt, so an inherited
@@ -110,29 +137,44 @@ def _to_codex(entry: dict, task: str, env: dict | None) -> dict:
             return {"status": "failed", "detail": "codex is not on PATH"}
         except subprocess.TimeoutExpired:
             return {"status": "timed_out", "detail": f"no answer in {CODEX_TIMEOUT_S:.0f}s"}
+
+        events = _codex_events(proc.stdout or "")
+        started = next((e for e in events if e.get("type") == "thread.started"), None)
+        thread_id = (started or {}).get("thread_id") or thread
+        failure = next(
+            (e for e in events if e.get("type") in ("error", "turn.failed")), None
+        )
         result = last.read_text(encoding="utf-8").strip() if last.exists() else ""
-        blob = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+
+        base = {"thread_id": thread_id, "resumed": bool(thread)}
 
         # A seat that is out of credit is not a broken seat, and a router needs
         # to tell those apart: the first means send this task somewhere else
-        # now, the second means stop sending anything here. Codex reports the
-        # first on stdout with exit 0, so returncode alone would call it a win.
-        quota = QUOTA_HINT.search(blob)
-        if quota:
-            return {
-                "status": "quota_exhausted",
-                "detail": quota.group(0).strip(),
-                "retry_after": (RETRY_AT.search(blob) or [None, None])[1]
-                if RETRY_AT.search(blob) else None,
-                "result": result,
-            }
+        # now, the second means stop sending anything here.
+        if failure:
+            msg = failure.get("message") or (failure.get("error") or {}).get("message", "")
+            if QUOTA_HINT.search(msg):
+                at = RETRY_AT.search(msg)
+                return {**base, "status": "quota_exhausted", "detail": msg.strip(),
+                        "retry_after": at.group(1) if at else None, "result": result}
+            return {**base, "status": "failed", "detail": msg.strip()[-500:], "result": result}
+
+        # Belt for the same signal arriving as prose. Codex prints the limit
+        # BOTH as a --json event and as a plain line, and the plain line is
+        # what a future version might keep if the event shape changes.
+        blob = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+        if QUOTA_HINT.search(blob):
+            at = RETRY_AT.search(blob)
+            return {**base, "status": "quota_exhausted",
+                    "detail": (QUOTA_HINT.search(blob) and
+                               blob[blob.lower().index("hit your usage limit"):][:200].strip()),
+                    "retry_after": at.group(1) if at else None, "result": result}
+
         if proc.returncode != 0 or not result:
-            return {
-                "status": "failed",
-                "detail": (proc.stderr or proc.stdout or "").strip()[-500:],
-                "result": result,
-            }
-        return {"status": "completed", "result": result}
+            return {**base, "status": "failed",
+                    "detail": (proc.stderr or proc.stdout or "").strip()[-500:],
+                    "result": result}
+        return {**base, "status": "completed", "result": result}
 
 
 def dispatch(
@@ -141,6 +183,7 @@ def dispatch(
     registry: Registry | None = None,
     results_path: Path | None = None,
     env: dict | None = None,
+    fresh: bool = False,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable."""
     registry = registry or Registry()
@@ -151,7 +194,10 @@ def dispatch(
     if entry["kind"] == "claude-session":
         outcome = _to_claude(entry, task, msg_id)
     else:
-        outcome = _to_codex(entry, task, env)
+        outcome = _to_codex(entry, task, env, fresh=fresh)
+        # pin the desk to its thread so the next task lands in the same one
+        if outcome.get("thread_id"):
+            registry.remember_thread(name, outcome["thread_id"])
 
     row = {
         "msg_id": msg_id,
@@ -209,6 +255,8 @@ def main(argv: list[str]) -> int:
     s = sub.add_parser("send", help="dispatch one task to one desk")
     s.add_argument("name")
     s.add_argument("task")
+    s.add_argument("--fresh", action="store_true",
+                   help="start a new Codex thread instead of resuming the desk's")
 
     a = p.parse_args(argv)
     reg = Registry(a.registry) if a.registry else Registry()
@@ -239,10 +287,13 @@ def main(argv: list[str]) -> int:
                     live = "live" if desks.is_live(e.get("socket", "")) else "not live"
                     print(f"{name:20} claude-session  {e.get('socket')}  [{live}]")
                 else:
-                    print(f"{name:20} codex-exec      {e.get('model')}  in {e.get('cwd')}")
+                    thread = e.get("thread_id")
+                    where = "new thread on first task" if not thread else f"thread {thread}"
+                    print(f"{name:20} codex-session   {e.get('model')}  in {e.get('cwd')}  [{where}]")
             return 0
 
-        row = dispatch(a.name, a.task, registry=reg, results_path=results)
+        row = dispatch(a.name, a.task, registry=reg, results_path=results,
+                       fresh=getattr(a, "fresh", False))
         print(json.dumps(row, indent=2))
         return 0 if row["status"] in ("delivered", "completed") else 1
 

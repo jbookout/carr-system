@@ -7,7 +7,7 @@ delegate to the appropriate model for each task i want to do." Hermes is the
 router; this is the wire it routes over. Two desk kinds so far:
 
   claude-session  a LIVE labeled Claude Code session, addressed by its socket
-  codex-exec      a headless `codex exec` run at a named model and directory
+  codex-session   a standing Codex thread, resumed by id so its context carries
 
 THE REFUSAL THAT MAKES IT SAFE TO RUN ON JOE'S MAC. Every ordinary Claude Code
 session binds /tmp/cc-socks/<pid>.sock, and Joe's real sessions sit in that
@@ -237,18 +237,22 @@ def main() -> int:
     fake = fake_bin / "codex"
     fake.write_text(
         "#!/usr/bin/env python3\n"
-        "import json,sys,os\n"
-        f"open({str(argv_log)!r},'w').write(json.dumps(sys.argv[1:]))\n"
+        "import json,sys\n"
+        "argv=sys.argv[1:]\n"
+        f"open({str(argv_log)!r},'a').write(json.dumps(argv)+chr(10))\n"
+        "resuming = 'resume' in argv[:2]\n"
+        "tid = argv[argv.index('-o')+2] if resuming else 'thread-first-0001'\n"
+        "print(json.dumps({'type':'thread.started','thread_id':tid}))\n"
         "out=None\n"
-        "for i,a in enumerate(sys.argv):\n"
-        "    if a in ('-o','--output-last-message'): out=sys.argv[i+1]\n"
+        "for i,a in enumerate(argv):\n"
+        "    if a in ('-o','--output-last-message'): out=argv[i+1]\n"
         "if out: open(out,'w').write('the cheap model answered')\n"
-        "print('done')\n"
+        "print(json.dumps({'type':'turn.completed'}))\n"
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 
     def dispatch_to_codex():
-        reg.register("codex-desk", "codex-exec", model="gpt-5.1-codex-mini", cwd=str(root))
+        reg.register("codex-desk", "codex-session", model="gpt-5.1-codex-mini", cwd=str(root))
         env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
         out = dispatch.dispatch(
             "codex-desk", "rename the variable", registry=reg,
@@ -256,7 +260,7 @@ def main() -> int:
         )
         assert out["status"] == "completed", out
         assert out["result"] == "the cheap model answered", out
-        argv = json.loads(argv_log.read_text())
+        argv = json.loads(argv_log.read_text().splitlines()[0])
         assert argv[0] == "exec", argv
         assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-5.1-codex-mini", argv
         assert "-C" in argv and argv[argv.index("-C") + 1] == str(root), argv
@@ -269,9 +273,14 @@ def main() -> int:
         broke = fake_bin / "codex-broke"
         broke.write_text(
             "#!/usr/bin/env python3\n"
-            "print(\"ERROR: You've hit your usage limit. Visit "
+            "import json\n"
+            "msg = (\"You've hit your usage limit. Visit "
             "https://chatgpt.com/codex/settings/usage to purchase more credits "
             "or try again at 11:36 PM.\")\n"
+            # the real binary emits BOTH forms; assert against both
+            "print('ERROR: ' + msg)\n"
+            "print(json.dumps({'type':'error','message':msg}))\n"
+            "print(json.dumps({'type':'turn.failed','error':{'message':msg}}))\n"
             "raise SystemExit(0)\n"
         )
         broke.chmod(broke.stat().st_mode | stat.S_IXUSR)
@@ -293,16 +302,55 @@ def main() -> int:
     check("a seat out of credit reports quota_exhausted, not success",
           codex_out_of_credit_is_its_own_status)
 
+    def codex_keeps_its_own_context():
+        """The second task must land in the SAME thread as the first.
+
+        Joe, 2026-08-20: "codex should be able to do the same thing as you. It
+        has its own context." A desk that started a new thread every task would
+        throw away everything it had been told, which makes it a shot rather
+        than a seat.
+        """
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        first = json.loads(reg_path.read_text())["desks"]["codex-desk"]["thread_id"]
+        assert first == "thread-first-0001", f"first dispatch did not pin a thread: {first}"
+
+        out = dispatch.dispatch(
+            "codex-desk", "and now rename the other one", registry=reg,
+            results_path=results, env=env,
+        )
+        assert out["resumed"] is True, out
+        assert out["thread_id"] == first, out
+        argv = [json.loads(l) for l in argv_log.read_text().splitlines() if l.strip()]
+        second = argv[-1]
+        assert second[:2] == ["exec", "resume"], second
+        assert first in second, f"the thread id was not passed to resume: {second}"
+
+    check("a Codex desk resumes its own thread, so its context carries",
+          codex_keeps_its_own_context)
+
+    def fresh_starts_a_new_thread():
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        out = dispatch.dispatch(
+            "codex-desk", "unrelated job", registry=reg, results_path=results,
+            env=env, fresh=True,
+        )
+        assert out["resumed"] is False, out
+        argv = [json.loads(l) for l in argv_log.read_text().splitlines() if l.strip()]
+        assert argv[-1][:2] != ["exec", "resume"], argv[-1]
+
+    check("--fresh deliberately starts a new Codex thread", fresh_starts_a_new_thread)
+
     # ---- the trail Hermes reads back --------------------------------------
 
     def results_are_ndjson():
         lines = [l for l in results.read_text().splitlines() if l.strip()]
-        assert len(lines) == 3, f"expected one line per dispatch, got {len(lines)}"
+        assert len(lines) == 5, f"expected one line per dispatch, got {len(lines)}"
         rows = [json.loads(l) for l in lines]
         assert rows[0]["desk"] == "claude-desk", rows[0]
         assert rows[0]["kind"] == "claude-session", rows[0]
         assert rows[1]["desk"] == "codex-desk", rows[1]
         assert rows[2]["status"] == "quota_exhausted", rows[2]
+        assert rows[3]["resumed"] is True, rows[3]
         for r in rows:
             assert r["task"], r
             assert r["status"], r
