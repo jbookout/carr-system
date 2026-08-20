@@ -17,15 +17,32 @@ scoped to one database and does not expire. Rotation was the remedy, and doing
 it by hand would have meant a password on a command line, which is the same
 class of mistake one step further along.
 
-THE THREE THINGS IT ROTATES
+THE FOUR THINGS IT ROTATES
 
   --role carr_jobs             ALTER ROLE, then rewrite CARR_DB_JOBS_URL
   --role app_exporter_local    ALTER ROLE, then rewrite CARR_DB_EXPORTER_URL
+  --role carr_backup           ALTER ROLE, then rewrite CARR_DB_BACKUP_URL —
+                               and MINT that line if it does not exist yet,
+                               which is the only minting this tool does. See
+                               the MINTABLE block below for why that exception
+                               is one role wide.
   --neon-api-key               mint a new Neon API key, then revoke the old one
 
   --generate makes it non-interactive: a 40-character password from the
   URL-safe alphabet, generated in-process, never shown. Without it the tool
-  prompts twice with hidden input, which is the original behaviour.
+  prompts twice with hidden input, which is the original behaviour. A mint is
+  --generate only: a credential no human ever types should not be one a human
+  chooses.
+
+  --github-secret also sets the BACKUP_DATABASE_URL repo secret, passed on
+  stdin so it never reaches the process table or shell history. Use it for
+  carr_backup every time. bin/backup-dump.sh serves this Mac AND
+  .github/workflows/backup-nightly.yml off that one role (rule a8c55a47), so
+  moving one end alone does not degrade the backup — it breaks the other end
+  silently, on a night nobody is watching.
+
+  DATABASE_URL=<owner> .venv/bin/python tools/rotate-credential.py \
+      --role carr_backup --generate --github-secret
 
 THE PASSWORD IS SWAPPED INTO THE EXISTING URL, NOT REBUILT FROM THE OWNER URL.
 The original tool derived the jobs URL from the owner DSN by substituting the
@@ -57,6 +74,7 @@ import re
 import secrets
 import stat
 import string
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -72,7 +90,46 @@ NEON_ORG = "org-dry-dew-75906281"
 ROLE_ENV = {
     "carr_jobs": "CARR_DB_JOBS_URL",
     "app_exporter_local": "CARR_DB_EXPORTER_URL",
+    "carr_backup": "CARR_DB_BACKUP_URL",
 }
+
+# THE ONE ROLE THIS TOOL MAY MINT A CONNECTION FOR, rather than only rotate.
+#
+# Everywhere else the refusal below stands: an absent env key means somebody
+# should look at why, not that a tool should invent a DSN. carr_backup is the
+# exception for a reason with a date on it. On 2026-08-20 the nightly chain was
+# found dead for three nights because CARR_DB_BACKUP_URL had never existed on
+# this Mac — #288 began requiring it, migration 0119 ships the role with a
+# placeholder password for a human to replace, and nothing in between could
+# produce the line. The gap was not the credential; it was that no path existed
+# to create it, so the only routes left were a hand-built DSN or a break-glass
+# session, and both of those are worse than this.
+#
+# The password still never leaves this process, the human still runs the
+# command, and the control-plane declaration (routine_backup.provisioning =
+# external_human_approval) still holds: this is the tool that approval drives,
+# not a way around it.
+MINTABLE = {"carr_backup"}
+
+# The database is the same one every routine credential already points at, so
+# the host and database name are COPIED from a routine DSN that is known to
+# work rather than typed or derived from the owner. Deriving from the owner is
+# what the header of this file warns against; deriving from a peer is not the
+# same act, because a peer has already proven the host reachable and carries no
+# privilege the new line could inherit.
+#
+# The query string is SET, never inherited. CARR_DB_JOBS_URL carries
+# &channel_binding=require and CARR_DB_EXPORTER_URL does not; copying whichever
+# happened to be present would make the backup credential's connection
+# semantics depend on which peer was read first. sslmode=require is the shape
+# .github/workflows/backup-nightly.yml documents and the shape the cloud backup
+# has been running on since 2026-08-14.
+MINT_SOURCE_KEYS = ("CARR_DB_EXPORTER_URL", "CARR_DB_JOBS_URL")
+MINT_QUERY = "sslmode=require"
+
+# The GitHub repository secret the cloud nightly reads. Same script, same role,
+# same database — see .github/workflows/backup-nightly.yml.
+GITHUB_SECRET = "BACKUP_DATABASE_URL"
 
 # No spaces, quotes, @ / : ? # — every one of them changes how a URL parses.
 ALPHABET = string.ascii_letters + string.digits
@@ -162,7 +219,53 @@ def new_password() -> str:
     return "".join(secrets.choice(ALPHABET) for _ in range(40))
 
 
-def rotate_role(role: str, generate: bool) -> int:
+def mint_url(role: str, env: dict[str, str], password: str) -> str:
+    """Build a first connection string for `role` from a peer routine DSN.
+
+    Host and database are copied from a peer that already connects; user is the
+    new role; the query string is SET to MINT_QUERY rather than inherited. See
+    the MINTABLE block above for why this exists and why it is one role only.
+
+    Returns a URL. Never logs it — the caller verifies it, writes it to a 0600
+    file, and prints only that it did so."""
+    for key in MINT_SOURCE_KEYS:
+        peer = env.get(key)
+        if not peer:
+            continue
+        m = re.match(r"^(?P<scheme>\w+://)[^:/@]+:[^@]*@(?P<host>[^/]+)/(?P<db>[^?]+)", peer)
+        if not m:
+            continue
+        return (f"{m.group('scheme')}{role}:{password}@"
+                f"{m.group('host')}/{m.group('db')}?{MINT_QUERY}")
+    sys.exit(f"rotate-credential: cannot mint {ROLE_ENV[role]} — none of "
+             f"{', '.join(MINT_SOURCE_KEYS)} is present in {ENV_PATH} in "
+             f"scheme://user:pass@host/db form, and this tool copies a host from a "
+             f"peer rather than inventing one.")
+
+
+def set_github_secret(url: str) -> None:
+    """Push the same value to the repo secret the cloud nightly reads.
+
+    BOTH ENDS OR NEITHER. bin/backup-dump.sh serves two callers (rule a8c55a47):
+    this Mac through db.env, and .github/workflows/backup-nightly.yml through
+    this secret. Rotating one and not the other does not degrade the backup — it
+    breaks whichever end was left behind, silently, until a night nobody is
+    watching. On 2026-08-20 the cloud end was the ONLY working backup path, so
+    the end that would have broken was the one actually protecting the data.
+
+    The value goes in on stdin, never on a command line, so it stays out of the
+    process table and out of shell history."""
+    proc = subprocess.run(["gh", "secret", "set", GITHUB_SECRET],
+                          input=url, text=True, capture_output=True)
+    if proc.returncode != 0:
+        sys.exit(f"rotate-credential: db.env IS WRITTEN but `gh secret set {GITHUB_SECRET}` "
+                 f"failed ({proc.stderr.strip()[:200]}). The two ends are now out of step and "
+                 f"the cloud nightly will fail on its next run. Re-run this command to reset "
+                 f"both together.")
+    print(f"  github secret {GITHUB_SECRET}: set (value passed on stdin, never displayed)")
+
+
+def rotate_role(role: str, generate: bool, github_secret: bool = False) -> int:
     import psycopg
     from psycopg import sql
 
@@ -174,9 +277,21 @@ def rotate_role(role: str, generate: bool) -> int:
     env_key = ROLE_ENV[role]
     env = read_env()
     existing = env.get(env_key)
+    minting = False
     if not existing:
-        sys.exit(f"rotate-credential: {env_key} is not in {ENV_PATH} — nothing to rotate. "
-                 f"Add the line first; this tool changes a password, it does not mint a connection.")
+        if role not in MINTABLE:
+            sys.exit(f"rotate-credential: {env_key} is not in {ENV_PATH} — nothing to rotate. "
+                     f"Add the line first; this tool changes a password, it does not mint a "
+                     f"connection.")
+        minting = True
+        if not generate:
+            # A first provision has no old value to preserve compatibility with,
+            # so there is nothing a typed password buys and one thing it costs:
+            # a human-chosen secret for an unattended role, typed twice, at the
+            # keyboard. Generated is strictly better here.
+            sys.exit(f"rotate-credential: {env_key} does not exist yet, so this run would MINT "
+                     f"it. Pass --generate: a credential no human ever needs to type should not "
+                     f"be one a human chooses.")
 
     if generate:
         pw = new_password()
@@ -194,7 +309,9 @@ def rotate_role(role: str, generate: bool) -> int:
             sql.Identifier(role), sql.Literal(pw)))
         conn.commit()
 
-    new_url = swap_password(existing, pw)
+    # Branch on `existing` rather than on the flag: same two cases, but this
+    # form lets a type checker see that swap_password never receives None.
+    new_url = swap_password(existing, pw) if existing else mint_url(role, env, pw)
 
     # PROVE IT BEFORE WRITING IT. If the new credential does not connect, the old
     # line stays in db.env and the only damage is a role whose password no longer
@@ -207,7 +324,20 @@ def rotate_role(role: str, generate: bool) -> int:
                      f"expected {role} — db.env NOT written")
 
     write_env_key(env_key, new_url)
-    print(f"{role}: password rotated · {env_key} rewritten · verified connection as {role}")
+    print(f"{role}: password {'set' if minting else 'rotated'} · {env_key} "
+          f"{'created' if minting else 'rewritten'} · verified connection as {role}")
+
+    if github_secret:
+        set_github_secret(new_url)
+    elif role == "carr_backup":
+        # Not a suggestion. bin/backup-dump.sh runs in both places off the same
+        # role, and the cloud end is the one that kept working through the
+        # 2026-08-20 outage — so the end left behind here is the one currently
+        # protecting the data.
+        print(f"  WARNING: the cloud nightly still holds the OLD password. "
+              f"{GITHUB_SECRET} must be set to match or "
+              f".github/workflows/backup-nightly.yml fails on its next run. "
+              f"Re-run this with --github-secret to set both together.")
     return 0
 
 
@@ -297,6 +427,9 @@ def main() -> int:
     p.add_argument("--neon-api-key", action="store_true")
     p.add_argument("--generate", action="store_true",
                    help="generate the password in-process instead of prompting")
+    p.add_argument("--github-secret", action="store_true",
+                   help=f"also set the {GITHUB_SECRET} repo secret the cloud nightly reads, "
+                        f"so both ends of the same role move together")
     p.add_argument("--label", default="carr-system",
                    help="name for the new Neon API key")
     args = p.parse_args()
@@ -304,7 +437,8 @@ def main() -> int:
     if bool(args.role) == bool(args.neon_api_key):
         p.error("choose exactly one of --role or --neon-api-key")
 
-    return rotate_role(args.role, args.generate) if args.role else rotate_api_key(args.label)
+    return (rotate_role(args.role, args.generate, args.github_secret)
+            if args.role else rotate_api_key(args.label))
 
 
 if __name__ == "__main__":
