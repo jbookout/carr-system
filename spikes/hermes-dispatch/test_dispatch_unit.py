@@ -374,11 +374,29 @@ def main() -> int:
     check("a desk that asked for nothing extra stays as locked down as before",
           default_desks_stay_locked_down)
 
+    def dispatched_codex_fires_its_hooks():
+        """A dispatched seat must behave like a hand-run one.
+
+        Codex runs enabled hooks only where their trust is already persisted,
+        so an invocation without --dangerously-bypass-hook-trust quietly skips
+        hooks a person running the same command would fire. The repo already
+        requires the flag at every other call site and fails any new one that
+        omits it; this dispatcher was a new one that omitted it.
+        """
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        dispatch.dispatch("codex-desk", "hook check", registry=reg,
+                          results_path=results, env=env)
+        argv = [json.loads(l) for l in argv_log.read_text().splitlines() if l.strip()][-1]
+        assert "--dangerously-bypass-hook-trust" in argv, argv
+
+    check("a dispatched Codex run fires its hooks like a hand-run one",
+          dispatched_codex_fires_its_hooks)
+
     # ---- the trail Hermes reads back --------------------------------------
 
     def results_are_ndjson():
         lines = [l for l in results.read_text().splitlines() if l.strip()]
-        assert len(lines) == 7, f"expected one line per dispatch, got {len(lines)}"
+        assert len(lines) == 8, f"expected one line per dispatch, got {len(lines)}"
         rows = [json.loads(l) for l in lines]
         assert rows[0]["desk"] == "claude-desk", rows[0]
         assert rows[0]["kind"] == "claude-session", rows[0]

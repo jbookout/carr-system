@@ -124,6 +124,14 @@ def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> 
         if thread:
             argv.append("resume")
         argv += [
+            # Without this, Codex runs its enabled hooks only if their trust is
+            # already persisted — so a dispatched run silently skips hooks that
+            # a hand-run session would fire, and the two seats stop behaving the
+            # same way. bin/council-lib.sh and pipelines/run_codex_review.py
+            # carry it for the same reason, and ops/codex-hook-smoke-selftest.py
+            # fails any new call site that leaves it out. This was a new site
+            # that left it out.
+            "--dangerously-bypass-hook-trust",
             "--json",
             "-m", entry["model"],
             "-C", entry.get("cwd") or str(Path.cwd()),
