@@ -94,9 +94,13 @@ def main() -> int:
           "Joe and Dell sign-in succeeds" in json.dumps(release)
           and "Joe uncoached cutover evidence; Dell validation is optional and nonblocking" in json.dumps(release))
     continuity = (REPO / "ops/partner-continuity-gate.py").read_text(encoding="utf-8")
+    continuity_contract = read("ops/config/partner-continuity-contract.v1.json")
+    continuity_migration = (REPO / "migrations/0196_partner_continuity_trusted_boundary.sql").read_text(encoding="utf-8")
     check("Dell continuity path remains available while Joe alone retires the legacy surface",
-          'PARTNERS = ("joe", "dell")' in continuity
-          and "joe_retirement_approval" in continuity)
+          continuity_contract.get("partners") == ["joe", "dell"]
+          and continuity_contract.get("retirement", {}).get("authority") == "joe"
+          and "record_partner_continuity_drive_retirement" in continuity_migration
+          and "fixed database projections" in continuity)
 
     return 1 if FAILED else 0
 

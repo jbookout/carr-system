@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "contract_version": 1,
+  "contract_digest": "e01daa45ad5bd4a52550296065a3d43f13871ed5be04832229325c12f3c25d9f",
+  "tenant": {"id": "carr-internal", "canonical_domain": "carr.us"},
+  "partners": ["joe", "dell"],
+  "streams": [
+    "standing_context",
+    "tentative_write_readback",
+    "conflict_undo",
+    "personal_canary_privacy_telemetry",
+    "document_download"
+  ],
+  "window": {
+    "minimum_overlap_seconds": 172800,
+    "minimum_distinct_sessions_per_stream": 3,
+    "maximum_cadence_gap_seconds": 86400
+  },
+  "retirement": {
+    "authority": "joe",
+    "separate_from_continuity": true,
+    "scheduler_receipt_reuse": "forbidden"
+  }
+}
