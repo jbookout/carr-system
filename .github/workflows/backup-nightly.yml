@@ -27,7 +27,7 @@
 # carr_writer/carr_reader/carr_jobs. bin/backup-dump.sh scopes pg_dump to those
 # same schemas; Neon-managed neon_auth is deliberately outside this artifact.
 # A leaked
-# BACKUP_DATABASE_URL secret can produce a read-only copy of the database
+# BACKUP_DATABASE_URL secret can produce a read-only copy of the database # ci-secret-scan: allow — documentation, not a credential
 # and nothing more.
 #
 # PROVISIONING IS DISABLED. Migration 0119 created carr_backup with an

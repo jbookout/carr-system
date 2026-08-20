@@ -76,6 +76,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from typing import NoReturn
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 ENV_PATH = os.path.expanduser("~/.config/carr/db.env")
@@ -338,7 +339,7 @@ def _clear_pending_backup_url() -> None:
         sys.exit("rotate-credential: pending backup state disappeared; refusing to guess")
 
 
-def _backup_mutation_unavailable() -> None:
+def _backup_mutation_unavailable() -> NoReturn:
     """Fail closed: no canonical receipt seam exists for this provider mutation."""
     sys.exit("rotate-credential: carr_backup rotation is disabled: no server-validated immutable "
              "approval-and-metering receipt binds this exact target and credential material")

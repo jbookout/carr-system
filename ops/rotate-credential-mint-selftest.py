@@ -17,7 +17,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("rotate_credential", REPO / "tools" / "rotate-credential.py")
@@ -27,8 +27,8 @@ rc: Any = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(rc)
 
 FAILURES: list[str] = []
-OWNER = "postgresql://owner:ownerpw@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require"
-PEER = "postgresql://carr_jobs:oldpw@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+OWNER = "postgresql://owner:ownerpw@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic fixture
+PEER = "postgresql://carr_jobs:oldpw@ep-x-123.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"  # ci-secret-scan: allow — hermetic fixture
 
 
 def check(label: str, ok: bool) -> None:
@@ -185,16 +185,17 @@ def main() -> int:
     real_run, old_host = rc.subprocess.run, os.environ.get("GH_HOST")
     rc.subprocess.run = lambda argv, **kw: (recorded.update(argv=argv, **kw) or types.SimpleNamespace(returncode=0))
     try:
-        rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")
+        rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")  # ci-secret-scan: allow — hermetic fixture
+        gh_environment = cast(dict[str, str], recorded["env"])
         check("GitHub call pins repository, host, and a bounded timeout",
               recorded["argv"] == ["gh", "secret", "set", "BACKUP_DATABASE_URL", "--repo", "jbookout/carr-system"]
-              and recorded["env"]["GH_HOST"] == "github.com" and recorded["timeout"] == 30)
+              and gh_environment["GH_HOST"] == "github.com" and recorded["timeout"] == 30)
         rc.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("gh", 30))
         check("GitHub timeout is secret-free and resumable", "timed out" in refused(
-            lambda: rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")))
+            lambda: rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")))  # ci-secret-scan: allow — hermetic fixture
         os.environ["GH_HOST"] = "evil.example"
         check("ambient GitHub host redirect is refused", "non-github.com" in refused(
-            lambda: rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")))
+            lambda: rc.set_github_secret("postgresql://carr_backup:NEVERPRINT@host/db?sslmode=require")))  # ci-secret-scan: allow — hermetic fixture
     finally:
         rc.subprocess.run = real_run
         if old_host is None:
