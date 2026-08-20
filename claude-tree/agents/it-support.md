@@ -565,7 +565,7 @@ where you can check them:
   to `00_Context/system-report-card-2026-07-07.md`.
 - The **playbook review** (`playbook-review-monthly`, daily 9:00 inside the 15th to 21st) records
   a playbook-review entry in `00_Context/decision-history.md` for the month. Its STEP 0.5 also
-  writes `Automation/Learning/promotion-review-latest.md` and `conflict-surfacing-latest.md`.
+  writes `out/Learning/promotion-review-latest.md` and `conflict-surfacing-latest.md` in the repo (they left the vault at the 2026-08-19 doctrine cutoff).
 - The **system sweep** (`system-sweep-monthly`, daily 8:30 inside the 15th to 21st, before the
   review) records in the run ledger inside `00_Context/sweep-sop.md`.
 

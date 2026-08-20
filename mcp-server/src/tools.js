@@ -2548,6 +2548,46 @@ export const TOOLS = {
     handler: async (c, _a, args) => ({ leads: (await c.query("select * from v_lead_hot order by score desc nulls last limit $1", [args.limit || 30])).rows }),
   },
 
+  "claim-card": {
+    write: false,
+    description: "The claimable candidate reservoir: who Joe or Dell could turn into a lead today, nearest lease window first. THE GAP THIS CLOSES, and it is the same one read-loop closed for loops: promote-pool and decline-candidate both refuse without base_version and both tell the caller to 'read the row from v_pool / v_claim_card first' — and nothing in the verb layer could perform that read. The only reader was a generated markdown card in the vault, which the doctrine cutoff retired on 2026-08-19; without this verb the two claim verbs would name a surface that no longer exists. Returns pool_id and base_version on every row, so a promote or decline follows directly with no guess and no version_conflict. SAFE COLUMNS ONLY — the view carries no email, phone or address by construction (has_channel says a channel exists; the human reads the number off the lead record after claiming). Ranked, never filtered: rows whose window has already PASSED are shown with a negative days_to_window rather than dropped, because a passed window is still a live conversation and three of them expired unread the last time this list had no reader. `needs_contact_count` is the tail with no channel at all — research, not calls, counted rather than hidden.",
+    inputSchema: { type: "object", properties: {
+      limit: { type: "integer", default: 5, description: "how many claimable rows to return, nearest window first" },
+      include_needs_contact: { type: "boolean", default: false, description: "also return the rows with no phone or email on file — a research queue, not a call list" },
+    } },
+    handler: async (c, _a, args) => {
+      // SAME ORDERING AS pipelines/brief_pack.py's claim card, deliberately:
+      // dated rows before undated, future windows before passed ones, then
+      // nearest window, then score. Rule a8c55a47 — a manual path and an
+      // automated path that do the same job must be the same code; this is the
+      // closest that gets across two languages, so the clause is copied
+      // verbatim rather than reinvented, and any change belongs in both.
+      const order = `order by (est_lease_event is null),
+                              (days_to_window < 0),
+                              abs(days_to_window) nulls last,
+                              score desc nulls last`;
+      const channel = args.include_needs_contact ? "" : "where has_channel";
+      const rows = (await c.query(
+        `select pool_id, base_version, lane, display_name, org_name, vertical,
+                city, county, state, segment, segment_play, score, score_basis,
+                est_lease_event, est_basis, days_to_window, has_channel,
+                needs_contact, dup_tier, dup_ref, dup_basis
+           from v_claim_card ${channel} ${order} limit $1`,
+        [args.limit || 5])).rows;
+      const totals = (await c.query(
+        `select count(*)::int as claimable,
+                count(*) filter (where not has_channel)::int as needs_contact_count
+           from v_claim_card`)).rows[0];
+      return {
+        showing: rows.length,
+        claimable: totals.claimable,
+        needs_contact_count: totals.needs_contact_count,
+        candidates: rows,
+        hint: "promote-pool or decline-candidate with the row's own pool_id and base_version. Every decline shortens this list permanently, which is the only thing that makes it shorter.",
+      };
+    },
+  },
+
   "stale-records": {
     write: false,
     description: "Active deals gone quiet 14+ days, measured on last_touch (see v_last_touch; a deal inherits its client's touch since 0033). Replaces the hand-run staleness sweep. Empty can mean 'nothing stale' OR 'nothing captured' — check v_capture_coverage before trusting a clean result.",

@@ -27,18 +27,33 @@ stamp() { print -r -- "$(date -u +%FT%TZ) cutoff $*" >> "$LOG" }
 # parser — the same single source the write-gate trusts. .md only; xlsx/json/
 # html surfaces survive the cutoff untouched.
 #
-# WHAT THE CUTOFF DELIBERATELY DOES NOT REACH, decided 2026-08-19 when firing it
-# turned up three vault .md files written OUTSIDE the registry, and settled so
-# that no later session "finishes the job" by deleting them:
-#   00_Context/today.md                        bin/local-briefs.sh, weekdays 06:45
-#   Automation/Learning/weekly-learning-latest.md    bin/learning-weekly.sh
-#   Automation/Learning/correction-miner-latest.md   bin/learning-monthly.sh
-# The cutoff ended the DOCTRINE render surface — files a session could read as
-# authoritative and a human could hand-edit into a second source of truth. These
-# three are periodic activity digests, regenerated whole on their own beat,
-# carrying no authority anything reads back. Killing them would remove a working
-# morning habit and replace it with nothing. They stay until someone rules
-# otherwise, and they are named in ops/vault-drift-watch.py's ALWAYS_EXPECTED.
+# THE THREE FILES THIS LIST DOES NOT SEE, and what happened to them. Firing the
+# cutoff on 2026-08-19 turned up three generated .md files written into the vault
+# OUTSIDE the exporter registry, so none of them appears above:
+#
+#   Automation/Learning/*.md      bin/learning-weekly.sh + bin/learning-monthly.sh
+#   00_Context/today.md           bin/local-briefs.sh, weekdays 06:45
+#
+# The first answer written here was that all three stay, on the ground that they
+# are "activity digests, not doctrine." That was wrong, and it was wrong in a
+# self-serving direction: each one is a RENDERING of rows that never left the
+# database, which is the exact test the 37 renders above were retired against.
+# job_corrections says so about itself — "it proposes nothing and writes nothing."
+#
+#   Learning reports — RETIRED with this cutoff. Both jobs now write only to the
+#   repo's out/Learning, which is gitignored, so the personal-tier boundary the
+#   vault placement protected is now structural rather than conventional. The
+#   three agent definitions that read the old paths were re-pointed in the same
+#   commit, and the folder's README moved to pipelines/learning-reports.md.
+#
+#   today.md — RETIRES AS SOON AS THE claim-card VERB IS DEPLOYED, and not one
+#   minute before. Two of its three sections (one-thing, renewal windows) are
+#   already served by today-triage. The third is the claim card, and until the
+#   claim-card verb ships there is NO reader for v_claim_card in the verb layer —
+#   promote-pool and decline-candidate both tell the caller to read that view
+#   first, so removing the file early would leave both verbs naming a surface
+#   nothing can reach. Same gap read-loop closed for loops. Verb written and its
+#   SQL proven against the live view; it retires the file on the deploy.
 renders=$("$REPO/.venv/bin/python" - <<'PY'
 import importlib.util, os
 spec = importlib.util.spec_from_file_location(

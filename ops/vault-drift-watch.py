@@ -152,15 +152,12 @@ ALWAYS_EXPECTED = {
     "DNA/compiled-rules-dell.md",
     # written by bin/local-briefs.sh (com.carr.local-briefs), not an export target
     "00_Context/today.md",
-    # THE OTHER TWO NON-REGISTRY WRITERS, found 2026-08-19 while firing the
-    # cutoff: bin/learning-weekly.sh and bin/learning-monthly.sh write these into
-    # Automation/Learning/ on their own beats. Both were being reported UNEXPECTED
-    # on every run that followed a learning job — a scheduled job's own output
-    # read as somebody hand-editing the vault. Naming them here is the whole fix;
-    # they are periodic digests, not doctrine, so the cutoff does not touch them.
-    "Automation/Learning/weekly-learning-latest.md",
-    "Automation/Learning/correction-miner-latest.md",
 }
+# The two Automation/Learning reports were briefly listed here as expected
+# writers. They are not listed any more because they no longer exist in the
+# vault: the same 2026-08-19 cutoff retired them, and bin/learning-weekly.sh and
+# bin/learning-monthly.sh now write to the repo's out/Learning instead. A path
+# that nothing writes does not belong in an expected-WRITERS set.
 
 # ---------------------------------------------------------------- ingest wiring
 # Same house pattern as bin/notes-sweep-post.sh and bin/pull-gmail-calendar.py:
