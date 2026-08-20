@@ -150,9 +150,11 @@ ALWAYS_EXPECTED = {
     "DNA/compiled-rules-shared.md",
     "00_Context/compiled-rules-joe.md",
     "DNA/compiled-rules-dell.md",
-    # written by bin/local-briefs.sh (com.carr.local-briefs), not an export target
-    "00_Context/today.md",
 }
+# 00_Context/today.md was listed here while bin/local-briefs.sh still copied it
+# into the vault. The cutoff retired that write on 2026-08-20 once the claim-card
+# verb shipped and served the one section no verb could reach, so nothing writes
+# the path any more and it does not belong in an expected-WRITERS set.
 # The two Automation/Learning reports were briefly listed here as expected
 # writers. They are not listed any more because they no longer exist in the
 # vault: the same 2026-08-19 cutoff retired them, and bin/learning-weekly.sh and
