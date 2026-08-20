@@ -4,7 +4,7 @@
 // wobble on every landing, locked camera, no narration. The last second holds on
 // the finished static, so the end frame IS the original graphic.
 //
-// Reads Scripts/animstatic-job.json (written by make-animated-static.sh):
+// Reads the staged CARR_ANIMSTATIC_JOB_URI (written by make-animated-static.sh):
 //   { compName, width, height, fps, duration, stepFrames, holdTail,
 //     layers: [ { src, beat, from: "below|above|left|right|scale", drift } ],
 //     outPath }
@@ -26,11 +26,15 @@
     if (!PIPE || !Folder(PIPE + "/Scripts").exists) {
         PIPE = Folder("~/Movies/CARR Video Pipeline").fsName;
     }
-    var LOG = new File(PIPE + "/Scripts/animstatic-log.txt");
+    var stagedLog = (typeof CARR_ANIMSTATIC_LOG_URI !== "undefined")
+        ? decodeURIComponent(CARR_ANIMSTATIC_LOG_URI) : $.getenv("CARR_ANIMSTATIC_LOG");
+    var LOG = new File(stagedLog || (PIPE + "/Scripts/animstatic-log.txt"));
     function log(msg) { LOG.open("a"); LOG.writeln(new Date().toTimeString().substr(0, 8) + "  " + msg); LOG.close(); }
     function fail(msg) { log("FAIL: " + msg); throw new Error(msg); }
 
-    var jobFile = new File(PIPE + "/Scripts/animstatic-job.json");
+    var stagedJob = (typeof CARR_ANIMSTATIC_JOB_URI !== "undefined")
+        ? decodeURIComponent(CARR_ANIMSTATIC_JOB_URI) : $.getenv("CARR_ANIMSTATIC_JOB");
+    var jobFile = new File(stagedJob || (PIPE + "/Scripts/animstatic-job.json"));
     if (!jobFile.exists) fail("job file missing");
     jobFile.open("r"); var job = eval("(" + jobFile.read() + ")"); jobFile.close();
 
@@ -147,7 +151,9 @@
                 "s from " + from);
         }
 
-        var aep = new File(PIPE + "/AE_Templates/AnimatedStatic_last_generated.aep");
+        var stagedAep = (typeof CARR_ANIMSTATIC_AEP_URI !== "undefined")
+            ? decodeURIComponent(CARR_ANIMSTATIC_AEP_URI) : $.getenv("CARR_ANIMSTATIC_AEP");
+        var aep = new File(stagedAep || (PIPE + "/AE_Templates/AnimatedStatic_last_generated.aep"));
         app.project.save(aep);
 
         var rqi = app.project.renderQueue.items.add(comp);
