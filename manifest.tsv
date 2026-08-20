@@ -8,6 +8,14 @@
 # the drift pairing is retired rather than alarming every night. Vault copy governed by
 # dna-protocol as before. Former row: generators/build-deal-room.py <TAB> DNA/Team/live-boards/build-deal-room.py
 generators/build-lead-board.py	Automation/build-lead-board.py
+# THE LEAD-BOARD SHELL, moved into the repo 2026-08-20. It is hand-authored SOURCE,
+# not a render: build-lead-board.py reads it and writes lead-board.html from it. It
+# lived only in the vault with no version control, which cost a real bug -- the date
+# classifier hardcoded today as 2026-07-13 until 2026-08-09, rendering four weeks of
+# leads as future work rather than overdue, and the repair had no commit behind it.
+# The REPO copy is canonical; the generators read it from here and fall back to the
+# vault path only for the cloud-only runtime that has no repo beside it.
+generators/lead-board-template.html	Automation/lead-board-template.html
 generators/build-renewal-feed.py	Automation/build-renewal-feed.py
 pipelines/build-space-search.py	Automation/build-space-search.py
 pipelines/space-search-template.html	Automation/space-search-template.html
