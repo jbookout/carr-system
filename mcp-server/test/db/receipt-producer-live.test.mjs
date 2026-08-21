@@ -21,13 +21,34 @@
 // not exercise the producer's transaction, and the advisory lock it takes is
 // released immediately. Concurrency is out of scope here; the guards are not.
 //
-// SKIPPED unless CARR_TEST_DSN names a database with 0208 through 0220 applied.
-// ops/check-application-session.sh sets it.
+// IT USED TO SKIP ITSELF, AND THAT IS WHY IT LIVES IN test/db/ NOW.
+//
+// The describe below carried `{ skip: !DSN }`. Without CARR_TEST_DSN, node
+// --test reported "tests 0" and exited 0, so the six tests in this file --
+// which are the ONLY coverage the producer's real SQL has anywhere -- vanished
+// leaving a green run behind. Measured on the unmodified file: the repository's
+// full unit run reported "tests 577, skipped 0". Not one of these six appeared
+// even as a skip. That is the same shape as every other defect this slice
+// exists for: a guarantee that looks present and is never exercised.
+//
+// TWO CHANGES, and they are a pair:
+//
+//   NO DSN IS NOW A FAILURE, not a skip. Running this file without a database
+//   fails loudly and names what did not run.
+//
+//   AND THE FILE MOVED TO test/db/, so `node --test test/*.test.mjs` -- which
+//   has no database and is not supposed to -- does not match it. The database
+//   contracts already live in test/db/; this is one of them and was in the
+//   wrong place. ops/check-application-session.sh runs it by exact path with
+//   CARR_TEST_DSN set, which is the only context where it can mean anything.
+//
+// Together those give the property that was missing: there is no way to run
+// this file and have it silently do nothing.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { writeReceiptsFor } from "../src/tools.js";
+import { writeReceiptsFor } from "../../src/tools.js";
 
 const DSN = process.env.CARR_TEST_DSN;
 const SEP = "|";
@@ -54,6 +75,23 @@ function psqlClient() {
       return { rows: out ? out.split("\n").filter(Boolean).map(l => JSON.parse(l)) : [] };
     },
   };
+}
+
+if (!DSN) {
+  // ONE LOUD FAILURE, rather than six silent absences. The describe below still
+  // skips when there is no DSN -- letting it run would produce six confusing
+  // psql errors instead of one clear sentence -- but the run can no longer
+  // finish green having tested nothing.
+  test("CARR_TEST_DSN is required: the producer's real SQL has no other coverage", () => {
+    assert.fail(
+      "CARR_TEST_DSN is not set, so the six tests in this file did not run.\n" +
+      "They are the only place in this repository that executes the exact SQL\n" +
+      "the Worker sends. receipt-producer.test.mjs drives a hand-written fake\n" +
+      "that an audit showed refuses nothing: three separate producer mutations\n" +
+      "left it 9/9 green, and the real database refuses every one.\n" +
+      "Run ops/check-application-session.sh, which stands up a disposable\n" +
+      "cluster and sets CARR_TEST_DSN itself.");
+  });
 }
 
 describe("the receipt producer against a real database", { skip: !DSN }, () => {

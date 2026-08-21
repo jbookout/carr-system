@@ -17,7 +17,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeReceiptsFor } from "../src/tools.js";
+import { writeReceiptsFor, executeRegisteredTool } from "../src/tools.js";
 
 const SID = "aaaaaaaa-1111-2222-3333-444444444444";
 const QUALIFIED = { id: "actor-joe", slug: "joe", human: true, via: "oauth-google",
@@ -176,18 +176,134 @@ test("nothing the caller sent can reach the receipt", async () => {
   assert.ok(!ins.params.includes("forged"), "an actor-supplied digest must never ride in");
 });
 
-test("the write envelope actually calls the producer", async () => {
-  // Shape, and labelled as such: proving this behaviourally needs a real
-  // transaction and a database this suite does not have. Without it the
-  // producer could be correct and never invoked, which is the exact shape of
-  // the defect that shipped an inert door earlier.
-  const { readFile } = await import("node:fs/promises");
-  const src = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
-  const env = src.slice(src.indexOf("async function withEnvelope"),
-                        src.indexOf("async function writeEvent"));
-  assert.match(env, /await writeReceiptsFor\(client, actor, verb, key, hash\)/,
-    "withEnvelope must call the producer");
-  assert.ok(env.indexOf("toolCallInsertSQL") < env.indexOf("writeReceiptsFor"),
-    "receipts must be written AFTER the tool_call row, because the readback "
-    + "reads that row and could not otherwise prove");
+// ─────────────────────────────────────────────────────────────────────────
+// THE ENVELOPE ACTUALLY CALLS THE PRODUCER — behaviourally.
+//
+// WHAT WAS HERE BEFORE, AND WHY IT WAS NOT ENOUGH. This assertion used to read
+// src/tools.js as TEXT and regex-match `await writeReceiptsFor(client, actor,
+// verb, key, hash)` inside withEnvelope, with a comment conceding it was
+// "shape, and labelled as such". Two things are wrong with that, and the second
+// is the serious one:
+//
+//   IT ASSERTS ON SPELLING. Rename a parameter, reorder the arguments, wrap the
+//   call in a helper, or pass the same values from different variables, and a
+//   correct envelope fails while a broken one that happens to contain the
+//   literal string passes.
+//
+//   IT PROVES THE CALL IS WRITTEN, NEVER THAT IT RUNS. A `return` above it, a
+//   condition around it, an early replay path -- none of that moves the text.
+//   The defect this file exists for was a producer that shipped and was never
+//   invoked; an assertion that cannot distinguish "present in the source" from
+//   "executed" is blind to exactly that.
+//
+// So: drive a REAL registered write verb through executeRegisteredTool with a
+// recording fake, and assert on what the envelope actually did. triage-item is
+// used because it is the simplest write in the registry -- one update, one
+// event -- so the recorded call list is about the envelope rather than about
+// the verb.
+const INBOX_ITEM = "cccccccc-1111-2222-3333-444444444444";
+
+function envelopeClient() {
+  const calls = [];
+  return {
+    calls,
+    async query(text, params = []) {
+      const sql = text.replace(/\s+/g, " ").trim();
+      calls.push({ sql, params });
+      if (/^select request_hash, response/.test(sql)) return { rows: [] };
+      if (sql.includes("update ingest_inbox"))
+        return { rows: [{ id: INBOX_ITEM, source: "email", status: "rejected" }] };
+      if (sql.includes("insert into event")) return { rows: [] };
+      if (sql.includes("insert into tool_call")) return { rows: [] };
+      // writeReceiptsFor's own queries, from here down.
+      if (sql.includes("from event"))
+        return { rows: [{ subject_type: "inbox", subject_id: INBOX_ITEM }] };
+      if (sql.includes("write_receipt_digest"))
+        return { rows: [{ call_digest: "call-d", material_digest: "material-d" }] };
+      if (sql.includes("pg_advisory_xact_lock")) return { rows: [{}] };
+      if (sql.includes("from ops.write_receipt w")) return { rows: [] };
+      if (sql.includes("insert into ops.write_receipt")) return { rows: [] };
+      if (sql.includes("prove_write_receipt")) return { rows: [{}] };
+      throw new Error(`envelope fake received unexpected SQL: ${sql}`);
+    },
+  };
+}
+
+const TRIAGE_ARGS = { idempotency_key: "env-key-1", item_id: INBOX_ITEM,
+                      status: "rejected", note: "not ours" };
+
+test("the write envelope actually calls the producer, and only after the tool_call row", async () => {
+  const c = envelopeClient();
+  await executeRegisteredTool(c, QUALIFIED, "triage-item", TRIAGE_ARGS);
+
+  const toolCallAt = c.calls.findIndex(k => k.sql.includes("insert into tool_call"));
+  const receiptAt  = c.calls.findIndex(k => k.sql.includes("insert into ops.write_receipt"));
+  assert.ok(toolCallAt >= 0, "the envelope did not write a tool_call row at all");
+  assert.ok(receiptAt >= 0,
+    "a qualified write went through the envelope and produced NO receipt — the "
+    + "producer is written but never invoked, which is the defect this file exists for");
+  assert.ok(toolCallAt < receiptAt,
+    "the receipt was written BEFORE the tool_call row; the readback recomputes the "
+    + "call digest from that row and could not prove against one that does not exist yet");
+  // AND IT WAS PROVEN IN THE SAME TRANSACTION. A receipt left unproven blocks
+  // the acceptance bar, so producing one and walking away replaces an empty
+  // table with a permanently failing one.
+  const proveAt = c.calls.findIndex(k => k.sql.includes("prove_write_receipt"));
+  assert.ok(proveAt > receiptAt, "the receipt was never proven after being written");
+  // The receipt must be about THIS call, not some other one.
+  assert.ok(c.calls[receiptAt].params.includes("env-key-1"),
+    "the receipt does not carry the idempotency key of the call that produced it");
+});
+
+test("a replayed write writes neither a tool_call row nor a receipt", async () => {
+  // THE OTHER HALF OF "IT RUNS": the envelope's replay branch returns before
+  // either write. A source-text assertion cannot see this path at all, and a
+  // producer invoked on a replay would file a SECOND receipt for one call.
+  //
+  // requestHash is not exported, so the hash is LEARNED from a first honest
+  // run rather than recomputed here -- a locally reimplemented hash would be a
+  // fixture carrying a value production never supplies, which is one of the six
+  // ways a suite in this repository has lied before.
+  const first = envelopeClient();
+  await executeRegisteredTool(first, QUALIFIED, "triage-item", TRIAGE_ARGS);
+  const digestCall = first.calls.find(k => k.sql.includes("write_receipt_digest"));
+  const hash = digestCall.params[4];   // [verb, actor, tenant, sid, hash, ...]
+  assert.ok(hash, "could not learn the envelope's request hash from the first run");
+
+  const c = envelopeClient();
+  const inner = c.query.bind(c);
+  c.query = async function (text, params = []) {
+    const sql = text.replace(/\s+/g, " ").trim();
+    if (/^select request_hash, response/.test(sql)) {
+      c.calls.push({ sql, params });
+      return { rows: [{ request_hash: hash,
+                        response: { ok: true, replayed_fixture: true },
+                        actor_id: QUALIFIED.id,
+                        organization_tenant_id: QUALIFIED.organization_tenant_id,
+                        application_session_id: QUALIFIED.application_session_id }] };
+    }
+    return inner(text, params);
+  };
+
+  const out = await executeRegisteredTool(c, QUALIFIED, "triage-item", TRIAGE_ARGS);
+  assert.equal(out.replayed, true,
+    "the fixture did not actually take the replay path, so this test proves nothing");
+  assert.ok(!c.calls.some(k => k.sql.includes("insert into tool_call")),
+    "a replay wrote a second tool_call row");
+  assert.ok(!c.calls.some(k => k.sql.includes("insert into ops.write_receipt")),
+    "a replay filed a SECOND receipt for one call");
+});
+
+test("an unqualified (legacy) write still records the call, and files no receipt", async () => {
+  // The producer's own first line returns when there is no session. Asserted
+  // through the envelope so it is the SYSTEM's behaviour being checked, not the
+  // function's: the tool_call row must still be written, or a legacy write
+  // would stop being recorded at all.
+  const c = envelopeClient();
+  await executeRegisteredTool(c, LEGACY, "triage-item", TRIAGE_ARGS);
+  assert.ok(c.calls.some(k => k.sql.includes("insert into tool_call")),
+    "a legacy write stopped recording its tool_call row");
+  assert.ok(!c.calls.some(k => k.sql.includes("insert into ops.write_receipt")),
+    "a write with no authenticated session produced a receipt, which would be a "
+    + "receipt vouching for nothing");
 });

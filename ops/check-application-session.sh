@@ -150,9 +150,24 @@ psql "$BASE/empty_but_accepted" -v ON_ERROR_STOP=1 -q -f "$REPO/mcp-server/test/
 echo "empty-but-accepted fixture built (no Drive dependency, everything else satisfied)"
 
 psql "$BASE/postgres" -q -c "create database producer template subject"
-( cd "$REPO/mcp-server" && CARR_TEST_DSN="$BASE/producer" \
-    node --test test/receipt-producer-live.test.mjs )
-echo "producer exercised against a real database"
+# AND COUNT WHAT RAN. The file used to skip itself when CARR_TEST_DSN was
+# unset: node --test reported "tests 0" and exited 0, so this stage could pass
+# having executed nothing. The file now fails loudly instead of skipping, and
+# this is the second lock on the same door -- a stage that reports success must
+# report having actually run the six tests it exists to run.
+PRODUCER_OUT="$(cd "$REPO/mcp-server" && CARR_TEST_DSN="$BASE/producer" \
+    node --test test/db/receipt-producer-live.test.mjs 2>&1)"
+printf '%s\n' "$PRODUCER_OUT"
+# `[^ ]*` rather than `.`: node prefixes its summary with U+2139, and this
+# script runs under LC_ALL=C where `.` matches one BYTE, not one character.
+# Caught by this guard failing on a run where all six tests visibly passed.
+PRODUCER_PASSED="$(printf '%s' "$PRODUCER_OUT" | sed -n 's/^[^ ]* pass \([0-9][0-9]*\)$/\1/p' | tail -1)"
+if [ "${PRODUCER_PASSED:-0}" -lt 6 ]; then
+  echo "GATE FAILED: the live producer stage reported ${PRODUCER_PASSED:-0} passing tests, expected at least 6." >&2
+  echo "             A stage that runs nothing must not report success." >&2
+  exit 1
+fi
+echo "producer exercised against a real database ($PRODUCER_PASSED tests)"
 
 # Run TWICE. The suite must be re-runnable; a contract that only passes against
 # a virgin database is testing ordering, not the substrate.
