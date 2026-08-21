@@ -13,7 +13,11 @@ REPO = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = REPO / "ops/config/control-plane-release-recovery.v1.json"
 SCHEMA_PATH = REPO / "ops/config/control-plane-release-recovery.schema.v1.json"
 FAILURES: list[str] = []
-MIGRATIONS = ["0194_atomic_rule_approval", "0195_control_plane_cache_observations"]
+MIGRATIONS = [
+    "0193_session_work", "0194_atomic_rule_approval", "0195_control_plane_cache_observations",
+    "0199_guidance_standing_context_boundary", "0200_calendar_canary_record_layer",
+    "0201_nightly_availability_canary_record_layer", "0203_atomic_rule_lifecycle_forward_upgrade",
+]
 STEPS = [
     {"id": "contain", "action_kind": "contain"},
     {"id": "repair", "action_kind": "repair"},

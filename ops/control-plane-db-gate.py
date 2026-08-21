@@ -557,6 +557,30 @@ def main() -> int:
                         (rule_id,))
             if fetchone_required(cur.fetchone(), "receipt-bound applicable rule")[0] != 1:
                 fail("exact active enforced rule is absent from the policy compiler")
+            # 0203 may preserve an OLD 0194 pre-activation receipt only through
+            # its exact migration-time anchor. A fresh post-0203 approval is
+            # already post-version and must never be made to look legacy; nor
+            # may a caller claim a matching receipt with a substituted hash.
+            for savepoint, sql_text, message in (
+                ("fresh_receipt_anchor_refusal", """
+                    insert into ops.rule_approval_lifecycle_anchor
+                      (approval_receipt_id,rule_id,rule_version_after,statement_hash)
+                    select ar.id,ar.rule_id,ar.rule_version,ar.statement_hash
+                      from ops.rule_approval_receipt ar where ar.rule_id=%s
+                """, "fresh post-version approval was accepted as a legacy anchor"),
+                ("mismatched_anchor_refusal", """
+                    insert into ops.rule_approval_lifecycle_anchor
+                      (approval_receipt_id,rule_id,rule_version_after,statement_hash)
+                    select ar.id,ar.rule_id,ar.rule_version+1,repeat('0',64)
+                      from ops.rule_approval_receipt ar where ar.rule_id=%s
+                """, "mismatched legacy anchor was accepted"),
+            ):
+                cur.execute(f"savepoint {savepoint}")
+                try:
+                    cur.execute(sql_text, (rule_id,))
+                    fail(message)
+                except psycopg.Error:
+                    cur.execute(f"rollback to savepoint {savepoint}")
             for savepoint, sql_text, message in (
                 ("active_admission_drift_refusal",
                  "update ops.rule_admission set applicability='{}'::jsonb where rule_id=%s",

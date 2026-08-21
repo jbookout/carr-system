@@ -5,14 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-MIGRATION = REPO / "migrations" / "0194_atomic_rule_approval.sql"
+LEGACY_MIGRATION = REPO / "migrations" / "0194_atomic_rule_approval.sql"
+MIGRATION = REPO / "migrations" / "0203_atomic_rule_lifecycle_forward_upgrade.sql"
 TOOLS = REPO / "mcp-server" / "src" / "tools.js"
 DB_GATE = REPO / "ops" / "control-plane-db-gate.py"
 LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
 
 
 def main() -> int:
-    sql = MIGRATION.read_text(encoding="utf-8").lower()
+    sql = (LEGACY_MIGRATION.read_text(encoding="utf-8")
+           + MIGRATION.read_text(encoding="utf-8")).lower()
     tools = TOOLS.read_text(encoding="utf-8")
     gate = DB_GATE.read_text(encoding="utf-8")
     acceptance = LOCAL_ACCEPTANCE.read_text(encoding="utf-8")
@@ -100,6 +102,23 @@ def main() -> int:
           "current active rule no longer matches the immutable approval" in sql
           and "exact installed enforcement or authority evidence is stale" in sql
           and "v_rule.version+1" in sql)
+    check("deployed 0194 pre-activation receipts receive only verified immutable anchors",
+          "rule_approval_lifecycle_anchor" in sql
+          and "ar.rule_version+1=r.version" in sql
+          and "legacy.approval_receipt_id=ar.id" in sql
+          and "legacy.rule_version_after=r.version" in sql
+          and "function ops.require_rule_approval_lifecycle_anchor()" in sql
+          and "before insert on ops.rule_approval_lifecycle_anchor" in sql
+          and "ar.rule_id=new.rule_id" in sql
+          and "ar.rule_version+1=new.rule_version_after" in sql
+          and "joe.slug='joe' and joe.kind='human' and joe.active" in sql
+          and "a.state='admitted' and a.admitted_by=ar.actor_id" in sql
+          and "r.enforcement=(case when ar.enforcement_status='hard_enforced'" in sql
+          and "legacy approval anchor requires an exact active joe-approved 0194 receipt chain" in sql
+          and "rule_approval_lifecycle_anchor_append_only" in sql
+          and "anything that fails that proof" in sql
+          and "fresh_receipt_anchor_refusal" in gate
+          and "mismatched_anchor_refusal" in gate)
     check("the exact atomic activation is allowed through the preimage freeze",
           "old.status='proposed' and new.status='active'" in sql
           and "enforcement label does not match approval" in sql)
@@ -122,7 +141,7 @@ def main() -> int:
           and "mislabeled as unbreakable enforcement" in sql)
     check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
 
-    print(f"\natomic-rule-approval-selftest: {20-len(failures)}/20 passed")
+    print(f"\natomic-rule-approval-selftest: {21-len(failures)}/21 passed")
     return 1 if failures else 0
 
 

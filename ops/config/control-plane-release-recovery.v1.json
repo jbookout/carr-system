@@ -3,8 +3,13 @@
   "contract": "control-plane-release-recovery-procedure",
   "candidate": {
     "migrations": [
+      "0193_session_work",
       "0194_atomic_rule_approval",
-      "0195_control_plane_cache_observations"
+      "0195_control_plane_cache_observations",
+      "0199_guidance_standing_context_boundary",
+      "0200_calendar_canary_record_layer",
+      "0201_nightly_availability_canary_record_layer",
+      "0203_atomic_rule_lifecycle_forward_upgrade"
     ]
   },
   "database_down_migration": "does_not_exist",

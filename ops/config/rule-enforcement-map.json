@@ -385,6 +385,7 @@
       "implementation": [
         "hooks/rule-shape-gate.py",
         "migrations/0194_atomic_rule_approval.sql",
+        "migrations/0203_atomic_rule_lifecycle_forward_upgrade.sql",
         "mcp-server/src/tools.js"
       ],
       "test": [
