@@ -366,69 +366,21 @@ def main() -> int:
             """)
             if fetchone_required(cur.fetchone(), "forward control catalog restoration")[0] != 2:
                 fail("0228 did not restore the two exact reviewed control catalog rows")
-            # The exact spending rule and decision were captured before the
-            # atomic approval architecture existed. Deployment must bind their
-            # pinned preimages to the cost gate; a familiar UUID with different
-            # words or governance decision must never be blessed.
-            cur.execute("""
-                insert into rule(id,statement,human_quote,taught_by,status)
-                values ('a57d981a-8f6d-4c18-95ee-0e63a5a90b89',
-                        'Every metered CARR execution must pass a machine-enforced pre-dispatch budget gate; prose or registry-only guidance does not count as enforcement, and Joe alone may approve exceeding a cap, buying usage credits, or enabling paid overage.',
-                        'fixture',%s,'proposed')
-            """, (actor,))
-            cur.execute("""
-                insert into event
-                  (id,occurred_at,actor_id,verb,subject_type,subject_id,new_value,
-                   cause,human_quote,agent_rationale,idempotency_key)
-                values
-                  ('f7ea060c-268b-47f1-8a17-7168841b77e0',now(),%s,
-                   'log-decision','decision','8b31938a-e2f2-4b8f-9c29-187efa5c1650',
-                   jsonb_build_object(
-                     'title','Make cost discipline permanent; expire only the temporary emergency restriction',
-                     'quote_absent',false,'provenance','rollback DB gate fixture'),
-                   'human_stated',
-                   'But also, we want a budget rule in affect going forward not just expiring in September. We need to operate the system with cost in mind. Not to the point where it limits the system but just to the point where excessive spending is avoided',
-                   'exact pinned decision fixture','db-gate-cost-decision')
-            """, (actor,))
-            cur.execute("""
-                insert into record_source(entity_type,entity_id,source_system,external_key)
-                values ('event','f7ea060c-268b-47f1-8a17-7168841b77e0',
-                        'decision-history','fixture#db-gate-cost-binding')
-            """)
-            cur.execute("select ops.sync_system_rule_control_bindings()")
-            if fetchone_required(cur.fetchone(), "system-rule binding sync")[0] != 1:
-                fail("existing spending rule did not receive its exact installed-control binding")
-            cur.execute("""
-                select count(*)
-                  from ops.rule_control_binding b
-                  join rule r on r.id=b.rule_id
-                 where b.rule_id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'
-                   and b.control_key='platform_metering_pre_dispatch'
-                   and b.statement_hash=encode(digest(r.statement,'sha256'),'hex')
-                   and b.binding_contract->>'durable_decision_ref'=
-                       '8b31938a-e2f2-4b8f-9c29-187efa5c1650'
-                   and b.binding_contract->>'decision_event_ref'=
-                       'f7ea060c-268b-47f1-8a17-7168841b77e0'
-            """)
-            if fetchone_required(cur.fetchone(), "system-rule binding readback")[0] != 1:
-                fail("spending rule binding does not match the exact statement and decision")
-            for savepoint, mutation, params, message in (
-                ("narrowed_system_rule_scope",
-                 "update rule set scope='{\"workflows\":[\"one-workflow\"]}'::jsonb "
-                 "where id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'",
-                 (), "system-rule sync accepted narrowed applicability"),
-                ("personal_system_rule_audience",
-                 "update rule set personal_to=%s "
-                 "where id='a57d981a-8f6d-4c18-95ee-0e63a5a90b89'",
-                 (actor,), "system-rule sync accepted a personal audience"),
-            ):
-                cur.execute(f"savepoint {savepoint}")
-                try:
-                    cur.execute(mutation, params)
-                    cur.execute("select ops.sync_system_rule_control_bindings()")
-                    fail(message)
-                except psycopg.Error:
-                    cur.execute(f"rollback to savepoint {savepoint}")
+            # RETARGETED FROM THE COST RULE, 2026-08-21. This block used to
+            # fixture the machine-enforced pre-dispatch budget rule and prove
+            # the sync bound it to platform_metering_pre_dispatch. Joe retired
+            # that rule — "end the cost restrictions ... now everything is being
+            # blocked bc you think you arent allowed to do anything that costs
+            # usage or money" — and 0228 no longer binds it, so a fixture for it
+            # would assert behaviour that can no longer occur. The assertions
+            # are worth keeping, so they run against the rule 0228 does still
+            # bind: Joe as sole required system authority.
+            #
+            # ORDER IS LOAD-BEARING. The wrong-preimage check runs BEFORE the
+            # real rule is inserted. It used to run after, when the fixture rule
+            # carried a different id; against this id a later insert would fail
+            # on the primary key rather than on the preimage, and the check
+            # would pass having proved nothing.
             cur.execute("savepoint wrong_system_rule_preimage")
             try:
                 cur.execute("""
@@ -440,6 +392,65 @@ def main() -> int:
                 fail("system-rule sync accepted a known UUID with the wrong statement")
             except psycopg.Error:
                 cur.execute("rollback to savepoint wrong_system_rule_preimage")
+            cur.execute("""
+                insert into rule(id,statement,human_quote,taught_by,status)
+                values ('ae44e0c0-e773-456c-a85b-2dc4cf4dd49e',
+                        'Joe is the sole required authority for system architecture, development, releases, and high-level functional decisions. Dell remains a fully authorized business-record user and may teach workflows and rules, review, and participate voluntarily, but Dell’s approval or availability must never be required or block a system change. Compatibility evidence may ensure a change does not strand Dell; it is not approval or veto authority.',
+                        'fixture',%s,'proposed')
+            """, (actor,))
+            cur.execute("""
+                insert into event
+                  (id,occurred_at,actor_id,verb,subject_type,subject_id,new_value,
+                   cause,human_quote,agent_rationale,idempotency_key)
+                values
+                  ('1fe7c57e-c23f-4fb0-9cff-36f6d3cfcf08',now(),%s,
+                   'log-decision','decision','4a0e59ce-728a-49b5-a055-116156e9470e',
+                   jsonb_build_object(
+                     'title','Joe is the sole required authority for system development and high-level system decisions',
+                     'quote_absent',false,'provenance','rollback DB gate fixture'),
+                   'human_stated',
+                   'One thing I need to make sure of, I do not want this system to become dependent on dell’s approval for changes. He is not involved in system development at all. He is basically just a user of the system who may train a new work flow here and there but he will not be involved in building the system or making high level decisions about the way the system functions. He’s relying on me for that. Don’t block him from any of those decisions but don’t require his approval either',
+                   'exact pinned decision fixture','db-gate-authority-decision')
+            """, (actor,))
+            cur.execute("""
+                insert into record_source(entity_type,entity_id,source_system,external_key)
+                values ('event','1fe7c57e-c23f-4fb0-9cff-36f6d3cfcf08',
+                        'decision-history','fixture#db-gate-authority-binding')
+            """)
+            cur.execute("select ops.sync_system_rule_control_bindings()")
+            if fetchone_required(cur.fetchone(), "system-rule binding sync")[0] != 1:
+                fail("governance rule did not receive its exact installed-control binding")
+            cur.execute("""
+                select count(*)
+                  from ops.rule_control_binding b
+                  join rule r on r.id=b.rule_id
+                 where b.rule_id='ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'
+                   and b.control_key='human_authority_runtime'
+                   and b.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+                   and b.binding_contract->>'durable_decision_ref'=
+                       '4a0e59ce-728a-49b5-a055-116156e9470e'
+                   and b.binding_contract->>'decision_event_ref'=
+                       '1fe7c57e-c23f-4fb0-9cff-36f6d3cfcf08'
+            """)
+            if fetchone_required(cur.fetchone(), "system-rule binding readback")[0] != 1:
+                fail("governance rule binding does not match the exact statement and decision")
+            for savepoint, mutation, params, message in (
+                ("narrowed_system_rule_scope",
+                 "update rule set scope='{\"workflows\":[\"one-workflow\"]}'::jsonb "
+                 "where id='ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'",
+                 (), "system-rule sync accepted narrowed applicability"),
+                ("personal_system_rule_audience",
+                 "update rule set personal_to=%s "
+                 "where id='ae44e0c0-e773-456c-a85b-2dc4cf4dd49e'",
+                 (actor,), "system-rule sync accepted a personal audience"),
+            ):
+                cur.execute(f"savepoint {savepoint}")
+                try:
+                    cur.execute(mutation, params)
+                    cur.execute("select ops.sync_system_rule_control_bindings()")
+                    fail(message)
+                except psycopg.Error:
+                    cur.execute(f"rollback to savepoint {savepoint}")
             grant_settable_runtime_roles(cur, "carr_writer")
             set_local_role(cur, "carr_writer")
             cur.execute("select has_function_privilege(current_user,%s,'execute')",

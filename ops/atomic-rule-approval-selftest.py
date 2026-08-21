@@ -87,22 +87,36 @@ def main() -> int:
           and catalog_seed.index("0228 failed: control catalog does not match the two exact reviewed controls")
               < forward_sql.index("create or replace function ops.sync_system_rule_control_bindings()")
           and "forward control catalog restoration" in gate)
-    check("Joe's existing governance and cost rules bind to distinct exact controls",
-          "ae44e0c0-e773-456c-a85b-2dc4cf4dd49e" in sql
-          and "9e02f7eee01220fd604ba97d605830ea903d3266f95b626a5ca5d9a73567c8f9" in sql
-          and "4a0e59ce-728a-49b5-a055-116156e9470e" in sql
-          and "human_authority_runtime" in sql
-          and "a57d981a-8f6d-4c18-95ee-0e63a5a90b89" in sql
-          and "c6fd62eb91d3f03b21a6098a6fd6b2848b902a45b8c0430b1717edf4e143f668" in sql
-          and "8b31938a-e2f2-4b8f-9c29-187efa5c1650" in sql
-          and "platform_metering_pre_dispatch" in sql
+    # COMMENTS ARE NOT BINDINGS. This check reads raw text, so it must look at
+    # executable SQL only: the migration explains in a comment WHY the cost
+    # rule is no longer bound, and that prose names the very id and control the
+    # check refuses to find. Matching against the whole file would let the
+    # explanation satisfy the assertion it exists to make.
+    executable_sql = "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+    check("Joe's governance rule binds to its exact control",
+          "ae44e0c0-e773-456c-a85b-2dc4cf4dd49e" in executable_sql
+          and "9e02f7eee01220fd604ba97d605830ea903d3266f95b626a5ca5d9a73567c8f9" in executable_sql
+          and "4a0e59ce-728a-49b5-a055-116156e9470e" in executable_sql
+          and "human_authority_runtime" in executable_sql
           and "function ops.sync_system_rule_control_bindings()" in sql
           and "select ops.sync_system_rule_control_bindings()" in sql
           and "does not match joe-approved preimage" in sql
           and "lacks its exact joe decision evidence" in sql
-          and "must retain exact shared system-wide scope" in sql
+          and "must retain shared system-wide scope" in sql
           and "narrowed_system_rule_scope" in gate
           and "personal_system_rule_audience" in gate)
+    # Joe retired the pre-dispatch budget rule on 2026-08-21. A retired rule
+    # cannot be bound: the sync refuses any rule that is not proposed or active,
+    # so leaving it in the list would make this migration raise and stop. This
+    # asserts the removal held, in executable SQL rather than in prose.
+    # The CONTROL stays in the catalog and is asserted above — it still guards
+    # the two reviewed deploy wrappers. What must not exist is a BINDING from
+    # the retired rule to it, which is why this looks for the rule's id and not
+    # the control's name.
+    check("the retired cost rule is not bound by the migration",
+          "a57d981a-8f6d-4c18-95ee-0e63a5a90b89" not in executable_sql)
     check("routine roles cannot approve rules",
           "from public,carr_reader,carr_writer,carr_jobs" in sql
           and "grant execute on function ops.approve_rule" in sql
