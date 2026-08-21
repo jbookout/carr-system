@@ -119,8 +119,13 @@ check("prohibited event field refuses", refuses(lambda: bridge.normalize_snapsho
 check("DSN login mismatch refuses", refuses(lambda: bridge.ingest(sponsor="joe", job_id="j", lease="l", snapshot=snapshot,
       environ={"CARR_DB_CALENDAR_PREBRIEF_JOE_URL": "postgresql://carr_jobs:fixture@db/carr"},  # ci-secret-scan: allow
       connector=lambda _dsn: Conn())))
-owners = {row["key"]: row["inventory"]["owner"] for row in manifest["workflows"] if row["key"].startswith("calendar-prebrief-projection-")}
-check("manifest sync preserves sponsor owners", owners == {"calendar-prebrief-projection-joe-daily": "joe", "calendar-prebrief-projection-dell-daily": "dell"})
+owners = {row["key"]: row["inventory"]["owner"] for row in manifest["workflows"] if row["key"].startswith("calendar-prebrief-")}
+check("manifest sync preserves exact sponsor owners across live and isolated definitions", owners == {
+    "calendar-prebrief-projection-joe-daily": "joe",
+    "calendar-prebrief-projection-dell-daily": "dell",
+    "calendar-prebrief-canary-joe-daily": "joe",
+    "calendar-prebrief-canary-dell-daily": "dell",
+})
 
 with tempfile.TemporaryDirectory() as raw:
     file = Path(raw) / "snapshot.json"; file.write_text(json.dumps(snapshot))
