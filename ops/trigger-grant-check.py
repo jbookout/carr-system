@@ -62,10 +62,22 @@ Fixtures: ops/trigger-grant-selftest.py.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import pathlib
 import re
 import subprocess
 import sys
+
+# The postgres CLIENT lookup, shared with ops/p1-rebuild-gate.py. Loading by path
+# is how every ops gate reaches tools/db-tap.py, whose hyphenated filename cannot
+# be imported normally.
+_REPO = pathlib.Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("db_tap", _REPO / "tools" / "db-tap.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("trigger-grant-check: could not load tools/db-tap.py")
+db_tap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(db_tap)
 
 # `from x` / `join x` in a function body. Every hit is intersected with
 # pg_class before it counts, so this can be generous without inventing tables.
@@ -79,8 +91,11 @@ SEP = "\x1f"
 
 
 def psql(dsn, sql):
-    p = subprocess.run(["psql", "-d", dsn, "-At", "-F", SEP, "-v", "ON_ERROR_STOP=1",
-                        "-c", sql], capture_output=True, text=True)
+    # Not the bare name: with no client installed that failed as FileNotFoundError
+    # from inside subprocess, naming neither the missing dependency nor the fix.
+    p = subprocess.run([db_tap.psql_bin(), "-d", dsn, "-At", "-F", SEP,
+                        "-v", "ON_ERROR_STOP=1", "-c", sql],
+                       capture_output=True, text=True)
     if p.returncode != 0:
         raise RuntimeError(p.stderr.strip()[:300])
     return [line.split(SEP) for line in p.stdout.strip().split("\n") if line]
