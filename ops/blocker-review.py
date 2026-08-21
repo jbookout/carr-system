@@ -25,14 +25,33 @@ out loud rather than guessed at, because a false "unblocked" costs more than a
 missed one: it puts work in front of a partner that is still blocked, and two of
 those teach him to stop reading the list.
 
-  counterparty    CLEARABLE. The loop names who it waits on. If any contact-kind
-                  activity has been logged against that party since the loop was
-                  raised, the ball is back on our side.
+  counterparty    CLEARABLE IN PRINCIPLE, AND NOT UNDER THIS CREDENTIAL. The test
+                  wants any contact-kind activity logged against the party the
+                  detail names, since the loop was raised. That reads activity,
+                  activity_kind, party and the client/lead/vendor union — four
+                  base tables. app_exporter_local, the credential this script
+                  runs under, can read NONE of them: measured 2026-08-21,
+                  has_table_privilege returns loop_item=True and activity,
+                  activity_kind, party, client, lead, vendor all False. The
+                  exporter is view-scoped on purpose (79 of 79 views readable,
+                  zero base tables), so this is a deliberate boundary and not a
+                  missing grant to go and add. Until a view exposes party name
+                  beside last contact date, the branch reports itself untestable
+                  IN THE OUTPUT rather than crashing or, worse, quietly
+                  answering "nothing cleared".
   external_event  CLEARABLE. A dated wait whose date has passed is no longer a
                   wait. due_on is the date; loops carrying none are skipped.
-  capability      CLEARABLE. These name a verb, a view or a credential that did
-                  not exist. All three are checkable now: the verb registry, the
-                  catalog, and the presence of the key.
+  capability      PARTLY CLEARABLE, and the docstring used to overstate it. It
+                  claimed a verb, a view and a credential were all checkable;
+                  the code under it did nothing but `unknown += 1`. Two of the
+                  three are real and are implemented here: a named RELATION is
+                  tested against the catalog, and a named CREDENTIAL against the
+                  environment and ~/.config/carr/*.env. A named VERB is NOT
+                  tested and must never clear on one — the checkout's tools.js
+                  is not proof of what production runs. On 2026-08-21 production
+                  sat 12 commits behind main, so a verb sitting in the source
+                  tree was genuinely absent from the live Worker. Read the verb
+                  count off /release if that test is ever wanted.
   other_lane      CLEARABLE where the row names a loop number. If that loop is
                   closed, this one is no longer waiting on it.
   ruling          NOT CLEARABLE. A ruling is a human's to make and nothing in the
@@ -56,6 +75,130 @@ from datetime import date, datetime
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOOP_REF = re.compile(r"(?:loop\s*#|#)(\d{1,4})", re.I)
+
+# The four base tables the counterparty test would have to join. Named here so
+# the privilege probe, the degradation notice and the selftest all read the same
+# list — a second copy of a boundary is a second chance to get it wrong, which is
+# the lesson GATE_LIVE below already carries.
+COUNTERPARTY_TABLES = ("activity", "activity_kind", "party", "client", "lead", "vendor")
+
+# Identifiers a capability blocker can be tested on. Backticked tokens are read
+# because that is how these rows are written when they mean a specific thing;
+# bare `v_*` and BARE_UPPER_SNAKE are read too because neither shape occurs in
+# ordinary prose, so neither can produce the false clear the module's own bar
+# forbids ("a false 'unblocked' costs more than a missed one").
+_BACKTICKED = re.compile(r"`([^`]{2,64})`")
+_RELATION = re.compile(r"^[a-z][a-z0-9_]{2,}$")
+_VIEWISH = re.compile(r"\bv_[a-z0-9_]{2,}\b")
+_CREDENTIAL = re.compile(r"^[A-Z][A-Z0-9_]{4,}$")
+_BARE_CREDENTIAL = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,}\b")
+
+
+def _wrap(text: str, width: int):
+    """Wrap without pulling textwrap in for one call site."""
+    out, line = [], ""
+    for word in text.split():
+        if len(line) + len(word) + 1 > width:
+            out.append(line); line = word
+        else:
+            line = f"{line} {word}".strip()
+    if line:
+        out.append(line)
+    return out
+
+
+def refs_in(detail: str, num: str) -> set[str]:
+    """Loop numbers a blocker_detail names, minus the row's own number."""
+    return {m for m in LOOP_REF.findall(detail or "")} - {str(num)}
+
+
+def test_external_event(due_on, today) -> str | None:
+    """A dated wait whose date has arrived is no longer a wait."""
+    if due_on and due_on <= today:
+        return f"the date it was waiting for ({due_on}) has passed"
+    return None
+
+
+def test_other_lane(detail: str, num: str, states) -> str | None:
+    """Cleared only when EVERY loop the detail names is closed. `states` is the
+    (number, status) rows the caller looked up; an empty list means the detail
+    named nothing testable, which is a hold, not a clear."""
+    if not refs_in(detail, num):
+        return None
+    if states and all(st != "open" for _, st in states):
+        return ("the loop(s) it waited on are closed: "
+                + ", ".join(f"#{n}" for n, _ in states))
+    return None
+
+
+def _capability_identifiers(detail: str):
+    """(relations, credentials, verbs) named in a capability blocker.
+
+    A token carrying a hyphen is a VERB and is returned separately so the caller
+    can refuse to clear on it. Everything about verbs here is deliberately
+    inert."""
+    relations, credentials, verbs = set(), set(), set()
+    for tok in _BACKTICKED.findall(detail or ""):
+        tok = tok.strip()
+        if "-" in tok:
+            verbs.add(tok)
+        elif _CREDENTIAL.match(tok):
+            credentials.add(tok)
+        elif _RELATION.match(tok):
+            relations.add(tok)
+    relations |= set(_VIEWISH.findall(detail or ""))
+    credentials |= set(_BARE_CREDENTIAL.findall(detail or ""))
+    return relations, credentials, verbs
+
+
+def test_capability(detail: str, relation_exists, credential_exists) -> str | None:
+    """Cleared when a RELATION or CREDENTIAL the row named now exists.
+
+    Never cleared on a verb name: see the capability entry in the module
+    docstring. `relation_exists` and `credential_exists` are injected so this is
+    provable without a database."""
+    relations, credentials, _verbs = _capability_identifiers(detail)
+    for name in sorted(relations):
+        if relation_exists(name):
+            return f"`{name}` exists in the catalog now; this row was raised because it did not"
+    for name in sorted(credentials):
+        if credential_exists(name):
+            return f"`{name}` is present on this machine now; this row was raised because it was not"
+    return None
+
+
+def render_degradation(unreadable) -> str:
+    """The counterparty notice. It must NAME the tables, because 'some checks
+    were skipped' is the kind of line a reader learns to scroll past."""
+    if not unreadable:
+        return ""
+    return ("counterparty rows were NOT tested: this credential cannot read "
+            + ", ".join(sorted(unreadable))
+            + ". That is the exporter's deliberate view-only scope, not a missing "
+              "grant — the fix is a view exposing party name beside last contact "
+              "date, not widening the credential.")
+
+
+def credential_present(name: str) -> bool:
+    """Is a named credential on this machine — in the environment, or in any of
+    the ~/.config/carr/*.env files the rest of the system reads."""
+    if os.environ.get(name):
+        return True
+    conf = os.path.expanduser("~/.config/carr")
+    if not os.path.isdir(conf):
+        return False
+    for fn in os.listdir(conf):
+        if not fn.endswith(".env"):
+            continue
+        try:
+            with open(os.path.join(conf, fn), encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith(f"{name}=") and line.split("=", 1)[1].strip():
+                        return True
+        except OSError:
+            continue
+    return False
+
 
 
 def db_url() -> str | None:
@@ -94,8 +237,22 @@ def main() -> int:
     # get it wrong.
     GATE_LIVE = datetime.fromisoformat("2026-08-09T22:20:28.647+00:00")
     cleared, human, unknown, unblockered, leaked = [], 0, 0, 0, []
+    untestable_counterparty = 0
 
     with psycopg.connect(url) as conn, conn.cursor() as cur:
+        # PROBE THE PRIVILEGE BEFORE USING IT, rather than letting the query
+        # raise. This script died here on 2026-08-21 — InsufficientPrivilege on
+        # `activity` — and because psycopg aborts the whole transaction on a
+        # failed statement, catching it per-row would have needed a savepoint
+        # around every counterparty test. Asking once is cheaper and, more to the
+        # point, lets the run SAY what it could not do instead of discovering it
+        # one row at a time.
+        unreadable = []
+        for tbl in COUNTERPARTY_TABLES:
+            cur.execute("select has_table_privilege(current_user, %s, 'SELECT')", (tbl,))
+            if not cur.fetchone()[0]:
+                unreadable.append(tbl)
+
         cur.execute("""
             select number, owner, domain, blocker_class, blocker_detail, due_on,
                    left(regexp_replace(coalesce(body, title, ''), '[[:space:]]+', ' ', 'g'), 120),
@@ -119,12 +276,20 @@ def main() -> int:
                 continue
 
             if bclass == "external_event":
-                if due_on and due_on <= today:
-                    cleared.append((num, owner, domain, gist,
-                                    f"the date it was waiting for ({due_on}) has passed"))
+                why = test_external_event(due_on, today)
+                if why:
+                    cleared.append((num, owner, domain, gist, why))
                 continue
 
             if bclass == "counterparty":
+                if unreadable:
+                    # Untestable, and counted so the notice below can say how
+                    # many rows it applies to. NOT folded into `unknown`: a row
+                    # nothing can test and a row this credential happens not to
+                    # be able to test are different findings, and merging them
+                    # would hide a fixable gap inside a permanent one.
+                    untestable_counterparty += 1
+                    continue
                 # Any contact-kind activity against a party the detail names,
                 # since the loop was raised. Name match is deliberately narrow:
                 # a full-name match only, because matching a bare first name
@@ -150,21 +315,31 @@ def main() -> int:
                 continue
 
             if bclass == "other_lane":
-                refs = {m for m in LOOP_REF.findall(detail)} - {str(num)}
+                refs = refs_in(detail, num)
                 if not refs:
                     unknown += 1
                     continue
                 cur.execute("""select number, status from loop_item
                                 where number = any(%s) and kind='open_loop'""", (list(refs),))
-                states = cur.fetchall()
-                if states and all(s != "open" for _, s in states):
-                    cleared.append((num, owner, domain, gist,
-                                    "the loop(s) it waited on are closed: "
-                                    + ", ".join(f"#{n}" for n, _ in states)))
+                why = test_other_lane(detail, num, cur.fetchall())
+                if why:
+                    cleared.append((num, owner, domain, gist, why))
                 continue
 
             if bclass == "capability":
-                unknown += 1
+                # to_regclass is the catalog's own answer and returns null
+                # rather than raising on a name that does not exist, so an
+                # invented identifier in prose costs one cheap lookup and
+                # nothing else.
+                def relation_exists(name, _cur=cur):
+                    _cur.execute("select to_regclass(%s)", ("public." + name,))
+                    return _cur.fetchone()[0] is not None
+
+                why = test_capability(detail, relation_exists, credential_present)
+                if why:
+                    cleared.append((num, owner, domain, gist, why))
+                else:
+                    unknown += 1
                 continue
 
             unknown += 1
@@ -174,6 +349,10 @@ def main() -> int:
     print( "      that is the real backlog problem rather than a reporting gap")
     print(f"  {human} wait on a human by definition; not testable here")
     print(f"  {unknown} name a blocker this cannot test from the record")
+    if untestable_counterparty:
+        print(f"  {untestable_counterparty} wait on a counterparty and were NOT tested:")
+        for line in _wrap(render_degradation(unreadable), 68):
+            print(f"      {line}")
     print()
     if leaked:
         print(f"⚠︎ THE GATE LEAKS: {len(leaked)} loop(s) raised after the gate went live")
