@@ -132,9 +132,11 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     local_disposable = (os.path.isfile(os.path.join(data_path, "PG_VERSION"))
                         and os.path.basename(os.path.dirname(data_path)).startswith("carr-local-pg-ci."))
     hosted_disposable = (os.environ.get("GITHUB_ACTIONS") == "true"
+                         and os.environ.get("CI") == "true"
                          and os.environ.get("CARR_CI_PORTABLE_ONLY") == "1"
-                         and data_path == "/var/lib/postgresql/data"
-                         and os.path.isfile(os.path.join(data_path, "PG_VERSION")))
+                         and os.environ.get("GITHUB_REPOSITORY") == "jbookout/carr-system"
+                         and bool(os.environ.get("GITHUB_RUN_ID"))
+                         and data_path == "/var/lib/postgresql/data")
     if database_name != "carr_ci" or role_name != "carr_ci" or is_superuser is not True or not (local_disposable or hosted_disposable):
         raise RuntimeError("calendar prebrief acceptance requires a dedicated disposable carr_ci database")
     cur.execute("begin")
