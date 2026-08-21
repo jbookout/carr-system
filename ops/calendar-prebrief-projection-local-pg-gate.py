@@ -67,12 +67,27 @@ def ingest_sql() -> str:
 
 
 def attest_sql() -> str:
-    return "select (ops.record_calendar_prebrief_verified_envelope(%s,%s,%s,%s,%s,%s,%s,%s)).id"
+    return "select (ops.record_calendar_prebrief_verified_envelope(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)).id"
 
 
-def envelope_args(args: tuple[Any, ...], destination: str = "live", fingerprint: str = "f" * 64,
-                  signature: str = "d" * 64, version: str = "eventkit-1.0") -> tuple[Any, ...]:
-    return (*args, destination, fingerprint, signature, version)
+def capture_contract(cur: psycopg.Cursor[Any], sponsor: str, job_id: uuid.UUID, lease: uuid.UUID) -> tuple[Any, ...]:
+    cur.execute(f"set session authorization carr_calendar_prebrief_resolver_{sponsor}")
+    cur.execute("select * from ops.issue_calendar_prebrief_capture_contract(%s,%s)", (job_id, lease))
+    row = required(cur, "DB-issued capture contract")
+    cur.execute("reset session authorization")
+    return row
+
+
+def envelope_args(cur: psycopg.Cursor[Any], sponsor: str, args: tuple[Any, ...], destination: str | None = None,
+                  fingerprint: str = "f" * 64, signature: str = "d" * 64, version: str = "eventkit-1.0",
+                  contract: tuple[Any, ...] | None = None) -> tuple[Any, ...]:
+    job_id, lease, observed, events = args
+    contract = contract or capture_contract(cur, sponsor, job_id, lease)
+    challenge, contract_sponsor, contract_job, attempt, contract_lease, scheduled, window_start, window_end, mode, contract_destination, revision, digest, keys = contract
+    if contract_sponsor != sponsor or contract_job != job_id or contract_lease != lease:
+        raise RuntimeError("capture contract did not bind exact sponsor/job/lease")
+    return (job_id, lease, challenge, scheduled, window_start, window_end, revision, digest, keys, observed, events,
+            contract_destination if destination is None else destination, fingerprint, signature, version)
 
 
 def canary_ingest_sql() -> str:
@@ -80,9 +95,17 @@ def canary_ingest_sql() -> str:
 
 
 def attest(cur: psycopg.Cursor[Any], sponsor: str, args: tuple[Any, ...], destination: str = "live",
-           fingerprint: str = "f" * 64, signature: str = "d" * 64, version: str = "eventkit-1.0") -> uuid.UUID:
+           fingerprint: str = "f" * 64, signature: str | None = None, version: str = "eventkit-1.0") -> uuid.UUID:
+    # A signature identifies one signed envelope globally.  Fresh test jobs
+    # therefore need a fresh digest; exact replay deliberately reuses one.
+    signature = signature or uuid.uuid4().hex + uuid.uuid4().hex
+    signed = envelope_args(cur, sponsor, args, destination, fingerprint, signature, version)
+    return attest_signed(cur, sponsor, signed)
+
+
+def attest_signed(cur: psycopg.Cursor[Any], sponsor: str, signed: tuple[Any, ...]) -> uuid.UUID:
     cur.execute(f"set session authorization carr_calendar_prebrief_attestor_{sponsor}")
-    cur.execute(attest_sql(), envelope_args(args, destination, fingerprint, signature, version))
+    cur.execute(attest_sql(), signed)
     receipt = required(cur, "verified source envelope receipt")[0]
     cur.execute("reset session authorization")
     return receipt
@@ -115,6 +138,8 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
              if not exists(select 1 from pg_roles where rolname='carr_authority_dell') then create role carr_authority_dell login; end if;
              if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_joe') then create role carr_calendar_prebrief_joe login; end if;
              if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_dell') then create role carr_calendar_prebrief_dell login; end if;
+             if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_canary_joe') then create role carr_calendar_prebrief_canary_joe login; end if;
+             if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_canary_dell') then create role carr_calendar_prebrief_canary_dell login; end if;
              if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_other') then create role carr_calendar_prebrief_other login; end if;
              if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_attestor_joe') then create role carr_calendar_prebrief_attestor_joe login; end if;
              if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_attestor_dell') then create role carr_calendar_prebrief_attestor_dell login; end if;
@@ -126,6 +151,7 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     )
     cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
     cur.execute("grant carr_calendar_prebrief_jobs to carr_calendar_prebrief_joe,carr_calendar_prebrief_dell,carr_calendar_prebrief_other")
+    cur.execute("grant carr_calendar_prebrief_canary_jobs to carr_calendar_prebrief_canary_joe,carr_calendar_prebrief_canary_dell")
     cur.execute("grant carr_calendar_prebrief_attestors to carr_calendar_prebrief_attestor_joe,carr_calendar_prebrief_attestor_dell,carr_calendar_prebrief_attestor_other")
     cur.execute("grant carr_calendar_prebrief_email_resolver to carr_calendar_prebrief_resolver_joe,carr_calendar_prebrief_resolver_dell,carr_calendar_prebrief_resolver_other")
     cur.execute(
@@ -190,16 +216,26 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     first_job, first_snapshot = job(cur, joe_key, first_lease)
     first_events = Jsonb(payload_data(joe_allowed, "1" * 64, ref, first_snapshot))
     first_args = (first_job, first_lease, [joe_allowed], first_events)
+    first_signed = envelope_args(cur, "joe", first_args)
 
     # The device receipt is mandatory even for an empty snapshot: otherwise a
     # jobs credential could claim false coverage and prune the current view.
     cur.execute("set session authorization carr_calendar_prebrief_joe")
     refused(cur, ingest_sql(), first_args, "55000", "exact immutable verified source envelope")
-    refused(cur, attest_sql(), envelope_args(first_args), "42501", "permission denied")
+    refused(cur, attest_sql(), first_signed, "42501", "permission denied")
     cur.execute("reset session authorization")
-    first_receipt = attested_ingest(cur, "joe", first_args)
-    if attested_ingest(cur, "joe", first_args) != first_receipt:
+    attest_signed(cur, "joe", first_signed)
+    cur.execute("set session authorization carr_calendar_prebrief_joe")
+    cur.execute(ingest_sql(), first_args)
+    first_receipt = required(cur, "first attested projection receipt")[0]
+    cur.execute("reset session authorization")
+    if attest_signed(cur, "joe", first_signed) is None:
+        raise RuntimeError("exact signed envelope replay returned no source receipt")
+    cur.execute("set session authorization carr_calendar_prebrief_joe")
+    cur.execute(ingest_sql(), first_args)
+    if required(cur, "exact job-attempt projection replay")[0] != first_receipt:
         raise RuntimeError("exact job-attempt replay did not return its immutable receipt")
+    cur.execute("reset session authorization")
     false_empty_lease = uuid.uuid4()
     false_empty_job, _ = job(cur, joe_key, false_empty_lease, "1 second")
     cur.execute("set session authorization carr_calendar_prebrief_joe")
@@ -208,23 +244,30 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("select count(*) from ops.calendar_prebrief_projection_event where sponsor='joe'")
     if required(cur, "false-empty refusal preserves live projection") != (1,):
         raise RuntimeError("an unattested false empty snapshot pruned the live projection")
+    false_empty_bad_signed = envelope_args(cur, "joe", (false_empty_job, false_empty_lease, [alien], Jsonb([])))
     cur.execute("set session authorization carr_calendar_prebrief_attestor_joe")
-    refused(cur, attest_sql(), envelope_args((false_empty_job, false_empty_lease, [alien], Jsonb([]))), "22023", "exact DB allowlist coverage")
+    refused(cur, attest_sql(), false_empty_bad_signed, "22023", "exact signed allowlist coverage")
     cur.execute("reset session authorization")
+    cur.execute("set session authorization carr_calendar_prebrief_attestor_joe")
+    refused(cur, attest_sql(), (false_empty_job, false_empty_lease) + first_signed[2:], "42501", "signed claim does not match")
+    cur.execute("reset session authorization")
+    first_signed_for_dell = envelope_args(cur, "joe", first_args)
     cur.execute("set session authorization carr_calendar_prebrief_attestor_dell")
-    refused(cur, attest_sql(), envelope_args(first_args), "42501", "does not match the static job owner")
+    refused(cur, attest_sql(), first_signed_for_dell, "42501", "signed claim does not match")
     cur.execute("reset session authorization")
+    first_signed_for_other = envelope_args(cur, "joe", first_args)
     cur.execute("set session authorization carr_calendar_prebrief_attestor_other")
-    refused(cur, attest_sql(), envelope_args(first_args), "42501", "exact sponsor-bound verifier identity")
+    refused(cur, attest_sql(), first_signed_for_other, "42501", "exact sponsor-bound verifier identity")
     cur.execute("reset session authorization")
     altered_events = Jsonb(payload_data(joe_allowed, "7" * 64, ref, first_snapshot))
+    altered_signed = envelope_args(cur, "joe", (first_job, first_lease, [joe_allowed], altered_events))
     cur.execute("set session authorization carr_calendar_prebrief_attestor_joe")
-    refused(cur, attest_sql(), envelope_args((first_job, first_lease, [joe_allowed], altered_events)), "23505", "replay conflicts with immutable attempt")
-    refused(cur, attest_sql(), envelope_args(first_args, signature="e" * 64), "23505", "replay conflicts with immutable attempt")
+    refused(cur, attest_sql(), altered_signed, "23505", "replay conflicts with immutable attempt")
+    refused(cur, attest_sql(), first_signed[:-2] + ("e" * 64, first_signed[-1]), "23505", "replay conflicts with immutable attempt")
     refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "42501", "permission denied")
     cur.execute("reset session authorization")
     cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
-    refused(cur, attest_sql(), envelope_args(first_args), "42501", "permission denied")
+    refused(cur, attest_sql(), first_signed, "42501", "permission denied")
     cur.execute("reset session authorization")
     cur.execute("set session authorization carr_calendar_prebrief_other")
     refused(cur, ingest_sql(), first_args, "42501", "named externally provisioned execution identity")
@@ -281,7 +324,7 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     dell_canary_job, dell_canary_snapshot = job(cur, "calendar-prebrief-canary-dell-daily", dell_canary_lease, "2 seconds", mode="canary")
     dell_canary_events = Jsonb(payload_data(dell_allowed, "c" * 64, second_ref, dell_canary_snapshot))
     attest(cur, "dell", (dell_canary_job, dell_canary_lease, [dell_allowed], dell_canary_events), "calendar-prebrief-canary-dell")
-    cur.execute("set session authorization carr_calendar_prebrief_dell")
+    cur.execute("set session authorization carr_calendar_prebrief_canary_dell")
     cur.execute(canary_ingest_sql(), (dell_canary_job, dell_canary_lease, "calendar-prebrief-canary-dell", [dell_allowed], dell_canary_events))
     required(cur, "Dell isolated canary receipt")
     cur.execute("reset session authorization")
@@ -318,11 +361,14 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     canary_events = Jsonb(payload_data(joe_allowed, "8" * 64, ref, canary_snapshot))
     canary_args = (canary_job, canary_lease, [joe_allowed], canary_events)
     attest(cur, "joe", canary_args, canary_destination)
-    cur.execute("set session authorization carr_calendar_prebrief_joe")
+    cur.execute("set session authorization carr_calendar_prebrief_canary_joe")
     cur.execute(canary_ingest_sql(), (canary_job, canary_lease, canary_destination, [joe_allowed], canary_events))
     canary_receipt = required(cur, "isolated canary receipt")[0]
+    refused(cur, ingest_sql(), canary_args, "42501", "permission denied")
+    cur.execute("reset session authorization")
+    cur.execute("set session authorization carr_calendar_prebrief_joe")
+    refused(cur, canary_ingest_sql(), (canary_job, canary_lease, canary_destination, [joe_allowed], canary_events), "42501", "permission denied")
     refused(cur, ingest_sql(), canary_args, "42501", "does not match the static job owner")
-    refused(cur, canary_ingest_sql(), (first_job, first_lease, canary_destination, [joe_allowed], first_events), "42501", "mode or destination")
     cur.execute("reset session authorization")
     cur.execute("select count(*) from ops.calendar_prebrief_projection_event where sponsor='joe'")
     if required(cur, "canary never mutates live projection") != (1,):
@@ -336,11 +382,11 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute(
         """select has_table_privilege(role_name,table_name,'select') or has_table_privilege(role_name,table_name,'insert')
                     or has_table_privilege(role_name,table_name,'update') or has_table_privilege(role_name,table_name,'delete')
-              from (values ('carr_reader'),('carr_writer'),('carr_jobs'),('carr_authority'),('carr_calendar_prebrief_jobs'),
+              from (values ('carr_reader'),('carr_writer'),('carr_jobs'),('carr_authority'),('carr_calendar_prebrief_jobs'),('carr_calendar_prebrief_canary_jobs'),
                            ('carr_calendar_prebrief_attestors'),('carr_calendar_prebrief_email_resolver')) roles(role_name)
               cross join (values ('ops.calendar_prebrief_allowed_calendar'),('ops.calendar_prebrief_allowlist_receipt'),
                                  ('ops.calendar_prebrief_projection_event'),('ops.calendar_prebrief_projection_participant'),
-                                 ('ops.calendar_prebrief_projection_receipt'),('ops.calendar_prebrief_source_attestation_receipt'),
+                                 ('ops.calendar_prebrief_projection_receipt'),('ops.calendar_prebrief_source_attestation_receipt'),('ops.calendar_prebrief_capture_challenge'),
                                  ('ops.calendar_prebrief_canary_event'),('ops.calendar_prebrief_canary_receipt')) tables(table_name)"""
     )
     if any(row[0] for row in cur.fetchall()):
@@ -350,17 +396,21 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
                   has_function_privilege('carr_jobs','ops.ingest_calendar_prebrief_projection(uuid,uuid,text[],jsonb)','execute'),
                   has_function_privilege('carr_writer','ops.ingest_calendar_prebrief_projection(uuid,uuid,text[],jsonb)','execute'),
                   has_function_privilege('carr_calendar_prebrief_jobs','ops.ingest_calendar_prebrief_projection(uuid,uuid,text[],jsonb)','execute'),
-                  has_function_privilege('carr_calendar_prebrief_attestors','ops.record_calendar_prebrief_verified_envelope(uuid,uuid,text[],jsonb,text,text,text,text)','execute'),
-                  has_function_privilege('carr_calendar_prebrief_jobs','ops.record_calendar_prebrief_verified_envelope(uuid,uuid,text[],jsonb,text,text,text,text)','execute'),
+                  has_function_privilege('carr_calendar_prebrief_attestors','ops.record_calendar_prebrief_verified_envelope(uuid,uuid,uuid,timestamptz,timestamptz,timestamptz,uuid,text,text[],text[],jsonb,text,text,text,text)','execute'),
+                  has_function_privilege('carr_calendar_prebrief_jobs','ops.record_calendar_prebrief_verified_envelope(uuid,uuid,uuid,timestamptz,timestamptz,timestamptz,uuid,text,text[],text[],jsonb,text,text,text,text)','execute'),
                   has_function_privilege('carr_calendar_prebrief_email_resolver','ops.resolve_calendar_prebrief_email_ref(text)','execute'),
                   has_function_privilege('carr_calendar_prebrief_jobs','ops.ingest_calendar_prebrief_canary_projection(uuid,uuid,text,text[],jsonb)','execute'),
+                  has_function_privilege('carr_calendar_prebrief_canary_jobs','ops.ingest_calendar_prebrief_canary_projection(uuid,uuid,text,text[],jsonb)','execute'),
+                  has_function_privilege('carr_calendar_prebrief_canary_jobs','ops.ingest_calendar_prebrief_projection(uuid,uuid,text[],jsonb)','execute'),
+                  has_function_privilege('carr_calendar_prebrief_email_resolver','ops.issue_calendar_prebrief_capture_contract(uuid,uuid)','execute'),
+                  has_function_privilege('carr_calendar_prebrief_attestors','ops.issue_calendar_prebrief_capture_contract(uuid,uuid)','execute'),
                   has_function_privilege('carr_authority','ops.replace_calendar_prebrief_allowlist(text[])','execute'),
                   has_function_privilege('carr_reader','ops.replace_calendar_prebrief_allowlist(text[])','execute'),
                   has_function_privilege('carr_jobs','ops.replace_calendar_prebrief_allowlist(text[])','execute'),
                   has_function_privilege('carr_calendar_prebrief_jobs','ops.replace_calendar_prebrief_allowlist(text[])','execute')"""
     )
     capability_split = required(cur, "function capability split")
-    if capability_split != (False, False, False, True, True, False, True, True, True, False, False, False):
+    if capability_split != (False, False, False, True, True, False, True, False, True, False, True, False, True, False, False, False):
         raise RuntimeError(f"calendar prebrief function capability grants are wrong: {capability_split!r}")
     cur.execute("set session authorization carr_jobs")
     refused(cur, ingest_sql(), first_args, "42501", "permission denied")
@@ -388,6 +438,12 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     refused(cur, "select * from ops.calendar_prebrief_projection_event", (), "42501", "permission denied")
     refused(cur, "select * from ops.calendar_prebrief_allowed_calendar", (), "42501", "permission denied")
     cur.execute("reset session authorization")
+    # Capture under revision A, then change the allowlist before isolated
+    # ingestion.  The stale source must not become a hidden canary receipt.
+    stale_canary_lease = uuid.uuid4()
+    stale_canary_job, stale_canary_snapshot = job(cur, "calendar-prebrief-canary-dell-daily", stale_canary_lease, "5 seconds", mode="canary")
+    stale_canary_events = Jsonb(payload_data(dell_allowed, "a" * 63 + "1", second_ref, stale_canary_snapshot))
+    attest(cur, "dell", (stale_canary_job, stale_canary_lease, [dell_allowed], stale_canary_events), "calendar-prebrief-canary-dell")
     cur.execute("set session authorization carr_authority_dell")
     cur.execute("select (ops.replace_calendar_prebrief_allowlist(%s)).configuration_digest", ([dell_allowed, alien],))
     required(cur, "fresh Dell allowlist receipt")
@@ -406,6 +462,9 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("select sponsor,destination,event_count from v_calendar_prebrief_canary_snapshot_status order by sponsor,destination")
     if cur.fetchall() != [("joe", "calendar-prebrief-canary-joe", 1)]:
         raise RuntimeError("allowlist change did not immediately hide Dell's stale canary status")
+    cur.execute("reset session authorization")
+    cur.execute("set session authorization carr_calendar_prebrief_canary_dell")
+    refused(cur, canary_ingest_sql(), (stale_canary_job, stale_canary_lease, "calendar-prebrief-canary-dell", [dell_allowed], stale_canary_events), "55000", "exact immutable verified source envelope")
     cur.execute("reset session authorization")
     cur.execute("set session authorization carr_authority_dell")
     cur.execute("select (ops.replace_calendar_prebrief_allowlist(%s)).id", ([dell_allowed],))
@@ -437,13 +496,14 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     concurrent_lease = uuid.uuid4()
     concurrent_job, concurrent_snapshot = job(cur, joe_key, concurrent_lease, "4 seconds")
     concurrent_events = Jsonb(payload_data(joe_allowed, "6" * 64, ref, concurrent_snapshot))
+    concurrent_signed = envelope_args(cur, "joe", (concurrent_job, concurrent_lease, [joe_allowed], concurrent_events), signature="6" * 64)
     conn.commit()
     concurrent_results: list[uuid.UUID] = []
 
     def concurrent_attest() -> None:
         with psycopg.connect(dsn) as peer_conn, peer_conn.cursor() as peer:
             peer.execute("set session authorization carr_calendar_prebrief_attestor_joe")
-            peer.execute(attest_sql(), envelope_args((concurrent_job, concurrent_lease, [joe_allowed], concurrent_events)))
+            peer.execute(attest_sql(), concurrent_signed)
             concurrent_results.append(required(peer, "concurrent immutable source receipt")[0])
             peer_conn.commit()
 

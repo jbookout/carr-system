@@ -68,8 +68,8 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # preamble so the applied-through-0205 snapshot cannot leak a 0216 artifact.
 # Move it into APP_ROLES and the generator together on the snapshot refresh
 # that records 0216 as applied.
-PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs", "carr_calendar_prebrief_attestors",
-                        "carr_calendar_prebrief_email_resolver"]
+PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
+                        "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver"]
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
