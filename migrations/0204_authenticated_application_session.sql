@@ -553,13 +553,32 @@ begin
   -- then reached the mint through SET ROLE. NOINHERIT plus SET ROLE is the
   -- normal way to wire a privilege bundle, so this is the likely shape of the
   -- door wiring a later slice adds.
-  select string_agg(m.member::regrole::text, ', ') into offenders
-    from pg_auth_members m
-   where m.roleid = 'carr_session_minter'::regrole
-     and not exists (select 1 from pg_roles r where r.oid = m.member and r.rolsuper);
+  -- NO RUNTIME ROLE MAY REACH THE MINT, directly or by inheritance. This used to
+  -- assert that the minter had NO members at all, which was over-tight in a way
+  -- that only showed up later: wiring a door is the whole point of the next
+  -- slice, and it wires one by making a dedicated issuer credential a member.
+  -- The strict form made this migration refuse to apply to any fresh database in
+  -- a cluster where that had already happened — role membership is cluster-wide
+  -- while migrations are per-database — so an assertion meant to protect the
+  -- substrate would have blocked the substrate's own intended use.
+  --
+  -- The property worth asserting was never "nobody is a member". It is that the
+  -- credentials this substrate CONSTRAINS cannot reach the thing that mints. A
+  -- purpose-built issuer being a member is the design; carr_writer being one,
+  -- through any path, is the failure.
+  select string_agg(format('%s (SET ROLE=%s, inherits=%s)', r,
+                           pg_has_role(r, 'carr_session_minter', 'MEMBER'),
+                           pg_has_role(r, 'carr_session_minter', 'USAGE')), ', ')
+    into offenders
+    from unnest(array['carr_writer','carr_reader','carr_jobs','carr_authority',
+                      'carr_exporter','carr_device_evidence']) r
+   where exists (select 1 from pg_roles where rolname = r)
+     and (pg_has_role(r, 'carr_session_minter', 'MEMBER')
+          or pg_has_role(r, 'carr_session_minter', 'USAGE'));
   if offenders is not null then
-    raise exception '0204 FAILED: carr_session_minter must have no members until a '
-      'later slice decides which door credential joins it; found: %', offenders;
+    raise exception '0204 FAILED: these runtime roles can reach the mint, so the '
+      'credential this substrate constrains could forge its own authentication: %',
+      offenders;
   end if;
   if exists (select 1 from pg_roles where rolname='carr_session_minter' and rolcanlogin) then
     raise exception '0204 FAILED: carr_session_minter must be NOLOGIN';
