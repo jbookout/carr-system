@@ -662,6 +662,24 @@ RESTORE_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_
 [ -n "$RESTORE_URL" ] || die "could not obtain the $RESTORE_DB connection string"
 say "  ok    empty database $RESTORE_DB created on the branch"
 
+# SCOPED DUMPS DO NOT CARRY CLUSTER EXTENSIONS. backup-dump.sh deliberately
+# selects only the application-owned public and ops schemas. PostgreSQL
+# extensions are cluster/database objects outside that selection, even though
+# the functions they install live in public. The 2026-08-17 recovery drill
+# proved the consequence: the dump reached a guidance view using public.digest
+# and failed because pgcrypto had never been installed in the new database.
+# These are the exact two extension prerequisites declared by the migration
+# tree (0001 and 0135). Install them in the throwaway target before loading;
+# production is untouched and every application object still comes from the
+# encrypted artifact.
+if ! psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -q \
+    -c "create extension if not exists pg_trgm; create extension if not exists pgcrypto;" \
+    >/dev/null 2>"$WORKDIR/extensions.err"; then
+  say "$(cat "$WORKDIR/extensions.err")" >&2
+  die "could not install the dump's pg_trgm and pgcrypto prerequisites"
+fi
+say "  ok    pg_trgm and pgcrypto prerequisites installed in the throwaway database"
+
 # THE DECRYPT. Piped straight into psql: the plaintext dump exists only in a
 # pipe, never as a file, so there is nothing to forget to delete.
 #
@@ -676,7 +694,7 @@ say "  ok    empty database $RESTORE_DB created on the branch"
 # pipefail matters just as much: without it the pipeline's status is psql's, and
 # psql exits 0 on an empty stdin. A failed decrypt would have loaded nothing and
 # passed.
-# THE ACL FILTER, and why it is a filter rather than ON_ERROR_STOP=0.
+# THE PORTABILITY FILTER, and why it is a filter rather than ON_ERROR_STOP=0.
 #
 # FOUND BY THE FIRST REAL RUN, 2026-08-02: the restore died on
 #   ERROR: permission denied to change default privileges
@@ -697,10 +715,17 @@ say "  ok    empty database $RESTORE_DB created on the branch"
 # defect this whole drill was built to expose. Filtering removes exactly the
 # statement classes we know cannot apply and leaves every other error fatal.
 #
+# FOUND AGAIN BY THE 2026-08-17 PRE-ACTIVATION RECOVERY DRILL: scoped plain-SQL
+# dumps now include `CREATE SCHEMA public;`, while a newly created PostgreSQL
+# database already owns that schema. ON_ERROR_STOP correctly refused the
+# duplicate before loading a table. `public` is the only pre-created schema;
+# `CREATE SCHEMA ops;` must remain and every table/COPY error stays fatal. Strip
+# exactly that one idempotent declaration, not CREATE SCHEMA generally.
+#
 # The count assertion in phase 4 is what proves the filter did not eat data: ACL
 # statements move no rows, so if stripping them changed a single count, the
 # comparison fails.
-ACL_FILTER='/^(ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMENT ON EXTENSION )/d'
+RESTORE_FILTER='/^(CREATE SCHEMA public;|ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMENT ON EXTENSION )/d'
 
 # EVIDENCE (Program 4): the RTO clock for "how long does restore take" starts
 # HERE — right before the actual decrypt+load — not at branch-create above, so
@@ -710,10 +735,10 @@ ACL_FILTER='/^(ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMEN
 RESTORE_START_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RESTORE_START_EPOCH="$(date +%s)"
 say "  decrypting and loading (this is the slow step) ..."
-say "  note: stripping ownership/ACL statements the source dump carries (see comment)"
+say "  note: stripping the pre-created public schema declaration and ownership/ACL statements (see comment)"
 set -o pipefail
 if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/restore.err" \
-     | sed -E "$ACL_FILTER" \
+     | sed -E "$RESTORE_FILTER" \
      | psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -q >"$WORKDIR/restore.out" 2>>"$WORKDIR/restore.err"; then
   set +o pipefail
   say ""

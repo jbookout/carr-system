@@ -27,16 +27,20 @@ def main() -> int:
     restore = RESTORE.read_text(encoding="utf-8")
     check("nightly never sources db.env", '. "$HOME/.config/carr/db.env"' not in nightly)
     check("nightly uses a clean child environment", "carr_routine_exec \"$@\"" in nightly)
-    # 5 -> 6 on 2026-08-20: the portability mirror gained a refusal branch. An
-    # exact count rather than a floor, deliberately — the point of this check is
-    # that an admin-capability step CANNOT be added without going through the
-    # helper, and `>=` would let a seventh slip past unrefused.
+    # Back to 5: the mirror's refusal branch came out again once #387 made
+    # doctrine_mirror.py exit 78 on its own. An exact count rather than a floor,
+    # deliberately — the point of this check is that an admin-capability step
+    # CANNOT be added without going through the helper, and `>=` would let a
+    # sixth slip past unrefused.
     check("admin nightly steps refuse through evidence-producing step calls",
-          nightly.count("routine-admin-refusal.sh") == 6)
+          nightly.count("routine-admin-refusal.sh") == 5)
     check("routine nightly contains no db-tap escalation", "CARR_BREAK_GLASS=1" not in nightly)
+    # Scope only: the mirror gets the backup capability and nothing wider. What
+    # happens when that capability is ABSENT is not this file's question — the
+    # mirror answers it itself with exit 78, and
+    # ops/nightly-capability-skip-selftest.py proves that by running it.
     check("portability mirror uses only the backup capability",
           'portability mirror (md+csv, 2 locations)' in nightly
-          and 'if [ -n "$CARR_DB_BACKUP_URL" ]; then' in nightly
           and 'DATABASE_URL="$CARR_DB_BACKUP_URL"' in nightly)
     check("each backup invocation binds the backup capability explicitly",
           nightly.count('env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh') == 3)

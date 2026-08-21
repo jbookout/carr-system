@@ -381,8 +381,11 @@ def main():
     # left red. Judging whether a state was chosen is not mechanical, but what
     # to do once it has been is, so it carries a manifest row typed procedure
     # rather than compiling as a constraint the way 937252fb did.
+    # doctrine 14 -> 13 on 2026-08-20 when e7a620cc was retired: the broad
+    # cross-session Dr. CRE persona was withdrawn while the real Doc app
+    # doctrine remained intact.
     reviewed_counts = {
-        "constraint": 75, "procedure": 77, "doctrine": 14, "rubric": 37,
+        "constraint": 75, "procedure": 77, "doctrine": 13, "rubric": 37,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -415,7 +418,7 @@ def main():
         "source_manifest_provenance": {
             "path": "audits/guidance-migration-manifest.v1.tsv", "sha256": "a" * 64,
             "manifest": "carr-guidance-migration", "schema_version": "1.0.0",
-            "source_classification": "judgment_ambient", "entry_count": 94,
+            "source_classification": "judgment_ambient", "entry_count": 93,
         },
         "base_inventory": {
             "path": "ops/config/rule-enforcement-map.json", "sha256": "b" * 64,
@@ -438,10 +441,11 @@ def main():
             source_rule_ids[item["source_id"]]
             for item in reviewed_registry["items"] if item["guidance_id"] in constitution)
         # 216 -> 217 on 2026-08-16 with rule 937252fb, 217 -> 218 on 2026-08-18
-        # with rule bd4a6d22. One entry per compiled guidance item, so this
-        # total follows the same activations the counts above follow, and the
+        # with rule bd4a6d22, then 218 -> 217 when e7a620cc was retired on
+        # 2026-08-20. One entry per compiled guidance item, so this total
+        # follows the same lifecycle changes as the counts above, and the
         # manifest entry_count above moves with the TSV that feeds it.
-        and len(activation_manifest["entries"]) == 218
+        and len(activation_manifest["entries"]) == 217
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)

@@ -525,25 +525,22 @@ step "vendor level drift (reports, never changes a level)" ./.venv/bin/python op
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # The portability mirror (Joe's ruling 2026-08-08): the readable escape hatch —
 # md per doctrine doc + CSV per table, Drive + local disk, wholesale overwrite.
-# GUARDED, NOT DEFAULTED. Everything else on this page is safe to default,
-# because the callee exits 78 on an empty value and 78 reads as SKIP. This one
-# is not: an empty DATABASE_URL makes doctrine_mirror.py exit 2, which reads as
-# FAIL, so defaulting it trades a dead chain for a red row that fires every
-# night the credential is absent — which is the alarm-fatigue failure the ORDER
-# 2 addendum already fixed once for the boards. Observed live on 2026-08-20:
-# #380 defaulted this line and the very next run logged
-# `FAIL portability mirror (exit 2)`.
+# NO GUARD HERE. #391 wrapped this in `if [ -n "$CARR_DB_BACKUP_URL" ]` because
+# an empty DATABASE_URL used to make doctrine_mirror.py exit 2, which reads as
+# FAIL. #387 fixed that in the callee on the same day: the mirror now returns
+# 78 on an absent credential, the house SKIP contract, exactly as
+# bin/backup-dump.sh already did. Both landed within an hour of each other and
+# nobody noticed they overlapped.
 #
-# The refusal helper is the same one the environment gates above use, so the
-# unconfigured case names WHICH capability is missing instead of surfacing a
-# bare traceback.
-if [ -n "$CARR_DB_BACKUP_URL" ]; then
-  drive_projection "portability mirror (md+csv, 2 locations)" \
-    "canonical portability document destination" \
-    env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
-else
-  step "portability mirror (backup capability unavailable)" sh ./bin/routine-admin-refusal.sh "portability mirror needs the carr_backup DSN in ~/.config/carr/db.env"
-fi
+# The callee is the right home for it. A guard here protects one caller; 78
+# protects every caller, including anyone who runs the mirror by hand. Keeping
+# both meant two places to read before you could answer what happens when the
+# credential is missing, and the shell branch would go stale the moment the
+# exit code changed again. ops/nightly-capability-skip-selftest.py asserts the
+# behaviour against the mirror itself rather than against this line.
+drive_projection "portability mirror (md+csv, 2 locations)" \
+  "canonical portability document destination" \
+  env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py --out "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/Backups/portability-mirror" --also "$HOME/carr-system/out/mirror"
 BACKUP_RC=$LAST_STEP_RC
 
 # Added 2026-08-06 (loop #180): the published Outlook feeds are a ROLLING window

@@ -168,9 +168,14 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("backup login-role mapping is not bound by migration 0119")
     if "CARR_DB_BACKUP_URL" not in backup_dump or "carr_backup" not in backup_dump:
         errors.append("backup credential and login boundary are not bound by backup-dump")
+    # SCOPE, which is this preflight's subject: the mirror receives the backup
+    # capability and nothing wider. #391 briefly also required the shell guard
+    # `if [ -n "$CARR_DB_BACKUP_URL" ]` here, which is a different question —
+    # what happens when the capability is absent — and one the callee now
+    # answers itself by exiting 78 (#387). Asserting it here made a provisioning
+    # preflight fail over the shape of a caller's error handling.
     if (
-        'if [ -n "$CARR_DB_BACKUP_URL" ]; then' not in nightly
-        or 'env DATABASE_URL="$CARR_DB_BACKUP_URL"' not in nightly
+        'env DATABASE_URL="$CARR_DB_BACKUP_URL"' not in nightly
         or "pipelines/doctrine_mirror.py" not in nightly
     ):
         errors.append("backup credential is not scoped to the portability mirror step")
