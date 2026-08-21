@@ -208,3 +208,63 @@ export async function sessionForAccessToken(request, env, actor, deps = {}) {
     return null;
   }
 }
+
+/**
+ * The Deal Room cookie door.
+ *
+ * WHY THIS DOOR QUALIFIES AND THE BEARER DOORS DO NOT. Its KV record carries an
+ * issuance instant (createdAt), an enforced expiry (expiresAt, under a hard
+ * seven-day ceiling), and a real revocation: signing out deletes the key, and
+ * the lookup deletes on expiry. That is all three properties a session identity
+ * needs. A static secret map has none of them.
+ *
+ * ONE COOKIE SESSION IS ONE APPLICATION SESSION, and the mapping is stored IN
+ * the cookie record rather than beside it. That is deliberate: the two then
+ * share a lifetime by construction, so a revoked or expired cookie cannot leave
+ * a mapping behind pointing at a session someone could still cite. Deleting the
+ * record deletes the link in the same operation.
+ *
+ * Expiry is the cookie's ABSOLUTE end, not its idle end. The idle window slides
+ * forward on every request, so binding to it would let a session that is
+ * actively used never expire — which is the grant-not-a-session mistake in a
+ * different costume. The absolute ceiling cannot slide.
+ *
+ * Returns { sessionId, changed }. `changed` tells the caller to persist the
+ * record; it never writes KV itself, so the mint rides along with whatever
+ * write the caller was already going to make rather than adding one.
+ */
+export async function sessionForDealRoomCookie(opts) {
+  const { record, actor, absoluteEndMs, mintFn, now } = opts;
+  const onFailure = opts.onFailure || (() => {});
+  if (record?.application_session_id) {
+    return { sessionId: record.application_session_id, changed: false };
+  }
+  if (!mintFn || !actor?.slug) {
+    onFailure("session_mint_unavailable",
+              { mintFn: Boolean(mintFn), slug: actor?.slug || null, door: "dealroom-cookie" });
+    return { sessionId: null, changed: false };
+  }
+  try {
+    const expiresMs = sessionExpiry(absoluteEndMs, now);
+    if (!expiresMs) {
+      onFailure("session_credential_expiry_unusable", { door: "dealroom-cookie" });
+      return { sessionId: null, changed: false };
+    }
+    const sessionId = await mintApplicationSession(mintFn, {
+      id: opts.uuid ? opts.uuid() : crypto.randomUUID(),
+      actorSlug: actor.slug,
+      organizationTenantId: actor.organization_tenant_id || "carr-internal",
+      sponsoringHumanSlug: actor.sponsoring_human_slug || (actor.human ? actor.slug : null),
+      via: "dealroom-cookie",
+      authIssuer: "accounts.google.com",
+      authorizationClass: actor.authorization_class || null,
+      verifiedSubject: actor.slug,
+      expiresAt: new Date(expiresMs).toISOString(),
+    });
+    return { sessionId, changed: true };
+  } catch (e) {
+    onFailure("session_mint_failed",
+              { door: "dealroom-cookie", error: String(e?.message || e).slice(0, 200) });
+    return { sessionId: null, changed: false };
+  }
+}

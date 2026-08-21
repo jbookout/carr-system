@@ -12,6 +12,8 @@ import {
   verifyGoogleIdToken,
 } from "./google-oidc.js";
 import { actorFromProps, propsForSlug, slugForEmail } from "./identity.js";
+import { neon } from "@neondatabase/serverless";
+import { sessionForDealRoomCookie } from "./session.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
 
@@ -290,6 +292,41 @@ async function sessionFor(request, env, dependencies) {
   }
 
   let changed = false;
+
+  // THE SECOND DOOR THAT MINTS (migrations 0208/0209/0210). This cookie has all
+  // three properties a session identity needs — an issuance instant, an enforced
+  // expiry under a hard seven-day ceiling, and a real revocation on sign-out —
+  // which is exactly what the bearer doors lack and why they stay on the legacy
+  // path with a null link.
+  //
+  // Minting HERE covers every authenticated Deal Room surface at once, including
+  // the Program 6 posts that write evidence, because they all pass through this
+  // function. The session rides on the actor the same way the OAuth door's does,
+  // so the write path picks it up through auditIdentity with no verb change.
+  //
+  // A null result is normal: the request proceeds and records legacy evidence.
+  // It is reported rather than silent, because a door that has quietly stopped
+  // qualifying is indistinguishable from one nobody used.
+  const minted = await sessionForDealRoomCookie({
+    record: session,
+    actor,
+    absoluteEndMs: absoluteEnd,
+    now,
+    mintFn: env.SESSION_MINT_FN
+      || (env.DATABASE_URL_SESSION_ISSUER
+        ? (text, params) => neon(env.DATABASE_URL_SESSION_ISSUER).query(text, params)
+        : null),
+    onFailure: dependencies.onSessionMintFailure || (() => {}),
+  });
+  if (minted.sessionId) {
+    actor.application_session_id = minted.sessionId;
+    if (minted.changed) {
+      // Persisted through the SAME put the refresh path below already makes.
+      session.application_session_id = minted.sessionId;
+      changed = true;
+    }
+  }
+
   // Sessions issued before the browser-action boundary was introduced have no
   // synchronizer token.  Mint it server-side on first use; it never enters the
   // cookie and a legacy session is not magically treated as freshly reauthed.

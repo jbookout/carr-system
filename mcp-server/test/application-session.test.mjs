@@ -460,3 +460,183 @@ test("mcpApiHandler passes the DECORATED actor onward, not the original", async 
     "mcpApiHandler must hand dispatch the decorated actor; passing `actor` "
     + "directly would mint a session and then discard it");
 });
+
+// ───────────────────────────────────────────── the Deal Room cookie door ─────
+// The second door that qualifies. Its KV record carries an issuance instant, an
+// enforced expiry under a hard seven-day ceiling, and a real revocation on
+// sign-out — the three properties the bearer doors lack.
+import { sessionForDealRoomCookie } from "../src/session.js";
+
+const ABS_END = NOW + 7 * 24 * 3600_000;
+
+test("Deal Room: mints once, then reuses from the record itself", async () => {
+  let mints = 0;
+  const mintFn = async () => { mints += 1; return [{ id: `dr-${mints}` }]; };
+  const record = { createdAt: NOW, expiresAt: NOW + 3600_000 };
+  const first = await sessionForDealRoomCookie({
+    record, actor: JOE, absoluteEndMs: ABS_END, now: NOW, mintFn, uuid: () => "u" });
+  assert.equal(first.sessionId, "dr-1");
+  assert.equal(first.changed, true, "the caller must persist a first mint");
+
+  record.application_session_id = first.sessionId;   // as the caller persists it
+  const second = await sessionForDealRoomCookie({
+    record, actor: JOE, absoluteEndMs: ABS_END, now: NOW, mintFn, uuid: () => "u" });
+  assert.equal(second.sessionId, "dr-1");
+  assert.equal(second.changed, false, "a reuse must not trigger another write");
+  assert.equal(mints, 1, "one cookie session is one application session");
+});
+
+test("Deal Room: binds the ABSOLUTE end, so an actively used cookie still expires", async () => {
+  // The idle window slides forward on every request. Binding to it would let a
+  // session that is used continuously never expire, which is the
+  // grant-is-not-a-session mistake wearing different clothes.
+  let sent = null;
+  const mintFn = async (_t, p) => { sent = p[8]; return [{ id: "dr" }]; };
+  await sessionForDealRoomCookie({
+    record: { createdAt: NOW, expiresAt: NOW + 3600_000 },
+    actor: JOE, absoluteEndMs: ABS_END, now: NOW, mintFn, uuid: () => "u" });
+  assert.equal(Date.parse(sent), ABS_END,
+    "expiry must be the cookie's absolute ceiling, not its sliding idle end");
+});
+
+test("Deal Room: the 30-day cap still applies over a longer ceiling", async () => {
+  let sent = null;
+  const mintFn = async (_t, p) => { sent = p[8]; return [{ id: "dr" }]; };
+  await sessionForDealRoomCookie({
+    record: { createdAt: NOW }, actor: JOE,
+    absoluteEndMs: NOW + 400 * 24 * 3600_000, now: NOW, mintFn, uuid: () => "u" });
+  assert.equal(Date.parse(sent), NOW + SESSION_CAP_MS);
+});
+
+test("Deal Room: it mints by SLUG and sends no authentication instant", async () => {
+  let call = null;
+  const mintFn = async (t, p) => { call = { t, p }; return [{ id: "dr" }]; };
+  await sessionForDealRoomCookie({
+    record: { createdAt: NOW }, actor: JOE, absoluteEndMs: ABS_END,
+    now: NOW, mintFn, uuid: () => "u" });
+  assert.match(call.t, /mint_application_session_for_slug/);
+  assert.equal(call.p.length, 9, "an authenticated_at parameter would make backdating expressible");
+  assert.equal(call.p[1], "joe");
+  assert.equal(call.p[4], "dealroom-cookie", "the door records which surface authenticated");
+});
+
+test("Deal Room: an expired ceiling mints nothing and reports", async () => {
+  const failures = [];
+  const out = await sessionForDealRoomCookie({
+    record: { createdAt: NOW }, actor: JOE, absoluteEndMs: NOW - 1, now: NOW,
+    mintFn: async () => [{ id: "dr" }], uuid: () => "u",
+    onFailure: (k, d) => failures.push({ k, d }) });
+  assert.equal(out.sessionId, null);
+  assert.equal(failures[0].k, "session_credential_expiry_unusable");
+});
+
+test("Deal Room: a minting failure downgrades and REPORTS, naming the door", async () => {
+  const failures = [];
+  const out = await sessionForDealRoomCookie({
+    record: { createdAt: NOW }, actor: JOE, absoluteEndMs: ABS_END, now: NOW,
+    mintFn: async () => { throw new Error("issuer unreachable"); }, uuid: () => "u",
+    onFailure: (k, d) => failures.push({ k, d }) });
+  assert.equal(out.sessionId, null, "the request proceeds on the legacy path");
+  assert.equal(failures[0].k, "session_mint_failed");
+  assert.equal(failures[0].d.door, "dealroom-cookie");
+});
+
+test("Deal Room: without an issuer credential it mints nothing and says which precondition failed", async () => {
+  const failures = [];
+  const out = await sessionForDealRoomCookie({
+    record: { createdAt: NOW }, actor: JOE, absoluteEndMs: ABS_END, now: NOW,
+    mintFn: null, onFailure: (k, d) => failures.push({ k, d }) });
+  assert.equal(out.sessionId, null);
+  assert.equal(failures[0].k, "session_mint_unavailable");
+  assert.equal(failures[0].d.mintFn, false);
+  assert.equal(failures[0].d.door, "dealroom-cookie");
+});
+
+// ──────────────────────────── the Deal Room CALL SITE, not just the function ─────
+// Two mutants survived a first pass here: binding the sliding idle end instead
+// of the absolute ceiling, and minting correctly then never attaching the result
+// to the actor. Both live in the wiring rather than in the function, so both are
+// invisible to a test that only calls the function. These drive the real handler.
+import { createDealroomHandler } from "../src/dealroom-web.js";
+
+const DR_COOKIE = "__Host-dealroom_session";
+const DR_PREFIX = "dealroom_session:";
+
+async function sha256hex(value) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function dealroomFixture({ createdAt, expiresAt, mintFn, existingSession = null }) {
+  const opaque = "opaque-cookie-value";
+  const key = DR_PREFIX + await sha256hex(opaque);
+  const record = { props: { slug: "joe", via: "dealroom-cookie" },
+                   createdAt, expiresAt, csrfToken: "csrf", reauthAt: createdAt };
+  if (existingSession) record.application_session_id = existingSession;
+  const store = new Map([[key, record]]);
+  const env = {
+    OAUTH_KV: {
+      async get(k) { return store.has(k) ? store.get(k) : null; },
+      async put(k, v) { store.set(k, JSON.parse(v)); },
+      async delete(k) { store.delete(k); },
+    },
+    SESSION_MINT_FN: mintFn,
+    DEALROOM_HOST: "dealroom.example.com",
+  };
+  const seen = {};
+  const handler = createDealroomHandler({
+    now: () => NOW,
+    pipelineHandler: async (_req, _env, _ctx, actor) => {
+      seen.actor = actor;
+      return new Response("ok", { status: 200 });
+    },
+  });
+  const request = {
+    method: "GET",
+    url: "https://dealroom.example.com/pipeline/changes",
+    headers: new Headers({ cookie: `${DR_COOKIE}=${opaque}` }),
+  };
+  return { handler, env, request, seen, store, key };
+}
+
+test("Deal Room call site: the actor handed onward CARRIES the session", async () => {
+  const mints = [];
+  const f = await dealroomFixture({
+    createdAt: NOW, expiresAt: NOW + 3600_000,
+    mintFn: async (t, p) => { mints.push({ t, p }); return [{ id: "dr-attached" }]; },
+  });
+  const res = await f.handler.fetch(f.request, f.env, { waitUntil: () => {} });
+  assert.equal(res.status, 200);
+  assert.equal(mints.length, 1, "the Deal Room door must mint");
+  assert.equal(f.seen.actor?.application_session_id, "dr-attached",
+    "minting and then not attaching leaves every write on the legacy path");
+});
+
+test("Deal Room call site: the mint binds the ABSOLUTE ceiling, not the sliding idle end", async () => {
+  const mints = [];
+  const f = await dealroomFixture({
+    createdAt: NOW,
+    expiresAt: NOW + 3600_000,                       // idle end: one hour away
+    mintFn: async (t, p) => { mints.push({ t, p }); return [{ id: "dr" }]; },
+  });
+  await f.handler.fetch(f.request, f.env, { waitUntil: () => {} });
+  const sentExpiry = Date.parse(mints[0].p[8]);
+  const absoluteEnd = NOW + 7 * 24 * 3600_000;       // createdAt + the 7-day ceiling
+  assert.equal(sentExpiry, absoluteEnd,
+    "the idle window slides forward on every request, so binding to it would let "
+    + "a continuously used cookie never expire");
+  assert.notEqual(sentExpiry, NOW + 3600_000);
+});
+
+test("Deal Room call site: the session is persisted, so the next request reuses it", async () => {
+  let mints = 0;
+  const f = await dealroomFixture({
+    createdAt: NOW, expiresAt: NOW + 3600_000,
+    mintFn: async () => { mints += 1; return [{ id: `dr-${mints}` }]; },
+  });
+  await f.handler.fetch(f.request, f.env, { waitUntil: () => {} });
+  assert.equal(f.store.get(f.key).application_session_id, "dr-1",
+    "the mint must be written into the cookie record, so it shares its lifetime");
+  await f.handler.fetch(f.request, f.env, { waitUntil: () => {} });
+  assert.equal(mints, 1, "one cookie session is one application session");
+});
