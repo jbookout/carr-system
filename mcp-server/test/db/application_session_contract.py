@@ -1375,6 +1375,180 @@ def main(dsn):  # noqa: C901
                     f"refused by a different guard: {str(exc).strip().splitlines()[0]}")
     check("req 6: a phase acceptance cannot be rewritten or deleted by anyone",
           acceptance_cannot_be_rewritten_even_by_the_owner)
+    RETIREMENT_INSERT = """insert into ops.drive_retirement
+        (id, drive_dependency_id, repoint_receipt_id, recovery_receipt_id,
+         application_session_id, retired_by_actor_id, organization_tenant_id, note)
+        values (%s,%s,%s,%s,%s,%s,'carr-internal',%s)"""
+
+
+    # ------------------------------------- 0214: Drive retirement ----------
+    # The static preflight (ops/drive-retirement-readiness-gate.py) refuses to
+    # close Phase 4 on inventory alone, in its own words: it "cannot resolve
+    # immutable repoint receipts, recovery receipts, or Joe's authority
+    # receipt", and it has no --evidence argument because caller JSON is not a
+    # receipt. These contracts exercise the record layer that answer points at.
+    def retirement_needs_proven_receipts():
+        """Not merely present — PROVEN. An unproven receipt is a claim the
+        database has already declined to confirm."""
+        sid, key, digest = receipt_fixture()
+        subj_a, subj_b = uuid.uuid4(), uuid.uuid4()
+        r1, r2 = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, subj_a, key, digest, "origin"),
+                    because="setup: repoint receipt, left unproven")
+        writer_runs(conn, RECEIPT_INSERT, (r2, sid, joe, subj_b, key, digest, "origin"),
+                    because="setup: recovery receipt, left unproven")
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        # EACH RECEIPT IS CHECKED SEPARATELY. Leaving both unproven passes even
+        # when only one of the two checks survives, because the other one fires
+        # and the message still says "is not proven". A mutant that deleted the
+        # repoint check lived through exactly that.
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r2,))
+            conn.commit()
+        refuses(conn, RETIREMENT_INSERT,
+                (uuid.uuid4(), dep, r1, r2, sid, joe, "repoint unproven"),
+                because="the REPOINT receipt is unproven while the recovery one is fine",
+                role="carr_writer", expect_message="repoint receipt")
+    check("req 7: retirement refuses an unproven REPOINT receipt",
+          retirement_needs_proven_receipts)
+
+    def retirement_needs_a_proven_recovery_receipt():
+        """The mirror. Proving one half and asserting on a shared phrase let a
+        mutation that deleted the other half survive."""
+        sid, key, digest = receipt_fixture()
+        r1, r2 = uuid.uuid4(), uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, uuid.uuid4(), key, digest, "origin"),
+                    because="setup: repoint receipt, proven below")
+        writer_runs(conn, RECEIPT_INSERT, (r2, sid, joe, uuid.uuid4(), key, digest, "origin"),
+                    because="setup: recovery receipt, left unproven")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        refuses(conn, RETIREMENT_INSERT,
+                (uuid.uuid4(), dep, r1, r2, sid, joe, "recovery unproven"),
+                because="the RECOVERY receipt is unproven while the repoint one is fine",
+                role="carr_writer", expect_message="recovery receipt")
+    check("req 7: retirement refuses an unproven RECOVERY receipt",
+          retirement_needs_a_proven_recovery_receipt)
+
+    def one_receipt_cannot_make_both_claims():
+        """Repointing a reader and proving recovery still works are different
+        assertions. Letting one receipt stand for both is how 'we checked'
+        becomes 'we checked once, sort of'."""
+        sid, key, digest = receipt_fixture()
+        r1 = uuid.uuid4()
+        writer_runs(conn, RECEIPT_INSERT, (r1, sid, joe, uuid.uuid4(), key, digest, "origin"),
+                    because="setup")
+        with as_writer(conn), conn.cursor() as cur:
+            cur.execute("select ops.prove_write_receipt(%s)", (r1,))
+            conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        refuses(conn, RETIREMENT_INSERT,
+                (uuid.uuid4(), dep, r1, r1, sid, joe, "same receipt twice"),
+                because="one receipt must not stand for two distinct claims",
+                role="carr_writer", expect_message="drive_retirement_distinct_receipts")
+    check("req 7: one receipt cannot serve as both the repoint and the recovery",
+          one_receipt_cannot_make_both_claims)
+
+    def readiness_is_computed_and_needs_authority():
+        """A function over the rows, not a flag, and it will not read ready
+        without an acceptance only the authority identity can create."""
+        sid, key, digest = receipt_fixture()
+        r1, r2 = uuid.uuid4(), uuid.uuid4()
+        for r, s_id in ((r1, uuid.uuid4()), (r2, uuid.uuid4())):
+            writer_runs(conn, RECEIPT_INSERT, (r, sid, joe, s_id, key, digest, "origin"),
+                        because="setup")
+            with as_writer(conn), conn.cursor() as cur:
+                cur.execute("select ops.prove_write_receipt(%s)", (r,))
+                conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("""insert into ops.drive_dependency
+                             (source_path, reference, classification, operational)
+                           values (%s, '{{VAULT}}', 'vault-path', true) returning id""",
+                        (f"contract/{uuid.uuid4()}.py:1",))
+            dep = cur.fetchone()[0]
+            conn.commit()
+        writer_runs(conn, RETIREMENT_INSERT,
+                    (uuid.uuid4(), dep, r1, r2, sid, joe, "an honest retirement"),
+                    because="two proven, distinct receipts must be enough to retire ONE "
+                            "dependency")
+        with conn.cursor() as cur:
+            cur.execute("select operational_total, retired_total, remaining, has_authority, ready "
+                        "from ops.drive_retirement_readiness()")
+            total, retired, remaining, has_auth, ready = cur.fetchone()
+        assert total >= 1 and retired >= 1, "the readiness function must see the rows"
+        assert ready is False or has_auth is True, \
+            "readiness must not report ready without an authority acceptance"
+    check("req 7: readiness is computed from the rows and requires authority",
+          readiness_is_computed_and_needs_authority)
+
+    def empty_inventory_is_not_ready():
+        """Nothing proven about nothing is not proof. A readiness function that
+        returns true for an empty inventory would report a system with no Drive
+        dependencies recorded as fully retired."""
+        with conn.cursor() as cur:
+            cur.execute("select ready, operational_total from ops.drive_retirement_readiness()")
+            ready, total = cur.fetchone()
+        if total == 0:
+            assert ready is False, "an empty inventory reported READY"
+        else:
+            # The suite has recorded dependencies; assert the rule directly.
+            cur = conn.cursor()
+            cur.execute("""select (op.n > 0 and op.n = ret.n and auth.n > 0) from
+                (select count(*) n from ops.drive_dependency where operational) op,
+                (select count(*) n from ops.drive_retirement r
+                   join ops.drive_dependency d on d.id=r.drive_dependency_id
+                  where d.operational) ret,
+                (select count(*) n from ops.phase4_acceptance) auth""")
+            expected = cur.fetchone()[0]
+            cur.close()
+            assert ready == expected, \
+                "readiness disagreed with the rule it claims to compute"
+    check("req 7: an empty inventory is not ready", empty_inventory_is_not_ready)
+
+    def retirement_records_are_frozen():
+        with conn.cursor() as cur:
+            cur.execute("""select count(*) from information_schema.table_privileges
+                            where table_schema='ops' and table_name='drive_retirement'
+                              and grantee='carr_writer'
+                              and privilege_type in ('UPDATE','DELETE')""")
+            assert cur.fetchone()[0] == 0, \
+                "carr_writer can rewrite or remove a retirement record"
+        # and the trigger holds even for a role that does have the privilege
+        with conn.cursor() as cur:
+            cur.execute("select id from ops.drive_retirement limit 1")
+            row = cur.fetchone()
+        if row:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("update ops.drive_retirement set note='rewritten' where id=%s",
+                                (row[0],))
+                conn.rollback()
+                raise AssertionError("a retirement record was rewritten by the owner")
+            except psycopg.Error as exc:
+                conn.rollback()
+                assert "cannot be rewritten" in str(exc).lower(), (
+                    f"refused by a different guard: {str(exc).strip().splitlines()[0]}")
+    check("req 7: retirement records cannot be rewritten", retirement_records_are_frozen)
 
     def triggers_enable_always():
         with conn.cursor() as cur:
@@ -1572,13 +1746,30 @@ def main(dsn):  # noqa: C901
             cur.execute("""select count(*) from information_schema.tables
                             where table_schema='ops' and table_name='phase4_acceptance'""")
             assert cur.fetchone()[0] == 1, "the acceptance surface must exist by this slice"
-            # Drive retirement is a LATER slice and must still be absent here.
-            cur.execute("""select table_name from information_schema.tables
-                            where table_schema in ('ops','public')
-                              and table_name like '%drive_retirement%'""")
-            rows = [r[0] for r in cur.fetchall()]
-            assert not rows, f"drive retirement surface arrived early: {rows}"
-    check("scope: the reducer and acceptance exist; retirement is still a later slice",
+            # Drive retirement is the LAST slice and now exists too. This
+            # assertion has been reversed twice, deliberately, and each reversal
+            # was a slice boundary rather than a loosening: first "none of this
+            # exists", then "the reducer and acceptance exist", now "all three
+            # exist and each is gated".
+            cur.execute("""select count(*) from information_schema.tables
+                            where table_schema='ops' and table_name='drive_retirement'""")
+            assert cur.fetchone()[0] == 1, "the retirement surface must exist by this slice"
+            cur.execute("""select count(*) from pg_proc p
+                             join pg_namespace n on n.oid=p.pronamespace
+                            where n.nspname='ops'
+                              and p.proname='drive_retirement_readiness'""")
+            assert cur.fetchone()[0] == 1, "readiness must be a function, not a stored flag"
+            # NOTHING may carry a completion flag. Every "is it done" answer in
+            # this substrate is derived when asked, so it cannot drift from the
+            # evidence it claims to summarise.
+            cur.execute("""select table_name, column_name
+                             from information_schema.columns
+                            where table_schema='ops'
+                              and column_name in ('is_complete','completed','phase_complete',
+                                                  'is_ready','retirement_complete')""")
+            flags = cur.fetchall()
+            assert not flags, f"a stored completion flag appeared: {flags}"
+    check("scope: all three surfaces exist, each gated, and none of them is a flag",
           phase4_surface_exists_and_is_gated)
 
     for c in CONNS:

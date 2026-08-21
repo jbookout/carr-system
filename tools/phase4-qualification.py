@@ -115,6 +115,7 @@ def main():
     # qualifying — the exact state it is built to catch and the one state
     # production cannot be put into on purpose. Unset in every real run.
     url = os.environ.get("CARR_QUALIFICATION_DSN")
+    target_label = args.project if not url else "LOCAL (CARR_QUALIFICATION_DSN)"
     if not url:
         # db-tap.py's filename is not a legal module name, so its DSN function is
         # loaded by path. Reused rather than reimplemented: it is the one place
@@ -132,7 +133,7 @@ def main():
             state = substrate_state(cur)
             cols = columns_present(cur)
 
-            print(f"target project : {args.project}"
+            print(f"target project : {target_label}"
                   + (f" (branch {args.branch})" if args.branch else ""))
             print(f"window         : last {args.since_hours}h\n")
             print("substrate      :", end=" ")
