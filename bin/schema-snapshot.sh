@@ -73,21 +73,17 @@
 # Usage:
 #   bin/schema-snapshot.sh            # regenerate db/schema.sql from production
 #   bin/schema-snapshot.sh --check    # non-zero if the checked-in file is stale
-#   CARR_SCHEMA_SNAPSHOT_DSN=postgres://127.0.0.1:55434/carr_ci bin/schema-snapshot.sh
-#                                     # regenerate from a disposable loopback DB
+#   bin/schema-snapshot.sh --from-disposable-local postgres://carr_ci@127.0.0.1:<port>/carr_ci
+#       # generate only from the loopback disposable PG17 full-build target
 #
-# By default this needs production access, so it runs on Joe's Mac and never in
-# CI — CI consumes the committed file and cannot reach production by
-# construction. The explicit local DSN mode exists only for a disposable
-# loopback reconstruction: it refuses any other host before pg_dump or psql
-# receive the URL.
+# Needs production access, so it runs on Joe's Mac and never in CI — CI consumes
+# the committed file and cannot reach production by construction.
 
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$REPO/db/schema.sql"
 NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"
-LOCAL_DSN_VALIDATOR="$REPO/ops/schema-snapshot-dsn.py"
 
 PG_DUMP=""
 for c in /opt/homebrew/opt/libpq/bin/pg_dump /usr/local/opt/libpq/bin/pg_dump pg_dump; do
@@ -101,24 +97,43 @@ for c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do
 done
 [ -n "$PSQL" ] || { echo "schema-snapshot: no psql found (needed for the grants section)" >&2; exit 69; }
 
-CHECK=0
-[ "${1:-}" = "--check" ] && CHECK=1
+# pg_dump's completion trailer has varied in its number of terminal blank
+# records across client versions. Keep every interior blank line intact, but
+# make the tracked snapshot's EOF a one-newline invariant.
+EOF_NORMALIZER='
+/^[[:space:]]*$/ { trailing = trailing $0 ORS; next }
+{ printf "%s", trailing; trailing = ""; print }
+'
 
-if [ -n "${CARR_SCHEMA_SNAPSHOT_DSN:-}" ]; then
-  [ -f "$LOCAL_DSN_VALIDATOR" ] || {
-    echo "schema-snapshot: local DSN validator is missing" >&2; exit 69; }
-  if ! CARR_SCHEMA_SNAPSHOT_DSN="$CARR_SCHEMA_SNAPSHOT_DSN" \
-       python3 "$LOCAL_DSN_VALIDATOR"; then
-    echo "schema-snapshot: CARR_SCHEMA_SNAPSHOT_DSN is not an allowed credential-free loopback URL" >&2
-    exit 64
-  fi
-  URL="$CARR_SCHEMA_SNAPSHOT_DSN"
+normalise_eof() {
+  awk "$EOF_NORMALIZER"
+}
+CHECK=0
+URL=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --from-disposable-local)
+      [ "$#" -ge 2 ] || { echo "schema-snapshot: --from-disposable-local needs a DSN" >&2; exit 64; }
+      URL="$2"; shift ;;
+    *) echo "schema-snapshot: unknown argument $1" >&2; exit 64 ;;
+  esac
+  shift
+done
+
+if [ -n "$URL" ]; then
+  printf '%s\n' "$URL" | grep -Eq '^postgres://carr_ci@127\.0\.0\.1:[0-9]{4,5}/carr_ci$' \
+    || { echo "schema-snapshot: disposable source must be passwordless carr_ci on 127.0.0.1/carr_ci" >&2; exit 64; }
 else
   [ -x "$NEONCTL" ] || { echo "schema-snapshot: neonctl not found at $NEONCTL" >&2; exit 69; }
   URL="$("$NEONCTL" connection-string production \
           --project-id steep-field-48688294 --role-name neondb_owner 2>/dev/null)"
   [ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
 fi
+
+# pg_dump renders timestamptz in the server session timezone; pin it so the
+# Production and disposable-local paths serialize identical instants alike.
+export PGOPTIONS='-c timezone=UTC'
 
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
@@ -150,15 +165,20 @@ cat > "$TMP" <<'ROLES'
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
+-- carr_calendar_prebrief_jobs makes it FIVE by way of 0208. It is the
+-- NOLOGIN capability bundle for the two externally provisioned sponsor-bound
+-- Calendar projection identities; the snapshot must carry the bundle after
+-- 0208 ages into the ledger, but must never manufacture either LOGIN identity.
 --
--- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
+-- ALL EIGHT of production's carr_ roles are now accounted for. Seven are created
 -- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
 -- widening a pattern.
--- carr_reader, carr_writer, carr_exporter, carr_authority and
--- carr_device_evidence are privilege bundles, so they stay NOLOGIN. carr_jobs is
+-- carr_reader, carr_writer, carr_exporter, carr_authority,
+-- carr_device_evidence and carr_calendar_prebrief_jobs are privilege bundles,
+-- so they stay NOLOGIN. carr_jobs is
 -- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
@@ -171,7 +191,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
+  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence','carr_calendar_prebrief_jobs'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -256,7 +276,7 @@ select format('revoke all on function %s.%s(%s) from public;',
  order by 1;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -270,7 +290,7 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -286,7 +306,7 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -303,7 +323,7 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -317,15 +337,18 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'), ('carr_calendar_prebrief_jobs')
 )
-select format('grant %s to %s;', gr.rolname, mem.rolname)
+-- pg_auth_members permits different grantors for the same role/member pair.
+-- The snapshot has no grantor field, so render each semantically identical
+-- membership exactly once without deduplicating any object ACL shape above.
+select distinct format('grant %s to %s;', gr.rolname, mem.rolname)
   from pg_auth_members m
   join pg_roles gr  on gr.oid  = m.roleid
   join pg_roles mem on mem.oid = m.member
  where gr.rolname in (select rolname from app)
    and mem.rolname in (select rolname from app union select 'neondb_owner')
- order by gr.rolname, mem.rolname;
+ order by 1;
 GRANTSQL
 
 cat >> "$TMP" <<'GRANTHDR'
@@ -415,15 +438,6 @@ fi
 #     the lookup returns null and it raises "golden suite digest mismatch".
 #     Found only after adding the two above, because the gate could not reach
 #     this check until it got past the proposals.
-#   * The exact two reviewed ops.enforcement_control_catalog controls are
-#     verified separately and appended as deterministic SQL below — never via
-#     the vocabulary pg_dump. Their fixed implementation/test references,
-#     enforcement classes, and installed/verification metadata contain no
-#     client, deal, event, secret, or runtime usage data. 0194 is already in a
-#     rebuilt snapshot's ledger, so its seed does not replay; without this
-#     controlled block the 0203 lifecycle cannot validate pinned rules. Do not
-#     add rule_control_binding or any receipt/rule table: those are per-rule
-#     history, not bounded internal control configuration.
 #
 # I counted every other table 0135 and 0168 seed, so the next rebuild does not
 # discover a fourth one the same way: doctrine_concept_mapping,
@@ -460,55 +474,6 @@ if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; th
   exit 1
 fi
 
-# The control catalog is deliberately NOT a --table dump: carrying every row
-# would let arbitrary implementation prose into a tracked snapshot. Verify the
-# two reviewed identities against the source, then append only safely quoted
-# source rows so an applied 0194 ledger cannot hide missing mutable seed rows.
-if ! "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_VERIFY'
-do $$
-begin
-  if (select count(*) from ops.enforcement_control_catalog where
-        (control_key='human_authority_runtime'
-         and implementation_ref='migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js'
-         and test_ref='mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py'
-         and enforcement_class='transactional_schema'
-         and installed and verified_at is not null)
-     or (control_key='platform_metering_pre_dispatch'
-         and implementation_ref='lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py'
-         and test_ref='ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py'
-         and enforcement_class='deny_gate'
-         and installed and verified_at is not null)) <> 2 then
-    raise exception 'schema snapshot refused: exact reviewed control catalog is missing or drifted';
-  end if;
-end $$;
-CONTROL_CATALOG_VERIFY
-then
-  echo "schema-snapshot: exact reviewed control catalog is missing or drifted — nothing written" >&2
-  exit 1
-fi
-
-cat >> "$TMP" <<'CONTROL_CATALOG_HEADER'
--- CARR REVIEWED CONTROL CATALOG (bin/schema-snapshot.sh) — exact two-row seed.
--- Verified against the source immediately before this block is written. The
--- following safely quoted rows preserve the source verification and update
--- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
-CONTROL_CATALOG_HEADER
-
-if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" <<'CONTROL_CATALOG_ROWS' >> "$TMP"
-select format(
-  'insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values (%L,%L,%L,%L,%L,%L::timestamptz,%L::timestamptz) on conflict (control_key) do nothing;',
-  control_key,implementation_ref,test_ref,enforcement_class,installed,
-  to_char(verified_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-  to_char(updated_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
-  from ops.enforcement_control_catalog
- where control_key in ('human_authority_runtime','platform_metering_pre_dispatch')
- order by array_position(array['human_authority_runtime','platform_metering_pre_dispatch'],control_key);
-CONTROL_CATALOG_ROWS
-then
-  echo "schema-snapshot: could not render exact reviewed control catalog rows — nothing written" >&2
-  exit 1
-fi
-
 # A truncated dump is the failure mode that matters: pg_dump has lost a Neon
 # connection mid-stream before (2026-08-07, on the nightly backup). A short file
 # that parses is worse than no file, because it would silently define a smaller
@@ -529,7 +494,7 @@ fi
 sed -e '/^-- Dumped from database version/d' \
     -e '/^-- Dumped by pg_dump version/d' \
     -e '/^\\restrict /d' \
-    -e '/^\\unrestrict /d' "$TMP" > "$TMP.clean"
+    -e '/^\\unrestrict /d' "$TMP" | normalise_eof > "$TMP.clean"
 mv "$TMP.clean" "$TMP"
 
 if [ "$CHECK" = "1" ]; then

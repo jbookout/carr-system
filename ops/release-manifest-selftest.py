@@ -89,6 +89,17 @@ def main() -> int:
     first = build("--sha", "HEAD")
     second = build("--sha", "HEAD")
 
+    check("0a. manifest declares the full applied schema ledger count",
+          isinstance(first.get("schema_applied_count"), int)
+          and first["schema_applied_count"] > 0)
+    check("0b. manifest binds the full applied schema ledger digest",
+          isinstance(first.get("schema_ledger_sha256"), str)
+          and first["schema_ledger_sha256"].startswith("sha256:")
+          and len(first["schema_ledger_sha256"]) == 71)
+    check("0c. highest applied migration is a full ledger filename",
+          isinstance(first.get("schema_highest_migration"), str)
+          and first["schema_highest_migration"].endswith(".sql"))
+
     # 1. determinism
     check("1. two builds of one SHA are identical",
           first == second,
@@ -145,6 +156,22 @@ def main() -> int:
               out.returncode != 0,
               "verify accepted a manifest whose digest does not match its SHA")
 
+        stale_count = dict(first)
+        stale_count["schema_applied_count"] += 1
+        stale_count["plan_hash"] = _plan_hash(stale_count)
+        bad.write_text(json.dumps(stale_count))
+        out = run("verify", "--manifest", str(bad))
+        check("5b. a valid-shaped stale applied-ledger count FAILS verify",
+              out.returncode != 0)
+
+        stale_ledger = dict(first)
+        stale_ledger["schema_ledger_sha256"] = "sha256:" + "1" * 64
+        stale_ledger["plan_hash"] = _plan_hash(stale_ledger)
+        bad.write_text(json.dumps(stale_ledger))
+        out = run("verify", "--manifest", str(bad))
+        check("5c. a valid-shaped stale applied-ledger digest FAILS verify",
+              out.returncode != 0)
+
     # 6. the plan hash covers material fields only
     material = dict(first)
     material["config_fingerprint"] = "sha256:" + "1" * 64
@@ -173,11 +200,23 @@ def main() -> int:
     check("6e. changing the recovery plan moves the plan hash",
           out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
 
+    schema_count = dict(first)
+    schema_count["schema_applied_count"] += 1
+    out = run("plan-hash", "--manifest", _tmp_json(schema_count))
+    check("6f. changing the full applied-ledger count moves the plan hash",
+          out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
+
+    schema_digest = dict(first)
+    schema_digest["schema_ledger_sha256"] = "sha256:" + "2" * 64
+    out = run("plan-hash", "--manifest", _tmp_json(schema_digest))
+    check("6g. changing the full applied-ledger digest moves the plan hash",
+          out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
+
     legacy_out = run("build", "--sha", "HEAD")
     legacy = json.loads(legacy_out.stdout) if legacy_out.returncode == 0 else {}
     legacy_path = _tmp_json(legacy)
     legacy_verify = run("verify", "--manifest", legacy_path)
-    check("6f. an all-absent historical assurance group still round-trips",
+    check("6h. an all-absent historical assurance group still round-trips",
           legacy_out.returncode == 0 and legacy_verify.returncode == 0)
 
     # 7. Provider versions do not exist until Cloudflare has uploaded the
@@ -194,7 +233,8 @@ def main() -> int:
         bound = json.loads(out.stdout) if out.returncode == 0 else {}
         source_fields = ("git_sha", "artifact_digest", "dependency_lock_digest",
                          "config_fingerprint", "migration_set",
-                         "schema_highest_migration")
+                         "schema_highest_migration", "schema_applied_count",
+                         "schema_ledger_sha256")
         check("7b. binding preserves the SHA and every source digest",
               all(bound.get(k) == first.get(k) for k in source_fields))
         check("7c. provider/version binding changes the approval plan hash",
@@ -239,7 +279,8 @@ def main() -> int:
     # 8. all seven acceptance classes present
     classes = {
         "code": ("git_sha", "artifact_digest", "dependency_lock_digest"),
-        "schema": ("schema_highest_migration", "migration_set"),
+        "schema": ("schema_highest_migration", "schema_applied_count",
+                   "schema_ledger_sha256", "migration_set"),
         "config": ("config_fingerprint", "config_paths"),
         "plan": ("plan_hash",),
     }
@@ -268,6 +309,13 @@ def _tmp_json(obj: dict) -> str:
     path = Path(_TMPDIR) / f"m{abs(hash(json.dumps(obj, sort_keys=True)))}.json"
     path.write_text(json.dumps(obj))
     return str(path)
+
+
+def _plan_hash(obj: dict) -> str:
+    out = run("plan-hash", "--manifest", _tmp_json(obj))
+    if out.returncode != 0:
+        raise SystemExit(f"release-manifest-selftest: plan-hash failed: {out.stderr.strip()}")
+    return out.stdout.strip()
 
 
 if __name__ == "__main__":

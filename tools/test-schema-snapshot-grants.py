@@ -44,6 +44,7 @@ from schema_snapshot_grants import (
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
+GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 
 # The app roles the migrations grant to. neondb_owner may appear as a membership
 # grantee only (0005/0006 bundle it the roles), never as an ACL grantee: its own
@@ -60,6 +61,13 @@ SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 # age out of the snapshot. This list and the preamble in bin/schema-snapshot.sh
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
+#
+# carr_calendar_prebrief_jobs is known here while 0208 remains pending. The
+# generator already includes it in its catalog query and role preamble, but the
+# committed production snapshot cannot contain its grants until 0208 is applied
+# there. Move it into APP_ROLES on that snapshot refresh; naming it here now is
+# what keeps the migration/snapshot role-coverage test honest in the meantime.
+PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs"]
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
@@ -163,6 +171,16 @@ def main():
     check("0006's membership bundle survives (exporter is reader-plus)",
           any(ln == "grant carr_reader to carr_exporter;"
               for _, ln in grant_lines))
+
+    generator = open(GENERATOR).read()
+    membership_query = re.search(
+        r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
+        r".*?from pg_auth_members m.*?order by 1;",
+        generator,
+        re.S,
+    )
+    check("membership renderer de-duplicates only identical rendered lines",
+          membership_query is not None)
 
     # THE WIDENING GUARD. Every grantee in the file must be an app role —
     # or neondb_owner, on membership lines only. Anything else means some
