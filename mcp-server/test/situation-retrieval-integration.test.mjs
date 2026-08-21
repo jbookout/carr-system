@@ -69,7 +69,14 @@ test("unsponsored search is shared-only and invalid required sponsorship is refu
       { slug: "codex", human: false, via: "oauth-google",
         sponsoring_human_slug: null, sponsor_required: true },
       { q: "personal doctrine" }),
-    /retrieval_scope_refused:missing_or_ambiguous_sponsor/,
+    // Typed since 2026-08-21: the refusal carries a payload rather than a
+    // colon-packed message string, so mcp.js can name it instead of reporting
+    // the bare "internal_error" it gives any untyped throw.
+    error => {
+      assert.equal(error.payload?.error, "retrieval_scope_refused");
+      assert.equal(error.payload?.reason, "missing_or_ambiguous_sponsor");
+      return true;
+    },
   );
   assert.equal(queried, false, "invalid sponsor must be refused before any visibility query");
 
@@ -81,7 +88,16 @@ test("unsponsored search is shared-only and invalid required sponsorship is refu
   await assert.rejects(
     TOOLS["search-doctrine"].handler(inactiveClient, sponsored("joe-local", "joe"),
       { q: "personal doctrine" }),
-    /retrieval_scope_refused:sponsor_not_active_human/,
+    // The payload now also reports WHICH sponsor and HOW MANY rows matched,
+    // because 0 and 2 are different production faults and the old message
+    // distinguished neither.
+    error => {
+      assert.equal(error.payload?.error, "retrieval_scope_refused");
+      assert.equal(error.payload?.reason, "sponsor_not_active_human");
+      assert.equal(error.payload?.sponsor, "joe");
+      assert.equal(error.payload?.matching_rows, 0);
+      return true;
+    },
   );
   assert.equal(inactiveCalls.length, 1);
   assert.match(inactiveCalls[0].sql, /kind='human' and active=true/);
