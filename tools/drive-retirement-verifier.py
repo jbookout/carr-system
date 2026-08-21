@@ -67,9 +67,35 @@ def main():
 
     with psycopg.connect(url, options="-c default_transaction_read_only=on") as conn:
         with conn.cursor() as cur:
-            cur.execute("""select count(*) from information_schema.tables
-                            where table_schema='ops' and table_name='drive_retirement'""")
-            if cur.fetchone()[0] != 1:
+            # THE WHOLE CHAIN, not just its first table. This probe used to check
+            # only that ops.drive_retirement existed, then queried objects that
+            # arrive with 0238 -- the withdrawal table and write_receipt's
+            # material_digest. Applied only through 0237, which
+            # `bin/migrate-prod.sh --through` produces and which 0238's own
+            # header names as a real operator path, the tool raised an
+            # UndefinedTable traceback instead of saying which piece was
+            # missing. A verifier whose job is to name what is absent should
+            # never be the thing that crashes because something is absent.
+            cur.execute("""select
+                (select count(*) from information_schema.tables
+                  where table_schema='ops' and table_name='drive_retirement'),
+                (select count(*) from information_schema.tables
+                  where table_schema='ops' and table_name='drive_retirement_withdrawal'),
+                (select count(*) from information_schema.columns
+                  where table_schema='ops' and table_name='write_receipt'
+                    and column_name='material_digest')""")
+            has_retirement, has_withdrawal, has_material = cur.fetchone()
+            if has_retirement == 1 and (has_withdrawal != 1 or has_material != 1):
+                print(f"target : {target_label}")
+                print("\nPARTIALLY DEPLOYED: the retirement surface exists but the "
+                      "receipt\n                    digest split does not. This "
+                      "database was migrated\n                    through 0237 and "
+                      "stopped short of 0238, so retirement\n                    "
+                      "cannot be verified against the guards that make its\n"
+                      "                    receipts mean anything. Apply the rest of "
+                      "the chain.")
+                return 1
+            if has_retirement != 1:
                 print(f"target : {target_label}")
                 print("\nNOT DEPLOYED: the retirement surface does not exist here, so "
                       "nothing\n              can be verified. That is a legitimate "

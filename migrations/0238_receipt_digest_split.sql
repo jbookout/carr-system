@@ -82,12 +82,38 @@
 -- and deploying the new Worker before the migrations land.
 --
 -- WHAT THIS MIGRATION DELIBERATELY DOES NOT DO, so the next reader does not
--- mistake silence for coverage: prior_digest is still caller-chosen and is not
--- verified against any existing receipt. Enforcing it would make the reducer's
--- 'broken' state unreachable, and 'broken' is a finding the system is supposed
--- to be able to report. Causal continuity therefore remains an honest-caller
--- integrity check, exactly as 0235 left it. It is recorded here as a known
--- limitation rather than fixed by a change that would blind the reducer.
+-- mistake silence for coverage.
+--
+-- A RETRACTION'S MATERIAL CLAIM IS UNCONSTRAINED, and that is by construction
+-- rather than by omission: a reversal's material is the state its TARGET built
+-- on, which is not a digest of its own rows and cannot be recomputed from them,
+-- so section (F)'s material check exempts both. That exemption was briefly a
+-- hole, because two other guards accepted a retraction as evidence of subject
+-- state -- the prior-state guard as a SOURCE of state, and the retirement gate
+-- as a repoint or a recovery. Both now refuse retractions and reversals, so the
+-- unconstrained material is inert: nothing downstream reads it. If a future
+-- guard starts reading material, it must exclude them too or reopen this.
+--
+-- PROOF IS ATTACHMENT AND INTERNAL CONSISTENCY, NOT TRUTH. carr_writer authors
+-- both sides -- it inserts the tool_call row including the request hash, it
+-- inserts the event rows the material digest folds, and it holds the digest
+-- function. A proven receipt therefore shows that a receipt is attached to a
+-- real qualified call in its own session and that its claims agree with that
+-- call's evidence. It does not show the claim is true. Against a BUGGY writer,
+-- which is the failure this layer exists for, that is strong. Against a
+-- compromised carr_writer no database-side guard helps, because writing the
+-- evidence is that credential's legitimate job. Closing that needs receipts
+-- minted by a credential the verb path does not hold, the way carr_session_issuer
+-- already works for sessions, and that is a Phase 5 change to the write path
+-- rather than a patch here. No surface may describe a proven receipt as
+-- evidence that a write is TRUE.
+--
+-- CORRECTED, because this section said the opposite until section (E) existed:
+-- prior_digest IS now verified. It must be 'origin' or name material a proven,
+-- unretracted, ordinary receipt on the same subject in the same tenant actually
+-- produced. The check is EXISTENCE and never recency, so a stale-but-real prior
+-- stays legal and the reducer's 'broken' state stays reachable, which is what
+-- the old text was protecting when it declined to verify anything at all.
 
 -- ============================================================ (A) the split
 
@@ -1030,6 +1056,46 @@ before update or delete on ops.drive_retirement_withdrawal
 for each row execute function ops.refuse_withdrawal_rewrite();
 alter table ops.drive_retirement_withdrawal
   enable always trigger drive_retirement_withdrawal_immutable;
+
+-- ONE LIVE RETIREMENT PER DEPENDENCY. The unique constraint had to go so that a
+-- withdrawn dependency could be retired again, but dropping it left nothing at
+-- all: a dependency could accumulate unbounded retirement rows, each costing
+-- only two proven receipts. Readiness counts DISTINCT dependencies so the total
+-- was never corrupted, but the record became a pile. This restores the
+-- invariant the constraint carried, in the one form that still allows a
+-- withdrawal to be followed by an honest re-retirement.
+create function ops.require_one_live_retirement()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops, public
+as $$
+begin
+  if exists (
+    select 1 from ops.drive_retirement r
+     where r.drive_dependency_id = new.drive_dependency_id
+       and r.id <> new.id
+       and not exists (select 1 from ops.drive_retirement_withdrawal w
+                        where w.drive_retirement_id = r.id))
+  then
+    raise exception
+      'dependency % already has a retirement that has not been withdrawn; '
+      'withdraw it before retiring the dependency again',
+      new.drive_dependency_id;
+  end if;
+  return new;
+end $$;
+
+-- NAMED TO FIRE AFTER the evidence checks, since Postgres runs BEFORE triggers
+-- in alphabetical order and `drive_retirement_requires_proven_receipts` must
+-- speak first. Named `one_live_per_dependency` it sorted ahead of them and
+-- masked every evidence refusal behind "this dependency is already retired",
+-- which is true but is never the interesting reason.
+create trigger drive_retirement_single_live_per_dependency
+before insert on ops.drive_retirement
+for each row execute function ops.require_one_live_retirement();
+alter table ops.drive_retirement
+  enable always trigger drive_retirement_single_live_per_dependency;
+
+revoke all on function ops.require_one_live_retirement() from public;
 
 create or replace function ops.drive_retirement_readiness()
 returns table (
@@ -2632,12 +2698,17 @@ begin
       raise exception '0238 FAILED: a dependency could not be retired again after '
                       'its first retirement was withdrawn';
     end if;
-    -- AND A SECOND LIVE ROW FOR THE SAME DEPENDENCY MUST STILL COUNT ONCE. The
-    -- unique constraint that used to guarantee this is gone, deliberately, so
-    -- that a withdrawn dependency can be retired again -- which means the
-    -- counting has to carry the weight instead. Two rows where NEITHER is
-    -- withdrawn is the case that distinguishes counting rows from counting
-    -- dependencies; the withdrawn pair above does not.
+    -- A SECOND LIVE RETIREMENT IS NOW REFUSED OUTRIGHT. Dropping the unique
+    -- constraint (so a withdrawn dependency could be retired again) left
+    -- nothing bounding the rows at all. The bound is back in the one form that
+    -- still permits an honest re-retirement after a withdrawal, and it is the
+    -- clause under test here.
+    --
+    -- IT ALSO SHADOWS THE DISTINCT COUNT in readiness, which is named as depth
+    -- rather than counted as tested: with at most one live row per dependency,
+    -- count(distinct ...) and count(*) can no longer disagree, so no fixture
+    -- can tell them apart. It stays because it is the correct expression of
+    -- what readiness means, and because this trigger could be dropped.
     insert into ops.write_receipt (id, application_session_id, actor_id,
       organization_tenant_id, verb, subject_type, subject_id,
       tool_call_idempotency_key, call_digest, material_digest, prior_digest)
@@ -2650,11 +2721,22 @@ begin
     values (p8,sid,probe_actor,'carr-internal','log-activity','drive_dependency',dep,kd8,
             ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kd8,'drive_dependency',dep),m8,m7);
     perform ops.prove_write_receipt(p8);
-    insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
-      recovery_receipt_id, application_session_id, retired_by_actor_id,
-      organization_tenant_id, note)
-    values (gen_random_uuid(), dep, p7, p8, sid, probe_actor, 'carr-internal',
-            'probe: a second live retirement row for the same dependency');
+    failed := false;
+    begin
+      insert into ops.drive_retirement (id, drive_dependency_id, repoint_receipt_id,
+        recovery_receipt_id, application_session_id, retired_by_actor_id,
+        organization_tenant_id, note)
+      values (gen_random_uuid(), dep, p7, p8, sid, probe_actor, 'carr-internal',
+              'probe: a second live retirement for one dependency');
+    exception when others then
+      failed := true;
+      if position('has a retirement that has not been withdrawn' in sqlerrm) = 0 then
+        raise exception '0238 FAILED: second live retirement refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0238 FAILED: one dependency accumulated two live retirements';
+    end if;
     select * into rdy from ops.drive_retirement_readiness();
     if rdy.retired_total <> 1 then
       raise exception '0238 FAILED: two live retirement rows for one dependency inflated '
@@ -2882,6 +2964,217 @@ begin
                           'part in making';
         end if;
       end;
+    end if;
+  end;
+
+  -- ===== (15) the seven guards an auditor could revert with nothing failing
+  -- Each was reverted by an evidence auditor against the previous commit and
+  -- survived BOTH proof surfaces. Two of them undo fixes this migration takes
+  -- credit for, which is the worst kind of gap: the commit message says the bug
+  -- is closed and nothing would notice it reopening.
+  declare
+    seq_a uuid := gen_random_uuid();
+    seq_b uuid := gen_random_uuid();
+    kseq  text := 'p15s-' || gen_random_uuid()::text;
+    swap_tmp uuid;
+    tie   timestamptz := clock_timestamp();
+    ssubj uuid := gen_random_uuid();
+    m_seq text;
+    ka text := 'p15a-' || gen_random_uuid()::text;
+    kb text := 'p15b-' || gen_random_uuid()::text;
+    amb uuid := gen_random_uuid();
+    src text;
+  begin
+    -- (15a) THE MATERIAL FOLD SORTS UNDER C. A behavioural probe cannot see
+    -- this: the disposable cluster's own collation is C, so dropping the
+    -- clause changes nothing here and the auditor's mutant survived. It is
+    -- checked by SHAPE instead, and named as a shape check rather than dressed
+    -- up as behaviour. What it defends is real -- under a non-C collation the
+    -- same events fold to a different digest, so the local harness and Neon
+    -- would disagree about identical writes.
+    select pg_get_functiondef(p.oid) into src
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'ops' and p.proname = 'write_receipt_material_digest';
+    if (length(src) - length(replace(src, 'collate "C"', ''))) / length('collate "C"') <> 4 then
+      raise exception '0238 FAILED: the material fold does not sort all four keys '
+                      'under collate "C", so its digest depends on the database''s '
+                      'collation and will not agree across environments';
+    end if;
+
+    -- (15b) THE REDUCER FOLDS BY seq, NOT BY (recorded_at, id). Two receipts
+    -- sharing a recorded_at, inserted so that insertion order is the OPPOSITE
+    -- of id order: under the old tiebreak the fold followed the smaller id,
+    -- which is a random number.
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kseq,'log-activity',probe_actor,kseq,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',ssubj,'stage','"s"'::jsonb,'system',kseq,'carr-internal',sid);
+    m_seq := ops.write_receipt_material_digest(kseq, sid, 'deal', ssubj);
+    -- Ensure the FIRST inserted carries the LARGER id, so insertion order and id
+    -- order disagree and the probe can tell which one the fold followed. Written
+    -- with a temporary because the two-statement form collapses both variables
+    -- onto one value, which collides on the primary key half the time -- a coin
+    -- flip this file would have shipped as a passing probe.
+    if seq_a < seq_b then
+      swap_tmp := seq_a; seq_a := seq_b; seq_b := swap_tmp;
+    end if;
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest, recorded_at)
+    values (seq_a,sid,probe_actor,'carr-internal','log-activity','deal',ssubj,kseq,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kseq,'deal',ssubj),
+            m_seq,'origin',tie);
+    perform ops.prove_write_receipt(seq_a);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest, recorded_at)
+    values (seq_b,sid,probe_actor,'carr-internal','log-activity','deal',ssubj,kseq,
+            ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kseq,'deal',ssubj),
+            m_seq,m_seq,tie);
+    perform ops.prove_write_receipt(seq_b);
+    select * into r from ops.continuity_reducer('deal', ssubj);
+    if r.break_at is not null then
+      raise exception '0238 FAILED: the reducer folded two same-instant receipts in id '
+                      'order rather than insertion order, so the fold depends on a '
+                      'random number again (break_at %)', r.break_at;
+    end if;
+
+    -- (15c) seq IS NOT CALLER-WRITABLE. `generated by default` would let a
+    -- writer choose its own position in the fold.
+    failed := false;
+    begin
+      insert into ops.write_receipt (id, seq, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (gen_random_uuid(), 1, sid, probe_actor,'carr-internal','log-activity','deal',ssubj,kseq,
+              ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,kseq,'deal',ssubj),
+              m_seq, m_seq);
+    exception when others then
+      failed := true;
+      if position('non-DEFAULT value' in sqlerrm) = 0 then
+        raise exception '0238 FAILED: caller-supplied seq refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0238 FAILED: a caller chose its own seq, so it can choose where '
+                      'it lands in the fold';
+    end if;
+
+    -- (15d) THE SEPARATORS ARE PRESENT. Checked by SHAPE, and named as a shape
+    -- check rather than dressed up as behaviour, because a colliding fixture
+    -- cannot be built in this schema: every folded row begins with its verb, so
+    -- two different row-splits never concatenate to the same string however the
+    -- separators are removed. The separators still matter -- they are what stops
+    -- a field boundary being ambiguous in principle -- so their absence is
+    -- caught here rather than left to a probe that cannot exist.
+    -- COUNTED, not merely present. Asking whether chr(31) appears at all passes
+    -- while two of the three are gone, which is how the first version of this
+    -- check let a mutant through.
+    if (length(src) - length(replace(src, 'chr(31)', ''))) / length('chr(31)') <> 3
+       or (length(src) - length(replace(src, 'chr(30)', ''))) / length('chr(30)') <> 2
+       or (length(src) - length(replace(src, 'chr(29)', ''))) / length('chr(29)') <> 1 then
+      raise exception '0238 FAILED: the material fold has lost a separator, so a field '
+                      'boundary inside it is ambiguous';
+    end if;
+  end;
+
+  -- (15e) THE PRIOR GUARD IS TENANT-SCOPED. Without it, material another tenant
+  -- proved on a subject id you both happen to name becomes a legal prior here,
+  -- which is the cross-tenant half of the bootstrap the guard exists to refuse.
+  declare
+    kt2 text := 'p15t-' || gen_random_uuid()::text;
+    km2 text := 'p15m-' || gen_random_uuid()::text;
+    shared_subj uuid := gen_random_uuid();
+    theirs uuid := gen_random_uuid();
+    their_material text;
+  begin
+    insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
+      response, organization_tenant_id, application_session_id)
+    values (kt2,'log-activity',probe_actor,kt2,'{}'::jsonb,'other-tenant',sid2),
+           (km2,'log-activity',probe_actor,km2,'{}'::jsonb,'carr-internal',sid);
+    insert into public.event (occurred_at, actor_id, verb, subject_type, subject_id,
+      field, new_value, cause, idempotency_key, organization_tenant_id, application_session_id)
+    values (clock_timestamp(),probe_actor,'log-activity','deal',shared_subj,'stage','"theirs"'::jsonb,'system',kt2,'other-tenant',sid2),
+           (clock_timestamp(),probe_actor,'log-activity','deal',shared_subj,'stage','"mine"'::jsonb,'system',km2,'carr-internal',sid);
+    their_material := ops.write_receipt_material_digest(kt2, sid2, 'deal', shared_subj);
+    insert into ops.write_receipt (id, application_session_id, actor_id,
+      organization_tenant_id, verb, subject_type, subject_id,
+      tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+    values (theirs,sid2,probe_actor,'other-tenant','log-activity','deal',shared_subj,kt2,
+            ops.write_receipt_digest('log-activity',probe_actor,'other-tenant',sid2,kt2,'deal',shared_subj),
+            their_material,'origin');
+    if not ops.prove_write_receipt(theirs) then
+      raise exception '0238 FAILED: the cross-tenant prior fixture did not prove';
+    end if;
+    failed := false;
+    begin
+      insert into ops.write_receipt (id, application_session_id, actor_id,
+        organization_tenant_id, verb, subject_type, subject_id,
+        tool_call_idempotency_key, call_digest, material_digest, prior_digest)
+      values (gen_random_uuid(),sid,probe_actor,'carr-internal','log-activity','deal',shared_subj,km2,
+              ops.write_receipt_digest('log-activity',probe_actor,'carr-internal',sid,km2,'deal',shared_subj),
+              ops.write_receipt_material_digest(km2, sid, 'deal', shared_subj), their_material);
+    exception when others then
+      failed := true;
+      if position('never reached' in sqlerrm) = 0 then
+        raise exception '0238 FAILED: cross-tenant prior refused by the WRONG guard: %', sqlerrm;
+      end if;
+    end;
+    if not failed then
+      raise exception '0238 FAILED: material PROVEN IN ANOTHER TENANT was accepted as a '
+                      'prior state here';
+    end if;
+  end;
+
+  -- (15f) A WITHDRAWAL IS BOUND TO ITS OWN SESSION, in both actor and tenant.
+  -- Neither binding had a probe, so either could be removed silently.
+  declare
+    a_ret uuid;
+    other_human uuid;
+  begin
+    select dr.id into a_ret from ops.drive_retirement dr
+     where not exists (select 1 from ops.drive_retirement_withdrawal w
+                        where w.drive_retirement_id = dr.id)
+     limit 1;
+    select id into other_human from public.actor
+     where kind = 'human' and id <> probe_actor order by slug limit 1;
+    if a_ret is not null and other_human is not null then
+      failed := false;
+      begin
+        insert into ops.drive_retirement_withdrawal (id, drive_retirement_id,
+          application_session_id, withdrawn_by_actor_id, organization_tenant_id, note)
+        values (gen_random_uuid(), a_ret, sid, other_human, 'carr-internal',
+                'probe: actor does not match its session');
+      exception when others then
+        failed := true;
+        if position('different actor than its session' in sqlerrm) = 0 then
+          raise exception '0238 FAILED: session-mismatched withdrawal refused by the WRONG guard: %', sqlerrm;
+        end if;
+      end;
+      if not failed then
+        raise exception '0238 FAILED: a withdrawal named an actor its own session never '
+                        'authenticated';
+      end if;
+    end if;
+    if a_ret is not null then
+      failed := false;
+      begin
+        insert into ops.drive_retirement_withdrawal (id, drive_retirement_id,
+          application_session_id, withdrawn_by_actor_id, organization_tenant_id, note)
+        values (gen_random_uuid(), a_ret, sid, probe_actor, 'other-tenant',
+                'probe: tenant does not match its session');
+      exception when others then
+        failed := true;
+        if position('different tenant than its session' in sqlerrm) = 0 then
+          raise exception '0238 FAILED: tenant-mismatched withdrawal refused by the WRONG guard: %', sqlerrm;
+        end if;
+      end;
+      if not failed then
+        raise exception '0238 FAILED: a withdrawal named a tenant its own session does '
+                        'not belong to';
+      end if;
     end if;
   end;
 

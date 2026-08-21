@@ -3742,7 +3742,32 @@ def main(dsn):  # noqa: C901
         total_1, retired_1, remaining_1, ready_1 = readiness()
         assert total_1 >= 1 and retired_1 >= 1, "the readiness function must see the rows"
 
-        rid_b, _head_b = file_retirement("second", head_a)
+        # THE SECOND LIVE RETIREMENT IS NOW REFUSED, and that is what this
+        # contract asserts. Dropping the one-per-dependency unique constraint
+        # (so a withdrawn dependency can be retired again) left nothing bounding
+        # the rows at all; the bound came back as a trigger permitting at most
+        # one retirement per dependency that has not been withdrawn.
+        #
+        # The distinct count in readiness is therefore SHADOWED: with one live
+        # row per dependency, count(distinct ...) and count(*) cannot disagree,
+        # so no fixture can tell them apart. It stays in readiness because it is
+        # the correct expression of what readiness means and because this
+        # trigger could be dropped, but this suite no longer claims to test it.
+        # file_retirement writes through writer_runs, which converts a refusal
+        # into an AssertionError rather than letting the psycopg error through,
+        # so the refusal is caught in that shape and its message checked.
+        refused = ""
+        try:
+            file_retirement("second", head_a)
+        except AssertionError as exc:
+            refused = str(exc)
+        assert refused, ("a dependency accepted a SECOND retirement while its "
+                         "first had not been withdrawn")
+        assert "has a retirement that has not been withdrawn" in refused, (
+            f"refused, but by a different guard: {refused.strip().splitlines()[-1]}")
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        return
 
         # NEITHER RETIREMENT IS WITHDRAWN -- both are live rows for ONE
         # dependency.
