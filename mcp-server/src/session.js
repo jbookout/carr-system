@@ -54,13 +54,19 @@
 export const SESSION_CAP_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Pure. The session expires when the CREDENTIAL does, or at the cap, whichever
- *  is sooner. A credential with no usable expiry gets the cap rather than
- *  forever — "unknown" must never read as "unbounded". */
+ *  is sooner. Returns NULL when the credential's expiry is unknown or already
+ *  past, and the caller must then decline to mint.
+ *
+ *  AN EARLIER VERSION RETURNED THE CAP FOR UNKNOWN INPUT, and that was the
+ *  inversion backwards: for a one-hour access token, thirty days is not a
+ *  conservative fallback, it is effectively unbounded. It also turned every
+ *  failed KV read into a thirty-day session, and a review used it to mint one
+ *  for a static agent-token secret that merely happened to contain two colons.
+ *  Not knowing when a credential dies is a reason to mint nothing. */
 export function sessionExpiry(credentialExpiresAtMs, nowMs, capMs = SESSION_CAP_MS) {
-  const cap = nowMs + capMs;
   const claimed = Number(credentialExpiresAtMs);
-  if (!Number.isFinite(claimed) || claimed <= nowMs) return cap;
-  return Math.min(claimed, cap);
+  if (!Number.isFinite(claimed) || claimed <= nowMs) return null;
+  return Math.min(claimed, nowMs + capMs);
 }
 
 /** Pure apart from the hash. Recovers the server-side identity of the access
@@ -103,12 +109,17 @@ export function sessionMapKey(tokenId) {
  */
 export async function mintApplicationSession(mintFn, fields) {
   const {
-    id, actorId, organizationTenantId, sponsoringHumanSlug, via,
+    id, actorSlug, organizationTenantId, sponsoringHumanSlug, via,
     authIssuer, authorizationClass, verifiedSubject, expiresAt,
   } = fields;
+  // BY SLUG, NOT BY ID (migration 0207). The door has a slug and no actor id --
+  // actor.id is not resolved until callTool, long after authentication -- and
+  // the issuer credential deliberately holds no table privilege with which to
+  // resolve one. 0207's SECURITY DEFINER wrapper does the lookup as its owner
+  // and delegates to 0204's mint, so the door needs neither the id nor a read.
   const rows = await mintFn(
-    `select ops.mint_application_session($1,$2,$3,$4,$5,$6,$7,$8,$9) as id`,
-    [id, actorId, organizationTenantId, sponsoringHumanSlug, via,
+    `select ops.mint_application_session_for_slug($1,$2,$3,$4,$5,$6,$7,$8,$9) as id`,
+    [id, actorSlug, organizationTenantId, sponsoringHumanSlug, via,
      authIssuer, authorizationClass, verifiedSubject, expiresAt]);
   const minted = rows?.[0]?.id ?? rows?.rows?.[0]?.id ?? null;
   if (!minted) throw new Error("mint_application_session returned no id");
@@ -132,26 +143,49 @@ export async function sessionForAccessToken(request, env, actor, deps = {}) {
   const kv = deps.kv || env?.OAUTH_KV;
   const mintFn = deps.mintFn;
   const now = deps.now ? deps.now() : Date.now();
-  if (!kv || !mintFn || !actor?.id) return null;
+  // onFailure makes a downgrade OBSERVABLE. The first version swallowed every
+  // failure into a bare `return null` with no log, no counter and no failure
+  // record -- and that is how three production-fatal defects stayed invisible
+  // through a full round of testing. Fail-open without a signal is not
+  // fail-open, it is fail-undetectably, which is this substrate's worst case:
+  // a fleet that looks authenticated and qualifies nothing.
+  const onFailure = deps.onFailure || (() => {});
+  if (!kv || !mintFn || !actor?.slug) {
+    onFailure("session_mint_unavailable", {
+      kv: Boolean(kv), mintFn: Boolean(mintFn), slug: actor?.slug || null });
+    return null;
+  }
   try {
     const identity = await accessTokenIdentity(request, deps.subtle);
-    if (!identity) return null;
+    if (!identity) return null;      // not an OAuth token; this door cannot mint
 
     const mapKey = sessionMapKey(identity.tokenId);
     const existing = await kv.get(mapKey, { type: "json" });
     if (existing?.session_id) return existing.session_id;
 
-    // The provider's own record for this token. It is the authority on when the
-    // credential expires, and reading it rather than assuming an hour means a
-    // shortened or externally-issued token is honoured.
+    // THE TOKEN RECORD MUST EXIST, and this is a security check rather than a
+    // lookup. It is the provider's own proof that this token was issued and
+    // when it dies. Without it there is no credential expiry to inherit, and
+    // an earlier version treated its absence as "unknown" and handed out the
+    // full thirty-day cap -- which minted a long session for any bearer string
+    // shaped like user:grant:secret, including static secrets from doors that
+    // must never qualify.
     const tokenRecord = await kv.get(identity.kvKey, { type: "json" });
-    const credentialExpiresMs = tokenRecord?.expiresAt ? Number(tokenRecord.expiresAt) * 1000 : NaN;
-    const expiresAt = new Date(sessionExpiry(credentialExpiresMs, now)).toISOString();
+    if (!tokenRecord) {
+      onFailure("session_token_record_absent", { tokenId: identity.tokenId });
+      return null;
+    }
+    const expiresMs = sessionExpiry(Number(tokenRecord.expiresAt) * 1000, now);
+    if (!expiresMs) {
+      onFailure("session_credential_expiry_unusable", { tokenId: identity.tokenId });
+      return null;
+    }
+    const expiresAt = new Date(expiresMs).toISOString();
 
     const id = deps.uuid ? deps.uuid() : crypto.randomUUID();
     const sessionId = await mintApplicationSession(mintFn, {
       id,
-      actorId: actor.id,
+      actorSlug: actor.slug,
       organizationTenantId: actor.organization_tenant_id || "carr-internal",
       sponsoringHumanSlug: actor.sponsoring_human_slug || (actor.human ? actor.slug : null),
       via: actor.via || "oauth-google",
@@ -161,15 +195,16 @@ export async function sessionForAccessToken(request, env, actor, deps = {}) {
       expiresAt,
     });
 
-    // Remembered only as long as the credential itself can live, so the mapping
-    // cannot outlive the token it describes.
-    const ttl = Math.max(1, Math.floor((Date.parse(expiresAt) - now) / 1000));
+    const ttl = Math.max(1, Math.floor((expiresMs - now) / 1000));
     await kv.put(mapKey, JSON.stringify({ session_id: sessionId, minted_at: now }),
                  { expirationTtl: ttl });
     return sessionId;
-  } catch {
-    // See the comment above: a minting failure downgrades this request's
-    // evidence, it does not fail the request.
+  } catch (e) {
+    // The request still proceeds and records legacy evidence: the alternative
+    // makes this a single point of failure for every authenticated write. But
+    // it is reported, so a door that has silently stopped qualifying is
+    // discoverable rather than indistinguishable from one nobody used.
+    onFailure("session_mint_failed", { error: String(e?.message || e).slice(0, 200) });
     return null;
   }
 }

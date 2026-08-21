@@ -42,6 +42,10 @@ MIGRATION="$REPO/migrations/0204_authenticated_application_session.sql"
 # path (each Neon database is its own cluster), but it means this script must
 # stand up its own cluster per run, which it does.
 MIGRATION_ISSUER="$REPO/migrations/0206_session_issuer_credential.sql"
+# 0207 lets the door mint from an actor SLUG. The door has no actor id --
+# actor.id is not resolved until callTool, long after authentication -- and the
+# issuer holds no table privilege with which to resolve one.
+MIGRATION_SLUG_MINT="$REPO/migrations/0207_mint_session_by_actor_slug.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
 export LC_ALL=C LANG=C
 export CARR_DISPOSABLE_PG_DIR="${CARR_DISPOSABLE_PG_DIR:-${TMPDIR:-/tmp}/carr-appsession-check}"
@@ -65,6 +69,8 @@ psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION"
 echo "migration 0204 applied (its own apply-time assertions passed)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_ISSUER"
 echo "migration 0206 applied (the minting credential is chosen and asserted)"
+psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SLUG_MINT"
+echo "migration 0207 applied (the door can mint without an actor id)"
 
 # Run TWICE. The suite must be re-runnable; a contract that only passes against
 # a virgin database is testing ordering, not the substrate.

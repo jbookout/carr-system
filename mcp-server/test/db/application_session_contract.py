@@ -808,6 +808,81 @@ def main(dsn):  # noqa: C901
     check("req 1: only the issuer reaches the mint, transitively",
           minter_membership_is_exactly_the_issuer)
 
+    # ------------------------------------- 0207: minting from an actor slug ----
+    def issuer_can_mint_by_slug():
+        """The door authenticates a SLUG and has no actor id: actor.id is not
+        resolved until callTool runs, long after authentication. The first
+        attempt to wire the door called the uuid-taking mint and therefore
+        minted nothing on every request, while its tests passed against a
+        hand-built actor carrying an id no door can produce."""
+        sid = uuid.uuid4()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("set role carr_session_issuer")
+                cur.execute("""select ops.mint_application_session_for_slug(
+                                 %s,'joe','carr-internal','joe','oauth-google',
+                                 'accounts.google.com','verified_partner','joe',
+                                 now() + interval '1 hour')""", (sid,))
+            conn.commit()
+        except psycopg.Error as exc:
+            conn.rollback()
+            raise AssertionError(
+                f"the issuer could not mint by slug, so the door still cannot mint: "
+                f"{str(exc).strip().splitlines()[0]}") from None
+        finally:
+            with contextlib.suppress(Exception), conn.cursor() as cur:
+                cur.execute("reset role"); conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("""select a.slug from ops.application_session s
+                             join actor a on a.id = s.actor_id where s.id=%s""", (sid,))
+            row = cur.fetchone()
+        assert row and row[0] == "joe", \
+            "the session must resolve to the actor the slug names, not a null principal"
+    check("req 1: the issuer can mint from a slug (0207 — the door has no actor id)",
+          issuer_can_mint_by_slug)
+
+    def unknown_slug_refuses():
+        """A session with a null actor would satisfy 'a row exists' while failing
+        the only thing the row is for: 0204's guard matches the evidence row's
+        actor against the session's, and null matches nothing."""
+        sid = uuid.uuid4()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("set role carr_session_issuer")
+                cur.execute("""select ops.mint_application_session_for_slug(
+                                 %s,'nobody-provisioned','carr-internal','joe','oauth-google',
+                                 'accounts.google.com','verified_partner','nobody-provisioned',
+                                 now() + interval '1 hour')""", (sid,))
+            conn.rollback()
+            raise AssertionError(
+                "an unprovisioned slug minted a session; it would name no principal")
+        except psycopg.Error as exc:
+            conn.rollback()
+            if getattr(exc, "sqlstate", None) in ABSENCE_SQLSTATES:
+                raise AssertionError("the substrate is absent, not refusing") from None
+            assert "no actor row for slug" in str(exc).lower(), (
+                f"refused, but by a different guard: "
+                f"{str(exc).strip().splitlines()[0]}")
+        finally:
+            with contextlib.suppress(Exception), conn.cursor() as cur:
+                cur.execute("reset role"); conn.commit()
+    check("req 1: minting by an unprovisioned slug refuses", unknown_slug_refuses)
+
+    def writer_cannot_mint_by_slug():
+        """The slug wrapper must not become a second door into the mint. It is
+        SECURITY DEFINER, so an over-broad grant here would hand the writer
+        exactly what 0206 spent a role separating it from."""
+        sid = uuid.uuid4()
+        refuses(conn, """select ops.mint_application_session_for_slug(
+                           %s,'joe','carr-internal','joe','oauth-google',
+                           'accounts.google.com','verified_partner','joe',
+                           now() + interval '1 hour')""", (sid,),
+                because="the write credential must not mint through the slug wrapper",
+                role="carr_writer", expect_message="permission denied",
+                privilege_is_the_point=True)
+    check("req 1: carr_writer cannot mint through the slug wrapper either",
+          writer_cannot_mint_by_slug)
+
     def triggers_enable_always():
         with conn.cursor() as cur:
             cur.execute("""select c.relname, t.tgname, t.tgenabled

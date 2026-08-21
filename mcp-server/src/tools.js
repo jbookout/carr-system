@@ -111,6 +111,28 @@ export function auditIdentity(actor) {
   };
 }
 
+// PURE — no DB, no env, no ctx — so the write path's audit columns are testable
+// on their own, exactly as readCallInsertSQL (mcp.js) makes the read path
+// testable. It is extracted for a specific reason: a review found that dropping
+// application_session_id from this INSERT passed every test in the repo,
+// because nothing could reach the statement without standing up a transaction
+// and a verb. A statement no test can see is a statement that can be silently
+// weakened.
+export function toolCallInsertSQL(key, verb, actor, hash, result) {
+  const identity = auditIdentity(actor);
+  return {
+    text: `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
+       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id,
+       application_session_id)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    params: [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null,
+             actor.client_id || null, identity.organization_tenant_id,
+             identity.sponsoring_human_slug, identity.personal_scope,
+             identity.authorization_class, identity.correlation_id,
+             identity.application_session_id],
+  };
+}
+
 async function withEnvelope(client, actor, verb, args, fn) {
   const key = args.idempotency_key;
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
@@ -129,15 +151,8 @@ async function withEnvelope(client, actor, verb, args, fn) {
     return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction
-  const identity = auditIdentity(actor);
-  await client.query(
-    `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id,
-       application_session_id)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null,
-     identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-     identity.authorization_class, identity.correlation_id, identity.application_session_id]);
+  const { text, params } = toolCallInsertSQL(key, verb, actor, hash, result);
+  await client.query(text, params);
   return result;
 }
 

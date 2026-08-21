@@ -307,7 +307,16 @@ test("audit migration and both write paths preserve actor, sponsor, scope, and a
   }
   assert.match(tools, /insert into tool_call \(idempotency_key, verb, actor_id/);
   assert.match(tools, /insert into event \(occurred_at, actor_id, verb/);
-  const auditHelper = tools.slice(tools.indexOf("export function auditIdentity"), tools.indexOf("async function withEnvelope"));
+  // Bounded at the next declaration after auditIdentity. toolCallInsertSQL was
+  // extracted between them, so the old boundary swept in a statement builder
+  // and its comments rather than the helper this assertion is about.
+  // Bounded at the comment that introduces the next declaration, not at the
+  // declaration itself: a doc comment sits above its function, so anchoring on
+  // the `export function` line sweeps that comment's prose into the slice.
+  const auditHelper = tools.slice(tools.indexOf("export function auditIdentity"), tools.indexOf("// PURE — no DB, no env, no ctx"));
+  assert.ok(auditHelper.length > 0 && auditHelper.length < 3000,
+    "the slice must actually bound auditIdentity — an empty or runaway slice "
+    + "makes the assertions below vacuous");
   assert.doesNotMatch(auditHelper, /statement|personal_rules|human_quote/);
   assert.ok(migration.lastIndexOf("do $$") < migration.lastIndexOf("commit;"),
     "0095 commits only after its postflight guard, so a guard failure rolls back DDL");

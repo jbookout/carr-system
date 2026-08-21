@@ -638,6 +638,53 @@ export async function dispatch(request, env, ctx, actor) {
   }
 }
 
+/**
+ * Decorate the authenticated actor with the session this request was minted, or
+ * return it unchanged when this door cannot mint one.
+ *
+ * EXPORTED SO ATTACHMENT IS TESTABLE. A review found that minting correctly and
+ * then never attaching the result passed every test in the repo: the mint was
+ * observable through its fake, but the actor handed to dispatch was not. This
+ * function is the attachment step, so a test can assert the returned actor
+ * carries the session rather than inferring it.
+ *
+ * THE CLASS AND TENANT ARE COMPUTED HERE, not read off the actor. Both are
+ * derived inside dispatch(), which runs after this, so reading them from
+ * `actor` yields undefined — and 0204 raises on a null authorization class. The
+ * first version of this wiring did exactly that and minted nothing on every
+ * request while its tests passed against a hand-built actor shape no door can
+ * produce. Both functions below are pure and server-derived.
+ *
+ * env.SESSION_MINT_FN IS A TEST SEAM and production cannot set it: Worker env
+ * values come from wrangler config and secrets, which are strings, so only a
+ * test in this process can inject a function. It exists because the alternative
+ * is a call site no test can reach, and a call site no test can reach can be
+ * deleted without any test noticing — which is how the first version shipped
+ * inert.
+ */
+export async function withApplicationSession(request, env, ctx, actor) {
+  const mintFn = env.SESSION_MINT_FN
+    || (env.DATABASE_URL_SESSION_ISSUER
+      ? (text, params) => neon(env.DATABASE_URL_SESSION_ISSUER).query(text, params)
+      : null);
+  const sessionId = await sessionForAccessToken(request, env, {
+    ...actor,
+    authorization_class: authorizationClassForActor(actor),
+    organization_tenant_id: organizationTenantForActor(actor),
+  }, {
+    mintFn,
+    // A downgrade goes through the same failure path the Worker already uses,
+    // so "this door stopped qualifying" is visible without anyone thinking to
+    // look for it. Silence is what hid three production-fatal defects.
+    onFailure: (kind, detail) => scheduleFailureRecord(env, ctx, {
+      routeKey: "mcp:session-mint",
+      failureClass: kind,
+      detail: JSON.stringify(detail).slice(0, 200),
+    }),
+  });
+  return sessionId ? { ...actor, application_session_id: sessionId } : actor;
+}
+
 /** Mounted as OAuthProvider `apiHandler` for /mcp. ctx.props is already authenticated. */
 export const mcpApiHandler = {
   async fetch(request, env, ctx) {
@@ -658,26 +705,6 @@ export const mcpApiHandler = {
       });
       return json({ error: "unauthorized" }, 401);
     }
-    // THE ONLY DOOR THAT MINTS (migration 0204/0206), and it mints HERE rather
-    // than in dispatch() because dispatch is shared by every door. The bearer
-    // doors reach dispatch too, and they authenticate against a static secret
-    // map with no issuance instant, no expiry and no revocation state — so a
-    // session minted for one would be a fiction. Keeping the mint at the door
-    // means "which doors may qualify" is answered by which code path runs, not
-    // by a condition someone could later widen by accident.
-    //
-    // The session is attached to the actor the same way correlation_id is
-    // below in dispatch(): every write verb then picks it up through
-    // auditIdentity(actor) in tools.js with no change to any verb.
-    //
-    // A null result is normal, not an error — see session.js. It means this
-    // request records legacy, non-qualifying evidence, exactly as every
-    // request did before the substrate existed.
-    const sessionId = await sessionForAccessToken(request, env, actor, {
-      mintFn: env.DATABASE_URL_SESSION_ISSUER
-        ? (text, params) => neon(env.DATABASE_URL_SESSION_ISSUER).query(text, params)
-        : null,
-    });
-    return dispatch(request, env, ctx, sessionId ? { ...actor, application_session_id: sessionId } : actor);
+    return dispatch(request, env, ctx, await withApplicationSession(request, env, ctx, actor));
   },
 };
