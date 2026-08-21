@@ -2,7 +2,7 @@
 """Hermetic contract checks for lease-bound Calendar canary evidence."""
 from pathlib import Path
 import importlib.util
-ROOT=Path(__file__).resolve().parents[1]; failed=[]
+ROOT=Path(__file__).resolve().parents[1]; failed: list[str]=[]
 def check(label,ok):
  print(('  ok  ' if ok else '  FAIL ')+label)
  if not ok: failed.append(label)
@@ -13,7 +13,9 @@ check('receipt binds exact job-definition lease, Calendar v5 deterministic canar
 check('receipt is append-only and cannot touch live activities','calendar_canary_receipt_append_only' in sql and 'log-activity' not in sql and 'activity' not in sql)
 check('strict child marker occurs before intake/live writes',capture.index('calendar-canary-result.py') < capture.index('calendar-intake-gate.py'))
 check('parent recomputes both digests and rejects bool counts','type(counts.get(k)) is int' in child and 'hashlib.sha256' in runner and 'set(value)' in runner and 'type(count) is int' in runner)
-spec=importlib.util.spec_from_file_location('calendar_matcher',ROOT/'tools/calendar-touch-matcher.py');matcher=importlib.util.module_from_spec(spec);spec.loader.exec_module(matcher)
+spec=importlib.util.spec_from_file_location('calendar_matcher',ROOT/'tools/calendar-touch-matcher.py')
+assert spec is not None and spec.loader is not None
+matcher=importlib.util.module_from_spec(spec);spec.loader.exec_module(matcher)
 emails,domains=matcher.load_record_contacts([{'email':'z@same.example','ref':'C-1','name':'Client','org':'Client Org'},{'email':'a@same.example','ref':'L-1','name':'Lead','org':'Lead Org'}])
 check('global snapshot order preserves client domain precedence','jsonb_agg(x order by source_rank' in sql and domains['same.example'].startswith('C-1'))
 check('matcher envelope requires exact key set','set(envelope)!={"source_snapshot_id","snapshot_digest","contact_count","snapshot_text"}' in (ROOT/'tools/calendar-touch-matcher.py').read_text())

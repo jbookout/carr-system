@@ -24,12 +24,12 @@ rejected = (
     "https://127.0.0.1:55434/carr_ci",
     "postgres://evil.example/@localhost:55434/carr_ci",
     "postgres://evil.example/carr_ci?x=@localhost:55434",
-    "postgres://user:password@127.0.0.1:55434/carr_ci",
+    "postgres://user:password@127.0.0.1:55434/carr_ci",  # ci-secret-scan: allow — adversarial local DSN fixture
     "postgres://user@localhost:55434/carr_ci?sslmode=disable",
     "postgres://[::1]:55434/carr_ci",
     "postgres://user@[::1]:55434/carr_ci",
     "postgres://127.0.0.1:55434/carr_ci?host=/tmp",
-    "postgres://127.0.0.1:55434/carr_ci#@localhost",
+    "postgres://127.0.0.1:55434/carr_ci#@localhost",  # ci-secret-scan: allow — adversarial local DSN fixture
     "postgres://127.0.0.1:55434/%63arr_ci",
     "postgres://%31%32%37.0.0.1:55434/carr_ci",
     "postgres://127.0.0.1:055434/carr_ci",
@@ -41,7 +41,7 @@ rejected = (
     "postgres://127.0.0.1:65536/carr_ci",
     "postgres://127.0.0.1:55434/carr-ci",
     "postgres://127.0.0.1:55434/carr_ci/extra",
-    "postgres://127.0.0.1:55434/carr_ci\\@evil.example",
+    "postgres://127.0.0.1:55434/carr_ci\\@evil.example",  # ci-secret-scan: allow — adversarial local DSN fixture
 )
 
 assert all(validator.is_allowed_local_dsn(value) for value in accepted)
