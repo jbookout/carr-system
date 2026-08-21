@@ -662,6 +662,36 @@ def main(dsn):  # noqa: C901
                           f"switches them off: {weak}")
     check("every session trigger is ENABLE ALWAYS", triggers_enable_always)
 
+    def legacy_rows_stay_mutable():
+        """The freeze is deliberately scoped to rows that ARE qualified, and
+        this migration's own comment promises it 'cannot break an existing
+        cleanup path'. Nothing tested that promise. A mutant that dropped the
+        `old.application_session_id is not null` conditions -- freezing EVERY
+        row, legacy included -- applied cleanly and passed all 45 contracts,
+        while in production it would have broken every existing update and
+        retention path over historical rows."""
+        key = str(uuid.uuid4())
+        writer_runs(conn, TOOL_CALL_INSERT, (key, joe, None),
+                    because="a legacy row (no session) must still be writable")
+        writer_runs(conn,
+                    "update tool_call set response='{\"touched\":true}'::jsonb "
+                    "where idempotency_key=%s", (key,),
+                    because="a legacy tool_call row must remain updatable -- the "
+                            "freeze applies only to qualified evidence")
+        # DELETE is exercised as the owner: carr_writer deliberately holds no
+        # DELETE on tool_call (that privilege is what closes the legacy
+        # promotion route), so the writer is the wrong role to prove the
+        # trigger permits deletion of legacy rows.
+        with conn.cursor() as cur:
+            cur.execute("delete from tool_call where idempotency_key=%s", (key,))
+            assert cur.rowcount == 1, (
+                f"deleting a LEGACY tool_call row removed {cur.rowcount} rows; "
+                f"the evidence freeze has become overbroad and now covers rows "
+                f"no session ever vouched for")
+        conn.commit()
+    check("legacy (unqualified) rows stay mutable and removable",
+          legacy_rows_stay_mutable)
+
     # -------------------------------------------------------- replay, Dell ---
     def replay_converges():
         sid = mint(conn, joe)
