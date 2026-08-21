@@ -431,6 +431,50 @@ def main() -> int:
               (fixture["current_key"],PLAN_HASH,approval_idem)))
         owner(cur)
 
+        # This is the production failure path: completion is an invoker-rights
+        # trigger fired by carr_jobs, and its exact typed-bundle comparison
+        # invokes program5_migration_set_sha256().  Seed only the serving and
+        # performance facts under the disposable owner; the state transition
+        # itself must succeed as the routine role.
+        completion_fixture = seed_fixture(cur, "completion")
+        make_typed_bundle(cur, completion_fixture)
+        authority(cur, "carr_authority_joe")
+        cur.execute("select ops.approve_program5_release(%s,%s,%s::uuid,12)",
+                    (completion_fixture["current_key"], PLAN_HASH, uuid.uuid4()))
+        one(cur)
+        owner(cur)
+        completion_correlation = uuid.uuid4()
+        completion_now = datetime.now(timezone.utc)
+        completion_end = completion_now + timedelta(milliseconds=100)
+        cur.execute("""insert into ops.deployment(
+          correlation_id,service_id,environment,state,git_sha,provider,provider_version_id,
+          release_id,deployed_by_actor,verb_count,schema_highest_migration,
+          doctrine_generation,started_at,ended_at,read_back_at,
+          verification_evidence_ref,source_kind,source_ref,observed_at)
+          values(%s,%s,'production','complete',%s,'cloudflare-workers',%s,%s,
+          'jobs',211,%s,170,%s,%s,%s,'production:/readback','wrapper','gate',%s)""",
+          (completion_correlation,completion_fixture["service_id"],CURRENT_SHA,CURRENT_PROVIDER_VERSION,
+           completion_fixture["current_id"],"0202_staging_release_readback_receipt.sql",
+           completion_now,completion_now,completion_now,completion_now))
+        cur.execute("""insert into ops.run(
+          correlation_id,kind,service_id,environment,run_key,state,started_at,ended_at,
+          source_kind,source_ref,observed_at,evidence_ref,release_id,budget_ms)
+          values(%s,'check',%s,'production','performance.release','succeeded',
+          %s,%s,'wrapper','gate',%s,'performance:/receipt',%s,250)""",
+          (completion_correlation,completion_fixture["service_id"],completion_now,completion_end,
+           completion_now,completion_fixture["current_id"]))
+        check("only carr_jobs receives the completion-trigger hash helper",
+              _has_function(cur,"carr_jobs","ops.program5_migration_set_sha256(text[])")
+              and not any(_has_function(cur,role,"ops.program5_migration_set_sha256(text[])")
+                          for role in ("carr_reader","carr_writer","carr_authority")))
+        authority(cur,"carr_jobs")
+        cur.execute("update ops.release set state='complete',ended_at=clock_timestamp() where id=%s",
+                    (completion_fixture["current_id"],))
+        owner(cur)
+        cur.execute("select state from ops.release where id=%s",(completion_fixture["current_id"],))
+        check("carr_jobs completes an approved release through the exact assurance trigger",
+              one(cur)[0]=="complete")
+
         revised_plan="sha256:"+"9"*64
         cur.execute("update ops.release set plan_hash=%s where id=%s",
                     (revised_plan,fixture["current_id"]))
