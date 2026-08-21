@@ -93,7 +93,11 @@ with tempfile.TemporaryDirectory() as raw:
         {"identifier": "cal-joe", "sponsor": "joe"},
         {"identifier": "cal-dell", "sponsor": "dell"},
     ]})
-    cfg = mod.load_allowlist(config)
+    check("mixed-sponsor config refuses a Joe capture", _refuses(lambda: mod.load_allowlist(config, "joe")))
+    joe_config = write_json(root / "joe.json", {"version": 1, "calendars": [
+        {"identifier": "cal-joe", "sponsor": "joe"},
+    ]})
+    cfg = mod.load_allowlist(joe_config, "joe")
     resolver_data = {"client@example.com": "C-100",
                      "multiple@example.com": ["C-1", "L-2"]}
     resolve = mod.load_resolver_map_data(resolver_data)
@@ -106,17 +110,14 @@ with tempfile.TemporaryDirectory() as raw:
     snapshot = mod.capture_snapshot(store, cfg, resolve, now=datetime(2026, 8, 20, tzinfo=timezone.utc))
     check("permission denial refuses", _refuses(lambda: mod.capture_snapshot(
         FakeStore([joe, dell], events, allowed=False), cfg, resolve)))
-    check("predicate gets exactly allowlisted calendars", store.predicate_calendars == [joe, dell], repr(store.predicate_calendars))
+    check("predicate gets exactly one sponsor's allowlisted calendars", store.predicate_calendars == [joe], repr(store.predicate_calendars))
     check("predicate never receives all calendars", store.predicate_calendars is not None)
     check("window is fixed -7/+45 days", store.predicate_start == datetime(2026, 8, 13, tzinfo=timezone.utc)
           and store.predicate_end == datetime(2026, 10, 4, tzinfo=timezone.utc),
           f"{store.predicate_start!r} {store.predicate_end!r}")
     entry = snapshot["events"][0]
-    check("observed calendars include empty configured coverage",
-          snapshot["observed_calendars"] == [
-              {"sponsor": "dell", "calendar_key": mod.opaque_key("calendar", "cal-dell")},
-              {"sponsor": "joe", "calendar_key": mod.opaque_key("calendar", "cal-joe")},
-          ])
+    check("observed calendars include only the selected sponsor coverage",
+          snapshot["observed_calendars"] == [{"sponsor": "joe", "calendar_key": mod.opaque_key("calendar", "cal-joe")}])
     check("internal carr.us attendee excluded", entry["participant_refs"] == ["C-100"], repr(entry))
     check("opaque keys stable", entry["calendar_key"] == mod.opaque_key("calendar", "cal-joe")
           and entry["event_key"] == mod.opaque_key("event", "cal-joe", "event-1")
@@ -131,7 +132,7 @@ with tempfile.TemporaryDirectory() as raw:
     check("ambiguous attendee refuses", _refuses(lambda: mod.capture_snapshot(
         FakeStore([joe, dell], [FakeEvent(joe, "x", start, start + timedelta(hours=1),
                                            "x", "", ["multiple@example.com"])]), cfg, resolve)))
-    check("configured calendar absence refuses", _refuses(lambda: mod.capture_snapshot(FakeStore([joe], events), cfg, resolve)))
+    check("configured calendar absence refuses", _refuses(lambda: mod.capture_snapshot(FakeStore([], events), cfg, resolve)))
     check("unexpected calendar event refuses", _refuses(lambda: mod.capture_snapshot(
         FakeStore([joe, dell, private], [FakeEvent(private, "private-event", start,
                                                    start + timedelta(hours=1), "Private", "", [])]), cfg, resolve)))
@@ -153,7 +154,7 @@ with tempfile.TemporaryDirectory() as raw:
     resolver_file = write_json(root / "resolver.json", resolver_data)
     with resolver_file.open("r") as raw_stdin:
         regular_input = subprocess.run(
-            [str(REPO / ".venv/bin/python"), str(SCRIPT), "--allowlist", str(config),
+            [str(REPO / ".venv/bin/python"), str(SCRIPT), "--allowlist", str(joe_config), "--sponsor", "joe",
              "--resolver-map-stdin"], stdin=raw_stdin, text=True, capture_output=True)
     check("durable resolver-map file refuses", regular_input.returncode == 78
           and "process pipe" in regular_input.stderr)

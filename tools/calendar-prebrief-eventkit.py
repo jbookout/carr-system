@@ -43,7 +43,7 @@ def _secure_regular_json(path: Path, label: str) -> Any:
         raise Refusal(f"{label} is malformed") from exc
 
 
-def load_allowlist(path: Path) -> list[dict[str, str]]:
+def load_allowlist(path: Path, sponsor: str | None = None) -> list[dict[str, str]]:
     raw = _secure_regular_json(path, "allowlist config")
     if not isinstance(raw, dict) or raw.get("version") != 1 or not isinstance(raw.get("calendars"), list):
         raise Refusal("allowlist config has an unsupported shape")
@@ -62,6 +62,9 @@ def load_allowlist(path: Path) -> list[dict[str, str]]:
         entries.append({"identifier": identifier, "sponsor": sponsor})
     if not entries:
         raise Refusal("allowlist contains no calendars")
+    if sponsor is not None:
+        if sponsor not in {"joe", "dell"} or any(entry["sponsor"] != sponsor for entry in entries):
+            raise Refusal("allowlist must contain only the requested sponsor")
     return entries
 
 
@@ -273,12 +276,14 @@ def capture_snapshot(store: Any, allowlist: list[dict[str, str]], resolver: Call
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allowlist", required=True, type=Path, help="0600 JSON EventKit calendar allowlist")
+    parser.add_argument("--sponsor", required=True, choices=("joe", "dell"),
+                        help="capture one sponsor only; never co-mingle partner calendar material")
     parser.add_argument("--resolver-map-stdin", action="store_true",
                         help="read the canonical email-to-ref map from a process pipe")
     parser.add_argument("--as-of", help="UTC anchor timestamp (ISO-8601), default now")
     args = parser.parse_args()
     try:
-        allowlist = load_allowlist(args.allowlist)
+        allowlist = load_allowlist(args.allowlist, args.sponsor)
         if not args.resolver_map_stdin:
             raise Refusal("--resolver-map-stdin is required")
         resolver = load_resolver_map_stdin()
