@@ -34,6 +34,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _spec = importlib.util.spec_from_file_location(
     "blocker_review", os.path.join(REPO, "ops", "blocker-review.py"))
+# The hyphen in the filename is why this is loaded by path rather than imported.
+# Both of these can be None by signature, and a bare failure here would read as
+# "the tests passed" to anything counting exit codes, so say which half is missing.
+assert _spec is not None, "cannot load ops/blocker-review.py — file moved?"
+assert _spec.loader is not None, "ops/blocker-review.py has no loader"
 br = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(br)
 

@@ -250,7 +250,10 @@ def main() -> int:
         unreadable = []
         for tbl in COUNTERPARTY_TABLES:
             cur.execute("select has_table_privilege(current_user, %s, 'SELECT')", (tbl,))
-            if not cur.fetchone()[0]:
+            row = cur.fetchone()
+            # No row at all means the question could not be answered, which is
+            # not the same as "yes" and must not be read as one.
+            if row is None or not row[0]:
                 unreadable.append(tbl)
 
         cur.execute("""
@@ -333,7 +336,8 @@ def main() -> int:
                 # nothing else.
                 def relation_exists(name, _cur=cur):
                     _cur.execute("select to_regclass(%s)", ("public." + name,))
-                    return _cur.fetchone()[0] is not None
+                    row = _cur.fetchone()
+                    return row is not None and row[0] is not None
 
                 why = test_capability(detail, relation_exists, credential_present)
                 if why:
