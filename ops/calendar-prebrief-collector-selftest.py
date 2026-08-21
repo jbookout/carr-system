@@ -10,6 +10,40 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+# EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE — the convention ops/ci.sh's
+# gate loop already honours (it prints the last line below as the reason), and
+# the same one bin/type-check.sh uses. Apple ships LibreSSL as /usr/bin/openssl
+# and LibreSSL has no Ed25519, so on a stock Mac this proof died with a bare
+# CalledProcessError and read as a red gate that no amount of fixing could
+# clear — which is what pushed a real session to CARR_SKIP_CI on 2026-08-21.
+#
+# DELIBERATELY NARROW. This declines only when the machine cannot mint the
+# keypair the proof is built on. On CI, and on any machine carrying OpenSSL 3,
+# every assertion still runs and still has to pass; nothing here weakens what is
+# being proved, and no other failure is swallowed.
+def _require_ed25519() -> None:
+    # ASK THE QUESTION THE PROOF ITSELF ASKS. The first version of this grepped
+    # `openssl list -public-key-algorithms` for the name, which would have
+    # skipped all three proofs anywhere that output was worded differently — a
+    # probe that silently disables the very thing it guards, on the machine that
+    # matters most. Minting a throwaway key is the exact question, so a build
+    # that CAN do Ed25519 never skips, whatever its text output looks like.
+    with tempfile.TemporaryDirectory() as probe_dir:
+        attempt = subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ED25519",
+             "-out", str(Path(probe_dir) / "probe.pem")],
+            capture_output=True, text=True)
+    if attempt.returncode == 0:
+        return
+    build = subprocess.run(["openssl", "version"], capture_output=True, text=True)
+    print(f"openssl here cannot mint an Ed25519 key "
+          f"({(build.stdout or '').strip() or 'unknown build'}); this proof needs OpenSSL 3")
+    sys.exit(78)
+
+
+_require_ed25519()
+
 ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = ROOT / "tools/calendar-prebrief-collector.py"
 spec = importlib.util.spec_from_file_location("calendar_prebrief_collector", COLLECTOR)
