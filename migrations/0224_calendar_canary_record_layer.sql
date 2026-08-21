@@ -1,4 +1,4 @@
--- 0223_calendar_canary_record_layer.sql
+-- 0224_calendar_canary_record_layer.sql
 begin;
 create table ops.calendar_canary_source_snapshot(
  id uuid primary key default gen_random_uuid(), job_id uuid not null references ops.job(id), attempt integer not null,

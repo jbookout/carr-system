@@ -15,7 +15,7 @@ def check(label, ok):
 nightly=(ROOT/'bin/nightly.sh').read_text()
 matcher=(ROOT/'pipelines/availability_matcher.py').read_text()
 runner=(ROOT/'tools/control-plane.py').read_text()
-sql=(ROOT/'migrations/0224_nightly_availability_canary_record_layer.sql').read_text()
+sql=(ROOT/'migrations/0225_nightly_availability_canary_record_layer.sql').read_text()
 manifest=json.loads((ROOT/'ops/config/control-plane-workflows.v1.json').read_text())
 workflow=next(w for w in manifest['workflows'] if w['key']=='nightly-record-layer')
 check('Nightly canary is an explicit standalone argument before normal setup',

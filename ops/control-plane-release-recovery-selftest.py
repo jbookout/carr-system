@@ -16,9 +16,10 @@ FAILURES: list[str] = []
 MIGRATIONS = [
     "0193_session_work", "0194_atomic_rule_approval", "0195_control_plane_cache_observations",
     "0199_guidance_standing_context_boundary", "0212_doctrine_meta_singleton",
-    "0215_program5_completion_hash_grant", "0223_calendar_canary_record_layer",
-    "0224_nightly_availability_canary_record_layer", "0225_atomic_rule_lifecycle_forward_upgrade",
-    "0226_calendar_prebrief_projection", "0227_renewal_decision_delivery",
+    "0215_program5_completion_hash_grant", "0223_doctrine_search_reads_without_writing_or_reading_actor",
+    "0224_calendar_canary_record_layer", "0225_nightly_availability_canary_record_layer",
+    "0226_atomic_rule_lifecycle_forward_upgrade", "0227_calendar_prebrief_projection",
+    "0228_renewal_decision_delivery",
 ]
 STEPS = [
     {"id": "contain", "action_kind": "contain"},
@@ -123,7 +124,7 @@ def main() -> int:
     rejected("15. omission of the main candidate migration is refused", bad, schema)
     bad = copy.deepcopy(contract); bad["candidate"]["migrations"] = list(MIGRATIONS); bad["candidate"]["migrations"][-2:] = list(reversed(bad["candidate"]["migrations"][-2:]))
     rejected("16. reordered calendar and renewal migrations are refused", bad, schema)
-    bad = copy.deepcopy(contract); bad["candidate"]["migrations"] = list(MIGRATIONS); bad["candidate"]["migrations"][-1] = "0227_renewal_decision_delivery_replayed"
+    bad = copy.deepcopy(contract); bad["candidate"]["migrations"] = list(MIGRATIONS); bad["candidate"]["migrations"][-1] = "0228_renewal_decision_delivery_replayed"
     rejected("17. substituted delivery migration is refused", bad, schema)
     bad = copy.deepcopy(contract); bad["forward_fix_steps"][1]["id"] = "retry"
     rejected("18. step ID mutation is refused", bad, schema)

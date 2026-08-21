@@ -349,7 +349,7 @@ def main() -> int:
             cur.execute("select id from actor where slug='joe'")
             actor = fetchone_required(cur.fetchone(), "Joe actor")[0]
             # A snapshot carries 0194 in its migration ledger but historically
-            # omitted its mutable catalog seeds. 0225 must restore exactly the
+            # omitted its mutable catalog seeds. 0226 must restore exactly the
             # two reviewed global controls before attempting semantic binding.
             cur.execute("""
                 select count(*) from ops.enforcement_control_catalog
@@ -365,7 +365,7 @@ def main() -> int:
                         and installed and verified_at is not null)
             """)
             if fetchone_required(cur.fetchone(), "forward control catalog restoration")[0] != 2:
-                fail("0225 did not restore the two exact reviewed control catalog rows")
+                fail("0226 did not restore the two exact reviewed control catalog rows")
             # The exact spending rule and decision were captured before the
             # atomic approval architecture existed. Deployment must bind their
             # pinned preimages to the cost gate; a familiar UUID with different
@@ -575,8 +575,8 @@ def main() -> int:
                         (rule_id,))
             if fetchone_required(cur.fetchone(), "receipt-bound applicable rule")[0] != 1:
                 fail("exact active enforced rule is absent from the policy compiler")
-            # 0225 may preserve an OLD 0194 pre-activation receipt only through
-            # its exact migration-time anchor. A fresh post-0225 approval is
+            # 0226 may preserve an OLD 0194 pre-activation receipt only through
+            # its exact migration-time anchor. A fresh post-0226 approval is
             # already post-version and must never be made to look legacy; nor
             # may a caller claim a matching receipt with a substituted hash.
             for savepoint, sql_text, message in (

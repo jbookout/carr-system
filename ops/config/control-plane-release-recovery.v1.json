@@ -9,11 +9,12 @@
       "0199_guidance_standing_context_boundary",
       "0212_doctrine_meta_singleton",
       "0215_program5_completion_hash_grant",
-      "0223_calendar_canary_record_layer",
-      "0224_nightly_availability_canary_record_layer",
-      "0225_atomic_rule_lifecycle_forward_upgrade",
-      "0226_calendar_prebrief_projection",
-      "0227_renewal_decision_delivery"
+      "0223_doctrine_search_reads_without_writing_or_reading_actor",
+      "0224_calendar_canary_record_layer",
+      "0225_nightly_availability_canary_record_layer",
+      "0226_atomic_rule_lifecycle_forward_upgrade",
+      "0227_calendar_prebrief_projection",
+      "0228_renewal_decision_delivery"
     ]
   },
   "database_down_migration": "does_not_exist",
