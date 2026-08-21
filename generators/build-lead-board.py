@@ -6,24 +6,23 @@ Run by the weekly lead-system run (see DNA/Leads/lead-system-weekly.md) and any
 session that moves a worked lead (refresh-on-change law, mirrors the Deal Room).
 
 Usage:
-  python3 build-lead-board.py [CARR_ROOT] [--files|--records]
+  python3 build-lead-board.py [--recovery --reason WHY [--vault PATH]]
 
 TWO SOURCE MODES (ORDER 26(b), the ORDER 29a pattern).
-  --files    the historical read: the router xlsx, the lane JSONs, the registry
-             xlsx. Still the fallback, and still the only mode a cloud-only
-             session or machine without a database credential can use. No longer the
-             default: the chain flipped to records on 2026-08-04 (ORDER 26(c)).
-  --records  the same board derived from the record layer: `candidate_pool` (the
-             router rows ORDER 25 imported plus the radar-lane rows ORDER 26(a)
-             maps) and the lead registry's export view.
+  normal     the canonical record-layer read: `candidate_pool` (the router rows
+             plus mapped lane rows consumed by this builder, including
+             renewal-radar) and the lead registry's export view. This is the
+             only normal mode.
+  recovery   an explicit, reasoned noncanonical Drive-file read for an outage.
+             `--files` and `--records` are deliberately not caller-selectable.
 
 The two modes share every transform. What changes is only where the RAW row came
 from — an xlsx cell, a JSON object, or the `source_row` jsonb that stored that
 same object verbatim. That is what makes byte-identical output provable rather
 than hoped for: tools/parity-lead-board.py runs both and diffs the payload the
-template consumes. Records mode falls back to files, loudly, when the record path
-is unreachable; a board that quietly dropped its radar rows would be worse than
-one that admits it read the files.
+template consumes. Normal mode fails closed when canonical record ingress is
+unavailable; legacy file reads require explicit recovery and are labeled
+noncanonical.
 
 CARR_ROOT defaults to the folder two levels up from this script (…/CARR AI).
 Sources:
@@ -83,8 +82,8 @@ if _HAVE_RECORDS:
     #     v_export_pool_all (migration 0025, applied 2026-07-31). Until today this
     #     file's records mode was unreachable in the chain: the view existed and
     #     lib/record_sources.py had never been taught to look for it.
-    # The fallback below stays exactly as it was — a board that cannot reach the
-    # pool still says so loudly and derives from files rather than failing.
+    # Normal mode fails closed if the pool is unavailable. File reads are an
+    # explicitly requested, labeled recovery path, never a normal fallback.
     MODE = MODE_FILES if _RECOVERY.recovery else MODE_RECORDS
     if MODE == MODE_RECORDS:
         _want = (ROUTER_SOURCE,) + LANE_SOURCES
