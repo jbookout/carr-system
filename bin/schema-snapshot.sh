@@ -469,6 +469,20 @@ if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; th
   exit 1
 fi
 
+# doctrine_meta is a singleton bootstrap rather than reference vocabulary: its
+# live generation advances with successful doctrine commits and must never be
+# copied into a tracked rebuild declaration.  A rebuilt database always starts
+# from the canonical counter value, exactly as 0075 originally established.
+cat >> "$TMP" <<'DOCTRINE_META'
+--
+-- CARR DOCTRINE META BOOTSTRAP (bin/schema-snapshot.sh) — canonical, not
+-- production data.  A snapshot rebuild starts generation at zero.
+--
+
+insert into public.doctrine_meta (id, generation) values (1, 0);
+
+DOCTRINE_META
+
 # A truncated dump is the failure mode that matters: pg_dump has lost a Neon
 # connection mid-stream before (2026-08-07, on the nightly backup). A short file
 # that parses is worse than no file, because it would silently define a smaller
