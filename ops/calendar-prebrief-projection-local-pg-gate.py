@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
-"""Rollback-only adversarial proof for calendar-prebrief projection 0208."""
+"""Rollback-only adversarial proof for calendar-prebrief projection 0216."""
 import os
 import uuid
 from datetime import datetime, timedelta

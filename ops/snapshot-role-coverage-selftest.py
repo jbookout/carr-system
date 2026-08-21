@@ -57,7 +57,7 @@ EXCLUDED = {
 # role -> why it must be known but absent from the current active preamble
 PENDING = {
     "carr_calendar_prebrief_jobs": (
-        "0208 remains pending in db/schema.sql; the migration is still the "
+        "0216 remains pending in db/schema.sql; the migration is still the "
         "only truthful creator until the snapshot ledger records it as applied"
     ),
 }

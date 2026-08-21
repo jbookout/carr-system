@@ -62,11 +62,11 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # are the same set written twice, so they have to move together: a role in one
 # and not the other makes its own grants report as strays.
 #
-# carr_calendar_prebrief_jobs is known here while 0208 remains pending. The
+# carr_calendar_prebrief_jobs is known here while 0216 remains pending. The
 # generator deliberately excludes it from its active catalog query and role
-# preamble so the applied-through-0205 snapshot cannot leak a 0208 artifact.
+# preamble so the applied-through-0205 snapshot cannot leak a 0216 artifact.
 # Move it into APP_ROLES and the generator together on the snapshot refresh
-# that records 0208 as applied.
+# that records 0216 as applied.
 PENDING_ROLE_BUNDLES = ["carr_calendar_prebrief_jobs"]
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence"]

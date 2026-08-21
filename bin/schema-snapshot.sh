@@ -165,10 +165,10 @@ cat > "$TMP" <<'ROLES'
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
--- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0208
+-- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0216
 -- ages into the ledger. Until then the migration must remain the only creator;
 -- move that NOLOGIN capability bundle into this active preamble and the grant
--- catalog queries only on the snapshot refresh that records 0208 as applied.
+-- catalog queries only on the snapshot refresh that records 0216 as applied.
 --
 -- ALL SEVEN current production carr_ roles are accounted for. Six are created
 -- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
@@ -530,6 +530,20 @@ then
   echo "schema-snapshot: could not render the reviewed control catalog — nothing written" >&2
   exit 1
 fi
+
+# doctrine_meta is a singleton bootstrap rather than reference vocabulary: its
+# live generation advances with successful doctrine commits and must never be
+# copied into a tracked rebuild declaration.  A rebuilt database always starts
+# from the canonical counter value, exactly as 0075 originally established.
+cat >> "$TMP" <<'DOCTRINE_META'
+--
+-- CARR DOCTRINE META BOOTSTRAP (bin/schema-snapshot.sh) — canonical, not
+-- production data.  A snapshot rebuild starts generation at zero.
+--
+
+insert into public.doctrine_meta (id, generation) values (1, 0);
+
+DOCTRINE_META
 
 # A truncated dump is the failure mode that matters: pg_dump has lost a Neon
 # connection mid-stream before (2026-08-07, on the nightly backup). A short file

@@ -22,10 +22,10 @@
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
--- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0208
+-- carr_calendar_prebrief_jobs will make it FIVE after pending migration 0216
 -- ages into the ledger. Until then the migration must remain the only creator;
 -- move that NOLOGIN capability bundle into this active preamble and the grant
--- catalog queries only on the snapshot refresh that records 0208 as applied.
+-- catalog queries only on the snapshot refresh that records 0216 as applied.
 --
 -- ALL SEVEN current production carr_ roles are accounted for. Six are created
 -- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
@@ -26205,6 +26205,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-21 03:12:08.288479+00
 0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 03:12:08.791175+00
 0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 03:12:09.011429+00
+0212_doctrine_meta_singleton.sql	673545077c5e1bbe37676425a1addfb224acb5ef99921a736ce111fab4c4e8ab	2026-08-21 03:47:57.328664+00
 0200_calendar_canary_record_layer.sql	22b740eca07045241f5d48c44131442eac354e6f0df664f35271f6caa19e8594	2026-08-21 04:05:39.337406+00
 0201_nightly_availability_canary_record_layer.sql	53fedf7d84b7b5fdc42f27dbbe9e701fa65e7238e35882100cc8f6a8da1a1cb8	2026-08-21 04:05:41.747623+00
 0203_atomic_rule_lifecycle_forward_upgrade.sql	1a277029b99abe0ea07c9e9cc7b46586de8bed4fe076f74bfe98cbc77b9848c3	2026-08-21 04:05:44.175095+00
@@ -26594,3 +26595,10 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 -- timestamps; never dump arbitrary ops.enforcement_control_catalog rows.
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('human_authority_runtime','migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js','mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py','transactional_schema','t','2026-08-21T04:05:44.150236Z'::timestamptz,'2026-08-21T04:05:44.150236Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('platform_metering_pre_dispatch','lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py','ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py','deny_gate','t','2026-08-21T04:05:44.150236Z'::timestamptz,'2026-08-21T04:05:44.150236Z'::timestamptz) on conflict (control_key) do nothing;
+
+--
+-- CARR DOCTRINE META BOOTSTRAP (bin/schema-snapshot.sh) — canonical, not
+-- production data.  A snapshot rebuild starts generation at zero.
+--
+
+insert into public.doctrine_meta (id, generation) values (1, 0);
