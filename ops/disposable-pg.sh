@@ -107,7 +107,7 @@ start() {
   # is worse than one that does not simulate it at all.
   psql -h 127.0.0.1 -p "$port" -U carr_test -d carr_h -q \
     -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname='neondb_owner')
-        then create role neondb_owner superuser login; end if; end \$\$"
+        then create role neondb_owner createrole createdb login; end if; end \$\$"
   psql -h 127.0.0.1 -p "$port" -U carr_test -d carr_h -v ON_ERROR_STOP=1 -q \
     -f "$REPO/db/schema.sql" >"$RUNDIR/schema.log" 2>&1
   trap - ERR
