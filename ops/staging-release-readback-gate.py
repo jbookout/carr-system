@@ -148,7 +148,7 @@ def seed_fixture(cur, prefix: str) -> dict:
 
 def record_sql() -> str:
     return """select ops.record_staging_release_readback(
-      %s::uuid,%s::uuid,%s,%s,%s,%s,%s)"""
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s)"""
 
 
 def prepare_sql() -> str:
@@ -161,14 +161,18 @@ def claim_sql() -> str:
 
 
 def record_params(fixture: dict, attempt: uuid.UUID, step: str, idem: uuid.UUID,
-                  version: uuid.UUID, *, verb_count: int = 211) -> tuple:
+                  version: uuid.UUID, *, verb_count: int = 211,
+                  program6_actions_enabled: bool = False) -> tuple:
     return (idem,version,f"carr-staging-{idem.hex}",verb_count,
-            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170)
+            "0202_staging_release_readback_receipt.sql",SCHEMA_APPLIED_COUNT,170,
+            program6_actions_enabled)
 
 
 def prepare_params(fixture: dict, attempt: uuid.UUID, step: str,
                    idem: uuid.UUID) -> tuple:
     sha = PRIOR_SHA if step == "prior" else CURRENT_SHA
+    if step == "standalone":
+        return (idem,attempt,fixture["current_key"],None,None,step,sha)
     return (idem,attempt,fixture["current_key"],fixture["prior_key"],attempt,step,sha)
 
 
@@ -234,7 +238,56 @@ def main() -> int:
         check("observed attempt can never authorize a redeploy",one(cur)[0]["deploy_allowed"] is False)
         check("mutated replay is refused", refuses(cur,record_sql(),
               record_params(fixture,attempt,"current_after",ids[-1],versions[-1],verb_count=212)))
+        check("Program 6 posture change on an exact replay is refused", refuses(cur,record_sql(),
+              record_params(fixture,attempt,"current_after",ids[-1],versions[-1],
+                            program6_actions_enabled=True)))
         owner(cur)
+
+        # An enabled receipt is a different immutable fact from an otherwise
+        # identical disabled one.  The column remains nullable solely for
+        # receipts written before 0218, whose hashes cannot be retrofitted.
+        enabled_attempt=uuid.uuid4(); enabled_idem=uuid.uuid4(); enabled_version=uuid.uuid4()
+        authority(cur,"carr_jobs")
+        prepare_and_claim(cur,fixture,enabled_attempt,"standalone",enabled_idem)
+        cur.execute(record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
+                                               enabled_version,program6_actions_enabled=True))
+        enabled=one(cur)[0]
+        cur.execute("select program6_actions_enabled,projection_sha256 from ops.staging_release_readback_receipt where id=%s",
+                    (enabled["receipt_id"],))
+        enabled_posture,enabled_hash=one(cur)
+        cur.execute("select projection_sha256 from ops.staging_release_readback_receipt where id=%s",(results[-1]["receipt_id"],))
+        disabled_hash=one(cur)[0]
+        check("enabled readback stores posture and binds a distinct receipt hash",
+              enabled_posture is True and enabled_hash != disabled_hash)
+        cur.execute(record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
+                                               enabled_version,program6_actions_enabled=True))
+        check("enabled readback exact replay is idempotent",one(cur)[0]["replayed"] is True)
+        check("enabled receipt refuses a changed disabled replay",refuses(cur,record_sql(),
+              record_params(fixture,enabled_attempt,"standalone",enabled_idem,enabled_version,
+                            program6_actions_enabled=False)))
+        # Simulate a receipt that predated this column.  Its existing hash and
+        # append-only fact survive; an upgraded caller may resume its common
+        # typed input but cannot claim the historical hash bound the new field.
+        owner(cur)
+        cur.execute("set local session_replication_role=replica")
+        cur.execute("update ops.staging_release_readback_receipt set program6_actions_enabled=null where id=%s",
+                    (enabled["receipt_id"],))
+        cur.execute("set local session_replication_role=origin")
+        authority(cur,"carr_jobs")
+        cur.execute(record_sql(),record_params(fixture,enabled_attempt,"standalone",enabled_idem,
+                                               enabled_version,program6_actions_enabled=False))
+        check("legacy nullable receipt replays by its immutable common fields",one(cur)[0]["replayed"] is True)
+        owner(cur)
+        cur.execute("""select is_nullable='YES' from information_schema.columns
+                       where table_schema='ops' and table_name='staging_release_readback_receipt'
+                         and column_name='program6_actions_enabled'""")
+        check("legacy receipts remain structurally representable with NULL posture",one(cur)[0] is True)
+        cur.execute("""select to_regprocedure('ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint)') is null,
+                              has_function_privilege('carr_jobs','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
+                              has_function_privilege('carr_reader','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
+                              has_function_privilege('carr_writer','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute'),
+                              has_function_privilege('carr_authority','ops.record_staging_release_readback(uuid,uuid,text,integer,text,integer,bigint,boolean)'::regprocedure,'execute')""")
+        check("only carr_jobs retains the new eight-argument recorder",one(cur)==(True,True,False,False,False))
 
         crash_attempt=uuid.uuid4(); crash_id=uuid.uuid4(); crash_version=uuid.uuid4()
         authority(cur,"carr_jobs")

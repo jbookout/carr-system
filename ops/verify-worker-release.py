@@ -25,6 +25,8 @@ def main() -> int:
     parser.add_argument("--sha", required=True)
     parser.add_argument("--provider", required=True)
     parser.add_argument("--provider-version-id", required=True)
+    parser.add_argument("--expected-program6-actions", required=True,
+                        choices=["enabled", "disabled"])
     args = parser.parse_args()
 
     expected_version = canonical_uuid(args.provider_version_id)
@@ -47,11 +49,14 @@ def main() -> int:
     env_value = payload.get("env")
     git_sha_value = payload.get("git_sha")
     worker_version_value = payload.get("worker_version")
+    program6_actions_value = payload.get("program6_actions")
     env: dict[str, object] = env_value if isinstance(env_value, dict) else {}
     git_sha: dict[str, object] = (
         git_sha_value if isinstance(git_sha_value, dict) else {})
     worker_version: dict[str, object] = (
         worker_version_value if isinstance(worker_version_value, dict) else {})
+    program6_actions: dict[str, object] = (
+        program6_actions_value if isinstance(program6_actions_value, dict) else {})
     observed_id = worker_version.get("id")
     observed_version = canonical_uuid(observed_id) if isinstance(observed_id, str) else None
     mismatches = []
@@ -65,11 +70,16 @@ def main() -> int:
         mismatches.append("provider")
     if observed_version != expected_version:
         mismatches.append("worker_version.id")
+    expected_enabled = args.expected_program6_actions == "enabled"
+    if (program6_actions.get("enabled") is not expected_enabled
+            or program6_actions.get("posture") != args.expected_program6_actions
+            or program6_actions.get("reason") is not None):
+        mismatches.append("program6_actions")
     if mismatches:
         print("verify-worker-release: identity mismatch: " + ", ".join(mismatches),
               file=sys.stderr)
         return 1
-    print("verify-worker-release: exact Production identity observed")
+    print("verify-worker-release: exact Production identity and Program 6 posture observed")
     return 0
 
 
