@@ -3062,13 +3062,30 @@ begin
                       'it lands in the fold';
     end if;
 
-    -- (15d) THE SEPARATORS ARE PRESENT. Checked by SHAPE, and named as a shape
-    -- check rather than dressed up as behaviour, because a colliding fixture
-    -- cannot be built in this schema: every folded row begins with its verb, so
-    -- two different row-splits never concatenate to the same string however the
-    -- separators are removed. The separators still matter -- they are what stops
-    -- a field boundary being ambiguous in principle -- so their absence is
-    -- caught here rather than left to a probe that cannot exist.
+    -- (15d) THE SEPARATORS ARE PRESENT. Checked by SHAPE, and the reason is
+    -- worth stating exactly, because the first version of this was a
+    -- behavioural probe that tested nothing. It folded field 'ab' carrying "c"
+    -- against field 'a' carrying "bc" and asserted the two digests differed.
+    -- They do differ -- with the separator or without it -- because new_value
+    -- is jsonb and a jsonb STRING renders WITH its quotes, so the folds are
+    -- ab"c" and a"bc" and never collide. The quotes were doing the separator's
+    -- job, and the probe passed against a fold that had lost it.
+    --
+    -- A COLLIDING FIXTURE IS CONSTRUCTIBLE. An earlier version of this comment
+    -- claimed it was not, on the grounds that every folded row begins with its
+    -- verb. That is wrong: both rows carry the SAME verb, so the prefix cancels
+    -- and protects nothing. jsonb NUMBERS render bare, and field 'a' carrying
+    -- 12 against field 'a1' carrying 2 both fold to a12 -- digests EQUAL once
+    -- the separator is dropped, and DIFFERENT under this file. Measured on a
+    -- disposable cluster in both directions, not reasoned about.
+    --
+    -- SHAPE IS STILL THE RIGHT CHECK HERE, for a reason that survives the
+    -- correction: behaviour needs one fixture PER separator. The pair above
+    -- kills a fold that lost the separators around old_value, but a fold that
+    -- lost only the one before new_value needs the difference to straddle THAT
+    -- boundary instead -- old 1 with new 23, against old 12 with new 3. Six
+    -- positions means six fixtures and six ways to write one that quietly
+    -- proves nothing. One counted assertion covers every position at once.
     -- COUNTED, not merely present. Asking whether chr(31) appears at all passes
     -- while two of the three are gone, which is how the first version of this
     -- check let a mutant through.
