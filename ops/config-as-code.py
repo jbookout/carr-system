@@ -199,8 +199,9 @@ TOKENS = [(tok, real) for tok, real in
 #                         100 CU-h/month at ~5 min per wake, so a second Mac
 #                         waking it hourly doubles the burn and can SUSPEND the
 #                         database for the rest of the month.
-#   local-briefs        — writes today.md into Joe's vault path; on another
-#                         machine it correctly SKIPs, so it is pure noise.
+#   local-briefs        — maintains Joe's local review queue. Legacy brief files
+#                         are explicit recovery only; a second scheduler would
+#                         duplicate the same owner-specific maintenance.
 #   partner-ping        — writes the shared record. One pinger is the point.
 #
 # What the second machine still needs from the nightly is the record-derived

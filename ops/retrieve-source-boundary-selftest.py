@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import date, datetime
 import importlib.util
 import io
 import json
@@ -29,6 +30,14 @@ def check(label: str, condition: bool) -> None:
     if not condition:
         raise AssertionError(label)
     checks += 1
+
+
+def _raises(fn, error_type: type[BaseException]) -> bool:
+    try:
+        fn()
+    except error_type:
+        return True
+    return False
 
 
 def invoke(args: list[str]) -> tuple[int, str, str]:
@@ -118,9 +127,9 @@ try:
     review_source = (ROOT / "pipelines/review_queue.py").read_text()
     check("brief-pack resolves CARR_VAULT only after explicit recovery",
           'if a.recovery else None' in brief_source)
-    check("normal prebriefs refuse noncanonical calendar exports",
-          '"prebriefs" in wanted and not a.recovery' in brief_source
-          and "will not produce a degraded brief" in brief_source)
+    check("normal prebriefs read the redacted canonical Calendar view",
+          "from v_calendar_prebrief_events" in brief_source
+          and '"prebriefs" in wanted and not a.recovery' not in brief_source)
     check("Monday decisions read canonical v_loops",
           "from v_loops" in brief_source and "marker = 'decision'" in brief_source)
     check("review-queue no longer has a Drive vault source",
@@ -158,19 +167,67 @@ try:
           and "tier = 'personal' and personal_to = %s" in brief_sql)
     check("Monday query returns the in-scope decision", decisions[0]["question"] == "Approve the plan.")
 
-    original_principal_reader = brief.local_partner_principal
-    original_argv = sys.argv
-    brief.local_partner_principal = lambda: "joe"
-    sys.argv = ["brief_pack.py", "--section", "prebriefs"]
-    refused_out, refused_err = io.StringIO(), io.StringIO()
-    try:
-        with contextlib.redirect_stdout(refused_out), contextlib.redirect_stderr(refused_err):
-            refused_prebrief = brief.main()
-    finally:
-        brief.local_partner_principal = original_principal_reader
-        sys.argv = original_argv
-    check("direct normal prebrief still refuses before producing output",
-          refused_prebrief == 69 and "will not produce a degraded brief" in refused_err.getvalue())
+    class SequenceCursor(Cursor):
+        def __init__(self, results):
+            self.results = results
+            self.calls = []
+            self.description = []
+            self.rows = []
+        def execute(self, sql, params=()):
+            super().execute(sql, params)
+            columns, rows = self.results[len(self.calls) - 1]
+            self.description = [Description(name) for name in columns]
+            self.rows = rows
+
+    status_columns = ["sponsor", "snapshot_at", "captured_at", "event_count",
+                      "participant_count"]
+    event_columns = ["sponsor", "occurrence_key", "starts_at", "ends_at", "title",
+                     "location", "participant_ref", "participant_display_name",
+                     "participant_org_name", "participant_status",
+                     "participant_last_touch", "open_owner", "open_action"]
+    meeting_cursor = SequenceCursor([
+        (status_columns, [
+            ("joe", datetime(2026, 8, 20, 6, 30), datetime(2026, 8, 20, 6, 31), 1, 1),
+            ("dell", datetime(2026, 8, 20, 6, 30), datetime(2026, 8, 20, 6, 31), 0, 0),
+        ]),
+        (event_columns, [
+            ("joe", "a" * 64, datetime(2026, 8, 20, 9, 30),
+             datetime(2026, 8, 20, 10, 0), "Lease review", "Mobile",
+             "C-TEST-001", "Fixture Doctor", "Fixture Practice", "engaged",
+             date(2026, 8, 10), "joe", "Confirm the renewal decision"),
+        ]),
+    ])
+    brief.RECOVERY_MODE = False
+    canonical_prebrief = brief.section_prebriefs(meeting_cursor, date(2026, 8, 20))
+    status_sql, _status_params = meeting_cursor.calls[0]
+    meeting_sql, meeting_params = meeting_cursor.calls[1]
+    check("normal prebrief requires a current receipt for both partners",
+          "from v_calendar_prebrief_snapshot_status" in status_sql)
+    check("normal prebrief binds the requested day to the canonical view",
+          "from v_calendar_prebrief_events" in meeting_sql
+          and meeting_params == (date(2026, 8, 20), date(2026, 8, 20)))
+    check("normal prebrief renders resolved record context",
+          "Fixture Doctor is engaged" in canonical_prebrief
+          and "last touched 10 days ago" in canonical_prebrief
+          and "Confirm the renewal decision" in canonical_prebrief)
+    check("normal prebrief does not expose a raw participant address or source identifier",
+          "@" not in canonical_prebrief and "C-TEST-001" not in canonical_prebrief)
+    stale_cursor = SequenceCursor([(status_columns, [
+        ("joe", datetime(2026, 8, 19, 6, 30), datetime(2026, 8, 19, 6, 31), 0, 0),
+    ])])
+    check("normal prebrief refuses missing or stale sponsor receipts",
+          _raises(lambda: brief.section_prebriefs(stale_cursor, date(2026, 8, 20)),
+                  brief.CanonicalPrebriefUnavailable))
+    weekend_cursor = SequenceCursor([
+        (status_columns, [
+            ("joe", datetime(2026, 8, 21, 6, 30), datetime(2026, 8, 21, 6, 31), 0, 0),
+            ("dell", datetime(2026, 8, 21, 6, 30), datetime(2026, 8, 21, 6, 31), 0, 0),
+        ]),
+        (event_columns, []),
+    ])
+    check("weekend manual brief accepts Friday's last-good empty snapshot",
+          "No meetings on either calendar" in
+          brief.section_prebriefs(weekend_cursor, date(2026, 8, 22)))
 
     review_spec = importlib.util.spec_from_file_location("review_boundary", ROOT / "pipelines/review_queue.py")
     assert review_spec and review_spec.loader
@@ -226,13 +283,14 @@ if [ \"$1\" = \"brief-pack\" ]; then
   print 'claim' > \"$HOME/carr-system/out/brief-pack/claim-card.md\"
   print 'renewal' > \"$HOME/carr-system/out/brief-pack/renewal-shortlist.md\"
 fi
+[ \"$1\" = \"review-queue\" ] && [ \"${FAKE_REVIEW_FAIL:-0}\" = \"1\" ] && exit 69
 exit 0
 """)
         fake_run.chmod(0o755)
         vault = home / "Google Drive/CARR AI"
         (vault / "00_Context").mkdir(parents=True)
         base_env = {**os.environ, "HOME": str(home), "CARR_VAULT": str(vault)}
-        failed = subprocess.run(["/bin/zsh", str(script)], env={**base_env, "FAKE_BRIEF_FAIL": "1"},
+        failed = subprocess.run(["/bin/zsh", str(script)], env={**base_env, "FAKE_REVIEW_FAIL": "1"},
                                 text=True, capture_output=True)
         check("scheduled path fails before producing a degraded brief", failed.returncode == 1)
         check("failed scheduled path writes no repo or Drive today document",
@@ -241,18 +299,32 @@ exit 0
 
         normal = subprocess.run(["/bin/zsh", str(script)], env=base_env,
                                 text=True, capture_output=True)
-        check("normal scheduled success leaves canonical component outputs", normal.returncode == 0
-              and all((repo / "out/brief-pack" / name).exists() for name in (
-                  "one-thing.md", "claim-card.md", "renewal-shortlist.md")))
+        check("normal scheduled success does not produce legacy brief projections", normal.returncode == 0
+              and not (repo / "out/brief-pack").exists())
         check("normal scheduled success never recreates retired today surfaces",
               not (repo / "out/brief-pack/today.md").exists()
               and not (vault / "00_Context/today.md").exists())
         normal_calls = (repo / "out/fake-run-calls.log").read_text()
-        check("normal scheduler requests only the three consumed canonical-safe sections",
-              all(f"brief-pack --quiet --section {section}" in normal_calls
-                  for section in ("one-thing", "claim-card", "renewal-shortlist"))
-              and "brief-pack --quiet\n" not in normal_calls
-              and "--recovery" not in normal_calls)
+        check("normal scheduler maintains review queue without rendering a brief lookalike",
+              "review-queue" in normal_calls
+              and "brief-pack" not in normal_calls
+              and "--recovery" not in normal_calls
+              and "morning-brief" not in normal_calls)
+
+        source = script.read_text(encoding="utf-8")
+        check("legacy local projection names its noncanonical status and the record-native reader",
+              "not a delivery surface" in source and "morning-brief" in source
+              and "canonical-safe sections" not in source)
+
+        registry = json.loads((ROOT / "ops/config/drive-dependencies.v1.json").read_text())
+        registry_rows = {row["id"]: row for row in registry["entries"]}
+        check("Drive registry names the record-native morning reader replacement",
+              registry_rows["scheduled-brief-render"]["replacement"]["status"]
+              == "normal_path_repointed_to_record_mcp_reader")
+        health_source = (ROOT / "tools/health-check.py").read_text()
+        check("health does not require retired local brief mtimes",
+              "brief-pack-latest.md" not in health_source
+              and "monday-agenda.md" not in health_source)
 
         recovery = subprocess.run(
             ["/bin/zsh", str(script), "--recovery"],
