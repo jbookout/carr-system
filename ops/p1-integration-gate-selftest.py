@@ -63,6 +63,45 @@ def main():
     check("host_of returns empty rather than guessing on a malformed DSN",
           gate.host_of("not-a-dsn") == "")
 
+    class ProviderResult:
+        def __init__(self, returncode, stdout=""):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    provider_calls = []
+    sleeps = []
+    provider_results = iter([
+        ProviderResult(1),
+        ProviderResult(0, ""),
+        ProviderResult(0, "postgresql://fixture@branch.example/neondb?sslmode=require\n"),  # ci-secret-scan: allow — hermetic non-routable fixture
+    ])
+
+    def provider(_env, *args):
+        provider_calls.append(args)
+        return next(provider_results)
+
+    dsn = gate.wait_for_branch_connection_string(
+        {}, "branch-id", "staging-project", attempts=3, delay_seconds=0.25,
+        runner=provider, sleeper=sleeps.append,
+    )
+    check("new integration branch connection lookup retries bounded not-ready results",
+          dsn.endswith("sslmode=require") and sleeps == [0.25, 0.25]
+          and len(provider_calls) == 3)
+    check("integration lookup pins exact read-write owner database scope",
+          all(call == (
+              "connection-string", "branch-id", "--project-id", "staging-project",
+              "--role-name", "neondb_owner", "--database-name", "neondb",
+              "--endpoint-type", "read_write",
+          ) for call in provider_calls))
+
+    exhausted_sleeps = []
+    exhausted = gate.wait_for_branch_connection_string(
+        {}, "branch-id", "staging-project", attempts=2, delay_seconds=0.5,
+        runner=lambda _env, *_args: ProviderResult(1), sleeper=exhausted_sleeps.append,
+    )
+    check("integration lookup fails closed after its bounded retry window",
+          exhausted == "" and exhausted_sleeps == [0.5])
+
     # ── GUARD 0: the refusal that prevents branching production ─────────────
     # Drives the REAL module in a subprocess with the two project ids collided,
     # so the assertion is on the shipped code path rather than on a copy of it.
