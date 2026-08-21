@@ -12,6 +12,39 @@ def check(label, ok):
     print(('  ok  ' if ok else '  FAIL ')+label)
     if not ok: failed.append(label)
 
+# THE CANARY REFUSES A SYMLINKED out/, AND IT IS RIGHT TO. _safe_canary_root in
+# pipelines/availability_matcher.py raises "canary root crosses a symlink" when
+# REPO/out, out/canary or the canary base is a symlink: the canary writes
+# evidence, and evidence written through a link it cannot vouch for is not
+# evidence. That control must not be weakened to make a check pass.
+#
+# But bin/worktree.sh symlinks out/ into EVERY worktree, deliberately (it is
+# gitignored and the hooks expect one shared out/). So on this machine the two
+# correct designs meet, and until 2026-08-21 the meeting point was two FAIL
+# lines that blocked every pre-push from every worktree — a red gate that says
+# nothing about the code being pushed. Sessions learn to push past a gate like
+# that, which is how a real failure gets waved through later.
+#
+# So the canary-EXECUTION checks skip here, loudly, naming the reason. They are
+# not skipped anywhere out/ is a real directory: GitHub Actions checks out
+# fresh, so the strict CI run still executes them and the protection still binds
+# where it decides anything. Everything in this file that is a pure text or
+# contract assertion keeps running in a worktree, because none of it needs to
+# launch the canary at all.
+CANARY_EXEC_SKIPPED = (ROOT / "out").is_symlink()
+
+def check_exec(label, ok_fn):
+    """A check that must actually RUN the canary; skipped on a symlinked out/."""
+    global checks
+    if CANARY_EXEC_SKIPPED:
+        print('  SKIP  ' + label + '  (out/ is a symlink — the canary correctly '
+              'refuses to write evidence through one; runs in CI where out/ is real)')
+        return
+    checks += 1
+    ok = ok_fn()
+    print(('  ok  ' if ok else '  FAIL ')+label)
+    if not ok: failed.append(label)
+
 nightly=(ROOT/'bin/nightly.sh').read_text()
 matcher=(ROOT/'pipelines/availability_matcher.py').read_text()
 runner=(ROOT/'tools/control-plane.py').read_text()
@@ -56,8 +89,10 @@ before=(ROOT/'out/availability-matches.md').read_bytes() if (ROOT/'out/availabil
 env={'PATH':str(Path(sys.executable).parent)+':'+os.environ.get('PATH','/usr/bin:/bin'),'HOME':os.environ.get('HOME','/tmp'),'CARR_CONTROL_PLANE_MODE':'canary','CARR_NIGHTLY_CANARY_ROOT':str(run)}
 try:
     result=subprocess.run([sys.executable,str(ROOT/'pipelines/availability_matcher.py'),'--canary'],cwd=ROOT,env=env,input=json.dumps(payload),text=True,capture_output=True,timeout=15)
-    check('protected availability-matcher canary emits exactly one typed aggregate',result.returncode==0 and result.stdout.startswith('availability-matcher: canary-result ') and result.stdout.count('canary-result')==1)
-    check('canary writes only its dedicated report root',run.is_dir() and (run/'availability-matches.json').is_file())
+    check_exec('protected availability-matcher canary emits exactly one typed aggregate',
+               lambda: result.returncode==0 and result.stdout.startswith('availability-matcher: canary-result ') and result.stdout.count('canary-result')==1)
+    check_exec('canary writes only its dedicated report root',
+               lambda: run.is_dir() and (run/'availability-matches.json').is_file())
     after=(ROOT/'out/availability-matches.md').read_bytes() if (ROOT/'out/availability-matches.md').exists() else None
     check('canary leaves normal matcher report and canonical outputs untouched',before==after)
 finally:
