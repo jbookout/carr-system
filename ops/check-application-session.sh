@@ -70,6 +70,7 @@ MIGRATION_SPLIT="$REPO/migrations/0244_receipt_digest_split.sql"
 # had written. It applies last because it replaces 0238's readiness function.
 MIGRATION_INVENTORY="$REPO/migrations/0246_drive_inventory_is_not_the_runtime_s_to_declare.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
+GRANDFATHERED="$REPO/mcp-server/test/db/grandfathered_receipt_contract.py"
 export LC_ALL=C LANG=C
 export CARR_DISPOSABLE_PG_DIR="${CARR_DISPOSABLE_PG_DIR:-${TMPDIR:-/tmp}/carr-appsession-check}"
 
@@ -100,10 +101,33 @@ psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_ACCEPT"
 echo "migration 0242 applied (the reducer folds, and acceptance is gated)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_RETIRE"
 echo "migration 0243 applied (retirement needs two proven receipts and authority)"
+
+# THE GRANDFATHERED DATABASE, forked HERE and nowhere else. 0244 backfills
+# every pre-existing receipt's material digest with three statements that stand
+# the immutability trigger down, and its own apply-time proof cannot observe a
+# single one of them: that block runs in a transaction it rolls back, so every
+# row it can see is one it created AFTER the backfill. The backfill's actual
+# subject is a receipt that existed BEFORE the migration, and this is the only
+# place in the repository where one is made.
+#
+# The copy is taken from `subject` at exactly this point -- 0243 applied, 0244
+# not yet -- because a template copy taken any later has already been through
+# the backfill and proves nothing.
+psql "$BASE/postgres" -q -c "create database grandfathered template subject"
+"$PYBIN" "$GRANDFATHERED" seed "$BASE/grandfathered"
+echo "pre-0244 receipts seeded under the OLD rules"
+
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SPLIT"
 echo "migration 0244 applied (the call digest and the material claim are two columns)"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_INVENTORY"
 echo "migration 0246 applied (the inventory is declared, not written by the runtime)"
+
+# ...and now bring the grandfathered copy forward THROUGH the backfill, so the
+# contract below runs against rows the UPDATE actually rewrote.
+psql "$BASE/grandfathered" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_SPLIT"
+psql "$BASE/grandfathered" -v ON_ERROR_STOP=1 -q -f "$MIGRATION_INVENTORY"
+echo "grandfathered database brought forward through the 0244 backfill"
+"$PYBIN" "$GRANDFATHERED" verify "$BASE/grandfathered"
 
 # THE PRODUCER, AGAINST A REAL DATABASE, before the contract suite runs. Its own
 # unit test drives a hand-written fake client, and an audit showed that fake

@@ -109,6 +109,43 @@ alter table ops.write_receipt add column material_digest text;
 -- so it would refuse this backfill. It is disabled for the statement and
 -- restored to ENABLE ALWAYS, which is the state 0211 left it in; restoring it
 -- with a plain ENABLE would quietly downgrade it to origin-only.
+--
+-- ═══ THERE IS NO DOWN PATH, AND THESE THREE STATEMENTS ARE WHY IT MATTERS ═══
+--
+-- migrations/README.md is forward-only: this series has no down files, and
+-- tools/migrate.py records a sha256 per applied migration and refuses any
+-- applied file whose content changed. So the paragraph below is not a warning
+-- that someone should write a reverse migration. It is what "forward-only"
+-- actually costs here, said out loud at the one statement that spends it.
+--
+-- WHAT IS UNRECOVERABLE. Nothing records which rows this UPDATE touched. After
+-- it runs, a pre-existing receipt is indistinguishable from a new one in every
+-- way except its VALUE, and there is no statement that restores the pre-split
+-- shape. The data itself is not lost — the old claimed_digest survives under
+-- its new name, call_digest — but the fact of the rewrite is not written down
+-- anywhere.
+--
+-- WHAT SURVIVES, AND IT IS ENOUGH TO IDENTIFY THEM FOREVER. A backfilled row is
+-- exactly a row where material_digest = call_digest, and section (F) below makes
+-- that shape unwritable from this migration onward: an ordinary receipt must
+-- carry the material ops.write_receipt_material_digest computes from its call's
+-- event rows, which is a digest of different inputs and cannot equal the call
+-- digest. So the signature is a true discriminator rather than a heuristic.
+--
+-- WHAT A GRANDFATHERED ROW STILL DOES, stated because it is a live exposure and
+-- not a defect: it carries a value the guard in (F) would refuse; it counts
+-- toward ops.accept_phase4's bar exactly like a row written under the new rules,
+-- proven or unproven; and ops.require_prior_state_existed will let a new receipt
+-- BUILD on its material. All three are true at once.
+--
+-- NONE OF THAT IS OBSERVABLE FROM THIS FILE. The apply-time block at the bottom
+-- runs inside a transaction it rolls back, so every receipt it can see is one it
+-- created AFTER this UPDATE; a row that existed BEFORE the migration is
+-- unreachable from inside the migration by construction. The coverage therefore
+-- lives in mcp-server/test/db/grandfathered_receipt_contract.py, which
+-- ops/check-application-session.sh runs against a database forked from `subject`
+-- after 0243 and seeded under the pre-split rules — the only place in this
+-- repository where a grandfathered receipt exists.
 alter table ops.write_receipt disable trigger write_receipt_immutable;
 update ops.write_receipt set material_digest = call_digest where material_digest is null;
 alter table ops.write_receipt enable always trigger write_receipt_immutable;
