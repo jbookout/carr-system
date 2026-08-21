@@ -1,4 +1,4 @@
--- 0211 — write receipts: a session, a material digest, and a readback that is
+-- 0235 — write receipts: a session, a material digest, and a readback that is
 --        computed by the database rather than asserted by the caller
 --
 -- THIS LAYER WAS REJECTED ONCE. Reading that rejection is the fastest way to
@@ -21,7 +21,7 @@
 -- THE SESSION IS THE APPLICATION SESSION, NOT THE CONNECTION. The link is NOT
 -- NULL and references ops.application_session, and a trigger requires that
 -- session to be live, unexpired, unrevoked, and to match the receipt's actor
--- and tenant — the same standard evidence rows are held to in 0208. There is no
+-- and tenant — the same standard evidence rows are held to in 0232. There is no
 -- code path that derives a receipt's session from current_user, the backend pid,
 -- or anything else about the connection.
 --
@@ -29,7 +29,7 @@
 -- THE READBACK IS COMPUTED BY THE DATABASE, FROM A FROZEN ROW. The caller
 -- supplies what it BELIEVES it wrote (claimed_digest). The database then reads
 -- the qualified public.tool_call row for that idempotency key and computes the
--- digest itself. Those rows are frozen against update and delete by 0208 once
+-- digest itself. Those rows are frozen against update and delete by 0232 once
 -- they carry a session, so the readback source cannot be edited after the fact.
 -- A receipt is VALID only when the two digests agree, and validity is a
 -- generated column rather than a flag someone sets.
@@ -60,7 +60,7 @@ create table ops.write_receipt (
   verb                     text not null,
   subject_type             text not null,
   subject_id               uuid not null,
-  -- The evidence row this receipt is a receipt FOR. Frozen by 0208 once bound.
+  -- The evidence row this receipt is a receipt FOR. Frozen by 0232 once bound.
   tool_call_idempotency_key text not null,
   -- What the caller believes it wrote.
   claimed_digest           text not null,
@@ -93,7 +93,7 @@ comment on column ops.write_receipt.readback_digest is
   'no parameter through which a caller can supply this value.';
 
 -- ------------------------------------------------------- the session guard
--- Same standard as evidence in 0208: live, unexpired, unrevoked, and matching
+-- Same standard as evidence in 0232: live, unexpired, unrevoked, and matching
 -- actor AND tenant. A receipt naming a session that does not vouch for its
 -- actor is worse than no receipt, because it looks like proof.
 create function ops.require_live_session_for_receipt()
@@ -228,7 +228,7 @@ begin
       p_receipt_id, r.tool_call_idempotency_key;
   end if;
   -- THE EVIDENCE MUST ITSELF BE QUALIFIED, and by the SAME session. A receipt
-  -- proved against a legacy row would be a proof about something 0208 says
+  -- proved against a legacy row would be a proof about something 0232 says
   -- proves nothing.
   if tc.application_session_id is null then
     raise exception 'receipt % names LEGACY evidence, which cannot be read back',
@@ -311,7 +311,7 @@ revoke update, delete on ops.write_receipt from carr_writer;
 
 -- --------------------------------------------------------------- apply-time
 -- EXERCISES the guarantees rather than describing them, and rolls every probe
--- back. Same reasoning as 0208's block: this file runs where the contract suite
+-- back. Same reasoning as 0232's block: this file runs where the contract suite
 -- does not, so shape checks alone would let a gutted guard through.
 do $$
 declare
@@ -329,7 +329,7 @@ begin
   select id into probe_actor from public.actor order by slug limit 1;
   select id into other_actor from public.actor where id <> probe_actor order by slug limit 1;
   if probe_actor is null or other_actor is null then
-    raise exception '0211 FAILED: need two seeded actors to exercise the guards';
+    raise exception '0235 FAILED: need two seeded actors to exercise the guards';
   end if;
 
   insert into ops.application_session
@@ -358,11 +358,11 @@ begin
   exception when others then
     failed := true;
     if position('different actor' in sqlerrm) = 0 then
-      raise exception '0211 FAILED: cross-actor receipt refused by the WRONG guard: %', sqlerrm;
+      raise exception '0235 FAILED: cross-actor receipt refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0211 FAILED: a receipt naming a different actor than its session was ACCEPTED';
+    raise exception '0235 FAILED: a receipt naming a different actor than its session was ACCEPTED';
   end if;
 
   -- The honest path: insert, then prove.
@@ -373,15 +373,15 @@ begin
           'deal', gen_random_uuid(), key1, claimed, 'prior-0');
 
   if (select is_proven from ops.write_receipt where id = rid) then
-    raise exception '0211 FAILED: a receipt was proven before any readback ran';
+    raise exception '0235 FAILED: a receipt was proven before any readback ran';
   end if;
 
   proved := ops.prove_write_receipt(rid);
   if not proved then
-    raise exception '0211 FAILED: an honest receipt did not prove against its frozen evidence';
+    raise exception '0235 FAILED: an honest receipt did not prove against its frozen evidence';
   end if;
   if not (select is_proven from ops.write_receipt where id = rid) then
-    raise exception '0211 FAILED: readback ran but is_proven did not follow it';
+    raise exception '0235 FAILED: readback ran but is_proven did not follow it';
   end if;
 
   -- A LYING receipt: same evidence, a digest it did not write. The readback must
@@ -392,10 +392,10 @@ begin
   values (rid2, sid, probe_actor, 'carr-internal', 'log-activity',
           'deal', gen_random_uuid(), key1, 'a-digest-nobody-wrote', 'prior-0');
   if ops.prove_write_receipt(rid2) then
-    raise exception '0211 FAILED: a receipt claiming a digest it never wrote was PROVEN';
+    raise exception '0235 FAILED: a receipt claiming a digest it never wrote was PROVEN';
   end if;
   if (select is_proven from ops.write_receipt where id = rid2) then
-    raise exception '0211 FAILED: a false claim still reported is_proven';
+    raise exception '0235 FAILED: a false claim still reported is_proven';
   end if;
 
   -- Readback is one-way.
@@ -405,11 +405,11 @@ begin
   exception when others then
     failed := true;
     if position('already carries a readback' in sqlerrm) = 0 then
-      raise exception '0211 FAILED: re-proving refused by the WRONG guard: %', sqlerrm;
+      raise exception '0235 FAILED: re-proving refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0211 FAILED: a receipt was proven twice';
+    raise exception '0235 FAILED: a receipt was proven twice';
   end if;
 
   -- An INEXACT reversal must refuse.
@@ -425,11 +425,11 @@ begin
   exception when others then
     failed := true;
     if position('reversal is not exact' in sqlerrm) = 0 then
-      raise exception '0211 FAILED: inexact reversal refused by the WRONG guard: %', sqlerrm;
+      raise exception '0235 FAILED: inexact reversal refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0211 FAILED: a reversal that does not restore the prior state was ACCEPTED';
+    raise exception '0235 FAILED: a reversal that does not restore the prior state was ACCEPTED';
   end if;
 
   -- An EXACT reversal must be accepted.
@@ -449,7 +449,7 @@ begin
     failed := true;
   end;
   if not failed then
-    raise exception '0211 FAILED: a receipt digest was rewritten';
+    raise exception '0235 FAILED: a receipt digest was rewritten';
   end if;
 
   -- Receipts cannot be deleted.
@@ -459,11 +459,11 @@ begin
   exception when others then
     failed := true;
     if position('cannot be deleted' in sqlerrm) = 0 then
-      raise exception '0211 FAILED: receipt deletion refused by the WRONG guard: %', sqlerrm;
+      raise exception '0235 FAILED: receipt deletion refused by the WRONG guard: %', sqlerrm;
     end if;
   end;
   if not failed then
-    raise exception '0211 FAILED: a receipt was deleted';
+    raise exception '0235 FAILED: a receipt was deleted';
   end if;
 
   -- A receipt against a session that is not this one's must refuse.
@@ -486,18 +486,18 @@ begin
     exception when others then
       failed := true;
       if position('different session' in sqlerrm) = 0 then
-        raise exception '0211 FAILED: cross-session readback refused by the WRONG guard: %', sqlerrm;
+        raise exception '0235 FAILED: cross-session readback refused by the WRONG guard: %', sqlerrm;
       end if;
     end;
     if not failed then
-      raise exception '0211 FAILED: a receipt was proven against another session''s evidence';
+      raise exception '0235 FAILED: a receipt was proven against another session''s evidence';
     end if;
   end;
 
-  raise notice '0211 apply-time proof passed';
-  raise exception 'ROLLBACK_0211_PROBE';
+  raise notice '0235 apply-time proof passed';
+  raise exception 'ROLLBACK_0235_PROBE';
 exception when others then
-  if sqlerrm = 'ROLLBACK_0211_PROBE' then
+  if sqlerrm = 'ROLLBACK_0235_PROBE' then
     return;
   end if;
   raise;

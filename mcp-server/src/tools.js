@@ -94,7 +94,7 @@ export function auditIdentity(actor) {
     // caller that reaches a write handler without going through dispatch() —
     // tests, and anything constructing an actor object by hand.
     correlation_id: actor.correlation_id || null,
-    // THE AUTHENTICATED SESSION THIS WRITE HAPPENED INSIDE (migration 0208).
+    // THE AUTHENTICATED SESSION THIS WRITE HAPPENED INSIDE (migration 0232).
     // Server-derived and set on the actor object by the DOOR, never read from
     // grant props and never accepted from a verb -- the same rule via and
     // client_id follow above, for the same reason: an attestation the caller
@@ -103,7 +103,7 @@ export function auditIdentity(actor) {
     //
     // null is a MEANINGFUL, PERMANENT value, not a gap waiting to be filled. A
     // row written with no session is legacy/non-qualifying evidence forever;
-    // 0208 refuses to let it be promoted later. The doors that authenticate
+    // 0232 refuses to let it be promoted later. The doors that authenticate
     // against a static shared secret deliberately leave this null, because a
     // static secret has no issuance instant, no expiry and no revocation state,
     // so any session minted for one would be a fiction.
@@ -177,7 +177,7 @@ export function replayDecision(row, hash, actor) {
 }
 
 // THE RECEIPT PRODUCER. Without this, ops.write_receipt is a table nothing ever
-// writes to, and 0213's acceptance bar — which requires at least one PROVEN
+// writes to, and 0236's acceptance bar — which requires at least one PROVEN
 // receipt — can never be met. That is the inert-substrate defect one layer up:
 // a surface and a gate that depends on it, with no producer between them.
 //
@@ -185,16 +185,16 @@ export function replayDecision(row, hash, actor) {
 // about a SUBJECT: "this deal now says X, built on it having said Y". tool_call
 // knows the verb and the arguments but not what they were about, while event
 // carries subject_type and subject_id. Reducing a subject's receipts into a
-// continuity state is the whole point of 0213's reducer, and a receipt keyed on
+// continuity state is the whole point of 0236's reducer, and a receipt keyed on
 // the call rather than the subject would give every subject a chain of length
 // one and make the reducer useless.
 //
 // IN THE SAME TRANSACTION as the evidence, and AFTER the tool_call insert. The
-// readback in 0211 reads the frozen tool_call row, so a receipt written before
+// readback in 0235 reads the frozen tool_call row, so a receipt written before
 // that row exists could never prove. Same transaction means a receipt cannot
 // survive a write that rolled back.
 //
-// A LEGACY WRITE PRODUCES NO RECEIPT AND THAT IS CORRECT, not a gap: 0208 says
+// A LEGACY WRITE PRODUCES NO RECEIPT AND THAT IS CORRECT, not a gap: 0232 says
 // a row with no session proves nothing, so a receipt vouching for one would be
 // a proof about something already declared unprovable. This also keeps the
 // extra queries off every existing fake-client test, whose actors carry no
@@ -209,13 +209,13 @@ export async function writeReceiptsFor(client, actor, verb, key, hash) {
         and subject_id is not null`, [key, sid]);
   if (!subjects.rows.length) return;
   for (const s of subjects.rows) {
-    // TWO DIGESTS, BECAUSE THEY ANSWER TWO DIFFERENT QUESTIONS (0220). The call
+    // TWO DIGESTS, BECAUSE THEY ANSWER TWO DIFFERENT QUESTIONS (0238). The call
     // digest is proof of attachment: the database recomputes it from the frozen
     // tool_call row and from this receipt's own subject, and is_proven is that
     // comparison. The material digest is the claim about the SUBJECT — what this
     // call wrote about it — and it is what prior_digest, the conflict detector,
     // exact reversal and the reducer all read. One column could not be honest
-    // about both, which is the defect 0220 exists to remove.
+    // about both, which is the defect 0238 exists to remove.
     //
     // COMPUTED PER SUBJECT, not once per call. The call digest is bound to the
     // subject now, so hoisting it out of this loop would hand every subject the
@@ -270,7 +270,7 @@ export async function writeReceiptsFor(client, actor, verb, key, hash) {
       [rid, sid, actor.id, identity.organization_tenant_id, verb,
        s.subject_type, s.subject_id, key, callDigest, material, prior]);
     // Prove it HERE, in the same transaction. A receipt left unproven blocks
-    // 0213's acceptance bar, so producing one and walking away would replace an
+    // 0236's acceptance bar, so producing one and walking away would replace an
     // empty table with a permanently failing one.
     await client.query(`select ops.prove_write_receipt($1)`, [rid]);
   }

@@ -1,8 +1,8 @@
-// session.js — minting an authenticated application session (migration 0208/0209)
+// session.js — minting an authenticated application session (migration 0232/0233)
 //
-// WHAT THIS IS FOR. 0208 gave the database an opaque, server-minted session
+// WHAT THIS IS FOR. 0232 gave the database an opaque, server-minted session
 // identity and a trigger that refuses evidence naming a session that is not
-// live, unexpired, unrevoked, and whose actor and tenant match the row. 0209
+// live, unexpired, unrevoked, and whose actor and tenant match the row. 0233
 // named the credential permitted to mint one: carr_session_issuer, which the
 // tool-execution path does not hold. This module is the only place that
 // credential is used, and it is deliberately not imported by tools.js.
@@ -25,7 +25,7 @@
 // no issuance instant, no expiry and no revocation state, so a session minted
 // for one would be a fiction dressed as evidence. Those doors leave the session
 // null and their rows are permanently non-qualifying, which is exactly what
-// 0208's legacy path means.
+// 0232's legacy path means.
 //
 // The risk there is NOT that they break. It is that someone later reads "these
 // doors produce no qualified evidence" as a defect and fixes it by minting on
@@ -47,7 +47,7 @@
 // stores under; and that record carries expiresAt. All server-side, none of it
 // caller-chosen.
 
-/** 0208 caps a session at 30 days. Nothing here may exceed it, and a credential
+/** 0232 caps a session at 30 days. Nothing here may exceed it, and a credential
  *  claiming a longer life is clamped rather than rejected: the clamp is the
  *  security property, and refusing would turn a long-lived cookie into an
  *  outage. */
@@ -103,7 +103,7 @@ export function sessionMapKey(tokenId) {
  * than imported so this is testable without a database and so the writer
  * credential is not even reachable from here.
  *
- * There is NO parameter for the authentication instant. 0208's mint function
+ * There is NO parameter for the authentication instant. 0232's mint function
  * takes the server clock, so backdating is unexpressible rather than merely
  * rejected, and this signature keeps that true one layer up.
  */
@@ -112,11 +112,11 @@ export async function mintApplicationSession(mintFn, fields) {
     id, actorSlug, organizationTenantId, sponsoringHumanSlug, via,
     authIssuer, authorizationClass, verifiedSubject, expiresAt,
   } = fields;
-  // BY SLUG, NOT BY ID (migration 0210). The door has a slug and no actor id --
+  // BY SLUG, NOT BY ID (migration 0234). The door has a slug and no actor id --
   // actor.id is not resolved until callTool, long after authentication -- and
   // the issuer credential deliberately holds no table privilege with which to
-  // resolve one. 0210's SECURITY DEFINER wrapper does the lookup as its owner
-  // and delegates to 0208's mint, so the door needs neither the id nor a read.
+  // resolve one. 0234's SECURITY DEFINER wrapper does the lookup as its owner
+  // and delegates to 0232's mint, so the door needs neither the id nor a read.
   const rows = await mintFn(
     `select ops.mint_application_session_for_slug($1,$2,$3,$4,$5,$6,$7,$8,$9) as id`,
     [id, actorSlug, organizationTenantId, sponsoringHumanSlug, via,

@@ -294,7 +294,7 @@ async function sessionFor(request, env, dependencies) {
 
   let changed = false;
 
-  // THE SECOND DOOR THAT MINTS (migrations 0208/0209/0210). This cookie has all
+  // THE SECOND DOOR THAT MINTS (migrations 0232/0233/0234). This cookie has all
   // three properties a session identity needs — an issuance instant, an enforced
   // expiry under a hard seven-day ceiling, and a real revocation on sign-out —
   // which is exactly what the bearer doors lack and why they stay on the legacy
@@ -311,7 +311,7 @@ async function sessionFor(request, env, dependencies) {
   // THE CLASS AND TENANT ARE COMPUTED HERE, and leaving them out is not a
   // detail — it is the whole defect. actorFromProps returns NEITHER: the
   // authorization class is derived inside dispatch(), which runs after this,
-  // and 0208 refuses a mint whose class is null. The OAuth door computes both
+  // and 0232 refuses a mint whose class is null. The OAuth door computes both
   // in withApplicationSession (mcp.js) for exactly this reason; this door did
   // not, so it minted nothing on every request while its tests passed against
   // a fake mint that ignored its parameters.

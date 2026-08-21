@@ -24,7 +24,7 @@
 -- change that created the role.
 --
 -- ALL EIGHT of production's carr_ roles are now accounted for. Seven are created
--- here. carr_session_minter joined on 2026-08-20 with migration 0208: it is the
+-- here. carr_session_minter joined on 2026-08-20 with migration 0232: it is the
 -- ONLY role permitted to mint an authenticated application session, which is the
 -- whole of that migration's separation argument, so a rebuilt cluster missing it
 -- would have no separation to enforce. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
@@ -61,7 +61,7 @@ begin
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
-  -- carr_session_issuer (migration 0209) is the SECOND login role, and it is
+  -- carr_session_issuer (migration 0233) is the SECOND login role, and it is
   -- added the way carr_jobs is added rather than by widening the NOLOGIN array
   -- above -- which is what the note further up asks for. It is the credential
   -- the authentication layer holds to mint an application session, so it must
@@ -76,14 +76,14 @@ begin
     execute format('alter role %I login password %L', 'carr_session_issuer', issuer_placeholder);
   end if;
   -- THE ROLE ONLY, NEVER THE MEMBERSHIP, and the reason is about what the
-  -- tests then prove. 0208 no longer objects to a purpose-built issuer holding
+  -- tests then prove. 0232 no longer objects to a purpose-built issuer holding
   -- the membership, so this is a choice on the merits rather than a workaround.
   --
-  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0209
+  -- Granting it here would mean a rebuilt cluster reaches the mint WITHOUT 0233
   -- having run, and the contracts that assert the membership graph would pass
   -- against the preamble instead of against the migration they exist to test --
-  -- a suite testing its own fixture. Establishing the membership is 0209's
-  -- whole job, so 0209 is where it happens and where a test can see it happen.
+  -- a suite testing its own fixture. Establishing the membership is 0233's
+  -- whole job, so 0233 is where it happens and where a test can see it happen.
   --
   -- Creating the role here is still required and is a different question: the
   -- grant-whitelist gates name it, and has_function_privilege RAISES on a

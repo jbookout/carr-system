@@ -210,7 +210,7 @@ test("runtime attribution and sponsor provenance survive without capability inhe
     // hand (this test's own actor() helper), never decorated by mcp.js's
     // dispatch() the way a real request's actor would be.
     correlation_id: null,
-    // Migration 0208: null for the same reason, and the null is load-bearing
+    // Migration 0232: null for the same reason, and the null is load-bearing
     // rather than incidental. A hand-built actor passed through no door, so no
     // door minted it a session, so its writes are legacy/non-qualifying
     // evidence -- which is exactly what an actor nobody authenticated should
@@ -227,7 +227,7 @@ test("a session id in grant props is IGNORED — only a door may set one", () =>
   // The session must come from the door that authenticated THIS request, never
   // from the grant, which is long-lived and replayable. A grant that carried a
   // session id -- stale, corrupt, or planted -- would let an old authentication
-  // vouch for a new request, which is the precise thing migration 0208 exists
+  // vouch for a new request, which is the precise thing migration 0232 exists
   // to make impossible. via and client_id ride through from props by design;
   // this one must not, and nothing else in actorFromProps distinguishes them,
   // so it is asserted here rather than assumed.
