@@ -340,6 +340,17 @@ $$;
 -- computes a digest that is not bound to a subject, which is the exact defect
 -- this migration exists to remove; leaving it callable would leave the defect
 -- callable.
+-- The grants 0235 filed on that recipe are withdrawn EXPLICITLY, in the same
+-- breath as the drop. In the database the drop removes its ACLs by itself, but
+-- the canonical full-rebuild plan the staging bundle gates compare against is
+-- COMPOSED FROM THE GRANT AND REVOKE STATEMENTS this chain writes, and it does
+-- not model DROP. A drop with no matching revoke therefore leaves carr_writer
+-- and carr_reader holding a planned grant on a function no rebuilt database
+-- has, and the gates fail with "carr_reader differs from canonical
+-- full-rebuild plan". This is the pairing 0235 itself used when it superseded
+-- a recipe: revoke the old in the same migration that grants the new.
+revoke all on function ops.write_receipt_digest(text,uuid,text,uuid,text)
+  from carr_writer, carr_reader;
 drop function ops.write_receipt_digest(text,uuid,text,uuid,text);
 
 create or replace function ops.prove_write_receipt(p_receipt_id uuid)
@@ -1226,6 +1237,21 @@ for each row execute function ops.refuse_receipted_event_rewrite();
 alter table public.event enable always trigger event_receipted_content_frozen;
 
 revoke all on function ops.refuse_receipted_event_rewrite() from public;
+
+-- THE TRIGGER ABOVE IS INVOKER-RIGHTS, so it reads ops.write_receipt as
+-- whoever is updating the event. 0235 granted that read to carr_writer and
+-- carr_reader only -- but carr_authority and carr_jobs both write public.event,
+-- so the trigger fires for them and dies with "permission denied for table
+-- write_receipt", freezing nothing and breaking every update those two roles
+-- make. No rehearsal as the owner can see it, because grants never fire for
+-- the owner; that is how set-lead stayed broken for five days.
+--
+-- Column-scoped, the form 0078 established: exactly the five columns the
+-- trigger body reads, and no others. The receipt table's remaining columns
+-- stay unreadable to both roles.
+grant select (tool_call_idempotency_key, application_session_id, subject_type,
+              subject_id, is_proven)
+  on ops.write_receipt to carr_authority, carr_jobs;
 
 -- --------------------------------------------------------------- apply-time
 -- EXERCISES every guarantee this migration claims, and rolls all of it back.
