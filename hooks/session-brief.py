@@ -162,7 +162,35 @@ def nightly_verdict(log: str | None = None) -> str:
     return ""
 
 
-def loose_work():
+def _newest_mtime(path):
+    """Most recent mtime at `path`, descending into it when it is a directory.
+
+    A tracked path is not always a file. A git submodule (gitlink) is a
+    DIRECTORY, and a directory's own mtime records when entries were added to or
+    removed from it — not when a file nested inside it was edited. Calling
+    getmtime() straight on one therefore reports the moment the submodule was
+    checked out, forever, and the age it implies only grows. Returns None when
+    nothing readable is there, which the caller treats as "skip this path".
+    """
+    try:
+        if not os.path.isdir(path):
+            return os.path.getmtime(path)
+    except OSError:
+        return None
+    newest = None
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in files:
+            try:
+                mt = os.path.getmtime(os.path.join(root, name))
+            except OSError:
+                continue
+            if newest is None or mt > newest:
+                newest = mt
+    return newest
+
+
+def loose_work(repo=None):
     """One line when tracked work has sat outside git past a night, else nothing.
 
     Added 2026-08-10, when Joe asked whether a routine should force every session
@@ -175,11 +203,24 @@ def loose_work():
     So this reports and never acts. TRACKED FILES ONLY and a 12-hour clock, for
     the same reason the health row uses them: untracked generated assets would
     make this speak every single session, and a line that always prints is a line
-    nobody reads by the end of the week."""
+    nobody reads by the end of the week.
+
+    SUBMODULES, 2026-08-21. Two separate ways this line lied about one path.
+    (1) `--ignore-submodules=dirty`: a vendored submodule whose WORK TREE is
+    dirty is not stranded work when the build itself dirties it — the dictation
+    rig applies tools/dictation-rig/patches/*.patch on every build, so quill is
+    permanently modified by design and was being announced nightly as somebody's
+    lost edit. A moved gitlink COMMIT is still real uncommitted work and is
+    still reported; only work-tree dirt is ignored. (2) `_newest_mtime`: a
+    gitlink path is a DIRECTORY, and a directory's mtime does not move when a
+    file nested inside it changes, so getmtime() on one returns the date the
+    submodule was first checked out and the age only ever climbs. That reported
+    a 29-hour-old edit as 324 hours old."""
     import subprocess
-    repo = os.path.expanduser("~/carr-system")
-    out = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
-                         capture_output=True, text=True, timeout=15)
+    repo = os.path.expanduser("~/carr-system") if repo is None else repo
+    out = subprocess.run(
+        ["git", "status", "--porcelain", "--ignore-submodules=dirty"],
+        cwd=repo, capture_output=True, text=True, timeout=15)
     if out.returncode != 0:
         return ""
     oldest = None
@@ -188,9 +229,8 @@ def loose_work():
         if not row.strip() or row.startswith("??"):
             continue
         rel = row[3:].strip().strip('"').split(" -> ")[-1]
-        try:
-            mt = os.path.getmtime(os.path.join(repo, rel))
-        except OSError:
+        mt = _newest_mtime(os.path.join(repo, rel))
+        if mt is None:
             continue
         count += 1
         if oldest is None or mt < oldest:
