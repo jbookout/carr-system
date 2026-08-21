@@ -296,7 +296,7 @@ SECONDARY_SCHEDULED_TASKS: set[str] = set()
 # both directions. The task itself declares what it is, so a genuine CARR task
 # that someone forgot to commit still shows up as drift — which is the part of
 # this check worth keeping.
-EPHEMERAL_MARKERS = ("ephemeral: true", "ephemeral:true")
+EPHEMERAL_MARKER = "ephemeral:true"
 
 
 def is_ephemeral_scheduled_task(text):
@@ -313,7 +313,7 @@ def is_ephemeral_scheduled_task(text):
     for line in lines[1:]:
         if line.strip() == "---":
             return False
-        if line.strip().lower().replace(" ", "") == "ephemeral:true":
+        if line.strip().lower().replace(" ", "") == EPHEMERAL_MARKER:
             return True
     return False
 
@@ -1049,6 +1049,15 @@ def cmd_install(apply):
     # mistaken for proof that a task is enabled.
     if IS_PRIMARY:
         for name, source in sorted(tracked_scheduled_task_paths().items()):
+            # THE SKIP PRINTED ABOVE IS AN ANNOUNCEMENT; THIS IS THE WRITE IT
+            # DESCRIBES. Guarding only the announcing loop left `install
+            # --apply` reporting "SKIP scheduled task X (definition only)" and
+            # then creating X anyway, which is precisely the outcome that loop's
+            # comment says must not happen. The plan loop and the write loop
+            # both walk the same registry, so a rule applied to one and not the
+            # other is not a partial fix — it is a fix that prints.
+            if is_definition_only_task(read(source)):
+                continue
             destination = os.path.join(TASKS_SRC, name, "SKILL.md")
             desired = concrete(read(source))
             if read(destination) != desired:
