@@ -52,6 +52,8 @@ if _cached.is_dir():
         stale.unlink()
 
 spec = importlib.util.spec_from_file_location("recovery_point", MODULE_PATH)
+if spec is None or spec.loader is None:      # mypy: both are Optional by signature
+    raise SystemExit(f"recovery-point-selftest: cannot load {MODULE_PATH}")
 rp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rp)
 
