@@ -22,7 +22,7 @@ def verify(envelope:dict[str,Any],public_key:Path,expected_fingerprint:str,repla
  if replay_seen(digest): raise Refusal("collector envelope replay refused")
  sig_r,sig_w=os.pipe()
  try:
-  proc=subprocess.Popen(["openssl","pkeyutl","-verify","-pubin","-inkey",str(public_key),"-rawin","-in","/dev/stdin","-sigfile","/dev/fd/3"],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,pass_fds=(sig_r,),preexec_fn=lambda:os.dup2(sig_r,3))
+  proc=subprocess.Popen(["openssl","pkeyutl","-verify","-pubin","-inkey",str(public_key),"-rawin","-in","/dev/stdin","-sigfile",f"/dev/fd/{sig_r}"],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,pass_fds=(sig_r,))
   os.close(sig_r); os.write(sig_w,signature); os.close(sig_w); sig_w=-1
   proc.communicate(payload,timeout=5)
  except Exception as e: raise Refusal("collector signature verification failed") from e
