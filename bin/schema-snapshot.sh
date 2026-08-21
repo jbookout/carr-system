@@ -131,6 +131,18 @@ else
   [ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
 fi
 
+# Some bounded build seeds belong only to schema that has actually entered the
+# source ledger.  A production-truth snapshot taken immediately before that
+# migration must leave the seed pending with the migration; embedding it early
+# makes the pending migration fail on its own primary key.
+RENEWAL_SOURCE_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0230_renewal_decision_delivery.sql')" \
+  2>/dev/null)"
+case "$RENEWAL_SOURCE_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the renewal-delivery ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -551,6 +563,7 @@ then
   exit 1
 fi
 
+if [ "$RENEWAL_SOURCE_APPLIED" = t ]; then
 cat >> "$TMP" <<'RENEWAL_SOURCE_JOB'
 -- CARR RENEWAL SOURCE JOB (bin/schema-snapshot.sh) — exact disabled contract.
 -- This is the one canonical 0230 definition needed to reconstruct its FK and
@@ -577,6 +590,7 @@ values
 on conflict (key,version) do nothing;
 
 RENEWAL_SOURCE_JOB
+fi
 
 # doctrine_meta is a singleton bootstrap rather than reference vocabulary: its
 # live generation advances with successful doctrine commits and must never be
