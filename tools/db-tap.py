@@ -262,7 +262,12 @@ def dsn(branch=None, project: str = "production", role_name: str = "neondb_owner
     out = subprocess.run(
         [NEONCTL, "connection-string", branch,
          "--project-id", project_id,
-         "--role-name", role_name],
+         "--role-name", role_name,
+         # A project can hold more than one database.  All sanctioned CARR
+         # owner paths target this one explicitly rather than inheriting the
+         # provider's mutable default database selection.
+         "--database-name", "neondb",
+         "--endpoint-type", "read_write"],
         capture_output=True, text=True, timeout=60, env=env,
     )
     if out.returncode != 0 or not out.stdout.strip():
