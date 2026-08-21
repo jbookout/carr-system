@@ -673,6 +673,24 @@ def codex_configuration_state():
     return "absent"
 
 
+# A DEFINITION-ONLY TASK IS NOT A MISSING JOB. Four calendar-prebrief contracts
+# live in the repository and say, in their own bodies, "This definition is
+# disabled. Do not create, enable, or invoke any scheduler." Their activation
+# needs Joe's allowlist approval, EventKit permission and device evidence that
+# do not exist yet. The repository holds them as CONTRACTS, deliberately ahead
+# of the machine — config-as-code-selftest even asserts a definition-only tick
+# is not installed before cutover.
+#
+# Reporting them as MISSING FROM MACHINE told every session to install four
+# jobs whose own text forbids installing them, and blocked the pre-push gate
+# until somebody did. That is the ephemeral-task problem from the other
+# direction: the repository and the machine legitimately differ, and the check
+# could not express it.
+def is_definition_only_task(text):
+    """True when a repo-side task declares itself disabled rather than deployed."""
+    return bool(text) and "This definition is disabled" in text
+
+
 def pairs():
     """(label, live_text, repo_path) for every tracked item. live_text is
     already portable; repo contents are compared verbatim against it."""
@@ -701,6 +719,8 @@ def pairs():
     for name, source in sorted(tracked_scheduled_task_paths().items()):
         filename = f"{name}.SKILL.md"
         if scheduled_task_allowed(name) and filename not in seen:
+            if is_definition_only_task(read(source)):
+                continue
             out.append((f"scheduled-task {name} (IN REPO, NOT ON MACHINE)",
                         None, source))
 
