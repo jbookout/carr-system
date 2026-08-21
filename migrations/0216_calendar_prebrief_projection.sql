@@ -18,7 +18,7 @@ values
    '{"owner":"joe","inputs":["bounded calendar projection snapshot"],"canonical_writes":["ops.calendar_prebrief_projection_event","ops.calendar_prebrief_projection_receipt"]}'::jsonb,
    '{"cron":"30 6 * * 1-5","timezone":"America/Chicago","not_before":"06:30","brief_deadline":"06:45"}'::jsonb,
    '{"owner":"ops.job","initial":"queued"}'::jsonb,
-   '{"key":"facts.all_true","spec":{"all_of":["calendar.snapshot_bounded"]}}'::jsonb,
+   '{"key":"facts.all_true","destination":"live","spec":{"all_of":["calendar.snapshot_bounded"]}}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["calendar.keys_opaque","calendar.parties_resolved"]}}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["calendar.projection_receipt_persisted"]}}'::jsonb,
    '{"max_attempts":2,"backoff":"exponential","base_seconds":60,"cap_seconds":600,"timeout_seconds":300}'::jsonb,
@@ -30,13 +30,37 @@ values
    '{"owner":"dell","inputs":["bounded calendar projection snapshot"],"canonical_writes":["ops.calendar_prebrief_projection_event","ops.calendar_prebrief_projection_receipt"]}'::jsonb,
    '{"cron":"30 6 * * 1-5","timezone":"America/Chicago","not_before":"06:30","brief_deadline":"06:45"}'::jsonb,
    '{"owner":"ops.job","initial":"queued"}'::jsonb,
-   '{"key":"facts.all_true","spec":{"all_of":["calendar.snapshot_bounded"]}}'::jsonb,
+   '{"key":"facts.all_true","destination":"live","spec":{"all_of":["calendar.snapshot_bounded"]}}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["calendar.keys_opaque","calendar.parties_resolved"]}}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["calendar.projection_receipt_persisted"]}}'::jsonb,
    '{"max_attempts":2,"backoff":"exponential","base_seconds":60,"cap_seconds":600,"timeout_seconds":300}'::jsonb,
    '{"key_template":"calendar-prebrief-projection-dell-daily:{scheduled_for}"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["calendar.projection_receipt_persisted"]},"receipt_kind":"calendar_prebrief_projection"}'::jsonb,
-   '{"provider":"ops.job dispatcher","status":"disabled","activation":"pending allowlist and device acceptance"}'::jsonb);
+   '{"provider":"ops.job dispatcher","status":"disabled","activation":"pending allowlist and device acceptance"}'::jsonb),
+  ('calendar-prebrief-canary-joe-daily',1,false,'green','joe','deterministic',
+   '{"entrypoint":"ops.ingest_calendar_prebrief_canary_projection","activation":"disabled isolated canary"}'::jsonb,
+   '{"owner":"joe","inputs":["bounded calendar prebrief canary snapshot"],"canonical_writes":["ops.calendar_prebrief_canary_event","ops.calendar_prebrief_canary_receipt"]}'::jsonb,
+   '{"cron":"30 6 * * 1-5","timezone":"America/Chicago","not_before":"06:30","brief_deadline":"06:45"}'::jsonb,
+   '{"owner":"ops.job","initial":"queued"}'::jsonb,
+   '{"key":"facts.all_true","destination":"calendar-prebrief-canary-joe","spec":{"all_of":["calendar.canary_bounded"]}}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["calendar.keys_opaque"]}}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["calendar.canary_receipt_persisted"]}}'::jsonb,
+   '{"max_attempts":2,"backoff":"exponential","base_seconds":60,"cap_seconds":600,"timeout_seconds":300}'::jsonb,
+   '{"key_template":"calendar-prebrief-canary-joe-daily:{scheduled_for}"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["calendar.canary_receipt_persisted"]},"receipt_kind":"calendar_prebrief_canary"}'::jsonb,
+   '{"provider":"ops.job dispatcher","status":"disabled","activation":"isolated canary only"}'::jsonb),
+  ('calendar-prebrief-canary-dell-daily',1,false,'green','dell','deterministic',
+   '{"entrypoint":"ops.ingest_calendar_prebrief_canary_projection","activation":"disabled isolated canary"}'::jsonb,
+   '{"owner":"dell","inputs":["bounded calendar prebrief canary snapshot"],"canonical_writes":["ops.calendar_prebrief_canary_event","ops.calendar_prebrief_canary_receipt"]}'::jsonb,
+   '{"cron":"30 6 * * 1-5","timezone":"America/Chicago","not_before":"06:30","brief_deadline":"06:45"}'::jsonb,
+   '{"owner":"ops.job","initial":"queued"}'::jsonb,
+   '{"key":"facts.all_true","destination":"calendar-prebrief-canary-dell","spec":{"all_of":["calendar.canary_bounded"]}}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["calendar.keys_opaque"]}}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["calendar.canary_receipt_persisted"]}}'::jsonb,
+   '{"max_attempts":2,"backoff":"exponential","base_seconds":60,"cap_seconds":600,"timeout_seconds":300}'::jsonb,
+   '{"key_template":"calendar-prebrief-canary-dell-daily:{scheduled_for}"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["calendar.canary_receipt_persisted"]},"receipt_kind":"calendar_prebrief_canary"}'::jsonb,
+   '{"provider":"ops.job dispatcher","status":"disabled","activation":"isolated canary only"}'::jsonb);
 
 -- This is a privilege bundle only.  The two LOGIN identities are provisioned
 -- outside migrations; hard-coding their exact names below makes a substituted
@@ -47,6 +71,19 @@ do $$ begin
   end if;
 end $$;
 grant usage on schema ops,public to carr_calendar_prebrief_jobs;
+
+-- Provisioned device identities receive these bundles outside migrations.  The
+-- bundles are intentionally separate: resolving a live email is narrower than
+-- attesting one bounded source snapshot, and neither can write a projection.
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname='carr_calendar_prebrief_devices') then
+    create role carr_calendar_prebrief_devices nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname='carr_calendar_prebrief_email_resolver') then
+    create role carr_calendar_prebrief_email_resolver nologin;
+  end if;
+end $$;
+grant usage on schema ops,public to carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver;
 
 create table ops.calendar_prebrief_allowlist_receipt(
   id uuid primary key default gen_random_uuid(),
@@ -149,6 +186,184 @@ create trigger calendar_prebrief_projection_receipt_append_only
   before update or delete on ops.calendar_prebrief_projection_receipt
   for each row execute function ops.refuse_job_evidence_rewrite();
 
+-- A device attests exactly the bounded source it observed.  This receipt is
+-- append-only and carries only opaque keys, counts, and digests; notably it
+-- cannot carry an EventKit identifier or an attendee address.
+create table ops.calendar_prebrief_source_attestation_receipt(
+  id uuid primary key default gen_random_uuid(),
+  job_id uuid not null references ops.job(id),
+  attempt integer not null check (attempt > 0),
+  lease_token uuid not null,
+  sponsor text not null check (sponsor in ('joe','dell')),
+  device_identity text not null check (device_identity in ('carr_calendar_prebrief_device_joe','carr_calendar_prebrief_device_dell')),
+  mode text not null check (mode in ('live','canary')),
+  destination text not null check (destination in ('live','calendar-prebrief-canary-joe','calendar-prebrief-canary-dell')),
+  snapshot_at timestamptz not null,
+  allowlist_revision_id uuid not null references ops.calendar_prebrief_allowlist_receipt(id),
+  allowlist_digest text not null check (allowlist_digest ~ '^[0-9a-f]{64}$'),
+  observed_calendar_keys text[] not null,
+  event_count integer not null check (event_count >= 0 and event_count <= 128),
+  canonical_event_digest text not null check (canonical_event_digest ~ '^[0-9a-f]{64}$'),
+  attested_at timestamptz not null default now(),
+  unique(job_id,attempt)
+);
+create trigger calendar_prebrief_source_attestation_receipt_append_only
+  before update or delete on ops.calendar_prebrief_source_attestation_receipt
+  for each row execute function ops.refuse_job_evidence_rewrite();
+
+alter table ops.calendar_prebrief_projection_receipt
+  add column source_attestation_id uuid not null references ops.calendar_prebrief_source_attestation_receipt(id);
+
+create table ops.calendar_prebrief_canary_event(
+  id uuid primary key default gen_random_uuid(),
+  sponsor text not null check (sponsor in ('joe','dell')),
+  destination text not null check (destination in ('calendar-prebrief-canary-joe','calendar-prebrief-canary-dell')),
+  occurrence_key text not null check (occurrence_key ~ '^[0-9a-f]{64}$'),
+  snapshot_at timestamptz not null,
+  source_attestation_id uuid not null references ops.calendar_prebrief_source_attestation_receipt(id),
+  captured_at timestamptz not null default now(),
+  unique(sponsor,destination,occurrence_key)
+);
+create table ops.calendar_prebrief_canary_receipt(
+  id uuid primary key default gen_random_uuid(),
+  job_id uuid not null references ops.job(id),
+  attempt integer not null check (attempt > 0),
+  sponsor text not null check (sponsor in ('joe','dell')),
+  destination text not null check (destination in ('calendar-prebrief-canary-joe','calendar-prebrief-canary-dell')),
+  snapshot_at timestamptz not null,
+  source_attestation_id uuid not null references ops.calendar_prebrief_source_attestation_receipt(id),
+  canonical_event_digest text not null check (canonical_event_digest ~ '^[0-9a-f]{64}$'),
+  event_count integer not null check (event_count >= 0),
+  captured_at timestamptz not null default now(),
+  unique(job_id,attempt)
+);
+create trigger calendar_prebrief_canary_receipt_append_only
+  before update or delete on ops.calendar_prebrief_canary_receipt
+  for each row execute function ops.refuse_job_evidence_rewrite();
+
+create or replace function ops.calendar_prebrief_device_sponsor()
+returns text language plpgsql security definer set search_path=ops,public,pg_temp as $$
+begin
+  if not pg_has_role(session_user,'carr_calendar_prebrief_devices','member') then
+    raise exception using errcode='42501',message='calendar prebrief device identity lacks its capability bundle';
+  end if;
+  case session_user
+    when 'carr_calendar_prebrief_device_joe' then return 'joe';
+    when 'carr_calendar_prebrief_device_dell' then return 'dell';
+    else raise exception using errcode='42501',message='calendar prebrief requires its exact sponsor-bound device identity';
+  end case;
+end $$;
+
+create or replace function ops.calendar_prebrief_canonical_event_digest(p_events jsonb)
+returns table(event_count integer,canonical_event_digest text)
+language plpgsql security definer set search_path=ops,public,pg_temp as $$
+declare v_events jsonb;
+begin
+  if p_events is null or pg_column_size(p_events)>262144 or jsonb_typeof(p_events)<>'array' then
+    raise exception using errcode='22023',message='calendar prebrief source attestation requires a bounded event array';
+  end if;
+  if jsonb_array_length(p_events)>128 or exists(
+      select 1 from jsonb_array_elements(p_events) e(value)
+       where pg_column_size(e.value)>4096 or jsonb_typeof(e.value)<>'object'
+          or jsonb_typeof(e.value->'participant_refs')<>'array') then
+    raise exception using errcode='22023',message='calendar prebrief source attestation has invalid bounded events';
+  end if;
+  select coalesce(jsonb_agg(event order by event->>'occurrence_key'),'[]'::jsonb) into v_events
+    from (select jsonb_set(e.value,'{participant_refs}',coalesce((select jsonb_agg(ref order by ref)
+             from jsonb_array_elements_text(e.value->'participant_refs') refs(ref)),'[]'::jsonb)) event
+            from jsonb_array_elements(p_events) e(value)) normalized;
+  event_count:=jsonb_array_length(p_events);
+  canonical_event_digest:=encode(digest(convert_to(v_events::text,'UTF8'),'sha256'),'hex');
+  return next;
+end $$;
+
+create or replace function ops.attest_calendar_prebrief_source(
+  p_job_id uuid,p_lease uuid,p_observed_calendar_keys text[],p_events jsonb,p_destination text
+) returns ops.calendar_prebrief_source_attestation_receipt
+language plpgsql security definer set search_path=ops,public,pg_temp
+as $$
+declare
+  v_job ops.job%rowtype; v_sponsor text; v_device_sponsor text; v_owner text;
+  v_allowed text[]; v_observed text[]; v_allowlist_digest text; v_allowlist_revision_id uuid;
+  v_expected_destination text; v_event_count integer; v_event_digest text;
+  v_existing ops.calendar_prebrief_source_attestation_receipt%rowtype;
+begin
+  v_device_sponsor:=ops.calendar_prebrief_device_sponsor();
+  select * into v_job from ops.job where id=p_job_id for update;
+  if not found or v_job.state<>'running' or v_job.lease_token is distinct from p_lease
+     or v_job.leased_until is null or v_job.leased_until<now() then
+    raise exception using errcode='55000',message='calendar prebrief source attestation requires current live job lease';
+  end if;
+  if v_job.scheduled_for < now()-interval '30 minutes' or v_job.scheduled_for > now()+interval '5 minutes' then
+    raise exception using errcode='22023',message='calendar prebrief source attestation refuses job scheduled outside its DB-clock window';
+  end if;
+  select owner_actor into v_owner from ops.job_definition
+    where key=v_job.definition_key and version=v_job.definition_version for update;
+  v_expected_destination:=case v_job.definition_key
+    when 'calendar-prebrief-projection-joe-daily' then 'live'
+    when 'calendar-prebrief-projection-dell-daily' then 'live'
+    when 'calendar-prebrief-canary-joe-daily' then 'calendar-prebrief-canary-joe'
+    when 'calendar-prebrief-canary-dell-daily' then 'calendar-prebrief-canary-dell'
+  end;
+  if not found or v_owner not in ('joe','dell') or v_owner<>v_device_sponsor
+     or p_destination is distinct from v_expected_destination
+     or ((v_job.definition_key in ('calendar-prebrief-projection-joe-daily','calendar-prebrief-projection-dell-daily')) <> (v_job.mode='live'))
+     or ((v_job.definition_key in ('calendar-prebrief-canary-joe-daily','calendar-prebrief-canary-dell-daily')) <> (v_job.mode='canary'))
+     or v_job.definition_key not in ('calendar-prebrief-projection-joe-daily','calendar-prebrief-projection-dell-daily','calendar-prebrief-canary-joe-daily','calendar-prebrief-canary-dell-daily') then
+    raise exception using errcode='42501',message='calendar prebrief source attestation identity, mode, or destination does not match the static job owner',
+      detail=format('owner=%s device=%s key=%s mode=%s expected_destination=%s destination=%s',v_owner,v_device_sponsor,v_job.definition_key,v_job.mode,v_expected_destination,p_destination);
+  end if;
+  v_sponsor:=v_owner;
+  select calendar_keys,configuration_digest,active_revision_id into v_allowed,v_allowlist_digest,v_allowlist_revision_id
+    from ops.calendar_prebrief_allowed_calendar where sponsor=v_sponsor for update;
+  select array_agg(k order by k) into v_observed from unnest(coalesce(p_observed_calendar_keys,'{}'::text[])) keys(k);
+  if not found or coalesce(cardinality(v_allowed),0)=0 or coalesce(cardinality(v_observed),0)=0
+     or array_position(v_observed,null) is not null
+     or exists(select 1 from unnest(v_observed) keys(k) where k !~ '^[0-9a-f]{64}$')
+     or cardinality(v_observed)<>(select count(distinct k) from unnest(v_observed) keys(k))
+     or v_observed is distinct from v_allowed then
+    raise exception using errcode='22023',message='calendar prebrief source attestation requires exact DB allowlist coverage';
+  end if;
+  select event_count,canonical_event_digest into v_event_count,v_event_digest
+    from ops.calendar_prebrief_canonical_event_digest(p_events);
+  perform pg_advisory_xact_lock(hashtextextended('calendar-prebrief-source:' || v_job.id::text,0));
+  select * into v_existing from ops.calendar_prebrief_source_attestation_receipt where job_id=v_job.id and attempt=v_job.attempt;
+  if found then
+    if v_existing.lease_token<>p_lease or v_existing.sponsor<>v_sponsor or v_existing.device_identity<>session_user
+       or v_existing.destination<>p_destination or v_existing.snapshot_at<>v_job.scheduled_for
+       or v_existing.allowlist_revision_id<>v_allowlist_revision_id or v_existing.allowlist_digest<>v_allowlist_digest
+       or v_existing.observed_calendar_keys is distinct from v_observed or v_existing.event_count<>v_event_count
+       or v_existing.canonical_event_digest<>v_event_digest then
+      raise exception using errcode='23505',message='calendar prebrief source attestation replay conflicts with immutable attempt';
+    end if;
+    return v_existing;
+  end if;
+  insert into ops.calendar_prebrief_source_attestation_receipt
+    (job_id,attempt,lease_token,sponsor,device_identity,mode,destination,snapshot_at,allowlist_revision_id,allowlist_digest,observed_calendar_keys,event_count,canonical_event_digest)
+  values(v_job.id,v_job.attempt,p_lease,v_sponsor,session_user,v_job.mode,p_destination,v_job.scheduled_for,v_allowlist_revision_id,v_allowlist_digest,v_observed,v_event_count,v_event_digest)
+  returning * into v_existing;
+  return v_existing;
+end $$;
+
+create or replace function ops.resolve_calendar_prebrief_email_ref(p_email text)
+returns text language plpgsql security definer set search_path=ops,public,pg_temp as $$
+declare v_count integer; v_ref text;
+begin
+  perform ops.calendar_prebrief_device_sponsor();
+  if not pg_has_role(session_user,'carr_calendar_prebrief_email_resolver','member')
+     or p_email is null or length(p_email)>320
+     or lower(btrim(p_email)) !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$' then
+    raise exception using errcode='42501',message='calendar prebrief email resolver requires one bounded exact email';
+  end if;
+  select count(distinct r.ref),min(r.ref) into v_count,v_ref
+    from party p join v_ref_index r on r.party_id=p.id and not r.merged
+   where lower(btrim(p.email))=lower(btrim(p_email));
+  if v_count<>1 then
+    raise exception using errcode='22023',message='calendar prebrief email resolver requires exactly one live unmerged canonical ref';
+  end if;
+  return v_ref;
+end $$;
+
 create or replace function ops.ingest_calendar_prebrief_projection(
   p_job_id uuid,
   p_lease uuid,
@@ -184,8 +399,10 @@ declare
   v_event_count integer := 0;
   v_participant_count integer := 0;
   v_canonical_events jsonb;
+  v_event_digest text;
   v_snapshot_digest text;
   v_receipt ops.calendar_prebrief_projection_receipt%rowtype;
+  v_source ops.calendar_prebrief_source_attestation_receipt%rowtype;
 begin
   case session_user
     when 'carr_calendar_prebrief_joe' then v_session_sponsor := 'joe';
@@ -306,9 +523,19 @@ begin
   from (select jsonb_set(element.value,'{participant_refs}',coalesce((select jsonb_agg(ref order by ref)
           from jsonb_array_elements_text(element.value->'participant_refs') refs(ref)),'[]'::jsonb)) event
         from jsonb_array_elements(p_events) element(value)) normalized;
+  v_event_digest:=encode(digest(convert_to(v_canonical_events::text,'UTF8'),'sha256'),'hex');
   v_snapshot_digest:=encode(digest(convert_to(jsonb_build_object(
     'allowlist_revision_id',v_allowlist_revision_id,'allowlist_digest',v_allowlist_digest,'observed_calendar_keys',to_jsonb(v_observed),
     'events',v_canonical_events,'snapshot_at',v_job.scheduled_for)::text,'UTF8'),'sha256'),'hex');
+  select * into v_source from ops.calendar_prebrief_source_attestation_receipt
+   where job_id=v_job.id and attempt=v_job.attempt;
+  if not found or v_source.lease_token<>p_lease or v_source.sponsor<>v_sponsor
+     or v_source.mode<>'live' or v_source.destination<>'live'
+     or v_source.snapshot_at<>v_job.scheduled_for or v_source.allowlist_revision_id<>v_allowlist_revision_id
+     or v_source.allowlist_digest<>v_allowlist_digest or v_source.observed_calendar_keys is distinct from v_observed
+     or v_source.event_count<>jsonb_array_length(p_events) or v_source.canonical_event_digest<>v_event_digest then
+    raise exception using errcode='55000',message='calendar prebrief projection requires an exact immutable device source attestation';
+  end if;
   select * into v_receipt from ops.calendar_prebrief_projection_receipt where job_id=v_job.id and attempt=v_job.attempt;
   if found then
     if v_receipt.snapshot_digest<>v_snapshot_digest then raise exception using errcode='23505',message='calendar prebrief job attempt conflicts with immutable snapshot'; end if;
@@ -345,8 +572,84 @@ begin
       v_participant_count:=v_participant_count+1;
     end loop;
   end loop;
-  insert into ops.calendar_prebrief_projection_receipt(job_id,attempt,sponsor,snapshot_at,allowlist_revision_id,allowlist_digest,snapshot_digest,event_count,participant_count)
-  values(v_job.id,v_job.attempt,v_sponsor,v_job.scheduled_for,v_allowlist_revision_id,v_allowlist_digest,v_snapshot_digest,v_event_count,v_participant_count)
+  insert into ops.calendar_prebrief_projection_receipt(job_id,attempt,sponsor,snapshot_at,allowlist_revision_id,allowlist_digest,source_attestation_id,snapshot_digest,event_count,participant_count)
+  values(v_job.id,v_job.attempt,v_sponsor,v_job.scheduled_for,v_allowlist_revision_id,v_allowlist_digest,v_source.id,v_snapshot_digest,v_event_count,v_participant_count)
+  returning * into v_receipt;
+  return v_receipt;
+end $$;
+
+create or replace function ops.ingest_calendar_prebrief_canary_projection(
+  p_job_id uuid,p_lease uuid,p_destination text,p_observed_calendar_keys text[],p_events jsonb
+) returns ops.calendar_prebrief_canary_receipt
+language plpgsql security definer set search_path=ops,public,pg_temp
+as $$
+declare
+  v_job ops.job%rowtype; v_sponsor text; v_session_sponsor text; v_destination text;
+  v_observed text[]; v_event_count integer; v_event_digest text; v_source ops.calendar_prebrief_source_attestation_receipt%rowtype;
+  v_receipt ops.calendar_prebrief_canary_receipt%rowtype; v_event jsonb;
+begin
+  case session_user
+    when 'carr_calendar_prebrief_joe' then v_session_sponsor := 'joe';
+    when 'carr_calendar_prebrief_dell' then v_session_sponsor := 'dell';
+    else raise exception using errcode='42501',message='calendar prebrief canary requires its named externally provisioned execution identity';
+  end case;
+  if not pg_has_role(session_user,'carr_calendar_prebrief_jobs','member') then
+    raise exception using errcode='42501',message='calendar prebrief canary execution identity lacks its capability bundle';
+  end if;
+  select * into v_job from ops.job where id=p_job_id for update;
+  if not found or v_job.state<>'running' or v_job.lease_token is distinct from p_lease
+     or v_job.leased_until is null or v_job.leased_until<now() then
+    raise exception using errcode='55000',message='calendar prebrief canary requires current live job lease';
+  end if;
+  select owner_actor into v_sponsor from ops.job_definition
+    where key=v_job.definition_key and version=v_job.definition_version for update;
+  v_destination:=case v_job.definition_key
+    when 'calendar-prebrief-canary-joe-daily' then 'calendar-prebrief-canary-joe'
+    when 'calendar-prebrief-canary-dell-daily' then 'calendar-prebrief-canary-dell'
+  end;
+  if not found or v_job.mode<>'canary' or v_sponsor<>v_session_sponsor or p_destination is distinct from v_destination
+     or (v_job.definition_key='calendar-prebrief-canary-joe-daily' and v_sponsor<>'joe')
+     or (v_job.definition_key='calendar-prebrief-canary-dell-daily' and v_sponsor<>'dell')
+     or v_job.definition_key not in ('calendar-prebrief-canary-joe-daily','calendar-prebrief-canary-dell-daily') then
+    raise exception using errcode='42501',message='calendar prebrief canary mode or destination does not match the static job owner';
+  end if;
+  select array_agg(k order by k) into v_observed from unnest(coalesce(p_observed_calendar_keys,'{}'::text[])) keys(k);
+  select event_count,canonical_event_digest into v_event_count,v_event_digest
+    from ops.calendar_prebrief_canonical_event_digest(p_events);
+  select * into v_source from ops.calendar_prebrief_source_attestation_receipt
+   where job_id=v_job.id and attempt=v_job.attempt;
+  if not found or v_source.lease_token<>p_lease or v_source.sponsor<>v_sponsor or v_source.mode<>'canary'
+     or v_source.destination<>v_destination or v_source.snapshot_at<>v_job.scheduled_for
+     or v_source.observed_calendar_keys is distinct from v_observed or v_source.event_count<>v_event_count
+     or v_source.canonical_event_digest<>v_event_digest then
+    raise exception using errcode='55000',message='calendar prebrief canary requires an exact immutable device source attestation';
+  end if;
+  select * into v_receipt from ops.calendar_prebrief_canary_receipt where job_id=v_job.id and attempt=v_job.attempt;
+  if found then
+    if v_receipt.source_attestation_id<>v_source.id or v_receipt.destination<>v_destination
+       or v_receipt.canonical_event_digest<>v_event_digest then
+      raise exception using errcode='23505',message='calendar prebrief canary replay conflicts with immutable attempt';
+    end if;
+    return v_receipt;
+  end if;
+  if exists(select 1 from ops.calendar_prebrief_canary_receipt where sponsor=v_sponsor and destination=v_destination and snapshot_at>v_job.scheduled_for) then
+    raise exception using errcode='22023',message='calendar prebrief canary refuses stale snapshot';
+  end if;
+  if not exists(select 1 from ops.job where id=v_job.id and state='running' and lease_token=p_lease and leased_until>=now()) then
+    raise exception using errcode='55000',message='calendar prebrief canary lease expired before isolated replacement';
+  end if;
+  if exists(select 1 from jsonb_array_elements(p_events) e(value)
+      where coalesce(e.value->>'occurrence_key','') !~ '^[0-9a-f]{64}$')
+     or v_event_count<>(select count(distinct e.value->>'occurrence_key') from jsonb_array_elements(p_events) e(value)) then
+    raise exception using errcode='22023',message='calendar prebrief canary requires distinct opaque occurrence keys';
+  end if;
+  delete from ops.calendar_prebrief_canary_event where sponsor=v_sponsor and destination=v_destination;
+  for v_event in select value from jsonb_array_elements(p_events) loop
+    insert into ops.calendar_prebrief_canary_event(sponsor,destination,occurrence_key,snapshot_at,source_attestation_id)
+    values(v_sponsor,v_destination,v_event->>'occurrence_key',v_job.scheduled_for,v_source.id);
+  end loop;
+  insert into ops.calendar_prebrief_canary_receipt(job_id,attempt,sponsor,destination,snapshot_at,source_attestation_id,canonical_event_digest,event_count)
+  values(v_job.id,v_job.attempt,v_sponsor,v_destination,v_job.scheduled_for,v_source.id,v_event_digest,v_event_count)
   returning * into v_receipt;
   return v_receipt;
 end $$;
@@ -370,15 +673,27 @@ select distinct on (r.sponsor) r.sponsor,r.snapshot_at,r.captured_at,r.event_cou
   join ops.calendar_prebrief_allowed_calendar a on a.sponsor=r.sponsor and a.active_revision_id=r.allowlist_revision_id
  order by r.sponsor,r.snapshot_at desc,r.captured_at desc;
 
+create view v_calendar_prebrief_canary_snapshot_status as
+select sponsor,destination,snapshot_at,captured_at,event_count
+  from ops.calendar_prebrief_canary_receipt;
+
 revoke all on ops.calendar_prebrief_allowed_calendar,ops.calendar_prebrief_allowlist_receipt,
-  ops.calendar_prebrief_projection_event,ops.calendar_prebrief_projection_participant,ops.calendar_prebrief_projection_receipt
-  from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_calendar_prebrief_jobs;
+  ops.calendar_prebrief_projection_event,ops.calendar_prebrief_projection_participant,ops.calendar_prebrief_projection_receipt,
+  ops.calendar_prebrief_source_attestation_receipt,ops.calendar_prebrief_canary_event,ops.calendar_prebrief_canary_receipt
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_calendar_prebrief_jobs,carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver;
 revoke all on function ops.replace_calendar_prebrief_allowlist(text[]) from public,carr_reader,carr_writer,carr_jobs,carr_calendar_prebrief_jobs;
 revoke all on function ops.ingest_calendar_prebrief_projection(uuid,uuid,text[],jsonb) from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.calendar_prebrief_device_sponsor(),ops.calendar_prebrief_canonical_event_digest(jsonb),
+  ops.attest_calendar_prebrief_source(uuid,uuid,text[],jsonb,text),ops.resolve_calendar_prebrief_email_ref(text),
+  ops.ingest_calendar_prebrief_canary_projection(uuid,uuid,text,text[],jsonb)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_calendar_prebrief_jobs,carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver;
 grant execute on function ops.replace_calendar_prebrief_allowlist(text[]) to carr_authority;
 grant execute on function ops.ingest_calendar_prebrief_projection(uuid,uuid,text[],jsonb) to carr_calendar_prebrief_jobs;
-revoke all on v_calendar_prebrief_events,v_calendar_prebrief_snapshot_status from public,carr_writer,carr_jobs,carr_authority,carr_calendar_prebrief_jobs;
-grant select on v_calendar_prebrief_events,v_calendar_prebrief_snapshot_status to carr_reader;
+grant execute on function ops.attest_calendar_prebrief_source(uuid,uuid,text[],jsonb,text) to carr_calendar_prebrief_devices;
+grant execute on function ops.resolve_calendar_prebrief_email_ref(text) to carr_calendar_prebrief_email_resolver;
+grant execute on function ops.ingest_calendar_prebrief_canary_projection(uuid,uuid,text,text[],jsonb) to carr_calendar_prebrief_jobs;
+revoke all on v_calendar_prebrief_events,v_calendar_prebrief_snapshot_status,v_calendar_prebrief_canary_snapshot_status from public,carr_writer,carr_jobs,carr_authority,carr_calendar_prebrief_jobs,carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver;
+grant select on v_calendar_prebrief_events,v_calendar_prebrief_snapshot_status,v_calendar_prebrief_canary_snapshot_status to carr_reader;
 
 commit;
 
@@ -388,6 +703,10 @@ begin
   if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_jobs' and not rolcanlogin) then
     raise exception '0216 FAILED: calendar prebrief capability bundle is not NOLOGIN';
   end if;
+  if not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_devices' and not rolcanlogin)
+     or not exists(select 1 from pg_roles where rolname='carr_calendar_prebrief_email_resolver' and not rolcanlogin) then
+    raise exception '0216 FAILED: calendar prebrief device capability bundles are not NOLOGIN';
+  end if;
   if (select count(*) from ops.job_definition where version=1 and enabled=false and execution_kind='deterministic'
       and inventory_contract->>'owner'=owner_actor
       and legacy_schedule->>'status'='disabled'
@@ -395,13 +714,18 @@ begin
       and ((key='calendar-prebrief-projection-joe-daily' and owner_actor='joe') or (key='calendar-prebrief-projection-dell-daily' and owner_actor='dell')))<>2 then
     raise exception '0216 FAILED: separate disabled pre-06:45 Joe/Dell job definitions are missing';
   end if;
+  if (select count(*) from ops.job_definition where version=1 and enabled=false and execution_kind='deterministic'
+      and legacy_schedule->>'status'='disabled' and recurrence->>'cron'='30 6 * * 1-5'
+      and ((key='calendar-prebrief-canary-joe-daily' and owner_actor='joe') or (key='calendar-prebrief-canary-dell-daily' and owner_actor='dell')))<>2 then
+    raise exception '0216 FAILED: separate disabled isolated Joe/Dell canary definitions are missing';
+  end if;
   if exists(select 1 from information_schema.columns where table_schema='ops' and table_name in
-      ('calendar_prebrief_allowed_calendar','calendar_prebrief_allowlist_receipt','calendar_prebrief_projection_event','calendar_prebrief_projection_participant','calendar_prebrief_projection_receipt')
+      ('calendar_prebrief_allowed_calendar','calendar_prebrief_allowlist_receipt','calendar_prebrief_projection_event','calendar_prebrief_projection_participant','calendar_prebrief_projection_receipt','calendar_prebrief_source_attestation_receipt','calendar_prebrief_canary_event','calendar_prebrief_canary_receipt')
       and column_name~'(email|description|url|recurrence|credential|eventkit)') then
     raise exception '0216 FAILED: calendar prebrief base tables retain prohibited source data columns';
   end if;
-  for v_role in select unnest(array['carr_reader','carr_writer','carr_jobs','carr_authority','carr_calendar_prebrief_jobs']) role_name loop
-    if exists(select 1 from unnest(array['ops.calendar_prebrief_allowed_calendar','ops.calendar_prebrief_allowlist_receipt','ops.calendar_prebrief_projection_event','ops.calendar_prebrief_projection_participant','ops.calendar_prebrief_projection_receipt']) tbl(name)
+  for v_role in select unnest(array['carr_reader','carr_writer','carr_jobs','carr_authority','carr_calendar_prebrief_jobs','carr_calendar_prebrief_devices','carr_calendar_prebrief_email_resolver']) role_name loop
+    if exists(select 1 from unnest(array['ops.calendar_prebrief_allowed_calendar','ops.calendar_prebrief_allowlist_receipt','ops.calendar_prebrief_projection_event','ops.calendar_prebrief_projection_participant','ops.calendar_prebrief_projection_receipt','ops.calendar_prebrief_source_attestation_receipt','ops.calendar_prebrief_canary_event','ops.calendar_prebrief_canary_receipt']) tbl(name)
               where has_table_privilege(v_role.role_name,tbl.name,'select')
                  or has_table_privilege(v_role.role_name,tbl.name,'insert')
                  or has_table_privilege(v_role.role_name,tbl.name,'update')
@@ -418,7 +742,12 @@ begin
      or has_function_privilege('carr_jobs','ops.replace_calendar_prebrief_allowlist(text[])'::regprocedure,'execute')
      or has_function_privilege('carr_writer','ops.replace_calendar_prebrief_allowlist(text[])'::regprocedure,'execute')
      or has_function_privilege('carr_calendar_prebrief_jobs','ops.replace_calendar_prebrief_allowlist(text[])'::regprocedure,'execute')
-     or not has_function_privilege('carr_authority','ops.replace_calendar_prebrief_allowlist(text[])'::regprocedure,'execute') then
+     or not has_function_privilege('carr_authority','ops.replace_calendar_prebrief_allowlist(text[])'::regprocedure,'execute')
+     or not has_function_privilege('carr_calendar_prebrief_devices','ops.attest_calendar_prebrief_source(uuid,uuid,text[],jsonb,text)'::regprocedure,'execute')
+     or has_function_privilege('carr_calendar_prebrief_jobs','ops.attest_calendar_prebrief_source(uuid,uuid,text[],jsonb,text)'::regprocedure,'execute')
+     or not has_function_privilege('carr_calendar_prebrief_email_resolver','ops.resolve_calendar_prebrief_email_ref(text)'::regprocedure,'execute')
+     or has_function_privilege('carr_calendar_prebrief_devices','ops.resolve_calendar_prebrief_email_ref(text)'::regprocedure,'execute')
+     or not has_function_privilege('carr_calendar_prebrief_jobs','ops.ingest_calendar_prebrief_canary_projection(uuid,uuid,text,text[],jsonb)'::regprocedure,'execute') then
     raise exception '0216 FAILED: calendar prebrief function privilege boundary is wrong';
   end if;
   if not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_allowed_calendar' and column_name='configuration_digest')
@@ -428,8 +757,15 @@ begin
      or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_projection_receipt' and column_name='allowlist_revision_id') then
     raise exception '0216 FAILED: allowlist freshness revision columns are missing';
   end if;
+  if not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_projection_receipt' and column_name='source_attestation_id')
+     or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_source_attestation_receipt' and column_name='canonical_event_digest')
+     or not exists(select 1 from information_schema.columns where table_schema='ops' and table_name='calendar_prebrief_source_attestation_receipt' and column_name='device_identity') then
+    raise exception '0216 FAILED: immutable device source attestation columns are missing';
+  end if;
   if not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_allowlist_receipt'::regclass and tgname='calendar_prebrief_allowlist_receipt_append_only' and not tgisinternal)
-     or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_projection_receipt'::regclass and tgname='calendar_prebrief_projection_receipt_append_only' and not tgisinternal) then
+     or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_projection_receipt'::regclass and tgname='calendar_prebrief_projection_receipt_append_only' and not tgisinternal)
+     or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_source_attestation_receipt'::regclass and tgname='calendar_prebrief_source_attestation_receipt_append_only' and not tgisinternal)
+     or not exists(select 1 from pg_trigger where tgrelid='ops.calendar_prebrief_canary_receipt'::regclass and tgname='calendar_prebrief_canary_receipt_append_only' and not tgisinternal) then
     raise exception '0216 FAILED: append-only calendar prebrief receipts are not guarded';
   end if;
   if (select count(*) from pg_constraint where contype='f' and confrelid='ops.calendar_prebrief_allowlist_receipt'::regclass
