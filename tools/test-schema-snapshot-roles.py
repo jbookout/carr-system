@@ -40,7 +40,12 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # need a role to attach to. neondb_owner is excluded on purpose: it is
 # Neon's, exists on every Neon project and on no vanilla Postgres, and
 # .github/workflows/ci.yml creates it for that reason.
-NOLOGIN_BUNDLES = ["carr_reader", "carr_writer", "carr_exporter"]
+NOLOGIN_BUNDLES = [
+    "carr_reader", "carr_writer", "carr_exporter", "carr_authority",
+    "carr_device_evidence", "carr_calendar_prebrief_jobs",
+    "carr_calendar_prebrief_canary_jobs", "carr_calendar_prebrief_attestors",
+    "carr_calendar_prebrief_email_resolver",
+]
 EXPECTED_ROLES = [*NOLOGIN_BUNDLES, "carr_jobs"]
 
 failures: list[str] = []

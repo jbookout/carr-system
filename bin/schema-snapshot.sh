@@ -166,14 +166,15 @@ cat > "$TMP" <<'ROLES'
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
 --
--- ALL SEVEN of production's carr_ roles are now accounted for. Six are created
--- here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- All privilege bundles whose creating migrations are in the snapshot ledger
+-- are created here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
 -- widening a pattern.
--- carr_reader, carr_writer, carr_exporter, carr_authority and
--- carr_device_evidence are privilege bundles, so they stay NOLOGIN. carr_jobs is
+-- carr_reader, carr_writer, carr_exporter, carr_authority,
+-- carr_device_evidence, and the four calendar-prebrief roles are privilege
+-- bundles, so they stay NOLOGIN. carr_jobs is
 -- the narrow unattended runtime identity: a fresh
 -- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
 -- it with a fresh random placeholder password; an already-login role is left
@@ -186,7 +187,11 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
 begin
-  foreach r in array array['carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence'] loop
+  foreach r in array array[
+    'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
+    'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
+    'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver'
+  ] loop
     if not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
@@ -212,8 +217,8 @@ fi
 # principals and whatever login roles neonctl has minted per environment, and
 # the first grant naming an absent role aborts the load. Instead the app roles'
 # privileges are read from the catalogs and emitted as plain GRANTs, scoped by
-# grantee to the three NOLOGIN bundles plus the narrow carr_jobs login the
-# preamble creates. Membership
+# grantee to the NOLOGIN bundles plus the narrow carr_jobs login the preamble
+# creates. Membership
 # bundles may additionally name neondb_owner (0005/0006 grant it the bundles),
 # which every loading environment already has: .github/workflows/ci.yml creates
 # it for the same reason.
@@ -251,6 +256,12 @@ fi
 # default was deliberately taken away, and that is what gets emitted.
 GRANTS_SQL="$(mktemp)"
 cat > "$GRANTS_SQL" <<'GRANTSQL'
+-- Force pg_get_function_identity_arguments() to schema-qualify composite
+-- argument types.  Otherwise a type visible through the dump connection's
+-- search_path is rendered bare and the later grants section cannot load under
+-- a fresh session's search_path.
+set search_path = '';
+
 -- Built from nspname + proname + identity arguments rather than from
 -- oid::regprocedure, which omits the schema for anything the current
 -- search_path already covers. That produced bare `revoke all on function
@@ -271,7 +282,9 @@ select format('revoke all on function %s.%s(%s) from public;',
  order by 1;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
+         ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -285,7 +298,9 @@ select format('grant %s on schema %s to %s;',
  order by n.nspname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
+         ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -301,7 +316,9 @@ select format('grant %s on %s %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
+         ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -318,7 +335,9 @@ select format('grant %s (%s) on table %s.%s to %s;',
  order by n.nspname, c.relname, r.rolname, lower(a.privilege_type);
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
+         ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -332,7 +351,9 @@ select format('grant execute on function %s.%s(%s) to %s;',
  order by n.nspname, p.proname, r.rolname;
 
 with app(rolname) as (
-  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
+  values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
+         ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
+         ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
 -- The snapshot has no grantor field, so render each semantically identical
@@ -442,6 +463,9 @@ fi
 #     controlled block the 0228 lifecycle cannot validate pinned rules. Do not
 #     add rule_control_binding or any receipt/rule table: those are per-rule
 #     history, not bounded internal control configuration.
+#   * The disabled renewal-radar-source-daily v1 job definition is a fixed
+#     internal contract required by 0230's lease-bound delivery gate. Carry
+#     only that exact row; never widen this to arbitrary job/runtime rows.
 #
 # I counted every other table 0135 and 0168 seed, so the next rebuild does not
 # discover a fourth one the same way: doctrine_concept_mapping,
@@ -526,6 +550,33 @@ then
   echo "schema-snapshot: could not render the reviewed control catalog — nothing written" >&2
   exit 1
 fi
+
+cat >> "$TMP" <<'RENEWAL_SOURCE_JOB'
+-- CARR RENEWAL SOURCE JOB (bin/schema-snapshot.sh) — exact disabled contract.
+-- This is the one canonical 0230 definition needed to reconstruct its FK and
+-- gate surface after 0230 has entered the migration ledger. It carries no run,
+-- lease, client, party, deal, event, or credential data.
+insert into ops.job_definition
+  (key,version,enabled,risk,owner_actor,execution_kind,execution_contract,
+   inventory_contract,recurrence,state_contract,routing_contract,
+   filtering_contract,validation_contract,retry_policy,deduplication,
+   completion_contract,legacy_schedule)
+values
+  ('renewal-radar-source-daily',1,false,'yellow','system','deterministic',
+   '{"entrypoint":"ops.seal_renewal_decision_source_run","activation":"pending source-run adapter"}'::jsonb,
+   '{"owner":"ops.job","inputs":["renewal-radar candidate import"],"canonical_writes":["ops.renewal_decision_source_run","ops.renewal_decision_source_run_member"]}'::jsonb,
+   '{"cron":null,"timezone":"America/Chicago","source":"disabled pending source-run adapter"}'::jsonb,
+   '{"owner":"ops.job","initial":"queued"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["renewal.source_complete"]}}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["renewal.pool_imported"]}}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["renewal.source_run_sealed"]}}'::jsonb,
+   '{"max_attempts":2,"backoff":"exponential","base_seconds":60,"cap_seconds":600,"timeout_seconds":300}'::jsonb,
+   '{"key_template":"renewal-radar-source-daily:{scheduled_for}"}'::jsonb,
+   '{"key":"facts.all_true","spec":{"all_of":["renewal.source_run_sealed"]},"receipt_kind":"renewal_source_run"}'::jsonb,
+   '{"provider":"none","status":"disabled","activation":"explicit source-run adapter required"}'::jsonb)
+on conflict (key,version) do nothing;
+
+RENEWAL_SOURCE_JOB
 
 # doctrine_meta is a singleton bootstrap rather than reference vocabulary: its
 # live generation advances with successful doctrine commits and must never be
