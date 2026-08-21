@@ -60,9 +60,9 @@ PENDING = {
         "0216 remains pending in db/schema.sql; the migration is still the "
         "only truthful creator until the snapshot ledger records it as applied"
     ),
-    "carr_calendar_prebrief_devices": (
+    "carr_calendar_prebrief_attestors": (
         "0216 remains pending in db/schema.sql; its externally provisioned "
-        "device capability cannot appear in the applied snapshot yet"
+        "attestor capability cannot appear in the applied snapshot yet"
     ),
     "carr_calendar_prebrief_email_resolver": (
         "0216 remains pending in db/schema.sql; its narrow resolver capability "
