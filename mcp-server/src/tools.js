@@ -6754,6 +6754,13 @@ const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "authorization", "authorization_class", "profile", "capability", "capabilities",
   "action", "actions", "action_authority", "action_authorities", "allowed_actions",
   "write", "writes_records", "calls_models", "call_models",
+  // The authenticated application session, and the instant it was minted. This
+  // list exists for exactly this class of field — a value the caller must never
+  // be able to choose — and these two are the most load-bearing members of it,
+  // because a caller who could set them could assert its own authentication.
+  // Nothing accepts them from a request body today; this is the control that
+  // keeps that true when a future handler spreads arguments into an actor.
+  "application_session_id", "application_session_authenticated_at",
 ]);
 
 export function assertNoCallerAuthorityFields(args) {

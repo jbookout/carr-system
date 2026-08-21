@@ -759,6 +759,19 @@ begin
     -- POSITIVE CASES FIRST, on ALL THREE tables. A substrate that refuses
     -- everything would sail through a suite of negative probes while producing
     -- no evidence at all, which is the silent failure this file exists to stop.
+    -- AS THE RUNTIME WRITER, not as the migration owner. The owner holds
+    -- privileges carr_writer does not, so a positive probe run as the owner
+    -- proves the guard works for somebody who was never going to be blocked.
+    --
+    -- This is not a hypothetical. Removing SECURITY DEFINER from the binding
+    -- guard makes it take a row lock as the caller, row locks require UPDATE,
+    -- and UPDATE on the session table is exactly what the writer is denied — so
+    -- every qualified insert is refused while the legacy path still succeeds and
+    -- the fleet quietly produces nothing that qualifies. Run as the owner, that
+    -- passes. The contract suite catches it, and the contract suite deliberately
+    -- does not run in CI, which leaves this block as the only place it can be
+    -- caught where the migration actually lands.
+    set local role carr_writer;
     insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
       response, organization_tenant_id, application_session_id)
     values (qualified_key, 'probe', probe_actor, 'h', '{}'::jsonb, 'carr-internal', probe_sid);
@@ -770,6 +783,7 @@ begin
       organization_tenant_id, application_session_id)
     values ('probe', (select slug from public.actor where id = probe_actor),
             probe_actor, 'carr-internal', probe_sid);
+    reset role;
     if (select count(*) from public.tool_call where application_session_id = probe_sid) <> 1
        or (select count(*) from public.event where application_session_id = probe_sid) <> 1
        or (select count(*) from public.tool_read_call where application_session_id = probe_sid) <> 1 then
