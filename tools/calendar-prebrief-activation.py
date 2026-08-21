@@ -13,12 +13,14 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 REPO=Path(__file__).resolve().parent.parent
 SPECS={
  "CARR_DB_AUTHORITY_JOE_URL":"carr_authority_joe", "CARR_DB_AUTHORITY_DELL_URL":"carr_authority_dell",
- "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_URL":"carr_calendar_prebrief_resolver",
+ "CARR_DB_CALENDAR_PREBRIEF_DEVICE_JOE_URL":"carr_calendar_prebrief_device_joe",
+ "CARR_DB_CALENDAR_PREBRIEF_DEVICE_DELL_URL":"carr_calendar_prebrief_device_dell",
  "CARR_DB_CALENDAR_PREBRIEF_JOE_URL":"carr_calendar_prebrief_joe",
  "CARR_DB_CALENDAR_PREBRIEF_DELL_URL":"carr_calendar_prebrief_dell", "CARR_DB_JOBS_URL":"carr_jobs"}
 BROAD={"DATABASE_URL","CARR_DB_WRITER_URL","CARR_DB_OWNER_URL","CARR_DB_READER_URL","CARR_DB_EXPORTER_URL","CARR_DB_BACKUP_URL","CARR_DB_DEVICE_URL","CARR_DB_AUTHORITY_URL"}
 CAPABILITY={"CARR_DB_AUTHORITY_JOE_URL":"carr_authority","CARR_DB_AUTHORITY_DELL_URL":"carr_authority",
- "CARR_DB_CALENDAR_PREBRIEF_RESOLVER_URL":"carr_calendar_prebrief_device",
+ "CARR_DB_CALENDAR_PREBRIEF_DEVICE_JOE_URL":"carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver",
+ "CARR_DB_CALENDAR_PREBRIEF_DEVICE_DELL_URL":"carr_calendar_prebrief_devices,carr_calendar_prebrief_email_resolver",
  "CARR_DB_CALENDAR_PREBRIEF_JOE_URL":"carr_calendar_prebrief_jobs","CARR_DB_CALENDAR_PREBRIEF_DELL_URL":"carr_calendar_prebrief_jobs",
  "CARR_DB_JOBS_URL":"carr_jobs"}
 class Refusal(RuntimeError): pass
@@ -58,8 +60,9 @@ def probe_scoped_identity(key:str, dsn:str, connect:Callable[[str],Any])->bool:
   cur.execute("begin transaction read only")
   cur.execute("select session_user,current_user"); identity=cur.fetchone()
   if tuple(identity or ()) != (SPECS[key],SPECS[key]): raise Refusal("scoped database identity mismatch")
-  cur.execute("select pg_has_role(current_user,%s,'member')",(CAPABILITY[key],)); row=cur.fetchone()
-  if tuple(row or ()) != (True,): raise Refusal("scoped database capability membership mismatch")
+  for role in CAPABILITY[key].split(","):
+   cur.execute("select pg_has_role(current_user,%s,'member')",(role,)); row=cur.fetchone()
+   if tuple(row or ()) != (True,): raise Refusal("scoped database capability membership mismatch")
  return True
 
 def _eventkit():

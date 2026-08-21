@@ -85,9 +85,9 @@ def normalize_snapshot(snapshot: dict[str, Any], sponsor: str) -> tuple[list[str
         if item_sponsor not in SPONSORS or not isinstance(key, str) or not HEX64.fullmatch(key):
             raise Refusal("observed calendar is malformed")
         keys_by_sponsor[item_sponsor].append(key)
-    for owner, keys in keys_by_sponsor.items():
-        if not keys or len(set(keys)) != len(keys):
-            raise Refusal(f"{owner} observed calendar coverage is missing or duplicated")
+    keys = keys_by_sponsor[sponsor]
+    if not keys or len(set(keys)) != len(keys):
+        raise Refusal(f"{sponsor} observed calendar coverage is missing or duplicated")
     normalized: list[dict[str, Any]] = []
     occurrences: set[tuple[str, str]] = set()
     for item in events:

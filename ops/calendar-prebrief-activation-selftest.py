@@ -17,7 +17,7 @@ def refuses(fn):
 def dsn(user): return f"postgresql://{user}:fixture@db.example/carr?sslmode=require&channel_binding=require" # ci-secret-scan: allow
 with tempfile.TemporaryDirectory() as raw:
  root=Path(raw); env=root/"prebrief.env"
- values={"CARR_DB_AUTHORITY_JOE_URL":dsn("carr_authority_joe"),"CARR_DB_AUTHORITY_DELL_URL":dsn("carr_authority_dell"),"CARR_DB_CALENDAR_PREBRIEF_RESOLVER_URL":dsn("carr_calendar_prebrief_resolver"),"CARR_DB_CALENDAR_PREBRIEF_JOE_URL":dsn("carr_calendar_prebrief_joe"),"CARR_DB_CALENDAR_PREBRIEF_DELL_URL":dsn("carr_calendar_prebrief_dell"),"CARR_DB_JOBS_URL":dsn("carr_jobs")}
+ values={"CARR_DB_AUTHORITY_JOE_URL":dsn("carr_authority_joe"),"CARR_DB_AUTHORITY_DELL_URL":dsn("carr_authority_dell"),"CARR_DB_CALENDAR_PREBRIEF_DEVICE_JOE_URL":dsn("carr_calendar_prebrief_device_joe"),"CARR_DB_CALENDAR_PREBRIEF_DEVICE_DELL_URL":dsn("carr_calendar_prebrief_device_dell"),"CARR_DB_CALENDAR_PREBRIEF_JOE_URL":dsn("carr_calendar_prebrief_joe"),"CARR_DB_CALENDAR_PREBRIEF_DELL_URL":dsn("carr_calendar_prebrief_dell"),"CARR_DB_JOBS_URL":dsn("carr_jobs")}
  env.write_text("\n".join(f"{k}='{v}'" for k,v in values.items())+"\n"); env.chmod(0o600)
  parsed=mod.load_scoped_env(env,{})
  check("secure exact scoped env is admitted",set(parsed)==set(values))
