@@ -18,6 +18,8 @@ FAIL-SOFT IS A STOP RAIL, NOT SILENCE: if the store is unreachable the hook
 still injects the identity line and the stop-and-say-so instruction — a blank
 session that improvises files is the failure this whole build exists to end.
 """
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -217,7 +219,8 @@ def loose_work(repo=None):
     submodule was first checked out and the age only ever climbs. That reported
     a 29-hour-old edit as 324 hours old."""
     import subprocess
-    repo = os.path.expanduser("~/carr-system") if repo is None else repo
+    if repo is None:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = subprocess.run(
         ["git", "status", "--porcelain", "--ignore-submodules=dirty"],
         cwd=repo, capture_output=True, text=True, timeout=15)
@@ -254,10 +257,16 @@ def _seed_evidence_rows(repo=None):
     store does. This cannot confirm live state, but it can confirm that code
     exists on disk — which is the whole point of the latch. A store outage
     cannot hide landed work through this path.
+
+    GENERALIZED 2026-08-21: parses any program_key, not only
+    carr-ai-engineering-suite-v1. The state is read from the migration row
+    when present (the seed uses 'ready' for all rows); the ref and evidence
+    are extracted the same way for any program.
     """
     import json as _json
     import re
-    repo = os.path.expanduser("~/carr-system") if repo is None else repo
+    if repo is None:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     migration = os.path.join(repo, "migrations", "0125_ai_capability_program.sql")
     if not os.path.exists(migration):
         return []
@@ -265,16 +274,21 @@ def _seed_evidence_rows(repo=None):
     # The seed rows look like:
     # (N, 'carr-ai-engineering-suite-v1', 'WR-AI-00X', 'Title', 'build', ...,
     #  '{"scope":"...","evidence":["path/a","path/b"],...}'::jsonb, 'joe', 'joe')
+    # Generalized: any program_key, not only carr-ai-engineering-suite-v1.
     pattern = re.compile(
-        r"\(\s*\d+\s*,\s*'carr-ai-engineering-suite-v1'\s*,\s*"
-        r"'(WR-AI-\d+)'\s*,\s*'[^']*'\s*,\s*"
+        r"\(\s*\d+\s*,\s*'([^']+)'\s*,\s*"
+        r"'(WR-[^']+)'\s*,\s*'[^']*'\s*,\s*"
         r"'(build|extend|adopt|decline)'"
+        r"[\s\S]*?'(claimed|in_progress|verification|captured|triaged|ready|"
+        r"awaiting_release|released|confirmed_closed|blocked|failed|needs_joe)'"
         r"[\s\S]*?'(\{[^']+\})'::jsonb"
     )
     rows = []
     for m in pattern.finditer(sql):
-        ref = m.group(1)
-        ctx_json = m.group(3)
+        ref = m.group(2)
+        state = m.group(4)
+        program_key = m.group(1)
+        ctx_json = m.group(5)
         try:
             ctx = _json.loads(ctx_json)
         except Exception:
@@ -282,29 +296,74 @@ def _seed_evidence_rows(repo=None):
         ev = ctx.get("evidence", [])
         if not isinstance(ev, list):
             ev = []
-        rows.append({"ref": ref, "state": "ready", "evidence": ev})
+        rows.append({"ref": ref, "state": state, "evidence": ev,
+                     "program_key": program_key})
     return rows
 
 
-def built_unclosed_brief(repo=None):
-    """The CLOSE-BEFORE-BUILD line when built work is unclosed, else ''.
+def _oldest_ref(rows):
+    """Return the oldest ref string from rows, or None when empty."""
+    if not rows:
+        return None
+    # Sort by ref to get the oldest ordinal; refs are like WR-AI-006.
+    return sorted(r.get("ref", "?") for r in rows)[0]
 
-    Added 2026-08-21. capability-program reports completed=N (confirmed_closed
-    count), which is attestation truth — a Work Request can have code on main
-    and still sit at state != confirmed_closed because nobody ran
-    prepare/attest/complete. 24 times a session read "0/51" as "nothing is
-    built" and started a rebuild of work that already landed.
 
-    This is the local half of the latch: the Worker cannot stat the repo, but
-    this hook can. When built_unclosed is non-empty, the brief MUST begin with a
-    hard line so a session cannot start a new build while built work is unclosed.
+def _has_uncommitted_writes(repo):
+    """True when this checkout has this session's own uncommitted tracked writes.
+
+    Reuses the loose-work helpers already in this module (loose_tracked in
+    loose-work-gate.py) rather than reimplementing git status parsing. A
+    session that cannot tell whose file is whose must not act on the whole
+    tree — but the brief can report it.
+
+    Returns True when `git status --porcelain --ignore-submodules=dirty` has
+    any tracked-modified or added entries (not untracked — untracked is not
+    a session's abandoned edit).
+    """
+    import subprocess
+    out = subprocess.run(
+        ["git", "status", "--porcelain", "--ignore-submodules=dirty",
+         "--untracked-files=no"],
+        cwd=repo, capture_output=True, text=True, timeout=15)
+    if out.returncode != 0:
+        return False
+    for line in out.stdout.splitlines():
+        if not line.strip():
+            continue
+        return True
+    return False
+
+
+def close_before_open_brief(repo=None):
+    """The CLOSE-BEFORE-OPEN line when any open work blocks a new front, else ''.
+
+    Added 2026-08-21, generalized from built_unclosed_brief. The opslang state
+    machine has three stages — CONCEPTUAL, IMPLEMENTATION, CONSTRUCTION — and
+    a session must name its STAGE and its WORK REQUEST. If it cannot, it is a
+    side quest and must stop or file, not build.
+
+    This brief fires when any of these are true:
+      - built-unclosed: code on disk (evidence paths exist) but not
+        confirmed_closed — the build landed but nobody attested it.
+      - implementation-open: a work request in claimed/in_progress/verification
+        — an active build session that a new side quest must not interrupt.
+      - uncommitted writes: this checkout has tracked-modified files that have
+        not been committed (reuses loose-work helpers, not a reimplementation).
+
+    Names the oldest item. Does not dump a 51-row list.
 
     FAIL-SOFT: when the exporter DB is down, fall back to the seed migration's
     evidence paths checked against the repo. A store outage cannot hide landed
     work through this path. The seed says state='ready' for all rows, which is
     the conservative worst case — it over-reports rather than under-reports.
+
+    REPO is the checkout root (the worktree), not a hardcoded ~/carr-system.
+    The caller passes the dirname of hooks/ — the repo this hook is running
+    from — so a worktree session checks its own tree, not the main checkout.
     """
-    repo = os.path.expanduser("~/carr-system") if repo is None else repo
+    if repo is None:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Import the detector from the repo's ops/ directory
     sys.path.insert(0, os.path.join(repo, "ops"))
     try:
@@ -312,20 +371,80 @@ def built_unclosed_brief(repo=None):
     except Exception:
         return ""
     rows = _bu.load_live_rows()
+    db_unreachable = rows is None
     if rows is None:
         # DB down or not configured — fall back to the seed migration
         rows = _seed_evidence_rows(repo)
     if not rows:
+        rows = _seed_evidence_rows(repo)
+    if not rows:
         return ""
-    unclosed = _bu.detect_built_unclosed(rows, repo)
-    if not unclosed:
+
+    classified = _bu.detect_all_open(rows, repo)
+    built_unclosed = classified["built_unclosed"]
+    impl_open = classified["implementation_open"]
+    concept_open = classified["conceptual_open"]
+
+    # FAIL CLOSED when the DB is unreachable: the seed migration says
+    # state='ready' for all rows, but the live state may include rows in
+    # claimed/in_progress/verification or captured/triaged that the seed
+    # cannot see. Do not silently treat a DB outage as "no open
+    # implementation" — report it so the partner knows the state is unknown.
+    if db_unreachable and not impl_open and not concept_open:
+        oldest = _oldest_ref(rows)
+        parts_open = (
+            f"implementation/conceptual state UNKNOWN (exporter DB "
+            f"unreachable; seed fallback reports 'ready' but live state may "
+            f"have open work — oldest ref in seed: {oldest})"
+        )
+    else:
+        parts_open = None
+
+    parts = []
+
+    if built_unclosed:
+        oldest = _oldest_ref(built_unclosed)
+        parts.append(
+            f"{len(built_unclosed)} built-unclosed work request(s) have code on disk "
+            f"and are not confirmed_closed (oldest: {oldest})"
+        )
+
+    if impl_open:
+        oldest = _oldest_ref(impl_open)
+        parts.append(
+            f"{len(impl_open)} implementation-open work request(s) are in "
+            f"claimed/in_progress/verification (oldest: {oldest})"
+        )
+
+    if concept_open:
+        oldest = _oldest_ref(concept_open)
+        parts.append(
+            f"{len(concept_open)} conceptual-open work request(s) are in "
+            f"captured/triaged (oldest: {oldest})"
+        )
+
+    if parts_open:
+        parts.append(parts_open)
+
+    # Uncommitted writes: this checkout has tracked-modified files
+    try:
+        if _has_uncommitted_writes(repo):
+            parts.append(
+                "this checkout has uncommitted tracked writes"
+            )
+    except Exception:
+        pass  # the brief must never fail on this
+
+    if not parts:
         return ""
-    refs = ", ".join(r.get("ref", "?") for r in unclosed[:10])
-    suffix = f" … +{len(unclosed) - 10}" if len(unclosed) > 10 else ""
-    return (f"\nCLOSE-BEFORE-BUILD: {len(unclosed)} work request(s) have code on disk "
-            f"and are not confirmed_closed: {refs}{suffix}. "
-            f"Do not start a new build, roadmap, or side quest. Close or park those first. "
-            f"Run ops/built_unclosed.py for details.")
+
+    summary = "; ".join(parts)
+    return (
+        f"\nCLOSE-BEFORE-OPEN: {summary}. "
+        f"Do not start a new conceptual plan, implementation, or construction "
+        f"while these are open. Close or park them first. "
+        f"Run ops/built_unclosed.py for details."
+    )
 
 
 def main():
@@ -334,10 +453,10 @@ def main():
     except Exception:
         pass
     extra = ""
-    # CLOSE-BEFORE-BUILD goes FIRST — before any other extra line, so a session
+    # CLOSE-BEFORE-OPEN goes FIRST — before any other extra line, so a session
     # that skims the top of the brief cannot miss it.
     try:
-        cbb = built_unclosed_brief()
+        cbb = close_before_open_brief()
         if cbb:
             extra = cbb
     except Exception:

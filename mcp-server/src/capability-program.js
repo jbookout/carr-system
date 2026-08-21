@@ -90,6 +90,7 @@ function sessionBrief(row) {
   if (!row) return null;
   const p = programRow(row); const c = p.context;
   return [
+    `This card may already have code. completed!=closed is not permission to rebuild. Run ops/built_unclosed.py before writing.`,
     `Build the current CARR AI Engineering Suite project #${p.sequence}: ${p.title}.`,
     `Canonical Work Request: ${p.ref}; base_version: ${p.version}; disposition: ${p.disposition}; state: ${p.state}.`,
     `Outcome: ${p.desired_outcome}`, `Scope: ${c.scope || "Use the canonical Work Request scope."}`,
@@ -189,7 +190,24 @@ export function capabilityProgramTools({ withEnvelope, writeEvent, ToolError }) 
         const requested = args.sequence === undefined ? current : rows.rows.find(row => Number(row.program_ordinal) === Number(args.sequence));
         if (args.sequence !== undefined && !requested) throw new ToolError({ error: "capability_project_not_found", program_key: DEFAULT_PROGRAM, sequence: args.sequence });
         const capability_session = await readCurrentSession(c, current);
-        return { program_key: DEFAULT_PROGRAM, total: rows.rows.length, completed: rows.rows.filter(row => row.state === "confirmed_closed").length, program_complete: !current, current: programRow(current), requested: programRow(requested), capability_session, session_brief: sessionBrief(requested), projects: args.include_all ? rows.rows.map(programRow) : undefined };
+        // The completed count is confirmed_closed attestations only — it is NOT
+        // a count of code on disk. A Work Request can have artifacts already
+        // merged to main and still sit at state != confirmed_closed because
+        // nobody ran prepare/attest/complete. landed_in_repo and built_unclosed
+        // are null here because the Worker cannot stat the repo; the local hook
+        // (session-brief.py / close-before-open-gate.py) fills them. The hint
+        // names the local path so a session does not read 0/51 as "nothing is
+        // built" and start a rebuild of work that already landed.
+        return {
+          program_key: DEFAULT_PROGRAM, total: rows.rows.length,
+          completed: rows.rows.filter(row => row.state === "confirmed_closed").length,
+          program_complete: !current, current: programRow(current),
+          requested: programRow(requested), capability_session,
+          session_brief: sessionBrief(requested),
+          landed_in_repo: null, built_unclosed: [],
+          hint: "completed is attestation (confirmed_closed), not unbuilt — code on main may already exist. Run ops/built_unclosed.py / read session-brief CLOSE-BEFORE-OPEN.",
+          projects: args.include_all ? rows.rows.map(programRow) : undefined,
+        };
       },
     },
     "start-capability-project": {
