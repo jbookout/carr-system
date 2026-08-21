@@ -1170,8 +1170,17 @@ try:
             _pending.append(_ln.split("  FAIL  ", 1)[1].strip())
         elif "  BLOCKED  " in _ln:
             _blocked.append(_ln.split("  BLOCKED  ", 1)[1].strip())
-        elif "chain OK" in _ln or "FINISHED WITH FAILURES" in _ln:
-            _done.append(("chain OK" in _ln, _pending, _blocked))
+        # MATCHED ON THE FULL BANNER, NOT THE SUBSTRING "chain OK" (2026-08-21).
+        # bin/hc-ping.sh prints "hc-ping: whole chain OK -> pinged" on a green
+        # night, and the loose test closed the run right there — 40 lines before
+        # the real verdict. The FAILs and BLOCKEDs went to that early close and
+        # the true banner then opened a phantom run with nothing in it, which is
+        # the one _done[-1] read. The row said "all steps OK" and silently
+        # dropped 14 blocked steps on the first green night after the BLOCKED
+        # outcome shipped. Both banners are emitted by say() as
+        # "===== nightly chain OK =====", so match that and nothing else.
+        elif "===== nightly chain OK =====" in _ln or "FINISHED WITH FAILURES" in _ln:
+            _done.append(("===== nightly chain OK =====" in _ln, _pending, _blocked))
             _pending = []
             _blocked = []
             _open = max(0, _open - 1)
