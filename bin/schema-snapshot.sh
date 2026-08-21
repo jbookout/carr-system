@@ -96,6 +96,18 @@ for c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do
   if command -v "$c" >/dev/null 2>&1; then PSQL="$c"; break; fi
 done
 [ -n "$PSQL" ] || { echo "schema-snapshot: no psql found (needed for the grants section)" >&2; exit 69; }
+
+# pg_dump's completion trailer has varied in its number of terminal blank
+# records across client versions. Keep every interior blank line intact, but
+# make the tracked snapshot's EOF a one-newline invariant.
+EOF_NORMALIZER='
+/^[[:space:]]*$/ { trailing = trailing $0 ORS; next }
+{ printf "%s", trailing; trailing = ""; print }
+'
+
+normalise_eof() {
+  awk "$EOF_NORMALIZER"
+}
 CHECK=0
 URL=""
 while [ "$#" -gt 0 ]; do
@@ -322,13 +334,16 @@ select format('grant execute on function %s.%s(%s) to %s;',
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence')
 )
-select format('grant %s to %s;', gr.rolname, mem.rolname)
+-- pg_auth_members permits different grantors for the same role/member pair.
+-- The snapshot has no grantor field, so render each semantically identical
+-- membership exactly once without deduplicating any object ACL shape above.
+select distinct format('grant %s to %s;', gr.rolname, mem.rolname)
   from pg_auth_members m
   join pg_roles gr  on gr.oid  = m.roleid
   join pg_roles mem on mem.oid = m.member
  where gr.rolname in (select rolname from app)
    and mem.rolname in (select rolname from app union select 'neondb_owner')
- order by gr.rolname, mem.rolname;
+ order by 1;
 GRANTSQL
 
 cat >> "$TMP" <<'GRANTHDR'
@@ -474,7 +489,7 @@ fi
 sed -e '/^-- Dumped from database version/d' \
     -e '/^-- Dumped by pg_dump version/d' \
     -e '/^\\restrict /d' \
-    -e '/^\\unrestrict /d' "$TMP" > "$TMP.clean"
+    -e '/^\\unrestrict /d' "$TMP" | normalise_eof > "$TMP.clean"
 mv "$TMP.clean" "$TMP"
 
 if [ "$CHECK" = "1" ]; then

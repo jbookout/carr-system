@@ -1982,8 +1982,8 @@ SET default_table_access_method = heap;
 
 CREATE TABLE ops.job (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    definition_key text NOT NULL,
-    definition_version integer NOT NULL,
+    definition_key text CONSTRAINT job_definition_key_not_null1 NOT NULL,
+    definition_version integer CONSTRAINT job_definition_version_not_null1 NOT NULL,
     correlation_id uuid DEFAULT gen_random_uuid() NOT NULL,
     idempotency_key text NOT NULL,
     scheduled_for timestamp with time zone NOT NULL,
@@ -7198,13 +7198,13 @@ CREATE TABLE ops.npi_device_evidence_receipt (
 
 CREATE TABLE ops.program6_browser_action_challenge_redemption (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token_digest text NOT NULL,
-    session_digest text NOT NULL,
+    token_digest text CONSTRAINT program6_browser_action_challenge_redempt_token_digest_not_null NOT NULL,
+    session_digest text CONSTRAINT program6_browser_action_challenge_redem_session_digest_not_null NOT NULL,
     action text NOT NULL,
-    material_digest text NOT NULL,
-    idempotency_key uuid NOT NULL,
-    redeemed_by_actor_id uuid NOT NULL,
-    redeemed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    material_digest text CONSTRAINT program6_browser_action_challenge_rede_material_digest_not_null NOT NULL,
+    idempotency_key uuid CONSTRAINT program6_browser_action_challenge_rede_idempotency_key_not_null NOT NULL,
+    redeemed_by_actor_id uuid CONSTRAINT program6_browser_action_challenge_redeemed_by_actor_id_not_null NOT NULL,
+    redeemed_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT program6_browser_action_challenge_redempti_redeemed_at_not_null NOT NULL,
     CONSTRAINT program6_browser_action_challenge_redempt_material_digest_check CHECK ((material_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redempti_session_digest_check CHECK ((session_digest ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT program6_browser_action_challenge_redemption_action_check CHECK ((action = ANY (ARRAY['accept-ready-plan'::text, 'accept-outcome-feedback'::text]))),
@@ -7681,19 +7681,19 @@ CREATE TABLE ops.sourced_work_request_outcome_feedback (
     work_request_id uuid NOT NULL,
     feedback_version integer NOT NULL,
     idempotency_key uuid NOT NULL,
-    work_request_version integer NOT NULL,
+    work_request_version integer CONSTRAINT sourced_work_request_outcome_feed_work_request_version_not_null NOT NULL,
     plan_id uuid NOT NULL,
-    plan_acceptance_receipt_id uuid NOT NULL,
+    plan_acceptance_receipt_id uuid CONSTRAINT sourced_work_request_outcom_plan_acceptance_receipt_id_not_null NOT NULL,
     preimage jsonb NOT NULL,
-    criterion_results jsonb NOT NULL,
+    criterion_results jsonb CONSTRAINT sourced_work_request_outcome_feedbac_criterion_results_not_null NOT NULL,
     evidence_refs jsonb NOT NULL,
     outcome text NOT NULL,
     blocker_code text NOT NULL,
     result_summary text NOT NULL,
     observed_minutes integer NOT NULL,
-    interaction_surface text NOT NULL,
-    heavy_session_used boolean NOT NULL,
-    manual_context_transfers integer NOT NULL,
+    interaction_surface text CONSTRAINT sourced_work_request_outcome_feedb_interaction_surface_not_null NOT NULL,
+    heavy_session_used boolean CONSTRAINT sourced_work_request_outcome_feedba_heavy_session_used_not_null NOT NULL,
+    manual_context_transfers integer CONSTRAINT sourced_work_request_outcome__manual_context_transfers_not_null NOT NULL,
     feedback_hash text NOT NULL,
     feedback_ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -7725,15 +7725,15 @@ COMMENT ON TABLE ops.sourced_work_request_outcome_feedback IS 'Append-only bound
 --
 
 CREATE TABLE ops.sourced_work_request_outcome_feedback_acceptance_receipt (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid NOT NULL,
-    feedback_id uuid NOT NULL,
-    idempotency_key uuid NOT NULL,
-    base_version integer NOT NULL,
-    feedback_hash text NOT NULL,
-    accepted_by_actor_id uuid NOT NULL,
-    accepted_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    result_version integer NOT NULL,
+    id uuid DEFAULT gen_random_uuid() CONSTRAINT sourced_work_request_outcome_feedback_acceptance_re_id_not_null NOT NULL,
+    work_request_id uuid CONSTRAINT sourced_work_request_outcome_feedback__work_request_id_not_null NOT NULL,
+    feedback_id uuid CONSTRAINT sourced_work_request_outcome_feedback_acce_feedback_id_not_null NOT NULL,
+    idempotency_key uuid CONSTRAINT sourced_work_request_outcome_feedback__idempotency_key_not_null NOT NULL,
+    base_version integer CONSTRAINT sourced_work_request_outcome_feedback_acc_base_version_not_null NOT NULL,
+    feedback_hash text CONSTRAINT sourced_work_request_outcome_feedback_ac_feedback_hash_not_null NOT NULL,
+    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_outcome_feed_accepted_by_actor_id_not_null NOT NULL,
+    accepted_at timestamp with time zone DEFAULT clock_timestamp() CONSTRAINT sourced_work_request_outcome_feedback_acce_accepted_at_not_null NOT NULL,
+    result_version integer CONSTRAINT sourced_work_request_outcome_feedback_a_result_version_not_null NOT NULL,
     CONSTRAINT sourced_work_request_outcome_feedback_acce_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_outcome_feedback_accep_feedback_hash_check CHECK ((feedback_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT sourced_work_request_outcome_feedback_accept_base_version_check CHECK ((base_version > 0))
@@ -7798,16 +7798,16 @@ COMMENT ON TABLE ops.sourced_work_request_plan IS 'Append-only Program 6 plan pr
 
 CREATE TABLE ops.sourced_work_request_plan_acceptance_receipt (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    work_request_id uuid NOT NULL,
+    work_request_id uuid CONSTRAINT sourced_work_request_plan_acceptance_r_work_request_id_not_null NOT NULL,
     plan_id uuid NOT NULL,
-    idempotency_key uuid NOT NULL,
-    base_version integer NOT NULL,
+    idempotency_key uuid CONSTRAINT sourced_work_request_plan_acceptance_r_idempotency_key_not_null NOT NULL,
+    base_version integer CONSTRAINT sourced_work_request_plan_acceptance_rece_base_version_not_null NOT NULL,
     plan_hash text NOT NULL,
-    accepted_by_actor_id uuid NOT NULL,
-    accepted_at timestamp with time zone DEFAULT now() NOT NULL,
-    result_version integer NOT NULL,
-    shape_fixed_surface_ref text NOT NULL,
-    shape_rationale text NOT NULL,
+    accepted_by_actor_id uuid CONSTRAINT sourced_work_request_plan_accepta_accepted_by_actor_id_not_null NOT NULL,
+    accepted_at timestamp with time zone DEFAULT now() CONSTRAINT sourced_work_request_plan_acceptance_recei_accepted_at_not_null NOT NULL,
+    result_version integer CONSTRAINT sourced_work_request_plan_acceptance_re_result_version_not_null NOT NULL,
+    shape_fixed_surface_ref text CONSTRAINT sourced_work_request_plan_acce_shape_fixed_surface_ref_not_null NOT NULL,
+    shape_rationale text CONSTRAINT sourced_work_request_plan_acceptance_r_shape_rationale_not_null NOT NULL,
     CONSTRAINT sourced_work_request_plan_acceptance_recei_result_version_check CHECK ((result_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_base_version_check CHECK ((base_version > 0)),
     CONSTRAINT sourced_work_request_plan_acceptance_receipt_plan_hash_check CHECK ((plan_hash ~ '^sha256:[0-9a-f]{64}$'::text))
@@ -7839,11 +7839,11 @@ CREATE TABLE ops.staging_deployment_attempt (
     git_sha text NOT NULL,
     provider text NOT NULL,
     expected_provider_tag text NOT NULL,
-    declared_migration_set_sha256 text NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_deployment_attempt_declared_migration_set_sha2_not_null NOT NULL,
     declared_migration_count integer NOT NULL,
-    declared_schema_highest_migration text NOT NULL,
-    declared_schema_applied_count integer NOT NULL,
-    declared_schema_ledger_sha256 text NOT NULL,
+    declared_schema_highest_migration text CONSTRAINT staging_deployment_attempt_declared_schema_highest_mig_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_deployment_attempt_declared_schema_applied_cou_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_deployment_attempt_declared_schema_ledger_sha2_not_null NOT NULL,
     prepared_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     writer_session_user text NOT NULL,
     CONSTRAINT staging_attempt_recovery_shape CHECK ((((recovery_step = 'standalone'::text) AND (recovery_attempt_id IS NULL) AND (prior_release_id IS NULL)) OR ((recovery_step <> 'standalone'::text) AND (recovery_attempt_id IS NOT NULL) AND (prior_release_id IS NOT NULL) AND (correlation_id = recovery_attempt_id)))),
@@ -7885,17 +7885,17 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     prior_release_id uuid NOT NULL,
     service_id uuid NOT NULL,
     environment text NOT NULL,
-    current_before_receipt_id uuid NOT NULL,
-    prior_after_rollback_receipt_id uuid NOT NULL,
-    current_after_restore_receipt_id uuid NOT NULL,
+    current_before_receipt_id uuid CONSTRAINT staging_recovery_rehearsal_b_current_before_receipt_id_not_null NOT NULL,
+    prior_after_rollback_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__prior_after_rollback_recei_not_null NOT NULL,
+    current_after_restore_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__current_after_restore_rece_not_null NOT NULL,
     recovery_strategy text NOT NULL,
     recovery_plan_ref text NOT NULL,
     plan_hash text NOT NULL,
-    declared_migration_set_sha256 text NOT NULL,
-    declared_migration_count integer NOT NULL,
-    declared_schema_highest_migration text NOT NULL,
-    declared_schema_applied_count integer NOT NULL,
-    declared_schema_ledger_sha256 text NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_count integer CONSTRAINT staging_recovery_rehearsal_bu_declared_migration_count_not_null NOT NULL,
+    declared_schema_highest_migration text CONSTRAINT staging_recovery_rehearsal__declared_schema_highest_mi_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_recovery_rehearsal__declared_schema_applied_co_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_recovery_rehearsal__declared_schema_ledger_sha_not_null NOT NULL,
     bundle_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
     completed_at timestamp with time zone NOT NULL,
@@ -7937,12 +7937,12 @@ CREATE TABLE ops.staging_release_readback_receipt (
     provider_version_id uuid NOT NULL,
     provider_tag text NOT NULL,
     verb_count integer NOT NULL,
-    schema_highest_migration text NOT NULL,
+    schema_highest_migration text CONSTRAINT staging_release_readback_rece_schema_highest_migration_not_null NOT NULL,
     schema_applied_count integer NOT NULL,
-    declared_migration_set_sha256 text NOT NULL,
-    declared_migration_count integer NOT NULL,
-    declared_schema_applied_count integer NOT NULL,
-    declared_schema_ledger_sha256 text NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_release_readback_re_declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_count integer CONSTRAINT staging_release_readback_rece_declared_migration_count_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_release_readback_re_declared_schema_applied_co_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_release_readback_re_declared_schema_ledger_sha_not_null NOT NULL,
     doctrine_generation bigint NOT NULL,
     projection_sha256 text NOT NULL,
     evidence_ref text NOT NULL,
@@ -9904,12 +9904,12 @@ COMMENT ON COLUMN public.campaign.coverage_at_scoring IS 'The measurement covera
 --
 
 CREATE TABLE public.candidate_pool (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    source text NOT NULL,
-    source_key text NOT NULL,
+    id uuid DEFAULT gen_random_uuid() CONSTRAINT prospect_pool_id_not_null NOT NULL,
+    source text CONSTRAINT prospect_pool_source_not_null NOT NULL,
+    source_key text CONSTRAINT prospect_pool_source_key_not_null NOT NULL,
     source_seq integer,
-    source_row jsonb NOT NULL,
-    name text NOT NULL,
+    source_row jsonb CONSTRAINT prospect_pool_source_row_not_null NOT NULL,
+    name text CONSTRAINT prospect_pool_name_not_null NOT NULL,
     org_name text,
     vertical text,
     address text,
@@ -9924,19 +9924,19 @@ CREATE TABLE public.candidate_pool (
     score_basis text,
     est_lease_event date,
     est_basis text,
-    status text DEFAULT 'pool'::text NOT NULL,
+    status text DEFAULT 'pool'::text CONSTRAINT prospect_pool_status_not_null NOT NULL,
     promoted_lead_id uuid,
     dup_tier text,
     dup_subject_type text,
     dup_subject_id uuid,
     dup_ref text,
     dup_basis text,
-    dup_do_not_contact boolean DEFAULT false NOT NULL,
-    version integer DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_by uuid NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_by uuid NOT NULL,
+    dup_do_not_contact boolean DEFAULT false CONSTRAINT prospect_pool_dup_do_not_contact_not_null NOT NULL,
+    version integer DEFAULT 1 CONSTRAINT prospect_pool_version_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_created_at_not_null NOT NULL,
+    created_by uuid CONSTRAINT prospect_pool_created_by_not_null NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() CONSTRAINT prospect_pool_updated_at_not_null NOT NULL,
+    updated_by uuid CONSTRAINT prospect_pool_updated_by_not_null NOT NULL,
     declined_at timestamp with time zone,
     declined_by uuid,
     decline_reason text,
@@ -12773,16 +12773,16 @@ CREATE VIEW public.v_capture_coverage AS
            FROM public.deal d
           WHERE ((d.outcome IS NULL) AND (d.phase <> 'closed'::text))
         UNION ALL
-         SELECT 'client'::text AS text,
+         SELECT 'client'::text,
             c.id
            FROM public.client c
           WHERE (c.merged_into IS NULL)
         UNION ALL
-         SELECT 'lead'::text AS text,
+         SELECT 'lead'::text,
             l.id
            FROM public.lead l
         UNION ALL
-         SELECT 'vendor'::text AS text,
+         SELECT 'vendor'::text,
             v.id
            FROM public.vendor v
         )
@@ -15041,7 +15041,7 @@ CREATE VIEW public.v_export_dossier_analysis AS
           WHERE (c.notes_path IS NOT NULL)
         UNION ALL
          SELECT l.id,
-            'lead'::text AS text,
+            'lead'::text,
             ('DNA/Clients/prospects/'::text || regexp_replace(l.notes_path, '^.*/'::text, ''::text))
            FROM public.lead l
           WHERE (l.notes_path IS NOT NULL)
@@ -24124,6 +24124,7 @@ ALTER TABLE ONLY public.vendor
 -- PostgreSQL database dump complete
 --
 
+
 --
 -- CARR GRANTS (bin/schema-snapshot.sh) — not produced by pg_dump.
 --
@@ -25111,9 +25112,9 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0193_session_work.sql	d2c4c868194cc5500bf9ee99ae749a505dac03bc607ed468b0e22f1c47c4e985	2026-08-20 15:09:00.711206+00
 0194_atomic_rule_approval.sql	14ab570195589b24baeb3706a21a93cabc523bc6e8e4dbb703b46d9dda3deeed	2026-08-20 15:09:02.331211+00
 0195_control_plane_cache_observations.sql	8a14afb37bc1f1d4d3cfb9f1e37f307e8db93452e85757e04da07c8dbd76c56f	2026-08-20 15:09:03.019187+00
-0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-21 02:00:42.190993+00
-0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 02:00:42.212701+00
-0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 02:00:42.214891+00
+0199_guidance_standing_context_boundary.sql	76bb5327079abbdba667c22ac643a0ddadd0110dcdc46f1393c375304d59dff1	2026-08-21 03:12:08.288479+00
+0202_staging_release_readback_receipt.sql	526b9815897bdfb641329c506826afc230fb2bb76a8a67d59a347e2f7754fcb5	2026-08-21 03:12:08.791175+00
+0205_program5_approval_verifier.sql	02cb742f7be2c2d278704e9a58fa9626abc00323901adca9f2da5b539bfbd38a	2026-08-21 03:12:09.011429+00
 \.
 
 
@@ -25492,4 +25493,3 @@ COPY public.vendor_relationship_level (level, label, note) FROM stdin;
 --
 -- PostgreSQL database dump complete
 --
-

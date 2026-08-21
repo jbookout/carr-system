@@ -27,6 +27,7 @@ to say, it would have come back.
 """
 import os
 import re
+import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -88,6 +89,24 @@ def main():
     check("the snapshot generator carries the exact checked-in role preamble",
           generated is not None and preamble_end > 0
           and generated.group(1).strip() == sql[:preamble_end].strip())
+
+    normalizer = re.search(r"EOF_NORMALIZER='\n(.*?)\n'", generator, re.S)
+    if normalizer is None:
+        eof_shape_ok = False
+    else:
+        normalized = subprocess.run(
+            ["awk", normalizer.group(1)],
+            input="first\n\nsecond\n  \n\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        eof_shape_ok = (
+            normalized.returncode == 0
+            and normalized.stdout == "first\n\nsecond\n"
+        )
+    check("the snapshot EOF normalizer preserves interior blanks and emits one LF",
+          eof_shape_ok)
 
     check("creating them is idempotent, so loading the snapshot onto a cluster "
           "that already has them is not an error",
