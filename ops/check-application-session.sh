@@ -11,7 +11,7 @@
 # NOT WIRED INTO HOSTED CI, deliberately. It needs a live PostgreSQL, and this
 # repo's GitHub Actions minutes are metered and over the free allowance. Wiring
 # it there is a cost decision for Joe, not a default. Run it locally before
-# touching the substrate, and after any change to migration 0204.
+# touching the substrate, and after any change to migration 0231.
 #
 # Risk colour GREEN: entirely local. No network, no Neon, no staging, no
 # production, nothing metered.
@@ -30,7 +30,7 @@ fi
 "$PYBIN" -c "import psycopg" 2>/dev/null || {
   echo "psycopg is not importable under $PYBIN; set CARR_PYTHON to an interpreter that has it" >&2
   exit 1; }
-MIGRATION="$REPO/migrations/0204_authenticated_application_session.sql"
+MIGRATION="$REPO/migrations/0231_authenticated_application_session.sql"
 SUITE="$REPO/mcp-server/test/db/application_session_contract.py"
 export LC_ALL=C LANG=C
 export CARR_DISPOSABLE_PG_DIR="${CARR_DISPOSABLE_PG_DIR:-${TMPDIR:-/tmp}/carr-appsession-check}"
@@ -51,7 +51,7 @@ trap cleanup EXIT
 BASE="${DSN%/carr_h}"
 psql "$BASE/postgres" -q -c "create database subject template carr_h"
 psql "$BASE/subject" -v ON_ERROR_STOP=1 -q -f "$MIGRATION"
-echo "migration 0204 applied (its own apply-time assertions passed)"
+echo "migration 0231 applied (its own apply-time assertions passed)"
 
 # Run TWICE. The suite must be re-runnable; a contract that only passes against
 # a virgin database is testing ordering, not the substrate.

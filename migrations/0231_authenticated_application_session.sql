@@ -1,7 +1,19 @@
--- 0204_authenticated_application_session.sql
+-- 0231_authenticated_application_session.sql
 --
--- NUMBERED 0198 WHILE IT WAS BEING WRITTEN, AND RENUMBERED BEFORE IT APPLIED
--- ANYWHERE. 0199 merged to main during the same session, and 0200-0203 were
+-- NUMBERED 0198, THEN 0204, AND RENUMBERED AGAIN TO 0231 BEFORE APPLYING ANYWHERE.
+-- Twice now this file has been overtaken while it was being reviewed: migrations
+-- merged to main above its number, which would have left it a pending EARLIER
+-- migration beneath already-applied later ones. The runner refuses that outright,
+-- and the refusal blocks every subsequent migration on the database rather than
+-- only this one. The rename window shuts the moment a file applies anywhere, so
+-- the self-references below were corrected in the same change both times.
+--
+-- THE LESSON, for whoever writes the next long-lived migration here: the number
+-- is not yours until the file merges. Re-run tools/next-migration.py immediately
+-- before writing it AND immediately before committing, and expect to renumber if
+-- review takes longer than an afternoon.
+--
+-- ORIGINAL NOTE. 0199 merged to main during the same session, and 0200-0203 were
 -- claimed by concurrent worktrees; leaving this at 0198 would have made it a
 -- pending EARLIER migration sitting beneath already-applied later ones, which
 -- tools/migrate.py refuses outright — and that refusal blocks every subsequent
@@ -503,7 +515,7 @@ begin
      and (grantee = 'PUBLIC'
           or not exists (select 1 from pg_roles where rolname = grantee and rolsuper));
   if offenders is not null then
-    raise exception '0204 FAILED: column-level grants let these roles create or '
+    raise exception '0231 FAILED: column-level grants let these roles create or '
       'mutate sessions: %', offenders;
   end if;
 
@@ -515,7 +527,7 @@ begin
      and (grantee = 'PUBLIC'
           or not exists (select 1 from pg_roles where rolname = grantee and rolsuper));
   if offenders is not null then
-    raise exception '0204 FAILED: these roles can create or mutate sessions, and '
+    raise exception '0231 FAILED: these roles can create or mutate sessions, and '
       'setting revoked_at is revocation: %', offenders;
   end if;
 
@@ -544,7 +556,7 @@ begin
      and (a.grantee = 0
           or not exists (select 1 from pg_roles r where r.oid = a.grantee and r.rolsuper));
   if offenders is not null then
-    raise exception '0204 FAILED: only carr_session_minter may mint or revoke; found: %',
+    raise exception '0231 FAILED: only carr_session_minter may mint or revoke; found: %',
       offenders;
   end if;
 
@@ -576,19 +588,19 @@ begin
      and (pg_has_role(r, 'carr_session_minter', 'MEMBER')
           or pg_has_role(r, 'carr_session_minter', 'USAGE'));
   if offenders is not null then
-    raise exception '0204 FAILED: these runtime roles can reach the mint, so the '
+    raise exception '0231 FAILED: these runtime roles can reach the mint, so the '
       'credential this substrate constrains could forge its own authentication: %',
       offenders;
   end if;
   if exists (select 1 from pg_roles where rolname='carr_session_minter' and rolcanlogin) then
-    raise exception '0204 FAILED: carr_session_minter must be NOLOGIN';
+    raise exception '0231 FAILED: carr_session_minter must be NOLOGIN';
   end if;
 
   ---------------------------------------------------------------- definer shape
   if not exists (select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                   where n.nspname='ops' and p.proname='mint_application_session'
                     and p.prosecdef) then
-    raise exception '0204 FAILED: the mint must be SECURITY DEFINER';
+    raise exception '0231 FAILED: the mint must be SECURITY DEFINER';
   end if;
   -- PER FUNCTION. An `exists` over both names was satisfied by either one being
   -- pinned, while the message claimed both — so reordering a single function's
@@ -603,7 +615,7 @@ begin
                        'refuse_qualified_evidence_rewrite')
      and not ('search_path=pg_catalog, ops, public' = any(coalesce(p.proconfig, '{}')));
   if offenders is not null then
-    raise exception '0204 FAILED: these functions do not pin search_path to exactly '
+    raise exception '0231 FAILED: these functions do not pin search_path to exactly '
       'pg_catalog, ops, public (a different ORDER is a different function): %', offenders;
   end if;
   -- A guard has no business reading a runtime setting, so the cheapest and most
@@ -647,7 +659,7 @@ begin
          -- runtime out of fragments this pattern cannot see
          || '|execute\s+');
   if offenders is not null then
-    raise exception '0204 FAILED: these guards reference something a guard has no '
+    raise exception '0231 FAILED: these guards reference something a guard has no '
       'business reading — a runtime setting, the calling role, migration state, or '
       'dynamic SQL. Each is a way to behave correctly during this proof and '
       'differently afterwards: %', offenders;
@@ -659,7 +671,7 @@ begin
          and c.confrelid = 'ops.application_session'::regclass
          and c.conrelid in ('public.tool_call'::regclass, 'public.event'::regclass,
                             'public.tool_read_call'::regclass)) <> 3 then
-    raise exception '0204 FAILED: each audit table must carry a foreign key to '
+    raise exception '0231 FAILED: each audit table must carry a foreign key to '
       'ops.application_session';
   end if;
 
@@ -692,15 +704,15 @@ begin
          and t.tgrelid = expected[i][2]::regclass
          and t.tgfoid  = expected[i][3]::regproc;
       if not found then
-        raise exception '0204 FAILED: trigger % is missing, or is not attached to % '
+        raise exception '0231 FAILED: trigger % is missing, or is not attached to % '
           'running %', expected[i][1], expected[i][2], expected[i][3];
       end if;
       if hit.tgenabled <> 'A' then
-        raise exception '0204 FAILED: trigger % on % is not ENABLE ALWAYS',
+        raise exception '0231 FAILED: trigger % on % is not ENABLE ALWAYS',
           expected[i][1], expected[i][2];
       end if;
       if position('FOR EACH ROW' in upper(hit.def)) = 0 then
-        raise exception '0204 FAILED: trigger % on % is not FOR EACH ROW',
+        raise exception '0231 FAILED: trigger % on % is not FOR EACH ROW',
           expected[i][1], expected[i][2];
       end if;
       if expected[i][3] = 'ops.refuse_application_session_relink' then
@@ -709,20 +721,20 @@ begin
         -- is an ADDED term ("... and false"), which the length check catches.
         if not (upper(hit.def) like '%WHEN ((OLD.APPLICATION_SESSION_ID IS DISTINCT FROM NEW.APPLICATION_SESSION_ID))%'
              or upper(hit.def) like '%WHEN ((NEW.APPLICATION_SESSION_ID IS DISTINCT FROM OLD.APPLICATION_SESSION_ID))%') then
-          raise exception '0204 FAILED: relink trigger % does not carry exactly the '
+          raise exception '0231 FAILED: relink trigger % does not carry exactly the '
             'expected WHEN condition; it may be inert. Definition: %',
             expected[i][1], hit.def;
         end if;
       elsif hit.tgqual is not null then
-        raise exception '0204 FAILED: trigger % on % carries a WHEN clause it must not '
+        raise exception '0231 FAILED: trigger % on % carries a WHEN clause it must not '
           'have; a condition that never holds makes it inert', expected[i][1], expected[i][2];
       end if;
       if position(expected[i][4] in upper(hit.def)) = 0 then
-        raise exception '0204 FAILED: trigger % on % is the wrong shape (% absent). '
+        raise exception '0231 FAILED: trigger % on % is the wrong shape (% absent). '
           'Definition: %', expected[i][1], expected[i][2], expected[i][4], hit.def;
       end if;
       if expected[i][5] <> '' and position(expected[i][5] in upper(hit.def)) > 0 then
-        raise exception '0204 FAILED: trigger % on % must NOT cover %',
+        raise exception '0231 FAILED: trigger % on % must NOT cover %',
           expected[i][1], expected[i][2], expected[i][5];
       end if;
     end loop;
@@ -732,7 +744,7 @@ begin
   select id into probe_actor from public.actor order by slug limit 1;
   select id into other_actor from public.actor where id <> probe_actor order by slug limit 1;
   if probe_actor is null or other_actor is null then
-    raise exception '0204 FAILED: cannot prove the guards without two actor rows';
+    raise exception '0231 FAILED: cannot prove the guards without two actor rows';
   end if;
 
   -- The rollback sentinel carries a value generated HERE, at apply time. It used
@@ -753,7 +765,7 @@ begin
       clock_timestamp() + interval '1 second');
 
     if not ops.application_session_is_live(probe_sid) then
-      raise exception '0204 FAILED: a freshly minted session is not live';
+      raise exception '0231 FAILED: a freshly minted session is not live';
     end if;
 
     -- POSITIVE CASES FIRST, on ALL THREE tables. A substrate that refuses
@@ -787,7 +799,7 @@ begin
     if (select count(*) from public.tool_call where application_session_id = probe_sid) <> 1
        or (select count(*) from public.event where application_session_id = probe_sid) <> 1
        or (select count(*) from public.tool_read_call where application_session_id = probe_sid) <> 1 then
-      raise exception '0204 FAILED: a qualified insert reported success but wrote no row';
+      raise exception '0231 FAILED: a qualified insert reported success but wrote no row';
     end if;
 
     -- LEGACY rows on both tables, so the promotion probes have a real target.
@@ -871,14 +883,14 @@ begin
       for k in 1 .. array_length(probes, 1) loop
         begin
           execute probes[k][3];
-          raise exception '0204 FAILED: % was ACCEPTED but every guard here exists to '
+          raise exception '0231 FAILED: % was ACCEPTED but every guard here exists to '
             'refuse it. The plumbing may be present while the logic is not.', probes[k][2];
         exception
           when others then
-            if sqlerrm like '0204 FAILED%' then raise; end if;
+            if sqlerrm like '0231 FAILED%' then raise; end if;
             if sqlerrm like 'PROBE_ROLLBACK%' then raise; end if;
             if position(lower(probes[k][1]) in lower(sqlerrm)) = 0 then
-              raise exception '0204 FAILED: % was refused, but by a DIFFERENT guard than '
+              raise exception '0231 FAILED: % was refused, but by a DIFFERENT guard than '
                 'the one under test. Expected a message containing %; got: %',
                 probes[k][2], probes[k][1], sqlerrm;
             end if;
@@ -888,7 +900,7 @@ begin
       -- Every probe must have RUN. A guard able to abort the loop early would
       -- otherwise leave the rest unexecuted and unnoticed.
       if ran <> array_length(probes, 1) then
-        raise exception '0204 FAILED: only % of % behaviour probes completed',
+        raise exception '0231 FAILED: only % of % behaviour probes completed',
           ran, array_length(probes, 1);
       end if;
     end;
@@ -904,12 +916,12 @@ begin
      where idempotency_key = legacy_key;
     if not exists (select 1 from public.tool_call
                     where idempotency_key = legacy_key and request_hash = 'still-legacy') then
-      raise exception '0204 FAILED: a legacy row could not be updated — the freeze '
+      raise exception '0231 FAILED: a legacy row could not be updated — the freeze '
         'guard is not scoped to qualified rows and will break existing writers';
     end if;
     delete from public.tool_call where idempotency_key = legacy_key;
     if exists (select 1 from public.tool_call where idempotency_key = legacy_key) then
-      raise exception '0204 FAILED: a legacy row could not be removed — the freeze '
+      raise exception '0231 FAILED: a legacy row could not be removed — the freeze '
         'guard is not scoped to qualified rows and will break existing retention';
     end if;
     delete from public.event where subject_id = legacy_subject;
@@ -917,41 +929,41 @@ begin
     -- F5: liveness must actually consider expiry. The only probes were "fresh is
     -- live" and "revoked is not live", so a function ignoring expires_at passed.
     if not ops.application_session_is_live(probe_sid) then
-      raise exception '0204 FAILED: a live session reports not live';
+      raise exception '0231 FAILED: a live session reports not live';
     end if;
     if ops.application_session_is_live(expired_sid) then
-      raise exception '0204 FAILED: an EXPIRED session reports live — the liveness '
+      raise exception '0231 FAILED: an EXPIRED session reports live — the liveness '
         'function ignores expires_at, and it is the API the layer above consumes';
     end if;
 
     -- F11: a revocation with no stated reason is not a revocation record.
     begin
       perform ops.revoke_application_session(expired_sid, '');
-      raise exception '0204 FAILED: revoking with an empty reason reported success';
+      raise exception '0231 FAILED: revoking with an empty reason reported success';
     exception
       when others then
-        if sqlerrm like '0204 FAILED%' then raise; end if;
+        if sqlerrm like '0231 FAILED%' then raise; end if;
         if position('requires a reason' in lower(sqlerrm)) = 0 then
-          raise exception '0204 FAILED: the empty-reason refusal came from a '
+          raise exception '0231 FAILED: the empty-reason refusal came from a '
             'different guard: %', sqlerrm;
         end if;
     end;
 
     perform ops.revoke_application_session(probe_sid, 'probe complete');
     if ops.application_session_is_live(probe_sid) then
-      raise exception '0204 FAILED: a revoked session still reports live';
+      raise exception '0231 FAILED: a revoked session still reports live';
     end if;
     begin
       insert into public.tool_call (idempotency_key, verb, actor_id, request_hash,
         response, organization_tenant_id, application_session_id)
       values ('p'||gen_random_uuid()::text,'probe',probe_actor,'h','{}'::jsonb,
               'carr-internal', probe_sid);
-      raise exception '0204 FAILED: a REVOKED session still produced qualified evidence';
+      raise exception '0231 FAILED: a REVOKED session still produced qualified evidence';
     exception
       when others then
-        if sqlerrm like '0204 FAILED%' then raise; end if;
+        if sqlerrm like '0231 FAILED%' then raise; end if;
         if position('is revoked' in lower(sqlerrm)) = 0 then
-          raise exception '0204 FAILED: the revoked-session refusal came from a '
+          raise exception '0231 FAILED: the revoked-session refusal came from a '
             'different guard: %', sqlerrm;
         end if;
     end;
@@ -970,13 +982,13 @@ begin
       for j in 1 .. array_length(after_revoke, 1) loop
         begin
           execute after_revoke[j][2];
-          raise exception '0204 FAILED: % accepted evidence for a REVOKED session',
+          raise exception '0231 FAILED: % accepted evidence for a REVOKED session',
             after_revoke[j][1];
         exception
           when others then
-            if sqlerrm like '0204 FAILED%' then raise; end if;
+            if sqlerrm like '0231 FAILED%' then raise; end if;
             if position('is revoked' in lower(sqlerrm)) = 0 then
-              raise exception '0204 FAILED: % refused a revoked session by a different '
+              raise exception '0231 FAILED: % refused a revoked session by a different '
                 'guard: %', after_revoke[j][1], sqlerrm;
             end if;
         end;
@@ -985,12 +997,12 @@ begin
 
     begin
       perform ops.revoke_application_session(probe_sid, 'second');
-      raise exception '0204 FAILED: re-revoking reported success';
+      raise exception '0231 FAILED: re-revoking reported success';
     exception
       when others then
-        if sqlerrm like '0204 FAILED%' then raise; end if;
+        if sqlerrm like '0231 FAILED%' then raise; end if;
         if position('already revoked' in lower(sqlerrm)) = 0 then
-          raise exception '0204 FAILED: the re-revocation refusal came from a '
+          raise exception '0231 FAILED: the re-revocation refusal came from a '
             'different guard: %', sqlerrm;
         end if;
     end;
@@ -998,9 +1010,9 @@ begin
     raise exception '%', sentinel;   -- discard every probe row
   exception
     when others then
-      if sqlerrm like '0204 FAILED%' then raise; end if;
+      if sqlerrm like '0231 FAILED%' then raise; end if;
       if sqlerrm <> sentinel then
-        raise exception '0204 FAILED: the behaviour proof could not complete: %', sqlerrm;
+        raise exception '0231 FAILED: the behaviour proof could not complete: %', sqlerrm;
       end if;
   end;
 
@@ -1008,7 +1020,7 @@ begin
      or exists (select 1 from public.tool_call
                  where idempotency_key in (qualified_key, legacy_key))
      or exists (select 1 from public.event where subject_id in (probe_subject, legacy_subject)) then
-    raise exception '0204 FAILED: the behaviour proof left rows behind';
+    raise exception '0231 FAILED: the behaviour proof left rows behind';
   end if;
 end $$;
 
