@@ -941,6 +941,15 @@ def cmd_install(apply):
         for name in task_plan["install"]:
             source = tracked_scheduled_task_paths()[name]
             destination = os.path.join(TASKS_SRC, name, "SKILL.md")
+            # Same rule the launchd loop below already applies to
+            # DEFINITION_ONLY plists, which this loop had never honoured. A task
+            # whose body says "do not create, enable, or invoke any scheduler"
+            # must not be written INTO the scheduler directory by the installer
+            # that claims to be converging the machine to the repository.
+            if is_definition_only_task(read(source)):
+                print(f"  SKIP  scheduled task {name} (definition only: "
+                      f"awaits its own stated activation approval)")
+                continue
             if read(destination) == concrete(read(source)):
                 print(f"  scheduled task already matches: {name}")
             else:
