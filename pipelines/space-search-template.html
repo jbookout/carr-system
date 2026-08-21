@@ -375,6 +375,17 @@
      doctrine: orange is an accent, never body text. */
   .onote{ font-size:13.5px; color:var(--muted); margin:11px 0 0; max-width:68ch; }
 
+  /* The physical address, labelled, on every card. The heading is a display title and
+     on a land listing the broker's title carries no street number, so the address gets
+     its own line and its own label rather than being inferred from the heading.
+     Dell, 2026-08-20: "never ever never leave out the address." */
+  .addr{ margin:10px 0 0; font-size:14px; color:var(--ink); }
+  .addrlab{
+    font-family:"CARR Display","Oswald",sans-serif; font-size:9.5px; font-weight:400;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--muted);
+    display:inline-block; margin-right:9px;
+  }
+
   /* ---------- notes box ----------
      Ours, not the client's: somewhere to write while standing in the building.
      On screen a quiet ruled panel; on paper it is the reason a packet gets
@@ -570,6 +581,10 @@
        to write between, and never let the box split across two sheets. */
     .agent{ font-size:8pt; margin-top:9pt; }
     .onote{ font-size:8.5pt; margin-top:7pt; max-width:none; }
+    /* The address never shrinks below readable and never breaks away from its card:
+       it is the one line on the sheet somebody types into a phone at the kerb. */
+    .addr{ font-size:10pt; margin-top:6pt; break-inside:avoid; page-break-inside:avoid; }
+    .addrlab{ font-size:6.5pt; margin-right:7pt; }
     .notes{ margin-top:10pt; padding-top:8pt; break-inside:avoid; page-break-inside:avoid; }
     .notes h4{ font-size:6.5pt; margin-bottom:5pt; }
     .nlines{

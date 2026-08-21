@@ -283,6 +283,46 @@ def agent_line(p):
     return f'<p class="agent">Listing agent: {at}</p>'
 
 
+class MissingAddress(ValueError):
+    """A card was built with no physical address. Never allowed on a tour packet."""
+
+
+def address_line(p):
+    """The physical address, labelled, on EVERY card, with no exceptions.
+
+    Dell, 2026-08-20: "you left out the most important part, the physical address.
+    never ever never leave out the address."
+
+    The card heading is a DISPLAY TITLE, and on a land listing the display title is
+    whatever the broker called it: "1.3 Acres Emerald Coast Parkway", "Hwy 98 E,
+    Sandbar outparcel". Those are not addresses. Nobody can navigate to them, hand
+    them to a title company, or look them up in a county GIS. Five of the eleven
+    River Bank records were in that state and the packet shipped anyway, because the
+    heading LOOKED like an address on the six that had street numbers.
+
+    So the address is its own field and its own line. Where a parcel has no street
+    number assigned, which is normal for raw land, the line carries the road, the
+    parcel number, and a landmark, because that IS the address of that dirt. What it
+    never carries is nothing.
+    """
+    loc = p.get("location") or {}
+    street, parcel = (loc.get("street") or "").strip(), (loc.get("parcel") or "").strip()
+    near = (loc.get("near") or "").strip()
+    if not (street or parcel):
+        raise MissingAddress(
+            f'{p["address"]}: no location.street and no location.parcel. Every card '
+            f'carries a physical address; raw land with no street number carries its '
+            f'road, its parcel number, and a landmark instead.')
+    bits = [street] if street else []
+    if parcel:
+        bits.append(f'Parcel {parcel}' if street else
+                    f'No street number assigned. Parcel {parcel}')
+    if near:
+        bits.append(near)
+    return (f'<p class="addr"><span class="addrlab">Address</span>'
+            f'{esc(". ".join(b.rstrip(".") for b in bits))}.</p>')
+
+
 def notes_box(p):
     """Ruled space for our own notes on the property. Ours, not the client's."""
     if not p.get("notes"):
@@ -456,6 +496,7 @@ def build_tour_card(p, photos, minis=None, photo_px=None):
                  <p class="pcity">{esc(p["city"])}</p></div>
             <span class="chip">{esc(p["chip"])}</span>
           </div>
+          {address_line(p)}
           {img}
           <p class="why">{esc(p["why"])}</p>
           <dl class="specs">{"".join(x for x in specs if x)}</dl>
@@ -573,7 +614,8 @@ def main():
     try:
         for p in props:
             agent_line(p)
-    except ContactLeak as exc:
+            address_line(p)
+    except (ContactLeak, MissingAddress) as exc:
         print(f"STOP: {exc}", file=sys.stderr)
         return 2
 
